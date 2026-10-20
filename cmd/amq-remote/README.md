@@ -17,10 +17,10 @@ checksum. See [INSTALL.md](../../INSTALL.md). `amq upgrade` leaves these
 binaries unchanged; update them with `brew upgrade amq` or from the release
 asset.
 
-After an upgrade, a running endpoint keeps the old binary: stop its
-`amq-remote up` (Ctrl-C, or SIGTERM to its pid) and run `amq-remote up` again.
-Commands that need a newer endpoint, such as `link add`, say so ("restart
-amq-remote up first").
+A running endpoint runs the binary it started with. After an upgrade, stop
+its `amq-remote up` (Ctrl-C, or SIGTERM to its pid) and run `amq-remote up`
+again. A command that needs the upgraded endpoint, such as `link add`, says
+"restart amq-remote up first".
 
 `make build` also produces a local `amq-remote` and `amq-owner-sign` next to
 `amq`.
@@ -65,6 +65,8 @@ amq-remote mcp --link NAME
 amq-remote service install|uninstall|status [--root ROOT]
 amq-remote doctor
 amq-remote version
+amq-remote claude install-stop-hook | uninstall-stop-hook
+amq-remote claude install-approval-hook | uninstall-approval-hook
 ```
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
@@ -79,10 +81,13 @@ the endpoint has no record yet. `requests` does not use that socket: it reads
 the local request store and the sender spool directly, including while the
 endpoint is down.
 `share` mints or enrolls a session body key and does not start the endpoint.
-`version` prints `amq-remote <version>`.
+`version` prints `amq-remote <version>`. The `claude` commands install and
+remove the Claude Code hooks (see [Claude Code](#claude-code)); the usage
+banner does not list them.
 
-Client commands and `doctor` accept `--json`. JSON goes to stdout and
-diagnostics to stderr. `serve`, `up`, and `share` do not emit a JSON result.
+`--json` prints the result as JSON on stdout, with diagnostics on stderr. The
+commands that take it are listed under [Common flags](#common). `serve` and
+`up` accept `--json` and print no JSON result. `share` has no `--json`.
 
 ## Manifest
 
@@ -157,8 +162,8 @@ capabilities and `observed_at`. Under `up`, those lines come from the child
 ## Relay
 
 A manifest with `"schema_version": 2` may carry one `relay` object. Without
-it, `serve` makes no relay connection. An older binary refuses a version 2
-file instead of ignoring the object.
+it, `serve` makes no relay connection. A binary without relay support
+refuses a `schema_version` 2 file instead of ignoring the object.
 
 ```json
 {
@@ -183,17 +188,14 @@ host. A target or session can be shared once.
 `self` key (64 lowercase hex); without it, `serve` reads the key from the
 relay's NIP-11 document and refuses a redirect.
 
-`serve` keeps one connection per share. It answers the relay's NIP-42
-challenge with a kind 22242 event signed by the body key, carrying exactly
-one enrolled NIP-OA tag: the owner's kind 1059 grant. The connection counts
-as authenticated only after the relay's positive OK for that event. On each
-connect, and every minute while connected, `serve` re-reads the enrolled
-generation, so a renewal is picked up. The connection closes at the grant's
-signed expiry. An enrolled owner that differs from `owner_pubkey` stops
-authentication. The first body `serve` loads stays pinned: a different body
-enrolled under the same owner is refused until `serve` restarts or the share
-is removed and added again. A lost
-connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ delivery keep working while the relay is down.
+`serve` keeps one authenticated connection per share, signed in with the
+share's body key and the owner's grant until the grant's signed expiry. It
+picks up a renewal without a restart. The first body
+`serve` loads stays pinned: a different body enrolled under the same owner
+is refused until `serve` restarts or the share is removed and added again.
+A lost connection reconnects with backoff. Local IPC and AMQ delivery keep
+working while the relay is down. The authentication, reconnect, and DM
+surface rules are in [the relay connection reference](../../docs/amq-remote-relay.md).
 
 A running `serve` follows the relay block. When the manifest bytes change,
 it applies the shares as a restart would:
@@ -215,12 +217,6 @@ it applies the shares as a restart would:
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
 
-What the relay checks: at NIP-42 AUTH, a Buzz relay verifies the owner
-signature on the NIP-OA tag and refuses self-attestation. Relays that include
-block/buzz#7004 also refuse a grant whose `created_at` bounds have passed;
-older relays accept a signed grant until the owner or the body key is removed
-from the relay. No relay checks `kind=` conditions at connection admission,
-so the per-kind limit is enforced by `amq-remote` itself, not by the relay.
 Treat a body key and its tags as one credential: to revoke it, remove the
 owner's relay membership or ban the body key on the relay. A socket that is
 already open stays open until it reconnects.
@@ -307,9 +303,7 @@ encrypted kind 24200 frames, which the Buzz Desktop agent session panel
 renders. For Codex the id is the thread id. A Codex turn streams live,
 whether it started in the Codex TUI or from Buzz: the user prompt, the
 assistant text as it is written, each command with its output so far, and
-the plan. Deltas for one item are merged into one frame per 100 ms, so a
-fast stream stays well under the 100 frames per second cap. Approvals are
-not shown. For Claude the id is the registry `sessionId`, and the activity
+the plan. Approvals are not shown. For Claude the id is the registry `sessionId`, and the activity
 comes from the transcript the adapter already parses, one message at a
 time; a prompt sent from Buzz shows as the text the owner typed. Export
 runs only while the target's attached native
@@ -374,21 +368,11 @@ submits a plain prompt too. A leading `nostr:npub1…` mention is dropped from
 the prompt. The result row goes to the DM channel, never to the mentioning
 channel. Slash commands work only in the DM.
 
-The surface opens only when the relay's own key signs the channel's NIP-29
-membership (kind 39002) as exactly the owner and the body, and its metadata
-(kind 39000) as private and of type `dm`. `serve` reads the membership and
-the native session again every minute and closes the surface on the first
-read that no longer verifies. These are stored relay snapshots, not a read
-of current membership, so a change can show late; no bound on the delay is
-claimed.
-
-The body signs a kind 9 or 40003 event only when the enrolled generation has
-the owner's grant for that kind. It attaches that grant as the event's
-NIP-OA tag. The relay does not enforce these grants; `serve` does, and it
-checks them again before it sends owed output. Each owner event is claimed
-once and its outcome recorded, so a redelivered DM never runs again, even
-after a busy rejection. Output owed from an earlier channel or body is kept,
-never redirected.
+The surface opens only while the relay shows the channel as a private DM
+whose members are exactly the owner and the body, and closes when that no
+longer holds; a membership change can show late. A redelivered DM never runs
+again, even after a busy rejection. The exact checks are in [the relay
+connection reference](../../docs/amq-remote-relay.md#owner-dm-surface).
 
 Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
 read the prompts and the result rows. Do not share a session whose prompts or
@@ -398,7 +382,7 @@ results the relay operator must not see.
 
 A link connects this machine to a server the user signs tasks in (for example
 a web assistant). The machine dials the server; the server never connects in.
-Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
+Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
 
 1. In the server, create a link code and a consent passkey. It shows a code
    and the passkey fingerprint.
@@ -416,9 +400,8 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    lists the tool profiles it grants in its link info, `--tools` must be one
    of them. A pi session is driven only by the endpoint of its own AMQ root,
    so its link must live there: link that root with `--root`.
-4. `serve` (under `up`) keeps the link up. A revision counts as published only
-   after the server acknowledged that it committed it; until then the store
-   still owes it and offers it again. A revision the server holds with another
+4. `serve` (under `up`) keeps the link up and offers each request revision
+   until the server acknowledges it. A revision the server holds with another
    digest is a conflict: never sent again, counted in `link status`.
 5. To sign with another passkey (a second device), create it in the server
    and run `amq-remote link keys add NAME --code CODE`, typing its
@@ -480,16 +463,10 @@ command changes a unit it did not write. `doctor` names `service install` when
 the root has a link and no current service for it.
 
 A link lives in exactly one root, normally the machine root; its state is
-never copied or moved. One link name in two roots is refused.
-State, per link root under `<root>/extensions/remote/link/` (normally
-`~/.amq/remote/root/extensions/remote/link/`): `store_id` (minted
-once), `<name>/device.key` (Ed25519, 0600, never overwritten),
-`<name>/link.json` (the pinned server id, URL, signing origin and the tool
-profiles the server grants),
-`<name>/consent_keys.json` (public keys only), `<name>/status.json`, and
-`retired/<sink>`. A server that closes with 4010 revokes the device: the
-endpoint retires the sink and deletes the key. Close 1012 (server restart)
-reconnects after 0-60 s; 45 s without a ping reconnects too.
+never copied or moved. One link name in two roots is refused. The state
+files are listed in [the protocol's endpoint state](../../docs/remote-link-protocol.md#endpoint-state).
+When the server revokes the device, the endpoint retires the sink and
+deletes the device key.
 
 A session shared with a link never gains answering authority: the server sees
 the agent's prompts and cannot answer them. A tool permission prompt is
@@ -498,15 +475,20 @@ answered in the session's terminal, and a task that needs one waits there;
 
 ## Flags
 
-Flags may appear before or after the positional argument. `amq-remote
-COMMAND --help` prints a command's flags.
+Flags may appear before or after the positional argument.
+`amq-remote COMMAND --help` prints the flags and exits 0 for the client
+commands, `requests`, `attach`, `detach`, `bindings`, the `link` commands,
+`mcp`, `service`, and `doctor`. `serve --help`, `up --help`, and
+`claude install-approval-hook --help` print the flags and exit 2.
+`share --help`, `version --help`, and the other `claude` commands print no
+flag list; the `share` flags are in the table below.
 
 ### Common
 
 | Flag | Default | Commands |
 | --- | --- | --- |
-| `--root DIR` | `AM_ROOT`; link commands: the link's root | all except `version` |
-| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `doctor` |
+| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
+| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `attach`, `detach`, `bindings`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
 
@@ -548,7 +530,7 @@ prompt is exit 2.
 | `--deliver turn\|steer` | `turn` | Accepted values. `steer` is disabled in v1: the endpoint returns `unsupported` (exit 6) before any durable write. |
 | `--request-id UUID` | new UUID | Retry identity. A repeat reconciles instead of submitting twice. |
 | `--admit-within DURATION` | `2m` | Latest admission time relative to now. Must be inside `(0, 24h]`. |
-| `--min-evidence admitted\|submitted` | omitted | Minimum submit evidence. Omitted keeps legacy admission. |
+| `--min-evidence admitted\|submitted` | omitted | Minimum submit evidence. Omitted sets no floor: any evidence is accepted. |
 | `--epoch EPOCH` | live inspect | Previously verified epoch. Required to enqueue while the endpoint is down. |
 
 `submit` does not spool until it has an epoch. With no `--epoch` it inspects
@@ -557,10 +539,10 @@ verified `--epoch`, an unreachable endpoint still exits 0 and returns the
 spool receipt. Restart dispatches that envelope only while its admission
 window is still open; a closed window expires it without dispatch.
 
-### `status`, `wait`, `cancel`
+### `status`, `wait`, `cancel`, `requests`
 
-Each takes one `REQUEST_REF`. `status` also accepts a bare request id that is
-still in the sender spool.
+`status`, `wait`, and `cancel` each take one `REQUEST_REF`. `status` also
+accepts a bare request id that is still in the sender spool.
 
 | Flag | Command | Default | Meaning |
 | --- | --- | --- | --- |
@@ -569,7 +551,18 @@ still in the sender spool.
 
 `wait` interrupted by SIGINT exits 130. The request keeps running.
 
-### `attach`, `detach`
+### `attach`, `detach`, `bindings`
+
+| Flag | Command | Default | Meaning |
+| --- | --- | --- | --- |
+| `--self` | `attach`, `detach` | false | `attach`: bind the session this command runs in. `detach`: remove the binding that names this session. |
+| `--native` | `attach` | false | Drive the exact native session through the endpoint, not the AMQ mailbox. |
+| `--link NAME` | `attach` | empty | Share this session with linked server `NAME`. Implies `--native`. |
+| `--consent passkey\|local` | `attach` | `passkey` | With `--link`: `local` also holds each signed task for a confirmation on this machine. |
+| `--tools PROFILE` | `attach` | `read` | With `--link`: the server tool profile agents in this session may call. Empty for none. |
+| `--me HANDLE` | `attach` | `AM_ME` | AMQ handle of this session. |
+| `--name NAME` | `attach`, `detach` | see below | `attach`: the binding name. `detach`: remove only the binding with this name. |
+| `--all` | `detach` | false | Remove every binding. |
 
 `amq-remote attach --self` binds this session's Buzz agent (amq-acp in binding
 mode) to this session's AMQ handle, `AM_ME` under `AM_ROOT`. Each Buzz DM then
@@ -580,20 +573,22 @@ is not on AMQ is refused and pointed at `--native`.
 
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
-is found by the command's process ancestry. A pi (Amit) chat is found the
+is found by the command's process ancestry. A pi chat is found the
 same way: its tools run under the pi process whose pid the chat's bridge
 publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
-background (log: `up.log` in the state directory). Claude needs the Stop hook
-on this path: without it a task never finishes, so attach of a Claude session
-(`--native` or `--link`) exits 6 and names `amq-remote claude
-install-stop-hook`. When that file sets `disableAllHooks`, attach goes ahead
-and warns (JSON `warning`), because a project or managed setting decides
-whether the hook runs. Attach never edits `~/.claude/settings.json` itself.
+background (log: `up.log` in the state directory). Claude needs the
+[Stop hook](#claude-code) on this path: without it a task never finishes, so
+attach of a Claude session (`--native` or `--link`) whose
+`~/.claude/settings.json` has no AMQ Stop hook exits 6 and names
+`amq-remote claude install-stop-hook`. When that file sets
+`disableAllHooks`, attach goes ahead and warns (JSON `warning`), because a
+project or managed setting decides whether the hook runs. Attach never edits
+`~/.claude/settings.json` itself.
 
-Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
+Each attach writes a named binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>-<session>` for a root
 `<project>/.agent-mail/<session>`; for a native session `<kind>-<project>`,
 from the session's own working directory, or the native target when that
@@ -609,9 +604,9 @@ in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
 are created 0700 below an existing ancestor that has no symlink on its path,
 is owned by you, and is not group- or world-writable. Several sessions can be
 connected at once. Each has its own Buzz agent, pinned to its binding by the
-system prompt line `AMQ Remote session: <name>` (`amq-acp setup --session
-<name>` writes its Import file; an existing agent may pin with the model
-`amq-remote:<name>` instead).
+system prompt line `AMQ Remote session: <name>`, which `amq-acp setup
+--session <name>` writes into its import file. An agent may instead pin with
+the model `amq-remote:<name>`.
 
 Attach tells the owner only what is still needed. It prints `Connected:
 <label>`, the session's label (`<harness> · <project>/<session> @
@@ -625,9 +620,9 @@ under `~/.amq/remote/acp/agents/<name>/` while the agent runs:
   the session is proven live: the helper opens Buzz Desktop's Create agent
   dialog for it;
 - it has none otherwise: run `amq-acp setup --session <name>` once and
-  import the file. With no helper on this machine, attach adds that
-  importing the helper once (`amq-acp setup --helper`) makes later sessions
-  need only that dialog.
+  import the file. With no helper on this machine, attach also suggests
+  importing the helper once (`amq-acp setup --helper`), so that later
+  sessions need only the Create agent dialog.
 
 `--json` reports `name`, `label`, `reused` (this session already held the
 name, as a binding or a tombstone, so its agent comes back), `agent` and
@@ -639,9 +634,9 @@ its own lines; a link has no Buzz agent.
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
 ended, then lists each binding with its label, `live` or `unknown`, its
 agent's state and its name, with `amq-remote detach --name <name>` for the
-unknown ones. It names, once, the agents of removed bindings made before
-sessions had labels: those agents never archive themselves, so delete them in
-Buzz Desktop and hide their DMs. The text output records them as named;
+unknown ones. It names, once, the agents of removed bindings that carry no
+label: those agents never archive themselves, so delete them in Buzz Desktop
+and hide their DMs. The text output records them as named;
 `--json` lists them without recording. `--json` reports `bindings`, `pruned`,
 `helper` and `legacy_agents`.
 
@@ -656,20 +651,33 @@ or ended, is never taken: the session gets the next free `<name>-N`.
 Attaching the same session again keeps its name. An explicit `--name`
 replaces the binding of that name.
 
+### `link`, `mcp`
+
+| Flag | Command | Default | Meaning |
+| --- | --- | --- | --- |
+| `--code CODE` | `link add`, `link keys add` | empty | The single-use code the server shows. |
+| `--device-name NAME` | `link add` | the host name | This machine's name as the server shows it. |
+| `--link NAME` | `link confirm`, `link tools`, `link call`, `mcp` | the only link | The link to use. |
+| `--args JSON` | `link call` | `{}` | The tool's arguments as a JSON object. |
+| `--idempotency-key KEY` | `link call` | a new key, printed first | The call's durable key. Run the call again with the same key to resume after a lost answer. |
+| `--wait` | `link call` | false | Wait for the call's final state. |
+
 ### `share`
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--root DIR` | `AM_ROOT` | AMQ root whose state directory holds the session's keys. |
 | `--session ID` | empty | Shared session id. Required. |
 | `--renew` | false | Reprint preimages for a fresh attestation window, for every kind. |
 | `--days N` | `30` | Attestation window in days. Range `1..90`. An explicit `0` is exit 2. On `--renew`, an explicit `--days` that would not exceed the current window bounds is refused. |
-| `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. | 
+| `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. |
 | `--bundle PATH` | empty | JSON array of those tags, one file for the whole window. Enrolls every tag. Not combined with `--tag-file`. |
 | `--target ID` | empty | Adapter target written into the manifest relay block. Set with `--relay`. |
 | `--relay URL` | empty | Relay `wss://` URL written into the manifest relay block. Set with `--target`. The owner public key is copied from the enrolled tags. |
 | `--dm-channel ID` | empty | The owner's Buzz DM channel id. Set with `--native-session` and `--target`. Writes `dm_channel_id`, `native_session_id` and `"commands": true` into the share. Refused unless the tags hold the buzz-dm kinds. |
 | `--native-session ID` | empty | The native session id approved for sharing. Set with `--dm-channel`. |
 | `--min-evidence CLASS` | empty | Submit evidence floor for owner commands: `admitted` (the default when unset) or `submitted`. Writes `min_evidence` into the share. Set with `--target`. |
+| `--presence NAME` | empty | Display name for the body's Buzz profile and status; turns on [presence](#presence-in-buzz-desktop). Set with `--target`. |
 | `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 
@@ -730,27 +738,21 @@ that the relay materialized the owner binding or that any viewer is ready.
 
 `publication_refused` is advice, not a failure: it names each owed DM
 output whose last attempt the relay refused, with the relay's reason, the
-number of refused attempts and the next try. A refusal describes one
-attempt, so the output stays owed and is retried with a backoff (30 seconds,
-doubling to 10 minutes). Order is kept per request: while a request's
-earlier output is owed, its later outputs wait; other requests' outputs
-still go out. Do not send the message again from Buzz: that starts a new
-request.
+number of refused attempts and the next try. The output stays owed and is
+retried with a backoff, in order per request. Do not send the message again
+from Buzz: that starts a new request.
 
 `stale_harness` is advice, not a failure: it is reported under `notes` and
-never makes doctor exit non-zero. A different identity can also be a
-byte-identical copy or another binary with the same name, so the note asks
-the operator to decide, naming the running process and the installed path.
-A process whose executable identity cannot be read (lsof unavailable, a
-2-second probe timeout, or a first text record that is not a readable
-amq-acp path) is *unknown*, not current: it never counts as fine, and a
-single `stale_harness` note names every affected pid with the reason, so a
-stale process never just vanishes from the report. The whole probe runs
-under one 3-second total deadline (ps included) with a 500ms WaitDelay, so
-a stalled child cannot extend it.
+never makes doctor exit non-zero. It names each running amq-acp process
+whose executable differs from the installed one, with the installed path, and
+asks the operator to decide, since a different identity can also be a
+byte-identical copy. A process whose executable cannot be read within the
+probe deadline is reported as unknown, never as current.
+
+## Claude Code
 
 Submit writes one frame to the target session's cross-session socket. The
-socket answers nothing, so the ladder comes from the session's transcript:
+socket answers nothing, so progress comes from the session's transcript:
 the entry that delivers the frame is `submitted`, the next assistant entry
 in that turn is admitted, and a Stop event ends the run with the turn's last
 assistant text as the result. The Stop event needs the hook:
@@ -776,81 +778,24 @@ allows it, but only when the hook pins the owner's public key. It needs one
 more hook:
 
 ```text
-amq-remote claude install-approval-hook [--owner <hex|npub>] [--root <dir>] [--session <name>]   # adds a PermissionRequest hook to ~/.claude/settings.json
-amq-remote claude uninstall-approval-hook                                                     # removes only that hook
+amq-remote claude install-approval-hook [--owner <hex|npub>] [--root <dir>] [--session <name>] [--manifest <path>]   # adds a PermissionRequest hook to ~/.claude/settings.json
+amq-remote claude uninstall-approval-hook                                                                         # removes only that hook
 ```
 
 Without `--owner` the installer pins the one owner of the relay shares in
 the manifest (`--root` or `AM_ROOT`, or `--manifest`). With no owner found
-it installs a reject-only hook. With an owner it pins that owner's one
-relay share with a DM channel (or the `--session` one), as the manifest and
-the enrolled credentials name it at install time, on the hook's command
-line: `... claude permission-hook --wait 600 --owner '<64 hex>' --root
-'<AMQ root>' --session '<name>' --relay '<relay URL>' --body '<body
-pubkey>' --channel '<DM channel>' --target '<target>'`. Claude Code asks
-before Claude edits its own settings file, so Claude cannot change the pin
-on its own. The hook never reads the manifest: the root and session only
-locate the enrolled body secret it signs in with, whose pubkey must be the
-pinned body. A pin that misses any flag is reject-only. Run the installer
-again after the share's relay, channel or body changes.
+it installs a reject-only hook. With an owner it pins that owner's one relay
+share with a DM channel (or the `--session` one) on the hook's command line.
+Run the installer again after the share's relay, channel or body changes.
 
-The hook has no matcher, a 600 second wait, and a 630 second timeout. It
-exits at once with no output, so the terminal dialog decides, unless every
-check passes: the session has a pin that a live `amq-remote serve` wrote for
-that share, and the call belongs to a prompt that an AMQ request delivered
-as its own turn. A request that Claude absorbed into a running turn gets no
-DM approval. The hook never exits 2. It denies for the owner's ❌ on that
-exact call, and the turn goes on.
-
-Any same-user process can write the answer file, so an allow in it proves
-nothing by itself. The hook prints allow only when all of these hold:
-
-- its command line pins an owner and a whole share;
-- the call is a Bash call with only `command`, `description`, `timeout` and
-  `run_in_background`, shown whole: nothing hidden, shortened, or removed
-  for display;
-- the answer carries the owner's kind 7 reaction ✅, or the owner's kind 9
-  typed approve (`yes`, `y`, `approve` or ✅) in the share's DM channel,
-  whose id and BIP-340 signature verify under the pinned key, dated from 30
-  seconds before the request to its deadline;
-- the reaction's last `e` tag, or one of the typed reply's `reply`, `root`
-  or unmarked `e` tags, is the approval message, whose id and
-  signature verify, which the share's body key signed in the share's DM
-  channel, and whose content is the approval text for the hook's own
-  rendering of the call under a request of the share's target: the
-  command preview, then `Interaction: <id>` and `Action: <sha256 of the
-  call>`;
-- the hook's own read of the pinned relay, signed in with the share's
-  body key as `amq-remote serve` is, each read to the end of stored events
-  within 10 seconds, finds every way a Buzz client changes or hides the
-  message harmless: each edit (kind 40003, by the body or by the owner,
-  whom Buzz lets edit an agent's message) shows the same call with only
-  another answer line or outcome, no deletion (kind 5, or the Buzz-native
-  kind 9005) names the message or one of its edits, the body sent no
-  deletion ever, and the owner sent no deletion since the message, with or
-  without an `h` tag. The relay hides a deleted edit, AMQ never deletes,
-  and a deletion's time is what its signer claims;
-- the approval is still open when the hook checks, both before and after
-  it verifies: its deadline has not passed, Claude has not ended the hook,
-  and nothing else closed it. One allow applies once.
-
-On a missing pin, any failed check, an error, or a timeout the hook prints
-no allow. The endpoint runs the same verification before it passes a ✅ to
-the hook. When it fails, nothing is answered and the DM says why:
-"The approval message was altered after it was posted; check the
-terminal." for an edit that changed the call or a deletion, and "Could not
-verify the approval: <reason>. React again to retry." otherwise (a relay
-error or timeout, for example). A later ✅ or a ❌ still works. When the
-endpoint's check passes and the hook's own check then fails, the hook
-records that it refused exactly that proof: the answer never applies, the
-DM gives the same reply with the hook's reason, and a later ❌ or a new ✅
-replaces it. The hook allows a proof only when no refusal of it is
-recorded. While one answer to an approval is checked, a second one waits
-for it.
-
-The DM offers ✅ only when the call can pass these checks, the
-installed hook pins the share's owner, and the approval is bound to one
-tool call in the transcript; otherwise it offers ❌ only.
+The DM offers ✅ only for a Bash call it shows whole, when the installed hook
+pins the share's owner and the approval is bound to one tool call; otherwise
+it offers ❌ only. A call that may contain a secret shows "Command hidden: it
+may contain a secret. Check the terminal.", and a call too long to show
+whole shows "Command too long: check the terminal." The first answer wins, in
+Buzz or in the terminal, and the message is edited with the outcome. A
+request that Claude absorbed into a running turn gets no DM approval. When an
+approval cannot be verified, nothing is answered and the DM says why.
 
 The pin holds only while Claude cannot change settings or run commands
 without a prompt. Each of these defeats it: a click on "allow Claude to edit
@@ -858,23 +803,5 @@ without a prompt. Each of these defeats it: a click on "allow Claude to edit
 rule that allows every Bash command. `amq-remote doctor` reports the pinned
 owner and share and warns on the last two in `~/.claude/settings.json`.
 
-The relay is trusted to return the full edit and deletion history of the
-message. A same-user process that can replace the installed `amq-remote`
-binary, or edit the Claude settings with the owner's consent, defeats this
-protection.
-
-The message shows the call whole, or not at all: a call that may contain
-a secret anywhere shows "Command hidden: it may contain a secret. Check the
-terminal.", and a call too long to show whole shows "Command too long:
-check the terminal." ❌ still blocks either; ✅ is never offered. The first
-answer wins, in Buzz or in the terminal. When the hook stops before it
-records that its decision was written whole, the message says the answer
-may not have reached the terminal (`delivery_unknown`). A terminal reject
-stops the hook at once.
-A terminal approve does not signal the hook, so the endpoint detects it
-from the call's `tool_result` in the transcript and edits the message to
-say it was answered outside Buzz. When two identical calls are waiting in
-one turn, the approval cannot be bound to one of them, ✅ is not offered,
-and the first `tool_result` among them closes it. Another PermissionRequest
-hook that decides can answer first; AMQ reports only what its own hook
-printed.
+The checks the hook and the endpoint run before an allow are in
+[Claude Code approvals from Buzz](../../docs/amq-remote-approvals.md).

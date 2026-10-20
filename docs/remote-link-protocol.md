@@ -1,0 +1,149 @@
+# amq.remote.link/1 protocol
+
+`amq.remote.link/1` is the WebSocket an `amq-remote` endpoint dials to a
+linked server, a server the user signs tasks in. The machine dials the
+server; the server never connects in. Operator commands are in
+[the amq-remote reference](../cmd/amq-remote/README.md#link).
+
+The frame schema is [remote-link-v1.schema.json](../schemas/remote-link-v1.schema.json).
+The golden [contract fixtures](../testdata/link/README.md) pin the bytes: a
+server implementation copies them and runs the same checks as
+`internal/remote/linkcontract` and `internal/remote/jcs`.
+
+## Encodings
+
+- Binary values are base64url without padding (RFC 4648 section 5), never
+  empty: keys, signatures, nonces, credential ids, `document_b64`,
+  `authenticator_data`, `client_data_json`.
+- Public keys are SPKI DER: P-256 (`alg` -7, ES256, DER signature) or
+  Ed25519 (`alg` -8) for consent keys, Ed25519 for device keys.
+- JCS uses an integer profile: integers within +-(2^53-1) only, at most 64
+  nested objects and arrays. A fraction, an exponent or a larger integer is
+  refused, never formatted, as are duplicate keys, lone surrogates and
+  trailing data. A canonicalizer that formats floats (for example Python's
+  `rfc8785` package) must add these refusals.
+
+## Envelope
+
+`{"schema": "amq.remote.link/1", "id"?, "re"?, "gen"?, "body"}`
+
+- `id` names a frame; `re` answers the frame with that id. `hello` has both:
+  it answers `challenge`, and `welcome` answers it.
+- `gen` is absent on `challenge` and `hello`. `welcome` assigns it, and every
+  later frame in both directions carries it. A frame from an older
+  generation is dropped.
+- Notifications (`bindings`, `key_revoked`) carry an `id` and get no reply.
+- The envelope ignores unknown fields. Every body is strict: an unknown or
+  duplicate key is refused. A new body version is a new schema string.
+
+## Transport
+
+- The endpoint dials the server: `wss://`, or `ws://` to a loopback host.
+  It answers the challenge only for the `server_id` it pinned at linking.
+- A frame is at most 4 MiB. Both sides refuse a larger one before buffering.
+- Liveness is WebSocket ping and pong. The server pings every 20 s; the
+  endpoint reconnects after 45 s without a ping, after the machine wakes, and
+  after close 1012 (server restart) with a random delay of 0-60 s. Other
+  reconnects back off with jitter.
+- Close 4010 is a permanent revoke: the endpoint retires the link's sink and
+  deletes its device key, so it can never dial again.
+- Commands for one request run in arrival order. A reader never waits on a
+  command or a tool call; when its queue is full it answers `busy` with
+  `retry_after_ms`, and the sender keeps the work.
+- An acknowledgement (`{"ok": digest}`) is sent only after the receiver
+  committed the revision. Until then the endpoint still owes the revision
+  and offers it again on a later sweep (at most once per 30 s per offer, and
+  again on every new connection). The same revision with the same digest is
+  acknowledged again. Another digest is a conflict: the server never
+  overwrites, and answers `error{code: conflict}`. The endpoint then marks that
+  revision terminal: no resend, one log line, counted in `link status`.
+
+## Bindings
+
+A binding is one AMQ binding shared with the link, as the machine sees it
+now: `binding`, `target_id`, `epoch`, `native_session_id`, `labels`
+(`device`, `session`, `harness`, `project`), `harness`, `display_name`,
+`attachment`, `consent` (`passkey` or `local`), `tools` (the tool profile)
+and `capabilities`. `approve_tool` and `answer_question` are always false: a
+link never answers the agent's prompts. `hello` carries the bindings and
+`pending_local` (digests of documents waiting for a local confirmation);
+`amq.remote.link.bindings/1` pushes them again when they change, and
+`session.list` and `session.inspect` answer with them. A consent document's
+binding, target, epoch, native session and labels must equal these values.
+
+## Signatures and derived values
+
+- `hello.signature`: Ed25519 by the device key over
+  `"amq.remote.link/1\0hello\0" + server_id + "\0" + nonce + "\0" + store_id`,
+  with `server_id` and `nonce` from the challenge.
+- Consent: the WebAuthn challenge is SHA-256 of the document bytes. The
+  signature covers `authenticatorData || SHA-256(clientDataJSON)`, with
+  `clientDataJSON` hashed as the raw bytes received, never re-serialized.
+  `authenticatorData` is `SHA-256(rp_id) || flags || counter`; UP and UV are
+  set, BE equals `backup_eligible`. There is no counter check.
+- Fingerprint: base32 (RFC 4648 alphabet, no padding) of
+  `SHA-256(JCS({credential_id, spki, alg, rp_id, origin}))`, the first 20
+  characters, shown as five groups of four.
+- Creator host: `"link-"` + the first 16 hex digits of SHA-256(device key SPKI DER).
+- Revision digest: `"sha256:"` + hex SHA-256 of the JCS form of `snapshot`.
+  The acknowledgement's `ok` is that digest.
+
+## Refusals
+
+An error reply is `{"error": {"code", "message"?, "retry_after_ms"?}}`. A
+signed submit is refused before admission with one of:
+
+| Code | Meaning |
+| --- | --- |
+| `consent_invalid` | The passkey is unknown or revoked, the WebAuthn profile fails, the document is for another server or store, or it does not decode strictly (`consent/refused/`) |
+| `stale_epoch` | The binding's target, epoch or labels moved on: read the binding again and sign again |
+| `session_changed` | The native session behind the binding is another one |
+| `clock_skew` | `issued_at` is more than 60 s from the machine's clock |
+| `expired` | The consent's `not_after` has passed |
+| `unshared` | The binding is not shared with this link |
+| `busy` | The harness is busy and `input.busy` is `reject`. No `retry_after_ms`: sending again is a new request and a new signature |
+
+`interaction.respond` and `session.events` from a link are always refused
+with `unsupported`.
+
+A signed submit on a binding whose `consent` is `local` that passes every
+check is held on the machine, not admitted. The reply is
+`{"outcome": {"op": "request.submit", "code": "pending_local", "message"}}`,
+and `hello.pending_local` lists the digest (`"sha256:"` + hex of the signed
+document bytes) while the task waits. The person confirms with
+`amq-remote link confirm ID`, ID being the first 8 hex digits of the request
+id; the local passkey signs SHA-256(`"amq.remote.link/1\0confirm\0"` +
+digest). After a confirmation the request has a record and revisions like
+any other. A task whose deadline passes, or that a restart drops, has no
+record and no revision; the next hello omits its digest.
+
+## Tool calls
+
+A call that ended without a result is `{"status": "error", "error": {"code"}}`
+with one of `rejected`, `expired`, `unknown`, `refused`, `tool_error`,
+`conflict` (the same idempotency key with another tool or arguments) and
+`not_allowed` (the tool is not in the link's catalog). `busy`, with
+`retry_after_ms`, means "try again later" and is never final: the endpoint
+sends the same call or `call_get` again.
+
+The endpoint sends `call_id = "c_" + idempotency_key`, a client-scoped alias:
+the server echoes that id in every `call_reply` and answers `call_get` for it,
+resolved by the calling subject, the link's device and the key, for 24 hours
+after the call is final; after that a `call_get` answers `error.code` `unknown`.
+A write that waits for the owner answers `pending_approval` with its
+`review_url`.
+
+## Endpoint state
+
+A link lives in exactly one AMQ root, normally the machine root
+`~/.amq/remote/root`; its state is never copied or moved, and one link name
+in two roots is refused. Per link root, under `<root>/extensions/remote/link/`:
+
+| Path | Content |
+| --- | --- |
+| `store_id` | The store identity, minted once. |
+| `<name>/device.key` | The Ed25519 device key, mode 0600, never overwritten. |
+| `<name>/link.json` | The pinned server id, URL, signing origin, and the tool profiles the server grants. |
+| `<name>/consent_keys.json` | Consent public keys only. |
+| `<name>/status.json` | The link's last recorded status, which `link status` shows. |
+| `retired/<sink>` | Sinks of removed or revoked links. |
