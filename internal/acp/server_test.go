@@ -600,16 +600,26 @@ func TestChannelThreadMappingSurvivesRespawn(t *testing.T) {
 
 // Found in review of #1094: Buzz sends no channel id, so every session/new
 // persisted a fresh "session/<id>" entry that is never read again. The state
-// file grew without bound and load refuses it over 1 MiB, which then refuses
-// every session/new. Synthetic entries are not persisted, and old ones are
-// pruned on the next save.
+// file grew without bound until load refused it, which then refuses every
+// session/new. Synthetic entries are not persisted, and old ones are pruned
+// on the next save.
 func TestSessionsWithoutChannelIDAreNotPersisted(t *testing.T) {
 	cfg := testConfig(t)
-	old := `{"version":1,"channels":{"session/0123":{"thread":"cockpit/session/0123","updatedAt":"2026-10-01T00:00:00Z"}}}`
+	// Over 1 MiB of synthetic entries, as an older binary left it: load must
+	// still read the file so the next save prunes it (review of #1096).
+	var old strings.Builder
+	old.WriteString(`{"version":1,"channels":{`)
+	for i := 0; i < 16000; i++ {
+		if i > 0 {
+			old.WriteByte(',')
+		}
+		fmt.Fprintf(&old, `"session/%08d":{"thread":"cockpit/session/%08d","updatedAt":"2026-10-01T00:00:00Z"}`, i, i)
+	}
+	old.WriteString(`}}`)
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cfg.StateDir, sessionStateFilename), []byte(old), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, sessionStateFilename), []byte(old.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	live := startServer(t, cfg)
