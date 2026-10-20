@@ -478,9 +478,10 @@ answered in the session's terminal, and a task that needs one waits there;
 Flags may appear before or after the positional argument.
 `amq-remote COMMAND --help` prints the flags and exits 0 for the client
 commands, `requests`, `attach`, `detach`, `bindings`, the `link` commands,
-`mcp`, `service`, and `doctor`. `serve --help` and `up --help` print the
-flags and exit 2. `share --help`, `version --help`, and the `claude`
-commands print no flag list; their flags are in the tables below.
+`mcp`, `service`, and `doctor`. `serve --help`, `up --help`, and
+`claude install-approval-hook --help` print the flags and exit 2.
+`share --help`, `version --help`, and the other `claude` commands print no
+flag list; the `share` flags are in the table below.
 
 ### Common
 
