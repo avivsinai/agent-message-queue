@@ -72,7 +72,25 @@ func runHost(args []string) int {
 		return exitUsage
 	}
 
-	h, err := host.Open(host.Config{Root: root, Me: me, Cwd: dir, Version: version, Agent: filepath.Base(argv[0]), Log: os.Stderr})
+	// The agent's exit is watched while the host still reads its stdout,
+	// so the turn the agent did not survive can name the exit status.
+	// StdoutPipe would close the read end on Wait and lose the agent's last
+	// lines; an os.Pipe read end stays the host's.
+	exitDone := make(chan struct{})
+	var exitErr error
+	agentExit := func() string {
+		select {
+		case <-exitDone:
+		case <-time.After(childExitWait):
+			return "still running"
+		}
+		if exitErr == nil {
+			return "exit status 0"
+		}
+		return exitErr.Error()
+	}
+
+	h, err := host.Open(host.Config{Root: root, Me: me, Cwd: dir, Version: version, Agent: filepath.Base(argv[0]), Log: os.Stderr, AgentExit: agentExit})
 	if err != nil {
 		return hostExit(err)
 	}
@@ -88,15 +106,27 @@ func runHost(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitGeneral
 	}
-	stdout, err := child.StdoutPipe()
+	stdout, agentStdout, err := os.Pipe()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitGeneral
 	}
-	if err := child.Start(); err != nil {
+	defer func() { _ = stdout.Close() }()
+	child.Stdout = agentStdout
+	err = child.Start()
+	_ = agentStdout.Close()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp host: start the agent:", err)
 		return exitGeneral
 	}
+	go func() {
+		exitErr = child.Wait()
+		close(exitDone)
+		// A process the agent left behind may hold its stdout open; the
+		// host still sees the exit once the agent's last lines had time to
+		// arrive.
+		time.AfterFunc(childExitWait, func() { _ = stdout.Close() })
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,17 +139,14 @@ func runHost(args []string) int {
 	runErr := h.Run(ctx, stdout, stdin)
 
 	_ = stdin.Close()
-	exited := make(chan error, 1)
-	go func() { exited <- child.Wait() }()
-	var waitErr error
 	select {
-	case waitErr = <-exited:
+	case <-exitDone:
 	case <-time.After(childExitWait):
 		killProcessGroup(child)
-		waitErr = <-exited
+		<-exitDone
 	}
-	if waitErr != nil {
-		fmt.Fprintln(os.Stderr, "amq-acp host: the agent exited:", waitErr)
+	if exitErr != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host: the agent exited:", exitErr)
 	}
 	if runErr != nil {
 		return hostExit(runErr)

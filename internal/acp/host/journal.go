@@ -11,13 +11,17 @@ import (
 )
 
 // Turn states. A record moves forward only: claimed, then dispatching, then
-// answered, then replied; or claimed, then skipped.
+// answered, then replied (or undeliverable when no retry can deliver the
+// reply); or claimed, then skipped.
 const (
 	stateClaimed     = "claimed"
 	stateDispatching = "dispatching"
 	stateAnswered    = "answered"
 	stateReplied     = "replied"
 	stateSkipped     = "skipped"
+	// stateUndeliverable is terminal: the reply cannot form a deliverable
+	// message, and Reason says why.
+	stateUndeliverable = "undeliverable"
 )
 
 // turnRecord is the journal of one inbound message. The reply id and its

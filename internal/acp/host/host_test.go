@@ -139,8 +139,8 @@ func newRoot(t *testing.T) string {
 	return root
 }
 
-// send delivers one message from codex to grok and returns it.
-func send(t *testing.T, root, kind, body string) format.Message {
+// send delivers one message from a sender to grok and returns it.
+func send(t *testing.T, root, from, kind, body string) format.Message {
 	t.Helper()
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -148,7 +148,7 @@ func send(t *testing.T, root, kind, body string) format.Message {
 		t.Fatal(err)
 	}
 	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{"grok"},
+		Schema: format.CurrentSchema, ID: id, From: from, To: []string{"grok"},
 		Thread: "p2p/codex__grok", Subject: "sum", Created: now.UTC().Format(time.RFC3339Nano), Kind: kind,
 	}, Body: body}
 	data, err := msg.Marshal()
@@ -195,7 +195,7 @@ func waitReply(t *testing.T, root string) format.Message {
 
 func TestHostAnswersAMessageOnItsThread(t *testing.T) {
 	root := newRoot(t)
-	question := send(t, root, format.KindQuestion, "what is 2+2?")
+	question := send(t, root, "codex", format.KindQuestion, "what is 2+2?")
 	agent := &fakeAgent{}
 	startHost(t, root, agent)
 
@@ -222,7 +222,7 @@ func TestHostAnswersAMessageOnItsThread(t *testing.T) {
 
 func TestHostRejectsAToolCall(t *testing.T) {
 	root := newRoot(t)
-	send(t, root, format.KindTodo, "clean the build")
+	send(t, root, "codex", format.KindTodo, "clean the build")
 	agent := &fakeAgent{askPermission: true}
 	startHost(t, root, agent)
 
@@ -238,7 +238,7 @@ func TestHostRejectsAToolCall(t *testing.T) {
 // reply, so two hosts can never answer each other forever.
 func TestHostDrainsAStatusWithoutReply(t *testing.T) {
 	root := newRoot(t)
-	status := send(t, root, format.KindStatus, "done with the build")
+	status := send(t, root, "codex", format.KindStatus, "done with the build")
 	agent := &fakeAgent{}
 	startHost(t, root, agent)
 
@@ -264,5 +264,31 @@ func TestHostDrainsAStatusWithoutReply(t *testing.T) {
 	defer agent.mu.Unlock()
 	if slices.Contains(agent.methods, "session/prompt") {
 		t.Fatal("a status message ran an ACP turn")
+	}
+}
+
+// Review of the first host slice (P1): a question from a bridged sender
+// (peer/handle) was prompted, its reply failed handle validation, and the
+// host exited; every restart replayed the same reply and exited again. Such
+// a sender is now skipped before any prompt, and the next message runs.
+func TestHostSkipsASenderItCannotReplyTo(t *testing.T) {
+	root := newRoot(t)
+	bridged := send(t, root, "peer/codex", format.KindQuestion, "from another host")
+	question := send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+	agent := &fakeAgent{}
+	startHost(t, root, agent)
+
+	reply := waitReply(t, root)
+	if !slices.Equal(reply.Header.Refs, []string{question.Header.ID}) {
+		t.Fatalf("reply refs=%v; want the local question %s", reply.Header.Refs, question.Header.ID)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns", bridged.Header.ID+".json"))
+	if err != nil || !strings.Contains(string(data), `"state":"skipped"`) {
+		t.Fatalf("bridged question record=%s (%v); want skipped", data, err)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.prompts) != 1 {
+		t.Fatalf("agent ran %d turns; want one, for the local question", len(agent.prompts))
 	}
 }

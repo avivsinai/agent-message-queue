@@ -41,6 +41,7 @@ const protocolVersion = 1
 
 const (
 	scanInterval       = time.Second
+	handshakeTimeout   = 60 * time.Second
 	defaultTurnTimeout = 30 * time.Minute
 	cancelGrace        = 30 * time.Second
 	// bodyLimit leaves room for the reply header under the message size cap.
@@ -71,6 +72,9 @@ type Config struct {
 	// Agent names the agent executable in log lines.
 	Agent string
 	Log   io.Writer
+	// AgentExit, when set, reports how the agent process exited, for the
+	// reply to a turn the agent did not survive. It may wait briefly.
+	AgentExit func() string
 }
 
 // Host is one running amq-acp host.
@@ -83,8 +87,8 @@ type Host struct {
 	sessionID string
 	agentName string
 	timeout   time.Duration
-	// unreadable remembers inbox files that did not parse, so each is
-	// logged once; amq drain owns moving them to the DLQ.
+	// unreadable remembers inbox files the host leaves in place, so each
+	// is logged once.
 	unreadable map[string]bool
 
 	mu   sync.Mutex
@@ -163,7 +167,7 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	if err := h.handshake(ctx); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s answers AMQ messages through %s (ACP session %s). %s\n", h.cfg.Me, h.cfg.Agent, h.sessionID, AutonomyNotice)
+	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (ACP session %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.sessionID, AutonomyNotice)
 	if err := h.withRoot(func(root *fsq.DeliveryRoot) error { return h.recover(ctx, root) }); err != nil {
 		return err
 	}
@@ -194,7 +198,11 @@ func (h *Host) withRoot(fn func(*fsq.DeliveryRoot) error) error {
 	return fn(root)
 }
 
+// handshake runs initialize and session/new within one budget, so an agent
+// that never answers does not hold the host lock forever.
 func (h *Host) handshake(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
 	raw, err := h.conn.call(ctx, "initialize", map[string]any{
 		"protocolVersion": protocolVersion,
 		"clientCapabilities": map[string]any{
@@ -204,6 +212,9 @@ func (h *Host) handshake(ctx context.Context) error {
 		"clientInfo": map[string]string{"name": "amq-acp", "version": h.cfg.Version},
 	}, nil)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return actionRequired("the agent did not answer initialize within %s", handshakeTimeout)
+		}
 		return fmt.Errorf("initialize the agent: %w", err)
 	}
 	var init struct {
@@ -223,6 +234,9 @@ func (h *Host) handshake(ctx context.Context) error {
 
 	raw, err = h.conn.call(ctx, "session/new", map[string]any{"cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return actionRequired("the agent did not answer session/new within %s", handshakeTimeout)
+		}
 		if authRequired(err) {
 			return actionRequired("the agent needs a login: authenticate the harness once with its own CLI, then start the host again (%v)", err)
 		}
@@ -329,7 +343,7 @@ func (h *Host) recover(ctx context.Context, root *fsq.DeliveryRoot) error {
 			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %v; left as is\n", err)
 			continue
 		}
-		if rec == nil || rec.State == stateReplied || rec.State == stateSkipped {
+		if rec == nil || rec.State == stateReplied || rec.State == stateSkipped || rec.State == stateUndeliverable {
 			continue
 		}
 		if err := h.advance(ctx, root, rec); err != nil {
@@ -374,10 +388,7 @@ func (h *Host) take(ctx context.Context, root *fsq.DeliveryRoot, name string) er
 		if os.IsNotExist(err) {
 			return nil
 		}
-		if !h.unreadable[name] {
-			h.unreadable[name] = true
-			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s is not a readable message (%v); amq drain moves it to the DLQ\n", name, err)
-		}
+		h.deadLetter(root, name, err)
 		return nil
 	}
 	id := msg.Header.ID
@@ -458,14 +469,21 @@ func (h *Host) advance(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 				return err
 			}
 		case stateAnswered:
+			next := stateReplied
 			if err := h.deliverReply(root, rec); err != nil {
-				return err
+				var permanent *permanentError
+				if !errors.As(err, &permanent) {
+					return err
+				}
+				// No retry can deliver this reply; record why and move on.
+				next, rec.Reason = stateUndeliverable, err.Error()
+				_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %v\n", err)
 			}
-			rec.State = stateReplied
+			rec.State = next
 			if err := saveTurn(root, h.cfg.Me, *rec); err != nil {
 				return err
 			}
-		case stateReplied, stateSkipped:
+		case stateReplied, stateSkipped, stateUndeliverable:
 			return fatal
 		default:
 			return fmt.Errorf("turn record %s has unknown state %q", rec.MessageID, rec.State)
@@ -473,11 +491,19 @@ func (h *Host) advance(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 	}
 }
 
-// skipReason is the loop guard. Only a question, a review request, a todo, a
+// skipReason is the loop guard. A message whose sender cannot receive a reply
+// in this root (a bridged peer/handle, an empty or invalid handle) or that has
+// no thread runs no turn. Only a question, a review request, a todo, a
 // brainstorm, or a message with no kind runs a turn; answers, review
 // responses, status and decisions are taken without a reply. A message with
 // the host label is another host's reply.
 func skipReason(msg format.Message) string {
+	if err := fsq.ValidateHandle(msg.Header.From); err != nil {
+		return fmt.Sprintf("sender %q cannot receive a reply here: %v", msg.Header.From, err)
+	}
+	if strings.TrimSpace(msg.Header.Thread) == "" {
+		return "the message has no thread to reply on"
+	}
 	switch msg.Header.Kind {
 	case "", format.KindQuestion, format.KindReviewRequest, format.KindTodo, format.KindBrainstorm:
 	default:
@@ -590,7 +616,7 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 	answer, refused := collect.text.String(), collect.refused
 	h.mu.Unlock()
 	rec.State = stateAnswered
-	rec.StopReason, rec.ReplyBody, fatal = replyFor(answer, cancelled, result.raw, result.err)
+	rec.StopReason, rec.ReplyBody, fatal = replyFor(answer, cancelled, result.raw, result.err, h.cfg.AgentExit)
 	if refused > 0 {
 		rec.ReplyBody += fmt.Sprintf("\n\nThe host rejected %d tool call(s) the agent asked to run.", refused)
 	}
@@ -602,7 +628,7 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 
 // replyFor maps a turn's outcome to the stop label, the reply body, and
 // whether the host must stop afterwards.
-func replyFor(answer, cancelled string, raw json.RawMessage, callErr error) (string, string, error) {
+func replyFor(answer, cancelled string, raw json.RawMessage, callErr error, exitStatus func() string) (string, string, error) {
 	answer = truncate(answer)
 	if callErr != nil {
 		var rerr *rpcError
@@ -610,7 +636,11 @@ func replyFor(answer, cancelled string, raw json.RawMessage, callErr error) (str
 		case errors.As(callErr, &rerr):
 			return "error", truncate("The agent failed this turn: " + rerr.Message), nil
 		case errors.Is(callErr, errClosed):
-			return "error", "The agent exited during this turn; its effects are unknown.", callErr
+			status := "status unknown"
+			if exitStatus != nil {
+				status = exitStatus()
+			}
+			return "error", "The agent exited during this turn (" + status + "); its effects are unknown.", callErr
 		default:
 			return "error", "The turn failed: " + callErr.Error() + "; its effects are unknown.", callErr
 		}
@@ -685,6 +715,12 @@ func framePrompt(msg format.Message) string {
 // come from the claim, so a replay is the same message and is not delivered
 // twice.
 func (h *Host) deliverReply(root *fsq.DeliveryRoot, rec *turnRecord) error {
+	if err := fsq.ValidateHandle(rec.From); err != nil {
+		return &permanentError{fmt.Errorf("reply to %s: sender %q: %w", rec.MessageID, rec.From, err)}
+	}
+	if strings.TrimSpace(rec.Thread) == "" {
+		return &permanentError{fmt.Errorf("reply to %s: the message has no thread", rec.MessageID)}
+	}
 	kind := rec.Kind
 	switch kind {
 	case format.KindReviewRequest:
@@ -716,17 +752,47 @@ func (h *Host) deliverReply(root *fsq.DeliveryRoot, rec *turnRecord) error {
 		Body: rec.ReplyBody,
 	}.Marshal()
 	if err != nil {
-		return err
+		return &permanentError{fmt.Errorf("reply to %s: %w", rec.MessageID, err)}
+	}
+	if len(data) > format.MaxMessageSize {
+		return &permanentError{fmt.Errorf("reply to %s exceeds the maximum AMQ message size", rec.MessageID)}
 	}
 	created, err := time.Parse(time.RFC3339Nano, rec.ReplyCreated)
 	if err != nil {
-		return fmt.Errorf("turn record %s has an unreadable reply time", rec.MessageID)
+		return &permanentError{fmt.Errorf("turn record %s has an unreadable reply time", rec.MessageID)}
 	}
 	if _, err := acp.DeliverPrepared(root, rec.From, rec.Thread, rec.ReplyID, created, data); err != nil {
 		return fmt.Errorf("reply to %s: %w", rec.MessageID, err)
 	}
 	_, _ = root.WriteFileAtomic(filepath.Join("agents", h.cfg.Me, "outbox", "sent"), rec.ReplyID+".md", data, 0o600)
 	return nil
+}
+
+// permanentError is a reply that no retry can deliver: the record itself
+// cannot form a deliverable message. Any other delivery error is I/O and
+// stops the host so the next start retries it.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// deadLetter moves an inbox file that does not parse to the DLQ with a dlq
+// receipt, the path amq drain takes for a corrupt message. A move that fails
+// leaves the file in place and is logged once.
+func (h *Host) deadLetter(root *fsq.DeliveryRoot, name string, parseErr error) {
+	id := strings.TrimSuffix(name, ".md")
+	if _, err := fsq.MoveToDLQ(root, h.cfg.Me, name, id, "parse_error", parseErr.Error()); err != nil {
+		var committed *fsq.CommittedDurabilityError
+		if !errors.As(err, &committed) {
+			if !h.unreadable[name] {
+				h.unreadable[name] = true
+				_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s does not parse (%v) and could not move to the DLQ: %v\n", name, parseErr, err)
+			}
+			return
+		}
+	}
+	_ = receipt.EmitDeliveryRoot(root, receipt.New(id, "", "", h.cfg.Me, receipt.StageDLQ, parseErr.Error()))
+	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s does not parse (%v); moved to the DLQ\n", name, parseErr)
 }
 
 // reloadSettings re-reads turn_timeout from the host's settings.json at the
