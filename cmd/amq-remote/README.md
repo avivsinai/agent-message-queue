@@ -315,8 +315,10 @@ time; a prompt sent from Buzz shows as the text the owner typed. Export
 runs only while the target's attached native
 session is the pinned one, and stops the moment it is not. Activity carries
 no control: nothing in it can submit, cancel or approve. A frame the relay
-may or may not have accepted is never sent again. Codex and Claude targets
-export activity; pi targets do not.
+may or may not have accepted is never sent again. Codex, Claude and pi targets
+export activity. For pi the bridge writes the session's turns, whole messages
+and tool calls to `activity/<session_id>.jsonl`; a pi bridge without that file
+exports none.
 
 ### Owner DM commands
 
