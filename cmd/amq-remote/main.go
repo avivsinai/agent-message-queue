@@ -657,6 +657,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// also for a serve that has no share yet.
 	edges.bind(ep.Handle, ep.NativeSessionID)
 	edges.bindAttachments(ep.AttachmentOf)
+	ep.SetThreadApprovals(edges.bindThreadApprovals(ep.RespondThreadApproval))
 	relays := newRelaySet(c.root, stateDir, manifestFile, edges, stderr)
 	relays.start(ctx, relayCfg)
 	if relayCfg != nil {

@@ -358,6 +358,16 @@ answer is edited to say so, and a reaction on it then answers nothing.
 | ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. A Codex permission, input or MCP elicitation request shows with no reaction to take: answer it in the terminal. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. Claude targets with `approve` and the PermissionRequest hook; ✅ only when the hook pins the owner. |
 | `yes` or `no` typed in the DM (also `y`, `n`, `approve`, `reject`, ✅, ❌) | Answers a pending approval as ✅ or ❌ does. In the approval message's thread it answers that approval; in the main DM it answers the target's pending approval once the owner could have seen it. A Claude approval takes a typed yes only in its thread; a yes in the main DM is not sent, and the reply says how to allow. |
 
+A Codex target with `approve` also shows approvals of turns started in the
+Codex TUI, on the share whose `native_session_id` is the thread. Each has
+its own DM message, outside any request's thread. ✅ and ❌, or `yes` and
+`no` typed in that message's thread, answer it as above, only from that
+share and for one hour; then the message says to answer in the terminal.
+A permission, input or MCP elicitation request of such a turn is not shown.
+After an endpoint restart, the app-server sends a still-pending approval
+again, and its DM message answers it again. An approval that closed while
+the endpoint was down keeps its old text, and a reaction on it is not sent.
+
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
 submits a plain prompt too. A leading `nostr:npub1…` mention is dropped from
@@ -508,7 +518,7 @@ COMMAND --help` prints a command's flags.
 | `--fake` | false | Append the fake runtime as target `fake`. |
 | `--codex-socket PATH` | empty | Unix socket of a running Codex app-server. |
 | `--codex-thread ID` | empty | With `--codex-socket`, attach only this thread. |
-| `--codex-approve` | false | Answer approvals of runs this endpoint submitted to those Codex threads from remote clients. |
+| `--codex-approve` | false | Answer approvals of those Codex threads from remote clients: runs this endpoint submitted, and turns started in the Codex TUI on a thread a relay share pins. |
 | `--manifest PATH` | `<root>/extensions/remote/manifest.json` | Adapter manifest path. |
 | `--discover` | false | List candidates and exit. |
 | `--poll DURATION` | `500ms` | Import and reconciliation interval. |

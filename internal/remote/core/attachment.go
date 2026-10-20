@@ -107,6 +107,11 @@ const (
 	EventLocalIntervention NativeEventType = "local_intervention"
 	EventEpochChanged      NativeEventType = "epoch_changed"
 	EventStatus            NativeEventType = "status"
+	// EventThreadQuestion and EventThreadQuestionResolved are an approval
+	// of a turn no request owns, such as one the user started in the
+	// harness's terminal, and its end. They carry Turn, never a Key.
+	EventThreadQuestion         NativeEventType = "thread_question"
+	EventThreadQuestionResolved NativeEventType = "thread_question_resolved"
 )
 
 // NativeEvent is one observation from an attachment. Key is set for events
@@ -129,6 +134,8 @@ type NativeEvent struct {
 	// that interaction id.
 	Outcome protocol.ResolutionOutcome
 	Option  string
+	// Turn is the native turn of a thread question.
+	Turn string
 }
 
 // Attachment is the native seam contract from the design. Implementations

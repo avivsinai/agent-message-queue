@@ -50,6 +50,9 @@ type dmEdges struct {
 	// identity is the endpoint's in-process native session accessor, bound
 	// with handle.
 	identity func(target string) string
+	// respondThread is the endpoint's thread approval answer path, bound
+	// with handle.
+	respondThread buzzio.ThreadResponder
 	// pins are the DM-approval pins this process wrote (pinApprovals,
 	// pinNative).
 	pins []approvalPin
@@ -170,6 +173,7 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 		return
 	}
 	ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.identityLate, d.handleLate)
+	ds.carrier.SetThreadResponder(d.respondThreadLate)
 	d.mu.Lock()
 	d.byBody[b.Body] = ds
 	d.state[sh.Session] = "configured"
@@ -503,6 +507,58 @@ func (d *dmEdges) bind(h buzzio.Handler, identity func(target string) string) {
 	d.mu.Lock()
 	d.handle, d.identity = h, identity
 	d.mu.Unlock()
+}
+
+// bindThreadApprovals attaches the endpoint's thread approval answer path
+// and returns where the endpoint shows thread approvals: the commands share
+// of the target whose approved native session is the approval's (611.42
+// slice 1b).
+func (d *dmEdges) bindThreadApprovals(respond buzzio.ThreadResponder) core.ThreadApprovalSink {
+	d.mu.Lock()
+	d.respondThread = respond
+	d.mu.Unlock()
+	return core.ThreadApprovalSink{Owner: d.threadOwner, Publish: d.publishThread}
+}
+
+// threadShare is the commands share of target pinned to native, or nil.
+func (d *dmEdges) threadShare(target, native string) *dmShare {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, ds := range d.byBody {
+		if ds.binding.Target == target && native != "" && ds.binding.NativeSession == native {
+			return ds
+		}
+	}
+	return nil
+}
+
+// threadOwner is the source of the share a thread approval belongs to.
+func (d *dmEdges) threadOwner(target, native string) (core.Source, bool) {
+	ds := d.threadShare(target, native)
+	if ds == nil {
+		return core.Source{}, false
+	}
+	return ds.carrier.ShareSource(), true
+}
+
+// publishThread shows a thread approval on its share, or leaves it owed.
+func (d *dmEdges) publishThread(ta core.ThreadApproval) error {
+	ds := d.threadShare(ta.TargetID, ta.NativeSession)
+	if ds == nil {
+		return fmt.Errorf("%w: no Buzz carrier for thread approval %s", errCarrierUnavailable, ta.ID)
+	}
+	return ds.carrier.PublishThreadApproval(ta)
+}
+
+// respondThreadLate is the endpoint's thread approval answer path.
+func (d *dmEdges) respondThreadLate(src core.Source, id, option string) error {
+	d.mu.Lock()
+	fn := d.respondThread
+	d.mu.Unlock()
+	if fn == nil {
+		return errors.New("endpoint not started")
+	}
+	return fn(src, id, option)
 }
 
 // identityLate is the native session of target, "" before bind.

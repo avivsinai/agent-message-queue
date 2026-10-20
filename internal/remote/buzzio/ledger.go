@@ -467,7 +467,10 @@ func (l *Ledger) RequestForRow(rowEventID string) (string, bool, error) {
 // Approval is one approval message this edge posted: the pending
 // interaction it shows and the request fields an answer must carry.
 type Approval struct {
-	RequestRef    string `json:"request_ref"`
+	RequestRef string `json:"request_ref"`
+	// Thread is the id of a thread approval (core.ThreadApproval), which
+	// no request owns; RequestRef is then empty.
+	Thread        string `json:"thread_approval,omitempty"`
 	InteractionID string `json:"interaction_id"`
 	Target        string `json:"target"`
 	Epoch         string `json:"epoch"`

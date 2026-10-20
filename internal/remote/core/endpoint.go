@@ -200,6 +200,15 @@ type Endpoint struct {
 	// (611.42.14). An entry lives while a respond holds or waits for it.
 	answering map[answerKey]*answerLock
 	consent   ConsentCheck
+	// threadApprovals are the open approvals of turns no request owns, by
+	// id, and threadSink is where they are shown (611.42 slice 1b).
+	threadApprovals map[string]*threadApproval
+	threadSink      ThreadApprovalSink
+	// threadOwed are thread approval publications that failed, by id.
+	threadOwed map[string]ThreadApproval
+	// threadPubMu orders thread approval publications: it is taken before
+	// e.mu and held from a state change through its publication.
+	threadPubMu sync.Mutex
 }
 
 // answerKey names one interaction of one request.
@@ -248,6 +257,8 @@ func New(cfg Config) *Endpoint {
 		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
 		answering:        map[answerKey]*answerLock{},
+		threadApprovals:  map[string]*threadApproval{},
+		threadOwed:       map[string]ThreadApproval{},
 		consent:          cfg.Consent,
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
@@ -1071,10 +1082,16 @@ const buzzHostPrefix = "buzz-"
 // socket stamps none, so a local sender, the asking agent included, can
 // never pass.
 func fromOwnerShare(src Source, rec *requests.Record) bool {
-	o, r := src.Origin, rec.Origin
+	return sameShare(src, rec.CreatorHost, rec.Origin)
+}
+
+// sameShare reports whether src is the Buzz share with creator host host
+// and routing origin.
+func sameShare(src Source, host string, origin map[string]string) bool {
+	o, r := src.Origin, origin
 	// The creator host is derived from relay, body and owner, so it also
 	// catches a new owner on the same body and channel.
-	return src.Host == rec.CreatorHost && o["carrier"] == "buzz" && r["carrier"] == "buzz" &&
+	return src.Host == host && o["carrier"] == "buzz" && r["carrier"] == "buzz" &&
 		o["body"] != "" && o["body"] == r["body"] && o["channel"] == r["channel"]
 }
 
@@ -1628,6 +1645,17 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// synchronous publishLocked stays under the lock until B14e reworks
 	// publication bounding; the ack is the unbounded-latency call and moves
 	// out now.
+	//
+	// A thread question is not a request record's: it is shown outside
+	// e.mu, ordered by threadPubMu.
+	switch ev.Type {
+	case EventThreadQuestion:
+		e.onThreadQuestion(targetID, ev)
+		return
+	case EventThreadQuestionResolved:
+		e.onThreadResolved(targetID, ev)
+		return
+	}
 	e.mu.Lock()
 	if ev.Type == EventEpochChanged || ev.Type == EventStatus {
 		e.mu.Unlock()
@@ -2726,6 +2754,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 // Tick retries deferred admissions and expiry; carriers call it on a timer
 // and when a target comes back online.
 func (e *Endpoint) Tick() error {
+	e.tickThreadApprovals()
 	return e.Reconcile()
 }
 

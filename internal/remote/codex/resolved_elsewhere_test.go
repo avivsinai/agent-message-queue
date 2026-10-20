@@ -60,7 +60,7 @@ func TestApprovalAnsweredElsewhereRefusesLateAnswer(t *testing.T) {
 		t.Fatal("serverRequest/resolved did not resolve the approval")
 	}
 	waitNoInteraction(t, att)
-	if code, err := att.Respond(key, s.Epoch, "tool1", "accept"); err != nil || code != protocol.CodeAlreadyResolved {
+	if code, err := att.Respond(key, s.Epoch, "tool1:7", "accept"); err != nil || code != protocol.CodeAlreadyResolved {
 		t.Fatalf("late Respond = (%q, %v), want already_resolved", code, err)
 	}
 }
@@ -280,10 +280,10 @@ func TestOverlappingApprovalsShowOneAtATime(t *testing.T) {
 			t.Fatalf("events = %v, want three", got)
 		}
 	}
-	if want := []string{"ask a1", "resolved", "ask b1"}; strings.Join(got, ",") != strings.Join(want, ",") {
+	if want := []string{"ask a1:10", "resolved", "ask b1:11"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", got, want)
 	}
-	if code, err := att.Respond(key, s.Epoch, "b1", "accept"); err != nil || code != "" {
+	if code, err := att.Respond(key, s.Epoch, "b1:11", "accept"); err != nil || code != "" {
 		t.Fatalf("Respond on the second approval = (%q, %v), want it answered", code, err)
 	}
 }
@@ -326,7 +326,7 @@ func TestApprovalResolvedBeforeDeliveryIsNotShown(t *testing.T) {
 	srv.sendServerRequest(t, "13", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"next","command":"pwd"}`)
 	select {
 	case id := <-asked:
-		if id != "next" {
+		if id != "next:13" {
 			t.Fatalf("shown approval = %s, want only the unresolved one", id)
 		}
 	case <-time.After(5 * time.Second):
