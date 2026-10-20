@@ -875,18 +875,14 @@ func loadOptionalLocalConfig(path string) (launch.LocalConfig, []byte, bool, err
 }
 
 func readOptionalRegular(path string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	data, err := fsq.ReadRegularNoFollow(path)
 	if os.IsNotExist(err) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("%s must be a regular file", path)
-	}
-	data, err := os.ReadFile(path)
-	return data, true, err
+	return data, true, nil
 }
 
 func setupBaseConfig(root string, agents []string) (config.Config, []byte, []string, error) {

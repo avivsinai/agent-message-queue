@@ -209,23 +209,16 @@ func storeDir(create bool) (string, error) {
 // readStrict decodes a small regular 0600 file at path into v, opened
 // without following a symlink and checked against the file it inspected.
 func readStrict(path string, v any) error {
-	fi, err := os.Lstat(path)
+	f, fi, err := fsq.OpenRegularNoFollowBounded(path, maxBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrNone
 	}
 	if err != nil {
 		return err
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 || fi.Size() > maxBytes {
-		return fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
-	if err != nil {
-		return err
-	}
 	defer func() { _ = f.Close() }()
-	if fi2, err := f.Stat(); err != nil || !os.SameFile(fi, fi2) {
-		return fmt.Errorf("%s was replaced while opening; refusing", path)
+	if fi.Mode().Perm() != 0o600 {
+		return fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
