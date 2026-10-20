@@ -386,6 +386,24 @@ func provenCreated(root *fsq.DeliveryRoot, handle, messageID string) (time.Time,
 	return time.Time{}, fmt.Errorf("message %s is in %s's inbox but its header is unreadable", messageID, handle)
 }
 
+// DeliverPrepared delivers an already-serialized message with a fixed id to
+// one recipient through the pinned root, unless the recipient's inbox (new or
+// cur) already holds it. A caller that replays after a crash passes the same
+// bytes and gets Duplicate instead of a second copy.
+func DeliverPrepared(root *fsq.DeliveryRoot, to, thread, id string, created time.Time, data []byte) (Delivery, error) {
+	if len(data) > format.MaxMessageSize {
+		return Delivery{}, fmt.Errorf("message exceeds the maximum AMQ message size")
+	}
+	held, err := inboxHasMessage(root, to, id)
+	if err != nil {
+		return Delivery{}, err
+	}
+	if held {
+		return Delivery{MessageID: id, To: to, Thread: thread, Created: created, State: DeliveryDuplicate, Committed: true, Egress: EgressConfirmed, Duplicate: true}, nil
+	}
+	return writeToInbox(Config{To: to}, root, claimIdentity("", id, to, thread), created, data)
+}
+
 // claimIdentity builds the in-memory identity of a message being delivered
 // first-hand, shaped like a claim so writeToInbox serves both paths.
 func claimIdentity(eventID, messageID, to, thread string) *eventRecord {
