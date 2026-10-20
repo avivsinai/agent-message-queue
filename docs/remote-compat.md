@@ -177,9 +177,11 @@ amq-remote-design.html §Capability per harness):
   on the thread, applies the first response, drops later ones with only a
   log line, and then sends `serverRequest/resolved` to every client (source:
   `codex-rs/app-server/src/outgoing_message.rs:330-495`,
-  `thread_lifecycle.rs:864-885`). The adapter answers only approvals of runs
-  it submitted and clears an approval on `serverRequest/resolved`, so a late
-  answer is refused. A remote approve is offered only for a plain command
+  `thread_lifecycle.rs:864-885`). The adapter answers approvals of runs it
+  submitted and, for a turn it did not submit (one started in the Codex
+  TUI), decision approvals on the relay share pinned to the thread. It
+  clears an approval on `serverRequest/resolved` or when its turn completes,
+  so a late answer is refused. A remote approve is offered only for a plain command
   that the prompt shows whole; file changes and network, permission or
   write-root grants take a remote reject only. Not live-verified against a
   running Codex terminal.

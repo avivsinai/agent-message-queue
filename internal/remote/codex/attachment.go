@@ -173,10 +173,31 @@ type Attachment struct {
 	// request is already answered and is never shown. FIFO-bounded.
 	resolvedEarly      map[string]bool
 	resolvedEarlyOrder []string
+	// threadApprovals are the open decision approvals of turns no run of
+	// ours owns, such as a turn the user started in the TUI, by threadKey
+	// (611.42 slice 1b). At most maxThreadApprovals; past that the TUI
+	// answers alone.
+	threadApprovals map[string]*threadApproval
 }
 
 // maxResolvedEarly bounds Attachment.resolvedEarly.
 const maxResolvedEarly = 64
+
+// maxThreadApprovals bounds Attachment.threadApprovals.
+const maxThreadApprovals = 64
+
+// threadApproval is one decision approval of a turn no run of ours owns.
+// sending and resolvedWhileSending work as on run.
+type threadApproval struct {
+	turnID               string
+	reqID                json.RawMessage
+	inter                *protocol.Interaction
+	sending              bool
+	resolvedWhileSending bool
+}
+
+// threadKey names a thread approval by its turn and interaction id.
+func threadKey(turnID, interactionID string) string { return turnID + "\x00" + interactionID }
 
 // Option configures Attach.
 type Option func(*Attachment)
@@ -1063,6 +1084,74 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 // answer never gets here: the endpoint refuses it first.
 var errAnswerInFlight = errors.New("an answer to this approval is already being sent")
 
+// RespondThread implements core.ThreadResponder: it answers a decision
+// approval of a turn no run of ours owns, as Respond answers one of ours.
+func (a *Attachment) RespondThread(turnID, interactionID, option string) (protocol.Code, error) {
+	k := threadKey(turnID, interactionID)
+	a.mu.Lock()
+	ta := a.threadApprovals[k]
+	switch {
+	case ta == nil:
+		a.mu.Unlock()
+		return protocol.CodeAlreadyResolved, nil
+	case offered(ta.inter.Options, option) == "":
+		a.mu.Unlock()
+		return protocol.CodeInvalid, nil
+	case ta.sending:
+		a.mu.Unlock()
+		return "", errAnswerInFlight
+	}
+	ta.sending, ta.resolvedWhileSending = true, false
+	a.mu.Unlock()
+	err := a.client.Load().Respond(ta.reqID, map[string]string{"decision": option})
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
+	a.mu.Lock()
+	resolved, open := ta.resolvedWhileSending, a.threadApprovals[k] == ta
+	ta.sending, ta.resolvedWhileSending = false, false
+	if open && (err == nil || resolved) {
+		delete(a.threadApprovals, k)
+	}
+	a.mu.Unlock()
+	switch {
+	case err != nil && !resolved:
+		return "", err
+	case err != nil:
+		// Another client answered while our send failed.
+		a.emitThreadResolved(ta, false, "")
+		return protocol.CodeAlreadyResolved, nil
+	case open:
+		a.emitThreadResolved(ta, true, "")
+	}
+	return "", nil
+}
+
+// emitThreadResolved reports a thread approval resolved: by our answer
+// (remote), by the harness, or with outcome when it is set.
+func (a *Attachment) emitThreadResolved(ta *threadApproval, remote bool, outcome protocol.ResolutionOutcome) {
+	a.emit(core.NativeEvent{Type: core.EventThreadQuestionResolved, Turn: ta.turnID,
+		Interaction: &protocol.Interaction{InteractionID: ta.inter.InteractionID}, Remote: remote, Outcome: outcome})
+}
+
+// endThreadApprovals resolves every thread approval of a turn that ended
+// while it was open.
+func (a *Attachment) endThreadApprovals(turnID string) {
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
+	a.mu.Lock()
+	var ended []*threadApproval
+	for k, ta := range a.threadApprovals {
+		if ta.turnID == turnID && !ta.sending {
+			ended = append(ended, ta)
+			delete(a.threadApprovals, k)
+		}
+	}
+	a.mu.Unlock()
+	for _, ta := range ended {
+		a.emitThreadResolved(ta, false, protocol.ResolutionRunEnded)
+	}
+}
+
 // advanceLocked makes the oldest queued approval that Codex still holds the
 // pending one, and returns it, or nil. The caller holds a.mu and has
 // cleared r.interaction.
@@ -1127,6 +1216,20 @@ func (a *Attachment) onServerRequestResolved(n Notification) {
 			a.emitResolved(r, false, next)
 			return
 		}
+	}
+	for k, ta := range a.threadApprovals {
+		if !sameRequestID(ta.reqID, p.RequestID) {
+			continue
+		}
+		if ta.sending {
+			ta.resolvedWhileSending = true
+			a.mu.Unlock()
+			return
+		}
+		delete(a.threadApprovals, k)
+		a.mu.Unlock()
+		a.emitThreadResolved(ta, false, "")
+		return
 	}
 	// Server requests reach onServerRequest through a worker queue, so the
 	// resolution can overtake its own request. Remember it.
@@ -1361,6 +1464,7 @@ func (a *Attachment) onNotification(n Notification) {
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
 			return
 		}
+		a.endThreadApprovals(p.Turn.ID)
 		a.mu.Lock()
 		if a.activeTurn == p.Turn.ID {
 			a.activeTurn = ""
@@ -1571,18 +1675,23 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 }
 
 // raiseApproval makes inter the pending interaction of the run that owns
-// turnID, or queues it behind the pending one. The caller holds questionMu.
+// turnID, or queues it behind the pending one. An approval of a turn no run
+// of ours owns is a thread approval. The caller holds questionMu.
 func (a *Attachment) raiseApproval(turnID string, reqID json.RawMessage, inter *protocol.Interaction) {
 	a.mu.Lock()
-	r, ok := a.byTurn[turnID]
-	if !ok || !a.approve {
-		// Not our run, or approvals not advertised: the local TUI answers.
+	if !a.approve {
+		// Approvals not advertised: the local TUI answers.
 		a.mu.Unlock()
 		return
 	}
 	if key := compactID(reqID); a.resolvedEarly[key] {
 		a.mu.Unlock()
 		return // another client answered it before it reached us
+	}
+	r, ok := a.byTurn[turnID]
+	if !ok {
+		a.raiseThreadLocked(turnID, reqID, inter)
+		return
 	}
 	r.approvalReqs[inter.InteractionID] = reqID
 	if r.interaction != nil {
@@ -1594,6 +1703,26 @@ func (a *Attachment) raiseApproval(turnID string, reqID json.RawMessage, inter *
 	key, runID := r.key, r.runIDLocked()
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
+}
+
+// raiseThreadLocked records a decision approval of a turn no run of ours
+// owns, such as one the user started in the TUI, and reports it. A request
+// only the terminal answers is not reported: the owner can do nothing with
+// it from Buzz. The caller holds questionMu and a.mu, which it releases.
+func (a *Attachment) raiseThreadLocked(turnID string, reqID json.RawMessage, inter *protocol.Interaction) {
+	k := threadKey(turnID, inter.InteractionID)
+	if turnID == "" || len(inter.Options) == 0 || a.threadApprovals[k] != nil || len(a.threadApprovals) >= maxThreadApprovals {
+		a.mu.Unlock()
+		return
+	}
+	if a.threadApprovals == nil {
+		a.threadApprovals = map[string]*threadApproval{}
+	}
+	ta := &threadApproval{turnID: turnID, reqID: reqID, inter: inter}
+	a.threadApprovals[k] = ta
+	epoch := a.epoch
+	a.mu.Unlock()
+	a.emit(core.NativeEvent{Type: core.EventThreadQuestion, Turn: turnID, Epoch: epoch, Interaction: inter})
 }
 
 // asks names what each terminal-only request asks for, without its text.

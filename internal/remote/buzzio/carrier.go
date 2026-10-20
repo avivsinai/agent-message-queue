@@ -66,6 +66,9 @@ type Carrier struct {
 	now      func() time.Time
 
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
+	// respondThread answers thread approvals; set once after the endpoint
+	// exists.
+	respondThread ThreadResponder
 }
 
 // NewCarrier builds the edge for one binding. secret is the body key and
@@ -122,6 +125,10 @@ func (c *Carrier) source(eventID, root string) core.Source {
 	}
 	return src
 }
+
+// ShareSource is this carrier's identity to the endpoint with no input
+// event: the owner share a thread approval belongs to.
+func (c *Carrier) ShareSource() core.Source { return c.source("", "") }
 
 // sourceFor is the source of a request submitted by evt. A mention-channel
 // input is marked, so its result row carries no reference into the channel
@@ -810,42 +817,7 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 		}
 	}
 	for _, r := range snap.Resolved {
-		key := approvalKey(snap.RequestRef, r.InteractionID)
-		if _, done, err := c.ledger.Prepared(key + "/outcome"); err != nil || done {
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		posted, ok, err := c.ledger.Prepared(key)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue // never shown here: nothing to update
-		}
-		var msg nostr.Event
-		if err := json.Unmarshal(posted.Event, &msg); err != nil {
-			return err
-		}
-		appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		if appr.Pending != nil {
-			if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
-				return err
-			}
-		}
-		now := c.now().Unix()
-		if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
-			return ErrClockBehind
-		}
-		edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(appr, outcomeText(r, appr))}
-		if err := c.prepare(key+"/outcome", edit); err != nil {
+		if err := c.editOutcome(approvalKey(snap.RequestRef, r.InteractionID), r); err != nil {
 			return err
 		}
 	}
@@ -865,22 +837,9 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 		return nil
 	}
 	key := approvalKey(snap.RequestRef, in.InteractionID)
-	posted, ok, err := c.ledger.Prepared(key)
+	msg, appr, ok, err := c.postedApproval(key)
 	if err != nil || !ok {
 		return err // never posted: nothing to edit
-	}
-	var msg nostr.Event
-	if err := json.Unmarshal(posted.Event, &msg); err != nil {
-		return err
-	}
-	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
-	if err != nil || !ok {
-		return err
-	}
-	if appr.Pending != nil {
-		if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
-			return err
-		}
 	}
 	want := appr
 	want.Disabled = !in.RemoteAnswer
@@ -892,16 +851,65 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
 		return nil
 	}
+	return c.editApproval(msg, appr, want, fmt.Sprintf("%s/edit/%08d", key, snap.Revision))
+}
+
+// postedApproval is the approval message stored under outbox key and its
+// mapping, with any edit a crash left unfinished finished first. ok is
+// false when it was never posted.
+func (c *Carrier) postedApproval(key string) (nostr.Event, Approval, bool, error) {
+	posted, ok, err := c.ledger.Prepared(key)
+	if err != nil || !ok {
+		return nostr.Event{}, Approval{}, false, err
+	}
+	var msg nostr.Event
+	if err := json.Unmarshal(posted.Event, &msg); err != nil {
+		return nostr.Event{}, Approval{}, false, err
+	}
+	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
+	if err != nil || !ok {
+		return nostr.Event{}, Approval{}, false, err
+	}
+	if appr.Pending != nil {
+		if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
+			return nostr.Event{}, Approval{}, false, err
+		}
+	}
+	return msg, appr, true, nil
+}
+
+// editApproval changes the approval message msg to show want, as one
+// recoverable step: the intended edit is recorded on the mapping first,
+// then prepared under editKey, then the mapping takes the new view.
+func (c *Carrier) editApproval(msg nostr.Event, appr, want Approval, editKey string) error {
 	now := c.now().Unix()
 	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
 		return ErrClockBehind
 	}
-	appr.Pending = &ApprovalEdit{View: want, Key: fmt.Sprintf("%s/edit/%08d", key, snap.Revision), At: now}
+	appr.Pending = &ApprovalEdit{View: want, Key: editKey, At: now}
 	if err := c.ledger.UpdateApproval(msg.ID.Hex(), appr); err != nil {
 		return err
 	}
-	_, err = c.finishApprovalEdit(msg, appr)
+	_, err := c.finishApprovalEdit(msg, appr)
 	return err
+}
+
+// editOutcome edits the approval message under outbox key once with the
+// outcome r. A message never posted is not edited.
+func (c *Carrier) editOutcome(key string, r protocol.Resolution) error {
+	if _, done, err := c.ledger.Prepared(key + "/outcome"); err != nil || done {
+		return err
+	}
+	msg, appr, ok, err := c.postedApproval(key)
+	if err != nil || !ok {
+		return err
+	}
+	now := c.now().Unix()
+	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
+		return ErrClockBehind
+	}
+	edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(appr, outcomeText(r, appr))}
+	return c.prepare(key+"/outcome", edit)
 }
 
 // finishApprovalEdit prepares the edit recorded on appr, idempotently, and
@@ -934,7 +942,11 @@ var approvalEditPrepared = func() {}
 // to answer it, or, once resolved, the outcome instead of the instructions.
 func approvalText(a Approval, outcome string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", a.RequestRef, protocol.BoundPreview(a.Prompt))
+	label := a.RequestRef
+	if a.Thread != "" {
+		label = "a turn started in the terminal"
+	}
+	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", label, protocol.BoundPreview(a.Prompt))
 	switch {
 	case outcome != "":
 		b.WriteString("\n\n" + outcome)
@@ -988,6 +1000,9 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	}
 	if option == "" {
 		return nil // this approval offers no one-tap answer for the gesture
+	}
+	if appr.Thread != "" {
+		return c.answerThreadApproval(evt, messageID, appr, option)
 	}
 	// The approval belongs to a request this binding submitted: after a
 	// change of owner, channel or native session, old approvals are not
@@ -1055,6 +1070,106 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	}
 	// The outcome shows as an edit of the approval message when the record
 	// resolves the interaction.
+	_, err = c.ledger.Settle(evt.ID.Hex(), st)
+	return err
+}
+
+// threadApprovalKey is the outbox key of the message that shows thread
+// approval id; its edits extend it. It is its own ordering group.
+func threadApprovalKey(id string) string { return "row/" + id + "/approval" }
+
+// outboxKey is the outbox key of the message that shows a.
+func (a Approval) outboxKey() string {
+	if a.Thread != "" {
+		return threadApprovalKey(a.Thread)
+	}
+	return approvalKey(a.RequestRef, a.InteractionID)
+}
+
+// ThreadResponder answers a thread approval for the owner (the endpoint's
+// RespondThreadApproval).
+type ThreadResponder func(src core.Source, id, option string) error
+
+// SetThreadResponder installs the answer path of thread approvals. Until
+// it is set, a reaction on one is answered with a refusal.
+func (c *Carrier) SetThreadResponder(fn ThreadResponder) {
+	c.mu.Lock()
+	c.respondThread = fn
+	c.mu.Unlock()
+}
+
+// PublishThreadApproval shows a thread approval (core.ThreadApproval) in
+// the owner DM: a message when it opens, an edit when Buzz can no longer
+// answer it, and an edit with the outcome when it ends. No owner input
+// asked for it, so the message is a row of its own in the DM.
+func (c *Carrier) PublishThreadApproval(ta core.ThreadApproval) error {
+	if ta.TargetID != c.binding.Target || ta.NativeSession != c.binding.NativeSession || ta.Origin["carrier"] != "buzz" ||
+		ta.Origin["body"] != c.binding.Body || ta.Origin["channel"] != c.binding.Channel {
+		return fmt.Errorf("thread approval %s is not this Buzz carrier's", ta.ID)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	in, key := ta.Interaction, threadApprovalKey(ta.ID)
+	if ta.Resolution != nil {
+		return c.editOutcome(key, *ta.Resolution)
+	}
+	if !in.RemoteAnswer {
+		msg, appr, ok, err := c.postedApproval(key)
+		if err != nil || !ok || appr.Disabled {
+			return err
+		}
+		want := appr
+		want.Disabled = true
+		return c.editApproval(msg, appr, want, key+"/edit/disabled")
+	}
+	appr := Approval{Thread: ta.ID, InteractionID: in.InteractionID, Target: ta.TargetID, Epoch: ta.Epoch,
+		Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption}
+	evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.rowTags("", ""), Content: approvalText(appr, "")}
+	stored, err := c.prepareRow(key, evt, 0)
+	if err != nil {
+		return err
+	}
+	return c.ledger.PutApproval(stored.ID.Hex(), appr)
+}
+
+// answerThreadApproval sends the owner's answer to a thread approval. The
+// reaction is one decision, claimed before the endpoint sees it.
+func (c *Carrier) answerThreadApproval(evt nostr.Event, messageID string, appr Approval, option string) error {
+	// Shown under this binding: a message an earlier binding posted is
+	// never answered here.
+	if posted, ok, err := c.ledger.Prepared(appr.outboxKey()); err != nil || !ok || posted.Binding != c.share() {
+		return err
+	}
+	cmd, _ := json.Marshal(map[string]string{"message": messageID, "thread": appr.Thread, "interaction_id": appr.InteractionID, "option": option})
+	_, claim, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd)
+	if err != nil || !ok {
+		return err
+	}
+	// A replay answers only what was first claimed.
+	var first struct{ Message, Thread, Option string }
+	if claim.Op != OpRespond || json.Unmarshal(claim.Command, &first) != nil || first.Message != messageID || first.Thread != appr.Thread || first.Option != option {
+		return nil
+	}
+	c.mu.Lock()
+	respond := c.respondThread
+	c.mu.Unlock()
+	st := Settlement{Op: OpRespond}
+	if respond == nil {
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: answer in the terminal.")
+	}
+	err = respond(c.source(evt.ID.Hex(), ""), appr.Thread, option)
+	var refusal *protocol.Refusal
+	switch {
+	case err == nil:
+	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
+	case errors.As(err, &refusal):
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(refusal.Message)+".")
+	default:
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(err.Error()))
+	}
+	// The outcome shows as an edit of the approval message when the
+	// approval resolves.
 	_, err = c.ledger.Settle(evt.ID.Hex(), st)
 	return err
 }

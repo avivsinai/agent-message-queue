@@ -574,3 +574,66 @@ func TestApprovalReplayKeepsDeliveryUnknown(t *testing.T) {
 		t.Fatalf("sent = %q, want the unknown delivery, not an answer", reply)
 	}
 }
+
+// 611.42 slice 1b: an approval of a turn the user started in the Codex TUI
+// has no request row. It shows as its own DM message, the owner's ✅
+// answers it through the thread approval path from this share, and the
+// resolution edits it with the outcome.
+func TestThreadApprovalAnsweredByReaction(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, _ core.Source) (any, error) {
+		t.Fatalf("unexpected op %s", cmd.Op)
+		return nil, nil
+	})
+	var answered []string
+	c.SetThreadResponder(func(src core.Source, id, option string) error {
+		if src.Host != c.ShareSource().Host || src.Origin["body"] != b.Body || src.Origin["channel"] != "dm-1" {
+			t.Fatalf("answer source = %+v, want this share", src)
+		}
+		answered = append(answered, id, option)
+		return nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	ta := core.ThreadApproval{ID: "ta-1", TargetID: "cx", Epoch: "e1", NativeSession: "thread-1", Turn: "tui-1", Origin: c.ShareSource().Origin,
+		Interaction: protocol.Interaction{InteractionID: "c1", Kind: "approval", Prompt: "go test ./...", Options: []string{"accept", "decline"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "decline"}}
+	if err := c.PublishThreadApproval(ta); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	flush := func() {
+		sent = nil
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush()
+	if len(sent) != 1 || sent[0].Kind != KindDM || !strings.Contains(sent[0].Content, "a turn started in the terminal") || !strings.Contains(sent[0].Content, "React ✅") {
+		t.Fatalf("sent %+v, want one approval message for the terminal's turn", sent)
+	}
+	msg := sent[0]
+	react := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindReaction, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
+	if err := react.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.IngestReaction(react); err != nil {
+		t.Fatal(err)
+	}
+	if len(answered) != 2 || answered[0] != "ta-1" || answered[1] != "accept" {
+		t.Fatalf("answered %v, want accept for ta-1", answered)
+	}
+
+	now = now.Add(time.Second)
+	ta.Resolution = &protocol.Resolution{InteractionID: "c1", Outcome: protocol.ResolutionAnswered, Option: "accept"}
+	if err := c.PublishThreadApproval(ta); err != nil {
+		t.Fatal(err)
+	}
+	flush()
+	if len(sent) != 1 || sent[0].Kind != KindEdit || tagValue(sent[0], "e") != msg.ID.Hex() || !strings.Contains(sent[0].Content, "Approve was sent from Buzz") {
+		t.Fatalf("sent %+v, want the message edited with the sent approve", sent)
+	}
+}

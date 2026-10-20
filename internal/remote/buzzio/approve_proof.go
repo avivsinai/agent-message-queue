@@ -65,7 +65,7 @@ func (c *Carrier) approveEvidence(evt nostr.Event, messageID string, appr Approv
 // storedApproval is the kind 9 message posted for appr, read from the
 // outbox; its id must be messageID.
 func (c *Carrier) storedApproval(messageID string, appr Approval) (nostr.Event, error) {
-	posted, ok, err := c.ledger.Prepared(approvalKey(appr.RequestRef, appr.InteractionID))
+	posted, ok, err := c.ledger.Prepared(appr.outboxKey())
 	if err != nil || !ok {
 		return nostr.Event{}, fmt.Errorf("approval message for %s not stored: %v", appr.InteractionID, err)
 	}
