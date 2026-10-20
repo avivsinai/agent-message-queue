@@ -320,6 +320,11 @@ export activity. For pi the bridge writes the session's turns, whole messages
 and tool calls to `activity/<session_id>.jsonl`; a pi bridge without that file
 exports none.
 
+The endpoint socket also serves a local, read-only `activity` stream of one
+request while it runs, under the request's native pin. `amq-acp` remote mode
+reads it to show a Buzz-started turn live in Desktop (see
+[the amq-acp companion](../amq-acp/README.md#remote-mode)).
+
 ### Owner DM commands
 
 With `"commands": true`, `"dm_channel_id": "<channel>"` and

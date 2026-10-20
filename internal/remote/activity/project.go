@@ -255,6 +255,17 @@ func projectCodex(threadID string, n codex.Notification) (codexFact, bool) {
 	}
 }
 
+// codexMethods are the Codex notifications projectCodex maps.
+var codexMethods = map[string]bool{
+	"turn/started": true, "turn/completed": true, "turn/plan/updated": true,
+	"item/started": true, "item/completed": true,
+	"item/agentMessage/delta": true, "item/commandExecution/outputDelta": true,
+}
+
+// CodexProjected reports whether the projection maps a Codex notification
+// method, so an observer can drop any other before it copies the payload.
+func CodexProjected(method string) bool { return codexMethods[method] }
+
 // codexItem is the subset of a v2 ThreadItem the projection reads.
 type codexItem struct {
 	Type    string `json:"type"`
