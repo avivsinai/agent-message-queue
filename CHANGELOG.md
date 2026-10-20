@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.101.2](https://github.com/avivsinai/agent-message-queue/compare/v0.101.1...v0.101.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **acp:** run Desktop-created agents with any parallelism ([#1094](https://github.com/avivsinai/agent-message-queue/issues/1094)) ([b9d86cb](https://github.com/avivsinai/agent-message-queue/commit/b9d86cb1577263930f69a303b304ea3ff01be677))
+* **acp:** stop persisting sessions that have no channel id ([#1096](https://github.com/avivsinai/agent-message-queue/issues/1096)) ([f4fb086](https://github.com/avivsinai/agent-message-queue/commit/f4fb08615af2c8844962dfe1c928bdf379fc889a))
+
 ## [0.101.1](https://github.com/avivsinai/agent-message-queue/compare/v0.101.0...v0.101.1) (2026-10-19)
 
 
