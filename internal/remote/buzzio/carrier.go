@@ -1111,7 +1111,16 @@ func (c *Carrier) PublishThreadApproval(ta core.ThreadApproval) error {
 	defer c.mu.Unlock()
 	in, key := ta.Interaction, threadApprovalKey(ta.ID)
 	if ta.Resolution != nil {
-		return c.editOutcome(key, *ta.Resolution)
+		if err := c.editOutcome(key, *ta.Resolution); err != nil {
+			return err
+		}
+		// A closed approval's message never answers again.
+		msg, appr, ok, err := c.postedApproval(key)
+		if err != nil || !ok || appr.Disabled {
+			return err
+		}
+		appr.Disabled = true
+		return c.ledger.UpdateApproval(msg.ID.Hex(), appr)
 	}
 	if !in.RemoteAnswer {
 		msg, appr, ok, err := c.postedApproval(key)

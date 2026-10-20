@@ -147,7 +147,7 @@ func TestYl0PendingInteractionIsDeterministicOldest(t *testing.T) {
 
 	// And it must be the oldest run's interaction: the first submit raised
 	// toolA.
-	if *first != "toolA" {
+	if *first != "toolA:srvReqA" {
 		t.Fatalf("published %s, want the oldest interaction toolA (yl0)", *first)
 	}
 }

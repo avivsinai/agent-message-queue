@@ -1293,6 +1293,16 @@ func sameRequestID(x, y json.RawMessage) bool {
 	return cx != "" && cx == compactID(y)
 }
 
+// requestPart is a JSON-RPC id in the opaque grammar of an interaction id:
+// a string id as it is, a number in its compact form.
+func requestPart(id json.RawMessage) string {
+	var s string
+	if json.Unmarshal(id, &s) == nil {
+		return s
+	}
+	return compactID(id)
+}
+
 // compactID is the compact JSON encoding of a JSON-RPC id, or "".
 func compactID(id json.RawMessage) string {
 	var b bytes.Buffer
@@ -1627,10 +1637,13 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
 		return
 	}
-	id := p.ApprovalID
-	if id == "" {
-		id = p.ItemID
-	}
+	// The id names this server request, not only its item: Codex sends a
+	// null approvalId for a shell approval and asks again under the same
+	// itemId (a retry without the sandbox, network access), so the item id
+	// alone gave the retry the closed approval's id and DM message (review
+	// of slice 1b). The app-server resends a pending request under its own
+	// request id, so the id is stable across a restart.
+	id := cmp.Or(p.ApprovalID, p.ItemID) + ":" + requestPart(req.ID)
 	// Only a plain decision can be sent back as {"decision": option}.
 	var options []string
 	for _, raw := range p.AvailableDecisions {

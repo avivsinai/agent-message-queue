@@ -80,28 +80,41 @@ func (e *Endpoint) SetThreadApprovals(s ThreadApprovalSink) {
 // maxThreadOwed bounds the thread approval publications kept for retry.
 const maxThreadOwed = 64
 
-// publishThreadLocked shows the current state of rec. A failed publication
-// (an edit in the second the message was posted, a grant not yet renewed)
-// is owed and retried on Tick; its newer state replaces it. The caller
-// holds e.mu.
-func (e *Endpoint) publishThreadLocked(rec *threadApproval) {
+// snapshot is what a publication of rec shows.
+func (rec *threadApproval) snapshot() ThreadApproval {
 	ta := rec.ThreadApproval
 	ta.Origin = maps.Clone(ta.Origin)
-	delete(e.threadOwed, ta.ID)
-	if e.threadSink.Publish == nil || e.threadSink.Publish(ta) == nil {
-		return
-	}
-	if len(e.threadOwed) < maxThreadOwed {
-		e.threadOwed[ta.ID] = ta
-	}
+	return ta
 }
 
-// onThreadQuestionLocked records and shows an approval of a turn no request
+// publishThread shows one state of a thread approval, outside e.mu: the
+// sink reads share state and syncs the ledger. A failed publication (an
+// edit in the second the message was posted, a grant not yet renewed) is
+// owed and retried on Tick; a newer state replaces it. The caller holds
+// threadPubMu, so the states of one approval are shown in order.
+func (e *Endpoint) publishThread(sink ThreadApprovalSink, ta ThreadApproval) {
+	var err error
+	if sink.Publish != nil {
+		err = sink.Publish(ta)
+	}
+	e.mu.Lock()
+	delete(e.threadOwed, ta.ID)
+	if err != nil && len(e.threadOwed) < maxThreadOwed {
+		e.threadOwed[ta.ID] = ta
+	}
+	e.mu.Unlock()
+}
+
+// onThreadQuestion records and shows an approval of a turn no request
 // owns, when a share is pinned to the target's native session. Without one
-// the terminal answers it alone. The caller holds e.mu.
-func (e *Endpoint) onThreadQuestionLocked(targetID string, ev NativeEvent) {
-	t := e.targets[targetID]
-	if t == nil || ev.Interaction == nil || ev.Turn == "" || e.threadSink.Owner == nil {
+// the terminal answers it alone.
+func (e *Endpoint) onThreadQuestion(targetID string, ev NativeEvent) {
+	e.threadPubMu.Lock()
+	defer e.threadPubMu.Unlock()
+	e.mu.Lock()
+	t, sink := e.targets[targetID], e.threadSink
+	e.mu.Unlock()
+	if t == nil || ev.Interaction == nil || ev.Turn == "" || sink.Owner == nil {
 		return
 	}
 	n, ok := t.att.(NativeIdentifier)
@@ -109,12 +122,14 @@ func (e *Endpoint) onThreadQuestionLocked(targetID string, ev NativeEvent) {
 		return
 	}
 	native := n.NativeSessionID()
-	src, ok := e.threadSink.Owner(targetID, native)
+	src, ok := sink.Owner(targetID, native)
 	if !ok || src.Origin["carrier"] != "buzz" {
 		return
 	}
 	id := threadApprovalID(targetID, native, ev.Turn, ev.Interaction.InteractionID)
-	if e.threadApprovals[id] != nil {
+	e.mu.Lock()
+	if e.threadApprovals[id] != nil || e.targets[targetID] != t {
+		e.mu.Unlock()
 		return
 	}
 	rec := &threadApproval{
@@ -124,15 +139,21 @@ func (e *Endpoint) onThreadQuestionLocked(targetID string, ev NativeEvent) {
 		expires: e.now().Add(threadApprovalTTL),
 	}
 	e.threadApprovals[id] = rec
-	e.publishThreadLocked(rec)
+	ta := rec.snapshot()
+	e.mu.Unlock()
+	e.publishThread(sink, ta)
 }
 
-// onThreadResolvedLocked shows how a thread approval ended and forgets it.
-// The caller holds e.mu.
-func (e *Endpoint) onThreadResolvedLocked(targetID string, ev NativeEvent) {
+// onThreadResolved shows how a thread approval ended and forgets it.
+func (e *Endpoint) onThreadResolved(targetID string, ev NativeEvent) {
 	if ev.Interaction == nil {
 		return
 	}
+	e.threadPubMu.Lock()
+	defer e.threadPubMu.Unlock()
+	e.mu.Lock()
+	sink := e.threadSink
+	var ended []ThreadApproval
 	for id, rec := range e.threadApprovals {
 		if rec.TargetID != targetID || rec.Turn != ev.Turn || rec.Interaction.InteractionID != ev.Interaction.InteractionID {
 			continue
@@ -146,7 +167,11 @@ func (e *Endpoint) onThreadResolvedLocked(targetID string, ev NativeEvent) {
 		}
 		rec.Resolution = &r
 		delete(e.threadApprovals, id)
-		e.publishThreadLocked(rec)
+		ended = append(ended, rec.snapshot())
+	}
+	e.mu.Unlock()
+	for _, ta := range ended {
+		e.publishThread(sink, ta)
 	}
 }
 
@@ -154,15 +179,17 @@ func (e *Endpoint) onThreadResolvedLocked(targetID string, ev NativeEvent) {
 // of every thread approval past its expiry: the message says to answer in
 // the terminal.
 func (e *Endpoint) tickThreadApprovals() {
+	e.threadPubMu.Lock()
+	defer e.threadPubMu.Unlock()
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.state != stateAccepting {
+		e.mu.Unlock()
 		return
 	}
-	for id, ta := range e.threadOwed {
-		if e.threadSink.Publish != nil && e.threadSink.Publish(ta) == nil {
-			delete(e.threadOwed, id)
-		}
+	sink := e.threadSink
+	var due []ThreadApproval
+	for _, ta := range e.threadOwed {
+		due = append(due, ta)
 	}
 	now := e.now()
 	for id, rec := range e.threadApprovals {
@@ -171,7 +198,13 @@ func (e *Endpoint) tickThreadApprovals() {
 		}
 		rec.Interaction.RemoteAnswer = false
 		delete(e.threadApprovals, id)
-		e.publishThreadLocked(rec)
+		due = append(due, rec.snapshot())
+	}
+	e.mu.Unlock()
+	// An owed state comes before the expiry of the same approval: it was
+	// collected first.
+	for _, ta := range due {
+		e.publishThread(sink, ta)
 	}
 }
 

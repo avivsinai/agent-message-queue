@@ -357,8 +357,9 @@ its own DM message, outside any request's thread. ✅ and ❌, or `yes` and
 `no` typed in that message's thread, answer it as above, only from that
 share and for one hour; then the message says to answer in the terminal.
 A permission, input or MCP elicitation request of such a turn is not shown.
-After an endpoint restart, the message is not edited, and a reaction on it
-is not sent: the reply says to answer in the terminal.
+After an endpoint restart, the app-server sends a still-pending approval
+again, and its DM message answers it again. An approval that closed while
+the endpoint was down keeps its old text, and a reaction on it is not sent.
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body

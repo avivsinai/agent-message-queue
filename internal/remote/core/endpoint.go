@@ -206,6 +206,9 @@ type Endpoint struct {
 	threadSink      ThreadApprovalSink
 	// threadOwed are thread approval publications that failed, by id.
 	threadOwed map[string]ThreadApproval
+	// threadPubMu orders thread approval publications: it is taken before
+	// e.mu and held from a state change through its publication.
+	threadPubMu sync.Mutex
 }
 
 // answerKey names one interaction of one request.
@@ -1642,17 +1645,19 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// synchronous publishLocked stays under the lock until B14e reworks
 	// publication bounding; the ack is the unbounded-latency call and moves
 	// out now.
-	e.mu.Lock()
+	//
+	// A thread question is not a request record's: it is shown outside
+	// e.mu, ordered by threadPubMu.
 	switch ev.Type {
-	case EventEpochChanged, EventStatus:
-		e.mu.Unlock()
-		return
 	case EventThreadQuestion:
-		e.onThreadQuestionLocked(targetID, ev)
-		e.mu.Unlock()
+		e.onThreadQuestion(targetID, ev)
 		return
 	case EventThreadQuestionResolved:
-		e.onThreadResolvedLocked(targetID, ev)
+		e.onThreadResolved(targetID, ev)
+		return
+	}
+	e.mu.Lock()
+	if ev.Type == EventEpochChanged || ev.Type == EventStatus {
 		e.mu.Unlock()
 		return
 	}
