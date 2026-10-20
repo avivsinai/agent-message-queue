@@ -214,11 +214,12 @@ func (p *HookPin) field(name string) *string {
 }
 
 // PinWarnings names the user settings that defeat the owner pin: a
-// bypassPermissions default mode, or a permissions.allow entry for every
-// Bash command. Either lets Claude rewrite its settings, or run
+// bypassPermissions or auto default mode, or a permissions.allow entry for
+// every Bash command. Each lets Claude rewrite its settings, or run
 // install-approval-hook with another owner, without a prompt. Only
-// ~/.claude/settings.json is read; project and managed settings can add
-// the same.
+// ~/.claude/settings.json is read; managed settings can add the same, and a
+// session started with --permission-mode on the command line is not visible
+// here.
 func PinWarnings(home string) ([]string, error) {
 	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
@@ -239,6 +240,9 @@ func PinWarnings(home string) ([]string, error) {
 	var out []string
 	if st.Permissions.DefaultMode == "bypassPermissions" {
 		out = append(out, "permissions.defaultMode is bypassPermissions: Claude can rewrite the approval hook's owner pin without a prompt")
+	}
+	if st.Permissions.DefaultMode == "auto" {
+		out = append(out, "permissions.defaultMode is auto: Claude can rewrite the approval hook's owner pin without a prompt")
 	}
 	for _, a := range st.Permissions.Allow {
 		if a := strings.TrimSpace(a); a == "Bash" || a == "Bash(*)" {

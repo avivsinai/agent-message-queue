@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
@@ -89,6 +90,9 @@ type remoteTurn struct {
 	// mailboxThread is a mailbox turn's AMQ thread, set before its claim. A
 	// failure text points at it, not at amq-remote status.
 	mailboxThread string
+	// quiet posts the final answer without emitting it again: its text
+	// already reached the activity view as streamed native activity.
+	quiet bool
 }
 
 // postChannel is the Buzz channel the turn posts to. A mailbox event posts
@@ -581,6 +585,8 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Submitted to %s as %s.", r.meta.Target, snap.RequestRef)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
+	mirror := r.startMirror(snap.RequestRef)
+	defer mirror.finish(0)
 
 	// Pending tool approvals are shown in the DM while the turn runs
 	// (611.42.2). Deferred first, so watchers stop after the wait loop.
@@ -620,14 +626,17 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	for {
 		select {
 		case <-r.turn.done:
+			mirror.finish(0)
 			return r.settled(r.settle(""), snap)
 		case <-deadline.C:
+			mirror.finish(0)
 			return r.settled(r.settle("reply_timeout"), snap)
 		case w := <-waits:
 			if w.err == nil {
 				w.err = w.resp.AsError()
 			}
 			if w.err != nil {
+				mirror.finish(0)
 				return r.failed(remoteUncertain, w.err)
 			}
 			var current protocol.Snapshot
@@ -645,9 +654,110 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 			if !settledState(snap) {
 				continue // a newer revision of a running request
 			}
-			return r.settled(r.settle("replied"), snap)
+			// The endpoint ends the stream right after the request settles,
+			// so the streamed activity precedes the answer.
+			outcome := r.settle("replied")
+			streamed := mirror.finish(mirrorSettle)
+			r.quiet = snap.State == protocol.StateCompleted && snap.Result != nil && echoed(streamed, snap.Result.Text)
+			return r.settled(outcome, snap)
 		}
 	}
+}
+
+// mirrorSettle bounds the wait for the activity stream to end after the
+// request settled. mirrorTailBytes is how much of the latest streamed agent
+// text a turn keeps to compare with its answer.
+const (
+	mirrorSettle    = 2 * time.Second
+	mirrorTailBytes = 64 << 10
+)
+
+// echoed reports whether the streamed agent text already ends with the
+// answer, so the activity view shows it. A longer answer, a truncated one, or
+// a stream that dropped its end is sent again rather than lost.
+func echoed(streamed, answer string) bool {
+	answer = strings.TrimSpace(answer)
+	return answer != "" && strings.HasSuffix(strings.TrimSpace(streamed), answer)
+}
+
+// mirroredUpdates are the session updates a native activity stream may
+// carry into the ACP session. Anything else, such as session state a client
+// acts on, is dropped.
+var mirroredUpdates = map[string]bool{"agent_message_chunk": true, "tool_call": true, "tool_call_update": true, "plan": true}
+
+// remoteMirror relays the native activity of one running request into the
+// ACP session (bead agent-message-queue-611.40): streamed text, tool calls
+// and plan updates, read from the endpoint's activity stream under the
+// turn's native pin. The stream is read-only, and only session/update
+// notifications leave it, so it can never submit, cancel or approve. A
+// stream that fails, or an endpoint without one, leaves the turn as it was.
+type remoteMirror struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	// tail is the end of the streamed agent text, written only by the
+	// stream goroutine and read after it is done.
+	tail []byte
+}
+
+type rawSessionUpdate struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  struct {
+		SessionID string          `json:"sessionId"`
+		Update    json.RawMessage `json:"update"`
+	} `json:"params"`
+}
+
+func (r *remoteTurn) startMirror(ref string) *remoteMirror {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &remoteMirror{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(m.done)
+		req := ipc.Request{Activity: &ipc.ActivityRequest{RequestRef: ref}, NativeSession: r.native}
+		_ = ipc.Activity(ctx, r.dir, req, func(update json.RawMessage) {
+			var u struct {
+				SessionUpdate string `json:"sessionUpdate"`
+			}
+			if ctx.Err() != nil || json.Unmarshal(update, &u) != nil || !mirroredUpdates[u.SessionUpdate] {
+				return
+			}
+			note := rawSessionUpdate{JSONRPC: jsonRPCVersion, Method: "session/update"}
+			note.Params.SessionID, note.Params.Update = r.sessionID, update
+			if r.emit == nil || r.emit(note) != nil {
+				cancel() // the client is gone; the turn reports that itself
+				return
+			}
+			var text struct {
+				Content struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if u.SessionUpdate == "agent_message_chunk" && json.Unmarshal(update, &text) == nil {
+				m.tail = append(m.tail, text.Content.Text...)
+				if over := len(m.tail) - mirrorTailBytes; over > 0 {
+					m.tail = append(m.tail[:0], m.tail[over:]...)
+				}
+			}
+		})
+	}()
+	return m
+}
+
+// finish waits up to wait for the stream to end by itself, then stops it and
+// waits for its last emission, so nothing is emitted after the turn's
+// response. It returns the end of the streamed agent text.
+func (m *remoteMirror) finish(wait time.Duration) string {
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-m.done:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	m.cancel()
+	<-m.done
+	return string(m.tail)
 }
 
 // settledState reports a terminal or uncertain request: no later revision
@@ -806,6 +916,9 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 	if outcome != "client_disconnected" && text != "" {
 		// Buzz first: a failed ACP emission never skips the post.
 		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
+		if r.quiet && kind == postFinal {
+			return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
+		}
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}

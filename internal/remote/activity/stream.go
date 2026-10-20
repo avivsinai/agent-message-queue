@@ -44,7 +44,8 @@ func (c *commandOutput) add(delta string) bool {
 	return piece != ""
 }
 
-// streamState is the Codex stream state of one sink, guarded by Sink.mu.
+// streamState is the Codex stream state of one sink or mirror, guarded by
+// its owner's mutex.
 type streamState struct {
 	runs []*streamRun
 	// streamed holds agentMessage items that sent deltas: their completed
@@ -98,28 +99,68 @@ func (st *streamState) outputDelta(obs observation, now time.Time) {
 	st.runs = append(st.runs, &streamRun{obs: obs, since: now})
 }
 
-// flushDueLocked closes the open runs once the oldest one has been open for
-// coalesceWindow. The caller holds s.mu.
-func (s *Sink) flushDueLocked(now time.Time) error {
-	if len(s.stream.runs) == 0 || now.Sub(s.stream.runs[0].since) < coalesceWindow {
-		return nil
+// accept applies one projected Codex fact and passes every observation it
+// makes due to out, in order. The Sink and the Mirror share it, so a frame
+// and a local update follow the same coalescing and the same rule that a
+// streamed message is not sent again on completion.
+func (st *streamState) accept(fact codexFact, now time.Time, out func(observation) error) error {
+	switch fact.step {
+	case stepTextDelta:
+		st.textDelta(fact.obs, now)
+		return st.flushDue(now, out)
+	case stepOutputDelta:
+		st.outputDelta(fact.obs, now)
+		return st.flushDue(now, out)
 	}
-	return s.flushLocked()
+	// Any other fact ends the open runs first: Desktop closes the message
+	// being streamed when a tool or plan item arrives.
+	if err := st.flush(out); err != nil {
+		return err
+	}
+	obs := fact.obs
+	switch fact.step {
+	case stepMessageDone:
+		streamed := st.streamed[obs.ItemID]
+		delete(st.streamed, obs.ItemID)
+		if streamed || obs.Text == "" {
+			return nil
+		}
+	case stepCommandStart:
+		st.command(obs.ToolID).title = obs.Title
+	case stepCommandDone:
+		if c := st.commands[obs.ToolID]; c != nil && obs.Text == "" {
+			obs.Text = string(c.out)
+		}
+		delete(st.commands, obs.ToolID)
+		obs.Text = capText(obs.Text, streamOutputCap)
+	case stepTurnDone:
+		*st = streamState{}
+	}
+	return out(obs)
 }
 
-// flushLocked queues every open run, oldest first. The caller holds s.mu,
-// so no other frame of this sink takes a sequence number in between.
-func (s *Sink) flushLocked() error {
-	runs := s.stream.runs
-	s.stream.runs = nil
+// flushDue closes the open runs once the oldest one has been open for
+// coalesceWindow.
+func (st *streamState) flushDue(now time.Time, out func(observation) error) error {
+	if len(st.runs) == 0 || now.Sub(st.runs[0].since) < coalesceWindow {
+		return nil
+	}
+	return st.flush(out)
+}
+
+// flush passes every open run to out, oldest first. The Sink calls it under
+// s.mu, so no other frame of the sink takes a sequence number in between.
+func (st *streamState) flush(out func(observation) error) error {
+	runs := st.runs
+	st.runs = nil
 	for _, run := range runs {
 		obs := run.obs
 		if obs.Update == "tool_call_update" {
-			if c := s.stream.commands[obs.ToolID]; c != nil {
+			if c := st.commands[obs.ToolID]; c != nil {
 				obs.Text = string(c.out)
 			}
 		}
-		if err := s.queue(obs); err != nil {
+		if err := out(obs); err != nil {
 			return err
 		}
 	}
