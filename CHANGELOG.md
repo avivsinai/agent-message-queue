@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.102.0](https://github.com/avivsinai/agent-message-queue/compare/v0.101.2...v0.102.0) (2026-10-20)
+
+
+### Features
+
+* **acp:** mirror native turn activity into Desktop ([#1099](https://github.com/avivsinai/agent-message-queue/issues/1099)) ([8a71b75](https://github.com/avivsinai/agent-message-queue/commit/8a71b75bf91b8c339f796c80569c30be53e44401))
+* **acp:** run an ACP harness as an AMQ participant ([#1102](https://github.com/avivsinai/agent-message-queue/issues/1102)) ([61d2643](https://github.com/avivsinai/agent-message-queue/commit/61d2643f34d5ae783d2094d4d2008735f63be141))
+* **remote:** answer approvals of terminal-started Codex turns from Buzz ([#1100](https://github.com/avivsinai/agent-message-queue/issues/1100)) ([53a940c](https://github.com/avivsinai/agent-message-queue/commit/53a940cba2e09e6110e62633f7f103d2520ac212))
+
+
+### Bug Fixes
+
+* **remote:** warn that Claude auto mode defeats the approval pin ([#1097](https://github.com/avivsinai/agent-message-queue/issues/1097)) ([2b65b86](https://github.com/avivsinai/agent-message-queue/commit/2b65b868cf67f540dea4eb892468e5fc7233a28e))
+
 ## [0.101.2](https://github.com/avivsinai/agent-message-queue/compare/v0.101.1...v0.101.2) (2026-10-20)
 
 
