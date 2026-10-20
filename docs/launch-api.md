@@ -4,13 +4,15 @@ AMQ exposes a versioned launch contract for tools that must plan and apply a
 session without parsing human output. The Go package is `launchapi`. The JSON
 contract is [schemas/launch-api-v1.schema.json](../schemas/launch-api-v1.schema.json).
 
-The current contract is `0.61.1`. A caller must negotiate its
+## Negotiation
+
+`launchapi.ContractSemverV1` owns the contract semver. A caller negotiates its
 required contract range, intent version, result version, and features before it
 depends on them:
 
 ```go
 negotiated, err := launchapi.Negotiate(launchapi.RequirementV1{
-	ContractSemver: ">=0.61.0 <0.62.0",
+	ContractSemver: contractRange, // a semver range, for example ">=X.Y.0 <X.(Y+1).0"
 	IntentVersion:  launchapi.IntentVersionV1,
 	ResultVersion:  launchapi.ResultVersionV1,
 	Features:       []string{"prepare_apply_v1"},
@@ -21,106 +23,135 @@ if err != nil {
 _ = negotiated
 ```
 
-A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
-`on_live`, `caller_context`, `executable_identity`, and `wrapper`. A caller must
-require every feature it uses. Contract semver alone does not claim that an
-unadvertised feature is available.
+A caller must require every feature it uses. Contract semver alone does not
+claim that an unadvertised feature is available.
 
-The advertised feature set is derived from the callable platform
-implementation at build time:
+The build derives the advertised feature set from the platform
+implementation that the build can call:
 
 | Build platform | Advertised launch features |
 | --- | --- |
-| macOS, Linux (including WSL) | The full v1 set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, plus `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
-| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1` are not callable and are rejected by negotiation. |
+| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
+| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. Negotiation rejects `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1`. |
 
-WSL uses the Linux binary and therefore gets the Linux row. Negotiation fails
-closed for a feature that is not in the current build's advertised set.
+WSL uses the Linux binary and gets the Linux row. Negotiation fails closed for
+a feature that is not in the current build's advertised set.
 
-`PreviewV1.capabilities` reports the selected providers' static adapter grammar
-without executing a caller-supplied provider. `grammar_version` is the
-adapter-owned version that consumers compare. It changes when the allowed
-argument forms, configuration overrides, or carrier support changes.
-`verified_provider_version` is informational and names the provider release on
-which that grammar was verified; it does not claim the installed version.
-Runtime provider identity is bound into subject schema 2 before Apply executes
-it. Prepare records each runnable provider's consulted path (PATH lookup or
-absolute) plus the on-disk identity tuple, including symlink hops. Schema 1
-omits that binding. A same-path inode, mtime, symlink-hop, or PATH retarget
-changes `subject_digest`; Apply then returns `subject_changed` with no launch
-mutation. If the provider, wrapper, or cwd changes after Apply authorization,
-Reconcile refuses before capability probing or ticket creation with the typed
-`authorized_identity_changed` result. Plan and trust digests stay stable across
-those replacements.
+## Decoding
 
-The initial-input carrier is typed. Claude, Codex, and Grok currently
-advertise `argument`; AMQ appends its exact text as the final provider argv
-element.
-`stdin` and `file` remain typed but unadvertised and return
-`initial_input_unsupported` until real stdin/file seams exist. Content is
-limited to 262,144 UTF-8 bytes without C0 controls, DEL, CR, or LF, and must
-not begin with `-`; invalid text returns a typed `initial_input_control` or
-`initial_input_leading_dash` validation code before Prepare inspects the
-target. Content changes the plan and subject digests but not the trust digest.
-Initial input is a one-time bootstrap carrier: a resume plan never appends it
-again. The normalized execution and wake policy enters both the plan and trust
-digests, so any non-default execution, wake, or injector policy is
-trust-bearing and requires fresh trust for the exact policy.
-Claude admits one `--allowedTools <comma-separated-list>` pair. Grok Build uses
-the canonical `--tools <list>` and `--disallowed-tools <list>` flags; their
-values are opaque Grok tool names and are not compiled through Claude's
-`--allowedTools` validator. Codex admits
-ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
-`medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
-Every `env_overlay` key uses the POSIX environment grammar
-`[A-Za-z_][A-Za-z0-9_]*`; shell syntax such as `X;touch /tmp/pwn` is refused.
-Claude's GrammarVersion is 2: it covers the scoped `--allowedTools` grammar
-(`entry := name["("spec")"]`) and `-n`, `--name`, and `--name=` session labels.
+Public JSON decoders run a bounded structural pass before contract decoding.
+A structural refusal is a `*launchapi.StrictJSONError`. Inspect its typed
+`Code`, not its message:
 
-Public JSON decoders perform a bounded structural pass before contract
-decoding. A structural refusal is returned as `*launchapi.StrictJSONError`;
-inspect its typed `Code` instead of parsing the message. The validation codes
-are `launchapi.StrictJSONDuplicateKey` (`duplicate_json_key`) for an exact
-duplicate object key and `launchapi.StrictJSONDepthExceeded` (`depth_exceeded`)
-when nesting exceeds `launchapi.StrictJSONMaxDepth` (256). Object keys are
-compared after JSON string decoding, so case- or whitespace-distinct keys are
-different keys. The error also carries the containing `Path` and duplicate
-`Key` where applicable.
+- `launchapi.StrictJSONDuplicateKey` (`duplicate_json_key`): an object has an
+  exact duplicate key.
+- `launchapi.StrictJSONDepthExceeded` (`depth_exceeded`): nesting exceeds
+  `launchapi.StrictJSONMaxDepth`.
 
-An optional participant `wrapper` contains a clean absolute `executable` path
-and static `args`. The path must resolve to one regular file; resolvable
-symlinks are accepted. AMQ executes the exact argv `wrapper executable + wrapper
-args + resolved provider executable + provider args`, without a shell. The
-declared wrapper path and arguments enter the plan, trust, subject, ticket, and
-command preview. An argument initial input stays the final inner-provider
-argument. Unsupported `stdin` and `file` carriers remain typed refusals when a
-wrapper is present. The `wrapper` feature is advertised, and a strict decode
-accepts the field.
+Object keys compare after JSON string decoding, so keys that differ in case or
+whitespace are different keys. The error carries the containing `Path` and,
+for a duplicate, the `Key`.
 
-Executable containment refusals use stable typed codes: `provider_project_contained`
-for a provider path presented from the project, `wrapper_project_contained` for
-a wrapper path presented from the project, and `amq_launcher_project_contained` for the
-AMQ launcher path. Both the raw path and its resolved target are checked before
-the executable can be planned or ticketed.
+The decoder accepts only the underscore placement target enum and the
+`columns|rows|tiled` layout enum. Clients translate their own placement
+vocabulary before they prepare a request, for example `current-window` to
+`current_window`, `vertical` to `columns`, and `horizontal` to `rows`. These
+are client mappings, not decoder aliases.
+
+## Providers
+
+`PreviewV1.capabilities` reports the static adapter grammar of the selected
+providers without executing a caller-supplied provider.
+
+- `grammar_version` is the adapter-owned version that consumers compare. It
+  changes when the allowed argument forms, configuration overrides, or carrier
+  support change. The adapter table in `internal/launch/adapter.go` owns the
+  values.
+- `verified_provider_version` is informational. It names the provider release
+  on which AMQ verified the grammar, not the installed version.
+
+Provider argument grammar:
+
+- Claude admits one `--allowedTools <comma-separated-list>` pair, scoped as
+  `entry := name["("spec")"]`, and the `-n`, `--name`, and `--name=` session
+  labels.
+- Grok Build uses `--tools <list>` and `--disallowed-tools <list>`. Their
+  values are opaque Grok tool names; the Claude `--allowedTools` validator
+  does not check them.
+- Codex admits ordered `-c model_reasoning_effort=<value>` pairs with the
+  values `minimal`, `low`, `medium`, `high`, or `xhigh`. Duplicate keys and
+  unknown keys or values are rejected.
+- Every `env_overlay` key matches the POSIX environment grammar
+  `[A-Za-z_][A-Za-z0-9_]*`. A key with shell syntax, such as `a;b c`, is
+  refused.
+
+### Provider identity
+
+Subject schema 2 binds runtime provider identity before Apply executes it.
+Prepare records each runnable provider's consulted path (PATH lookup or
+absolute) and its on-disk identity tuple, including symlink hops. Subject
+schema 1 has no such binding.
+
+- A change to the inode, mtime, symlink hops, or PATH resolution of the same
+  path changes `subject_digest`. Apply then returns `subject_changed` with no
+  launch mutation.
+- If the provider, wrapper, or cwd changes after Apply authorization,
+  Reconcile refuses with the typed result `authorized_identity_changed`. It
+  refuses before capability probing or ticket creation.
+- Plan and trust digests stay stable across these replacements.
+
+### Initial input
+
+The initial-input carrier is typed. Claude, Codex, and Grok advertise
+`argument`: AMQ appends the exact text as the final provider argv element. The
+`stdin` and `file` carriers are typed but not advertised, and return
+`initial_input_unsupported`, including when a wrapper is present.
+
+- The content is at most `launchapi.MaxInitialInputBytes` of UTF-8, has no C0
+  controls, DEL, CR, or LF, and does not begin with `-`.
+- Invalid text returns the validation code `initial_input_control` or
+  `initial_input_leading_dash` before Prepare inspects the target.
+- The content changes the plan and subject digests, not the trust digest.
+- It is a one-time bootstrap carrier: a resume plan never appends it again.
+  Bootstrap text belongs here, not in a reconstructed provider command.
+- The normalized execution and wake policy enters both the plan and trust
+  digests. A non-default execution, wake, or injector policy therefore needs
+  fresh trust for that exact policy.
+
+### Wrapper
+
+An optional participant `wrapper` has a clean absolute `executable` path and
+static `args`. The path resolves to one regular file; a resolvable symlink is
+accepted.
+
+AMQ executes this argv, without a shell:
+
+```text
+wrapper executable + wrapper args + resolved provider executable + provider args
+```
+
+The wrapper path and arguments enter the plan, trust, subject, ticket, and
+command preview. An argument-carrier initial input stays the final
+inner-provider argument.
+
+### Executable containment
+
+AMQ checks both the raw path and its resolved target before it plans or
+tickets an executable. A path presented from the project returns a typed code:
+
+| Code | Path |
+| --- | --- |
+| `provider_project_contained` | provider |
+| `wrapper_project_contained` | wrapper |
+| `amq_launcher_project_contained` | AMQ launcher |
 
 ## Intent
 
 The intent owns the desired participants. Discovery owns the project root,
 default session, session root, and local launcher preference. A public intent
-does not replace committed project configuration. `amq setup --project-root
-<dir>` overrides discovery: the named directory, with parent components
-canonicalized, is the project root, `.amqrc`, `.amq/launch.json`, and
-`.gitignore` are written there, and upward base discovery does not redirect
-writes into a parent repo's live base root. A symlinked leaf is refused; a
-symlinked parent component is canonicalized (followed). An existing
-`.amq/launch.json` in cwd is authority without the flag, so a nested
-directory that already owns its config is the project root. A parent `.amqrc`
-found above an explicit project root (or a cwd that owns its config) is
-ignored, not adopted, so the parent tree stays byte-identical; the implicit
-case still refuses an upward-discovered parent `.amqrc` with the parent path
-named. A nested or linked Git worktree is the same ceiling without the flag:
-discovery uses that worktree's own config or fails closed, and does not adopt
-the parent live base root.
+does not replace committed project configuration.
+
+Intent example:
 
 ```json
 {
@@ -144,37 +175,72 @@ the parent live base root.
 }
 ```
 
+### Project root
+
+`amq setup --project-root <dir>` overrides discovery:
+
+- The named directory, with parent components canonicalized, is the project
+  root. AMQ writes `.amqrc`, `.amq/launch.json`, and `.gitignore` there.
+- Upward base discovery does not redirect writes into a parent repo's live
+  base root.
+- AMQ refuses a symlinked leaf and follows a symlinked parent component.
+
+Without the flag:
+
+- An existing `.amq/launch.json` in cwd is authority, so a nested directory
+  that owns its config is the project root.
+- A nested or linked Git worktree is the same ceiling: discovery uses that
+  worktree's own config or fails closed, and never adopts the parent live base
+  root.
+- A parent `.amqrc` above an explicit project root, or above a cwd that owns
+  its config, is ignored, so the parent tree stays byte-identical.
+- Otherwise AMQ refuses an upward-discovered parent `.amqrc` and names the
+  parent path.
+
+### Participants
+
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The v1 adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build.
-Claude Code and Grok Build mint their session IDs from the launch nonce. Codex CLI `0.147.0` reports its
-provider-owned thread ID after a completed turn through its legacy `notify`
-hook. AMQ adds one static hook override that is bound to the session root,
-handle, launch nonce, and AMQ executable. The private hook validates the exact
-ticket and payload, persists immutable evidence, and only then publishes the
-conversation identity. It forwards the identical payload to the operator's
-configured Codex notify command after publication; a missing command is a
-no-op, and a forwarding failure cannot undo or fail the evidence path. An
-unused Codex launch remains pending and cannot be resumed. Cursor CLI acquires
-its provider-owned chat ID before process start through `create-chat` at exact
-version `2026.08.11-e8db854`. Cursor's provider identity is `cursor-agent`.
-The current executable is `agent`; `cursor-agent` remains a supported legacy
-alias, including `.exe` variants.
+The adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build.
+Pi, Gemini CLI, and OpenCode have no launch adapter. Pi stays direct-only.
+
+Each provider owns its conversation identity:
+
+- Claude Code and Grok Build mint session IDs from the launch nonce.
+- Codex CLI reports its thread ID after a completed turn through its `notify`
+  hook, at the verified version `codexCaptureVersion`
+  (`internal/launch/adapter_codex.go`). AMQ adds one static hook override
+  bound to the session root, handle, launch nonce, and AMQ executable. The
+  private hook validates the exact ticket and payload, persists immutable
+  evidence, and only then publishes the conversation identity. It then
+  forwards the identical payload to the operator's configured Codex notify
+  command; a missing command is a no-op, and a forwarding failure cannot
+  undo or fail the evidence path. An unused Codex launch stays pending and
+  cannot be resumed.
+- Cursor CLI acquires its chat ID before process start through `create-chat`
+  at the exact version `cursorCaptureVersion`
+  (`internal/launch/adapter_cursor.go`). Its provider identity is
+  `cursor-agent`. The executable is `agent`, and `cursor-agent` is a supported
+  alias, including `.exe` variants.
+
+In committed `.amq/launch.json`, `agents[].named` overrides the top-level
+`named` setting, and naming is on by default. A managed Claude fresh plan
+carries `--name <session>/<handle>` in the ticket and trust digest. A resume
+plan never adds or renames a session. Codex, Cursor, and Grok are unnamed
+under managed launch.
+
+### Launchers
 
 The registered launcher backends are `commands`, `tmux`, `cmux`, and
-`ghostty`. `--launcher auto` walks the local preference; an explicit
-`--launcher <name>` wins. When `CMUX_SURFACE_ID` is set, auto prepends `cmux`
-ahead of `ghostty`; otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`.
-Selection still requires Detect Available. Cmux Create uses `--focus false`
-and restores prior selection; see [Managed launch recovery](launch-recovery.md).
+`ghostty`.
 
-Pi remains direct-only because it has no launch API adapter; Gemini CLI and
-OpenCode also remain outside this adapter set. In committed
-`.amq/launch.json`, `agents[].named` overrides the top-level `named` setting,
-and naming defaults to enabled. Managed Claude fresh plans carry
-`--name <session>/<handle>` in the ticket and trust digest. Resume plans never
-add or rename a session. Codex, Cursor, and Grok are unnamed under managed
-launch.
+- `--launcher <name>` wins over `--launcher auto`, which walks the local
+  preference.
+- Under `auto`, `CMUX_SURFACE_ID` prepends `cmux` ahead of `ghostty`;
+  otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`.
+- Selection still requires Detect Available.
+- Cmux Create uses `--focus false` and restores the prior selection. See
+  [Managed launch recovery](launch-recovery.md).
 
 ## Prepare and Apply
 
@@ -184,47 +250,59 @@ accepts the original Prepare request, the returned subject schema and digest,
 and one explicit decision for each required action. It recomputes the subject
 under that schema and fails closed if state changed.
 
-Omitted `placement` keeps the selected backend's v0.61 layout and still appears
-on `PreviewV1.placement.effective`. An explicit tuple the backend cannot
-realize returns `outcome: unsupported` and `reason: placement_unsupported`
-with zero planned backend mutation. Subject schema 2 binds that preview into
-`subject_digest`; schema 1 rejects an explicit placement field.
+`SubjectSchemaV2` is the schema for new Prepare calls. A caller copies the
+returned schema and never omits the field to select legacy behavior. An Apply
+request with no `subject_schema` is read as `SubjectSchemaV1` and reports
+`reprepare_recommended` in the result hints. Both constants live in
+`internal/launch/prepare.go`.
 
-Omitted `TargetV1.base_root` preserves the v0.61 exact-root behavior. When it
-is present, only the exact `project_root/.amqrc` authorizes it: the value must
-be the configured root or one direct child, and `session_root` must be the
-direct child named by `session`. Prepare does not create directories. A missing
-authorized base appears as a deterministic `create_base_root` entry in
-`planned_writes`; Apply revalidates the config and parent identity, then creates
-the base and session exclusively with mode `0700`. Siblings, nested roots,
-symlinks, alternate spellings, or changed authority return a typed refusal with
-no launch mutation.
+Schema 1 rules:
 
-`on_live` is `keep` or `refuse`. Omission and explicit `refuse` keep the v0.61
-whole-binding refusal. Explicit `keep` on a proven-owned live seat keeps that
-process and lets Apply create missing seats in the same tmux omitted-placement
-session. Hostile live resources refuse even with `keep`. Schema 1 rejects
-`on_live: keep`; omit and `refuse` stay digest-stable.
+- A participant-only Apply stays provisionable.
+- If any participant is runnable, Apply returns `action_required` with
+  `reason_code=reprepare_required` before launch mutation. Prepare and Apply
+  again with schema 2.
+- Schema 1 rejects an explicit `placement` and `on_live: keep`.
 
-`caller_context` is an opaque correlation map. It is limited to 32 entries;
-keys are 1 through 64 UTF-8 bytes, values are at most 1,024 UTF-8 bytes, and
-all keys plus values are at most 16 KiB. NUL, invalid UTF-8, and duplicate JSON
-keys reject. Canonical key ordering enters subject schema 2 and immutable
-evidence, but never the plan or trust digest. Apply echoes the request map.
-Inspect, Focus, and Close load it from the proven-owned binding; lifecycle
-requests cannot replace it.
+### Request fields
 
-The public decoder accepts only the underscore target enum and the
-`columns|rows|tiled` layout enum. One refused seat cohort-blocks creation of
-every missing seat. The `argument` carrier is the only advertised
-initial-input carrier; `stdin` and `file` remain typed refusals, including when
-a wrapper is present.
+`placement`: omission keeps the selected backend's default layout, which
+still appears in `PreviewV1.placement.effective`. An explicit tuple that the
+backend cannot realize returns `outcome: unsupported` and
+`reason: placement_unsupported`, with no planned backend mutation. Schema 2
+binds the preview into `subject_digest`. One refused seat cohort-blocks the
+creation of every missing seat.
 
-Clients must translate their own placement vocabulary before preparing a
-request: for example, `current-window` to `current_window`, `vertical` to
-`columns`, and `horizontal` to `rows`. These are client mappings, not decoder
-aliases. Bootstrap text belongs in `initial_input`, not in a reconstructed
-provider command.
+`TargetV1.base_root`: omission keeps the exact-root behavior. When present,
+only the exact `project_root/.amqrc` authorizes it.
+
+- The value is the configured root or one direct child, and `session_root` is
+  the direct child named by `session`.
+- Prepare creates no directories. A missing authorized base appears as a
+  deterministic `create_base_root` entry in `planned_writes`.
+- Apply revalidates the config and parent identity, then creates the base and
+  session exclusively with mode `0700`.
+- A sibling, nested root, symlink, alternate spelling, or changed authority
+  returns a typed refusal with no launch mutation.
+
+`on_live` is `keep` or `refuse`. Omission and `refuse` refuse the whole
+binding when a seat is live and stay digest-stable. `keep` on a proven-owned
+live seat keeps that process and lets Apply create missing seats in the same
+tmux omitted-placement session. Hostile live resources refuse even with
+`keep`.
+
+`caller_context` is an opaque correlation map.
+
+- Limits are the `MaxCallerContext*` constants in
+  `internal/launch/caller_context.go`: entries, key bytes (at least 1),
+  value bytes, and total bytes for all keys plus values.
+- NUL, invalid UTF-8, and duplicate JSON keys are rejected.
+- Canonical key ordering enters subject schema 2 and immutable evidence,
+  never the plan or trust digest.
+- Apply echoes the request map. Inspect, Focus, and Close load it from the
+  proven-owned binding; a lifecycle request cannot replace it.
+
+### Go example
 
 ```go
 request := launchapi.PrepareRequestV1{
@@ -271,26 +349,20 @@ result, err := launchapi.Apply(ctx, launchapi.ApplyRequestV1{
 })
 ```
 
-New Prepare calls use subject schema `2`. Apply input serialized by a `0.61.0`
-caller has no `subject_schema`; `0.61.1` interprets that omission as schema `1`
-and reports `reprepare_recommended` in the result hints. A new caller must copy
-the returned schema. It must not omit the field to select legacy behavior.
-
-`reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
+`reviewedChoiceFor` is caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.
 
-Apply and lifecycle results include a typed mutation disposition (`not_applied`,
-`committed`, or `uncertain`) and, after a launch commit, its binding generation;
-these fields describe the launch backend binding only, not session or roster
-durability codes. Post-commit failures remain action-required results with exit
-code `6`, not bare errors.
+### Results
 
-Apply with schema 1 remains compatible for participant-only requests. If any
-participant is runnable, it returns `action_required` with
-`reason_code=reprepare_required` before launch mutation; re-Prepare and Apply
-with schema 2. A participant-only schema-1 Apply remains provisionable.
+Apply and lifecycle results carry a typed mutation disposition
+(`not_applied`, `committed`, or `uncertain`) and, after a launch commit, its
+binding generation. These fields describe the launch backend binding only, not
+session or roster durability. A post-commit failure is an action-required
+result with exit code `6`, not a bare error.
 
-The equivalent CLI split is:
+## CLI
+
+The CLI runs the same flow:
 
 ```bash
 amq launch --plan intent.json --prepare --json --launcher commands
@@ -298,21 +370,21 @@ amq launch --apply apply-request.json --json
 amq launch --request prepare-request.json --json
 ```
 
-All three commands accept `-` for standard input. `--plan` is the intent-only
-convenience: discovery resolves the target (project root, default session,
-session root, and local launcher preference) from the committed project
-config, and `--plan` carries only the `LaunchIntentV1`. `--apply` and
-`--request` carry the complete target and launcher in the document itself, so
-`--session`, `--root`, `--launcher`, and `--placement` are not valid with
-either. `--request` decodes a full `PrepareRequestV1` (including
-`target.base_root` and `caller_context`) through `DecodePrepareRequestV1` and
-runs the same Prepare/Apply path as `--plan`; it is mutually exclusive with
-`--plan`, `--apply`, and `--placement`. `--prepare` pairs with `--plan` or
-`--request` to run prepare-only with no mutation, so a consumer can read the
-subject digest before Apply. With `--request`, the CLI and the Go package
-share one contract: every field a package caller can set on
-`PrepareRequestV1` is reachable from the CLI.
-`--plan` remains the intent-only convenience for callers that rely on
-committed discovery. Exit code `6` means the JSON result requires an operator
-action. JSON on stdout remains the machine contract; stderr is for people and
-must not be parsed.
+All three commands accept `-` for standard input.
+
+- `--plan` is the intent-only convenience. Discovery resolves the target
+  (project root, default session, session root, and local launcher
+  preference) from the committed project config, and `--plan` carries only
+  the `LaunchIntentV1`.
+- `--apply` and `--request` carry the complete target and launcher in the
+  document, so `--session`, `--root`, `--launcher`, and `--placement` are not
+  valid with either.
+- `--request` decodes a full `PrepareRequestV1` through
+  `DecodePrepareRequestV1` and runs the same Prepare and Apply path as
+  `--plan`. Every field a package caller can set is reachable from the CLI.
+  It is mutually exclusive with `--plan`, `--apply`, and `--placement`.
+- `--prepare` pairs with `--plan` or `--request` to run Prepare only, with no
+  mutation, so a consumer can read the subject digest before Apply.
+
+Exit code `6` means the JSON result requires an operator action. JSON on
+stdout is the machine contract; stderr is for people and is not parseable.

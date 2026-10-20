@@ -122,7 +122,7 @@ func runTrace(args []string) error {
 	usage := usageWithFlags(fs, "amq trace <message-id> [options]",
 		"Join current on-disk evidence for one message without mutating the queue.",
 		"",
-		"Phase A reports message copies, route fields, visible delivery artifacts, DLQ entries,",
+		"It reports message copies, route fields, visible delivery artifacts, DLQ entries,",
 		"delivery receipts, thread references, and durable agent-owned notification write attempts.",
 		"Notification evidence never proves that a TUI or person saw, displayed, or submitted it.",
 	)
@@ -628,7 +628,7 @@ func (c *traceCollector) finishLegs() {
 		},
 		"route": {
 			detail: "no message header is available to establish addressing metadata",
-			next:   "locate a parsable message copy; Phase A does not persist send-time route resolver decisions",
+			next:   "locate a parsable message copy; AMQ does not persist send-time route resolver decisions",
 		},
 		"delivery": {
 			detail: "no current message or DLQ file establishes visible delivery state",

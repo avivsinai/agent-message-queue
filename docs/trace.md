@@ -4,7 +4,7 @@
 evidence already present in one AMQ root. It does not run a daemon, repair a
 mailbox, retry delivery, or infer an event that has no durable artifact.
 
-Phase A inspects:
+It inspects:
 
 - message copies in inboxes and sender outboxes;
 - addressing fields persisted in message headers;
@@ -12,8 +12,9 @@ Phase A inspects:
 - DLQ envelopes and their embedded original messages;
 - drained and DLQ delivery receipts;
 - messages connected by `refs`;
-- notification history, which is explicitly `no_evidence` until AMQ has a
-  durable notification-attempt ledger.
+- notification attempts recorded in each agent's notification-attempt ledger
+  (`agents/<agent>/receipts/notification-attempts.jsonl` and its one rotated
+  copy).
 
 ## JSON contract
 
@@ -75,14 +76,22 @@ durability as `no_evidence`; do not infer retry safety from current file
 presence.
 
 Notification success is never inferred from wake state, a mailbox file, or a
-delivery receipt. Phase A reports the notification leg as `no_evidence` when
-the journal is absent. Its optional `state` distinguishes `ledger_absent`
-(no journal file), `ledger_present_no_record` (the active or rotated journal
-exists but has no record for this message), and `record_present`. On platforms
-where notification-attempt locking is unsupported, an absent journal is
-reported as `ledger_unsupported` rather than as a missing attempt. When present,
-schema 2 distinguishes `accepted`
-(explicit external-provider dispatch), `deferred`/`retried` (pre-dispatch busy
-with the cohort retained), and terminal `failed`; raw TIOCSTI and legacy
-injectors remain `written` byte evidence only. None of these states proves
-human or agent consumption.
+delivery receipt. The notification leg reads only the notification-attempt
+ledger, and its `state` field says what the ledger shows:
+
+- `ledger_absent`: no active or rotated journal file exists;
+- `ledger_unsupported`: no journal exists and this platform does not support
+  notification-attempt locking, so absence says nothing about attempts;
+- `ledger_present_no_record`: a journal exists but has no record for this
+  message;
+- `record_present`: the journal has at least one record for this message.
+
+The first three report the leg as `no_evidence`. Each record carries its folded
+lifecycle state: `accepted` (the external injector declared provider
+dispatch), `deferred` or `retried` (the provider was busy before dispatch and
+the cohort stays pending), `failed` (terminal), `written` (raw TIOCSTI or a
+legacy injector wrote bytes), `indeterminate` (a prepared record with no
+result), `write_failed` (the record itself could not be persisted), or
+`invalid` (an out-of-order sequence). The ledger contract is in
+[wake state invariants](wake-state-invariants.md#notification-attemptsjsonl-durable-notifier-lifecycle-audit).
+None of these states proves human or agent consumption.

@@ -35,18 +35,17 @@ turns; standalone AMQ keeps the second fact as its safer default.
   cohort. A marker-less exit-zero command remains a legacy transport success:
   its ledger state is `written`, not provider `accepted`, but compatibility
   transitions the current cohort to `announced` under `--retry-until injected`.
+- A timeout or deadline is `failed`, whatever the stderr markers say. Timeout
+  wins over every marker.
+- `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker. AMQ MUST enter
+  existing recovery and MUST NOT replay the payload before durable inbox
+  progress.
 - `AMQ_INJECT_PROGRESS=deferred` with a nonzero exit means the provider was
   busy or transitioning before dispatch. AMQ MUST retain the cohort, emit no
   terminal or attention fallback, and retry through the existing wake loop.
-- A timeout or deadline is classified `failed` before any marker is read —
-  timeout wins over every marker, including `uncertain`.
-- `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker, including a
-  deferred/uncertain pair. AMQ MUST enter existing recovery and MUST NOT
-  replay the payload before durable inbox progress.
-- Any other nonzero exit or timeout is `failed`, is terminal for that
-  AttemptID, and MUST NOT be silently replayed. Timeout wins even if stderr
-  contains a deferred marker. Authority refusal, partial write, and
-  output-only fallback MUST NOT acknowledge injection.
+- Any other nonzero exit is `failed`, is terminal for that AttemptID, and MUST
+  NOT be silently replayed. Authority refusal, partial write, and output-only
+  fallback MUST NOT acknowledge injection.
 
 The requested value is part of the retained wake target identity. The optional
 `retry_until` target/state field omits the default `drained` value for byte and
@@ -68,11 +67,12 @@ attempts remain on their own cadence while the cohort remains unread.
   immediately after debounce. The `hold_normal` and `hold_low` settings (`--hold-normal`, `--hold-low`, or
   `amq wake config`) delay
   that first attempt by priority; see [Wake operations](wake-operations.md#hold-by-priority).
-- Doorbell (input-injecting) attempts start at 5s and double up to a 2-minute
-  cap, because they drive the agent directly.
-- Attention-only attempts (terminal output, no input) start at 30s and
-  continue through 4 and 8 minutes to a 15-minute cap, because they alert a
-  human rather than act.
+- Doorbell (input-injecting) attempts wait 5s after the first attempt and
+  double after each later one (5s, 10s, 20s, ...) up to a 2-minute cap,
+  because they drive the agent directly.
+- Attention-only attempts (terminal output, no input) wait 30s and double
+  (30s, 1m, 2m, 4m, 8m) up to a 15-minute cap, because they alert a human
+  rather than act.
 - The delay is measured from when the preceding injector process exits or
   times out, not from when the attempt was scheduled. A provider `deferred`
   result keeps the same durable attempt and retry ladder; a terminal
@@ -87,7 +87,7 @@ attempts remain on their own cadence while the cohort remains unread.
 - A successful input attempt does not also emit attention output. A transient
   foreground-authority or input-quiet refusal keeps the input retry armed
   while rate-limiting the separate attention output on its own slower
-  cadence. Recovery-required state (see `wake_check`) never retries uncertain
+  cadence. Recovery-required state (see `amq wake check`) never retries uncertain
   terminal input; it repeats the manual drain-and-restart notice on the
   attention cadence until the unread cohort drains.
 - Contextual peer headers (sender/subject) appear only in terminal output or
@@ -110,8 +110,7 @@ idle -> retrying -> announced
        retrying      retrying
 ```
 
-- `retrying` retains the current 5s exponential input ladder and slower
-  attention ladder.
+- `retrying` keeps the input and attention ladders above.
 - Successful input delivery under `--retry-until injected` transitions to
   `announced`, retains the physical cohort snapshot, and owns no retry
   deadline.
@@ -152,24 +151,10 @@ policy. Injector acceptance MUST NOT be reported as a drained message receipt.
 An orchestrator that owns receipt-based recovery continues to use the original message's `drained` receipt for task
 delivery status and explicit recovery.
 
-## Acceptance criteria
-
-1. Default `drained` mode preserves the existing 5s/10s retry behavior.
-2. `injected` mode invokes a successful external injector once for an
-   unchanged unread cohort, even after its former retry deadlines.
-3. A new inbox member after acknowledgement produces one new injection.
-4. A provider failure or output-only fallback is terminal for that injector
-   AttemptID and never silently replays the injector; only `deferred` is
-   replayable, while legacy zero-exit behavior remains compatible.
-5. CLI validation rejects unknown values and `injected` without
-   `--inject-via`.
-6. Retained target/state round trips preserve `injected`; omitted values read
-   as `drained`.
-
 ## Keepalive adapter acceptance
 
 `amq-keepalive inject` emits `AMQ_INJECT_PROGRESS=accepted` only for adapters
-that implement the explicit provider-acceptance reporter contract. The current
+that implement the explicit provider-acceptance reporter contract. The
 classifications are:
 
 | Adapter | Acceptance evidence |

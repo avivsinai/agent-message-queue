@@ -103,20 +103,21 @@ Receipt states stay distinct. They are not collapsed:
 
 | State | Meaning |
 | --- | --- |
-| `transport_accepted` | The destination durably placed the exact envelope object in `rx/<peer>/new/`. |
+| `transport_accepted` | The HTTPS rendezvous accepted a pushed envelope. |
 | `destination_maildir_committed` | The destination host applied the message into its Maildir. |
-| `destination_rejected` | The authenticated destination returned a terminal rejection. |
+| `STORED` | A v3 peer filed the record into its Maildir. |
+| `destination_rejected` | Reserved and not emitted. |
 | consumer-local `drain` / `start` / `complete` | A consumer on that host ingested or progressed the work. |
 
-`transport_accepted` is not `destination_maildir_committed`. Destination
-commit is not consumer-local evidence, and it does not retire the source
-`tx` object. The source retires `tx` only after a verified signed
-`destination_maildir_committed` or `destination_rejected` outcome. Consumer
+`transport_accepted` is not `destination_maildir_committed`, and destination
+commit is not consumer-local evidence. A v3 sender removes an outbox record
+only after it verifies the signed `STORED` receipt; no outcome retires an
+envelope v2 object (see
+[the bridge protocol ADR](adr-bridge-protocol.md#receipts)). Consumer
 evidence may stay local; a remote party must not treat a wake, a transport
 ACK, or a missing remote drain receipt as proof of consumption.
 
-Peer-exchange outcomes use `status-tx/<peer>/returned`; `sent/` remains an
-HTTPS-only archive. Trusted peer keys use one flat `trusted/<host>` file
+`sent/` is an HTTPS-only archive. Trusted peer keys use one flat `trusted/<host>` file
 holding the peer's single active generation; rotation replaces it
 atomically via `amq-bridge trust add --replace` (generations are decimal
 integers compared numerically; a downgrade is refused), and envelopes
