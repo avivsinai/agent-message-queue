@@ -25,12 +25,18 @@ syntax comes from the [generated CLI reference](cli.md).
 
 - [Bridge companion](../cmd/amq-bridge/README.md) — exchange messages between hosts.
 - [Dot onboarding](dot-onboarding.md) — join the peer mesh as an intermittent host.
-- [ACP companion](../cmd/amq-acp/README.md) — deliver ACP prompts to an AMQ inbox.
+- [ACP companion](../cmd/amq-acp/README.md) — drive an AMQ handle or a remote
+  session from an ACP client, or run an ACP agent as an AMQ participant.
+- [Remote companion](../cmd/amq-remote/README.md) — attach to a running harness
+  session from Buzz, a linked server, or another client. Its
+  [relay connection](amq-remote-relay.md) and
+  [Claude Code approvals](amq-remote-approvals.md) have their own references.
 - [pi extension](../integrations/pi/README.md) — reach a live pi session from
   `amq-remote`; its wire contract is the [pi bridge protocol](pi-bridge-protocol.md).
-- [Server link](../testdata/link/README.md) — the `amq.remote.link/1` wire
-  contract between `amq-remote` and a linked server: the
-  [frame schema](../schemas/remote-link-v1.schema.json) and its golden fixtures.
+- [Server link](remote-link-protocol.md) — the `amq.remote.link/1` wire
+  contract between `amq-remote` and a linked server, with its
+  [frame schema](../schemas/remote-link-v1.schema.json) and
+  [golden fixtures](../testdata/link/README.md).
 - [Adapter contract](adapter-contract.md) — convert external events into messages.
 - [Launch API](launch-api.md) — version negotiation and prepare/apply integration.
 - [Extension metadata](adr-layer-extensions.md) — store layer-owned data without

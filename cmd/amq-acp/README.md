@@ -1,10 +1,14 @@
 # amq-acp
 
-`amq-acp` is a preview [Agent Client Protocol](https://agentclientprotocol.com)
-companion. It speaks ACP over stdio and turns each prompt into an ordinary AMQ
-message on a durable cockpit thread, then holds the turn open until a fresh
-reply is observed on that thread. It is a separate binary on purpose: `amq`
-itself gains no protocol server and no listening socket.
+`amq-acp` is an [Agent Client Protocol](https://agentclientprotocol.com)
+companion. As an ACP agent over stdio it delivers each prompt to one of three
+destinations and holds the turn open until the answer arrives: an AMQ handle
+as an ordinary message on a durable cockpit thread (mailbox mode), an
+amq-remote target ([remote mode](#remote-mode)), or the session that
+`amq-remote attach --self` bound ([binding mode](#binding-mode)).
+[Host mode](#host-mode) runs the other direction: an ACP agent becomes an
+AMQ participant. It is a separate binary on purpose: `amq` itself gains no
+protocol server and no listening socket.
 
 ## What it speaks
 
@@ -17,7 +21,7 @@ Implemented methods:
 | `initialize` | Answers `protocolVersion: 2` and the minimum honest capability set. Unknown top-level params are rejected. |
 | `session/new` | Returns a `sessionId`, `_meta.thread` (the durable AMQ cockpit thread for the session's channel), and `models` with exactly one model, the fixed destination. Requires a completed `initialize`. |
 | `session/set_model` | Accepts only a model that `session/new` advertises in `models`: `amq:<AMQ_ACP_TO>`, `amq-remote:<target>` in remote mode, or `amq-remote:<name>` for a named binding in binding mode, which selects that binding for the session. This bridge runs no model; the destination answers with its own. Any other id is refused. |
-| `session/prompt` | Delivers the prompt text to `AMQ_ACP_TO` on the session's cockpit thread, then holds the turn open. The client receives `session/update` notifications as the turn progresses and the reply text as an `agent_message_chunk`; the final result is `stopReason: "end_turn"` with the reply in `_meta.amq`, or the typed refusal `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` when the bounded wait expires. |
+| `session/prompt` | In mailbox mode, delivers the prompt text to `AMQ_ACP_TO` on the session's cockpit thread, then holds the turn open. The client receives `session/update` notifications as the turn progresses and the reply text as an `agent_message_chunk`; the final result is `stopReason: "end_turn"` with the reply in `_meta.amq`, or the typed refusal `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` when the bounded wait expires. |
 | `_session/steering` | Delivers owner steering on the session's cockpit thread, framed as untrusted task guidance. During an in-flight prompt it is AMQ `urgent` with the `buzz-steer` label and returns `outcome: "injected"`; while idle it is `normal` priority and returns `outcome: "startedNewTurn"`. A redelivered steer event returns `outcome: "duplicate"` with the original message id and delivers nothing new. The outcome names the delivery mode only: `_meta.amq` reports the prompt committed to the inbox, not drained or started, so neither outcome proves the peer acted. An in-turn steer refs the turn's prompt. A Nostr event id in `_meta` makes a redelivered steer idempotent. `initialize` advertises it as `_meta.steering.supported: true`, except in remote mode with a pinned target (binding mode: see below). |
 | `session/cancel` | Ends the session's in-flight prompt turn: that `session/prompt` returns `stopReason: "cancelled"` with `_meta.amq.state: "cancelled"` and `reason: "session_cancelled"`. The queued AMQ prompt is not retracted and the peer is not notified; a later reply on the thread cannot answer a new prompt. With no turn in flight it is a no-op. |
 
@@ -28,24 +32,24 @@ body as a markdown link (`[title-or-name](uri)`). `promptCapabilities` are all
 false, so `image`, `audio`, and embedded `resource` blocks are refused rather
 than silently dropped.
 
-## Live turns, threads, and honesty
+## Turn semantics
 
-- A prompt turn is **correlated, not fire-and-forget**. Only a message from the
+- A prompt turn is correlated, not fire-and-forget. Only a message from the
   configured peer, on the prompt's thread, created after the prompt, whose
   `refs` name the prompt can answer the turn. `amq reply --id <prompt id>` sets
   those refs, and so does a reply to an in-turn steer. A stale reply, or a late
   answer to a cancelled prompt, never answers a later turn.
-- The peer check is **not authentication**. Agents of the same user are not
+- The peer check is not authentication. Agents of the same user are not
   an isolation boundary ([SECURITY.md](../../SECURITY.md)), so any agent on
   the queue root can write a reply that answers the turn and is posted to the
   DM.
-- A turn settles **once**: the first of reply, `session/cancel`, stream close
+- A turn settles once: the first of reply, `session/cancel`, stream close
   and timeout decides it, and the others cannot overturn it.
-- The turn is **bounded**. If no fresh reply arrives within
+- The turn is bounded. If no fresh reply arrives within
   `AMQ_ACP_TURN_TIMEOUT`, the result is the typed refusal
   `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` and
   `_meta.amq.reason: "reply_timeout"` — never a fabricated success.
-- The channel-to-thread mapping **persists** under
+- The channel-to-thread mapping persists under
   `AMQ_ACP_STATE_DIR` (default `AM_ROOT/meta/acp`, path-guarded). A companion
   restart reopens the same cockpit thread instead of minting a new one.
 - While the turn is open the bridge emits `session/update` notifications:
@@ -340,8 +344,8 @@ manifest block.
 
 ## Limitations
 
-- Every prompt is delivered to the single handle in `AMQ_ACP_TO`; the ACP
-  session id does not select a recipient.
+- In mailbox mode, every prompt is delivered to the single handle in
+  `AMQ_ACP_TO`; the ACP session id does not select a recipient.
 - A timed-out turn is a refusal, not a retry. The peer's answer may still
   arrive later on the thread; read it with `amq thread` and re-prompt if the
   work must run.

@@ -1,16 +1,16 @@
-# R0-03: Claude Code cross-session UDS wire capture (bead 611.2)
+# Claude Code cross-session socket wire format
 
-Authorized probe of Claude Code v2.1.278's cross-session messaging socket, performed
-2026-09-22 against a disposable background target session (`claude --bg` in
-`/tmp/cc-probe-611.2`, pid 83401, job `55f0c758`). Target metadata came from
-`~/.claude/sessions/83401.json` (registry) and `~/.claude/sessions/83401.<sha256>.key`
+Probe of Claude Code 2.1.278's cross-session messaging socket against a
+disposable background target session (`claude --bg`). Target metadata came from
+`~/.claude/sessions/<pid>.json` (registry) and `~/.claude/sessions/<pid>.<sha256>.key`
 (peer-token key file). Findings were confirmed end-to-end: a hand-crafted frame was
 delivered and rendered in the target session as `› Message from @amq-probe: …`.
 
 > **Point-in-time research, not current truth.** This document records what was true of
-> Claude Code v2.1.278 on 2026-09-22. It grades individual claims (`[binary]` / `[live]` /
-> `[unverified]`), but the whole document ages with the pinned build; re-verify against
-> the installed version before relying on any claim (see `docs/remote-compat.md` §1).
+> Claude Code 2.1.278. It grades individual claims (`[binary]` / `[live]` /
+> `[unverified]`), but the whole document ages with that build; re-verify against
+> the installed version before relying on any claim (see
+> [the compatibility manifest](../remote-compat.md#2-how-to-read-the-evidence)).
 
 **Evidence conventions used below:** `[binary]` = fact derived from static analysis of
 the v2.1.278 binary (strings/symbol evidence); `[live]` = observed against the probe
@@ -121,7 +121,7 @@ into the transcript); it carries no run identity, so it never reaches `admitted`
 ## 4. Minimal working probe (verified delivered)
 
 Token value redacted — the live token used during the capture belonged to the
-disposable probe session (pid 83401), whose socket and `.key` file were removed at
+disposable probe session, whose socket and `.key` file were removed at
 teardown; it is dead and must not be republished. Resolve the target's token at
 runtime as shown in §2.
 
@@ -133,8 +133,8 @@ key = glob.glob(os.path.expanduser(
     f"~/.claude/sessions/<pid>.{hashlib.sha256(os.path.abspath(SOCK).encode()).hexdigest()}.key"))
 TOKEN = json.load(open(key[0]))["peerToken"]     # bearer credential — handle as a secret
 
-body = "CAPTURE-PROBE-611.2 ping"
-env  = ('<cross-session-message from="amq-probe-6112" from-session="amq-probe-sender"'
+body = "capture probe ping"
+env  = ('<cross-session-message from="amq-probe" from-session="amq-probe-sender"'
         ' from-name="amq-probe">\n' + body + '\n</cross-session-message>')
 frame = {
     "msgV": 1, "msg_id": str(uuid.uuid4()),
@@ -151,7 +151,7 @@ s.sendall((auth + "\n" + line + "\n").encode())
 data = s.recv(4096)   # fire-and-forget: recv stays empty until timeout/close
 s.close()
 # success signal is on the TARGET side: the target session's transcript shows
-# `› Message from @amq-probe: CAPTURE-PROBE-611.2 ping`
+# `› Message from @amq-probe: capture probe ping`
 ```
 
 `[live]` The socket returned no bytes (recv timeout / clean close), and the target
@@ -243,17 +243,15 @@ Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key)
   a second default-on gate `tengu_cuddly_willow`; sockets-dir vetting failures
   refuse to bind (fail-closed). When messaging is off, parked messages drop with
   "parked peer message(s) (cross-session messaging disabled)". `[binary]`
-  (Note: all `[binary]` statements here are against the exact 2.1.278 build, which
-  is also the `claude` version recorded in the compat manifest.)
+  (All `[binary]` statements here are against the 2.1.278 build.)
 
 **Required user-level value for unattended AMQ sends: `accept`.** Unset engages
 mode-parity gating, and the most likely AMQ configuration — an envelope without
 `from-mode` sent to an unattended (bypass-mode) target — parks silently under it.
 Operators who want supervision instead can set `crossSessionInbound: "hold"` (user or
 managed scope); AMQ's adapter should surface `hold`/`refuse`/parity holds as
-non-delivery, not failure. (PR2 of bead 611.12 may instead choose to carry a matching
-`from-mode` class in the envelope; that is an adapter design decision, not a claim of
-this document.)
+non-delivery, not failure. An adapter may instead carry a matching `from-mode` class
+in the envelope; that is an adapter design decision, not a claim of this document.
 
 ## 5b. Security assessment `[security]`
 
@@ -273,24 +271,3 @@ this document.)
 - **Recommendation for AMQ:** run the adapter as the same user, treat captured
   tokens as secrets (never log/commit), and prefer `hold`-mode supervision in
   unattended deployments.
-
-## 6. Implications for the AMQ adapter (`internal/remote/claude`)
-
-1. `factory.go` stub can be replaced with a real client: connect → optional auth
-   line → one JSON line → close. No reply to parse on the happy path.
-2. Sender must read the target's `.key` file to obtain `peerToken`; the key-file
-   name is derivable (`<pid>.<sha256(path.resolve(sockPath))>.key`), so no registry
-   scraping beyond `~/.claude/sessions/*.json` for `messagingSocketPath`.
-3. The XML envelope must be built exactly as §3.1; recommend a single
-   `buildCrossSessionEnvelope(from, fromSession, fromName, body, hopChain, mode)`
-   helper mirroring `pQe` and a round-trip self-test mirroring `TG`.
-4. `peerProtocol: 1` and `peerFeatures` (`notify_idle`, `reply_across_default_dirs`,
-   `artifact_yield`) in the registry pid-file can gate capability negotiation.
-5. `CLAUDE_CODE_MESSAGING_SOCKET` env override exists; feature flag
-   `tengu_session_stable_address` switches addressing to `sid:<sessionId>` form.
-6. Probe the `crossSessionInbound` paths before shipping unattended sends: with the
-   setting unset, mode-parity gating parks a mode-mismatched or mode-less sender
-   (§5a); `hold` is also the fail-closed state for invalid settings — so an AMQ send
-   can silently park rather than deliver or error. The reliable unattended posture is
-   an explicit `accept` on the target (or a PR2 decision to assert a matching
-   `from-mode`).
