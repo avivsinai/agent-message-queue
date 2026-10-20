@@ -59,11 +59,13 @@ func validateRegularNoFollowFile(path string, info os.FileInfo) error {
 //  1. Lstat gate: the leaf must exist and be a regular file, and with
 //     max > 0 be no larger than max. A symlink, FIFO, directory or huge
 //     file is refused before any open.
-//  2. The open is no-follow and non-blocking where the platform has it, so
-//     a symlink or FIFO swapped in after the gate is refused or cannot
-//     block.
+//  2. On darwin and linux the open is no-follow and non-blocking, so a
+//     symlink or FIFO swapped in after the gate is refused or cannot block.
+//     Other platforms (Windows) open normally; only step 3 stands there,
+//     and a Windows Lstat identity is not reliable, so a caller that needs
+//     the no-follow guarantee refuses on those platforms itself.
 //  3. The opened file must be a regular file and os.SameFile with the lstat
-//     result, so a swap after the gate is refused on every platform.
+//     result.
 //
 // max <= 0 sets no size bound. The lstat error passes through unwrapped, so
 // errors.Is(err, os.ErrNotExist) reports a missing file. The caller owns
@@ -106,6 +108,9 @@ var afterRegularLstatForTest func(path string)
 // OpenRegularNoFollowBounded; max must be positive. A file that grows past
 // max between the lstat gate and the read is refused too.
 func ReadRegularNoFollowBounded(path string, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, fmt.Errorf("%s: read bound %d is not positive", path, max)
+	}
 	file, _, err := OpenRegularNoFollowBounded(path, max)
 	if err != nil {
 		return nil, err
