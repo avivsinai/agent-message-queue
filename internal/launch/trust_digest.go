@@ -14,13 +14,10 @@ import (
 
 const executionTrustDigestVersion = 1
 
-// ExecutionTrustDigest binds the static provider plan to the session root in
-// which the plan will be emitted. The plan digest alone cannot distinguish a
-// selector-free launch after default_session changes.
-func ExecutionTrustDigest(plan Plan, session string, root *fsq.DeliveryRoot) (string, error) {
-	return ExecutionTrustDigestWithAuthority(plan, session, root, "")
-}
-
+// ExecutionTrustDigestWithAuthority binds the static provider plan to the
+// session root in which the plan will be emitted. The plan digest alone cannot
+// distinguish a selector-free launch after default_session changes. An empty
+// authorityDigest keeps the pre-authority digest.
 func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.DeliveryRoot, authorityDigest string) (string, error) {
 	if !canonicalSessionPattern.MatchString(session) || strings.HasPrefix(session, "-") {
 		return "", fmt.Errorf("invalid trust session %q", session)
