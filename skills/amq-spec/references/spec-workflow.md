@@ -3,8 +3,10 @@
 Each agent researches independently, then both discuss and agree on a plan
 that the user approves before implementation. The workflow uses ordinary AMQ
 commands (`amq send`, `amq drain`, `amq thread`) with the kinds and labels in
-[the skill's label table](../SKILL.md#labels). "Spec" avoids a collision with
-Claude Code plan mode.
+[the skill's label table](../SKILL.md#labels). Only the generic AMQ kinds
+(`question`, `brainstorm`, `review_request`, `review_response`, `decision`,
+`status`) with `workflow:spec` labels are valid spec messages. "Spec" avoids a
+collision with Claude Code plan mode.
 
 ## Phases
 
@@ -25,7 +27,15 @@ Do not send a finished spec without the research and discussion phases, and do
 not send a draft before both agents exchanged research.
 
 All spec messages use thread `spec/<topic>` (example: `spec/auth-redesign`).
-Read it at any time with `amq thread --id "spec/<topic>" --include-body`.
+Read it at any time with `amq thread --id "spec/<topic>" --include-body`; the
+labels show the phase:
+
+- `phase:request` -> kickoff/problem statement
+- `phase:research` -> research submissions
+- `phase:discuss` -> discussion rounds
+- `phase:draft` -> plan draft
+- `phase:review` -> plan review feedback
+- `phase:decision` -> final agreed plan
 
 ## Phase 1: Research (parallel)
 

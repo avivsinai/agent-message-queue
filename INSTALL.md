@@ -59,9 +59,9 @@ Release assets and `checksums.txt` are on the
 The [installer script](#installer-script-macos-and-linux) is the recommended
 way to install a release on macOS and Linux; it performs the verification
 below for you. For a manual install, verify the downloaded asset against
-`checksums.txt` before you extract it, as in the recipe below. A companion
-archive is verified the same way; install its extracted executable at a
-stable path. On Windows, extract the ZIP and put the `.exe` at a stable path.
+`checksums.txt` before you extract it, as in the recipe below. Companions have
+their own recipe under [Companion binaries](#companion-binaries). On Windows,
+extract the ZIP and put the `.exe` at a stable path.
 
 <details>
 <summary>Advanced checksum-verified manual install</summary>
@@ -270,9 +270,13 @@ Without npm, copy the canonical skill directory from a clone:
 
 ```sh
 git clone https://github.com/avivsinai/agent-message-queue.git amq-src
-mkdir -p ~/.claude/skills ~/.codex/skills
-cp -R amq-src/skills/amq-cli ~/.claude/skills/amq-cli
-cp -R amq-src/skills/amq-cli ~/.codex/skills/amq-cli
+for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli; do
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    echo "Skill target already exists: $target (remove it to replace it)" >&2
+  else
+    mkdir -p "$(dirname "$target")" && cp -R amq-src/skills/amq-cli "$target"
+  fi
+done
 ```
 
 Restart the agent after installing a skill.
@@ -290,6 +294,22 @@ and `arm64`. `amq-keepalive` is only a release asset.
 | `amq-acp` | Preview ACP v2 stdio companion. See [amq-acp](cmd/amq-acp/README.md). |
 | `amq-remote` | Remote-session companion. See [amq-remote](cmd/amq-remote/README.md). |
 | `amq-owner-sign` | The owner's signer for a strict relay share; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
+
+To install a companion from its release asset, verify its entry in
+`checksums.txt` before you extract it. Asset names follow
+`<companion>_<version>_<os>_<arch>.tar.gz`:
+
+```sh
+TAG=vX.Y.Z
+BIN=amq-keepalive
+ASSET=amq-keepalive_X.Y.Z_darwin_arm64.tar.gz
+base="https://github.com/avivsinai/agent-message-queue/releases/download/$TAG"
+curl -fsSLO "$base/$ASSET" && curl -fsSLO "$base/checksums.txt"
+grep "  $ASSET\$" checksums.txt | shasum -a 256 -c   # or: sha256sum -c
+tar -xzf "$ASSET" "$BIN"
+mkdir -p ~/.local/bin && install -m 0755 "$BIN" ~/.local/bin/"$BIN"
+~/.local/bin/"$BIN" --version
+```
 
 Install `amq-keepalive` at a stable path, not a versioned package-manager path:
 wake identity includes the resolved injector executable. Replacing that file is

@@ -158,6 +158,9 @@ amq session resume feature-x
 approved `sha256:<hex>` digest matches. It is mutually exclusive with `-y`;
 `--preview` is also mutually exclusive with `-y`.
 
+For Cursor, setup uses the `agent` command when it is on `PATH`; otherwise it
+falls back to the legacy `cursor-agent` command and the preview says so.
+
 Grok Build is supported by the managed launch adapter. It mints an exact
 `--session-id` from the AMQ launch nonce and resumes only with the stored
 `--resume <UUID>`; `--continue`, `--always-approve`, and `--yolo` are rejected
