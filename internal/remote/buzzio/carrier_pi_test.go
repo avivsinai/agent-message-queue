@@ -21,14 +21,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// Pro review of #926, 2026-09-30, #1: the Buzz approval path to pi was
+// Regression: #926, the Buzz approval path to pi was
 // unreachable. The carrier's fence needs the pi session id, and its submit
 // needed admitted evidence, which pi never gives. Through the real carrier,
 // endpoint and pi adapter over a revision-4 bridge: a share at submitted
 // evidence submits, the approval posts, a ✅ writes the answer file, and
 // interaction_resolved answered edits the message with the outcome.
 func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
-	// Pro review of #926 r2, 2026-09-30, #6: synthetic clocks only. The pi
+	// Synthetic clocks only. The pi
 	// adapter, the endpoint and the liveness record stand at base; the
 	// carrier steps one second per call, so its edits are strictly later.
 	// The extension's receipt is laid down before the submit, so nothing
@@ -100,7 +100,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridge, "receipts", want+".json"), []byte(rc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Pro review of #926 r3, 2026-09-30, #3: publication runs on whichever
+	// Publication runs on whichever
 	// goroutine owns the record, so Reconcile can return before the owed
 	// output is prepared. Each step waits, bounded, until the output it
 	// asserts on is in the outbox, then flushes.

@@ -6,7 +6,7 @@ import (
 	"fiatjaf.com/nostr"
 )
 
-// codex #867 r1: a policy without parallelism read as present, but the
+// Regression: #867, a policy without parallelism read as present, but the
 // pinned Desktop parser drops it, so the body was never listed.
 func TestPolicyForMatchesDesktopParser(t *testing.T) {
 	owner, body := nostr.Generate(), nostr.GetPublicKey(nostr.Generate()).Hex()
@@ -20,7 +20,7 @@ func TestPolicyForMatchesDesktopParser(t *testing.T) {
 	if PolicyFor(policy(`{"name":"AMQ session","respond_to":"owner-only"}`), body) {
 		t.Fatal("a policy without parallelism was accepted")
 	}
-	// codex #867 r2: a wrong optional field type or a null allowlist entry.
+	// A wrong optional field type or a null allowlist entry.
 	for _, bad := range []string{
 		`{"name":"AMQ session","parallelism":1,"respond_to":"owner-only","model":42}`,
 		`{"name":"AMQ session","parallelism":1,"respond_to":"allowlist","respond_to_allowlist":[null]}`,

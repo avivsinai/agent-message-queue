@@ -332,14 +332,3 @@ func readWakeTargetFromStateForInspection(
 	selection, err := readWakeStateSelectionForInspection(root, me, inspection)
 	return selection.Target, selection.TargetPresent, err
 }
-
-func readWakeTargetFromStateForInspectionAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
-	root string,
-	me string,
-	inspection wakeLockInspection,
-) (wakeTarget, bool, error) {
-	selection, err := readWakeStateSelectionForInspectionAt(dirfd, agentDir, root, me, inspection)
-	return selection.Target, selection.TargetPresent, err
-}

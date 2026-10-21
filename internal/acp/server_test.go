@@ -504,11 +504,12 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 // TestPromptRoundTripAndThreadState proves the exercisable core: the prompt
 // lands on the session's durable cockpit thread, the client sees the live
 // thought update, and a fresh reply completes the turn with its text.
+// Regression: #961.
 func TestPromptRoundTripAndThreadState(t *testing.T) {
 	cfg := testConfig(t)
 	// The turn must stay open until the test delivers the reply; the 40ms
 	// package default expired first when five packages ran in parallel
-	// under -race (review of #961 r10).
+	// under -race.
 	cfg.TurnTimeout = 5 * time.Second
 	live, sessionID, threadID := newLiveSession(t, cfg, "cockpit-42")
 	live.send(promptRequest(3, sessionID, "please inspect the bridge"))
@@ -598,7 +599,7 @@ func TestChannelThreadMappingSurvivesRespawn(t *testing.T) {
 	_ = second
 }
 
-// Found in review of #1094: Buzz sends no channel id, so every session/new
+// Regression: #1094, Buzz sends no channel id, so every session/new
 // persisted a fresh "session/<id>" entry that is never read again. The state
 // file grew without bound until load refused it, which then refuses every
 // session/new. Synthetic entries are not persisted, and old ones are pruned
@@ -606,7 +607,7 @@ func TestChannelThreadMappingSurvivesRespawn(t *testing.T) {
 func TestSessionsWithoutChannelIDAreNotPersisted(t *testing.T) {
 	cfg := testConfig(t)
 	// Over 1 MiB of synthetic entries, as an older binary left it: load must
-	// still read the file so the next save prunes it (review of #1096).
+	// still read the file so the next save prunes it.
 	var old strings.Builder
 	old.WriteString(`{"version":1,"channels":{`)
 	for i := 0; i < 16000; i++ {
@@ -1260,7 +1261,7 @@ func decodeAMQ(t *testing.T, line string) struct {
 	}](t, line)
 }
 
-// Buzz Desktop 2026-09-23: "amq-acp reported no models" kept Add agent
+// Regression: Buzz Desktop "amq-acp reported no models" kept Add agent
 // disabled, because session/new carried no model state. The one advertised
 // model must also be accepted by session/set_model.
 func TestSessionNewAdvertisesOneModelThatSetModelAccepts(t *testing.T) {

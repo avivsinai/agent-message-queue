@@ -506,7 +506,7 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
 	if err != nil {
 		// The router declares whether a failure is transient; the adapter in
-		// cmd/amq-remote/main.go turns ErrPeerRootUnreachable into
+		// cmd/amq-remote/serve.go turns ErrPeerRootUnreachable into
 		// amqio.TransientRouteError. A peer session that does not exist YET is
 		// as retryable as a peer base root that does not exist yet; the planner
 		// marks only the latter.

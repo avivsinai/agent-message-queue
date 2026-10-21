@@ -7,7 +7,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// TestMarkerWritesDoNotLoseUpdates pins the 611.22.34 B3 store-level fix:
+// TestMarkerWritesDoNotLoseUpdates pins the store-level fix (agent-message-queue-611.22.34):
 // MarkAcknowledged and MarkPublished are field-level merges on a FRESH read
 // under the store write lock. With raw Get->mutate->write (the shape this PR
 // first shipped) one marker silently reverts the other: losing
@@ -50,7 +50,7 @@ func TestMarkerWritesDoNotLoseUpdates(t *testing.T) {
 			t.Fatalf("round %d: get %v ok=%v", round, err, ok)
 		}
 		if !got.Acknowledged || got.PublishedRevision != 1 {
-			t.Fatalf("round %d: LOST UPDATE — acknowledged=%v published_revision=%d (want true/1): one marker silently reverted the other (agent-message-queue-611.22.34 B3)", round, got.Acknowledged, got.PublishedRevision)
+			t.Fatalf("round %d: LOST UPDATE — acknowledged=%v published_revision=%d (want true/1): one marker silently reverted the other", round, got.Acknowledged, got.PublishedRevision)
 		}
 		_ = s.Close()
 	}

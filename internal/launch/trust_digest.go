@@ -14,13 +14,10 @@ import (
 
 const executionTrustDigestVersion = 1
 
-// ExecutionTrustDigest binds the static provider plan to the session root in
-// which the plan will be emitted. The plan digest alone cannot distinguish a
-// selector-free launch after default_session changes.
-func ExecutionTrustDigest(plan Plan, session string, root *fsq.DeliveryRoot) (string, error) {
-	return ExecutionTrustDigestWithAuthority(plan, session, root, "")
-}
-
+// ExecutionTrustDigestWithAuthority binds the static provider plan to the
+// session root in which the plan will be emitted. The plan digest alone cannot
+// distinguish a selector-free launch after default_session changes. An empty
+// authorityDigest keeps the pre-authority digest.
 func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.DeliveryRoot, authorityDigest string) (string, error) {
 	if !canonicalSessionPattern.MatchString(session) || strings.HasPrefix(session, "-") {
 		return "", fmt.Errorf("invalid trust session %q", session)
@@ -50,14 +47,12 @@ func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.Deli
 	return executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest, nil)
 }
 
-// PrepareTrustDigest binds a nonce-free plan digest to the canonical target
-// and its physical identity. For an absent session, rootIdentity is a stable
-// intended-child identity derived from the pinned parent and child name.
-// onLiveKeep is sorted handles with explicit keep; empty preserves the v0.61 digest.
-func PrepareTrustDigest(planDigest, session, rootPath, rootIdentity string, onLiveKeep []string) (string, error) {
-	return PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, "", onLiveKeep)
-}
-
+// PrepareTrustDigestWithAuthority binds a nonce-free plan digest to the
+// canonical target and its physical identity. For an absent session,
+// rootIdentity is a stable intended-child identity derived from the pinned
+// parent and child name. onLiveKeep is sorted handles with explicit keep;
+// empty preserves the v0.61 digest. An empty authorityDigest keeps the
+// pre-authority digest.
 func PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string, onLiveKeep []string) (string, error) {
 	if !validDigest(planDigest) {
 		return "", fmt.Errorf("invalid prepare plan digest")

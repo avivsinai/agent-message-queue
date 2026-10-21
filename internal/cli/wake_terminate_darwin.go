@@ -50,7 +50,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 ) (removed bool, retErr error) {
 	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	var recheck wakeLockInspection
-	if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
+	if err := withWakeLifecycleGuardInDir(agentDir, wakeGuardExistingNoWait, func(dirfd int) error {
 		recheck = inspectWakeLockAt(
 			dirfd,
 			agentDir,
@@ -105,8 +105,9 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		return false, err
 	}
 	removed = false
-	err := withExistingWakeMutationScopeNoWaitInDir(
+	err := withWakeMutationScopeInDir(
 		agentDir,
+		wakeGuardExistingNoWait,
 		func(scope *wakeMutationScope) error {
 			dirfd, _, err := scope.location()
 			if err != nil {
@@ -134,10 +135,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				return err
 			}
 			var removeErr error
-			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+			outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
 				scope,
 				current,
-				scope.unlinkWakeLockForCleanup,
+				wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
 			)
 			removed, removeErr = outcome.Committed, outcome.Err
 			return removeErr
@@ -191,7 +192,7 @@ func sameConfirmedWakeLockInDir(
 	inspection wakeLockInspection,
 ) (bool, error) {
 	confirmed := false
-	err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardExistingNoWait, func(dirfd int) error {
 		recheck := inspectWakeLockAt(
 			dirfd,
 			agentDir,

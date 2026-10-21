@@ -76,10 +76,9 @@ func updateWakeSettingsFileInDir(
 	path := filepath.Join(agentDir.path, wakeSettingsFileName)
 	var stored []byte
 	var settings wakeSettings
-	err := withWakeLifecycleGuardModeAndTimeoutInDir(
+	err := withWakeLifecycleGuardInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeSettingsGuardTimeout,
+		wakeGuardOptions{noWait: true, retryTimeout: wakeSettingsGuardTimeout},
 		func(dirfd int) error {
 			raw, exists, err := readWakeSettingsFileAt(dirfd, agentDir)
 			if err != nil {
@@ -154,10 +153,9 @@ func loadWakeSettingsAtStartup(
 		return planWakeSettingsStartup(raw, exists, readErr, machine, flags, explicit, resume)
 	}
 	var plan wakeSettingsStartup
-	err := withWakeLifecycleGuardModeAndTimeoutInDir(
+	err := withWakeLifecycleGuardInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeSettingsGuardTimeout,
+		wakeGuardOptions{noWait: true, retryTimeout: wakeSettingsGuardTimeout},
 		func(dirfd int) error {
 			raw, exists, readErr := readWakeSettingsFileAt(dirfd, agentDir)
 			var err error
@@ -264,10 +262,9 @@ func seedWakeSettingsFile(
 	inspection wakeLockInspection,
 	seed []byte,
 ) (raw []byte, exists bool, readErr, seedErr error) {
-	seedErr = withWakeLifecycleGuardModeAndTimeoutInDir(
+	seedErr = withWakeLifecycleGuardInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeLifecycleGuardRetryTimeout,
+		wakeGuardNoWait,
 		func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
 			if !current.Exists ||
@@ -347,7 +344,7 @@ func recordWakeSettingsApplied(
 	if agentDir == nil || !inspection.Exists || inspection.Lock.Generation == "" {
 		return nil
 	}
-	return withWakeLifecycleGuardModeAndTimeoutInDir(agentDir, unix.LOCK_EX|unix.LOCK_NB, guardTimeout, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardOptions{noWait: true, retryTimeout: guardTimeout}, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
 		if !current.Exists ||
 			current.Lock.Generation != inspection.Lock.Generation ||

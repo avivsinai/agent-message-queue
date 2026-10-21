@@ -878,7 +878,7 @@ func touchWakePresenceInDir(agentDir *wakeAgentDir, me string) error {
 	if agentDir == nil {
 		return fmt.Errorf("wake repair agent directory capability is missing")
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		path := filepath.Join(agentDir.path, "presence.json")
 		data, _, exists, err := readWakeRepairMetadataAt(
 			dirfd,
@@ -948,7 +948,7 @@ func updateWakePresenceInDir(
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		path := filepath.Join(agentDir.path, "presence.json")
 		data, _, exists, err := readWakeRepairMetadataAt(
 			dirfd,

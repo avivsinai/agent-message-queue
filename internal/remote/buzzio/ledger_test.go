@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// 611.16: a claim and a prepared output are created once and replayed
+// A claim and a prepared output are created once and replayed
 // verbatim; an accepted output leaves the pending list.
 func TestLedgerReplaysClaimsAndPreparedOutputVerbatim(t *testing.T) {
 	l, err := OpenLedger(t.TempDir())
@@ -46,7 +46,7 @@ func TestLedgerReplaysClaimsAndPreparedOutputVerbatim(t *testing.T) {
 	}
 }
 
-// Pro review of #971 round 2 (agent-message-queue-611.58): an earlier build
+// Regression: #971, an earlier build
 // stored a refusal as a bare reason string, and one such record failed the
 // whole outbox scan. It reads as one refused attempt, due now.
 func TestLedgerReadsBareRefusalReason(t *testing.T) {

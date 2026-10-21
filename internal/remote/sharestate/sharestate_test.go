@@ -40,7 +40,7 @@ func enroll(t *testing.T, root string, kinds []uint16) {
 	}
 }
 
-// codex slice 1 review #3: a generation holding only the 1059 grant
+// Regression: a generation holding only the 1059 grant
 // authenticated; a partial generation is not one share produced.
 func TestLoadRefusesPartialGeneration(t *testing.T) {
 	root := t.TempDir()
@@ -50,7 +50,7 @@ func TestLoadRefusesPartialGeneration(t *testing.T) {
 	}
 }
 
-// codex slice 1 review #4: a symlinked keys directory adopted a body key
+// Regression: a symlinked keys directory adopted a body key
 // and generation from outside the root.
 func TestLoadRefusesSymlinkedKeysDir(t *testing.T) {
 	outside := t.TempDir()
@@ -70,7 +70,7 @@ func TestLoadRefusesSymlinkedKeysDir(t *testing.T) {
 	}
 }
 
-// codex slice 1 review r2 #2: keys/<session> swapped for an outside symlink
+// Regression: keys/<session> swapped for an outside symlink
 // after the directory check and before the leaf reads adopted the outside
 // body key. Leaves now read through the held, verified directory handle.
 func TestLoadReadsThroughVerifiedDirAfterParentSwap(t *testing.T) {

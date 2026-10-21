@@ -320,17 +320,6 @@ func (p Plan) validateForDigest(allowEmpty bool) error {
 	return nil
 }
 
-func DecodePlan(data []byte) (Plan, error) {
-	var plan Plan
-	if err := decodeStrict(data, &plan); err != nil {
-		return Plan{}, fmt.Errorf("decode launch plan: %w", err)
-	}
-	if err := plan.Validate(); err != nil {
-		return Plan{}, err
-	}
-	return plan, nil
-}
-
 func decodeStrict(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

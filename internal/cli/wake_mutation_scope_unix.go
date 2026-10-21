@@ -148,66 +148,16 @@ func (scope *wakeMutationScope) linkAtWith(
 	return scope.lease.LinkAtWith(link, fromDirFD, from, toDirFD, to, flags)
 }
 
+// withWakeMutationScopeInDir runs fn in a mutation scope that owns the
+// lifecycle guard lease and releases both when fn returns.
 func withWakeMutationScopeInDir(
 	agentDir *wakeAgentDir,
+	opts wakeGuardOptions,
 	fn func(*wakeMutationScope) error,
 ) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+	return withWakeLifecycleGuardLeaseInDir(
 		agentDir,
-		false,
-		unix.LOCK_EX,
-		wakeLifecycleGuardRetryTimeout,
-		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
-			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
-			return fn(scope)
-		},
-	)
-}
-
-func withWakeMutationScopeNoWaitInDir(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
-		agentDir,
-		false,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeLifecycleGuardRetryTimeout,
-		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
-			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
-			return fn(scope)
-		},
-	)
-}
-
-func withExistingWakeMutationScopeInDir(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
-		agentDir,
-		true,
-		unix.LOCK_EX,
-		wakeLifecycleGuardRetryTimeout,
-		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
-			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
-			return fn(scope)
-		},
-	)
-}
-
-func withExistingWakeMutationScopeNoWaitInDir(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
-		agentDir,
-		true,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeLifecycleGuardRetryTimeout,
+		opts,
 		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
 			scope := newWakeMutationScope(agentDir, dirfd, guard)
 			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)

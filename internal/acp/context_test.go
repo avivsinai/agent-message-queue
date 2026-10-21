@@ -249,7 +249,7 @@ func mustLoadConfigError(t *testing.T) error {
 	return err
 }
 
-// Pro review of za4 (P2-2): the pin was checked against a path and the
+// Regression: the pin was checked against a path and the
 // update then re-resolved the path, so a directory swapped in between took
 // the write. The capability itself must be what the pin authenticates.
 func TestVerifySessionPinOnChecksTheOpenCapability(t *testing.T) {

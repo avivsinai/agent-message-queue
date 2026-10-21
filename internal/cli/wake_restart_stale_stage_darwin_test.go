@@ -26,7 +26,7 @@ func TestStaleWakeReleasePreservesChangedDarwinStage(t *testing.T) {
 					if source == "persisted restart" {
 						fixture.record.BoundImage = &evidence
 						fixture.record.Candidate.SHA256 = evidence.SHA256
-						if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+						if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 							return writeWakeRestartRecordAt(scope, fixture.record)
 						}); err != nil {
 							t.Fatal(err)
@@ -85,7 +85,7 @@ func TestDoctorPreservesChangedDarwinStageWithoutLock(t *testing.T) {
 	evidence := fixture.currentEvidence
 	evidence.Device++
 	fixture.record.BoundImage = &evidence
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)

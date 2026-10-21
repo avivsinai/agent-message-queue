@@ -183,7 +183,7 @@ func writeWakeRepairFloorInDir(
 	root string,
 	floor wakeRepairFloor,
 ) error {
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		return writeWakeRepairFloorAt(dirfd, agentDir, root, floor)
 	})
 }

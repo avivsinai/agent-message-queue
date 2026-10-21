@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Codex #885 P2 #3: an off for session A must not remove a binding that a
+// Regression: #885, an off for session A must not remove a binding that a
 // concurrent attach already moved to session B.
 func TestRemoveLeavesAnotherSessionsBinding(t *testing.T) {
 	t.Setenv(EnvPath, filepath.Join(canonicalTempDir(t), "remote", "binding.json"))
@@ -16,7 +16,7 @@ func TestRemoveLeavesAnotherSessionsBinding(t *testing.T) {
 	if err := Write(b); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := Remove(a.Same); err != nil || removed {
+	if removed, err := Retire(a.Same); err != nil || len(removed) != 0 {
 		t.Fatalf("removed=%v err=%v; A's off removed B's binding", removed, err)
 	}
 	if got, err := Read(); err != nil || !got.Same(b) {
@@ -24,7 +24,7 @@ func TestRemoveLeavesAnotherSessionsBinding(t *testing.T) {
 	}
 }
 
-// Codex #885 P2 #4: a symlinked binding directory was followed.
+// Regression: #885, a symlinked binding directory was followed.
 func TestSymlinkedBindingDirectoryIsRefused(t *testing.T) {
 	base := canonicalTempDir(t)
 	real := filepath.Join(base, "elsewhere")
@@ -54,7 +54,7 @@ func canonicalTempDir(t *testing.T) string {
 	return dir
 }
 
-// Codex #885 r2 P2: the override followed a symlink above its own directory.
+// Regression: #885, the override followed a symlink above its own directory.
 func TestOverrideWithSymlinkedAncestorIsRefused(t *testing.T) {
 	base := canonicalTempDir(t)
 	if err := os.MkdirAll(filepath.Join(base, "real", "remote"), 0o700); err != nil {
@@ -69,7 +69,7 @@ func TestOverrideWithSymlinkedAncestorIsRefused(t *testing.T) {
 	}
 }
 
-// Pro review of 94w: a trailing slash on the same root was refused as a
+// Regression: a trailing slash on the same root was refused as a
 // collision when the same session attached again.
 func TestSameIgnoresRootSpelling(t *testing.T) {
 	a := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude"}
@@ -78,7 +78,7 @@ func TestSameIgnoresRootSpelling(t *testing.T) {
 	}
 }
 
-// review r1: EnsureDir now refuses a group-writable ~/.amq. With umask 0002
+// Regression: EnsureDir refuses a group-writable ~/.amq. With umask 0002
 // the amq-remote skill's mkdir -p makes ~/.amq 0775, and attach refused it.
 func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -115,7 +115,7 @@ func TestBindingOverrideCreatesMissingDirectories(t *testing.T) {
 	}
 }
 
-// Review B1 of #1041: a symlink swapped in for a missing level after the
+// Regression: #1041, a symlink swapped in for a missing level after the
 // ancestor check must not redirect the binding (MkdirAll followed it): Write
 // refuses and creates nothing under the link's target. An ancestor others can
 // write is refused too.
@@ -146,7 +146,7 @@ func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
 	}
 }
 
-// Review of S1 (review-s1 P1): with the bindings directory readable but not
+// Regression: with the bindings directory readable but not
 // searchable, every Lstat failed, so WriteSession searched for a free name
 // forever while it held the binding lock. It now fails closed.
 func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {

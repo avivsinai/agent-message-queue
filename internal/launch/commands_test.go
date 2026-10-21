@@ -28,12 +28,12 @@ func TestCommandsCreateEmitsCoopExecAndRoundTripsPlan(t *testing.T) {
 	if result.Outcome == OutcomeCreated || result.Outcome == OutcomeUnsupported {
 		t.Fatalf("Create invented %s", result.Outcome)
 	}
-	decoded, err := DecodePlan(result.Plan)
+	decoded, err := decodePlan(result.Plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(decoded, plan) {
-		t.Fatalf("DecodePlan round-trip mismatch\ngot %#v\nwant %#v", decoded, plan)
+		t.Fatalf("decodePlan round-trip mismatch\ngot %#v\nwant %#v", decoded, plan)
 	}
 	if len(result.Commands) != len(plan.Agents) {
 		t.Fatalf("commands = %d, want %d", len(result.Commands), len(plan.Agents))

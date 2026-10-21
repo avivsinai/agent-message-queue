@@ -104,10 +104,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				locked.Process = wakeProcessInfo{PID: locked.PID}
 				classifyWakeLock(locked.Root, locked.Agent, &locked)
 				var removeErr error
-				outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+				outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
 					scope,
 					locked,
-					scope.unlinkWakeLockForCleanup,
+					wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
 				)
 				provenGone, removeErr = outcome.Committed, outcome.Err
 				return removeErr
@@ -202,10 +202,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		switch relation {
 		case wakeAgentDirDetached:
 			var removeErr error
-			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+			outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
 				scope,
 				current,
-				scope.unlinkWakeLockForCleanup,
+				wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
 			)
 			removed, removeErr = outcome.Committed, outcome.Err
 			return removeErr
@@ -233,10 +233,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			), inspection.Root, inspection.Agent)
 		}
 		var removeErr error
-		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+		outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
 			scope,
 			current,
-			scope.unlinkWakeLockForCleanup,
+			wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
 		)
 		removed, removeErr = outcome.Committed, outcome.Err
 		return removeErr
@@ -337,8 +337,9 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 		if err != nil {
 			return fmt.Errorf("observe authoritative wake owner before %s: %w", signalName, err)
 		}
-		sendErr := withExistingWakeMutationScopeNoWaitInDir(
+		sendErr := withWakeMutationScopeInDir(
 			agentDir,
+			wakeGuardExistingNoWait,
 			func(scope *wakeMutationScope) error {
 				dirfd, scopedAgentDir, err := scope.location()
 				if err != nil {

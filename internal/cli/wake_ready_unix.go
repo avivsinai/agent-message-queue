@@ -64,7 +64,7 @@ func writeWakeReadyFileAgainstOwnerInDir(
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before readiness publication")
@@ -373,7 +373,7 @@ func validateWakeReadyFileAgainstOwnerInDir(
 		return false, fmt.Errorf("wake agent directory capability is missing")
 	}
 	ready := false
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		published, exists, err := readWakeReadyFile(path)
 		if err != nil || !exists {
 			return err

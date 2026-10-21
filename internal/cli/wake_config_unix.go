@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -93,18 +91,18 @@ func refuseWakeRestartOnlyFlags(args []string) error {
 }
 
 func runWakeConfig(args []string) error {
+	c := &wakeConfigRun{}
 	if err := refuseWakeRestartOnlyFlags(args); err != nil {
 		return err
 	}
 	fs := flag.NewFlagSet("wake config", flag.ContinueOnError)
-	common := addCommonFlags(fs)
-	values := registerWakeSettingsFlags(fs)
-	machine := fs.Bool("machine", false, "Show or change the machine settings (~/.amq/wake.settings) shared by every wake of this user")
-	var unsetKeys multiStringFlag
-	fs.Var(&unsetKeys, "unset", "Return a setting to the next layer (machine, then default) by key, e.g. hold_normal (repeatable)")
-	reset := fs.Bool("reset", false, "Replace the settings file with exactly the given setting flags (none = no overrides)")
-	wait := fs.Bool("wait", false, "Wait until the running wake has applied the settings files")
-	timeout := fs.Duration("timeout", 60*time.Second, "Maximum time for --wait (0 = wait forever)")
+	c.common = addCommonFlags(fs)
+	c.values = registerWakeSettingsFlags(fs)
+	c.machine = fs.Bool("machine", false, "Show or change the machine settings (~/.amq/wake.settings) shared by every wake of this user")
+	fs.Var(&c.unsetKeys, "unset", "Return a setting to the next layer (machine, then default) by key, e.g. hold_normal (repeatable)")
+	c.reset = fs.Bool("reset", false, "Replace the settings file with exactly the given setting flags (none = no overrides)")
+	c.wait = fs.Bool("wait", false, "Wait until the running wake has applied the settings files")
+	c.timeout = fs.Duration("timeout", 60*time.Second, "Maximum time for --wait (0 = wait forever)")
 
 	usage := usageWithFlags(fs, "amq wake config [--me <agent>] [--machine] [setting flags] [--unset <key>]... [--reset] [--wait] [options]",
 		"Show or change the live settings of the agent's wake.",
@@ -136,39 +134,38 @@ func runWakeConfig(args []string) error {
 	} else if handled {
 		return nil
 	}
-	hasMe := strings.TrimSpace(common.Me) != ""
-	if !*machine {
-		if err := requireMe(common.Me); err != nil {
+	hasMe := strings.TrimSpace(c.common.Me) != ""
+	if !*c.machine {
+		if err := requireMe(c.common.Me); err != nil {
 			return err
 		}
 	}
-	if *machine && *wait && !hasMe {
+	if *c.machine && *c.wait && !hasMe {
 		return UsageError("--machine --wait needs --me (or AM_ME) to name the wake to wait on")
 	}
-	var me string
 	if hasMe {
 		var err error
-		me, err = normalizeHandle(common.Me)
+		c.me, err = normalizeHandle(c.common.Me)
 		if err != nil {
 			return UsageError("--me: %v", err)
 		}
 	}
-	if *timeout < 0 {
+	if *c.timeout < 0 {
 		return UsageError("--timeout must be >= 0")
 	}
 	var root string
 	if hasMe {
-		root = resolveRoot(common.Root)
-		if err := validateKnownHandles(root, common.Strict, me); err != nil {
+		root = resolveRoot(c.common.Root)
+		if err := validateKnownHandles(root, c.common.Strict, c.me); err != nil {
 			return err
 		}
 	}
 
-	explicit := visitedWakeSettingsKeys(fs)
-	if *reset && len(unsetKeys) > 0 {
+	c.explicit = visitedWakeSettingsKeys(fs)
+	if *c.reset && len(c.unsetKeys) > 0 {
 		return UsageError("--reset cannot be combined with --unset")
 	}
-	for _, key := range unsetKeys {
+	for _, key := range c.unsetKeys {
 		if _, ok := lookupWakeSettingDef(key); !ok {
 			return UsageError(
 				"--unset: unknown wake setting %q (valid: %s)",
@@ -177,11 +174,10 @@ func runWakeConfig(args []string) error {
 			)
 		}
 	}
-	changing := *reset || len(explicit) > 0 || len(unsetKeys) > 0
-	var agentDir *wakeAgentDir
+	c.changing = *c.reset || len(c.explicit) > 0 || len(c.unsetKeys) > 0
 	if hasMe {
 		var err error
-		agentDir, err = openExistingWakeAgentDir(root, me)
+		c.agentDir, err = openExistingWakeAgentDir(root, c.me)
 		if err != nil {
 			// A missing mailbox or bad handle keeps its own exit code; the wake
 			// diagnostic wrap would turn it into a general error.
@@ -189,102 +185,109 @@ func runWakeConfig(args []string) error {
 			if errors.As(err, &exitErr) {
 				return err
 			}
-			return withWakeDiagnostic(err, canonicalWakeRoot(root), me)
+			return withWakeDiagnostic(err, canonicalWakeRoot(root), c.me)
 		}
-		defer func() { _ = agentDir.Close() }()
+		defer func() { _ = c.agentDir.Close() }()
 	}
-	canonicalRoot := ""
+	c.canonicalRoot = ""
 	if hasMe {
-		canonicalRoot = canonicalWakeRoot(root)
+		c.canonicalRoot = canonicalWakeRoot(root)
 	}
+	if err := c.storeFiles(); err != nil {
+		return err
+	}
+	return c.report()
+}
 
+// storeFiles writes the machine or agent settings file a change names and
+// reads the files it does not change. agentErr keeps a read error for display.
+func (c *wakeConfigRun) storeFiles() error {
 	// The machine file: changed here in machine mode, otherwise only read.
-	var machineRaw []byte
-	var machineExists bool
-	var machineErr error
-	if *machine && *reset {
+	if *c.machine && *c.reset {
 		var err error
-		if machineRaw, err = resetMachineWakeSettings(*values, explicit); err != nil {
+		if c.machineRaw, err = resetMachineWakeSettings(*c.values, c.explicit); err != nil {
 			return err
 		}
-		machineExists = true
-	} else if *machine && changing {
+		c.machineExists = true
+	} else if *c.machine && c.changing {
 		var err error
-		machineRaw, err = updateMachineWakeSettings(func(doc *wakeSettingsDoc) error {
-			for _, key := range unsetKeys {
+		c.machineRaw, err = updateMachineWakeSettings(func(doc *wakeSettingsDoc) error {
+			for _, key := range c.unsetKeys {
 				if err := doc.unset(key); err != nil {
 					return UsageError("--unset: %v", err)
 				}
 			}
-			doc.set(*values, explicit)
+			doc.set(*c.values, c.explicit)
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		machineExists = true
+		c.machineExists = true
 	} else {
-		machineRaw, machineExists, machineErr = readMachineWakeSettingsSettled()
+		c.machineRaw, c.machineExists, c.machineErr = readMachineWakeSettingsSettled()
 	}
-	machineDigest := wakeSettingsDigest(machineRaw, machineExists)
+	c.machineDigest = wakeSettingsDigest(c.machineRaw, c.machineExists)
 
-	var agentRaw []byte
-	var agentExists bool
-	var err error
 	switch {
-	case *machine:
-		if agentDir != nil {
-			agentRaw, agentExists, err = readWakeSettingsFile(agentDir)
+	case *c.machine:
+		if c.agentDir != nil {
+			c.agentRaw, c.agentExists, c.agentErr = readWakeSettingsFile(c.agentDir)
 		}
-	case *reset:
-		agentRaw, err = resetWakeSettingsFileInDir(agentDir, *values, explicit)
-		if err != nil {
+	case *c.reset:
+		c.agentRaw, c.agentErr = resetWakeSettingsFileInDir(c.agentDir, *c.values, c.explicit)
+		if c.agentErr != nil {
+			return c.agentErr
+		}
+		c.agentExists = true
+	case c.changing:
+		if err := requireValidWakeSettingsFile(c.agentDir); err != nil {
 			return err
 		}
-		agentExists = true
-	case changing:
-		if err := requireValidWakeSettingsFile(agentDir); err != nil {
+		if err := refuseSetOnUnreportedWake(c.agentDir, c.canonicalRoot, c.me); err != nil {
 			return err
 		}
-		if err := refuseSetOnUnreportedWake(agentDir, canonicalRoot, me); err != nil {
-			return err
-		}
-		agentRaw, _, err = updateWakeSettingsFileInDir(agentDir, func(doc *wakeSettingsDoc) error {
-			for _, key := range unsetKeys {
+		c.agentRaw, _, c.agentErr = updateWakeSettingsFileInDir(c.agentDir, func(doc *wakeSettingsDoc) error {
+			for _, key := range c.unsetKeys {
 				if err := doc.unset(key); err != nil {
 					return UsageError("--unset: %v", err)
 				}
 			}
-			doc.set(*values, explicit)
+			doc.set(*c.values, c.explicit)
 			return nil
 		})
-		if err != nil {
+		if c.agentErr != nil {
 			// The lifecycle guard joins its unlock result onto fn's error,
 			// which hides the usage exit code of an invalid merged value.
 			var exitErr *ExitCodeError
-			if errors.As(err, &exitErr) {
+			if errors.As(c.agentErr, &exitErr) {
 				return exitErr
 			}
-			return err
+			return c.agentErr
 		}
-		agentExists = true
+		c.agentExists = true
 	default:
-		agentRaw, agentExists, err = readWakeSettingsFile(agentDir)
+		c.agentRaw, c.agentExists, c.agentErr = readWakeSettingsFile(c.agentDir)
 	}
+	return nil
+}
 
+// report shows the layered settings and the running wake's state, waiting
+// for the wake to apply the files when asked.
+func (c *wakeConfigRun) report() error {
 	// A file that cannot be read or decoded is shown, not hidden: it adds no
 	// values and its status carries the error.
 	machineFile := wakeConfigMachineFileJSON{Status: "ok"}
 	machineFile.Path, _ = machineWakeSettingsPath()
 	var machineDoc wakeSettingsDoc
 	switch {
-	case machineErr != nil:
-		machineFile.Status, machineFile.Error = "refused", machineErr.Error()
-	case !machineExists:
+	case c.machineErr != nil:
+		machineFile.Status, machineFile.Error = "refused", c.machineErr.Error()
+	case !c.machineExists:
 		machineFile.Status = "absent"
 	default:
 		var derr error
-		if machineDoc, derr = decodeWakeSettingsDoc(machineRaw); derr == nil {
+		if machineDoc, derr = decodeWakeSettingsDoc(c.machineRaw); derr == nil {
 			_, _, derr = layerWakeSettings(machineDoc, wakeSettingsDoc{})
 		}
 		if derr != nil {
@@ -293,12 +296,12 @@ func runWakeConfig(args []string) error {
 		}
 	}
 
-	if *machine && agentDir != nil && machineFile.Status == "ok" && machineExists {
+	if *c.machine && c.agentDir != nil && machineFile.Status == "ok" && c.machineExists {
 		// A wake layers the machine file over this agent's file, so the
 		// status must match plain --me; the shown keys stay machine-only.
 		var checkDoc wakeSettingsDoc
-		if agentExists && err == nil {
-			if d, derr := decodeWakeSettingsDoc(agentRaw); derr == nil {
+		if c.agentExists && c.agentErr == nil {
+			if d, derr := decodeWakeSettingsDoc(c.agentRaw); derr == nil {
 				checkDoc = d
 			}
 		}
@@ -311,27 +314,27 @@ func runWakeConfig(args []string) error {
 
 	var file *wakeConfigFileJSON
 	var agentDoc wakeSettingsDoc
-	if agentDir != nil && !*machine {
+	if c.agentDir != nil && !*c.machine {
 		file = &wakeConfigFileJSON{Status: "ok"}
-		if err == nil && !agentExists {
+		if c.agentErr == nil && !c.agentExists {
 			file.Status = "absent"
 		}
-		if err == nil && agentExists {
-			agentDoc, err = decodeWakeSettingsDoc(agentRaw)
+		if c.agentErr == nil && c.agentExists {
+			agentDoc, c.agentErr = decodeWakeSettingsDoc(c.agentRaw)
 		}
-		if err != nil {
+		if c.agentErr != nil {
 			agentDoc = wakeSettingsDoc{}
-			*file = wakeConfigFileJSON{Status: "refused", Error: err.Error()}
+			*file = wakeConfigFileJSON{Status: "refused", Error: c.agentErr.Error()}
 		}
-	} else if err != nil {
-		return err
+	} else if c.agentErr != nil {
+		return c.agentErr
 	}
 	effective, sources := layerWakeConfig(machineDoc, agentDoc, &machineFile, file)
 
 	out := wakeConfigJSON{
 		Schema:      1,
-		Agent:       me,
-		Root:        canonicalRoot,
+		Agent:       c.me,
+		Root:        c.canonicalRoot,
 		Settings:    make(map[string]wakeConfigSettingJSON, len(wakeSettingDefs)),
 		RestartOnly: wakeRestartOnlyFlags,
 		File:        file,
@@ -344,14 +347,14 @@ func runWakeConfig(args []string) error {
 		}
 	}
 	var waitErr error
-	if agentDir != nil {
-		agentDigest := wakeSettingsDigest(agentRaw, agentExists)
-		state, err := inspectWakeSettingsRunState(agentDir, canonicalRoot, me, agentDigest, machineDigest)
+	if c.agentDir != nil {
+		agentDigest := wakeSettingsDigest(c.agentRaw, c.agentExists)
+		state, err := inspectWakeSettingsRunState(c.agentDir, c.canonicalRoot, c.me, agentDigest, c.machineDigest)
 		if err != nil {
 			return err
 		}
-		if *wait && state.Status != wakeSettingsRunNone {
-			state, waitErr = waitWakeSettingsApplied(agentDir, canonicalRoot, me, agentDigest, machineDigest, *machine, *timeout)
+		if *c.wait && state.Status != wakeSettingsRunNone {
+			state, waitErr = waitWakeSettingsApplied(c.agentDir, c.canonicalRoot, c.me, agentDigest, c.machineDigest, *c.machine, *c.timeout)
 		}
 		out.Wake = &wakeConfigWakeJSON{
 			Status:       state.Status,
@@ -361,10 +364,34 @@ func runWakeConfig(args []string) error {
 			MachineError: state.MachineError,
 		}
 	}
-	if err := printWakeConfig(common.JSON, out); err != nil {
+	if err := printWakeConfig(c.common.JSON, out); err != nil {
 		return err
 	}
 	return waitErr
+}
+
+// wakeConfigRun is one wake config invocation: its flags, the handle and
+// directory it acts on, and the settings files it read or wrote.
+type wakeConfigRun struct {
+	common        *commonFlags
+	values        *wakeSettings
+	machine       *bool
+	unsetKeys     multiStringFlag
+	reset         *bool
+	wait          *bool
+	timeout       *time.Duration
+	me            string
+	explicit      []string
+	changing      bool
+	agentDir      *wakeAgentDir
+	canonicalRoot string
+	machineRaw    []byte
+	machineExists bool
+	machineErr    error
+	machineDigest string
+	agentRaw      []byte
+	agentExists   bool
+	agentErr      error
 }
 
 // layerWakeConfig merges the layers for display. A layer that cannot merge is
@@ -567,10 +594,9 @@ func resetWakeSettingsFileInDir(agentDir *wakeAgentDir, values wakeSettings, key
 	if err != nil {
 		return nil, err
 	}
-	err = withWakeLifecycleGuardModeAndTimeoutInDir(
+	err = withWakeLifecycleGuardInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeSettingsGuardTimeout,
+		wakeGuardOptions{noWait: true, retryTimeout: wakeSettingsGuardTimeout},
 		func(dirfd int) error { return writeWakeSettingsFileAt(dirfd, agentDir, stored) },
 	)
 	if err != nil {

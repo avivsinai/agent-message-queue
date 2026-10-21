@@ -52,31 +52,237 @@ func openCoopWakeAttention(output *os.File) (*os.File, error) {
 	return attention, nil
 }
 
+// coopExecRun is the state of one coop exec invocation, shared by its phases.
+type coopExecRun struct {
+	managedLaunchNonce           string
+	fs                           *flag.FlagSet
+	rootFlag                     *string
+	sessionFlag                  *string
+	meFlag                       *string
+	noInitFlag                   *bool
+	noGitignoreFlag              *bool
+	noWakeFlag                   *bool
+	requireWakeFlag              *bool
+	wakeInjectModeFlag           *string
+	wakeInjectViaFlag            *string
+	wakeInjectArgFlags           multiStringFlag
+	managedNoWakeReasonFlag      *string
+	managedSymphonyEventFlags    multiStringFlag
+	managedSymphonyWorkspaceFlag *string
+	yesFlag                      *bool
+	namedFlag                    *bool
+	agentArgs                    []string
+	named                        coopNamedChoice
+	cmdName                      string
+	wakeInjectVia                string
+	wakeInjectMode               string
+	executionOptions             *launch.PrepareExecutionOptions
+	agentHandle                  string
+	managedGuard                 *managedExecutionGuard
+	rootRequested                bool
+	selectorFree                 bool
+	defaultSession               string
+	warnedCreation               bool
+	bootstrapBase                string
+	root                         string
+	sessionProvisioned           bool
+	binaryPath                   string
+	creationDeprecated           bool
+	baseEnv                      []string
+	earlyOwner                   *wakeOwner
+	wakeProc                     *os.Process
+	wakeWaiter                   *wakeProcessWaiter
+	wakeChildCapability          *authoritativeWakeChildCapability
+	wakeHelperClaim              *retainedCoopWakeHelperClaim
+	wakeHelperClaimErr           error
+	cleanupWakeReady             func()
+	retainWakeHelperClaim        func()
+	cleanupWakeHelper            func(preservePersistedClaim bool) error
+}
+
 func runCoopExec(args []string) error {
-	managedLaunchNonce := strings.TrimSpace(os.Getenv(launch.InternalLaunchNonceEnv))
+	c := &coopExecRun{}
+	amqArgs, usage := c.defineFlags(args)
+
+	if handled, err := parseFlagsAllowPositionals(c.fs, amqArgs, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	var err error
+	if err := c.validateFlags(); err != nil {
+		return err
+	}
+
+	// Derive agent handle from command basename (or --me override).
+	c.agentHandle = *c.meFlag
+	if c.agentHandle == "" {
+		c.agentHandle = strings.ToLower(filepath.Base(c.cmdName))
+	}
+	c.agentHandle, err = normalizeHandle(c.agentHandle)
+	if err != nil {
+		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", c.cmdName, err)
+	}
+	if c.managedLaunchNonce != "" {
+		c.managedGuard, err = acquireManagedExecutionGuard(*c.rootFlag, c.agentHandle, c.managedLaunchNonce, c.executionOptions)
+		if err != nil {
+			return ActionRequiredError("refusing managed execution options before root mutation: %v", err)
+		}
+		defer func() { _ = c.managedGuard.Close() }()
+	}
+
+	if err := c.selectRoot(); err != nil {
+		return err
+	}
+	if err := c.provisionRoot(); err != nil {
+		return err
+	}
+	if !*c.noWakeFlag {
+		if err := prepareCoopWakeLock(
+			c.root,
+			c.agentHandle,
+			*c.yesFlag,
+			coopWakeRemedyForCommand(c.root, c.agentHandle, c.cmdName, c.agentArgs),
+		); err != nil {
+			return err
+		}
+	}
+
+	// Start amq wake in background (unless --no-wake). Every coop-started wake
+	// is bound to this exact process identity and exits when the exec-replaced
+	// agent exits. On failed Exec, stable child cleanup stops it immediately.
+	c.baseEnv = unsetEnvVar(
+		unsetEnvVar(
+			unsetEnvVar(
+				unsetEnvVar(os.Environ(), launch.InternalLaunchNonceEnv),
+				envWakeOwner,
+			),
+			envWakePrivateStopFD,
+		),
+		envWakeAttentionFD,
+	)
+	c.retainWakeHelperClaim = func() {
+		retained, err := captureRetainedCoopWakeHelperClaim(c.wakeProc, c.root, c.agentHandle)
+		if err != nil {
+			c.wakeHelperClaimErr = errors.Join(c.wakeHelperClaimErr, err)
+			return
+		}
+		if retained != nil {
+			if c.wakeHelperClaim != nil {
+				_ = c.wakeHelperClaim.Close()
+			}
+			c.wakeHelperClaim = retained
+		}
+	}
+	c.cleanupWakeHelper = func(preservePersistedClaim bool) error {
+		cleanupErr := cleanupCoopWakeStartupHelper(
+			c.wakeProc,
+			c.wakeWaiter,
+			c.wakeChildCapability,
+			c.earlyOwner,
+			c.root,
+			c.agentHandle,
+			preservePersistedClaim,
+			c.wakeHelperClaim,
+		)
+		c.wakeHelperClaim = nil
+		return errors.Join(cleanupErr, c.wakeHelperClaimErr)
+	}
+	if !*c.noWakeFlag {
+		amqExecutable, binErr := os.Executable()
+		if binErr != nil {
+			return fmt.Errorf("resolve current amq executable: %w", binErr)
+		}
+		amqBin, binErr := coopWakeExecutionPath(amqExecutable)
+		if binErr != nil {
+			return binErr
+		}
+		wakeLaunchLocator := coopWakeLaunchLocator(os.Args[0])
+
+		captured, ownerErr := captureAuthoritativeCurrentWakeOwner()
+		if ownerErr != nil {
+			return fmt.Errorf("capture exact coop wake owner: %w", ownerErr)
+		}
+		c.earlyOwner = &captured
+		readyPath, cleanupReady, readyErr := newWakeReadyFile()
+		if readyErr != nil {
+			inspection := inspectWakeLock(c.root, c.agentHandle)
+			if err := handleCoopWakeSetupFailure(*c.requireWakeFlag, inspection, "create wake readiness file", readyErr); err != nil {
+				return err
+			}
+		} else {
+			c.cleanupWakeReady = cleanupReady
+			defer cleanupReady()
+			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, c.wakeInjectMode, c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
+			if wakeLaunchLocator != "" {
+				// Execute the already-running image, but preserve the absolute,
+				// unresolved invocation locator as argv[0] so the child can safely
+				// validate and observe installer symlink flips without a launch TOCTOU.
+				wakeCmd.Args[0] = wakeLaunchLocator
+			}
+			// Set AM_ROOT in wake's env so the helper process resolves the same
+			// session root even if the parent shell inherited a different value.
+			wakeEnv, wakeEnvErr := wakeCommandEnv(c.baseEnv, c.root, c.earlyOwner)
+			if wakeEnvErr != nil {
+				return wakeEnvErr
+			}
+			wakeCmd.Env = wakeEnv
+			wakeCmd.Stdin = os.Stdin
+			wakeOutput, outputErr := openCoopWakeOutput(c.root, c.agentHandle)
+			if outputErr != nil {
+				return fmt.Errorf("open durable coop wake diagnostics: %w", outputErr)
+			}
+			defer func() { _ = wakeOutput.Close() }()
+			wakeAttention, attentionErr := openCoopWakeAttention(wakeOutput)
+			if attentionErr != nil {
+				return fmt.Errorf("open isolated coop wake attention: %w", attentionErr)
+			}
+			defer func() { _ = wakeAttention.Close() }()
+			wakeCmd.Stdout = wakeOutput
+			wakeCmd.Stderr = wakeOutput
+			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
+				return fmt.Errorf("attach isolated coop wake attention: %w", err)
+			}
+			if err := c.superviseWakeHelper(wakeCmd, readyPath); err != nil {
+				return err
+			}
+		}
+	}
+	if c.managedGuard != nil {
+		if err := c.managedGuard.Close(); err != nil {
+			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
+		}
+	}
+
+	return c.execAgent()
+}
+
+// defineFlags registers the coop exec flags on c.fs, splitting the
+// agent's own flags at "--". It returns the AMQ arguments and the usage.
+func (c *coopExecRun) defineFlags(args []string) ([]string, func()) {
+	c.managedLaunchNonce = strings.TrimSpace(os.Getenv(launch.InternalLaunchNonceEnv))
 	// Split at "--" before flag parsing so agent flags aren't consumed.
-	amqArgs, agentArgs := splitDashDash(args)
+	var amqArgs []string
+	amqArgs, c.agentArgs = splitDashDash(args)
 
-	fs := flag.NewFlagSet("coop exec", flag.ContinueOnError)
-	rootFlag := fs.String("root", "", "Root directory (override auto-detection)")
-	sessionFlag := fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
-	meFlag := fs.String("me", "", "Agent handle (override auto-derivation from command name)")
-	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
-	noGitignoreFlag := fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
-	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
-	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
-	wakeInjectModeFlag := fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none")
-	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
-	var wakeInjectArgFlags multiStringFlag
-	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
-	managedNoWakeReasonFlag := fs.String("managed-no-wake-reason", "", "")
-	var managedSymphonyEventFlags multiStringFlag
-	fs.Var(&managedSymphonyEventFlags, "managed-symphony-event", "")
-	managedSymphonyWorkspaceFlag := fs.String("managed-symphony-workspace-key", "", "")
-	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
-	namedFlag := fs.Bool("named", true, "Stamp the session and AM_ME onto the spawned CLI session name")
+	c.fs = flag.NewFlagSet("coop exec", flag.ContinueOnError)
+	c.rootFlag = c.fs.String("root", "", "Root directory (override auto-detection)")
+	c.sessionFlag = c.fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
+	c.meFlag = c.fs.String("me", "", "Agent handle (override auto-derivation from command name)")
+	c.noInitFlag = c.fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
+	c.noGitignoreFlag = c.fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
+	c.noWakeFlag = c.fs.Bool("no-wake", false, "Don't start amq wake in background")
+	c.requireWakeFlag = c.fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
+	c.wakeInjectModeFlag = c.fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none")
+	c.wakeInjectViaFlag = c.fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
+	c.fs.Var(&c.wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
+	c.managedNoWakeReasonFlag = c.fs.String("managed-no-wake-reason", "", "")
+	c.fs.Var(&c.managedSymphonyEventFlags, "managed-symphony-event", "")
+	c.managedSymphonyWorkspaceFlag = c.fs.String("managed-symphony-workspace-key", "", "")
+	c.yesFlag = c.fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
+	c.namedFlag = c.fs.Bool("named", true, "Stamp the session and AM_ME onto the spawned CLI session name")
 
-	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
+	usage := usageWithFlags(c.fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
 		"",
 		"Sets AM_ROOT (always a session subdirectory) and AM_ME,",
@@ -103,138 +309,126 @@ func runCoopExec(args []string) error {
 		"  exact-owner identity. Only an exact owner-bound inject-via wake can be",
 		"  reused; stop an older generic wake before retrying coop exec.",
 	)
+	return amqArgs, usage
+}
 
-	if handled, err := parseFlagsAllowPositionals(fs, amqArgs, usage); err != nil {
-		return err
-	} else if handled {
-		return nil
-	}
-	named, err := resolveCoopNamedEnabled(flagWasVisited(fs, "named"), *namedFlag)
+// validateFlags checks the parsed flags and derives the command, the
+// session naming choice, the wake injector and managed execution options.
+func (c *coopExecRun) validateFlags() error {
+	var err error
+	c.named, err = resolveCoopNamedEnabled(flagWasVisited(c.fs, "named"), *c.namedFlag)
 	if err != nil {
 		return err
 	}
-	if managedLaunchNonce != "" {
+	if c.managedLaunchNonce != "" {
 		// Managed launches use the ticket's exact provider argv for naming.
-		named.enabled = false
+		c.named.enabled = false
 	}
-	remaining := fs.Args()
+	remaining := c.fs.Args()
 	if len(remaining) == 0 {
 		return UsageError("command required (e.g., 'claude', 'codex', 'bash')")
 	}
-	cmdName := remaining[0]
+	c.cmdName = remaining[0]
 	// Extra positional args before "--" are appended to agent args.
 	if len(remaining) > 1 {
-		agentArgs = append(remaining[1:], agentArgs...)
+		c.agentArgs = append(remaining[1:], c.agentArgs...)
 	}
-	if managedLaunchNonce != "" && flagWasVisited(fs, "named") && *namedFlag && !launch.ArgsHaveNameFlag(agentArgs) {
+	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
 	}
-	if managedLaunchNonce != "" {
-		if !flagWasVisited(fs, "root") || strings.TrimSpace(*rootFlag) == "" || !filepath.IsAbs(*rootFlag) {
+	if c.managedLaunchNonce != "" {
+		if !flagWasVisited(c.fs, "root") || strings.TrimSpace(*c.rootFlag) == "" || !filepath.IsAbs(*c.rootFlag) {
 			return ActionRequiredError("managed launch requires one explicit absolute --root")
 		}
-		if *sessionFlag != "" {
+		if *c.sessionFlag != "" {
 			return ActionRequiredError("managed launch forbids --session; use the ticket-bound exact --root")
 		}
 	}
-	if *noWakeFlag && *requireWakeFlag {
+	if *c.noWakeFlag && *c.requireWakeFlag {
 		return UsageError("--require-wake cannot be used with --no-wake")
 	}
-	declaredWakeInjectVia := strings.TrimSpace(*wakeInjectViaFlag)
-	wakeInjectVia := declaredWakeInjectVia
-	wakeInjectMode, err := normalizeWakeInjectMode(*wakeInjectModeFlag)
+	declaredWakeInjectVia := strings.TrimSpace(*c.wakeInjectViaFlag)
+	c.wakeInjectVia = declaredWakeInjectVia
+	c.wakeInjectMode, err = normalizeWakeInjectMode(*c.wakeInjectModeFlag)
 	if err != nil {
 		return UsageError("--wake-inject-mode: %v", err)
 	}
-	if *wakeInjectViaFlag != "" && wakeInjectVia == "" {
+	if *c.wakeInjectViaFlag != "" && c.wakeInjectVia == "" {
 		return UsageError("--wake-inject-via must not be blank")
 	}
-	if wakeInjectMode == wakeInjectModeNone && wakeInjectVia != "" {
+	if c.wakeInjectMode == wakeInjectModeNone && c.wakeInjectVia != "" {
 		return UsageError("--wake-inject-via cannot be used with --wake-inject-mode none")
 	}
-	if wakeInjectMode == wakeInjectModeNone && len(wakeInjectArgFlags) > 0 {
+	if c.wakeInjectMode == wakeInjectModeNone && len(c.wakeInjectArgFlags) > 0 {
 		return UsageError("--wake-inject-arg cannot be used with --wake-inject-mode none")
 	}
-	if wakeInjectVia == "" && len(wakeInjectArgFlags) > 0 {
+	if c.wakeInjectVia == "" && len(c.wakeInjectArgFlags) > 0 {
 		return UsageError("--wake-inject-arg requires --wake-inject-via")
 	}
-	if wakeInjectVia != "" {
-		resolvedWakeInjectVia, err := validateWakeInjectViaPath(wakeInjectVia)
+	if c.wakeInjectVia != "" {
+		resolvedWakeInjectVia, err := validateWakeInjectViaPath(c.wakeInjectVia)
 		if err != nil {
 			return UsageError("--wake-inject-via: %v", err)
 		}
-		wakeInjectVia = resolvedWakeInjectVia
+		c.wakeInjectVia = resolvedWakeInjectVia
 	}
-	managedOnlyOptions := flagWasVisited(fs, "managed-no-wake-reason") ||
-		flagWasVisited(fs, "managed-symphony-event") ||
-		flagWasVisited(fs, "managed-symphony-workspace-key")
-	if managedOnlyOptions && managedLaunchNonce == "" {
+	managedOnlyOptions := flagWasVisited(c.fs, "managed-no-wake-reason") ||
+		flagWasVisited(c.fs, "managed-symphony-event") ||
+		flagWasVisited(c.fs, "managed-symphony-workspace-key")
+	if managedOnlyOptions && c.managedLaunchNonce == "" {
 		return UsageError("managed execution options require a trusted launch ticket")
 	}
-	var executionOptions *launch.PrepareExecutionOptions
-	if managedLaunchNonce != "" && (managedOnlyOptions || flagWasVisited(fs, "named") ||
-		flagWasVisited(fs, "no-gitignore") || flagWasVisited(fs, "no-wake") ||
-		flagWasVisited(fs, "require-wake") || flagWasVisited(fs, "wake-inject-mode") ||
-		flagWasVisited(fs, "wake-inject-via") || flagWasVisited(fs, "wake-inject-arg")) {
+	if c.managedLaunchNonce != "" && (managedOnlyOptions || flagWasVisited(c.fs, "named") ||
+		flagWasVisited(c.fs, "no-gitignore") || flagWasVisited(c.fs, "no-wake") ||
+		flagWasVisited(c.fs, "require-wake") || flagWasVisited(c.fs, "wake-inject-mode") ||
+		flagWasVisited(c.fs, "wake-inject-via") || flagWasVisited(c.fs, "wake-inject-arg")) {
 		wakeMode := "enabled"
-		if *noWakeFlag {
+		if *c.noWakeFlag {
 			wakeMode = "disabled"
 		}
 		managedInjectorMode := ""
-		if flagWasVisited(fs, "wake-inject-mode") {
-			managedInjectorMode = wakeInjectMode
+		if flagWasVisited(c.fs, "wake-inject-mode") {
+			managedInjectorMode = c.wakeInjectMode
 		}
 		options := launch.PrepareExecutionOptions{
-			RequireWake:          *requireWakeFlag,
-			NoGitignore:          *noGitignoreFlag,
-			Named:                flagWasVisited(fs, "named") && *namedFlag,
+			RequireWake:          *c.requireWakeFlag,
+			NoGitignore:          *c.noGitignoreFlag,
+			Named:                flagWasVisited(c.fs, "named") && *c.namedFlag,
 			WakeMode:             wakeMode,
-			AuditReason:          *managedNoWakeReasonFlag,
+			AuditReason:          *c.managedNoWakeReasonFlag,
 			InjectorMode:         managedInjectorMode,
 			InjectorVia:          declaredWakeInjectVia,
-			InjectorArgs:         append([]string(nil), wakeInjectArgFlags...),
-			SymphonyEvents:       append([]string(nil), managedSymphonyEventFlags...),
-			SymphonyWorkspaceKey: *managedSymphonyWorkspaceFlag,
+			InjectorArgs:         append([]string(nil), c.wakeInjectArgFlags...),
+			SymphonyEvents:       append([]string(nil), c.managedSymphonyEventFlags...),
+			SymphonyWorkspaceKey: *c.managedSymphonyWorkspaceFlag,
 		}
 		if err := validateManagedExecutionOptions(options); err != nil {
 			return UsageError("managed execution options: %v", err)
 		}
-		executionOptions = &options
+		c.executionOptions = &options
 	}
+	return nil
+}
 
-	// Derive agent handle from command basename (or --me override).
-	agentHandle := *meFlag
-	if agentHandle == "" {
-		agentHandle = strings.ToLower(filepath.Base(cmdName))
-	}
-	agentHandle, err = normalizeHandle(agentHandle)
-	if err != nil {
-		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
-	}
-	var managedGuard *managedExecutionGuard
-	if managedLaunchNonce != "" {
-		managedGuard, err = acquireManagedExecutionGuard(*rootFlag, agentHandle, managedLaunchNonce, executionOptions)
-		if err != nil {
-			return ActionRequiredError("refusing managed execution options before root mutation: %v", err)
-		}
-		defer func() { _ = managedGuard.Close() }()
-	}
-
-	rootRequested := flagWasVisited(fs, "root")
-	sessionRequested := *sessionFlag != ""
-	selectorFree := !rootRequested && !sessionRequested
-	defaultSession := defaultSessionName
-	var warnedCreation bool
+// selectRoot resolves the session selector and the root, finds the agent
+// command, and reads the declared default session, all before the first
+// provisioning mutation.
+func (c *coopExecRun) selectRoot() error {
+	var err error
+	c.rootRequested = flagWasVisited(c.fs, "root")
+	sessionRequested := *c.sessionFlag != ""
+	c.selectorFree = !c.rootRequested && !sessionRequested
+	c.defaultSession = defaultSessionName
 
 	// Resolve explicit --session (pure sugar for --root <base>/<session>).
 	// A fresh Git worktree has no base yet; remember that bootstrap is needed
 	// and provision the requested session after full coop init completes.
-	bootstrapBase := ""
-	if *sessionFlag != "" {
-		if flagWasVisited(fs, "root") {
+	c.bootstrapBase = ""
+	if *c.sessionFlag != "" {
+		if flagWasVisited(c.fs, "root") {
 			return UsageError("--session and --root are mutually exclusive")
 		}
-		if err := validateSessionName(*sessionFlag); err != nil {
+		if err := validateSessionName(*c.sessionFlag); err != nil {
 			return err
 		}
 		base, ambient, err := resolveCoopAmbientSessionBase()
@@ -242,7 +436,7 @@ func runCoopExec(args []string) error {
 			return err
 		}
 		if !ambient {
-			if *noInitFlag {
+			if *c.noInitFlag {
 				base, err = resolveBaseRoot()
 				if err != nil {
 					return err
@@ -254,32 +448,32 @@ func runCoopExec(args []string) error {
 					return err
 				}
 				if !found {
-					bootstrapBase = base
+					c.bootstrapBase = base
 					base = ""
 				}
 			}
 		}
 		if base != "" {
-			*rootFlag = filepath.Join(base, *sessionFlag)
+			*c.rootFlag = filepath.Join(base, *c.sessionFlag)
 		}
 	}
 
 	// Resolve root: --root flag (or --session-derived) > ambient context >
 	// project/repo-local/global discovery > local initialization.
-	root := *rootFlag
-	sessionProvisioned := false
-	if root == "" {
+	c.root = *c.rootFlag
+	c.sessionProvisioned = false
+	if c.root == "" {
 		ambientBase, ambient, ambientErr := resolveCoopAmbientSessionBase()
 		if ambientErr != nil {
 			return ambientErr
 		}
 		if ambient {
-			root = ambientBase
+			c.root = ambientBase
 		} else {
 			var discoveredBase string
 			var found bool
 			var discoveryErr error
-			if *noInitFlag {
+			if *c.noInitFlag {
 				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRoot()
 			} else {
 				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRootForBootstrap()
@@ -288,9 +482,9 @@ func runCoopExec(args []string) error {
 				return discoveryErr
 			}
 			if found {
-				root = discoveredBase
+				c.root = discoveredBase
 			} else if discoveredBase != "" {
-				bootstrapBase = discoveredBase
+				c.bootstrapBase = discoveredBase
 			}
 		}
 	}
@@ -299,81 +493,87 @@ func runCoopExec(args []string) error {
 	// before the first provisioning mutation: a typo'd command must fail
 	// without minting roots, sessions, or mailboxes, while usage errors keep
 	// their established precedence over command-not-found.
-	binaryPath, err := exec.LookPath(cmdName)
+	c.binaryPath, err = exec.LookPath(c.cmdName)
 	if err != nil {
-		return fmt.Errorf("command not found: %s", cmdName)
+		return fmt.Errorf("command not found: %s", c.cmdName)
 	}
 
-	if selectorFree {
-		defaultSession, err = declaredCoopExecSession()
+	if c.selectorFree {
+		c.defaultSession, err = declaredCoopExecSession()
 		if err != nil {
 			return err
 		}
 	}
-	creationDeprecated, err := hasBootstrapSuppressingDeclaration()
+	c.creationDeprecated, err = hasBootstrapSuppressingDeclaration()
 	if err != nil {
 		return err
 	}
+	return nil
+}
 
+// provisionRoot creates the session or root when needed, pins the root to
+// an absolute path, and ensures the agent mailbox inside a proven queue.
+func (c *coopExecRun) provisionRoot() error {
+	var err error
 	// Explicit named sessions use the same direct-child creation boundary as
 	// coop init/default exec. In particular, never let MkdirAll traverse a
 	// pre-existing session symlink.
-	if *sessionFlag != "" && root != "" {
-		if *noInitFlag && !dirExists(root) {
-			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
+	if *c.sessionFlag != "" && c.root != "" {
+		if *c.noInitFlag && !dirExists(c.root) {
+			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", c.root)
 		}
-		base := filepath.Dir(root)
+		base := filepath.Dir(c.root)
 		if !dirExists(base) {
 			if err := fsq.EnsureRootDirs(base); err != nil {
 				return fmt.Errorf("failed to create base root %q: %w", base, err)
 			}
 		}
-		requestedRoot := root
+		requestedRoot := c.root
 		if !dirExists(requestedRoot) {
-			warnCoopExecCreationDeprecated(&warnedCreation)
+			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		c.root, err = provisionCoopSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
-		sessionProvisioned = true
+		c.sessionProvisioned = true
 	}
 
 	// Auto-init if needed (before session defaulting so full init fires on fresh projects).
-	if root == "" || !dirExists(root) {
-		if *noInitFlag {
-			if root == "" {
+	if c.root == "" || !dirExists(c.root) {
+		if *c.noInitFlag {
+			if c.root == "" {
 				return fmt.Errorf("no project, repo-local, or global AMQ root found and no --root specified; run 'amq coop init' first or remove --no-init")
 			}
-			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
+			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", c.root)
 		}
 
-		if root != "" {
+		if c.root != "" {
 			// We have a root (from --root, --session, or .amqrc) — create root + agent dirs.
-			if rootRequested {
-				warnCoopExecCreationDeprecated(&warnedCreation)
+			if c.rootRequested {
+				warnCoopExecCreationDeprecated(&c.warnedCreation)
 			}
-			delivery, err := fsq.CreateDirectoryPathExclusive(root)
+			delivery, err := fsq.CreateDirectoryPathExclusive(c.root)
 			if err != nil {
-				return fmt.Errorf("failed to create root %q: %w", root, err)
+				return fmt.Errorf("failed to create root %q: %w", c.root, err)
 			}
 			if err := delivery.EnsureRootDirs(); err != nil {
 				_ = delivery.Close()
-				return fmt.Errorf("failed to create root %q: %w", root, err)
+				return fmt.Errorf("failed to create root %q: %w", c.root, err)
 			}
-			if err := delivery.EnsureAgentDirs(agentHandle); err != nil {
+			if err := delivery.EnsureAgentDirs(c.agentHandle); err != nil {
 				_ = delivery.Close()
-				return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
+				return fmt.Errorf("failed to create mailbox for %s at %q: %w", c.agentHandle, c.root, err)
 			}
 			_ = delivery.Close()
 		} else {
 			// No explicit, ambient, project, repo-local, or global root: run
 			// full coop init. In a Git worktree, coop init relocates this to
 			// the worktree top so nested invocations do not scatter queues.
-			if !*yesFlag {
+			if !*c.yesFlag {
 				location := "current directory"
-				if bootstrapBase != "" {
-					location = fmt.Sprintf("Git worktree at %s", filepath.Dir(bootstrapBase))
+				if c.bootstrapBase != "" {
+					location = fmt.Sprintf("Git worktree at %s", filepath.Dir(c.bootstrapBase))
 				}
 				ok, err := confirmPromptYes(fmt.Sprintf("No project, repo-local, or global AMQ root found. Initialize co-op mode in %s?", location))
 				if err != nil {
@@ -385,7 +585,7 @@ func runCoopExec(args []string) error {
 			}
 
 			var initArgs []string
-			if *noGitignoreFlag {
+			if *c.noGitignoreFlag {
 				initArgs = []string{"--no-gitignore"}
 			}
 			if err := runCoopInitInternal(initArgs, false); err != nil {
@@ -397,42 +597,42 @@ func runCoopExec(args []string) error {
 			if existingErr != nil {
 				return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
 			}
-			root = existing.Config.Root
-			if root != "" && !filepath.IsAbs(root) {
-				root = filepath.Join(existing.Dir, root)
+			c.root = existing.Config.Root
+			if c.root != "" && !filepath.IsAbs(c.root) {
+				c.root = filepath.Join(existing.Dir, c.root)
 			}
 		}
 	}
 
-	if *sessionFlag != "" && !sessionProvisioned {
-		base := root
-		if bootstrapBase != "" && !sameTreeIdentity(base, bootstrapBase) {
-			return fmt.Errorf("bootstrap resolved base %q, but coop init produced %q", bootstrapBase, base)
+	if *c.sessionFlag != "" && !c.sessionProvisioned {
+		base := c.root
+		if c.bootstrapBase != "" && !sameTreeIdentity(base, c.bootstrapBase) {
+			return fmt.Errorf("bootstrap resolved base %q, but coop init produced %q", c.bootstrapBase, base)
 		}
-		requestedRoot := filepath.Join(base, *sessionFlag)
+		requestedRoot := filepath.Join(base, *c.sessionFlag)
 		if !dirExists(requestedRoot) {
-			warnCoopExecCreationDeprecated(&warnedCreation)
+			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		c.root, err = provisionCoopSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
-		sessionProvisioned = true
+		c.sessionProvisioned = true
 	}
 
 	// Default to the declared session (or collab) when neither --session nor
 	// --root was specified. This runs after auto-init so .amqrc exists.
-	if selectorFree {
-		base := root // root is the literal .amqrc root (e.g., .agent-mail)
-		requestedRoot := filepath.Join(base, defaultSession)
-		if creationDeprecated && !dirExists(requestedRoot) {
-			warnCoopExecCreationDeprecated(&warnedCreation)
+	if c.selectorFree {
+		base := c.root // root is the literal .amqrc root (e.g., .agent-mail)
+		requestedRoot := filepath.Join(base, c.defaultSession)
+		if c.creationDeprecated && !dirExists(requestedRoot) {
+			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		root, err = provisionCoopSession(base, defaultSession, []string{agentHandle}, agentHandle, cmdName)
+		c.root, err = provisionCoopSession(base, c.defaultSession, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
-		sessionProvisioned = true
+		c.sessionProvisioned = true
 	}
 
 	// Pin the session root to an absolute path before it reaches the wake
@@ -440,7 +640,7 @@ func runCoopExec(args []string) error {
 	// re-resolves against every future cwd of the agent process, silently
 	// splitting one session name into per-directory mailbox trees
 	// (messages land where no peer is reading).
-	root, err = absoluteSessionRoot(root)
+	c.root, err = absoluteSessionRoot(c.root)
 	if err != nil {
 		return fmt.Errorf("resolve absolute session root: %w", err)
 	}
@@ -449,309 +649,204 @@ func runCoopExec(args []string) error {
 	// target just because it exists (dirExists said nothing about what it
 	// is), so classify the layout through a pinned capability first and keep
 	// that same capability for the writes.
-	if !sessionProvisioned {
-		if managedGuard != nil {
-			if err := fsq.ValidateExistingMailboxLayout(managedGuard.root, agentHandle); err != nil {
+	if !c.sessionProvisioned {
+		if c.managedGuard != nil {
+			if err := fsq.ValidateExistingMailboxLayout(c.managedGuard.root, c.agentHandle); err != nil {
 				return ActionRequiredError("refusing managed mailbox provisioning: %v", err)
 			}
 		} else {
-			if err := provisionSelfMailboxInExistingRoot(root, agentHandle); err != nil {
+			if err := provisionSelfMailboxInExistingRoot(c.root, c.agentHandle); err != nil {
 				return err
 			}
 		}
 	}
-	if !*noWakeFlag {
-		if err := prepareCoopWakeLock(
-			root,
-			agentHandle,
-			*yesFlag,
-			coopWakeRemedyForCommand(root, agentHandle, cmdName, agentArgs),
-		); err != nil {
+	return nil
+}
+
+// superviseWakeHelper starts the prepared exact-owner wake helper, binds it,
+// waits for readiness, and validates or cleans up its claim. A setup failure
+// that is not required returns nil with no helper retained.
+func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) error {
+	var err error
+	c.wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
+	if err == nil && c.wakeChildCapability == nil {
+		return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")
+	}
+	if err == nil && c.managedGuard != nil {
+		if validateErr := c.managedGuard.Revalidate(); validateErr != nil {
+			closeErr := c.wakeChildCapability.Close()
+			c.wakeChildCapability = nil
+			return ActionRequiredError(
+				"refusing changed managed execution options before wake start: %v",
+				errors.Join(validateErr, closeErr),
+			)
+		}
+	}
+	if err != nil {
+		var closeErr error
+		if c.wakeChildCapability != nil {
+			closeErr = c.wakeChildCapability.Close()
+			c.wakeChildCapability = nil
+		}
+		if closeErr != nil {
+			return errors.Join(
+				fmt.Errorf("prepare exact-owner amq wake supervision: %w", err),
+				fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
+			)
+		}
+		inspection := inspectWakeLock(c.root, c.agentHandle)
+		if setupErr := handleCoopWakeSetupFailure(
+			*c.requireWakeFlag,
+			inspection,
+			"prepare exact-owner amq wake supervision",
+			err,
+		); setupErr != nil {
+			return setupErr
+		}
+	} else if err := wakeCmd.Start(); err != nil {
+		var closeErr error
+		if c.wakeChildCapability != nil {
+			closeErr = c.wakeChildCapability.Close()
+			c.wakeChildCapability = nil
+		}
+		if closeErr != nil {
+			return errors.Join(
+				fmt.Errorf("start exact-owner amq wake helper: %w", err),
+				fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
+			)
+		}
+		inspection := inspectWakeLock(c.root, c.agentHandle)
+		if err := handleCoopWakeSetupFailure(*c.requireWakeFlag, inspection, "start exact-owner amq wake helper", err); err != nil {
 			return err
 		}
-	}
-
-	// Start amq wake in background (unless --no-wake). Every coop-started wake
-	// is bound to this exact process identity and exits when the exec-replaced
-	// agent exits. On failed Exec, stable child cleanup stops it immediately.
-	var wakeProc *os.Process
-	var wakeWaiter *wakeProcessWaiter
-	var wakeChildCapability *authoritativeWakeChildCapability
-	var wakeHelperClaim *retainedCoopWakeHelperClaim
-	var wakeHelperClaimErr error
-	var cleanupWakeReady func()
-	var earlyOwner *wakeOwner
-	baseEnv := unsetEnvVar(
-		unsetEnvVar(
-			unsetEnvVar(
-				unsetEnvVar(os.Environ(), launch.InternalLaunchNonceEnv),
-				envWakeOwner,
-			),
-			envWakePrivateStopFD,
-		),
-		envWakeAttentionFD,
-	)
-	retainWakeHelperClaim := func() {
-		retained, err := captureRetainedCoopWakeHelperClaim(wakeProc, root, agentHandle)
-		if err != nil {
-			wakeHelperClaimErr = errors.Join(wakeHelperClaimErr, err)
-			return
-		}
-		if retained != nil {
-			if wakeHelperClaim != nil {
-				_ = wakeHelperClaim.Close()
+	} else {
+		c.wakeProc = wakeCmd.Process
+		c.wakeWaiter = newWakeProcessWaiter(c.wakeProc)
+		if c.wakeChildCapability != nil {
+			if err := c.wakeChildCapability.Bind(c.wakeProc); err != nil {
+				current := inspectWakeLock(c.root, c.agentHandle)
+				c.retainWakeHelperClaim()
+				cleanupErr := c.cleanupWakeHelper(current.Exists && current.PID != c.wakeProc.Pid)
+				bindErr := fmt.Errorf("bind stable owner-bound wake child: %w", err)
+				if cleanupErr == nil {
+					return bindErr
+				}
+				return errors.Join(bindErr, fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr))
 			}
-			wakeHelperClaim = retained
 		}
-	}
-	cleanupWakeHelper := func(preservePersistedClaim bool) error {
-		cleanupErr := cleanupCoopWakeStartupHelper(
-			wakeProc,
-			wakeWaiter,
-			wakeChildCapability,
-			earlyOwner,
-			root,
-			agentHandle,
-			preservePersistedClaim,
-			wakeHelperClaim,
+		readyErr := waitForWakeReadyWithOwner(
+			c.wakeWaiter,
+			readyPath,
+			c.root,
+			c.agentHandle,
+			c.earlyOwner,
+			wakeReadyTimeout,
 		)
-		wakeHelperClaim = nil
-		return errors.Join(cleanupErr, wakeHelperClaimErr)
-	}
-	if !*noWakeFlag {
-		amqExecutable, binErr := os.Executable()
-		if binErr != nil {
-			return fmt.Errorf("resolve current amq executable: %w", binErr)
-		}
-		amqBin, binErr := coopWakeExecutionPath(amqExecutable)
-		if binErr != nil {
-			return binErr
-		}
-		wakeLaunchLocator := coopWakeLaunchLocator(os.Args[0])
-
-		captured, ownerErr := captureAuthoritativeCurrentWakeOwner()
-		if ownerErr != nil {
-			return fmt.Errorf("capture exact coop wake owner: %w", ownerErr)
-		}
-		earlyOwner = &captured
-		readyPath, cleanupReady, readyErr := newWakeReadyFile()
+		current := inspectWakeLock(c.root, c.agentHandle)
+		c.retainWakeHelperClaim()
+		otherWake := current.Exists && current.PID != c.wakeProc.Pid
 		if readyErr != nil {
-			inspection := inspectWakeLock(root, agentHandle)
-			if err := handleCoopWakeSetupFailure(*requireWakeFlag, inspection, "create wake readiness file", readyErr); err != nil {
-				return err
+			startupErr := readyErr
+			if otherWake {
+				startupErr = coopWakeStartupConflictError(current, readyErr)
 			}
-		} else {
-			cleanupWakeReady = cleanupReady
-			defer cleanupReady()
-			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectMode, wakeInjectVia, []string(wakeInjectArgFlags), readyPath)...)
-			if wakeLaunchLocator != "" {
-				// Execute the already-running image, but preserve the absolute,
-				// unresolved invocation locator as argv[0] so the child can safely
-				// validate and observe installer symlink flips without a launch TOCTOU.
-				wakeCmd.Args[0] = wakeLaunchLocator
-			}
-			// Set AM_ROOT in wake's env so the helper process resolves the same
-			// session root even if the parent shell inherited a different value.
-			wakeEnv, wakeEnvErr := wakeCommandEnv(baseEnv, root, earlyOwner)
-			if wakeEnvErr != nil {
-				return wakeEnvErr
-			}
-			wakeCmd.Env = wakeEnv
-			wakeCmd.Stdin = os.Stdin
-			wakeOutput, outputErr := openCoopWakeOutput(root, agentHandle)
-			if outputErr != nil {
-				return fmt.Errorf("open durable coop wake diagnostics: %w", outputErr)
-			}
-			defer func() { _ = wakeOutput.Close() }()
-			wakeAttention, attentionErr := openCoopWakeAttention(wakeOutput)
-			if attentionErr != nil {
-				return fmt.Errorf("open isolated coop wake attention: %w", attentionErr)
-			}
-			defer func() { _ = wakeAttention.Close() }()
-			wakeCmd.Stdout = wakeOutput
-			wakeCmd.Stderr = wakeOutput
-			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
-				return fmt.Errorf("attach isolated coop wake attention: %w", err)
-			}
-			wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
-			if err == nil && wakeChildCapability == nil {
-				return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")
-			}
-			if err == nil && managedGuard != nil {
-				if validateErr := managedGuard.Revalidate(); validateErr != nil {
-					closeErr := wakeChildCapability.Close()
-					wakeChildCapability = nil
-					return ActionRequiredError(
-						"refusing changed managed execution options before wake start: %v",
-						errors.Join(validateErr, closeErr),
-					)
-				}
-			}
-			if err != nil {
-				var closeErr error
-				if wakeChildCapability != nil {
-					closeErr = wakeChildCapability.Close()
-					wakeChildCapability = nil
-				}
-				if closeErr != nil {
-					return errors.Join(
-						fmt.Errorf("prepare exact-owner amq wake supervision: %w", err),
-						fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
-					)
-				}
-				inspection := inspectWakeLock(root, agentHandle)
-				if setupErr := handleCoopWakeSetupFailure(
-					*requireWakeFlag,
-					inspection,
-					"prepare exact-owner amq wake supervision",
-					err,
-				); setupErr != nil {
-					return setupErr
-				}
-			} else if err := wakeCmd.Start(); err != nil {
-				var closeErr error
-				if wakeChildCapability != nil {
-					closeErr = wakeChildCapability.Close()
-					wakeChildCapability = nil
-				}
-				if closeErr != nil {
-					return errors.Join(
-						fmt.Errorf("start exact-owner amq wake helper: %w", err),
-						fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
-					)
-				}
-				inspection := inspectWakeLock(root, agentHandle)
-				if err := handleCoopWakeSetupFailure(*requireWakeFlag, inspection, "start exact-owner amq wake helper", err); err != nil {
-					return err
-				}
-			} else {
-				wakeProc = wakeCmd.Process
-				wakeWaiter = newWakeProcessWaiter(wakeProc)
-				if wakeChildCapability != nil {
-					if err := wakeChildCapability.Bind(wakeProc); err != nil {
-						current := inspectWakeLock(root, agentHandle)
-						retainWakeHelperClaim()
-						cleanupErr := cleanupWakeHelper(current.Exists && current.PID != wakeProc.Pid)
-						bindErr := fmt.Errorf("bind stable owner-bound wake child: %w", err)
-						if cleanupErr == nil {
-							return bindErr
-						}
-						return errors.Join(bindErr, fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr))
-					}
-				}
-				readyErr := waitForWakeReadyWithOwner(
-					wakeWaiter,
-					readyPath,
-					root,
-					agentHandle,
-					earlyOwner,
-					wakeReadyTimeout,
+			cleanupErr := c.cleanupWakeHelper(otherWake)
+			if cleanupErr != nil {
+				return errors.Join(
+					startupErr,
+					fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
 				)
-				current := inspectWakeLock(root, agentHandle)
-				retainWakeHelperClaim()
-				otherWake := current.Exists && current.PID != wakeProc.Pid
-				if readyErr != nil {
-					startupErr := readyErr
-					if otherWake {
-						startupErr = coopWakeStartupConflictError(current, readyErr)
-					}
-					cleanupErr := cleanupWakeHelper(otherWake)
-					if cleanupErr != nil {
-						return errors.Join(
-							startupErr,
-							fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
-						)
-					}
-					if otherWake || *requireWakeFlag {
-						return startupErr
-					}
-					_ = writeStderr("warning: failed to prepare amq wake: %v\n", readyErr)
-					wakeProc = nil
-					wakeWaiter = nil
-					wakeChildCapability = nil
-				} else {
-					current, claimErr := validatePreparedCoopWakeClaim(
-						root,
-						agentHandle,
-						wakeInjectVia,
-						[]string(wakeInjectArgFlags),
-						*earlyOwner,
-						wakeProc.Pid,
+			}
+			if otherWake || *c.requireWakeFlag {
+				return startupErr
+			}
+			_ = writeStderr("warning: failed to prepare amq wake: %v\n", readyErr)
+			c.wakeProc = nil
+			c.wakeWaiter = nil
+			c.wakeChildCapability = nil
+		} else {
+			current, claimErr := validatePreparedCoopWakeClaim(
+				c.root,
+				c.agentHandle,
+				c.wakeInjectVia,
+				[]string(c.wakeInjectArgFlags),
+				*c.earlyOwner,
+				c.wakeProc.Pid,
+			)
+			reused := current.Exists && current.PID != c.wakeProc.Pid
+			if !reused {
+				c.retainWakeHelperClaim()
+			}
+			if claimErr != nil {
+				cleanupErr := c.cleanupWakeHelper(reused)
+				if cleanupErr != nil {
+					return errors.Join(
+						claimErr,
+						fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
 					)
-					reused := current.Exists && current.PID != wakeProc.Pid
-					if !reused {
-						retainWakeHelperClaim()
-					}
-					if claimErr != nil {
-						cleanupErr := cleanupWakeHelper(reused)
-						if cleanupErr != nil {
-							return errors.Join(
-								claimErr,
-								fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
-							)
-						}
-						return claimErr
-					}
-					if reused {
-						if cleanupErr := cleanupWakeHelper(true); cleanupErr != nil {
-							return fmt.Errorf(
-								"finish exact reused-wake startup helper: %w",
-								cleanupErr,
-							)
-						}
-						_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, current.PID))
-						wakeProc = nil
-						wakeWaiter = nil
-						wakeChildCapability = nil
-					} else {
-						_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, wakeProc.Pid))
-					}
 				}
+				return claimErr
+			}
+			if reused {
+				if cleanupErr := c.cleanupWakeHelper(true); cleanupErr != nil {
+					return fmt.Errorf(
+						"finish exact reused-wake startup helper: %w",
+						cleanupErr,
+					)
+				}
+				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, current.PID))
+				c.wakeProc = nil
+				c.wakeWaiter = nil
+				c.wakeChildCapability = nil
+			} else {
+				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, c.wakeProc.Pid))
 			}
 		}
 	}
-	if managedGuard != nil {
-		if err := managedGuard.Close(); err != nil {
-			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
-		}
-	}
+	return nil
+}
 
+// execAgent builds the agent environment and argv, applies session naming,
+// and replaces the process. It returns only when exec fails, after cleaning
+// up the wake helper.
+func (c *coopExecRun) execAgent() error {
+	var err error
 	// A named/default or session-shaped explicit root pins an identity
 	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
-	requestedSession := *sessionFlag
-	if selectorFree {
-		requestedSession = defaultSession
+	requestedSession := *c.sessionFlag
+	if c.selectorFree {
+		requestedSession = c.defaultSession
 	}
-	sessionIdentity := coopSessionIdentity(root, requestedSession, *rootFlag)
-	env := buildCoopExecEnvironment(baseEnv, root, agentHandle, sessionIdentity)
+	sessionIdentity := coopSessionIdentity(c.root, requestedSession, *c.rootFlag)
+	env := buildCoopExecEnvironment(c.baseEnv, c.root, c.agentHandle, sessionIdentity)
 
 	// Automatic naming uses the resolved session identity. A custom sessionless
 	// root has no session prefix and therefore uses only the agent handle.
-	namedLabel := coopNamedSessionLabel(sessionIdentity, agentHandle)
+	namedLabel := coopNamedSessionLabel(sessionIdentity, c.agentHandle)
 	execStart := time.Now()
 	recordIdentity := codexThreadIdentityRecorder(env)
-	agentArgs, err = applyCoopNamedBeforeExecAt(named, binaryPath, agentArgs, namedLabel, execStart, recordIdentity)
+	c.agentArgs, err = applyCoopNamedBeforeExecAt(c.named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
 	if err != nil {
 		return err
 	}
-	agentArgs, err = resolveCodexResumeLaunch(binaryPath, agentArgs)
+	c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
 	if err != nil {
 		return err
 	}
-	if err := recordResumedCodexThread(binaryPath, agentArgs, recordIdentity); err != nil {
+	if err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
 		return err
 	}
 
 	// Build argv: command name + agent args.
-	argv := append([]string{cmdName}, agentArgs...)
+	argv := append([]string{c.cmdName}, c.agentArgs...)
 
 	// Replace process. On success, this never returns.
 	// On failure, clean up the wake process.
-	if cleanupWakeReady != nil {
-		cleanupWakeReady()
+	if c.cleanupWakeReady != nil {
+		c.cleanupWakeReady()
 	}
 	cleanupAfterError := func(cause error) error {
-		cleanupErr := cleanupWakeHelper(false)
+		cleanupErr := c.cleanupWakeHelper(false)
 		if cleanupErr == nil {
 			return cause
 		}
@@ -764,7 +859,7 @@ func runCoopExec(args []string) error {
 	if ownerErr != nil {
 		return cleanupAfterError(fmt.Errorf("capture final coop wake owner: %w", ownerErr))
 	}
-	if earlyOwner != nil && *earlyOwner != finalOwner {
+	if c.earlyOwner != nil && *c.earlyOwner != finalOwner {
 		return cleanupAfterError(fmt.Errorf("coop exec process identity changed after owner-bound wake start"))
 	}
 	encodedOwner, ownerErr := encodeWakeOwnerEnv(finalOwner)
@@ -773,10 +868,10 @@ func runCoopExec(args []string) error {
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
 	var execErr error
-	if managedLaunchNonce != "" {
-		execErr = reexecManagedLaunchWrapper(root, agentHandle, managedLaunchNonce, binaryPath, argv, env, executionOptions)
+	if c.managedLaunchNonce != "" {
+		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)
 	} else {
-		execErr = coopExecProcess(binaryPath, argv, env)
+		execErr = coopExecProcess(c.binaryPath, argv, env)
 	}
 	if execErr == nil {
 		execErr = fmt.Errorf("exec returned without replacing process")
@@ -983,7 +1078,7 @@ func validatePreparedCoopWakeClaim(
 	beforeValidatePreparedCoopWakeClaim(agentDir)
 
 	var current wakeLockInspection
-	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1349,7 +1444,7 @@ func rollbackAuthoritativeWakeClaimInDir(
 	if currentOwner != owner {
 		return fmt.Errorf("current process is not the exact owner authorized for wake rollback")
 	}
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1407,7 +1502,7 @@ func cleanupTerminatedWakeLock(expected wakeLockInspection) error {
 }
 
 func cleanupTerminatedWakeLockInDir(agentDir *wakeAgentDir, expected wakeLockInspection) error {
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1432,7 +1527,7 @@ func cleanupTerminatedWakeLockForPIDInDir(
 	root, me string,
 	terminatedPID int,
 ) error {
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err

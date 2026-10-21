@@ -80,7 +80,7 @@ func replyAs(t *testing.T, root, thread, prompt, kind, body string) string {
 	return id
 }
 
-// Bead agent-message-queue-611.36: a mailbox binding delivers the DM to the
+// A mailbox binding delivers the DM to the
 // handle and ends the turn on its final reply. A status reply is progress
 // and does not end the turn (codex 611.36 research, final-answer gap). The
 // turn claims its replies like drain (move to cur, drained receipt) and
@@ -137,7 +137,7 @@ func moveToCur(t *testing.T, root, id string) {
 	}
 }
 
-// Bead agent-message-queue-ee7 (review F2): every poll read every file in
+// Regression: #957, every poll read every file in
 // six folders, so a big mailbox cost a core per open turn. A poll reads only
 // buzz/inbox/new; cur is read at the turn start and on the heartbeat.
 func TestMailboxRepliesReadOnlyNew(t *testing.T) {
@@ -151,7 +151,7 @@ func TestMailboxRepliesReadOnlyNew(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-ee7, review of #957 (P1): two pollers both found
+// Regression: #957, two pollers both found
 // one reply in new; the one whose move failed with ENOENT also read it from
 // cur, so both returned it. Only one poller returns a reply.
 func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
@@ -179,7 +179,7 @@ func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-ee7, review of #957 r2 (P2): the mover emitted
+// Regression: #957, the mover emitted
 // the drained receipt only if it also won forwarding. When another watch's
 // cur recovery won first, no drained receipt was ever written.
 func TestMailboxMoverEmitsTheDrainedReceipt(t *testing.T) {
@@ -210,7 +210,7 @@ func TestMailboxMoverEmitsTheDrainedReceipt(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-ee7, review of #957 (P2): a reply another
+// Regression: #957, a reply another
 // consumer moved to buzz/inbox/cur before the turn saw it was never read, and
 // the turn timed out. The turn recovers it, once.
 func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
@@ -235,7 +235,7 @@ func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
 	}
 }
 
-// Codex 611.36 research, replay gap: a redelivered event published a second
+// Regression: bead agent-message-queue-611.36, a redelivered event published a second
 // message. It must reuse the first delivery's message.
 func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -251,7 +251,7 @@ func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	}
 }
 
-// Field report 2026-10-05 (#951): a `coop exec --session` root has no
+// Regression: #951, a `coop exec --session` root has no
 // config.json, so `amq reply` to buzz refused with `mailbox for "buzz" is
 // incomplete`. Delivery must leave buzz a complete mailbox to answer.
 // It calls publishOnce, where the mailbox is made, without a turn timer: a
@@ -278,7 +278,7 @@ func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
 	}
 }
 
-// Review of #951: a prompt an older amq-acp already delivered is redelivered
+// Regression: #951, a prompt an older amq-acp already delivered is redelivered
 // after the upgrade; the redelivery check must not skip creating the buzz
 // mailbox its reply needs.
 func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
@@ -312,7 +312,7 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-qff (review F4, Pro review of #964): a delivery
+// Regression: #964, a delivery
 // to a deleted handle mailbox recreated it and reported Delivered, and a
 // refused delivery could still be published by a later redelivery. It must
 // say not delivered, record that as the event's outcome, and never publish
@@ -358,7 +358,7 @@ func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 	}
 }
 
-// Pro review r2 of #964 (P1): a message was delivered, then the handle's
+// Regression: #964, a message was delivered, then the handle's
 // mailbox was deleted; a redelivery found it absent and recorded "not
 // delivered, send it again". Only the attempt that created the claim may.
 func TestMailboxRedeliveryAfterTheMailboxWentIsUncertain(t *testing.T) {
@@ -390,7 +390,7 @@ func TestMailboxRedeliveryAfterTheMailboxWentIsUncertain(t *testing.T) {
 	}
 }
 
-// Pro review r2 of #964 (P2): the layout repair must never recreate a
+// Regression: #964, the layout repair must never recreate a
 // mailbox or inbox that vanished after the anchor check.
 func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
 	for name, gone := range map[string]string{"mailbox": ".", "inbox": "inbox"} {
@@ -425,7 +425,7 @@ func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
 	}
 }
 
-// Pro review r3 of #964 (P1): the repair re-resolved the bound root path, so
+// Regression: #964, the repair re-resolved the bound root path, so
 // a root replaced, or an agents/ swapped for an outside symlink, after the
 // root was pinned had its mailbox completed.
 func TestMailboxRepairStaysInThePinnedRoot(t *testing.T) {
@@ -488,7 +488,7 @@ func pinnedTestRoot(t *testing.T) *fsq.DeliveryRoot {
 	return root
 }
 
-// Pro review of #964 (P2): a mailbox an older amq made has an inbox but no
+// Regression: #964, a mailbox an older amq made has an inbox but no
 // receipts/; delivery completes its layout instead of refusing it.
 // It calls publishOnce, where the layout is completed, without a turn timer:
 // a 50 ms turn budget expired before delivery under load ("inbox holds 0
@@ -511,8 +511,9 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 	}
 }
 
-// Codex 611.36 research, honest stop: a cancel says the message stays and
+// A cancel says the message stays and
 // may still run, and the message is not recalled.
+// Regression: bead agent-message-queue-611.36.
 func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
 	s, root := mailboxServer(t)
 	turn := newTurn()
@@ -540,12 +541,12 @@ func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
 	}
 }
 
-// Codex #895 P1 #1: a redelivery on a new ACP session polled its own thread
+// Regression: #895, a redelivery on a new ACP session polled its own thread
 // and missed the final answer on the first delivery's thread.
 func TestMailboxReplayUsesTheFirstThread(t *testing.T) {
 	s, root := mailboxServer(t)
 	// Long enough for the publish itself. The budget is checked again just
-	// before publish (codex #895 r3); 25ms expired under the parallel suite
+	// before publish (#895); 25ms expired under the parallel suite
 	// and the first delivery wrote nothing.
 	s.cfg.TurnTimeout = time.Second
 	eventID := strings.Repeat("4", 64)
@@ -573,7 +574,7 @@ func TestMailboxReplayUsesTheFirstThread(t *testing.T) {
 	}
 }
 
-// Codex #895 P1 #3: a turn cancelled before delivery still published.
+// Regression: #895, a turn cancelled before delivery still published.
 func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 	s, root := mailboxServer(t)
 	turn := newTurn()
@@ -590,7 +591,7 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 	}
 }
 
-// Codex #895 r2 P1: a cancel while the publish lock was held still
+// Regression: #895, a cancel while the publish lock was held still
 // delivered the prompt once the lock was released. The claim is now created
 // inside the locked operation, so the re-check is exercised there.
 func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
@@ -612,7 +613,7 @@ func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 	}
 }
 
-// Codex #895 r3 P2: an expired turn budget still published when the lock
+// Regression: #895, an expired turn budget still published when the lock
 // was free.
 func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -625,7 +626,7 @@ func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-611.38 (live test 2026-09-24): the answer ended
+// Regression: bead agent-message-queue-611.38, the answer ended
 // the ACP turn but never reached the Buzz DM, because buzz-acp does not post
 // ACP answer text. amq-acp posts it into the prompt's channel itself.
 func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
@@ -660,7 +661,7 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-1kc (review F7): a redelivered event posted the
+// Regression: #959, a redelivered event posted the
 // same reply into the Buzz DM a second time. The event posts once.
 func TestRedeliveredEventPostsOnce(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -695,7 +696,7 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq (review F1): a reply written after the turn
+// Regression: #961, a reply written after the turn
 // timed out never reached the DM. The sweep posts it once and records it.
 func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -726,7 +727,7 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	}
 }
 
-// Review of S3 P1-2 and P1-3: agents share remote-events, and one Buzz event
+// Regression: agents share remote-events, and one Buzz event
 // can reach several agents. Another agent followed the binding the first
 // agent recorded for the event, and its late-reply sweep posted the first
 // agent's reply as itself. Each agent follows and sweeps only its own claims.
@@ -766,7 +767,7 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 	}
 }
 
-// Issue #1068 (review of S3 r2): one Buzz event that reaches two agents,
+// Regression: #1068, one Buzz event that reaches two agents,
 // for example a channel message that mentions both, was claimed by the first
 // agent in the shared event state. The second agent refused it, so its own
 // session never got the message. Each agent now handles the event for its
@@ -811,7 +812,7 @@ func TestOneEventReachesEachAgentsSession(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-611.39: two sessions, each with its own named
+// Two sessions, each with its own named
 // binding. Each Buzz agent's model selects its binding, so each prompt lands
 // in its own session's inbox.
 func TestModelSelectsEachAgentsSession(t *testing.T) {
@@ -852,7 +853,7 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 	}
 }
 
-// Design AMQ fact 2, found in review of S3: an unpinned agent with two
+// Regression: an unpinned agent with two
 // bindings advertised the first binding as its default model, so its DM
 // silently drove the binding that sorts first. It must deliver nowhere and
 // list both sessions.
@@ -896,7 +897,7 @@ func TestUnpinnedAgentNeverDelivers(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 (P1): a redelivery reused
+// Regression: #961, a redelivery reused
 // the claim but posted the answer to its own channel, or with no channel
 // recorded the answer without sending it. The event's first channel wins.
 func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
@@ -943,7 +944,7 @@ func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 (P2): the sweep checked the
+// Regression: #961, the sweep checked the
 // cancel only before its scan, so a cancel landing between that check and
 // the post was posted over. The cancel and the final post share one
 // exclusive marker; this is the step that follows the sweep's check.
@@ -1035,7 +1036,7 @@ func recordPosts(t *testing.T) func() []string {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 r2: a cancel was accepted in
+// Regression: #961, a cancel was accepted in
 // memory before it was recorded, so a sweep could post in between, and it
 // wrote .cancelled even when a reply had already won. The cancel handler
 // now decides the event's one durable outcome before it settles the turn.
@@ -1084,7 +1085,7 @@ func TestCancelDecidesTheEventOutcome(t *testing.T) {
 	})
 }
 
-// Bead agent-message-queue-bdq, review of #961 r2 (P1): a turn with no DM
+// Regression: #961, a turn with no DM
 // channel consumed the final-answer record without a post, so the sweep
 // never posted the reply once a later delivery named a channel.
 func TestReplyWithoutAChannelWaitsForOne(t *testing.T) {
@@ -1104,7 +1105,7 @@ func TestReplyWithoutAChannelWaitsForOne(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 r3 (P1): the turn won the
+// Regression: #961, the turn won the
 // event's outcome, then a failed ACP emission returned before the Buzz
 // post, and nothing ever posted the reply. The post comes first.
 func TestFailedEmissionStillPostsTheReply(t *testing.T) {
@@ -1133,7 +1134,7 @@ func TestFailedEmissionStillPostsTheReply(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 r3 (P2): a cancel that
+// Regression: #961, a cancel that
 // arrived before the turn loaded its claim settled only in memory, so a
 // sweep could still post the event's late reply.
 func TestEarlyCancelIsDecidedBeforeTheSweep(t *testing.T) {
@@ -1169,7 +1170,7 @@ func TestEarlyCancelIsDecidedBeforeTheSweep(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-bdq, review of #961 r3 (P2): when the sweep had
+// Regression: #961, when the sweep had
 // posted reply B, a turn that then decided its own reply A lost and still
 // showed A. It returns the winner, B.
 func TestLosingReplyReturnsTheWinner(t *testing.T) {
@@ -1197,7 +1198,7 @@ func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-iqh (Ben review F9): a session whose model names a
+// Regression: bead agent-message-queue-iqh, a session whose model names a
 // missing binding must not fall back to the only binding left.
 func TestMissingModelNeverReachesAnotherBinding(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -1221,7 +1222,7 @@ func TestMissingModelNeverReachesAnotherBinding(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-iqh, Pro review of #954: the model session/new
+// Regression: #954, the model session/new
 // advertises pins the session, so removing that binding never falls back to
 // the one that remains.
 func TestAdvertisedModelPinsSessionWithoutSetModel(t *testing.T) {
@@ -1248,7 +1249,7 @@ func TestAdvertisedModelPinsSessionWithoutSetModel(t *testing.T) {
 	}
 }
 
-// Review of #957 r4 (agent-message-queue-bdq): another turn or the sweep
+// Regression: #957, another turn or the sweep
 // decided the event's outcome after this turn's last loop check, and the
 // turn still timed out and posted a timeout notice. It adopts the outcome.
 func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
@@ -1291,7 +1292,7 @@ func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
 	}
 }
 
-// Review of #961 r7 (agent-message-queue-bdq): a status notice could be
+// Regression: #961, a status notice could be
 // posted after the event's final text was reserved and posted. A status post
 // takes the event's post lock and is skipped once the final marker exists.
 func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
@@ -1326,7 +1327,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	}
 }
 
-// Review of #961 r8 (agent-message-queue-bdq): a Stop recorded the cancel
+// Regression: #961, a Stop recorded the cancel
 // as the event's final outcome, then its "Stopped waiting" confirmation was
 // skipped as superseded, so the DM never confirmed the Stop.
 func TestStopConfirmsOnceInTheDM(t *testing.T) {

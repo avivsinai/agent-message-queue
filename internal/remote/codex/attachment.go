@@ -218,12 +218,6 @@ func WithTarget(targetID string) Option {
 	}
 }
 
-// WithClock overrides the attachment's clock (for tests). Production uses time.Now.
-func WithClock(now func() time.Time) Option { return func(a *Attachment) { a.now = now } }
-
-// WithConfirmTimeout overrides the confirm timeout (for tests).
-func WithConfirmTimeout(d time.Duration) Option { return func(a *Attachment) { a.confirmTimeout = d } }
-
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
