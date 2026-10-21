@@ -120,7 +120,7 @@ func LoadConfig() (Config, error) {
 			return Config{}, contextError("set %s or %s, not both", EnvTo, EnvRemoteTarget)
 		}
 		// Sharing a target shares one native session, never whatever
-		// replaces it behind the same target (codex #876 P1 #3).
+		// replaces it behind the same target.
 		if remoteNative == "" {
 			return Config{}, contextError("%s requires %s", EnvRemoteTarget, EnvRemoteNative)
 		}

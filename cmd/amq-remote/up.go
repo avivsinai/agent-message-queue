@@ -61,7 +61,7 @@ func (p *execProcess) Signal(sig os.Signal) error {
 
 // execSpawner launches the amq-remote binary as a serve child.
 //
-// B4 (611.13.2): waitDelay bounds how long os/exec waits after the context
+// waitDelay bounds how long os/exec waits after the context
 // is cancelled (SIGTERM delivered) before killing the child with SIGKILL.
 // Without it, a serve that ignores SIGTERM keeps the up process alive for
 // an unbounded time - observed 10s+ and still counting. The delay is the
@@ -147,7 +147,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	if *sf.discover {
 		// Discovery never supervises: it returns before the registry dir,
 		// the lifetime lock and phantom reclaim, so it works while another
-		// up owns this root (codex 611.13 consult, requirement 1).
+		// up owns this root.
 		stateDir, err := c.stateDir()
 		if err != nil {
 			return protocol.ExitUsage, err
@@ -166,7 +166,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 			return 0, fmt.Errorf("registry path: %w", err)
 		}
 	}
-	// Stable identity before any derivation or persistence (codex r3 P1):
+	// Stable identity before any derivation or persistence:
 	// deriving the registry/lifetime identity from a NOT-YET-EXISTING root
 	// canonicalizes lexically (macOS: /tmp/...), but once serve creates the
 	// root the same path resolves through its symlink (/private/tmp/...) and
@@ -192,17 +192,17 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	entryID := registry.EntryID(c.root, *me, "remote", c.root)
 
 	// Process-lifetime ownership before anything is spawned or written.
-	// The secure parent directory is prepared first (codex P2): creating the
-	// lock used to fail ENOENT on first use when the keepalive home did not
-	// exist yet, and that FS error was mislabeled "another owner".
+	// The secure parent directory is prepared first: creating the lock
+	// fails ENOENT when the keepalive home does not exist yet, and that FS
+	// error would be mislabeled "another owner".
 	if err := prepareSecureDir(filepath.Dir(regPath)); err != nil {
 		return 0, fmt.Errorf("prepare registry directory: %w", err)
 	}
 	lifetime, err := acquireLifetimeLock(regPath, entryID)
 	if err != nil {
 		if errors.Is(err, errLifetimeHeld) {
-			// N3 (review-b5): name the running owner so the operator has
-			// something to inspect or kill — the lock holder's pid when the
+			// Name the running owner so the operator has something to inspect
+			// or kill — the lock holder's pid when the
 			// kernel can discover it, 0 meaning unknown, plus the entry id.
 			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeEndpointAlreadyRunning,
 				"up: another up already supervises root %s (registry %s, owner pid %d, entry %s)",
@@ -213,7 +213,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	defer func() { _ = lifetime.Close() }()
 
 	store := registry.New(regPath)
-	// D (611.13.2): reclaim phantom companion rows before registering. A
+	// Reclaim phantom companion rows before registering. A
 	// kill -9 on up skips its deferred Forget, leaving a row that supervise
 	// skips, GC keeps as not-detached, and doctor reports active forever -
 	// and whose target ownership BLOCKS the fresh up at Upsert. A row whose
@@ -236,8 +236,8 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		State:   registry.StateActive,
 	}
 	if _, err := store.Upsert(entry); err != nil {
-		// N2 (review-b5): a target owned by ANOTHER up refuses this up —
-		// the same "one up per root" condition the lifetime flock enforces,
+		// A target owned by ANOTHER up refuses this up — the same "one up per
+		// root" condition the lifetime flock enforces,
 		// so it gets the same positive refusal shape (exit 6,
 		// endpoint_already_running), not an untyped exit-1 error surface
 		// that scripts reading exit 6 miss. The registry error text carries
@@ -252,7 +252,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		// Only the lifetime owner reaches this Forget: the lock above is
 		// released after the registration is removed, so a racing second up
 		// can claim the slot only after it is actually empty. A cleanup
-		// failure is never silent (codex r3): a leftover row would present a
+		// failure is never silent: a leftover row would present a
 		// dead endpoint as active to every registry consumer.
 		if _, ferr := store.Forget(entryID); ferr != nil {
 			say(stderr, "amq-remote up: WARNING: could not remove registration %s from %s: %v\n", entryID, regPath, ferr)
@@ -261,8 +261,8 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	say(stderr, "amq-remote up: supervising serve for root %s (registry %s)\n", c.root, regPath)
 
 	// Serve args: forward --root and --me plus every serve flag the user
-	// passed, preserving parsed values (codex P1: --fake=false used to be
-	// forwarded bare as --fake, flipping an explicit opt-out back on).
+	// passed, preserving parsed values (--fake=false must not be forwarded
+	// bare as --fake, which would flip an explicit opt-out back on).
 	serveArgs := buildServeArgs(fs, c.root, *me)
 
 	sp := newSpawner(*self)
@@ -279,15 +279,15 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 }
 
 // newExecSpawner runs the --self binary as the serve child with the default
-// SIGTERM grace (B4, 611.13.2).
+// SIGTERM grace.
 func newExecSpawner(self string) spawner {
 	return &execSpawner{binary: self, waitDelay: upWaitDelay}
 }
 
 // prepareSecureDir creates dir (and parents) with 0700 and tightens an
-// EXISTING directory to 0700 as well (N6, review-b5): the creation-only
-// chmod left a pre-existing 0755 keepalive home loose, and the later
-// registry refusal pointed at the registry instead of the directory the
+// EXISTING directory to 0700 as well: a creation-only chmod would leave a
+// pre-existing 0755 keepalive home loose, and the later registry refusal
+// would point at the registry instead of the directory the
 // caller must fix. A home below ~/.amq (registry.DefaultHome on a fresh
 // install) gets ~/.amq from amqhome first, so MkdirAll never creates it
 // unchecked.
@@ -313,7 +313,7 @@ func prepareSecureDir(dir string) error {
 }
 
 // lifetimeOwnerPid reports the pid recorded by the entry's lifetime lock
-// holder (N3, review-b5: the exit-6 refusal must name the owner). This is
+// holder (the exit-6 refusal must name the owner). This is
 // a best-effort recorded pid, not verified process identity — never an
 // authority to kill a process, and the flock stays the only ownership
 // authority. 0 means unknown; never an error source.
@@ -344,20 +344,19 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	// review-828-r1 P1: BSD flock does not record a pid — the previous
-	// F_GETLK probe could never see this flock(2) holder (different lock
-	// namespaces; it reported pid 0 live on darwin and by documented
-	// semantics on Linux). So the holder self-registers: truncate the body
-	// (AFTER the flock — never on open, that would erase a live holder's
-	// record) and write the complete pid. Truncation matters: WriteString
-	// alone leaves a suffix when a shorter pid replaces a longer one
-	// ("123456\n" then "123\n" reads back "123\n56\n" → unknown), so the
-	// refusal would print 0 for a real holder (codex review). The pid is
-	// best-effort recorded text, NOT verified process identity — a failed
-	// truncate can leave old numeric text and a partial write can parse as
-	// a number — so it must never be used as authority to kill a process.
-	// The flock, not the content, stays the only ownership authority: a
-	// stale pid from a hard kill is harmless advisory text.
+	// BSD flock does not record a pid, and an F_GETLK probe cannot see a
+	// flock(2) holder (different lock namespaces; it reports pid 0 on
+	// darwin and by documented semantics on Linux). So the holder
+	// self-registers: truncate the body (AFTER the flock — never on open,
+	// that would erase a live holder's record) and write the complete pid.
+	// Truncation matters: WriteString alone leaves a suffix when a shorter
+	// pid replaces a longer one ("123456\n" then "123\n" reads back
+	// "123\n56\n" → unknown), so the refusal would print 0 for a real holder.
+	// The pid is best-effort recorded text, NOT verified process identity — a
+	// failed truncate can leave old numeric text and a partial write can
+	// parse as a number — so it must never be used as authority to kill a
+	// process. The flock, not the content, stays the only ownership
+	// authority: a stale pid from a hard kill is harmless advisory text.
 	if werr := f.Truncate(0); werr == nil {
 		if _, werr := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); werr != nil {
 			_ = werr // advisory only; unknown is an honest refusal value
@@ -367,7 +366,7 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 }
 
 // reclaimPhantomCompanions removes companion (adapter "remote") rows whose
-// process-lifetime lock is no longer held (611.13.2 D): the owning up died
+// process-lifetime lock is no longer held: the owning up died
 // hard - kill -9 - and its deferred Forget never ran. Rows are reclaimed
 // under the registration lock; the caller's own row and any row whose lock
 // IS held (a live companion) are untouched. A probe error fails closed: the
@@ -405,23 +404,23 @@ func reclaimPhantomCompanions(store *registry.Store, regPath, ownEntryID string)
 
 // lockFilePath derives the per-entry lifetime lock path from the registry
 // path so tests and production share one derivation. Delegates to the
-// registry package so doctor --ops probes the same file (611.13.2 D).
+// registry package so doctor --ops probes the same file.
 func lockFilePath(regPath, entryID string) string {
 	return registry.LifetimeLockPath(regPath, entryID)
 }
 
 // upWaitDelay is the default SIGTERM grace before SIGKILL for a real serve
-// child (B4, 611.13.2). Serve's own shutdown is fast when it cooperates;
+// child. Serve's own shutdown is fast when it cooperates;
 // the delay only binds when it ignores SIGTERM.
 const upWaitDelay = 10 * time.Second
 
 // upUsageExitCode is the exit class that terminates supervision: serve
-// refused its own arguments (B6, 611.13.2). Respawning a usage error loops
+// refused its own arguments. Respawning a usage error loops
 // forever - observed 'respawning in 1m0s' for a child exiting 2.
 const upUsageExitCode = 2
 
 // upHealthyUptime is the runtime after which a child counts as having run
-// healthily (B5, 611.13.2): the failure counter resets so the next crash
+// healthily: the failure counter resets so the next crash
 // waits the base backoff again, not an escalated step. Two times the base
 // keeps the bar low in tests (inject a tiny base) while staying meaningful
 // in production (a healthy serve runs far longer than two base steps).
@@ -436,7 +435,7 @@ type upConfig struct {
 	serveArgs   []string
 	// now returns the current time for uptime measurement; nil means
 	// time.Now. Injected by tests so the healthy-uptime logic is instant
-	// (611.13.2 review P2-2) instead of wall-clock.
+	// instead of wall-clock.
 	now func() time.Time
 }
 
@@ -451,8 +450,8 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 	}
 	// restart is the BACKOFF index: it resets on healthy uptime so the next
 	// crash waits the base step again. budget is the LIFETIME respawn count
-	// --max-restarts bounds (611.13.2 review P1-2): one counter, two
-	// obligations made the cap forgettable after any healthy-lived child.
+	// --max-restarts bounds: one counter, two obligations made the cap
+	// forgettable after any healthy-lived child.
 	restart := 0
 	budget := 0
 	for {
@@ -476,7 +475,7 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 				return 0, nil
 			}
 			if code == upUsageExitCode {
-				// B6 (611.13.2): serve refused its arguments. Respawning
+				// serve refused its arguments. Respawning
 				// replays the same refusal forever - observed 'respawning in
 				// 1m0s' for a child exiting 2. Propagate the code; up ends.
 				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
@@ -484,8 +483,8 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 			}
 			uptime := now().Sub(start)
 			say(stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
-			// B5 (611.13.2): a child that ran healthy-long did not fail
-			// immediately - the crash it just suffered starts a fresh failure
+			// A child that ran healthy-long did not fail immediately - the
+			// crash it just suffered starts a fresh failure
 			// series, so the counter resets and the next wait is the base
 			// step, not an escalated one.
 			if uptime >= upHealthyUptime(cfg.backoffBase) {

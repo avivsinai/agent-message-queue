@@ -82,8 +82,8 @@ var ErrAlreadyDelivered = errors.New("pi: request already delivered")
 
 // ErrForeignEventStream marks the protocol-string refusal of an event stream carrying a
 // foreign protocol string. It is typed so tests and callers can recognise
-// the refusal via errors.Is (review 816-r4 P1). Lifting rules live in
-// applyObservationLocked and are protocol-uniform: the refusal survives an
+// the refusal via errors.Is. Lifting rules live in applyObservationLocked and
+// are protocol-uniform: the refusal survives an
 // absent-or-unreadable log (rotation, truncation) and lifts only when a
 // present stream validates as v1 end to end.
 var ErrForeignEventStream = errors.New("pi: foreign-protocol event stream")

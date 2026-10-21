@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// Wire constants pinned by docs/research/r0-03-cc-socket-wire-capture.md
-// (merged 17bff18). PR2 implements exactly this wire; no fresh probe.
+// Wire constants pinned by docs/research/r0-03-cc-socket-wire-capture.md;
+// the adapter implements exactly this wire.
 
 // Frame is one peer message frame (capture §3).
 type Frame struct {
@@ -187,8 +187,7 @@ func EncodeFrames(token string, f *Frame) ([]byte, error) {
 // verified). filepath.Abs is the same operation. EvalSymlinks must never
 // be applied here: on macOS /tmp is a symlink to /private/tmp, so a
 // resolved hash names a key file the target never minted and every real
-// target reads as "no inbound" (codex #855 r1 item 1; reproduced live
-// against pid 52416 on 2026-09-22).
+// target reads as "no inbound" (reproduced live).
 func peerKeyFile(home string, pid int, sockPath string) (string, error) {
 	abs, err := filepath.Abs(sockPath)
 	if err != nil {
@@ -207,8 +206,8 @@ func readPeerToken(home string, pid int, sockPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Bounded, no-follow, non-blocking read (codex #855 r1 item 8): the key
-	// file lives in a directory the target harness owns; a FIFO or a huge
+	// Bounded, no-follow, non-blocking read: the key file lives in a
+	// directory the target harness owns; a FIFO or a huge
 	// file there must not stall or bloat Submit.
 	raw, err := readRegularBounded(p, maxPeerKeyBytes)
 	if err != nil {

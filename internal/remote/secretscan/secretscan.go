@@ -21,8 +21,8 @@ var secretShapes = []*regexp.Regexp{
 
 // curl's -u and -U always take user:password, so a curl command with
 // either, alone, in a short-option cluster or attached, may show one,
-// whatever its value looks like (Pro review of #988: value shapes did not
-// converge). Other tools' -u, as in git push -u, stays visible.
+// whatever its value looks like (value shapes do not converge). Other tools'
+// -u, as in git push -u, stays visible.
 var (
 	curlCommand = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])curl(?:$|[^A-Za-z0-9_.-])`)
 	curlUserOpt = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"-]*[uU]`)
@@ -77,8 +77,7 @@ func MayHold(text string) bool {
 		}, s)
 	}
 	// The shell joins a backslash-newline before it splits words, so the
-	// text is also read joined: curl -\<newline>u runs as curl -u (Pro
-	// review of #988).
+	// text is also read joined: curl -\<newline>u runs as curl -u.
 	joined := spaced(strings.ReplaceAll(text, "\\\n", ""))
 	for _, t := range []string{spaced(text), unquote.Replace(spaced(text)), joined, unquote.Replace(joined)} {
 		if hasSKToken(t) || curlCommand.MatchString(t) && curlUserOpt.MatchString(t) {

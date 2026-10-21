@@ -33,8 +33,8 @@ var ErrMembership = errors.New("DM channel membership is not owner and body only
 // (39000) snapshots of the bound channel and requires: both signed by the
 // relay's own key relaySelf, both for this channel (d tag), members exactly
 // {owner, body}, and the channel private and of type dm. Empty, invalid,
-// ambiguous or unreadable snapshots refuse (slice 4 contract, pinned Buzz
-// source a929532: filters by #d with authors [self]; the authenticated body
+// ambiguous or unreadable snapshots refuse (pinned Buzz source a929532:
+// filters by #d with authors [self]; the authenticated body
 // must itself be a member to read them).
 //
 // Limit, stated rather than hidden: these are stored snapshots behind a
@@ -86,7 +86,7 @@ func VerifyDMMembership(ctx context.Context, conn *relay.Conn, relaySelf string,
 		case <-sub.EOSE:
 			// Every stored event is queued before EOSE closes, but select
 			// may pick EOSE first: drain what is already queued, so the
-			// snapshot boundary keeps stream order (codex #866 r1 #7).
+			// snapshot boundary keeps stream order.
 			for drained := false; !drained; {
 				select {
 				case evt := <-sub.Events:

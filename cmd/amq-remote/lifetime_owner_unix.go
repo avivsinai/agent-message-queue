@@ -9,10 +9,10 @@ import (
 )
 
 // lifetimeOwnerPidOS reports the pid recorded in the entry's lifetime lock
-// file (N3, review-b5: the exit-6 refusal must name the owner).
+// file (the exit-6 refusal must name the owner).
 //
-// review-828-r1 P1: a kernel-side discovery (fcntl F_GETLK) can never see
-// the holder — the lifetime lock is taken with flock(2), a different lock
+// A kernel-side discovery (fcntl F_GETLK) can never see the holder — the
+// lifetime lock is taken with flock(2), a different lock
 // namespace (measured live on darwin: a flock conflict reports l_pid=-1;
 // on Linux the two namespaces are independent by documented design). So
 // discovery is cooperative: acquireLifetimeLock writes its pid into the

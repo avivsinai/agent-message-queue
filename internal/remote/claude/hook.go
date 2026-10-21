@@ -18,8 +18,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// Stop-hook bridge (bead 611.12 PR2): the hook is how the adapter learns a
-// submitted turn ENDED — the transcript user line proves the payload was
+// Stop-hook bridge: the hook is how the adapter learns a submitted turn ENDED
+// — the transcript user line proves the payload was
 // accepted and the assistant line proves the turn started, but only the
 // Stop event carries the completion signal. The installer writes the hook
 // into the TARGET's ~/.claude/settings.json; the receiver subcommand is
@@ -30,8 +30,8 @@ import (
 // the installer writes STARTS with this env assignment, and uninstall
 // removes exactly the entries whose nested commands all carry it. It is an
 // assignment, not the command word: the shell runs the quoted binary that
-// follows it (codex #855 r1 item 3 — the previous `AMQ_STOP_HOOK_BIN=<bin>
-// claude stop-hook` form executed the program `claude`).
+// follows it (an `AMQ_STOP_HOOK_BIN=<bin> claude stop-hook` form would
+// execute the program `claude`).
 const stopHookMarker = "AMQ_STOP_HOOK=1 "
 
 // stopHookType is the hook event name in settings.json.
@@ -52,8 +52,8 @@ const maxSettingsBytes = 4 << 20
 // removes exactly our hook plus that comma. Uninstall never removes a
 // container: formatting cannot prove who created an empty "Stop" array or
 // "hooks" object, so an operator's containers are preserved and ours may be
-// left behind empty, which Claude Code treats as no hooks (codex #855 r2
-// item 3). A file that already had a Stop array round-trips byte for byte.
+// left behind empty, which Claude Code treats as no hooks. A file that
+// already had a Stop array round-trips byte for byte.
 
 // InstallStopHook adds the fail-open receiver to the Stop hook chain in
 // home/.claude/settings.json. Idempotent: the same entry is left untouched,
@@ -100,8 +100,8 @@ var (
 // a session no relay share with approve is serving.
 //
 // pin.Owner, 64 lowercase hex, pins the owner pubkey on the hook's command
-// line: the only key whose signed reaction can allow a call (bead
-// 611.42.4); pin.Root (and pin.Session) pin where the share is read.
+// line: the only key whose signed reaction can allow a call;
+// pin.Root (and pin.Session) pin where the share is read.
 // Claude cannot edit its settings file without a prompt, so it cannot
 // change the pin on its own. An empty owner installs a reject-only hook.
 // A marked entry with another command is replaced; the same one is kept.
@@ -311,9 +311,8 @@ const (
 // StopHookState reports whether the user settings file under home holds the
 // AMQ Stop hook, and whether that file disables all hooks. Without an
 // effective hook a Claude request is admitted but never completes. It reads
-// only ~/.claude/settings.json, through the installer's bounded reader
-// (codex #869 r1); project or managed settings can still change the
-// effective result.
+// only ~/.claude/settings.json, through the installer's bounded reader;
+// project or managed settings can still change the effective result.
 func StopHookState(home string) (string, error) {
 	return hookState(home, stopHook)
 }
@@ -432,9 +431,9 @@ func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
 // schema: an OUTER object whose "hooks" array holds the command hook
-// (codex #855 r1 item 4; https://code.claude.com/docs/en/hooks#configuration
-// and internal/keepalive/hookinstall's SessionStart entry use the same
-// shape). Stop takes no matcher.
+// (https://code.claude.com/docs/en/hooks#configuration and
+// internal/keepalive/hookinstall's SessionStart entry use the same shape).
+// Stop takes no matcher.
 func stopHookEntry(bin string) []byte {
 	return commandHookEntry(stopHookCommand(bin), "", 10)
 }
@@ -486,8 +485,8 @@ type locFrame struct {
 // decoded as json.Number so nothing here can lose precision. It refuses a
 // non-object root, a non-object hooks, a non-array Stop, and duplicate
 // hooks/Stop keys — editing any of those would hide or clobber content.
-// (codex #855 r1 item 5: the previous walker never recognized "hooks
-// without Stop" and so added a duplicate top-level hooks key.)
+// A hooks object without Stop is recognized, so no duplicate top-level hooks
+// key is added.
 func locateSettings(raw []byte, event string) (settingsLoc, error) {
 	hooksPath, stopPath := "$/hooks", "$/hooks/"+event
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -752,10 +751,9 @@ func rawInsertEntry(raw []byte, spec hookSpec, entry []byte) ([]byte, error) {
 // rawRemoveStopEntries removes every marked hook from the Stop chain by byte
 // surgery, one cut per pass: a matcher group whose hooks are all ours is
 // cut whole; in a group that also holds foreign hooks only our inner hook
-// is cut and the foreign hooks stay (codex #855 r2 item 4 — the previous
-// version skipped mixed groups and reported success with our hook still
-// installed). Containers are never removed (see the header). No marked
-// hook -> nil,nil (no write).
+// is cut and the foreign hooks stay (a mixed group is never skipped, which
+// would report success with our hook still installed). Containers are never
+// removed (see the header). No marked hook -> nil,nil (no write).
 func rawRemoveEntries(raw []byte, spec hookSpec) ([]byte, error) {
 	removed := false
 	for {
@@ -839,15 +837,15 @@ var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // (exit 2 is the harness's blocking code). It must also never HANG: the
 // session id is validated before it becomes a path, and the marker is
 // opened no-follow and non-blocking so a symlink or FIFO planted at the
-// leaf is refused rather than followed or waited on (codex #855 r1).
-// Scope limits who may append. It does not cap the file. With no binding
+// leaf is refused rather than followed or waited on. Scope limits who may
+// append. It does not cap the file. With no binding
 // file the receiver follows the attachment sentinel, so user off leaves
 // writes in place while that attachment still owns the session.
 func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	defer func() { _ = recover() }() // fail-open, unconditionally
 	_ = stdout
 	if !noFollowSupported {
-		return 0 // no safe create on this platform (codex #855 r3 item 2)
+		return 0 // no safe create on this platform
 	}
 	var payload StopHookPayload
 	raw, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
@@ -861,7 +859,7 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	// An unbound session writes nothing. The check is before the marker
-	// directory is created (bead 611.37).
+	// directory is created.
 	if !stopSessionAllowed(home, payload.SessionID) {
 		return 0
 	}

@@ -88,7 +88,7 @@ type Record struct {
 	OwedOutcomes []string `json:"owed_outcomes,omitempty"`
 
 	// RetiredOutcomes is the interaction ids whose owed outcome the
-	// retention horizon retired (bead 611.45): no resolver produced it, so
+	// retention horizon retired: no resolver produced it, so
 	// the record shows the explicit uncertain delivery_unknown resolution
 	// and compaction no longer waits. A retired outcome stays correctable
 	// until the record compacts: an exact native resolution replaces the
@@ -112,11 +112,11 @@ type Record struct {
 	// "intent memoed"; Acknowledged means "delivered". Bookkeeping-only,
 	// written in place with no revision bump (mirrors PublishedRevision),
 	// so replayTerminalAck short-circuits already-acked terminal records
-	// instead of re-Lookuping them every tick forever (agent-message-queue-
-	// 611.22.34). Zero-value false for pre-upgrade stores: the first
-	// post-upgrade Reconcile replays each terminal record once (Lookup
-	// reports EvidenceNone after #744's release-on-ack, the replay returns
-	// nil, MarkAcknowledged fires) and then converges permanently.
+	// instead of re-Lookuping them every tick forever. Zero-value false for
+	// pre-upgrade stores: the first post-upgrade Reconcile replays each
+	// terminal record once (Lookup reports EvidenceNone after the runtime
+	// released the result on ack, the replay returns nil, MarkAcknowledged
+	// fires) and then converges permanently.
 	Acknowledged bool `json:"acknowledged,omitempty"`
 
 	// Tombstone marks a record that exists only to block a later submit or
@@ -148,21 +148,20 @@ type Store struct {
 	lock *ownerLock
 	now  func() time.Time
 	// closed is atomic: Close may run on any goroutine (endpoint shutdown)
-	// while bookkeeping writes such as MarkAcknowledged (611.22.34) may run
+	// while bookkeeping writes such as MarkAcknowledged may run
 	// on an async native-event goroutine. A plain bool tore under -race.
 	closed atomic.Bool
 	// mu serializes every durable mutation (Create/Update/WriteMemo/
-	// writeMarker). Before 611.22.34 the endpoint's e.mu serialized all
-	// writers; the async ack markers broke that assumption. The B3 lost-
-	// update probe (MarkAcknowledged vs MarkPublished, 200/200 losses with
-	// raw Get->mutate->write) is the regression for this lock. Revision CAS
+	// writeMarker). The endpoint's e.mu does not cover the async ack markers,
+	// so without this lock a raw Get->mutate->write lets MarkAcknowledged and
+	// MarkPublished lose each other's update. Revision CAS
 	// alone cannot close marker-vs-marker races: markers do not bump the
 	// revision, so two same-revision marker writes are indistinguishable
 	// under compare-and-retry — only mutual exclusion closes it.
 	mu       sync.Mutex
 	readOnly bool
-	// maxStoreBytes is the aggregate quota across every record in this store
-	// (611.22.19 BK4). Zero disables the aggregate quota; production sets it
+	// maxStoreBytes is the aggregate quota across every record in this store.
+	// Zero disables the aggregate quota; production sets it
 	// via WithMaxStoreBytes. used is the sum of record file sizes on disk,
 	// computed once at Open and maintained on every write/compact. A write
 	// that would exceed the quota refuses storage_full BEFORE dispatch; local
@@ -173,8 +172,8 @@ type Store struct {
 	// identity for an active epoch.
 	maxStoreBytes int64
 	used          int64
-	// reserved (611.22.19 BK4 round-2 B3) is the sum of MaxRecordBytes
-	// reservations held for admitted-but-not-yet-terminal records. A real
+	// reserved  is the sum of MaxRecordBytes reservations held for
+	// admitted-but-not-yet-terminal records. A real
 	// reservation, not a point-in-time check: Reserve increments it and
 	// tracks the per-key amount; Create/Update convert or release it when the
 	// record reaches a terminal state. The quota invariant is
@@ -183,8 +182,8 @@ type Store struct {
 	// Fail closed at the door, never after the work ran.
 	reserved     int64
 	reservedKeys map[Key]int64
-	// The sweep index (agent-message-queue-9dx.6) holds the records the
-	// endpoint's per-tick paths may act on, so a sweep reads those files and
+	// The sweep index holds the records the endpoint's per-tick paths may act
+	// on, so a sweep reads those files and
 	// not every retained record. The record files stay the truth: Open
 	// rebuilds the index from them, and write and writeSettlement, the only
 	// paths that change a record, reclassify it under mu.
@@ -214,7 +213,7 @@ func (s *Store) MaxStoreBytes() int64 {
 }
 
 // WithMaxStoreBytes sets the aggregate quota across every record in this
-// store (611.22.19 BK4). Zero disables the aggregate quota. Production sets
+// store. Zero disables the aggregate quota. Production sets
 // protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on
 // every write and reservation: a write that would exceed it refuses
 // storage_full before dispatch, while local native work (which does not pass
@@ -246,8 +245,8 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	// One walk over the record files seeds the quota usage, reseeds the
 	// reservations, and builds the sweep index. A store that cannot be read
 	// does not open: counting unread records as empty admits work into room
-	// it does not have (611.22.19 BK4, 9dx.8), and an incomplete index
-	// leaves an open record unreconciled (9dx.6).
+	// it does not have, and an incomplete index leaves an open record
+	// unreconciled.
 	if err := s.loadRecords(); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("load request store: %w", err)
@@ -266,7 +265,7 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 //
 // A file the bounded reader refuses (unreadable, not a regular file,
 // oversized) is an error naming its path relative to the store, so Open
-// stops (ruling z2). A file it reads but cannot decode is poison: counted
+// stops. A file it reads but cannot decode is poison: counted
 // in used, reported by List, skipped. Nothing indexes a poison record that
 // an operator repairs while the companion runs; the next Open does.
 func (s *Store) loadRecords() error {
@@ -360,8 +359,8 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // once ownership has moved on. The records stay on disk.
 //
 // The owner lock is released only after s.mu is held. A settlement writer
-// that already passed its closed check (agent-message-queue-859) still holds
-// s.mu through the durable write, so that write finishes before a replacement
+// that already passed its closed check still holds s.mu through the durable
+// write, so that write finishes before a replacement
 // Open can take ownership. A writer that has not entered the mutex yet sees
 // closed and refuses.
 func (s *Store) Close() error {
@@ -413,8 +412,8 @@ func safeSegment(seg string) bool {
 //
 // Creator hosts and target ids are case-sensitive protocol values, but on a
 // case-insensitive filesystem two keys that differ only by case share one
-// file (agent-message-queue-611.49). The record body carries its own key, so
-// a file that holds a different key is a conflict, never this key's record.
+// file. The record body carries its own key, so a file that holds a different
+// key is a conflict, never this key's record.
 // Create, Update, the markers, and compaction read through Get first, and
 // WriteMemo writes only a record its caller just read through Get, so the
 // conflict also stops every writer from overwriting the other key.
@@ -509,7 +508,7 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	// 611.22.34 B3: the whole read-mutate-write runs under s.mu. The publish
+	// The whole read-mutate-write runs under s.mu. The publish
 	// arm runs under e.mu today, but the ack markers now run from async
 	// goroutines — a raw Get->mutate->write here could revert a just-written
 	// Acknowledged flag. The field-level merge (fresh Get inside the lock,
@@ -537,20 +536,19 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 
 // MarkAcknowledged records that the native AcknowledgeResult call RETURNED
 // for this record (the adapter contract: AcknowledgeResult has no return
-// value, so "returned" is all the flag can prove — an earlier comment said
-// "delivered", which over-claimed). It rewrites the record in place without
-// a revision bump: ack bookkeeping is not new evidence about the request
-// (mirrors MarkPublished). Callers invoke it only after the call returned,
-// and only for records whose ack digest is non-empty
-// (agent-message-queue-611.22.34). The write is a revision-CAS (writeMarker):
-// a concurrent marker writer or commitLocked can advance the revision
+// value, so "returned" is all the flag can prove, not "delivered"). It
+// rewrites the record in place without a revision bump: ack bookkeeping is
+// not new evidence about the request (mirrors MarkPublished). Callers invoke
+// it only after the call returned, and only for records whose ack digest is
+// non-empty. The write is a revision-CAS (writeMarker): a concurrent marker
+// writer or commitLocked can advance the revision
 // between Get and write; losing that race REFUSES instead of silently
 // reverting the other writer's field, and this caller re-reads and retries.
 func (s *Store) MarkAcknowledged(k Key) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	// 611.22.34 B3: the whole read-mutate-write runs under s.mu, setting
+	// The whole read-mutate-write runs under s.mu, setting
 	// ONLY Acknowledged on a FRESH read — see MarkPublished for why a
 	// revision CAS alone cannot close marker-vs-marker races.
 	s.mu.Lock()
@@ -713,8 +711,8 @@ func (s *Store) CompactionCandidates() []Key {
 // file does not exist; a present-but-undecodable file returns an error so a
 // caller never mistakes poison for absence.
 //
-// The read is bounded and no-follow (agent-message-queue-qgc). A FIFO or an
-// oversized file is an error for this record, never a block and never a
+// The read is bounded and no-follow. A FIFO or an oversized file is an error
+// for this record, never a block and never a
 // missing record, so List can skip it and continue with the other targets.
 func (s *Store) readRecord(path string) (*Record, bool, error) {
 	data, err := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))
@@ -777,15 +775,14 @@ func normalizeRecord(rec *Record) {
 // tombstone. Returns true if the record was compacted. The endpoint's
 // Reconcile sweep is the only production caller.
 //
-// 611.22.19 BK4 round-2 B1: the whole read-mutate-write runs under s.mu.
-// The previous doc claimed the caller holds the endpoint mutex (e.mu),
-// but e.mu does not serialize CompactOne against the async ack markers
-// (endpoint.go calls MarkAcknowledged after e.mu.Unlock on the native-event
-// goroutine). A lost += on s.used drifted the quota counter for the life of
-// the process. CompactOne now takes s.mu like every other writer.
+// The whole read-mutate-write runs under s.mu. The endpoint mutex (e.mu)
+// does not serialize CompactOne against the async ack markers (endpoint.go
+// calls MarkAcknowledged after e.mu.Unlock on the native-event goroutine),
+// and a lost += on s.used would drift the quota counter for the life of the
+// process, so CompactOne takes s.mu like every other writer.
 //
-// 611.22.19 BK4 round-2 B2: the tombstone write is a settlement write, not
-// new work, so it is quota-exempt (writeSettlement). A terminal record with
+// The tombstone write is a settlement write, not new work, so it is
+// quota-exempt (writeSettlement). A terminal record with
 // no result GROWS on compaction (tombstone flag + revision bump); refusing
 // that growth at quota would deadlock the sweep forever, since key-ordered
 // List means one refused record stops every later compaction too.
@@ -799,44 +796,38 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if err != nil || !exists {
 		return false, err
 	}
-	// A2: the gate includes settlement — never reap a record we still owe the
+	// The gate includes settlement — never reap a record we still owe the
 	// runtime (bound run, unacked result).
 	// Two obligations gate compaction and they are different: OwesAck is
 	// what we owe the RUNTIME (release its retained result); an unpublished
 	// revision is what we owe the CALLER. Compaction erases the only retained
-	// result, so a revision the caller has not received yet must survive it
-	// (Pro r2 #14 / packet 4b, agent-message-queue-611.22.36).
+	// result, so a revision the caller has not received yet must survive it.
 	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision || len(rec.OwedOutcomes) > 0 {
 		return false, nil
 	}
-	// A retired outcome no longer gates compaction (611.45 r2 P1): the
-	// record already shows the explicit uncertain resolution, and a late
+	// A retired outcome no longer gates compaction: the record already shows
+	// the explicit uncertain resolution, and a late
 	// exact native resolution still corrects it while the record lives.
 	observed, err := protocol.ParseTime(rec.ObservedAt)
 	if err != nil || !observed.Before(before) {
 		return false, nil
 	}
 	rec.Revision++
-	// 611.22.41: mark the tombstone as published. A compacted revision is
-	// not a new publication — the tombstone is the record's final published
-	// state (repro before the fix: publication state=completed
-	// code=result_expired result=nil republished by the next Reconcile).
-	// This assignment is safe only because of the compaction gate above:
-	// it refuses PublishedRevision < Revision, so every terminal result has
-	// already reached the caller before compaction runs and the assignment
-	// cannot bury an unpublished one. On a base without that gate it could.
-	// (Replaces main's "Intentional asymmetry" comment, which described the
-	// opposite behavior from the code it sat on: with PublishedRevision left
-	// behind, the publish arm's PublishedRevision < Revision test fires and
-	// republishes the tombstone — the exact flooding that comment claimed
-	// the asymmetry avoided.)
+	// Mark the tombstone as published. A compacted revision is not a new
+	// publication: the tombstone is the record's final published state, and
+	// leaving PublishedRevision behind would make the publish arm's
+	// PublishedRevision < Revision test fire and republish the tombstone on
+	// every Reconcile. This assignment is safe only because of the compaction
+	// gate above: it refuses PublishedRevision < Revision, so every terminal
+	// result has already reached the caller before compaction runs and the
+	// assignment cannot bury an unpublished one.
 	rec.PublishedRevision = rec.Revision
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil
 	// A retired outcome stays correctable only until the record compacts:
 	// the tombstone keeps its delivery_unknown resolution, and nothing asks
-	// the resolver about it again (9dx.6, ruling bb).
+	// the resolver about it again.
 	rec.RetiredOutcomes = nil
 	rec.Tombstone = true
 	if rec.State == protocol.StateCompleted {
@@ -892,8 +883,8 @@ func (s *Store) write(rec *Record) error {
 		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
 	}
 	key := keyOf(rec)
-	// 611.22.19 BK4 round-2 B3: a real reservation, not a point-in-time check.
-	// A key with a reservation (admitted via Reserve before dispatch) may
+	// A real reservation, not a point-in-time check. A key with a reservation
+	// (admitted via Reserve before dispatch) may
 	// grow up to MaxRecordBytes without a quota check — the reservation
 	// already paid for the accepted work AND its bounded result. A result
 	// write for an admitted record is never quota-refused. A key WITHOUT a
@@ -924,7 +915,7 @@ func (s *Store) write(rec *Record) error {
 		// Account for the actual delta only after a successful write. A
 		// compaction that shrank the record (prevSize > new) reduces used.
 		s.used += delta
-		// B3: release the reservation when the record reaches a terminal
+		// Release the reservation when the record reaches a terminal
 		// state — the result has landed, the bounded space is now consumed
 		// by the actual record, and the reservation has served its purpose.
 		// Non-terminal updates (received->dispatching->running) keep the
@@ -947,9 +938,9 @@ func (s *Store) write(rec *Record) error {
 }
 
 // writeSettlement persists a settlement write (CompactOne, MarkPublished,
-// MarkAcknowledged, WriteMemo) that is exempt from the aggregate quota
-// (611.22.19 BK4 round-2 B2). Settlement writes never admit new work: a
-// tombstone grows a terminal record, a marker confirms delivery, a memo
+// MarkAcknowledged, WriteMemo) that is exempt from the aggregate quota.
+// Settlement writes never admit new work: a tombstone grows a terminal
+// record, a marker confirms delivery, a memo
 // annotates. Refusing them at quota would deadlock the sweep — a terminal
 // record with no result GROWS on compaction, and key-ordered List means one
 // refused record stops every later compaction too, so the quota can never
@@ -1014,10 +1005,10 @@ func (s *Store) releaseReservationLocked(key Key) {
 	}
 }
 
-// Reserve reserves bytes of store capacity for key before dispatch
-// (611.22.19 BK4). This is a REAL reservation, not a point-in-time check
-// (round-2 B3): it increments s.reserved and tracks the per-key amount so
-// the result write for an admitted record is never quota-refused — the
+// Reserve reserves bytes of store capacity for key before dispatch.
+// This is a REAL reservation, not a point-in-time check: it increments
+// s.reserved and tracks the per-key amount so the result write for an
+// admitted record is never quota-refused — the
 // reservation already paid for the accepted work AND its bounded result.
 // The quota invariant used+reserved <= maxStoreBytes is maintained. A zero
 // maxStoreBytes store (quota disabled) always succeeds. Callers hold no
@@ -1115,8 +1106,7 @@ func allowed(from, to protocol.State) bool {
 			return true
 		}
 	case protocol.StateRejected:
-		// A busy-rejected tombstone (B14c minimal tombstone semantics; full
-		// B2/B11 belongs to B14d) may be re-admitted by an identical
+		// A busy-rejected tombstone may be re-admitted by an identical
 		// resubmit: the caller was told the request was refused, and the
 		// retry is a NEW admission decision, not a resurrection of a
 		// dispatched request. Only re-admission (rejected -> dispatching) is
@@ -1132,10 +1122,9 @@ func allowed(from, to protocol.State) bool {
 }
 
 // OwesAck reports whether this record has a result we have not released.
-// B9 ruling (agent-message-queue-611.22.35): do not erase a result we have
-// not acknowledged. Terminal && Result != nil && AckDigest == "" refuses
-// compaction, REGARDLESS of NativeRun. The endpoint's owesAck delegates
-// to this — one predicate, one place.
+// A result we have not acknowledged must not be erased. Terminal && Result !=
+// nil && AckDigest == "" refuses compaction, REGARDLESS of NativeRun. The
+// endpoint's owesAck delegates to this — one predicate, one place.
 func (r *Record) OwesAck() bool {
 	return r.State.Terminal() && r.Result != nil && r.AckDigest == ""
 }
@@ -1158,10 +1147,11 @@ func (r *Record) OwesResult() bool {
 // with a record: a record that is not terminal; an unpublished revision;
 // an owed interaction outcome, or a retired one before compaction (a
 // tombstone an older binary compacted with retired outcomes still set
-// owes nothing, ruling ss); a cancel or a result the runtime owes; or an acknowledgement replay, which replayTerminalAck skips only
-// when the ack was delivered (AckDigest set and Acknowledged) or there is
-// no digest to send (no memoed digest and no result). A change to what
-// Reconcile acts on changes this predicate in the same commit.
+// owes nothing); a cancel or a result the runtime owes; or an acknowledgement
+// replay, which replayTerminalAck skips only when the ack was delivered
+// (AckDigest set and Acknowledged) or there is no digest to send (no memoed
+// digest and no result). A change to what Reconcile acts on changes this
+// predicate in the same commit.
 func (r *Record) NeedsSweep() bool {
 	switch {
 	case !r.State.Terminal(), r.PublishedRevision < r.Revision,

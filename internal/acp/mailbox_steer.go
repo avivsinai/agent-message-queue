@@ -28,8 +28,7 @@ type mailboxSteerTarget struct {
 // steerClaim is the durable first-delivery record of one steer event,
 // <steer-event>.steer.json in the shared state dir. Like the prompt claim it
 // fixes the message id, time and destination once, so a replayed steer goes
-// where the first one went, never into the session's current turn
-// (review of #965, finding 1).
+// where the first one went, never into the session's current turn.
 type steerClaim struct {
 	MessageID   string `json:"message_id"`
 	Created     string `json:"created"`
@@ -62,16 +61,15 @@ func errMailboxSteering() *rpcError {
 // errSteerTurnOver means the parent event already has its final answer.
 var errSteerTurnOver = errors.New("the turn already has its final answer")
 
-// mailboxSteering delivers a follow-up DM into an open mailbox turn
-// (bead agent-message-queue-cfy). It is an urgent buzz-steer message from
-// buzz to the bound handle on the turn's thread that refs the turn's prompt,
-// so `amq reply` to it also answers the turn. The turn keeps waiting for its
-// final reply.
+// mailboxSteering delivers a follow-up DM into an open mailbox turn. It is an
+// urgent buzz-steer message from buzz to the bound handle on the turn's
+// thread that refs the turn's prompt, so `amq reply` to it also answers the
+// turn. The turn keeps waiting for its final reply.
 //
 // The parent event's post lock serializes the steer with that event's final
 // answer across processes: a steer is written only while the event has no
-// final marker (review of #965, finding 2). A steer event's claim is created
-// under that lock before the write; a replay follows the claim and writes
+// final marker. A steer event's claim is created under that lock before the
+// write; a replay follows the claim and writes
 // only if the message is not already in the handle's inbox.
 func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 	var parsed steeringParams
@@ -143,8 +141,8 @@ func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 }
 
 // decideSteer decides a steer under parent's post lock, from state read
-// under it (review of #965 r2). It reloads the steer event's claim: when the
-// claim names another parent, it returns that parent and decides nothing,
+// under it. It reloads the steer event's claim: when the claim names another
+// parent, it returns that parent and decides nothing,
 // so the caller retakes the right lock. A claimed message already in the
 // handle's inbox is a duplicate even once the parent is final; a missing
 // one is written only while the parent has no final marker. Only with no
@@ -266,7 +264,7 @@ func (s *Server) claimSteer(eventID string, target mailboxSteerTarget) (steerCla
 // in the handle's inbox (new or cur), so a replay never duplicates it, and
 // only if mayWrite still allows it. It writes no event journal: the claim
 // is the steer's idempotency record, and a committed write is a delivery
-// whatever happens after it (review of #965, finding 3).
+// whatever happens after it.
 func writeSteerOnce(claim steerClaim, eventID, text string, mayWrite func() bool) (Delivery, error) {
 	created, _ := time.Parse(time.RFC3339Nano, claim.Created)
 	out := Delivery{
@@ -291,7 +289,7 @@ func writeSteerOnce(claim steerClaim, eventID, text string, mayWrite func() bool
 	name := claim.MessageID + ".md"
 	// Only a readable message with this id, read through the pinned root,
 	// proves the earlier delivery: a directory or a dangling link at the
-	// name is not one (agent-message-queue-u1e).
+	// name is not one.
 	if held, err := inboxHasMessage(root, claim.Handle, claim.MessageID); err != nil {
 		return Delivery{}, err
 	} else if held {

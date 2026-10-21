@@ -37,8 +37,8 @@ import (
 const attachReadyTimeout = 20 * time.Second
 
 // attach binds the per-user Buzz agent to the session the owner is typing
-// in (bead agent-message-queue-611.31). Typing the command is the sharing
-// choice, so the invoking session is found exactly, never guessed from a
+// in. Typing the command is the sharing choice, so the invoking session is
+// found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
 func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
@@ -131,8 +131,8 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
 	if cand.Kind == "claude" && *linkName == "" {
 		// A Claude session shows its tool approvals in the Buzz DM, where
-		// the owner can deny them (bead agent-message-queue-611.42.2). A
-		// session shared with a link never gains answering authority: no
+		// the owner can deny them. A session shared with a link never gains
+		// answering authority: no
 		// remote source answers the agent's prompts.
 		if reg.Config, err = withApprove(cand.Config); err != nil {
 			return protocol.ExitActionRequired, err
@@ -157,7 +157,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	// The endpoint's answer is checked against the identity resolved above,
 	// independently, so a target name reused for another session is never
-	// pinned as this one (codex #885 P1 #2).
+	// pinned as this one.
 	if native != want {
 		return protocol.ExitActionRequired, fmt.Errorf("the endpoint's %s is attached to another session; refusing to bind", cand.Target)
 	}
@@ -176,7 +176,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
 		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
 	// The session identity is the harness, root and working directory, so the
-	// same session coming back gets its name and agent back (ruling 2). A link
+	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
 	// and another process must never take that name over. That holds for a
 	// plain attach of a session a link already shares too: it keeps the
@@ -281,9 +281,9 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 	return protocol.Refuse(protocol.CodeInvalid, "link %s's server grants tool profiles %s; --tools %s is not one of them", link, strings.Join(*pin.ToolProfiles, ", "), tools)
 }
 
-// attachMailbox binds the Buzz agent to this session's AMQ handle (bead
-// agent-message-queue-611.36). Each DM becomes an AMQ message to the handle;
-// no endpoint, hook, or wake is required, because noticing the message is
+// attachMailbox binds the Buzz agent to this session's AMQ handle.
+// Each DM becomes an AMQ message to the handle; no endpoint, hook, or wake is
+// required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (int, error) {
 	if root == "" || handle == "" {
@@ -296,7 +296,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 		return protocol.ExitActionRequired, fmt.Errorf("AMQ root %s is not a directory", root)
 	}
 	// The inherited session pin must name this root, exactly as a direct
-	// amq-acp mailbox checks it (codex #895 P1 #4).
+	// amq-acp mailbox checks it.
 	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -340,8 +340,8 @@ func emitJSON(w io.Writer, v any) {
 
 // listBuzzInRoster adds the Buzz agent's handle to the root's config.json
 // agents list, so a reply to a Buzz DM routes without a "may not be read"
-// warning or a --strict refusal (bead agent-message-queue-za4). A root with
-// no config.json is left as it is, and a handle already listed is a no-op.
+// warning or a --strict refusal. A root with no config.json is left as it is,
+// and a handle already listed is a no-op.
 // Only the mailbox attach calls it. The root is opened once as a capability,
 // authenticated against the inherited session pin, and updated through that
 // same capability, so a directory swapped in after the check is never written.
@@ -374,18 +374,17 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 }
 
 // writeBinding adds the named binding, removes any other binding for the
-// same session, so one session is one Buzz agent (bead
-// agent-message-queue-611.39), and returns the name written and whether this
-// session already held that name. A defaulted name
-// never replaces another session's binding (bead agent-message-queue-94w); an
-// explicit --name is the caller's choice and replaces. A defaulted name is the
+// same session, so one session is one Buzz agent, and returns the name
+// written and whether this session already held that name. A defaulted name
+// never replaces another session's binding; an explicit --name is the
+// caller's choice and replaces. A defaulted name is the
 // session's own: the name its identity already holds, else the first of
 // b.Name, b.Name-2, ... that no other session holds (binding.WriteSession).
 //
 // With followLink (attach --self --link), the name also moves to b when it
 // pins the same root and target under another native session: the share
-// keeps its name after a session change (E2E kit F3, ruling ww). attach
-// reaches this write only after the endpoint confirmed the target is attached
+// keeps its name after a session change. attach reaches this write only after
+// the endpoint confirmed the target is attached
 // to b's session, and one target reports one native session, so the old
 // session is no longer the attached one. An old session resumed in another
 // process is another target, so another default name.
@@ -538,7 +537,7 @@ var (
 
 // codexView asks each Codex app-server daemon at most once per command:
 // one daemon pid and one loaded-thread list per socket, reused by every
-// binding and by the attaching session (review-stack P2-B6).
+// binding and by the attaching session.
 type codexView struct {
 	pids   map[string]codexAnswer[int]
 	loaded map[string]codexAnswer[[]string]
@@ -575,7 +574,7 @@ func (c *codexView) loadedThreads(sock string) ([]string, error) {
 // the daemon process that has it loaded now. Unless that daemon confirms the
 // thread is loaded, it records nothing, and the session's liveness stays
 // unknown: the session may run on another app-server, which this daemon
-// does not answer for (review-1070 P1-B1).
+// does not answer for.
 func loadedThread(codexes *codexView, sock, thread string) binding.AppServerThread {
 	daemon, err := daemonHolder(codexes, sock)
 	if err != nil {
@@ -600,7 +599,7 @@ func daemonHolder(codexes *codexView, sock string) (launch.HolderIdentity, error
 // app-server daemon that had it loaded when it was bound: the thread has
 // ended only when that same daemon process, still running, no longer has it
 // loaded. A restarted or other daemon, or an unreachable one, proves nothing,
-// so the thread is unknown (review-1070 P1-B2).
+// so the thread is unknown.
 func livenessOf(codexes *codexView, b binding.Binding) (binding.State, string) {
 	state, evidence := b.Liveness()
 	if state == binding.Ended || b.AppServer.Thread == "" {
@@ -663,8 +662,8 @@ func inspectOutsideLock(codexes *codexView) binding.Inspector {
 // followDaemon records the daemon process that has b's thread loaded now,
 // when it is not the recorded one: the thread moved to a restarted daemon (a
 // Codex update restarts it), and only the daemon that has the thread can
-// later prove it ended (review-stack P2-B5). The binding is rewritten only if
-// it is still exactly b, and the binding as it is afterwards is returned.
+// later prove it ended. The binding is rewritten only if it is still exactly
+// b, and the binding as it is afterwards is returned.
 func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
 	pid, err := codexes.daemonPID(b.AppServer.Socket)
 	if err != nil || pid == b.AppServer.Daemon.PID {
@@ -689,7 +688,7 @@ func linkShared(stateDir string, b binding.Binding) bool {
 	if err != nil {
 		// An unreadable manifest may hold a share of this session (a
 		// missing one loads empty): keep the target identity rather than
-		// move the share's name (review-1070 P2-B3).
+		// move the share's name.
 		return true
 	}
 	shared := map[string]bool{}
@@ -734,7 +733,7 @@ var detectHarness = func(codexes *codexView) harnessSession {
 
 // pruneAfterAttach prunes the bindings of ended sessions once attach has
 // written its own, so the write sees an ended binding of its own identity
-// and takes its name back (review-s2 P1-1). The attach has succeeded by then,
+// and takes its name back. The attach has succeeded by then,
 // so a failed prune is left to the next attach or `bindings`, which reports it.
 func pruneAfterAttach(inspect binding.Inspector) { _, _ = binding.PruneEnded(inspect) }
 
@@ -844,7 +843,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	var match func(binding.Binding) bool
 	// A native binding made outside AMQ used a fallback root; detach finds it
-	// in the binding itself, so off needs no --root (codex #895 P2 #5).
+	// in the binding itself, so off needs no --root.
 	if *self && c.root == "" {
 		if all, err := binding.List(); err == nil {
 			for _, b := range all {
@@ -921,8 +920,7 @@ var claudeStopHookState = func() (string, error) {
 // run, amq-remote 0.97.0). attach never edits ~/.claude/settings.json; it
 // names the command that does. A hook that the user settings turn off with
 // disableAllHooks is accepted with a warning: a project or managed setting
-// may turn hooks back on, and only the user file is read (review-stack
-// P2-C1).
+// may turn hooks back on, and only the user file is read.
 func requireStopHook() (warning string, err error) {
 	state, err := claudeStopHookState()
 	switch {
@@ -968,7 +966,7 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 		// A daemon AMQ cannot reach says nothing about the thread: name the
 		// failure, not "not loaded". Codex's sandbox denies the daemon socket
-		// to a tool call (agent-message-queue-611.65).
+		// to a tool call.
 		for _, d := range diags {
 			switch {
 			case d.Kind != "codex":
@@ -1152,7 +1150,7 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 				continue
 			}
 			// The same target name with another kind or config names another
-			// session; it is refused, never silently kept (codex #885 P1 #2).
+			// session; it is refused, never silently kept.
 			if existing.Kind != a.Kind || existing.Epoch != a.Epoch {
 				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
 			}

@@ -38,7 +38,7 @@ var ErrClockBehind = errors.New("edit waits for the clock to pass the previous e
 
 // ErrNoGrant means the enrolled generation holds no owner grant admitting
 // an event of this kind at this time. Buzz does not enforce NIP-OA kind
-// grants, so AMQ refuses to sign locally (slice 4 contract §4).
+// grants, so AMQ refuses to sign locally.
 var ErrNoGrant = errors.New("no enrolled owner grant for this event")
 
 // Grant returns the enrolled owner tag that admits kind at createdAt, or an
@@ -165,8 +165,7 @@ func (c *Carrier) originTags(origin map[string]string) nostr.Tags {
 // a reply-marked tag beside other e tags names an intermediate parent and
 // proves no root. With no markers, the legacy positional form names the
 // root first. A reply to a threaded event that names no root is refused by
-// the relay ("root tag does not match thread ancestry",
-// agent-message-queue-611.58).
+// the relay ("root tag does not match thread ancestry").
 func threadRoot(evt nostr.Event) string {
 	var es []nostr.Tag
 	marked := false
@@ -203,7 +202,7 @@ const cancelReaction = "❌"
 // IngestReaction handles one verified kind 7 event from the owner. On an
 // approval message this edge posted, ✅ approves and ❌ rejects exactly that
 // interaction (answerApproval). On one of this edge's result rows, ❌
-// cancels exactly that row's request (relay design §4, slice 5); the row is
+// cancels exactly that row's request (relay design §4); the row is
 // resolved through the persisted receipt mapping, not the reaction's own
 // tags, and a reaction carries no h tag it has to match. Anything else is
 // ignored; removing a reaction never undoes a cancel or an answer.
@@ -278,7 +277,7 @@ func (c *Carrier) Ingest(evt nostr.Event) error {
 
 // IngestMention handles one verified owner event from a mention channel:
 // the same claim and submit path as a DM, with every answer and result row
-// going to the DM channel (slice 5).
+// going to the DM channel.
 func (c *Carrier) IngestMention(evt nostr.Event) error {
 	return c.ingest(evt, NormalizeMention)
 }
@@ -291,7 +290,7 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	}
 	// The whole enabled surface must be granted before anything is admitted:
 	// a share whose owner never enabled buzz-dm must not run work it cannot
-	// answer (codex #866 r1 #3).
+	// answer.
 	if gerr := c.eligible(now); gerr != nil {
 		return gerr
 	}
@@ -302,15 +301,14 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 		return c.answer(evt, protocol.InertInline(err.Error()))
 	}
 	// Every command, not only submit, runs only against the approved native
-	// session: /inspect of a replacement session is never answered (codex
-	// #866 r2 #7).
+	// session: /inspect of a replacement session is never answered.
 	if err := c.fence(); err != nil {
 		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, protocol.InertInline(err.Error()))
 	}
 	// A typed answer in the owner DM is the same decision as the reaction on
-	// the approval message (611.42.7). A replay keeps its first decision: an
+	// the approval message. A replay keeps its first decision: an
 	// event claimed as a prompt stays a prompt, and one claimed as an answer
-	// answers only the approval it named (Pro review of #970).
+	// answers only the approval it named.
 	if gesture := typedAnswer(n.Text); n.Op == OpSubmit && gesture != "" && tagValue(evt, "h") == c.binding.Channel {
 		prior, claimed, err := c.ledger.ClaimFor(evt.ID.Hex())
 		if err != nil {
@@ -331,7 +329,7 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 			} else if ok && gesture == approveReaction && appr.ApproveProof && appr.ApproveOption != "" && !hasTagName(evt, "e") {
 				// An unthreaded yes names no approval message in what the
 				// owner signed, so it cannot prove the allow: it is not
-				// sent, and the owner learns how to allow (611.42.10).
+				// sent, and the owner learns how to allow.
 				return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, typedApproveHint)
 			} else if ok {
 				return c.answerApproval(evt, msgID, appr, gesture)
@@ -397,7 +395,7 @@ func (c *Carrier) claimFor(evt nostr.Event, op, requestID, epoch string, notAfte
 
 // owns reports whether a stored claim was made under this carrier's
 // binding. A claim from an earlier binding (another channel, body, relay or
-// target) is never replayed here (codex #866 r1 #6).
+// target) is never replayed here.
 func (c *Carrier) owns(cl Claim) bool {
 	return cl.Owner == c.binding.Owner && cl.Body == c.binding.Body && cl.Relay == c.binding.RelayHost &&
 		cl.Target == c.binding.Target && cl.DMChannel == c.binding.Channel && cl.NativeSession == c.binding.NativeSession &&
@@ -427,7 +425,7 @@ var ErrNotShared = errors.New("the attached session is not the one approved for 
 
 // fence checks the target's attached native session against the approved
 // identity, through the endpoint's in-process accessor (never the session
-// wire schema, codex #866 r2 #6).
+// wire schema).
 func (c *Carrier) fence() error {
 	if c.binding.NativeSession == "" || c.identity == nil || c.identity(c.binding.Target) != c.binding.NativeSession {
 		return ErrNotShared
@@ -454,11 +452,11 @@ func (c *Carrier) inspect() (protocol.Session, error) {
 // submit dispatches a claimed submit. The request's ref is deterministic
 // (protocol.EncodeRef of source host, target and request id), so its
 // receipt is written before dispatch and a result is never stranded without
-// one (codex #866 r2 #2). A claim that already existed but has no
-// settlement is an interrupted import: the core's own decision is read back
+// one. A claim that already existed but has no settlement is an interrupted
+// import: the core's own decision is read back
 // first and only a request the core never saw is submitted, so an
-// interrupted busy rejection never turns into execution (codex #866 r2 #1).
-// The settlement is recorded only after the row is prepared.
+// interrupted busy rejection never turns into execution. The settlement is
+// recorded only after the row is prepared.
 func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string) error {
 	src := c.sourceFor(evt)
 	ref := protocol.EncodeRef(src.Host, claim.Target, claim.RequestID)
@@ -477,14 +475,14 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 		// A decision already shown to the owner (a direct answer, or the
 		// request's result row) settles the command even when the core
 		// stored nothing, as for a refusal before admission: it is never
-		// resubmitted (codex #866 r3 #1).
+		// resubmitted.
 		_, answered, err := c.ledger.Prepared("direct/" + evt.ID.Hex())
 		if err != nil {
 			return err
 		}
 		// The root row is committed before its id reaches the receipt, so the
 		// prepared root obligation itself is checked, and the receipt is
-		// restored from it (codex #866 r4).
+		// restored from it.
 		if rc.RootEventID == "" {
 			if root, ok, err := c.ledger.Prepared(rootKey(ref)); err != nil {
 				return err
@@ -574,7 +572,7 @@ func (c *Carrier) receiptFor(ref string, claim Claim) Receipt {
 
 // statusOrCancel answers /status or performs /cancel (or a ❌) for a request
 // this share submitted. Cancel carries the request's stored target and
-// epoch and the owner command's signed deadline (codex #866 r1 #1).
+// epoch and the owner command's signed deadline.
 func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string, notAfter time.Time) error {
 	rc, owned, err := c.ledger.ReceiptFor(ref)
 	if err != nil {
@@ -600,9 +598,8 @@ func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string, notAfter time.
 }
 
 // settleAnswer prepares the command's answer, then records its settlement:
-// a failed answer leaves the command unsettled, so its redelivery answers it
-// (codex #866 r2 #3). The answer is keyed by the event, so a retry returns
-// the stored one.
+// a failed answer leaves the command unsettled, so its redelivery answers it.
+// The answer is keyed by the event, so a retry returns the stored one.
 func (c *Carrier) settleAnswer(evt nostr.Event, st Settlement, text string) error {
 	if err := c.answer(evt, text); err != nil {
 		return err
@@ -626,8 +623,8 @@ func (c *Carrier) reply(to nostr.Event, tags nostr.Tags, text string) error {
 // this body and DM channel. A request has one root row (kind 9) under a
 // revision-independent key, so a crash after preparing it is recovered,
 // never duplicated; later revisions are kind 40003 edits of that row, each
-// dated strictly after the previous one (codex #866 r1 #5). Returning nil
-// means the output is durably owed in the outbox; Flush delivers it.
+// dated strictly after the previous one. Returning nil means the output is
+// durably owed in the outbox; Flush delivers it.
 func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) error {
 	if origin["carrier"] != "buzz" || origin["body"] != c.binding.Body || origin["channel"] != c.binding.Channel {
 		return fmt.Errorf("record %s is not this Buzz carrier's", snap.RequestRef)
@@ -674,7 +671,7 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	}
 	// Reserve the edit's second before preparing it: after a crash between
 	// the two, the next edit is still dated strictly later than any edit
-	// already prepared (codex #866 r2 #5).
+	// already prepared.
 	rc.LastEditAt = now
 	if err := c.ledger.PutReceipt(rc); err != nil {
 		return err
@@ -711,12 +708,11 @@ func typedAnswer(text string) string {
 // openApproval is the approval message a typed answer refers to: the one
 // whose thread the owner replied in, or else the target's one pending
 // approval, when its message reached the relay before the owner typed. An
-// approval the owner could not yet have seen is never answered (Pro review
-// of #970).
+// approval the owner could not yet have seen is never answered.
 func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) {
 	// A threaded reply refers only to the message it names: the parent it
 	// replies to first, then its thread root. It never falls back to another
-	// pending approval (Pro review of #970, round 2).
+	// pending approval.
 	msgID := ""
 	threaded := false
 	for _, t := range evt.Tags {
@@ -779,7 +775,7 @@ func threadRefs(evt nostr.Event) []string {
 }
 
 // typedApproveHint answers an unthreaded typed approve for a harness that
-// approves only with proof bound to the approval message (611.42.10).
+// approves only with proof bound to the approval message.
 const typedApproveHint = "To allow, react ✅ on the approval or reply yes in its thread."
 
 func rejectReaction(gesture string) bool {
@@ -844,8 +840,7 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	want := appr
 	want.Disabled = !in.RemoteAnswer
 	if in.RemoteAnswer {
-		// An approval posted reject only takes ApproveProof with its ✅
-		// (advisor review of 611.42.10).
+		// An approval posted reject only takes ApproveProof with its ✅.
 		want.ApproveOption, want.RejectOption, want.ApproveProof = in.ApproveOption, in.RejectOption, in.ApproveProof
 	}
 	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
@@ -1016,8 +1011,7 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		return err
 	}
 	// The stored claim is the decision. A replay after a crash answers only
-	// the approval and option first claimed, never whatever is pending now
-	// (Pro review of #970).
+	// the approval and option first claimed, never whatever is pending now.
 	if claim.Op != OpRespond {
 		return nil
 	}
@@ -1034,7 +1028,7 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		messageID, appr, option = first.Message, stored, first.Option
 	}
 	// An approve carries its proof: a harness that allows a call only with
-	// the owner's signature (Claude, bead 611.42.4) verifies it itself.
+	// the owner's signature  verifies it itself.
 	var evidence json.RawMessage
 	if gesture == approveReaction {
 		var err error
@@ -1207,7 +1201,7 @@ func answeredWith(s protocol.Snapshot, interactionID, option string) bool {
 
 // settleApprovalAnswer replies under the approval message, then settles the
 // reaction. The approval message sits in the owner input's thread, so the
-// reply names that thread's root (agent-message-queue-611.58).
+// reply names that thread's root.
 func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Settlement, text string) error {
 	appr, ok, err := c.ledger.ApprovalFor(messageID)
 	if err != nil {
@@ -1275,8 +1269,8 @@ func (c *Carrier) prepare(key string, evt nostr.Event) error {
 	return err
 }
 
-// Flush bounds for one pass (codex #866 r1 #8): at most flushBatch sends,
-// each waiting at most publishTimeout for its OK, so a stalled relay never
+// Flush bounds for one pass: at most flushBatch sends, each waiting at most
+// publishTimeout for its OK, so a stalled relay never
 // holds the edge.
 const (
 	flushBatch     = 16
@@ -1287,22 +1281,21 @@ const (
 // matching OK. Before each send it re-checks that the output belongs to this
 // share (body and DM channel), that the enrolled generation still grants
 // its kind, and that gate (the verified membership) still admits export;
-// an output that fails stays owed and is never re-signed (codex #866 r1 #3,
-// #6). An unknown result or a lost connection stops the pass: the same
-// stored bytes are sent again next time, in order. A negative OK describes
-// that attempt only, so the output stays owed: its refusal and reason are
-// recorded and it is retried after a backoff (agent-message-queue-611.58).
-// Order is kept per request: a request's root row, edits, approval
-// messages and their edits go out in the order they were prepared (the
-// outbox sequence, never key text), and while an earlier output of a
+// an output that fails stays owed and is never re-signed. An unknown result
+// or a lost connection stops the pass: the same stored bytes are sent again
+// next time, in order. A negative OK describes that attempt only, so the
+// output stays owed: its refusal and reason are recorded and it is retried
+// after a backoff. Order is kept per request: a request's root row, edits,
+// approval messages and their edits go out in the order they were prepared
+// (the outbox sequence, never key text), and while an earlier output of a
 // request is owed (refused or not yet due), that request's later outputs
 // wait; other requests' outputs still go out. A root whose positive OK was
 // lost and whose retry the relay refuses as too old stays owed and holds
 // its request's later outputs until has, when given, finds the exact signed
 // event on the relay: verified presence proves the earlier send was stored,
 // so the output is accepted and its request's later outputs go out; a lookup
-// that fails or finds nothing leaves it owed (agent-message-queue-611.59).
-// The ledger lock is not held while a send waits.
+// that fails or finds nothing leaves it owed. The ledger lock is not held
+// while a send waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, has EventLookup, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
@@ -1314,7 +1307,7 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, has EventLookup, gat
 	waiting := map[string]bool{} // requests whose earlier output is still owed
 	// Outputs written before sequence numbers (Seq 0) have no provable order
 	// within their request: while any of them is refused and waiting out its
-	// backoff, the request's other old outputs wait too (Pro review of #971).
+	// backoff, the request's other old outputs wait too.
 	for _, o := range pending {
 		if o.Seq == 0 && o.Binding == c.share() && !o.Due(c.now()) {
 			waiting[outputGroup(o.Key)] = true
@@ -1333,7 +1326,7 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, has EventLookup, gat
 			continue
 		}
 		if sent == flushBatch {
-			return nil // only eligible sends count (codex #866 r2 #8)
+			return nil // only eligible sends count
 		}
 		var evt nostr.Event
 		if err := json.Unmarshal(o.Event, &evt); err != nil {
@@ -1424,8 +1417,8 @@ func outputGroup(key string) string {
 }
 
 // rowTags and editTags are the only place row tags are built (relay design
-// B2/B3, slice 4 contract §3): a row lives in the owner DM channel (h),
-// addresses the owner (p) and replies to the owner's input event (e ...
+// §3): a row lives in the owner DM channel (h), addresses the owner (p) and
+// replies to the owner's input event (e ...
 // reply) when it has one, naming the input's thread root (e ... root) when
 // the input was itself a reply; an edit names its original row (e) in the
 // same channel.
@@ -1457,7 +1450,7 @@ func sessionText(s protocol.Session) string {
 
 // snapshotText renders one revision of a request for its row: target, state,
 // code and reason, then the result, shortened with an explicit marker. The
-// request ref is an internal id and never shown to the owner (611.52).
+// request ref is an internal id and never shown to the owner.
 func snapshotText(s protocol.Snapshot, reason string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %s", s.TargetID, s.State)
@@ -1466,8 +1459,7 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 	}
 	if reason != "" {
 		// The reason is adapter text (a stored refusal); render it inert so
-		// the DM renderer cannot decode entities or autolink URLs inside it
-		// (review of #972 r2).
+		// the DM renderer cannot decode entities or autolink URLs inside it.
 		fmt.Fprintf(&b, ": %s", protocol.InertInline(reason))
 	}
 	if s.Result != nil && s.Result.Text != "" {

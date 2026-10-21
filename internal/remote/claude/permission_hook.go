@@ -13,15 +13,15 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// PermissionRequest hook (bead 611.42.3). Claude Code runs it for every
-// tool permission dialog. It raises a request for a tool call of a prompt
+// PermissionRequest hook. Claude Code runs it for every tool permission
+// dialog. It raises a request for a tool call of a prompt
 // that an AMQ run owns in a pinned session, and decides only where a relay
 // share with approve is serving (an observe-only pin shows, never decides);
 // everywhere else it exits at once with no output, so the normal dialog
 // decides. It never exits 2 (not honored for this event). It prints deny
 // for the owner's Buzz answer bound to this exact call. It prints allow
-// only with proof (bead 611.42.4): its command line pins the owner's
-// pubkey and the AMQ root whose manifest names the share, the call is
+// only with proof: its command line pins the owner's pubkey and the AMQ root
+// whose manifest names the share, the call is
 // shown whole, the answer carries the owner's signed approve reaction on
 // that share's approval message whose content is the hook's own rendering
 // of this call, and the hook's own read of the relay finds no edit that
@@ -209,8 +209,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 			} else if _, refused := rejectedRecord(h.home, in.SessionID, id, evidence); refused {
 				// A refusal of this proof, forged or not, came before the
 				// allow verdict: the endpoint may have dropped the intent
-				// and taken a ❌ (611.42.6, Pro review of #986 r1). The
-				// proof never applies.
+				// and taken a ❌. The proof never applies.
 				option = ""
 			}
 		}

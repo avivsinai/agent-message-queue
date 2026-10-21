@@ -100,8 +100,8 @@ type sessionState struct {
 
 // turnState is one prompt turn. Its terminal outcome is decided exactly once,
 // under Server.mu, by whichever of reply, cancel, stream close or timeout
-// settles it first (codex ebo PR2 consult): a reply read after a cancel
-// cannot overturn the cancel, and a cancel after a reply is a no-op.
+// settles it first: a reply read after a cancel cannot overturn the cancel,
+// and a cancel after a reply is a no-op.
 type turnState struct {
 	// timing is set when the prompt starts and fixed for the turn; nil means
 	// the startup values.
@@ -381,8 +381,8 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 	case "session/set_model":
 		return s.setModel(params)
 	case "_session/steering":
-		// A mailbox-binding turn takes follow-up DMs (bead
-		// agent-message-queue-cfy); every other remote turn refuses.
+		// A mailbox-binding turn takes follow-up DMs; every other remote turn
+		// refuses.
 		if s.cfg.RemoteBinding {
 			return s.mailboxSteering(params)
 		}
@@ -509,9 +509,9 @@ const bindingModelPrefix = "amq-remote:"
 
 // models lists the destinations this process can serve. In binding mode the
 // plain "amq-remote" model comes first, then one model per named binding, so
-// an existing agent's configured model still picks its own session (bead
-// agent-message-queue-611.39). The plain model selects nothing: the agent's
-// pin decides, and an unpinned agent drives the only binding or refuses.
+// an existing agent's configured model still picks its own session. The plain
+// model selects nothing: the agent's pin decides, and an unpinned agent
+// drives the only binding or refuses.
 func (s *Server) models() []modelInfo {
 	if !s.cfg.RemoteBinding {
 		return []modelInfo{s.model()}
@@ -721,9 +721,9 @@ func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpc
 // beginPrompt validates a session/prompt and reserves its turn. It runs on
 // the reader goroutine before the prompt's own goroutine starts, so a
 // session/cancel or steer read right after the prompt always finds the turn
-// (codex #860: reserving inside the goroutine let an immediate cancel see no
-// turn and be lost). It returns a run function for the slow part (delivery
-// and the bounded wait), or an immediate result or error.
+// (reserving inside the goroutine would let an immediate cancel see no turn
+// and be lost). It returns a run function for the slow part (delivery and the
+// bounded wait), or an immediate result or error.
 func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error) (any, *rpcError), any, *rpcError) {
 	s.mu.Lock()
 	ready := s.ready
@@ -920,8 +920,8 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, bool, error) {
 	// Only a reply that refs this turn's prompt answers it. Time and thread
 	// alone let a late answer to a cancelled prompt complete the next one
-	// (codex ebo PR2 consult). amq reply sets refs to the answered message
-	// plus its refs, so a reply to an in-turn steer, which refs the prompt,
+	// amq reply sets refs to the answered message plus its refs, so a reply
+	// to an in-turn steer, which refs the prompt,
 	// also qualifies.
 	hits, err := scan.replies(s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
@@ -1165,7 +1165,7 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
 	// A turn whose prompt is still being delivered has no identity yet;
-	// wait for it rather than classify the steer as idle (codex #860).
+	// wait for it rather than classify the steer as idle.
 	if t := session.turn; t != nil && t.outcome == "" && t.prompt == "" {
 		ready := t.ready
 		s.mu.Unlock()
@@ -1193,7 +1193,7 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 	case delivery.Duplicate:
 		// A replayed steer: nothing new was delivered, and the original
 		// delivery mode belongs to the original event, not to the session's
-		// current state (codex #860 P2).
+		// current state.
 		outcome = SteeringDuplicate
 	case turnPrompt != "":
 		outcome = SteeringInjected

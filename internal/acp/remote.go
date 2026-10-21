@@ -28,7 +28,7 @@ const remoteStateDir = "extensions/remote"
 const remoteAdmitWithin = 2 * time.Minute
 
 // busyRetryPause is the gap between busy submit retries. A 10-minute turn
-// budget must not become thousands of submit IPCs (Claude #889 P3).
+// budget must not become thousands of submit IPCs.
 const busyRetryPause = time.Second
 
 // remotePromptResult is a prompt turn run against one amq-remote target. The
@@ -56,8 +56,7 @@ type remoteMeta struct {
 	Truncated  bool   `json:"truncated,omitempty"`
 	// Posted is "posted" when the owner-facing text was published into the
 	// Buzz channel, "duplicate: ..." when an earlier delivery or the
-	// late-reply sweep already posted it, or the post error (bead
-	// agent-message-queue-611.38).
+	// late-reply sweep already posted it, or the post error.
 	Posted string `json:"posted,omitempty"`
 }
 
@@ -117,7 +116,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		return nil, newRPCError(codeInternalError, "request id: %v", err)
 	}
 	// A cancel while queued is durable. A later delivery of the same event
-	// answers cancelled and submits nothing (Claude #889 P2).
+	// answers cancelled and submits nothing.
 	if s.eventCancelled(eventID) {
 		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: remoteMeta{Reason: "session_cancelled"}}}, nil
 	}
@@ -159,15 +158,14 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		emit:      emit,
 		turn:      turn,
 		// The exact reference exists before any IPC, so an unknown submit
-		// outcome still names the request (codex #876 P1 #2).
+		// outcome still names the request.
 		meta: remoteMeta{Target: target, RequestRef: protocol.EncodeRef(ipc.LocalHost, target, id)},
 	}
 
 	// A redelivered event follows its stored request, whatever the target's
-	// epoch is now (codex #876 P2 #4). A busy-rejected record is resubmitted
-	// under its stored epoch, so the endpoint's own retry rule decides it
-	// (codex #876 r2 P2 #4). A failed lookup proves nothing about absence
-	// (codex #876 r2 P1 #2).
+	// epoch is now. A busy-rejected record is resubmitted
+	// under its stored epoch, so the endpoint's own retry rule decides it. A
+	// failed lookup proves nothing about absence.
 	epoch := ""
 	if eventID != "" {
 		rep, err := r.get()
@@ -192,7 +190,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 	}
 	// root, target and native stay the values captured above for every
-	// retry, so a rebind during the wait cannot move this turn (611.34).
+	// retry, so a rebind during the wait cannot move this turn.
 	deadline := time.Now().Add(r.s.timing(r.turn).timeout)
 	queued := false
 	var last protocol.Snapshot
@@ -212,7 +210,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if err != nil {
 			// Unreachable and unshared refuse before the endpoint sees the
 			// command. Any other error may follow a native run, so the exact
-			// record decides (codex #876 P1 #2).
+			// record decides.
 			if hasCode(err, protocol.CodeEndpointUnreachable) || hasCode(err, protocol.CodeUnshared) {
 				return r.failed(remoteNotSubmitted, err)
 			}
@@ -220,8 +218,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			switch {
 			case gerr == nil && retryableBusy(stored.Snapshot):
 				// A lost reply to a submit the endpoint refused as busy: the
-				// stored tombstone is retried like a busy reply (review of
-				// #959 r3).
+				// stored tombstone is retried like a busy reply.
 				rep = stored
 				rep.Outcome.Code = protocol.CodeBusy
 			case gerr == nil:
@@ -266,7 +263,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 
 // stoppedBeforeAdmit ends a queued turn that was never admitted. It does not
 // submit again and does not ask the endpoint to cancel: a busy tombstone
-// never started a native run (611.34).
+// never started a native run.
 func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) (any, *rpcError) {
 	if outcome == "session_cancelled" {
 		if err := r.s.recordEventCancel(r.eventID); err != nil {
@@ -328,11 +325,10 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 }
 
 // sessionBinding is the binding this ACP session drives: the agent's pin
-// (lifecycle.go), else the model the session selected (session/set_model,
-// bead agent-message-queue-611.39), else the only binding there is. A
-// selection that disagrees with the pin refuses. An unpinned agent with
-// several bindings never guesses, and the helper never delivers: both answer
-// with the bound sessions instead.
+// (lifecycle.go), else the model the session selected (session/set_model),
+// else the only binding there is. A selection that disagrees with the pin
+// refuses. An unpinned agent with several bindings never guesses, and the
+// helper never delivers: both answer with the bound sessions instead.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if s.cfg.PinErr != nil {
 		return binding.Binding{}, s.cfg.PinErr
@@ -369,8 +365,8 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event
 // follows the binding its first delivery recorded, never the current one,
-// so a rebind between deliveries cannot run the event twice in two sessions
-// (codex #885 P1 #1). A first delivery records its binding before submit.
+// so a rebind between deliveries cannot run the event twice in two sessions.
+// A first delivery records its binding before submit.
 func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error) {
 	if eventID == "" {
 		return s.sessionBinding(sessionID)
@@ -389,7 +385,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		}
 		// A claim can be visible before its directory entry is durable. Every
 		// reader makes it durable before it submits, so a crash cannot lose
-		// the claim behind a submission (codex #885 r3 P1).
+		// the claim behind a submission.
 		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
 			return binding.Binding{}, err
 		}
@@ -407,8 +403,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	}
 	// The first delivery claims the event exclusively. A concurrent first
 	// delivery that loses reads the winner's binding and never uses the one
-	// it captured, so all deliveries of one event share one session
-	// (codex #885 r2 P1).
+	// it captured, so all deliveries of one event share one session.
 	won, err := createExclusive(path, raw)
 	if err != nil {
 		return binding.Binding{}, err
@@ -422,7 +417,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 // eventClaim is an event's first-delivery record: the binding it runs
 // under, and the Buzz agent that claimed it. Agents share remote-events, and
 // one Buzz event can reach several agents (a channel they all belong to), so
-// an agent follows and sweeps only its own claims (review of S3 P1-2, P1-3).
+// an agent follows and sweeps only its own claims.
 type eventClaim struct {
 	binding.Binding
 	Name  string `json:"name,omitempty"`
@@ -459,7 +454,7 @@ func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remo
 
 // eventDir is the directory of one event's state. Each Buzz agent keeps its
 // own, remote-events/<agent pubkey>/, because one Buzz event can reach
-// several agents, and each handles it for its own session (#1068). State
+// several agents, and each handles it for its own session. State
 // written before lives in remote-events itself; an event whose claim is
 // there and is this agent's stays there. A process with no Buzz identity
 // uses remote-events itself.
@@ -558,15 +553,15 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	mirror := r.startMirror(snap.RequestRef)
 	defer mirror.finish(0)
 
-	// Pending tool approvals are shown in the DM while the turn runs
-	// (611.42.2). Deferred first, so watchers stop after the wait loop.
+	// Pending tool approvals are shown in the DM while the turn runs.
+	// Deferred first, so watchers stop after the wait loop.
 	approvals := newApprovals(r, r.postChannel(), buzzOwner)
 	defer approvals.close()
 	approvals.observe(snap)
 
 	// The goroutine reads only these immutable values; snap belongs to the
-	// consumer loop below (codex #876 r2 P1 #1). It waits past each revision
-	// it saw, so a pending interaction ends a wait, and stops once the
+	// consumer loop below. It waits past each revision it saw, so a pending
+	// interaction ends a wait, and stops once the
 	// request is terminal or uncertain.
 	ref, native, timeout, after := snap.RequestRef, r.native, r.s.timing(r.turn).heartbeat.Milliseconds(), snap.Revision
 	waits := make(chan remoteWait, 1)
@@ -656,8 +651,8 @@ func echoed(streamed, answer string) bool {
 var mirroredUpdates = map[string]bool{"agent_message_chunk": true, "tool_call": true, "tool_call_update": true, "plan": true}
 
 // remoteMirror relays the native activity of one running request into the
-// ACP session (bead agent-message-queue-611.40): streamed text, tool calls
-// and plan updates, read from the endpoint's activity stream under the
+// ACP session: streamed text, tool calls and plan updates, read from the
+// endpoint's activity stream under the
 // turn's native pin. The stream is read-only, and only session/update
 // notifications leave it, so it can never submit, cancel or approve. A
 // stream that fails, or an endpoint without one, leaves the turn as it was.
@@ -748,8 +743,8 @@ func (r *remoteTurn) settle(outcome string) string {
 }
 
 // settled renders the turn once its outcome stands. The first settled
-// outcome wins on every path (codex #876 P2 #5): a cancel that won is
-// reported even when the request later completed.
+// outcome wins on every path: a cancel that won is reported even when the
+// request later completed.
 func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcError) {
 	r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
 	switch outcome {
@@ -791,7 +786,7 @@ func retryableBusy(snap protocol.Snapshot) bool {
 // snapKind is postFinal only for a terminal request state that no later
 // delivery retries (a busy refusal is retried). An uncertain
 // request can still resolve to an answer, so its notice is a status text
-// and never takes the final-answer marker (review of #959 r2).
+// and never takes the final-answer marker.
 func snapKind(snap protocol.Snapshot) string {
 	if snap.State.Terminal() && !retryableBusy(snap) {
 		return postFinal
@@ -801,8 +796,7 @@ func snapKind(snap protocol.Snapshot) string {
 
 // cancel asks the endpoint to cancel the exact request under the epoch it was
 // stored with. The disposition comes from the reply's outcome or, for the
-// usual path, its snapshot (codex #876 P1 #1). Work that keeps running is
-// said so.
+// usual path, its snapshot. Work that keeps running is said so.
 func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
 	r.meta.Reason = "session_cancelled"
 	if snap.State.Terminal() {
@@ -896,10 +890,9 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
-// postOnce publishes text into channel at most once per event and kind
-// (review F7), and never posts a status after the event's final text
-// (review of #961). Both go through the per-event post lock
-// remote-events/<event>.post.lock:
+// postOnce publishes text into channel at most once per event and kind, and
+// never posts a status after the event's final text. Both go through the
+// per-event post lock remote-events/<event>.post.lock:
 //   - final: under the lock, reserve the final marker; release; then post.
 //     The lock is not held across the network.
 //   - status: under the lock, skip if the final marker exists or the status

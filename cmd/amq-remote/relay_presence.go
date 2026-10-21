@@ -17,8 +17,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// presenceShare is one share's Buzz presence (611.17 slice 2): the body's
-// kind 0 profile and kind 10100 status, plus a read of the owner's kind
+// presenceShare is one share's Buzz presence: the body's kind 0 profile and
+// kind 10100 status, plus a read of the owner's kind
 // 30177 policy that Desktop needs to list the body as owned. The relay only
 // accepts events its authenticated key authored, so the owner's 30177 is
 // published by the owner's own client; AMQ reads and reports it.
@@ -36,7 +36,7 @@ type presenceShare struct {
 }
 
 // presencePublishTimeout bounds one presence publication's wait for its OK,
-// so one missing OK never stalls status or policy refresh (codex #867 r1).
+// so one missing OK never stalls status or policy refresh.
 const presencePublishTimeout = 10 * time.Second
 
 // presenceTick is how often a live connection re-derives the status from
@@ -59,7 +59,7 @@ func (ps *presenceShare) set(state, discovery string) {
 
 // view is the presence state and discovery for status. Until the profile
 // is published the state is the profile's problem, never a status that
-// would read ready without an ownership profile (codex #867 r1).
+// would read ready without an ownership profile.
 func (ps *presenceShare) view() (string, string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()

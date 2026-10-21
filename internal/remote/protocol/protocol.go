@@ -52,7 +52,7 @@ const (
 	// MaxInputBytes bound RAW text, so without this factor they bound nothing
 	// about the ENCODED record: 512 KiB of newline-heavy log output encodes to
 	// 1.5x, quote-heavy to 2x, control-heavy to 6x, and the store refused all
-	// three as storage_full on a healthy disk (Pro B5, measured).
+	// three as storage_full on a healthy disk.
 	jsonWorstCaseExpansion = 6
 	// MaxRecordBytes bounds one durable request record on disk and on the wire.
 	// It is derived, not tuned: the worst-case encoding of a full-size result
@@ -71,7 +71,7 @@ const (
 	// re-admitted (busy) or answered result_expired rather than redispatched.
 	// The horizon bounds total store growth without deleting dedup state for
 	// active epochs — compaction never reaps a record that still owes an ack
-	// or an unpublished revision (611.22.19 BK4).
+	// or an unpublished revision.
 	DefaultCompactHorizon = 6 * time.Hour
 
 	// DefaultMaxStoreBytes is the production aggregate quota across every
@@ -79,7 +79,7 @@ const (
 	// targets). It is the total-state bound that complements the per-record
 	// MaxRecordBytes size limit: a store at quota refuses new records with
 	// storage_full before dispatch, while local native harness work is
-	// unaffected because it does not pass through this store (611.22.19 BK4).
+	// unaffected because it does not pass through this store.
 	// Tombstones for active epochs are never deleted to make space; the
 	// quota refuses rather than evicting dedup identity.
 	DefaultMaxStoreBytes int64 = 64 * 1024 * 1024
@@ -543,8 +543,7 @@ const RefPrefix = "amqr1_"
 // the fixed UUID request_id and the two NUL separators, base32-encoded without
 // padding (8 chars per 5 bytes, rounded up), plus the RefPrefix. The regex and
 // the schemas use this as the upper bound so a receipt for a max-size key
-// always round-trips (BK6: the previous 200-char cap rejected valid max-size
-// refs of up to 477 chars).
+// always round-trips (a max-size ref is up to 477 chars).
 const MaxRefLen = len(RefPrefix) + (MaxOpaqueLen*2+uuidLen+2+4)/5*8
 
 var refRe = regexp.MustCompile(`^amqr1_[a-z2-7]{16,` + strconv.Itoa(MaxRefLen) + `}$`)
@@ -596,10 +595,9 @@ const digestPrefix = "sha256:"
 // canonical form is JSON with the keys in the FIXED ORDER listed below and no
 // insignificant whitespace, so every carrier agrees on the bytes. The order is
 // deliberately NOT alphabetical: it is the declaration order of digestPayload,
-// which is what Go's encoder emits. An earlier version of this comment said
-// "object keys sorted", which the implementation never did — a non-Go carrier
-// that followed it would sort the keys, compute a different digest, and turn
-// every idempotent retry into request_conflict. A retry with a changed epoch or not_after (or
+// which is what Go's encoder emits; a non-Go carrier that sorted the keys
+// would compute a different digest and turn every idempotent retry into
+// request_conflict. A retry with a changed epoch or not_after (or
 // input) yields a different digest and is request_conflict; a retry that
 // recovers the original command bytes yields the same digest. The digest
 // excludes revision/state/result — those are server-derived, not part of the
@@ -674,8 +672,7 @@ func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
 // one — the same outcome digests differently across a restart. Both sides of
 // the ack-digest comparison must compute the digest over the same bounded
 // shape: call sites that compare a memoed ack digest (bound from the live
-// result) against re-read evidence digest that evidence through this helper
-// (agent-message-queue-611.22.34 B2, digest instability root cause).
+// result) against re-read evidence digest that evidence through this helper.
 func EvidenceDigestStable(r *Result) string {
 	if r == nil {
 		return ""
@@ -705,7 +702,7 @@ func EvidenceDigest(r *Result) string {
 // migrating records. omitempty is intentionally absent on submit-required
 // fields so the canonical shape is identical for every valid submit.
 //
-// B10: NotAfter is NOT in the digest. A deadline is POLICY about the
+// NotAfter is NOT in the digest. A deadline is POLICY about the
 // request, not its identity. Including it means a retry with a fresh
 // deadline (the normal case) changes the digest and hits request_conflict.
 // The stored record's NotAfter governs; a retry with any deadline matches
@@ -957,9 +954,9 @@ func BoundReason(s string) string {
 // renderer (Buzz uses remark with remark-gfm) re-interprets plain text: it
 // decodes HTML entities ("&#x202E;" becomes a bidi override) and autolinks
 // URLs, so character filtering alone cannot make text safe. The text is
-// first passed through BoundReason — filtering alone cannot make text inert
-// (review of #972 r3): an ASCII "&#x202E;" passes filtering and the renderer
-// decodes it back into a bidi override, and a URL survives to be
+// first passed through BoundReason — filtering alone cannot make text inert:
+// an ASCII "&#x202E;" passes filtering and the renderer decodes it back into
+// a bidi override, and a URL survives to be
 // GFM-autolinked — but it strips controls, invisible and line-breaking
 // runes and collapses whitespace, which a code span needs anyway: a newline
 // would end the span's line, and a blank line plus a link would let

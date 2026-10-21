@@ -18,7 +18,7 @@ import (
 // entry per live or recently live session.
 const maxDiscoverEntries = 512
 
-// discoverer lists attachable Claude Code sessions (bead 611.13): every
+// discoverer lists attachable Claude Code sessions: every
 // <pid>.json registry entry under ~/.claude/sessions that is interactive,
 // has a live pid, and exposes a messaging socket. It reads through the
 // same bounded, lstat-gated registry reader as Attach and never attaches.
@@ -36,7 +36,7 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 		}
 		home = h
 	}
-	// Bounded enumeration (codex #858): read the directory in batches and
+	// Bounded enumeration read the directory in batches and
 	// stop after maxDiscoverEntries names, reporting the scan incomplete
 	// instead of silently hiding live sessions behind stale rows.
 	dir, err := openSessionsDir(claudeSessionsDir(home))
@@ -89,7 +89,7 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 		}
 		// Target is always claude:<pid>: unique per process and protocol
 		// valid. Session names can repeat across sessions, so the name is
-		// display text only (codex 611.13 consult, requirement 3).
+		// display text only.
 		cfg, _ := json.Marshal(map[string]int{"pid": pid})
 		out = append(out, registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), Display: reg.Name, Config: cfg})
 	}

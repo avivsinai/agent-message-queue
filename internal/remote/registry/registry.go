@@ -3,9 +3,9 @@
 // keyed by its kind name. serve builds its attachment set from the manifest
 // via Build, never editing serve itself for a new adapter.
 //
-// An optional Discoverer interface lets adapters (.11 Codex app-server socket
-// discovery) list candidates without editing serve; serve --discover lists
-// candidates and attaches nothing.
+// An optional Discoverer interface lets adapters (such as Codex app-server
+// socket discovery) list candidates without editing serve; serve --discover
+// lists candidates and attaches nothing.
 package registry
 
 import (
@@ -179,7 +179,7 @@ type Diagnostic struct {
 // Discover lists candidates from all registered discoverers. serve --discover
 // calls this and attaches nothing. Discoverers are independent: one that
 // fails or is incomplete becomes a Diagnostic and never discards another's
-// candidates (codex #858).
+// candidates.
 func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, []Diagnostic) {
 	factMu.RLock()
 	kinds := make([]string, 0, len(discs))

@@ -1,26 +1,21 @@
-// Package claude is the Claude Code adapter factory (bead 611.12, PR1).
-// It registers the kind:"claude" factory so a manifest entry
+// Package claude is the Claude Code adapter factory. It registers the
+// kind:"claude" factory so a manifest entry
 // `{"kind":"claude","target":"<name>","config":{...}}` builds a
 // claudeAttachment without editing serve.
 //
-// PR1 scope (architect ruling 10:59Z, recut per review-852-r1): the
-// adapter skeleton, file-only inspect (session registry + transcript
-// tail — NO child process is ever spawned from Inspect), and an HONEST
-// capability projection — submit is advertised false and refusal-only
-// until PR2 wires the pinned 611.2 wire
-// (docs/research/r0-03-cc-socket-wire-capture.md, merged at 17bff18).
-// No keystrokes, no print child, no `claude -p` fallback, no process
-// ownership (ADR invariant 1). The Stop-hook installer is DEFERRED to
-// PR2 together with its receiver subcommand (review-852-r1 P1-3: an
-// installed hook whose command does not exist would exit 2, Claude
-// Code's blocking-error code — the opposite of failing open).
+// Inspect is file-only (session registry + transcript tail): NO child
+// process is ever spawned from Inspect. The capability projection is
+// HONEST: submit goes over the pinned socket wire
+// (docs/research/r0-03-cc-socket-wire-capture.md). No keystrokes, no print
+// child, no `claude -p` fallback, no process ownership (ADR invariant 1).
+// The Stop-hook installer ships with its receiver subcommand: an installed
+// hook whose command does not exist would exit 2, Claude Code's
+// blocking-error code — the opposite of failing open.
 //
-// Evidence vocabulary (architect ruling 10:59Z; "delivered" does not
-// exist in the schema — #822 removed it): a socket ack alone is
-// TENTATIVE (bound, ownership not proven); the transcript user line is
-// SUBMITTED; the assistant turn starting (Stop-hook post or transcript
-// assistant line) is ADMITTED. PR1 issues none of these over a wire:
-// submit refuses before any side effect.
+// Evidence vocabulary ("delivered" does not exist in the schema): a
+// socket ack alone is TENTATIVE (bound, ownership not proven); the
+// transcript user line is SUBMITTED; the assistant turn starting
+// (Stop-hook post or transcript assistant line) is ADMITTED.
 package claude
 
 import (
@@ -57,7 +52,7 @@ type config struct {
 	// Home overrides the Claude home for tests; empty = os.UserHomeDir().
 	Home string `json:"home,omitempty"`
 	// Approve lets the owner answer tool approvals of AMQ runs from the
-	// Buzz DM, through the PermissionRequest hook (bead 611.42.3).
+	// Buzz DM, through the PermissionRequest hook.
 	Approve bool `json:"approve,omitempty"`
 	// ObserveApprovals shows the pending tool approval of an AMQ run as the
 	// request's interaction without letting any remote source answer it: the
@@ -92,7 +87,7 @@ type sessionRegistry struct {
 
 // maxRegistryBytes bounds the session-registry read: a real entry is well
 // under 1 KiB; anything larger on a local-process-writable path is refused
-// before it can stall a read under the endpoint mutex (r2 P1-1).
+// before it can stall a read under the endpoint mutex.
 const maxRegistryBytes = 64 << 10
 
 // Factory builds a claude Attachment from a registry.FactoryConfig.
@@ -139,8 +134,8 @@ func Attach(cfg config) (*Attachment, error) {
 	if reg == nil {
 		// No registry entry for the pid: a claude session we cannot identify
 		// is never attached (a missing registry file is "unknown session",
-		// not "no registry kind") (r3: readSessionRegistry now returns
-		// nil,nil on absence; Attach refuses it).
+		// not "no registry kind"): readSessionRegistry returns nil,nil on
+		// absence and Attach refuses it.
 		return nil, fmt.Errorf("claude adapter: pid %d has no session registry entry; refusing", cfg.Pid)
 	}
 	if reg.Kind != "" && reg.Kind != "interactive" {
@@ -190,13 +185,13 @@ func claudeSessionsDir(home string) string {
 
 // readSessionRegistry reads ~/.claude/sessions/<pid>.json.
 //
-// Trust boundary (r3 P2-1): this is a Claude-internal registry file on a
+// Trust boundary: this is a Claude-internal registry file on a
 // local-process-writable path, not an AMQ state leaf — so it does NOT get
 // the state-leaf lstat refusal. Instead the read goes through
 // readRegularBounded (safeopen.go): lstat gate, size bound before open,
 // no-follow non-blocking open, fstat recheck, and a LimitReader, so neither
 // a FIFO nor a growing file can stall or bloat a read under the endpoint
-// mutex (r2 P1-1, r3 P1).
+// mutex.
 func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
 	raw, err := readRegularBounded(path, maxRegistryBytes)
@@ -219,10 +214,8 @@ func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 // Attachment implements core.Attachment over the Claude Code surfaces.
 // It never injects keystrokes, never spawns a print child, and owns no
 // process (ADR invariant 1). Inspect performs NO child-process spawn: it
-// reads the session registry file only (review-852-r1 P0-1 — a spawn
-// under the endpoint mutex froze every target for the life of a hung
-// child; the roster poller moves to PR2 with the socket client, on a
-// ticker into a cached value).
+// reads the session registry file only (a spawn under the endpoint
+// mutex would freeze every target for the life of a hung child).
 type Attachment struct {
 	target string
 	cfg    config
@@ -269,7 +262,7 @@ type Attachment struct {
 	curGen uint64
 	// recoverFrom[key] is how far a restart-recovery scan has read for a
 	// key it has not found yet, so an uncertain record costs only the new
-	// transcript bytes on each reconcile tick (611.25).
+	// transcript bytes on each reconcile tick.
 	recoverFrom map[requests.Key]recoverScan
 	// released holds keys whose result the endpoint acknowledged: their
 	// delivery is still in the transcript, and recovery must never bring
@@ -303,11 +296,11 @@ type Attachment struct {
 
 // Inspect implements core.Attachment: the honest projection. Status is
 // the registry file's own status field, normalized to the projection
-// vocabulary {idle,busy,unknown,offline} (P2-1, mirroring codex
-// threadStatus); the pid is liveness-checked (P2-4 — a stale registry
-// left by a crashed session must not read "live" forever). PR2: submit
-// is advertised TRUE — the pinned 611.2 socket wire is wired (submit.go);
-// the interrupt-family seams remain false (no keystroke seam,
+// vocabulary {idle,busy,unknown,offline} (mirroring codex
+// threadStatus); the pid is liveness-checked (a stale registry left by a
+// crashed session must not read "live" forever). Submit is advertised
+// TRUE — the pinned socket wire is wired (submit.go); the interrupt-family
+// seams remain false (no keystroke seam,
 // docs/remote-compat.md §3). The projection's submit evidence is
 // submitted; per-run evidence is carried by Lookup.
 func (a *Attachment) Inspect() protocol.Session {
@@ -329,10 +322,10 @@ func (a *Attachment) Inspect() protocol.Session {
 		Status:             status,
 		PendingInteraction: pending,
 		ActiveRequestRef:   active,
-		// PR2: submit true over the pinned socket wire; the rest stay
+		// Submit is true over the pinned socket wire; the rest stay
 		// false — no interrupt seam without keystrokes.
 		// ApproveTool: DM approvals through the PermissionRequest hook, when
-		// the manifest opts in (bead 611.42.3).
+		// the manifest opts in.
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: false,
 			ApproveTool: a.cfg.Approve && noFollowSupported, AnswerQuestion: false, Steer: false,
@@ -350,7 +343,7 @@ func (a *Attachment) Inspect() protocol.Session {
 // normalizeStatus maps the registry's status vocabulary onto the
 // projection's {idle,busy,unknown,offline}. Unknown values — including a
 // hostile or future-vocabulary value from the local-process-writable
-// registry — map to "unknown", never published raw (P2-1).
+// registry — map to "unknown", never published raw.
 func normalizeStatus(s string) string {
 	switch s {
 	case "idle":
@@ -372,15 +365,14 @@ func (a *Attachment) NativeSessionID() string {
 // observe returns the projection status and, for a live registry entry, its
 // sessionId: the native identity relay sharing pins. It is a pure
 // filesystem read: the registry file's status field plus a pid liveness
-// check. No child process, no bound that can silently exceed its timeout
-// (P0-1).
+// check. No child process, no bound that can silently exceed its timeout.
 func (a *Attachment) observe() (string, string) {
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil {
 		return "offline", ""
 	}
 	if reg == nil {
-		// No registry entry (r3: missing-file path) — offline.
+		// No registry entry (missing-file path) — offline.
 		return "offline", ""
 	}
 	if alive, err := pidAlive(a.cfg.Pid); err != nil || !alive {
@@ -419,19 +411,14 @@ func (a *Attachment) trackBoundSession(sessionID string) {
 	}
 }
 
-// Submit implements core.Attachment. PR1 refuses before ANY side effect:
-// the endpoint gates on Capabilities.Submit=false before dispatch reaches
-// the adapter (internal/remote/core/endpoint.go), so this is the second,
-// adapter-side gate — fail closed twice rather than once.
-// PR2: implemented in submit.go over the pinned 611.2 wire.
+// Submit is implemented in submit.go over the pinned socket wire.
 
 // Lookup is implemented in submit.go over the retained run map.
 
 // CancelExact implements core.Attachment: typed refusal, never a zero
-// value (P2-3 — an empty Disposition would persist as a fake outcome).
+// value (an empty Disposition would persist as a fake outcome).
 // Claude Code has no user-level interrupt without keystrokes (pinned
-// evidence, docs/remote-compat.md §3), so cancellation is unsupported
-// even in PR2.
+// evidence, docs/remote-compat.md §3), so cancellation is unsupported.
 func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidence, error) {
 	return core.CancelEvidence{
 		Disposition: protocol.CancelUnsupported,
@@ -490,7 +477,7 @@ const maxReleased = 4096
 //
 // Unsubscribe is the attachment's end of life: the endpoint calls it when
 // the target is replaced, unregistered or shut down, so it also stops the
-// confirmation poller for good (codex #855 r2 item 6).
+// confirmation poller for good.
 func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 	a.mu.Lock()
 	a.eventSink = cb

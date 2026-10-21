@@ -38,7 +38,7 @@ const (
 )
 
 // curFailureCap is the consecutive identical-failure count after which a cur
-// entry is skipped on subsequent full sweeps (611.22.46). A persistently
+// entry is skipped on subsequent full sweeps. A persistently
 // unreadable entry (EACCES/EIO that never clears) is quarantined from the
 // sweep so it stops forcing a full O(cur) rescan every tick. A DIFFERENT
 // error resets the counter, so a transient EAGAIN that later changes still
@@ -62,10 +62,10 @@ type Carrier struct {
 	// curRecovered is set after the first full cur sweep (the crash-recovery
 	// scan). Steady-state reconciliation tracks only IDs THIS process claimed.
 	curRecovered bool
-	// curFailures tracks consecutive identical read failures per cur entry
-	// (611.22.46). A persistently unreadable entry (EACCES/EIO that never
-	// clears) previously kept curRecovered false forever, forcing a full
-	// O(cur) sweep every tick. Once an entry fails identically curFailureCap
+	// curFailures tracks consecutive identical read failures per cur entry.
+	// A persistently unreadable entry (EACCES/EIO that never
+	// clears) would keep curRecovered false forever and force a full O(cur)
+	// sweep every tick. Once an entry fails identically curFailureCap
 	// times, it is skipped on subsequent sweeps (quarantined from the sweep,
 	// not from correctness — amq tooling owns DLQ). A DIFFERENT error resets
 	// the count so a transient EAGAIN that later changes still retries.
@@ -87,16 +87,15 @@ type Carrier struct {
 	mu             sync.Mutex
 	// syncDirFaultForTest is a test hook that injects a fault into every
 	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
-	// can be tested for CommittedDurabilityError propagation (B10).
+	// can be tested for CommittedDurabilityError propagation.
 	syncDirFaultForTest func(dir string) error
 
 	// owedReceipts are DLQ receipts whose message already left inbox/new but
 	// whose receipt write failed. Nothing revisits a DLQ'd command, so the
 	// obligation is carried here and retried at the top of every ImportOnce;
-	// recoverDLQReceipts rebuilds it from the DLQ entries after a restart
-	// (agent-message-queue-611.22.36 packet 5b).
+	// recoverDLQReceipts rebuilds it from the DLQ entries after a restart.
 	owedReceipts map[string]receipt.Receipt
-	// Warn is called for non-fatal durability failures (B12). When a
+	// Warn is called for non-fatal durability failures. When a
 	// CommittedDurabilityError's SyncDir retry exhausts all attempts, the
 	// message IS in the mailbox (rename committed) but its fsync is
 	// unconfirmed — the carrier returns nil (PublishedRevision advances),
@@ -126,17 +125,17 @@ type ReplyRouter func(replyProject, replyTo string) (root, handle string, err er
 func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
 
 // SetSyncDirFaultForTest installs a fault into every DeliveryRoot the carrier
-// opens. Used by B10 regression tests to force a CommittedDurabilityError
+// opens. Tests use it to force a CommittedDurabilityError
 // through the real Publish path (which opens its own root internally).
 func (c *Carrier) SetSyncDirFaultForTest(fn func(dir string) error) {
 	c.syncDirFaultForTest = fn
 }
 
 // errNoReplyRoute reports that a cross-project reply cannot be routed.
-// The error wraps the specific cause. F5 distinguishes POISON (DLQ) from
-// TRANSIENT (stays in new): a poison error is about the message itself (no
-// router configured, unusable handle), while a transient error is about the
-// world right now (peer root or mailbox not available yet).
+// The error wraps the specific cause. The carrier distinguishes POISON (DLQ)
+// from TRANSIENT (stays in new): a poison error is about the message itself
+// (no router configured, unusable handle), while a transient error is about
+// the world right now (peer root or mailbox not available yet).
 var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
 
 // TransientRouteError marks a route error as TRANSIENT (the world is not
@@ -162,15 +161,14 @@ func (e *TransientRouteError) Unwrap() error { return e.err }
 // DLQ) rather than the WORLD RIGHT NOW (transient, stays in new).
 // The router declares transient failures by wrapping them in
 // TransientRouteError; everything else is poison. The carrier does NOT infer
-// from which function failed (B1: that approach missed the real router's
-// errors, which are the only path to peer-root-absent in production).
-// crossRoot reports whether a reply leaves the endpoint's own root: the
+// from which function failed: the real router's errors are the only path to
+// peer-root-absent in production. crossRoot reports whether a reply leaves
+// the endpoint's own root: the
 // caller named another project, or another session of this project
 // (reply_to carries a session component, handle@session). The CLI sets a
 // bare-handle reply_to only together with reply_project, so a bare handle
 // with no project is a same-root caller. importOne's route probe and
-// destination() must agree on this, so it is one predicate (B7,
-// agent-message-queue-611.22.35).
+// destination() must agree on this, so it is one predicate.
 func crossRoot(origin map[string]string) bool {
 	return strings.TrimSpace(origin["reply_project"]) != "" || strings.Contains(strings.TrimSpace(origin["reply_to"]), "@")
 }
@@ -250,7 +248,7 @@ func sourceHostFromOrigin(origin map[string]string) string {
 // drained receipt. A message the endpoint refuses is still claimed, with the
 // refusal in the receipt detail and a reply to the sender.
 //
-// D1: a per-message failure is NEVER a loop failure. ImportOnce's job is to
+// A per-message failure is NEVER a loop failure. ImportOnce's job is to
 // make progress on every message independently. One caller's bad header must
 // not stop another caller's work. Each message is classified as (a) handled,
 // (b) transient — leave in new, try next tick (storage refusal), or (c)
@@ -267,9 +265,9 @@ func (c *Carrier) ImportOnce() (int, error) {
 	defer func() { _ = root.Close() }()
 	err = c.flushOwedReceipts(root)
 	// The startup sweep runs BEFORE the new scan: otherwise the first tick
-	// sweeps the very entries it just claimed and answers them twice
-	// (agent-message-queue-611.22.36 packet 6b). Steady state reconciles
-	// only the entries this process claimed, after the scan.
+	// sweeps the very entries it just claimed and answers them twice.
+	// Steady state reconciles only the entries this process claimed, after
+	// the scan.
 	c.mu.Lock()
 	firstSweep := !c.curRecovered
 	c.mu.Unlock()
@@ -308,7 +306,7 @@ func (c *Carrier) ImportOnce() (int, error) {
 			n++
 		}
 	}
-	// Pro B09 cur recovery: a command claimed into cur that crashed between
+	// Cur recovery: a command claimed into cur that crashed between
 	// the claim and its receipt (or whose receipt write failed) is invisible
 	// to the new-scan above and would otherwise never be heard from again.
 	// Reconcile cur: emit any missing drained receipt, and make sure the
@@ -324,7 +322,7 @@ func (c *Carrier) ImportOnce() (int, error) {
 	// tick) thereafter, with no loss of coverage. If the process dies, the
 	// in-memory set is lost, and the next startup's full sweep catches
 	// exactly those.
-	// P2 #5: the first sweep runs regardless of the new-scan result. One
+	// The first sweep runs regardless of the new-scan result. One
 	// persistently failing importOne must NOT defer crash recovery indefinitely.
 	// The sweep is decoupled — it runs after the new-scan, not gated on it.
 	c.mu.Lock()
@@ -379,8 +377,8 @@ func (c *Carrier) ImportOnce() (int, error) {
 // whose receipt is missing is recovered (receipt emitted, outcome reply
 // reconstructed from the durable record — never re-executed).
 //
-// P0 #2 (D1 principle): a per-entry failure is NEVER a loop failure. One
-// unparseable receipt or read error must not abort the sweep, strand every
+// A per-entry failure is NEVER a loop failure. One unparseable receipt or
+// read error must not abort the sweep, strand every
 // entry sorted after it, and re-run the full O(cur) scan every tick. Skip
 // the entry, accumulate the error, finish the sweep.
 func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
@@ -401,7 +399,7 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 	sort.Strings(names)
 	var errs []error
 	for _, name := range names {
-		// 611.22.46: a cur entry whose source read has failed identically
+		// A cur entry whose source read has failed identically
 		// curFailureCap times is quarantined from the FULL recoverOne pass
 		// (receipt/ledger/reply work), so one permanently unreadable entry
 		// stops forcing the full O(cur) rescan's per-entry cost every tick.
@@ -440,8 +438,8 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 }
 
 // curFailureCapped reports whether a cur entry has failed identically at least
-// curFailureCap times and should be skipped on this sweep (611.22.46). Caller
-// holds c.mu is NOT required — this method locks.
+// curFailureCap times and should be skipped on this sweep. The caller need
+// not hold c.mu — this method locks.
 func (c *Carrier) curFailureCapped(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -508,7 +506,7 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 	for id, entry := range claimed {
 		receiptPath := filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", entry.msgID, c.me, receipt.StageDrained))
 		if _, err := receipt.ReadDeliveryRoot(root, receiptPath); err == nil {
-			// B8: receipt exists, but the reply may not have been delivered.
+			// Receipt exists, but the reply may not have been delivered.
 			// recoverOne writes the receipt BEFORE sending the reply, so a
 			// receipt-only state means the reply was lost. Re-run recoverOne
 			// to re-send the idempotent recovery reply. Only delete from the
@@ -545,7 +543,7 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 // unreadable stays capped (one cheap read probe); a capped entry whose source
 // is readable again clears the cap and runs the full recoverOne (emitting the
 // pending drained receipt + outcome reply). This is the bounded pending-entry
-// recovery path codex required: no full resweep, individual retry.
+// recovery path: no full resweep, individual retry.
 func (c *Carrier) recoverCappedCur(root *fsq.DeliveryRoot) error {
 	c.mu.Lock()
 	if len(c.pendingRecovery) == 0 {
@@ -613,12 +611,11 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	if err != nil {
 		// A malformed entry is not ours to fix (amq tooling owns DLQ) and an
 		// entry that vanished owes nothing. A FAILED read is the world being
-		// unavailable right now: report it so the sweep is retried
-		// (agent-message-queue-611.22.36 packet 6a).
+		// unavailable right now: report it so the sweep is retried.
 		if !readFailed(err) {
 			return nil
 		}
-		// 611.22.46: wrap as a source-read failure so recoverCur's cap applies
+		// Wrap as a source-read failure so recoverCur's cap applies
 		// ONLY here — not to receipt/ledger/reply failures below, which owe
 		// recovery work that must stay eligible every tick.
 		return &errCurSourceReadFailed{err: err}
@@ -654,8 +651,8 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// the ledger says. The ledger arms below return without reaching the
 	// later emit, and every claimed command has a ledger entry, so emitting
 	// here is the only place that closes the claim-to-receipt crash gap
-	// (gate finding on agent-message-queue-611.22.36, union 42d923a4). The
-	// receipt is idempotent: WriteFileAtomic overwrites.
+	// (a crash between the claim and the receipt would otherwise lose it).
+	// The receipt is idempotent: WriteFileAtomic overwrites.
 	if !hasReceipt {
 		detail := "remote command recovered from cur"
 		if derr != nil {
@@ -670,7 +667,7 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// answered with (a refusal for an undecodable body included) and whether
 	// that answer became visible. It is written
 	// before the claim, so a crash anywhere after it re-sends identical bytes
-	// under the same id (agent-message-queue-611.22.36 packets 6b and .37).
+	// under the same id.
 	if led, lerr := c.readLedger(msg.Header.ID); lerr != nil {
 		return lerr
 	} else if led != nil {
@@ -691,12 +688,12 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	//
 	// The receipt was emitted above, before the ledger and the reply.
 	//
-	// The reply is NOT gated on !hasReceipt. The receipt-first ordering used
-	// to gate the reply inside !hasReceipt, which created a lost-reply window:
-	// if the receipt landed but the reply did not (crash between the two),
-	// the next sweep saw hasReceipt=true and skipped the entry forever — the
-	// caller never got the outcome. The recovery reply is idempotent by
-	// construction (deterministic message id + resolvePublishCollision), so a
+	// The reply is NOT gated on !hasReceipt. The receipt-first ordering must
+	// not gate the reply inside !hasReceipt: if the receipt landed but the
+	// reply did not (crash between the two), the next sweep would see
+	// hasReceipt=true and skip the entry forever — the caller would never get
+	// the outcome. The recovery reply is idempotent by construction
+	// (deterministic message id + resolvePublishCollision), so a
 	// duplicate reply is free. ALWAYS attempt the reply, subject only to the
 	// PublishedRevision check (a separate and correct concern: if the outcome
 	// already went out via Publish, there is nothing to re-send).
@@ -720,7 +717,7 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	}
 	shouldReply := true
 	if cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel {
-		// P1 #4: if the outcome was already published (PublishedRevision >=
+		// If the outcome was already published (PublishedRevision >=
 		// Revision), the caller got it via Publish before the crash. Do not
 		// send a duplicate reply.
 		if key, ok := recoveredKey(cmd, origin); ok {
@@ -793,7 +790,7 @@ func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]stri
 	rec, ok, err := c.ep.Store().Get(key)
 	if err != nil {
 		// A failed read of our own record is not an outcome the caller can be
-		// told; leave the entry unrecovered and retry (packet 6a).
+		// told; leave the entry unrecovered and retry.
 		return nil, fmt.Errorf("recovered record read: %w", err)
 	}
 	if !ok {
@@ -805,7 +802,8 @@ func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]stri
 // importOne handles one message from inbox/new. Returns (handled, err):
 // handled=true means the message was claimed into cur (or DLQ'd); handled=false
 // means it was left in new for a retry (transient failure, or unparseable).
-// err is non-nil for errors that should be accumulated (D1: never aborts the scan).
+// err is non-nil for errors that should be accumulated (never aborts the
+// scan).
 func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", c.me, "inbox", "new", name))
 	if err != nil {
@@ -823,25 +821,25 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 		"reply_to":      msg.Header.ReplyTo,
 		"reply_project": msg.Header.ReplyProject,
 	}
-	// D2: probe the route ONLY when the caller is actually elsewhere (another
-	// project, or another session of this project — B7). A same-root caller
-	// takes the pre-existing path with the old tolerant handling of a missing
-	// or unusable From and never goes near the ReplyRouter. Probing BEFORE
-	// Handle means a prompt whose reply can never be delivered is not run.
+	// Probe the route ONLY when the caller is actually elsewhere (another
+	// project, or another session of this project). A same-root caller
+	// takes the tolerant path for a missing or unusable From and never goes
+	// near the ReplyRouter. Probing BEFORE Handle means a prompt whose reply
+	// can never be delivered is not run.
 	if crossRoot(origin) {
-		// F5: POISON vs TRANSIENT. Poison is a statement about the MESSAGE;
+		// POISON vs TRANSIENT. Poison is a statement about the MESSAGE;
 		// transient is a statement about the WORLD RIGHT NOW.
 		//   - Poison (DLQ): the message names a project we do not know, or
 		//     carries a handle that can never be valid. No retry can fix it.
 		//   - Transient (stays in new): the peer root does not exist YET, the
 		//     mailbox is not provisioned YET, the volume is unavailable. The
 		//     next tick may well succeed.
-		// D3 originally said "unroutable is poison" — that was too broad. This
-		// is the correction, and it is consistent with transientRefusal (below).
+		// Unroutable is therefore not poison by itself. This is consistent
+		// with transientRefusal (below).
 		_, _, closeProbe, rerr := c.destination(root, origin)
 		if rerr != nil {
 			if isPoisonRoute(rerr) {
-				// F4: emit a DLQ receipt so a caller using `send --wait-for
+				// Emit a DLQ receipt so a caller using `send --wait-for
 				// drained` does not wait forever on a consumed message. Every
 				// other DLQ site in this repo pairs the move with a receipt.
 				if _, dlqErr := fsq.MoveToDLQ(root, c.me, name, msg.Header.ID, "unroutable", rerr.Error()); dlqErr != nil {
@@ -850,7 +848,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 				rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDLQ, "unroutable: "+rerr.Error())
 				if rerr2 := receipt.EmitDeliveryRoot(root, rc); rerr2 != nil {
 					// The move succeeded: the command is gone from new and nothing
-					// revisits DLQ. The receipt is now an owed obligation (packet 5b).
+					// revisits DLQ. The receipt is now an owed obligation.
 					c.mu.Lock()
 					if c.owedReceipts == nil {
 						c.owedReceipts = map[string]receipt.Receipt{}
@@ -889,12 +887,12 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	// with storage_full (ENOSPC, EPERM, oversize) and store_closed (shutdown),
 	// and on every op except submit-create those travel as an ERROR from
 	// Handle rather than as an Outcome on a Reply — so checking only
-	// Outcome.Code (the previous guard) missed them, and classifying by TYPE
-	// answered "refused" and CLAIMED the command for a failure that says
-	// nothing about the request. Worst case: a cancel whose tombstone could
-	// not be written was answered as refused and claimed, and the later
-	// submit then EXECUTED the request the caller had cancelled. Classify by
-	// CODE, from either channel (agent-message-queue-611.22.13).
+	// Outcome.Code misses them, and classifying by TYPE would answer
+	// "refused" and CLAIM the command for a failure that says nothing about
+	// the request. Worst case: a cancel whose tombstone could not be written
+	// would be answered as refused and claimed, and the later submit would
+	// then EXECUTE the request the caller had cancelled. Classify by CODE,
+	// from either channel.
 	var outcome protocol.Outcome
 	if rep, ok := reply.(protocol.Reply); ok {
 		outcome = rep.Outcome
@@ -904,7 +902,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	}
 	// Reply once here for: every refusal; every non-request op; and a request
 	// op that carries an op-specific Outcome which does not travel as a
-	// published revision (Pro B09: the caller must still learn the outcome).
+	// published revision (the caller must still learn the outcome).
 	// The signal is a Code OR a Disposition: a no-op terminal cancel carries a
 	// disposition with an empty code and never publishes a revision, so keying
 	// on Code alone silently dropped its reply.
@@ -912,11 +910,11 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	hasOutcomeSignal := outcome.Code != "" || outcome.Disposition != ""
 	owesReply := herr != nil || !isRequestOp || hasOutcomeSignal
 	// Order: ledger, claim, receipt, reply. A reply sent before the claim is
-	// re-sent under a fresh id when the claim fails (.37); a claim before the
+	// re-sent under a fresh id when the claim fails; a claim before the
 	// ledger leaves a crash with nothing to re-send from. The ledger is the
 	// exact bytes, so every later attempt is byte-identical and a collision
 	// with an earlier attempt resolves as a no-op. A route failure here leaves
-	// the message in new for the next tick (D1).
+	// the message in new for the next tick.
 	if owesReply {
 		if err := c.recordAnswer(root, origin, msg.Header.ID, msg.Header.Created, reply, herr); err != nil {
 			return false, err
@@ -995,7 +993,7 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 			}
 			return own, to, noop, nil
 		}
-		// B7: another session of this project. Route through the router; a
+		// Another session of this project. Route through the router; a
 		// failure propagates (transient stays transient), never a silent
 		// fallback to our own root, which would deliver the reply to the
 		// wrong session.
@@ -1023,13 +1021,11 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 		if err != nil {
 			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 		}
-		// D4 (agent-message-queue-611.22.43): the cross-project arm below gates
-		// on ValidateExistingMailboxLayout so a peer root whose mailbox does
-		// not exist is never written into (no black-hole creation in someone
-		// else's root). The cross-session arm must do the same — a routed
-		// session root with a missing mailbox is unroutable, not a write
-		// target. Without this gate, a cross-session reply silently created
-		// the mailbox in the peer root, the very hole D4 closed one dir over.
+		// The cross-project arm below gates on ValidateExistingMailboxLayout
+		// so a peer root whose mailbox does not exist is never written into
+		// (no black-hole creation in someone else's root). The cross-session
+		// arm does the same: a routed session root with a missing mailbox is
+		// unroutable, not a write target.
 		if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
 			_ = peer.Close()
 			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
@@ -1041,7 +1037,7 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	}
 	rootPath, handle, err := c.router(project, origin["reply_to"])
 	if err != nil {
-		// B1: the router declares transient failures by wrapping them in
+		// The router declares transient failures by wrapping them in
 		// TransientRouteError. We MUST preserve that wrapper — using %v here
 		// would flatten it to a string and isPoisonRoute would never see it.
 		// If the router already returned a TransientRouteError, pass it through;
@@ -1063,10 +1059,10 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	if err != nil {
 		return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 	}
-	// D4: never create a mailbox in someone else's root. A peer root whose
-	// mailbox does not exist is unroutable (D3 applies). Creating it is
-	// exactly the black hole this PR set out to close, just moved one dir over.
-	// Every other cross-root writer gates on ValidateExistingMailboxLayout first.
+	// Never create a mailbox in someone else's root. A peer root whose
+	// mailbox does not exist is unroutable (transient, not poison); creating
+	// it would make a black hole in that root. Every other cross-root writer
+	// gates on ValidateExistingMailboxLayout first.
 	if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
 		_ = peer.Close()
 		return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
@@ -1075,7 +1071,7 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 }
 
 // replyWith delivers a reply message. On CommittedDurabilityError (visible
-// rename, unknown fsync), the fsync is retried in place (B12). The message is
+// rename, unknown fsync), the fsync is retried in place. The message is
 // already in the mailbox; re-delivery after consumption is never idempotent.
 func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
 	dest, to, closeDest, rerr := c.destination(root, origin)
@@ -1083,7 +1079,7 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		return rerr
 	}
 	defer closeDest()
-	// F1: an empty handle means NO REPLY IS OWED — destination() returned
+	// An empty handle means NO REPLY IS OWED — destination() returned
 	// (own, "", noop, nil) for a same-project caller with an unusable From.
 	// This is a SUCCESS, not a delivery to nobody. Without this early return,
 	// DeliverToInboxes(dest, []string{""}, ...) fails ValidateHandle(""),
@@ -1119,7 +1115,7 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		}
 		context["remote"] = json.RawMessage(text)
 	}
-	// B1: for Publish (revision publication), use a DETERMINISTIC message id
+	// For Publish (revision publication), use a DETERMINISTIC message id
 	// derived from (request_ref, revision) so a republish of the same
 	// immutable revision resolves to the SAME filename and identical bytes.
 	// resolvePublishCollision returns nil on a byte-identical collision, so
@@ -1132,10 +1128,10 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 	isPublish := body != nil && refusal == nil
 	if isPublish {
 		if snap, ok := body.(protocol.Snapshot); ok {
-			// B1 + ordering: the id must be deterministic per (request_ref,
+			// The id must be deterministic per (request_ref,
 			// revision) AND sort chronologically against ordinary AMQ message
 			// ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
-			// AFTER every 2026-* message, starving drain --limit 20. Fix:
+			// AFTER every dated message, starving drain --limit 20. Fix:
 			// stable timestamp first (from snap.ObservedAt, not time.Now —
 			// ObservedAt is identical on every retry of that revision, keeping
 			// the write idempotent), then the deterministic part, then a short
@@ -1194,7 +1190,7 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 // replyWithRecovery delivers a recovery reply with a DETERMINISTIC message id
 // derived from the command's message id, so recovering the same command twice
 // produces the IDENTICAL filename and bytes and resolvePublishCollision
-// returns nil on the second pass. The id shape mirrors B10's Publish id
+// returns nil on the second pass. The id shape mirrors the Publish id
 // (timestamp prefix for drain ordering, then a deterministic body) but uses
 // the command's message id as the digest source. Uses the same reply path
 // (same as the inline reply) — the recovery path has no retry amplification
@@ -1246,13 +1242,13 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 		recovered = now
 	}
 	stamp := recovered.UTC().Format("2006-01-02T15:04:05.000Z")
-	// B11: include the revision in the recovery reply ID so different
+	// Include the revision in the recovery reply ID so different
 	// revisions of the same command produce different filenames. Without
 	// this, a recovery that publishes the running snapshot and a later
 	// recovery that publishes the completed snapshot would collide on the
 	// same filename with different bytes — resolvePublishCollision rejects
 	// non-byte-identical collisions and retains a conflict temp file.
-	// B11: derive the suffix from the content hash (first 12 hex of
+	// Derive the suffix from the content hash (first 12 hex of
 	// sha256(encoded body)), not a type switch. Identical content -> same
 	// id -> no-op; different content -> both delivered. Handles refusal
 	// errors (protocol.Refuse) whose text varies.
@@ -1314,12 +1310,11 @@ func refusalCode(r *protocol.Refusal) protocol.Code {
 }
 
 // finalizeDelivery is the one committed-delivery tail for every reply the
-// carrier sends: publish, inline, recovery. "Visible == published" (B12,
-// agent-message-queue-611.22.35): a rename that succeeded but whose directory
-// fsync is unconfirmed is repaired in place, never re-delivered, because the
-// path is the message identity and re-delivery after consumption can never be
-// idempotent. Persistent failure is reported through Warn and still counts as
-// delivered.
+// carrier sends: publish, inline, recovery. "Visible == published": a rename
+// that succeeded but whose directory fsync is unconfirmed is repaired in
+// place, never re-delivered, because the path is the message identity and
+// re-delivery after consumption can never be idempotent. Persistent failure
+// is reported through Warn and still counts as delivered.
 func (c *Carrier) finalizeDelivery(dest *fsq.DeliveryRoot, to, id string, data []byte) error {
 	_, err := fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
@@ -1343,7 +1338,7 @@ func (c *Carrier) finalizeDelivery(dest *fsq.DeliveryRoot, to, id string, data [
 // retry) from an entry that is absent or malformed (nothing to retry).
 // errCurSourceReadFailed wraps a failure to read a cur entry's source
 // message file (format.ReadMessageFileRoot). It is the ONLY failure class
-// the 611.22.46 sweep cap suppresses: the file is present on disk but cannot
+// the sweep cap suppresses: the file is present on disk but cannot
 // be read (EACCES/EIO/ESTALE). Receipt writes, ledger reads, and reply
 // routing/delivery failures are NOT source-read failures — they owe
 // recovery work that must stay eligible every tick until it converges.
@@ -1381,11 +1376,9 @@ func (c *Carrier) ledgerDir() string {
 // the ledger file is built as <msgID>.json under ledgerDir, so an id carrying
 // a path separator, a dotfile prefix, "..", a NUL byte, or an absolute path
 // would escape the ledger directory (path traversal) or collide with the
-// wrong file. readLedger and writeLedger MUST both call this — writeLedger
-// had no validation at all, and readLedger returned (nil, nil) on an invalid
-// id, silently dropping a ledger that should have been re-delivered
-// (agent-message-queue-611.22.44). The id is the base name only; the .json
-// suffix is constructed internally and never taken from the caller.
+// wrong file. readLedger and writeLedger MUST both call this. The id is the
+// base name only; the .json suffix is constructed internally and never taken
+// from the caller.
 func validateLedgerID(msgID string) error {
 	if msgID == "" {
 		return fmt.Errorf("empty ledger id")
@@ -1410,10 +1403,9 @@ func validateLedgerID(msgID string) error {
 
 func (c *Carrier) readLedger(msgID string) (*replyRecord, error) {
 	if err := validateLedgerID(msgID); err != nil {
-		// 611.22.44: do NOT return (nil, nil) — that silently dropped a
-		// ledger lookup for a malformed id, so a reply that should have
-		// been re-delivered was treated as "no ledger" and a fresh one
-		// written over it. Surface the error so the caller can decide.
+		// Do NOT return (nil, nil): a malformed id would read as "no ledger"
+		// and a fresh one would be written over a reply that should be
+		// re-delivered. Surface the error so the caller can decide.
 		return nil, fmt.Errorf("reply ledger id: %w", err)
 	}
 	data, err := os.ReadFile(filepath.Join(c.ledgerDir(), msgID+".json"))
@@ -1432,9 +1424,8 @@ func (c *Carrier) readLedger(msgID string) (*replyRecord, error) {
 
 func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
 	if err := validateLedgerID(msgID); err != nil {
-		// 611.22.44: writeLedger had NO filename validation — an id carrying
-		// a path separator or ".." would write outside ledgerDir (path
-		// traversal). Reject before touching the filesystem.
+		// An id carrying a path separator or ".." would write outside
+		// ledgerDir (path traversal). Reject before touching the filesystem.
 		return fmt.Errorf("reply ledger id: %w", err)
 	}
 	if err := os.MkdirAll(c.ledgerDir(), 0o700); err != nil {
@@ -1454,7 +1445,7 @@ func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
 // DETERMINISTIC id: <command created>_reply_<command msg digest>_<body digest>.
 // Identical content re-sent for the same command lands on the same filename
 // and resolves as a no-op collision; different content (a later revision, a
-// different refusal) lands beside it (B11).
+// different refusal) lands beside it.
 func (c *Carrier) composeReply(origin map[string]string, to, subject string, body any, refusal error, cmdMsgID, msgCreated string) (string, []byte, error) {
 	now := c.now()
 	labels := []string{LabelRemote}
@@ -1529,7 +1520,7 @@ func (c *Carrier) recordAnswer(root *fsq.DeliveryRoot, origin map[string]string,
 	}
 	closeDest()
 	if to == "" {
-		return nil // no reply is owed (F1); nothing to record
+		return nil // no reply is owed; nothing to record
 	}
 	id, data, err := c.composeReply(origin, to, "remote reply", body, refusal, cmdMsgID, msgCreated)
 	if err != nil {

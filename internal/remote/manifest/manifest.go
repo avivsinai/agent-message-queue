@@ -2,12 +2,19 @@
 // of truth for which adapters a serve instance runs. The manifest lives at
 // <AM_ROOT>/extensions/remote/manifest.json (per docs/adr-layer-extensions.md
 // the extensions/<layer> directory is owned by the layer; the companion owns
-// extensions/remote). The --manifest flag overrides the path for tests only.
+// extensions/remote). The --manifest flag of serve and approve selects
+// another path.
 //
-// The manifest is intentionally passive for lifecycle: it is read at serve
-// start (cold reload). A target absent from the manifest on the next start is
-// not registered, and its live records reconcile as attachment_lost through
-// the existing Reconcile path. Hot-reload (SIGHUP) is a later bead.
+// Serve loads one snapshot at start, and that snapshot alone drives target
+// attachment, the Buzz DM carriers and the relay configuration. Serve does
+// not re-read the adapter list: attach adds a target to a running serve by
+// writing the manifest and registering the adapter live, and a target absent
+// from the manifest at the next start is not registered, so its live records
+// reconcile as attachment_lost. While serve runs, the relay reloads its
+// shares when the manifest bytes change (a changed relay url, relay_self or
+// share entry still needs a restart), and the link set syncs its links when
+// the manifest mtime changes. Every other command reads the manifest once per
+// invocation.
 //
 // Flags (--fake, --codex-socket) APPEND to the manifest set. A target id
 // present in both is a usage error (exit 2). The manifest never stores an
@@ -49,7 +56,7 @@ type File struct {
 	SchemaVersion int       `json:"schema_version"`
 	Layer         string    `json:"layer"`
 	Adapters      []Adapter `json:"adapters"`
-	// Relay is the optional Buzz relay surface (bead 611.15). Absent means
+	// Relay is the optional Buzz relay surface. Absent means
 	// no relay network traffic. It requires schema_version 2, so an older
 	// binary refuses the file instead of silently ignoring the object.
 	Relay *Relay `json:"relay,omitempty"`
@@ -189,7 +196,7 @@ func Load(path string) (File, error) {
 
 // strictRelay re-decodes the relay object refusing unknown fields: a typo
 // in a v2 relay or share field must be a usage error, never a silently
-// ignored setting (codex slice 1 review #8).
+// ignored setting.
 func strictRelay(data []byte) error {
 	var top struct {
 		Relay json.RawMessage `json:"relay"`
@@ -266,8 +273,8 @@ func (e *ErrMissingField) Error() string { return e.Field + " is required (" + e
 // ErrInvalidTarget is returned when a manifest target id is not a
 // protocol-valid opaque id. An entry Validate accepts must be addressable:
 // the endpoint registers it and every CLI submit is checked against the same
-// rule (protocol.validOpaque). Accepting "sales team" here produced a
-// session no client could reach (611.13 r4).
+// rule (protocol.validOpaque), so "sales team" is refused here instead of
+// becoming a session no client could reach.
 type ErrInvalidTarget struct {
 	Target string
 }
@@ -277,8 +284,8 @@ func (e *ErrInvalidTarget) Error() string {
 }
 
 // ErrInvalidEpoch is returned when a fake adapter's test-only epoch is not a
-// protocol-valid opaque epoch. The fake requires an epoch at submit time; an
-// accepted empty-epoch entry produced an unusable session (611.13 r4).
+// protocol-valid opaque epoch. The fake requires an epoch at submit time, so
+// an empty epoch would produce an unusable session.
 type ErrInvalidEpoch struct {
 	Target string
 	Epoch  string

@@ -37,7 +37,7 @@ var blockSize = int64(unsafe.Sizeof(claude.TranscriptBlock{}))
 
 // size is the bytes an item retains, for the queue's byte budget: for a
 // Claude note every string it holds plus the block array's full allocation,
-// cap times element size (codex #872 r1, r2).
+// cap times element size.
 func (it activityItem) size() int64 {
 	if it.codex != nil {
 		return int64(len(it.codex.Params)) // the method is an allowlisted name
@@ -83,8 +83,8 @@ func observerOf(att any) observeFunc {
 	return nil
 }
 
-// activityShare is one share's activity export (611.17 slice 3): Codex
-// notifications for the approved native thread become NIP-44 kind 24200
+// activityShare is one share's activity export: Codex notifications for the
+// approved native thread become NIP-44 kind 24200
 // frames to the owner. Export runs only while the target's attached native
 // session is the pinned one (relay design §2); it carries no control.
 type activityShare struct {
@@ -163,8 +163,8 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 	}
 }
 
-// Queue bounds (codex #871 r2): the read-pump callback admits a
-// notification only if its method is one the projection uses, the queue has
+// Queue bounds: the read-pump callback admits a notification only if its
+// method is one the projection uses, the queue has
 // room, the payload is at most activityItemBytes, and the queued payloads
 // stay within activityQueueBytes (the sink's per-body budget). Everything
 // else is dropped before any copy.
@@ -224,11 +224,11 @@ var errActivityFenced = errors.New("the attached session is not the one approved
 //
 // The observer callback runs on the Codex read pump, so it only copies the
 // notification into a bounded queue and never blocks, encodes, does I/O or
-// calls the endpoint (codex #871 r1 #2). A worker applies the native fence
-// and feeds the sink. Every publication re-checks the fence, and a mismatch
-// discards the rest of the queue (#1). Shutdown stops the observer and waits
+// calls the endpoint. A worker applies the native fence and feeds the sink.
+// Every publication re-checks the fence, and a mismatch
+// discards the rest of the queue. Shutdown stops the observer and waits
 // for the worker before the sink is released; only the worker feeds the
-// sink, so no late callback acts after cleanup (#3).
+// sink, so no late callback acts after cleanup.
 func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe observeFunc, identity func(string) string, warn io.Writer) {
 	target, pin := as.share.Target, as.share.NativeSessionID
 	fenced := func() bool { return identity(target) != pin }
@@ -275,7 +275,7 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 				} else {
 					// AcceptParsed also drains, through the fenced Publish;
 					// drainMu keeps it and the tick's Drain from publishing
-					// out of order (codex #872 r1).
+					// out of order.
 					pctx, cancel := context.WithTimeout(wctx, activityPublishTimeout)
 					drainMu.Lock()
 					err = sink.AcceptParsed(pctx, *it.claude)

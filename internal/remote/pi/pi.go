@@ -499,8 +499,8 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 
 // observeGenerationLocked applies the epoch rule: only receipts pin. Any
 // valid, different generation replaces the current pin — the code does NOT
-// order observations by receipt time (P2-A, review 816-r3): with two
-// concurrent readers, a stale read can momentarily regress the pin. The
+// order observations by receipt time: with two concurrent readers, a stale
+// read can momentarily regress the pin. The
 // regression is self-healing: the extension answers a stale hint with
 // refused(generation), which unpins to the sentinel and lets the next
 // receipt re-pin. An invalid generation string is never pinned.
@@ -562,8 +562,8 @@ func (a *Attachment) consume() {
 		}
 		needLive = needLive || len(r.open) > 0
 		readRc := !r.confirmed
-		// e3b (review-816-r6 P2-1): a run whose stream was REFUSED (foreign
-		// protocol) must keep re-reading the events file even after
+		// A run whose stream was REFUSED (foreign protocol) must keep
+		// re-reading the events file even after
 		// the run went terminal — otherwise an operator rewriting the seam
 		// as clean v1 lines can never lift the refusal and every Lookup on
 		// the run returns the refusal error instead of the terminal result.
@@ -637,7 +637,7 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		case o.receipt != nil:
 			r.confirmed = true
 			r.notFound = nil
-			// NOT cleared here (review 816-r5 P1): the receipt and the event
+			// NOT cleared here: the receipt and the event
 			// log are different files — reading one proves nothing about the
 			// other's protocol. A protocol-string refusal recorded before the receipt
 			// landed (events-first ordering) must survive the receipt: only
@@ -646,11 +646,10 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			a.observeGenerationLocked(o.receipt.SessionGeneration, o.receipt.PID)
 		case o.rcErr != nil && !r.confirmed:
 			// Unreadable or foreign-protocol: never consume it as evidence.
-			// Only an unconfirmed run records the error (review 816-r3
-			// P2-B): a stale failed read landing after a successful receipt
-			// must not resurrect notFound — consume() never re-reads a
-			// confirmed run's receipt, so that would wedge the run into
-			// permanent uncertainty.
+			// Only an unconfirmed run records the error: a stale failed read
+			// landing after a successful receipt must not resurrect notFound
+			// — consume() never re-reads a confirmed run's receipt, so that
+			// would wedge the run into permanent uncertainty.
 			r.notFound = o.rcErr
 		}
 	} else if o.readRc && !r.confirmed {
@@ -670,12 +669,12 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			r.eventsRefused = o.evErr
 		case len(o.events) > 0:
 			// A present, protocol-validated stream clears a previous
-			// transient refusal (review 816-r3 P2-C). Only this case
-			// clears: an ABSENT log (rotation, truncation — readEvents
+			// transient refusal. Only this case clears: an ABSENT log
+			// (rotation, truncation — readEvents
 			// returns no error and no events) must never unmask a proven
-			// foreign seam as "no events" → confirmed-running
-			// (review 816-r4 P1), and a proven-foreign refusal therefore
-			// needs a present v1 stream to lift.
+			// foreign seam as "no events" → confirmed-running,
+			// and a proven-foreign refusal therefore needs a present v1
+			// stream to lift.
 			r.eventsRefused = nil
 			a.applyEventsLocked(r, o.events)
 		default:
@@ -1134,8 +1133,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		epochHint = gen
 	}
 	// The hint is captured in the SAME critical section as the gate
-	// above (review 816-r3 P1): re-reading it after the lock-free liveness
-	// check let a concurrent re-pin/refuse publish a generation the gate
+	// above: re-reading it after the lock-free liveness check let a
+	// concurrent re-pin/refuse publish a generation the gate
 	// never validated — or swap it for the live generation on a
 	// refused(generation), addressing a session the gate never checked.
 	if r, ok := a.runs[req.Key]; ok {

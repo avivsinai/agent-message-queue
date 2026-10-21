@@ -1,5 +1,5 @@
 // Package sharestate is the read-only runtime view of a shared session's
-// enrolled body identity (bead 611.15). `amq-remote share` owns every write:
+// enrolled body identity. `amq-remote share` owns every write:
 // minting the body key, the pending and staged windows, and publishing the
 // enrolled generation. The relay client only reads the enrolled generation
 // through this package; it never mints, renews, repairs or enrolls.
@@ -52,14 +52,13 @@ func KeyDir(root, session string) (string, error) {
 }
 
 // Load reads the session's body key and enrolled generation (share.json)
-// with the producer's rules (codex slice 1 review #3, #4):
+// with the producer's rules:
 //
 //   - the directory chain from the root's extensions/ down to
 //     keys/<session> is opened one component at a time through held
 //     directory handles, each a real directory and never a symlink, and
 //     both leaves are opened relative to the final handle; so no swap of a
-//     parent, before or during the read, adopts an out-of-root key
-//     (codex slice 1 review r2 #2);
+//     parent, before or during the read, adopts an out-of-root key;
 //   - both leaves are opened no-follow and non-blocking and checked on the
 //     opened handle, so a symlink or FIFO cannot be followed or hang
 //     startup;

@@ -369,7 +369,7 @@ func finish(stdout, stderr io.Writer, out any, asJSON bool, code int, err error)
 func printHuman(w io.Writer, out any) {
 	switch v := out.(type) {
 	case sender.SpoolReceipt:
-		// B3: the sender-side receipt is NOT a Snapshot — it has no request
+		// The sender-side receipt is NOT a Snapshot: it has no request
 		// ref or revision. Print it as its own shape.
 		say(w, "submitted  %s  (pending, %s)", v.RequestID, v.Reason)
 		if v.TargetID != "" {
@@ -492,13 +492,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if *manifestPath != "" {
 		manifestFile = *manifestPath
 	}
-	// --discover runs before any startup write or ownership check (codex
-	// 611.13 consult, requirement 1): no EnsureAgent, no store, no socket, so
-	// it also works while an endpoint for this root is running.
+	// --discover runs before any startup write or ownership check: no
+	// EnsureAgent, no store, no socket, so it also works while an endpoint
+	// for this root is running.
 	if *discover {
 		return discoverAndPrint(c.root, stateDir, manifestFile, *codexSocket, stdout, stderr)
 	}
-	// .10: register the endpoint's mailbox handle in config.json so other
+	// Register the endpoint's mailbox handle in config.json so other
 	// agents in the root can route to it. This preserves every other agent's
 	// config; amqio.New stays free of configuration side effects.
 	if added, cerr := config.EnsureAgent(c.root, *me); cerr != nil {
@@ -510,7 +510,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// carrier. SetPublish runs inside startupSequence; this closure forwards
 	// to the carrier once it exists.
 	var carrier *amqio.Carrier
-	// Buzz DM carriers (611.16) are built below, once the manifest path is
+	// Buzz DM carriers are built below, once the manifest path is
 	// known and before startup reconciliation.
 	var relayCfg *manifest.Relay
 	var edges *dmEdges
@@ -530,9 +530,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			return edges.publish(s, origin)
 		},
 	})
-	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
-	// validation and owned startup are ONE production path, serveStartupFrom —
-	// shared verbatim by the focused regressions (611.13 r4). Flag sugar is
+	// The manifest load, flag-sugar append (--fake, --codex-socket),
+	// validation and owned startup are ONE production path, serveStartupFrom,
+	// shared verbatim by the focused regressions. Flag sugar is
 	// built here (it needs LoadedThreads/flags) and handed in as entries; a
 	// duplicate target is exit 2 via the typed validation error. serveStartupFrom
 	// returns Load/Validate failures classified: validation -> exit 2, I/O or
@@ -560,9 +560,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	// One manifest snapshot drives target attachment, the Buzz DM carriers
-	// and the relay alike (codex slice 1 review #8): a second read could see
-	// a different file. Buzz DM carriers exist before startup reconciliation,
-	// so a Buzz record owed from before a restart publishes during reconcile.
+	// and the relay alike: a second read could see a different file. Buzz DM
+	// carriers exist before startup reconciliation, so a Buzz record owed
+	// from before a restart publishes during reconcile.
 	mfSnap, err := manifest.Load(manifestFile)
 	var ep *core.Endpoint
 	if err == nil {
@@ -575,9 +575,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		if manifest.IsValidation(err) {
 			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
-				// 611.13.4-5: name the actual sources. The old message
-				// blamed "flags and manifest" even when the duplicate was
-				// two identical manifest entries and no flag was passed.
+				// Name the actual sources: the duplicate may be two
+				// identical manifest entries with no flag passed.
 				inFlags := false
 				for _, adapter := range sugar {
 					if adapter.Target == dup.Target {
@@ -610,11 +609,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return 0, err
 	}
-	// w4x: carrier.Warn and the cross-project reply router are installed
+	// carrier.Warn and the cross-project reply router are installed
 	// inside startupSequence (wireCarrier) BEFORE Reconcile, so the startup
-	// revision already publishes through the shipped handlers. The post-hoc
-	// assignment that used to live here ran after Reconcile and is gone.
-	// Durable sender (.7): open the outgoing spool and a drainer. The drainer
+	// revision already publishes through the shipped handlers.
+	// Durable sender: open the outgoing spool and a drainer. The drainer
 	// replays pending envelopes (CLI submits that were persisted while the
 	// companion was down) through the endpoint on each tick, then reaps
 	// settled entries. The spool is separate durable storage from the request
@@ -631,7 +629,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	// Claude targets no relay share serves take Buzz Desktop denies
-	// through an owner-less pin (611.42.2): those attached at startup now,
+	// through an owner-less pin: those attached at startup now,
 	// those attached later as they register.
 	pinNative := func(a manifest.Adapter) { edges.pinNative(a, ep.NativeSessionID(a.Target), stderr) }
 	for _, a := range mfSnap.Adapters {
@@ -646,13 +644,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
 	// The attached targets, printed by the process that attached them, so
 	// `up` shows them from its own child and never from some other endpoint
-	// answering on the socket (codex 611.13 consult, requirement 4).
+	// answering on the socket.
 	for _, s := range ep.Sessions() {
 		printSession(stdout, s)
 	}
-	// Relay surface (611.15): one authenticated client per share. The
+	// Relay surface: one authenticated client per share. The
 	// manifest was already loaded and validated by serveStartupFrom; the
-	// set follows later manifest edits (#1024). Fresh remote commands are
+	// set follows later manifest edits. Fresh remote commands are
 	// admitted only now, after attachment and startup reconciliation, and
 	// also for a serve that has no share yet.
 	edges.bind(ep.Handle, ep.NativeSessionID)
@@ -683,7 +681,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				relays.tick()
 				// Replay durable sender envelopes (CLI submits persisted while the
 				// companion was down), then reap settled ones older than the reap
-				// horizon so the spool is bounded. B4: Reap on every tick,
+				// horizon so the spool is bounded. Reap on every tick,
 				// independent of Drain activity — a live submit settles its own
 				// envelope so Drain returns zero forever, and Reap must still run.
 				if _, derr := drainer.Drain(ctx); derr != nil {
@@ -694,8 +692,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}()
 	err = server.Serve(ctx)
-	// Cancel before joining (codex slice 1 review #7): Serve can also return
-	// on an accept error with ctx still live, and the relays would never end.
+	// Cancel before joining: Serve can also return on an accept error with
+	// ctx still live, and the relays would never end.
 	stop()
 	relays.wait()
 	if cerr := ep.Close(); cerr != nil && err == nil {
@@ -828,7 +826,7 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		NotAfter:  protocol.FormatTime(time.Now().Add(*window)),
 		Input:     &protocol.SubmitInput{Text: body, Busy: protocol.Busy(*busy), Deliver: protocol.Deliver(*deliver), MinEvidence: *minEvidence},
 	}
-	// Durable sender (.7): persist the exact command, identity, destination,
+	// Durable sender: persist the exact command, identity, destination,
 	// target, epoch and expiry atomically BEFORE returning submitted. If the
 	// endpoint is unreachable or crashes mid-dispatch, the companion's drainer
 	// replays this envelope after restart with the same identity and bytes.
@@ -858,19 +856,19 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		// already reached the endpoint; surface the stored reply instead of
 		// a spool receipt.
 		if isDuplicateConflict(derr) {
-			// B3: the receipt is NOT a Snapshot — it never mints a request ref
+			// The receipt is NOT a Snapshot: it never mints a request ref
 			// or revision the endpoint did not assign.
 			return env.Receipt("duplicate_conflict"), exitForState(protocol.StateDispatching), nil
 		}
 		if isEndpointUnreachable(derr) {
 			// The intent is persisted; the caller is told `submitted`, not
-			// an error. The drainer replays after restart. B3: the receipt is a
+			// an error. The drainer replays after restart. The receipt is a
 			// sender-side SpoolReceipt, not a fabricated Snapshot.
 			return env.Receipt("endpoint_unreachable"), protocol.ExitSuccess, nil
 		}
 		return nil, 0, derr
 	}
-	// B2: the endpoint returns refusals (stale_epoch, expired, unsupported,
+	// The endpoint returns refusals (stale_epoch, expired, unsupported,
 	// etc.) as a Reply with Outcome.Code and nil error. A non-empty code
 	// means the endpoint REFUSED the command — the envelope must NOT be
 	// marked dispatched. Mark it failed (terminal) so the caller learns the
@@ -982,8 +980,8 @@ func status(args []string, probe ...*jsonProbe) (any, int, error) {
 	}
 	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: refOrID})
 	if err != nil {
-		// B6: if the endpoint is unreachable or the record is not found,
-		// consult the sender spool. A submit persisted while the companion
+		// If the endpoint is unreachable or the record is not found,
+		// check the sender spool. A submit persisted while the companion
 		// was down has no request-store record; status must still tell the
 		// caller the truth (pending/dispatched/expired/failed).
 		if isEndpointUnreachable(err) || isNotFound(err) || isInvalid(err) {
@@ -1063,7 +1061,7 @@ func cancel(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	// B6: use the STORED request's epoch, not the current session epoch.
+	// Use the STORED request's epoch, not the current session epoch.
 	// A fresh attachment generates a fresh epoch; using it to cancel a
 	// request stored under an older epoch is rejected with stale_epoch.
 	// Fetch the stored request to get the original epoch.
@@ -1120,7 +1118,7 @@ func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 	for _, r := range recs {
 		out = append(out, r.Snapshot)
 	}
-	// B6: include ALL spool envelopes (pending, failed, expired, dispatched)
+	// Include ALL spool envelopes (pending, failed, expired, dispatched)
 	// that have no request-store record yet, with their actual terminal state
 	// and last_error. Submit persisted while the companion was down; the
 	// caller must see failures, not just pending. Dedup against existing
@@ -1185,7 +1183,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	}
 	report := map[string]any{"root": c.root, "state_dir": stateDir, "socket": ipc.SocketPath(stateDir)}
 	// failing names each broken boundary between the owner and the native
-	// session (611.18): AMQ route, endpoint, registration, native capability,
+	// session: AMQ route, endpoint, registration, native capability,
 	// body key, tag expiry, relay auth, DM surface, publication, presence,
 	// discovery.
 	// Doctor exits 6 exactly when it is not empty.
@@ -1251,8 +1249,8 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			fail("registration", r.Target, r.Kind+": "+r.Error, "fix the manifest entry for "+r.Target+", then restart serve")
 		}
 	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
-		// 611.13.4-1: a truncated/unreadable refusals.json used to be
-		// dropped silently and doctor exited 0 with no hint.
+		// A truncated or unreadable refusals.json must not be dropped
+		// silently: doctor reports it and does not exit 0.
 		report["refusals_error"] = loadErr.Error()
 		fail("registration", "refusals.json", loadErr.Error(), "restart serve; it rewrites refusals.json on every start")
 	}
@@ -1275,14 +1273,14 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		case state == claude.StopHookDisabled:
 			// Only the user file was read; a project or managed setting can
 			// override disableAllHooks, so the effective state is unknown and
-			// is reported, not failed (codex #869 r2).
+			// is reported, not failed.
 			report["claude_stop_hook"] = "~/.claude/settings.json holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		break
 	}
 	// A Codex target with approve whose thread runs Codex's automatic
 	// approvals reviewer gets few or no DM approvals: the reviewer answers
-	// them first (611.56). That is the owner's choice, so it is reported,
+	// them first. That is the owner's choice, so it is reported,
 	// not failed.
 	reviewers := map[string]string{}
 	for _, s := range sessions {
@@ -1331,7 +1329,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		break
 	}
-	// Body identity (611.15): per-session body keys, attestations, expiry
+	// Body identity: per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
 	// dir reports nothing — sessions without remote sharing are normal.
 	if bodyKeys := doctorShareInspection(c.root); bodyKeys != nil {
@@ -1353,7 +1351,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 				}
 			}
 			// A body with no enrolled generation, or only a pending one,
-			// cannot authenticate: that is a failing share (codex #869 r1).
+			// cannot authenticate: that is a failing share.
 			if att, ok := info["attestation"].(string); ok {
 				switch {
 				case strings.HasPrefix(att, "missing"):
@@ -1367,7 +1365,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			}
 		}
 	}
-	// Relay connections (611.15), as serve last reported them. Each state
+	// Relay connections, as serve last reported them. Each state
 	// is distinct: auth_pending is not authenticated, and authenticated is
 	// not proof the relay materialized ownership.
 	switch rs, rerr := loadRelayStatus(stateDir); {
@@ -1421,7 +1419,7 @@ const maxRefusedNotes = 5
 // noteRefusedRows names the share's owed outputs the relay refused on
 // their last attempt, with the relay's reason. They stay owed and are
 // retried, and other requests' outputs still go out
-// (agent-message-queue-611.58), so they are advice, not a failure.
+// so they are advice, not a failure.
 func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateDir, session string) {
 	refused, err := buzzio.RefusedOutputs(filepath.Join(stateDir, "shares", session))
 	if err != nil {
@@ -1513,8 +1511,8 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	if err != nil {
 		return err
 	}
-	// Atomic (611.13.4-1): a truncated refusals.json made doctor silently
-	// drop the refusal and exit 0. Same durability as every other
+	// Atomic: a truncated refusals.json would make doctor silently drop
+	// the refusal and exit 0. Same durability as every other
 	// generated-state file.
 	_, err = fsq.WriteFileAtomic(stateDir, "refusals.json", data, 0600)
 	return err
@@ -1531,9 +1529,8 @@ func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.A
 		Error  string `json:"error,omitempty"`
 	}
 	entries := make([]effEntry, 0, len(mf.Adapters))
-	// Kind per attached target from the manifest (611.13.4-2): attached
-	// entries used to carry an empty kind; the manifest is the authority
-	// that published the attachment.
+	// Kind per attached target comes from the manifest: it is the
+	// authority that published the attachment.
 	kinds := make(map[string]string, len(mf.Adapters))
 	for _, adapter := range mf.Adapters {
 		kinds[adapter.Target] = adapter.Kind
@@ -1579,7 +1576,7 @@ func loadRefusals(stateDir string) ([]refusalEntry, error) {
 // cross-project reply router on the carrier. serve hands it to
 // serveStartupFrom, which runs it inside startupSequence between amqio.New and
 // Reconcile, so the startup revision publishes through the fully-configured
-// carrier (w4x, review-a13 parity).
+// carrier.
 func wireCarrier(root string, warn io.Writer) func(*amqio.Carrier) {
 	return func(c *amqio.Carrier) {
 		if warn != nil {
@@ -1596,13 +1593,13 @@ func wireCarrier(root string, warn io.Writer) func(*amqio.Carrier) {
 // replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
 // route, and this adapter translates cli's vocabulary into the carrier's.
 // It is a named function, not an inline closure, so a test can exercise the
-// SHIPPED translation rather than reimplementing it (B1: deleting the
-// ErrPeerRootUnreachable -> TransientRouteError translation from this
-// function must fail TestImportCrossProjectRealRouterTransientPeerAbsent).
+// SHIPPED translation rather than reimplementing it
+// (TestImportCrossProjectRealRouterTransientPeerAbsent fails if the
+// ErrPeerRootUnreachable -> TransientRouteError translation is removed).
 func replyRouterFor(root string) amqio.ReplyRouter {
 	return func(replyProject, replyTo string) (string, string, error) {
 		r, h, err := amqcli.ResolveReplyRoute(root, replyProject, replyTo)
-		// B1: the adapter translates between the cli vocabulary
+		// The adapter translates between the cli vocabulary
 		// (ErrPeerRootUnreachable) and the amqio vocabulary
 		// (TransientRouteError). The generic cli layer must not import amqio;
 		// this named function is the seam that already imports both sides.
@@ -1615,11 +1612,11 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 
 // openServeStore builds the store and endpoint with exactly the defaults
 // serve uses (DefaultMaxStoreBytes, DefaultCompactHorizon). It is extracted
-// from serve so a test can exercise the SHIPPED wiring (round-3 NEW 1):
-// deleting the quota or horizon wiring from this function must fail
+// from serve so a test can exercise the SHIPPED wiring: deleting the quota or
+// horizon wiring from this function must fail
 // TestBK4ServeWiringCompactionNonVacuous. Reconcile is NOT called here;
 // serve calls it after SetPublish + Register + attachments are wired
-// (round-4 P0: running it here marks every running record attachment_lost).
+// (running it here would mark every running record attachment_lost).
 func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
 	if err != nil {
@@ -1632,21 +1629,21 @@ func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 	return store, ep, nil
 }
 
-// serveStartupFrom is the ONE production startup path serve runs (611.22.19
-// round-4 P0 made startup one callable sequence; 611.13 r4 extends the same
-// rule to the whole validate->Build->persist->sequence chain): it appends the
-// caller's flag-sugar entries to the loaded manifest, validates, and owns the
+// serveStartupFrom is the ONE production startup path serve runs: startup is
+// one callable sequence covering the whole validate->Build->persist->sequence
+// chain. It appends the caller's flag-sugar entries to the loaded manifest,
+// validates, and owns the
 // startup. serve loads the manifest once and hands the snapshot in, so target
-// attachment and the relay use one validated file (codex slice 1 review #8).
-// Validation failures come back typed so serve maps them to exit 2.
+// attachment and the relay use one validated file. Validation failures come
+// back typed so serve maps them to exit 2.
 //
 // Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
 // a typed outcome, not a lost start; generated diagnostics (refusals.json,
 // adapters.json) are published only AFTER startupSequence returns — the
 // store open inside it creates the state directory and acquires the owner
 // lock, so a losing starter never overwrites the live owner's files and a
-// fresh directory cannot break the write (611.13 r4 item 1). Publish
-// failures are warnings on the warn writer: doctor reads what exists, and
+// fresh directory cannot break the write. Publish failures are warnings on
+// the warn writer: doctor reads what exists, and
 // losing startup keeps its own exit code. Refusals are rewritten EVERY owned
 // start, including empty — a removed adapter must not persist as 'refused'
 // forever. The caller owns the returned endpoint: Close it when done.
@@ -1683,12 +1680,12 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 }
 
 // startupSequence is the construction-plus-reconcile order serve runs, as
-// ONE callable sequence so tests can pin it (611.22.19 round-4 P0): open
-// store, SetPublish, construct the carrier, wire it, Register attachments,
+// ONE callable sequence so tests can pin it: open store, SetPublish,
+// construct the carrier, wire it, Register attachments,
 // and ONLY THEN Reconcile. Moving Reconcile before SetPublish/Register marks
 // every running record attachment_lost and loses the first reconcile
-// revision to a no-op publisher (round-5 P0). The carrier is constructed and
-// wired INSIDE this sequence (round-6, w4x) so the startup revision reaches
+// revision to a no-op publisher. The carrier is constructed and
+// wired INSIDE this sequence so the startup revision reaches
 // the fully-configured carrier, not a no-op publisher. carrierOut is assigned
 // the carrier before Reconcile, so the caller's publish closure (which
 // captures the same pointer) sees it during Reconcile. The returned store is
@@ -1702,18 +1699,18 @@ func startupSequence(stateDir, root, handle string, publish core.Publisher, carr
 	// the carrier; in tests, a custom publish tracks calls. The carrier is
 	// assigned next so Reconcile's publish calls reach it.
 	ep.SetPublish(publish)
-	// Carrier construction (round-6: inside startupSequence, between SetPublish
-	// and Register). The carrier is assigned before Reconcile so the startup
-	// revision reaches it, not a no-op publisher. carrierOut lets the caller's
-	// publish closure see the carrier during Reconcile.
+	// Carrier construction sits between SetPublish and Register. The carrier
+	// is assigned before Reconcile so the startup revision reaches it, not a
+	// no-op publisher. carrierOut lets the caller's publish closure see the
+	// carrier during Reconcile.
 	carrier, err := amqio.New(root, handle, ep)
 	if err != nil {
 		_ = ep.Close()
 		return store, nil, nil, err
 	}
-	// w4x: wire the shipped warn handler + reply router BEFORE Reconcile so
+	// Wire the shipped warn handler + reply router BEFORE Reconcile so
 	// the startup revision already publishes through the fully-configured
-	// carrier (ordering parity with pre-#800 main).
+	// carrier.
 	wire(carrier)
 	if carrierOut != nil {
 		*carrierOut = carrier
@@ -1763,9 +1760,9 @@ func isInvalid(err error) bool {
 
 // lookupSpoolStatus checks the sender spool for a request ref OR a raw
 // request ID and returns a SpoolReceipt describing the envelope's state.
-// B6 (round-4): status accepts the envelope id directly as a positional
-// argument (no --request-id flag) because B3 stopped minting refs for
-// spooled submits. Returns (zero, false) when no envelope matches.
+// Status takes the envelope id directly as a positional argument (no
+// --request-id flag) because spooled submits mint no refs.
+// Returns (zero, false) when no envelope matches.
 func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
 	var creatorHost, requestID string
 	if h, _, id, err := protocol.DecodeRef(refOrID); err == nil {
@@ -1801,8 +1798,7 @@ func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
 // exitForSpoolReceipt maps a spool envelope state to an exit code. A
 // pending/dispatched envelope is success (the work is in flight). A
 // failed/expired envelope is ExitError: native work did not happen (or its
-// window closed) and the caller takes the failure path (round-4 B6: expired
-// now exits 1, not 0).
+// window closed) and the caller takes the failure path.
 func exitForSpoolReceipt(r sender.SpoolReceipt) int {
 	switch r.State {
 	case sender.StateFailed, sender.StateExpired:
@@ -1826,7 +1822,7 @@ func exitForState(s protocol.State) int {
 // printCandidates prints one discovered candidate per line: kind, target,
 // display name, then a manifest entry to paste, and the native session id
 // a share entry pins when the discoverer read it. Discovery never attaches
-// (611.13): registration stays an explicit manifest edit, the owner's
+// registration stays an explicit manifest edit, the owner's
 // consent to share the session.
 func printCandidates(w io.Writer, cands []registry.Candidate) {
 	for _, cand := range cands {
@@ -1848,12 +1844,12 @@ func printCandidates(w io.Writer, cands []registry.Candidate) {
 }
 
 // discoverAndPrint lists discovered candidates and exits. It runs before any
-// startup write or ownership check (codex 611.13 consult, requirement 1): no
-// EnsureAgent, no store, no socket, no lifetime lock, so it also works while
+// startup write or ownership check: no EnsureAgent, no store, no socket, no
+// lifetime lock, so it also works while
 // an endpoint or supervisor for this root is running. The manifest classifies
 // exactly like the serve path: validation failures are usage errors (exit
 // 2), I/O and parse failures are not. An explicit --codex-socket replaces
-// the default daemon socket (requirement 2).
+// the default daemon socket.
 func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, stderr io.Writer) (int, error) {
 	mf, lerr := manifest.Load(manifestFile)
 	if lerr != nil {
@@ -1871,8 +1867,8 @@ func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, 
 	})
 	printCandidates(stdout, cands)
 	// Each failed or incomplete discoverer is reported on stderr; the other
-	// discoverers' candidates above stand (codex #858). An explicitly
-	// supplied unusable hint is a usage error.
+	// discoverers' candidates above stand. An explicitly supplied unusable
+	// hint is a usage error.
 	for _, d := range diags {
 		if errors.Is(d.Err, registry.ErrBadHint) {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "discover %s: %v", d.Kind, d.Err)
@@ -1884,10 +1880,10 @@ func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, 
 	return 0, nil
 }
 
-// claudeSubcommand dispatches the PR2 Stop-hook bridge subcommands. The
+// claudeSubcommand dispatches the Stop-hook bridge subcommands. The
 // receiver is fail-open: exit 0 on any error path. install/uninstall are
 // the only subcommands allowed to fail (exit 1) — they run from the
-// sponsor, never from inside Claude Code.
+// operator, never from inside Claude Code.
 func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	if len(args) == 0 {
 		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook | permission-hook | install-approval-hook | uninstall-approval-hook)\n")
@@ -1899,9 +1895,8 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	}
 	switch args[0] {
 	case "install-stop-hook", "uninstall-stop-hook", "uninstall-approval-hook":
-		// They take no options: --help or a stray argument changes nothing
-		// (611.42.9: install-stop-hook --help installed the hook).
-		// Only the bare command acts; a lone -- parses clean (Pro review of #981).
+		// They take no options: --help or a stray argument changes nothing.
+		// Only the bare command acts; a lone -- parses clean.
 		if len(args) > 1 {
 			fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 			fs.SetOutput(os.Stderr)

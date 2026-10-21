@@ -44,7 +44,7 @@ type Request struct {
 	// NativeSession, when set, requires the command's target to be attached
 	// to exactly this native session; any other session refuses with
 	// unshared before the endpoint sees the command. Local-only: the native
-	// identity never enters the session wire schema (codex #866 r2 #6).
+	// identity never enters the session wire schema.
 	NativeSession string `json:"native_session,omitempty"`
 	// Native asks which native session a target is attached to, so a local
 	// sharing choice can pin it. Local-only, like NativeSession.
@@ -192,7 +192,7 @@ func EndpointFeatures(stateDir string) (f Features, ok bool, err error) {
 
 // ErrSocketPathTooLong is returned by Listen when the computed socket path
 // would exceed the Unix sun_path limit, which would cause bind to fail with
-// a bare EINVAL (611.23). The limit is platform-specific:// maxUnixSocketPathLen
+// a bare EINVAL. The limit is platform-specific: maxUnixSocketPathLen
 // (108 on Linux, 104 on macOS) is defined in platform-tagged files.
 var ErrSocketPathTooLong = errors.New("socket path exceeds unix sun_path limit")
 
@@ -228,7 +228,7 @@ func (s *Server) SetRegistrar(r Registrar) { s.registrar = r }
 // outlive the endpoint's owner.
 func (s *Server) Close() error {
 	_ = s.listener.Close()
-	// 611.13.4-4: Go unlinks the socket file as part of listener.Close() on
+	// Go unlinks the socket file as part of listener.Close() on
 	// Unix, so the explicit Remove usually loses with ENOENT. That is the
 	// expected end state, not an error.
 	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -326,7 +326,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		// observed yet" (exit 4), never "the work failed" (exit 1) — an
 		// orchestrator told its request failed during a routine endpoint
 		// restart would take a destructive recovery path for a request that
-		// is still running (agent-message-queue-611.22.27).
+		// is still running.
 		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			writeRecord(conn, Response{Reply: mustJSON(snap), TimedOut: true})
 			return
@@ -385,8 +385,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 // checkPin refuses a pinned request whose target is not attached to the
 // pinned native session. The target comes from the command, or from the
-// request reference for get and wait, so reads are fenced too (codex #876 r2
-// P1 #3).
+// request reference for get and wait, so reads are fenced too.
 func (s *Server) checkPin(req *Request) error {
 	if req.NativeSession == "" {
 		return nil

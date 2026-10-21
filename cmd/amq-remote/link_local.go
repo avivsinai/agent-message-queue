@@ -35,7 +35,7 @@ import (
 // terminal, and the page it opens needs the local passkey (Touch ID). The
 // ENDPOINT serves every local page, on one loopback port it holds for its
 // whole life and records once per root, so the local passkey is bound to
-// that origin (ruling cc): a look-alike page an agent serves on another port
+// that origin: a look-alike page an agent serves on another port
 // cannot produce a confirmation the endpoint accepts. No IPC operation takes
 // an assertion; only the endpoint's own page does.
 

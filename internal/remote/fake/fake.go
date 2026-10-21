@@ -45,10 +45,10 @@ type Runtime struct {
 	// (or, with no gate held, the instant it begins admission). It is the
 	// deterministic readiness signal that replaces a wall-clock sleep for
 	// async corpus steps: the harness waits on it to know the submit has
-	// reached the held admission gate (611.22.8). Per-call: set via
-	// NotifySubmitReady before the async Handle.
+	// reached the held admission gate. Per-call: set via NotifySubmitReady
+	// before the async Handle.
 	submitReady chan struct{}
-	// lookupReady is the Lookup analog of submitReady (611.22.54): closed
+	// lookupReady is the Lookup analog of submitReady: closed
 	// the instant the next Lookup reaches its gate-block point (or begins
 	// its body with no gate held). Set via NotifyLookupReady.
 	lookupReady          chan struct{}
@@ -371,12 +371,11 @@ func (r *Runtime) HoldAdmission() {
 
 // NotifySubmitReady installs a readiness signal closed the instant the next
 // Submit reaches its gate-block point (or begins admission with no gate
-// held). It replaces the corpus harness's wall-clock sleep for async steps
-// (611.22.8): the harness waits on the returned channel to know the submit
+// held). It replaces the corpus harness's wall-clock sleep for async steps:
+// the harness waits on the returned channel to know the submit
 // has reached the held admission gate, deterministically. A call with no
 // intervening Submit overwrites the previous, still-unconsumed signal - the
-// corpus harness's early-result fallback relies on that being benign
-// (review-819-r1 P2-2: no observed defect justifies a refusal).
+// corpus harness's early-result fallback relies on that being benign.
 func (r *Runtime) NotifySubmitReady() <-chan struct{} {
 	ch := make(chan struct{})
 	r.mu.Lock()
@@ -385,7 +384,7 @@ func (r *Runtime) NotifySubmitReady() <-chan struct{} {
 	return ch
 }
 
-// NotifyLookupReady is the Lookup analog of NotifySubmitReady (611.22.54):
+// NotifyLookupReady is the Lookup analog of NotifySubmitReady:
 // it installs a one-shot readiness signal closed the instant the next
 // Lookup reaches its gate-block point (or begins its body with no gate
 // held). It replaces the wall-clock sleep that waited for a Reconcile to
@@ -531,7 +530,7 @@ func (r *Runtime) Complete(requestID, text string) bool {
 
 // CompleteWhileAdmitHeld marks the run for requestID as completed with a
 // result and emits EventRunCompleted, EVEN IF the run was already cancelled
-// natively. This models the P1 Pro #2 shape: Submit is parked in
+// natively. This models the shape where Submit is parked in
 // afterAdmitGate, a native cancel moved the record to cancelled AND cancelled
 // the run, then the run finishes (produces output) before Submit returns.
 // The completion event arrives for a terminal (cancelled) record — onNative
@@ -700,11 +699,11 @@ func (r *Runtime) Question(requestID, interactionID string, options []string) {
 	r.emit(ev)
 }
 
-// ResolveOutcome reports how the harness resolved interactionID (bead
-// 611.45 r2): it emits the exact-resolution EventQuestionResolved the real
-// seams (pi, claude approvals) send, with or without a pending interaction.
-// Tests use it for late corrections of retired outcomes and for resolutions
-// the resolver never offers.
+// ResolveOutcome reports how the harness resolved interactionID: it emits the
+// exact-resolution EventQuestionResolved the real seams (pi, claude
+// approvals) send, with or without a pending interaction. Tests use it for
+// late corrections of retired outcomes and for resolutions the resolver never
+// offers.
 func (r *Runtime) ResolveOutcome(requestID, interactionID string, outcome protocol.ResolutionOutcome, option string) bool {
 	r.mu.Lock()
 	var target *run

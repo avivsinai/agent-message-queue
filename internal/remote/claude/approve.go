@@ -21,8 +21,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/secretscan"
 )
 
-// Tool approvals from the Buzz DM (bead 611.42.3). The PermissionRequest
-// hook and the attachment meet in files, because the hook process has only
+// Tool approvals from the Buzz DM. The PermissionRequest hook and the
+// attachment meet in files, because the hook process has only
 // the Claude home:
 //
 //	~/.claude/sessions/amq-approve/<sid>/
@@ -43,12 +43,12 @@ const approvalProtocol = "amq-claude-approval/v1"
 
 // optionDeny blocks a Claude tool call from Buzz. Its decision never
 // carries interrupt, so the turn continues. A forged deny is only a denial,
-// so a deny needs no proof beyond the answer file (bead 611.42.3).
+// so a deny needs no proof beyond the answer file.
 const optionDeny = "deny"
 
 // optionAllow lets a Claude tool call run from Buzz. The hook applies it only
 // with the owner's signed reaction on the approval message that showed this
-// exact call (bead 611.42.4), never on the answer file alone.
+// exact call, never on the answer file alone.
 const optionAllow = "allow"
 
 // maxApprovalFileBytes bounds every approval file read. A request holds a
@@ -149,8 +149,8 @@ var bashFields = map[string]bool{"command": true, "description": true, "timeout"
 // whole reports that the preview is a Bash call with only the named
 // fields, shown exactly as it runs: nothing hidden, nothing shortened, and
 // no character removed for display or replaced in decoding. Only such a
-// call can be allowed from Buzz (bead 611.42.4): the owner approves the
-// text they saw, so that text must be the call.
+// call can be allowed from Buzz: the owner approves the text they saw, so
+// that text must be the call.
 func approvalView(toolName string, input json.RawMessage, agentType string) (preview string, whole bool) {
 	var b strings.Builder
 	if agentType != "" {
@@ -416,9 +416,8 @@ func writeResolved(home, sessionID string, r approvalResolved) error {
 
 // rejected/<iid>-<proof> records that the hook could not verify one allow
 // answer, named by the hash of its evidence: that answer never applies,
-// a deny or a new proof replaces it, and the endpoint drops its intent
-// (Pro review of #936 r2). A record names one exact proof, so it never
-// retires a newer one.
+// a deny or a new proof replaces it, and the endpoint drops its intent.
+// A record names one exact proof, so it never retires a newer one.
 
 // proofName is the rejected record's name for an allow's evidence.
 func proofName(interactionID string, evidence json.RawMessage) string {
@@ -461,13 +460,13 @@ func rejected(home, sessionID, interactionID string, evidence json.RawMessage) b
 }
 
 // verdicts/<iid>-<proof> is the hook's one verdict on one allow proof,
-// written create-new beside the rejected record (611.42.6, Pro review of
-// #986 r1). The hook allows a proof only after it created the allow
-// verdict and then found no rejected record for it. It records a refusal
-// as a refused verdict and still as the rejected record, which an older
-// endpoint reads. A reader of both reads the rejected record first and the
-// verdict second, the reverse of the hook's order, so any refusal the
-// endpoint acts on, forged or not, is one the hook sees before it allows.
+// written create-new beside the rejected record. The hook allows a proof only
+// after it created the allow verdict and then found no rejected record for
+// it. It records a refusal as a refused verdict and still as the rejected
+// record, which an older endpoint reads. A reader of both reads the rejected
+// record first and the verdict second, the reverse of the hook's order, so
+// any refusal the endpoint acts on, forged or not, is one the hook sees
+// before it allows.
 type approvalVerdict struct {
 	Verdict string `json:"verdict"`
 	Reason  string `json:"reason,omitempty"`

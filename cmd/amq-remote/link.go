@@ -50,7 +50,7 @@ type linkSet struct {
 	retired  map[string]bool
 	mfStamp  time.Time
 	statuses map[string]linkio.Status
-	pages    *pageServer // the endpoint's own local pages (ruling cc)
+	pages    *pageServer // the endpoint's own local pages
 }
 
 type linkRun struct {

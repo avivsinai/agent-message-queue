@@ -24,7 +24,7 @@ import (
 
 // The login service runs `amq-remote up --root <root>` when the user logs in,
 // so a linked server sees this machine again after a reboot with no manual
-// step (issue #1064): a launchd user agent on macOS, a systemd user unit on
+// step: a launchd user agent on macOS, a systemd user unit on
 // Linux. `up` keeps its single-instance lock, so a manual `up` while the
 // service runs still refuses. The names and the unit reader live in
 // internal/remote/loginservice, so amq can read the unit too.

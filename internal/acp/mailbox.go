@@ -30,13 +30,12 @@ const mailboxSubject = "Buzz DM"
 // mailboxClaim is the durable first-delivery record of one event in a
 // mailbox binding: the message id and creation time chosen once, so a
 // redelivery publishes the same message at most once and waits for the
-// same reply (codex 611.36 research, replay gap).
+// same reply.
 type mailboxClaim struct {
 	MessageID string `json:"message_id"`
 	Created   string `json:"created"`
 	// Thread is the cockpit thread of the first delivery. A redelivery on a
-	// new ACP session publishes and waits there, never on its own thread
-	// (codex #895 P1 #1).
+	// new ACP session publishes and waits there, never on its own thread.
 	Thread string `json:"thread"`
 	// Channel is the Buzz channel of the first delivery, so the late-reply
 	// sweep can post a reply that arrives after the turn ended. An older
@@ -81,12 +80,12 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	}
 	r.mailboxThread = threadID
 
-	// A turn cancelled before delivery delivers nothing (codex #895 P1 #3).
+	// A turn cancelled before delivery delivers nothing.
 	if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
 		return s.mailboxNotDelivered(r, outcome)
 	}
 	// The turn budget starts before the claim, so a publish-lock wait counts
-	// against it (codex #895 r2 P1).
+	// against it.
 	budget := time.Now().Add(s.timing(turn).timeout)
 	claim, err := s.publishClaimed(r, budget, b, threadID, text)
 	if claim.MessageID != "" {
@@ -95,7 +94,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		r.meta.RequestRef = claim.MessageID
 		// The first known channel of the event is its DM; a redelivery from
 		// another channel, or from none, never moves the answer. A delivery
-		// that names one records it if none is known yet (review of #961).
+		// that names one records it if none is known yet.
 		s.eventChannel(eventID, claim.Channel, turn.channel)
 		r.mailbox, r.claimChannel = true, claim.Channel
 		s.mu.Lock()
@@ -329,8 +328,7 @@ func (s *Server) eventChannel(eventID, claimed, turn string) string {
 // already has an outcome, or another reply or a cancel wins it now, the turn
 // returns that outcome. Without a DM nothing is decided, so the sweep posts
 // the reply once a delivery names a channel. A won outcome is posted before
-// the ACP emission, so a failed emission never skips the post (review of
-// #961).
+// the ACP emission, so a failed emission never skips the post.
 func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string) (any, *rpcError) {
 	dest := r.postChannel()
 	if r.eventID != "" {
@@ -435,16 +433,15 @@ func (e *notDeliveredError) Error() string { return e.reason }
 
 // publishClaimed claims the event's message and publishes it under a
 // per-event lock, so two retries cannot both pass the absence check and
-// publish the same message twice (codex #895 P1 #2). It returns the claim
-// once it was read. The lock wait gives up on cancel, disconnect or the turn
+// publish the same message twice. It returns the claim once it was read. The
+// lock wait gives up on cancel, disconnect or the turn
 // budget, and cancellation is checked again once the lock is held, so a
-// cancelled prompt is never published (codex #895 r2 P1).
+// cancelled prompt is never published.
 func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Binding, threadID, text string) (mailboxClaim, error) {
 	var claim mailboxClaim
 	publish := func() error {
 		// The claim is created under the lock, so only the attempt that
-		// created it can know no earlier attempt published it
-		// (bead agent-message-queue-qff).
+		// created it can know no earlier attempt published it.
 		c, fresh, err := s.mailboxClaim(r.eventID, threadID, r.turn.channel, budget)
 		if err != nil {
 			return err
@@ -463,7 +460,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 			return errStoppedBeforePublish
 		}
 		// An expired budget publishes nothing, also when the lock was free
-		// or there is no event lock at all (codex #895 r3 P2).
+		// or there is no event lock at all.
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
@@ -548,14 +545,14 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	// The handle answers buzz with `amq reply`, which cannot create a missing
 	// mailbox in a root without config.json, so the sender ensures its own.
 	// This runs before the redelivery check: a prompt an older amq-acp
-	// delivered still needs the mailbox for its reply (#951).
+	// delivered still needs the mailbox for its reply.
 	if err := root.EnsureAgentDirs(mailboxSender); err != nil {
 		return err
 	}
 	name := id + ".md"
 	// Only a readable message with this id, read through the pinned root,
 	// proves the earlier delivery: a directory or a dangling link at the
-	// name is not one (agent-message-queue-u1e).
+	// name is not one.
 	if held, err := inboxHasMessage(root, b.Handle, id); err != nil {
 		return err
 	} else if held {

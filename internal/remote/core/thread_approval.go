@@ -10,10 +10,10 @@ import (
 )
 
 // ThreadApproval is an approval raised in a native turn that no request
-// owns: the user started the turn in the harness's own terminal (611.42
-// slice 1b). It is not a request record and has no requests.Key. The
-// endpoint keeps it in memory: a restarted process cannot answer an
-// approval the harness sent to the process before it.
+// owns: the user started the turn in the harness's own terminal. It is not a
+// request record and has no requests.Key. The endpoint keeps it in memory: a
+// restarted process cannot answer an approval the harness sent to the process
+// before it.
 type ThreadApproval struct {
 	// ID names the approval to the surface that shows it. It is derived
 	// from the target, native session, turn and interaction id.
@@ -210,8 +210,8 @@ func (e *Endpoint) tickThreadApprovals() {
 
 // RespondThreadApproval answers thread approval id with option. It is an
 // in-process seam, never a wire op: only a carrier in this process reaches
-// it, and only the owner share the approval was shown on may answer
-// (611.46). A nil error means the answer reached the harness; a refusal
+// it, and only the owner share the approval was shown on may answer.
+// A nil error means the answer reached the harness; a refusal
 // with CodeAlreadyResolved means the approval is no longer open here.
 func (e *Endpoint) RespondThreadApproval(src Source, id, option string) error {
 	e.mu.Lock()

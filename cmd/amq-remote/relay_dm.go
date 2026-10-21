@@ -37,10 +37,10 @@ type dmEdges struct {
 	relay  string // relay URL, for the NIP-11 self lookup
 	self   string // pinned relay self key; empty reads NIP-11
 	byBody map[string]*dmShare
-	// presence holds each presence share by session (611.17 slice 2).
+	// presence holds each presence share by session.
 	presence map[string]*presenceShare
-	// activity holds each activity share by session (611.17 slice 3), and
-	// attachment is the endpoint's attachment accessor it reads, bound late.
+	// activity holds each activity share by session, and attachment is the
+	// endpoint's attachment accessor it reads, bound late.
 	activity   map[string]*activityShare
 	attachment func(target string) (core.Attachment, bool)
 	state      map[string]string // session -> commands surface state, for status
@@ -62,7 +62,7 @@ type dmEdges struct {
 	dupBodies map[string]bool
 	// setupRefused names each share session whose setup refused a surface.
 	// A refusal a surface reports later at run time is not one: only a
-	// setup refusal is retried on a manifest change (#1024 ruling 3).
+	// setup refusal is retried on a manifest change.
 	setupRefused map[string]bool
 }
 
@@ -95,7 +95,7 @@ func (d *dmEdges) setRelay(url, self string) {
 
 // addShare builds one share's surfaces: activity, presence and the commands
 // carrier. Startup and a share added to the manifest later take this one
-// path (#1024). Only the reconcile goroutine adds or removes shares.
+// path. Only the reconcile goroutine adds or removes shares.
 func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup bool, warn io.Writer) {
 	d.mu.Lock()
 	d.shared[sh.Target] = true
@@ -134,9 +134,9 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 	}
 	b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: url, NativeSession: sh.NativeSessionID, MinEvidence: sh.MinEvidence}
 	// One body serves one share: two sessions whose key directories hold
-	// the same body are refused, never merged (codex #866 r1 #2). At startup
+	// the same body are refused, never merged. At startup
 	// both are refused; a share added later is refused alone, and the
-	// running one keeps its surface (#1024 ruling 1).
+	// running one keeps its surface.
 	const dupRefusal = "refused: its body key is also enrolled for another share"
 	d.mu.Lock()
 	if prev, dup := d.byBody[b.Body]; dup || d.dupBodies[b.Body] {
@@ -183,7 +183,7 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 // removeShare drops a share removed from the manifest: its surfaces, its
 // body's startup duplicate mark (so the other share of the pair can recover
 // on its retry), and its approval pins, which it returns for the caller to
-// unpin once any replacement pin is written (#1024 ruling 2a). Its owed Buzz
+// unpin once any replacement pin is written. Its owed Buzz
 // records stay owed, as after a restart without it. A target serves at most
 // one running share, so its shared mark goes with it.
 func (d *dmEdges) removeShare(sh manifest.Share, body string) []approvalPin {
@@ -262,7 +262,7 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 // pinShare writes the share's approval pin when it is a configured commands
 // share of a Claude adapter, then removes the target's native pin, which a
 // shared target does not get at startup. The share pin comes first, so the
-// session is never without a pin (#1024 ruling 2b).
+// session is never without a pin.
 func (d *dmEdges) pinShare(sh manifest.Share, adapters []manifest.Adapter, warn io.Writer) {
 	d.mu.Lock()
 	ds := d.forBodyLocked(sh.Session)
@@ -304,9 +304,9 @@ func (d *dmEdges) forBodyLocked(session string) *dmShare {
 
 // pinNative pins, for a Claude adapter with approve that no relay share
 // serves, its native session with no owner, so its PermissionRequest hook
-// can take a deny from the Buzz Desktop agent (amq-acp) and never an allow
-// (bead agent-message-queue-611.42.2). An adapter with only
-// observe_approvals gets an observe-only pin instead: its approvals are
+// can take a deny from the Buzz Desktop agent (amq-acp) and never an allow.
+// An adapter with only observe_approvals gets an observe-only pin instead:
+// its approvals are
 // shown and never answered. Like a share pin it lives while this process
 // does.
 func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) {
@@ -511,8 +511,7 @@ func (d *dmEdges) bind(h buzzio.Handler, identity func(target string) string) {
 
 // bindThreadApprovals attaches the endpoint's thread approval answer path
 // and returns where the endpoint shows thread approvals: the commands share
-// of the target whose approved native session is the approval's (611.42
-// slice 1b).
+// of the target whose approved native session is the approval's.
 func (d *dmEdges) bindThreadApprovals(respond buzzio.ThreadResponder) core.ThreadApprovalSink {
 	d.mu.Lock()
 	d.respondThread = respond
@@ -618,13 +617,13 @@ func (d *dmEdges) forBody(body string) *dmShare {
 const dmOverlap = 5 * time.Minute
 
 // verifyMembership proves the DM channel's members are exactly owner and
-// body, from snapshots signed by the relay's self key (slice 4 contract).
+// body, from snapshots signed by the relay's self key.
 var verifyMembership = buzzio.VerifyDMMembership
 
 // membershipRecheck is how often an open DM surface re-reads membership.
 //
-// Freshness policy (lead ruling 2026-09-23, codex #866 r1): Buzz offers no
-// read of current membership; the relay-signed 39002/39000 snapshots are
+// Freshness policy: Buzz offers no read of current membership; the
+// relay-signed 39002/39000 snapshots are
 // stored events behind a relay-side cache. v1 accepts them as the gate: the
 // surface opens on a verified snapshot and closes on the first re-read that
 // no longer verifies. No bound on how late a change shows is claimed.
@@ -664,8 +663,7 @@ func (ds *dmShare) verify(ctx context.Context, conn *relay.Conn, edges *dmEdges)
 // admitted, no output exported) and it re-checks on the recheck interval. A
 // subscription that ends on a healthy socket (CLOSED, overflow) closes the
 // connection, so the client's reconnect restores every subscription and
-// re-reads the overlap window (codex #866 r1 #9). It returns when the
-// connection or ctx ends.
+// re-reads the overlap window. It returns when the connection or ctx ends.
 func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) {
 	session := ds.share.Session
 	for {
@@ -699,8 +697,8 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 // ingests them, and runs two bounded loops beside the ingest loop: the
 // membership re-check and the outbox flush. Each command admission and each
 // export checks the verified flag, so a stalled publication never delays a
-// membership change or command handling (codex #866 r1 #8). It returns
-// errMembershipChanged when a re-check fails, and nil or a subscription
+// membership change or command handling. It returns errMembershipChanged when
+// a re-check fails, and nil or a subscription
 // error when the session ends otherwise.
 func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) error {
 	session := ds.share.Session
@@ -728,7 +726,7 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		return fmt.Errorf("subscribe reactions: %w", err)
 	}
 	defer reactions.Close()
-	// Owner messages that mention the body in an opted-in channel (slice 5).
+	// Owner messages that mention the body in an opted-in channel.
 	// Without mention channels these channels stay nil and never fire.
 	var mentions *relay.Sub
 	var mentionEvents <-chan nostr.Event

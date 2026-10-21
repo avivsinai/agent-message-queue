@@ -25,8 +25,8 @@ const (
 )
 
 // ApproveEvidence is the proof an owner ✅ carries to a harness that allows
-// a call only with the owner's signature (bead 611.42.4): the owner's signed
-// reaction, or approve typed in the message's thread (611.42.10), and the
+// a call only with the owner's signature: the owner's signed
+// reaction, or approve typed in the message's thread, and the
 // signed approval message it names, both as received and stored, never
 // re-encoded from parts. The message's edit and deletion
 // history is never taken from the evidence: the verifier reads it from the
@@ -88,7 +88,7 @@ func (c *Carrier) storedApproval(messageID string, appr Approval) (nostr.Event, 
 //   - it is a kind 7 whose content is the approve gesture ✅ and whose last
 //     e tag is the message's id, or a kind 9 in the share's DM channel
 //     whose content is a typed approve and that replies in the message's
-//     thread (611.42.10): the message is among the events it names as its
+//     thread: the message is among the events it names as its
 //     parent, root or unmarked e tag;
 //   - it is dated within [want.NotBefore, want.NotAfter];
 //   - the message is kind 9, its id and signature verify, it is signed by
@@ -195,8 +195,7 @@ func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want A
 	if err != nil {
 		return fmt.Errorf("read the approval message's edits: %w", err)
 	}
-	// The relay returns its newest page; a full one may hide an older edit
-	// (review of #936 r4).
+	// The relay returns its newest page; a full one may hide an older edit.
 	if len(edits) >= maxHistoryEdits {
 		return fmt.Errorf("the approval message has %d or more edits; its history is not known", maxHistoryEdits)
 	}
@@ -217,7 +216,7 @@ func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want A
 	}
 	// A deletion's created_at is its signer's claim, so the body's
 	// deletions are read with no time bound: AMQ never deletes, and a
-	// backdated one would otherwise hide a deleted edit (review of #936 r3).
+	// backdated one would otherwise hide a deleted edit.
 	byBody, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{msg.PubKey}})
 	if err != nil {
 		return fmt.Errorf("read the body's deletions: %w", err)

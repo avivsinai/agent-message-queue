@@ -65,10 +65,9 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		return Delivery{}, fmt.Errorf("message thread is empty")
 	}
 
-	// One canonical builder appends the nostr label exactly once (review of
-	// #976 P1 a): the first attempt and a replay must serialize identical
-	// bytes, or the no-replace inbox write refuses one of them as a
-	// collision.
+	// One canonical builder appends the nostr label exactly once: the first
+	// attempt and a replay must serialize identical bytes, or the no-replace
+	// inbox write refuses one of them as a collision.
 	build := func(messageID, created string) ([]byte, error) {
 		all := append(append([]string(nil), labels...), "nostr:"+eventID)
 		data, err := format.Message{
@@ -96,8 +95,8 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 	}
 
 	// With an event id the whole claim-check-write sequence runs under one
-	// cross-process per-event lock (review of #976 P1 b): claim
-	// create/load, the inbox absence check and the inbox write are one
+	// cross-process per-event lock: claim create/load, the inbox absence
+	// check and the inbox write are one
 	// critical section, so a paused winner cannot write a second copy into
 	// new/ after a replay's copy was drained to cur/, and two processes
 	// cannot both pass the absence check. The lock shape is the mailbox
@@ -152,8 +151,8 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 }
 
 // deliverLocked serves one event-keyed delivery attempt while holding the
-// event's post lock. Ordering rule (review of #976 r3): under the lock, a
-// claim that exists is proven against the inbox FIRST — a delivered event
+// event's post lock. Ordering rule: under the lock, a claim that exists is
+// proven against the inbox FIRST — a delivered event
 // reports Duplicate/Committed even if its journal is not yet durable,
 // because the delivery already happened and must never be reported as an
 // error — and the claim's durability is required ONLY before an ABSENT
@@ -180,7 +179,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 	}
 	if delivered {
 		// A legacy journal (no created) proves its time from the delivered
-		// message header before reporting the duplicate (review of #976 P2 d).
+		// message header before reporting the duplicate.
 		if created.IsZero() {
 			created, err = provenCreated(root, claim.To, claim.MessageID)
 			if err != nil {
@@ -206,7 +205,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 	}
 
 	// A legacy journal with no created time and no delivered message takes
-	// its header time from the delivered message too (review of #976 P2 d).
+	// its header time from the delivered message too.
 	if claim.Created == "" {
 		data, err := build(claim.MessageID, "")
 		if err != nil {
@@ -234,8 +233,8 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 
 // claimEvent loads the event's claim or creates it exclusively. It returns
 // a durability callback the caller runs ONLY before writing an absent inbox
-// message (review of #976 r3): on EVERY path — fresh create and adopt
-// alike — it fsyncs the claim file itself through the pinned root
+// message: on EVERY path — fresh create and adopt alike — it fsyncs the claim
+// file itself through the pinned root
 // (CreateExclusiveFile writes the final name directly; a creator killed
 // between write and sync leaves unsynced content) and the full directory
 // chain acp-events -> outbox -> agent dir (a freshly created acp-events
@@ -342,10 +341,10 @@ func readEventClaim(cfg Config, root *fsq.DeliveryRoot, eventID string) (*eventR
 
 // createExclusiveFile publishes raw at relPath only if nothing is there
 // yet: CreateExclusiveFile creates the name with O_EXCL and fsyncs the
-// content before the name is visible, then the journal directory is fsynced
-// (review of #976 P1 c). The parent chain (outbox, agent dir) is synced by
-// the adopt barrier (syncEventClaim) before any inbox write names the
-// claim, which also covers a freshly created acp-events directory.
+// content before the name is visible, then the journal directory is fsynced.
+// The parent chain (outbox, agent dir) is synced by the adopt barrier
+// (syncEventClaim) before any inbox write names the claim, which also covers
+// a freshly created acp-events directory.
 func createExclusiveFile(root *fsq.DeliveryRoot, relPath string, raw []byte) error {
 	if err := root.CreateExclusiveFile(relPath, raw, 0o600); err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -367,8 +366,7 @@ func writeEventClaimExclusive(root *fsq.DeliveryRoot, me string, rec eventRecord
 
 // provenCreated reads the delivered message's header Created time from the
 // recipient inbox. A legacy schema-1 journal records no created field; its
-// replay proves the time from the message it delivered (review of #976
-// P2 d).
+// replay proves the time from the message it delivered.
 func provenCreated(root *fsq.DeliveryRoot, handle, messageID string) (time.Time, error) {
 	name := messageID + ".md"
 	for _, rel := range []string{
@@ -413,8 +411,8 @@ func claimIdentity(eventID, messageID, to, thread string) *eventRecord {
 // inboxHasMessage reports whether the recipient's inbox (new or cur) already
 // holds the claimed message: the only delivery proof a replay trusts. Both
 // locations are inspected through the pinned delivery root with a no-follow
-// regular-file read (review of #976 r2 P2): a directory or a symlink named
-// <id>.md is not a delivery, and the entry must parse as the claimed message
+// regular-file read: a directory or a symlink named <id>.md is not a
+// delivery, and the entry must parse as the claimed message
 // (header id equals the claimed id) — anything else refuses instead of
 // reporting a delivery that is not one.
 func inboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, error) {

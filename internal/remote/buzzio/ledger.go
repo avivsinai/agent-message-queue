@@ -1,5 +1,5 @@
-// Package buzzio is the Buzz DM edge of the remote endpoint (bead 611.16,
-// relay design §4). This file is its durable ledger: ingress claims written
+// Package buzzio is the Buzz DM edge of the remote endpoint (relay
+// design §4). This file is its durable ledger: ingress claims written
 // before any command reaches the endpoint, prepared signed output written
 // before any transmission, and the request-to-row receipt mapping. Every
 // record is created once and then read back verbatim, so a restart,
@@ -58,7 +58,7 @@ type Claim struct {
 	Channel string `json:"channel"`
 	// DMChannel and NativeSession complete the share binding the claim was
 	// made under: a mention's source channel is not its destination, and a
-	// replacement native session never inherits old work (codex #866 r3 #2).
+	// replacement native session never inherits old work.
 	DMChannel     string          `json:"dm_channel"`
 	NativeSession string          `json:"native_session"`
 	Op            string          `json:"op"`
@@ -114,8 +114,8 @@ func (l *Ledger) ClaimFor(eventID string) (Claim, bool, error) {
 // Settlement is the decision an owner command reached, recorded once after
 // the endpoint answered it. A redelivered event with a settlement is never
 // sent to the endpoint again, so a busy rejection the owner already saw
-// cannot later turn into execution (codex #866 r1 #4). A claim without a
-// settlement is an import interrupted before its outcome was known; it is
+// cannot later turn into execution. A claim without a settlement is an import
+// interrupted before its outcome was known; it is
 // recovered by re-sending the same command.
 type Settlement struct {
 	Op         string `json:"op"`
@@ -174,15 +174,15 @@ type Outbound struct {
 	// first prepared; zero is a record from a build before sequences.
 	Seq int64 `json:"seq,omitempty"`
 	// Binding is the share the output was prepared under; Flush sends it
-	// only while the current share is the same (codex #866 r2 #4).
+	// only while the current share is the same.
 	Binding  ShareBinding `json:"binding"`
 	Accepted bool         `json:"accepted"`
 	// AcceptedAt is the second the relay's positive OK was seen: a typed
-	// answer must be later to refer to this output (611.42.7).
+	// answer must be later to refer to this output.
 	AcceptedAt int64 `json:"accepted_at,omitempty"`
 	// Refused is the relay's last negative OK for an output still owed:
 	// a refusal describes that attempt only, so the output is retried after
-	// a backoff and is never given up (agent-message-queue-611.58).
+	// a backoff and is never given up.
 	Refused *Refusal `json:"refused,omitempty"`
 }
 
@@ -254,9 +254,9 @@ type Refusal struct {
 	NextTry  int64  `json:"next_try"`
 }
 
-// UnmarshalJSON also reads the bare reason string an earlier build of
-// agent-message-queue-611.58 stored (Pro review of #971 round 2): that is
-// one refused attempt, due now, so one old record never stops a scan.
+// UnmarshalJSON also reads the bare reason string an earlier build
+// stored: that is one refused attempt, due now, so one old record never
+// stops a scan.
 func (r *Refusal) UnmarshalJSON(raw []byte) error {
 	var reason string
 	if json.Unmarshal(raw, &reason) == nil {
@@ -412,7 +412,7 @@ type Receipt struct {
 	Revision    int    `json:"revision"`
 	// The share binding and native address the request was submitted
 	// under: cancel needs the target and epoch, and a changed share never
-	// adopts or redirects another binding's request (codex #866 r1 #1, #6).
+	// adopts or redirects another binding's request.
 	Owner         string `json:"owner"`
 	Body          string `json:"body"`
 	Relay         string `json:"relay"`
@@ -425,7 +425,7 @@ type Receipt struct {
 // PutReceipt writes a request's receipt (created when the request is
 // submitted, updated as its row is prepared). The row-to-request mapping
 // is written first, so a crash between the two leaves the reaction lookup
-// in place and the next PutReceipt completes the receipt (codex #866 r1 #5).
+// in place and the next PutReceipt completes the receipt.
 func (l *Ledger) PutReceipt(r Receipt) error {
 	raw, err := json.Marshal(r)
 	if err != nil {

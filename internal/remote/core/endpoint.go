@@ -143,11 +143,10 @@ type Endpoint struct {
 	// visible records revisions the publisher has already delivered whose
 	// published_revision marker did not commit. Reconcile then retries the
 	// MARKER, never the delivery: the message is in the caller's mailbox and
-	// re-delivery after consumption is a duplicate (Pro r2 #13 / packet 4a,
-	// agent-message-queue-611.22.36). In memory only: a process crash in
-	// that window re-delivers, the documented exception.
+	// re-delivery after consumption is a duplicate. In memory only: a process
+	// crash in that window re-delivers, the documented exception.
 	//
-	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker, NOT an
+	// Visible means CONFIRMED DELIVERY awaiting its marker, NOT an
 	// in-flight attempt. A separate `publishing` set owns in-flight attempts
 	// so a failed publish cannot be mistaken for a delivered revision, and a
 	// concurrent caller cannot clear a reservation it does not own.
@@ -155,7 +154,7 @@ type Endpoint struct {
 	// publishing records keys with an in-flight publish attempt. Only one
 	// publish per key runs at a time; concurrent callers for the same key see
 	// it here and leave the work pending for the next Reconcile/Tick. The
-	// owner clears only its own entry on completion (611.22.48).
+	// owner clears only its own entry on completion.
 	publishing map[requests.Key]bool
 	// pubPending records accepted-but-skipped publication requests per key:
 	// a publishLocked caller that hit publishing[key] coalesces its revision
@@ -164,16 +163,16 @@ type Endpoint struct {
 	// republishes it BEFORE releasing its drain obligation, so every accepted
 	// revision is covered by exactly one obligation (its own in-flight
 	// attempt or the owner's chained attempt) and Close's drain waits for the
-	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
+	// whole chain.
 	pubPending map[requests.Key]int64
 	// failed holds the visible projection of a request whose async durable
 	// write failed. Reads serve it so the owner sees uncertain, not a stale
-	// running (611.50). It ends at the next durable write of the key, or
+	// running. It ends at the next durable write of the key, or
 	// when a Reconcile pass over the key returns without error and no newer
 	// failure was set meanwhile (failSeq tells them apart).
 	failed  map[requests.Key]failure
 	failSeq int64
-	// B13 lifecycle: state transitions accepting -> draining -> closed.
+	// Lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
 	// The entry check + increment happen in ONE critical section so a
@@ -188,20 +187,20 @@ type Endpoint struct {
 	// per-key/per-revision, not a global latch: a later successful publication
 	// of that revision (or a strictly newer one) retires the entry, so Close
 	// reports an incomplete drain ONLY for obligations genuinely left
-	// unpublished (codex round-4 P2-1). A failed attempt of attemptRev itself
-	// is NOT an obligation: the attempt ran and was counted; the durable
+	// unpublished. A failed attempt of attemptRev itself is NOT an
+	// obligation: the attempt ran and was counted; the durable
 	// unpublished state persists for Reconcile recovery.
 	drainObligations map[requests.Key]int64
 	// answering serializes the answers to one interaction of one request:
 	// respond holds its lock from the first read through the refusal
 	// rollback, so a rollback never erases a later answer with another
-	// option (611.42.6, Pro review of #986 r1). A rollback undoes only the
-	// intent its own respond recorded: a replay of an earlier intent keeps it
-	// (611.42.14). An entry lives while a respond holds or waits for it.
+	// option. A rollback undoes only the intent its own respond recorded: a
+	// replay of an earlier intent keeps it. An entry lives while a respond
+	// holds or waits for it.
 	answering map[answerKey]*answerLock
 	consent   ConsentCheck
 	// threadApprovals are the open approvals of turns no request owns, by
-	// id, and threadSink is where they are shown (611.42 slice 1b).
+	// id, and threadSink is where they are shown.
 	threadApprovals map[string]*threadApproval
 	threadSink      ThreadApprovalSink
 	// threadOwed are thread approval publications that failed, by id.
@@ -322,7 +321,6 @@ func (e *Endpoint) Register(att Attachment) {
 
 // UnregisterAll unsubscribes every attachment without closing the store:
 // reconcile tests use it to drop a target mid-flight (the restart shape).
-// Part of B14a's small surface, matching the reviewed recut.
 func (e *Endpoint) UnregisterAll() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -374,8 +372,7 @@ func (e *Endpoint) Close() error {
 	// Close is terminal, so the durable unpublished state is left for
 	// Reconcile recovery on the next start regardless. The map is per-key so
 	// a later successful publication (this Close path or a concurrent
-	// Reconcile) that already retired an entry does not get re-reported
-	// (codex round-4 P2-1).
+	// Reconcile) that already retired an entry does not get re-reported.
 	skipped := len(e.drainObligations)
 	e.drainObligations = map[requests.Key]int64{}
 	e.mu.Unlock()
@@ -404,8 +401,8 @@ func (e *Endpoint) releaseInFlight() {
 }
 
 // beginReconcile gates Reconcile/Tick on the lifecycle state and registers the
-// sweep as in-flight in ONE critical section, mirroring Handle's entry gate
-// (611.22.47). Without this, a Tick racing Close could start new native work
+// sweep as in-flight in ONE critical section, mirroring Handle's entry gate.
+// Without this, a Tick racing Close could start new native work
 // (admitDeferred -> att.Submit, reconcileCancelRetry -> att.CancelExact,
 // ack replay -> att.AcknowledgeResult) after the endpoint began draining:
 // Close waited only on Handle's inFlight, so shutdown began work it would not
@@ -432,7 +429,7 @@ func (e *Endpoint) InFlight() int {
 
 // IsDraining reports whether the endpoint has begun shutdown (state is
 // draining or closed). Test seam for synchronizing tests on the actual
-// lifecycle transition instead of an elapsed-time sleep (611.22.47, 611.22.48).
+// lifecycle transition instead of an elapsed-time sleep.
 func (e *Endpoint) IsDraining() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -442,7 +439,7 @@ func (e *Endpoint) IsDraining() bool {
 // IsDrainingState reports whether the endpoint is in the DRAINING state
 // specifically (not closed). This distinguishes 'Close is waiting on
 // in-flight handlers' from 'Close already set stateClosed and is past the
-// drain wait', which IsDraining conflates. Test seam for the 611.22.48
+// drain wait', which IsDraining conflates. Test seam for the
 // close-wait ordering regression: a test that releases a held publish after
 // observing IsDraining()==true must fail if what it actually observed was
 // stateClosed (Close raced past the drain without waiting).
@@ -462,7 +459,7 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 	if src.Host == "" {
 		return nil, protocol.Refuse(protocol.CodeInvalid, "command source host is required")
 	}
-	// B13 lifecycle: check state and register as in-flight in ONE critical
+	// Lifecycle: check state and register as in-flight in ONE critical
 	// section. A command arriving during draining/closed is refused with an
 	// action-required code (the caller retries) — never a failure code that
 	// would be recorded as the command's outcome.
@@ -498,8 +495,8 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 }
 
 func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, error) {
-	// D1 (bead 611.22.23): busy=queue and deliver=steer are disabled in v1 —
-	// their ownership+evidence models do not exist yet (steer would overwrite
+	// busy=queue and deliver=steer are disabled in v1 — their
+	// ownership+evidence models do not exist yet (steer would overwrite
 	// the running run's byTurn mapping; queue would admit without a NotAfter
 	// check at native admission or a per-runtime reservation). The gate sits
 	// BEFORE any durable write, so a disabled-mode submit consumes nothing
@@ -525,8 +522,8 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if exists {
 		// A busy-rejected tombstone from a previous attempt is not the
 		// request itself: the identical resubmit must be admitted normally,
-		// not answered from the tombstone (B14 minimal tombstone semantics —
-		// full B2/B11 safety/reset belongs to B14d). Recognizable as a
+		// not answered from the tombstone (minimal tombstone semantics;
+		// full safety/reset is not handled here). Recognizable as a
 		// tombstoned rejected record with no dispatch behind it and the same
 		// digest; only a DIFFERENT digest is a conflict. A link request is
 		// never re-admitted: its busy refusal is a terminal record, which
@@ -580,7 +577,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.publishRevision(rec)
 			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 		}
-		// Same reservation as a fresh admission (611.22.19 BK4): the room
+		// Same reservation as a fresh admission: the room
 		// for the result is taken before dispatch, and released on every
 		// exit that does not reach the dispatching write. Storage full
 		// leaves the busy tombstone as it was, still re-admittable.
@@ -706,7 +703,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
 	}
-	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
+	// Per-runtime reservation: refuse a second concurrent dispatch
 	// for the same target. Fail-closed — an undeterminable reservation state
 	// never authorizes a dispatch.
 	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
@@ -743,7 +740,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 	}
-	// 611.22.19 BK4: reserve room for the accepted work plus its bounded
+	// Reserve room for the accepted work plus its bounded
 	// result BEFORE dispatch, so storage pressure fails closed with
 	// storage_full here rather than wedging mid-flight or silently evicting
 	// a dedup tombstone for an active epoch. The reservation is for one
@@ -949,9 +946,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if !exists {
 		// Cancel arrived before its submit: leave a tombstone that a later
 		// submit cannot execute past. Only the Buzz carrier creates buzz-
-		// hosts, so a tombstone on one must come from that same share
-		// (agent-message-queue-611.48). The match ignores case: on a
-		// case-insensitive filesystem a BUZZ- tombstone is the same file.
+		// hosts, so a tombstone on one must come from that same share.
+		// The match ignores case: on a case-insensitive filesystem a BUZZ-
+		// tombstone is the same file.
 		if strings.HasPrefix(strings.ToLower(host), buzzHostPrefix) && (src.Origin["carrier"] != "buzz" || src.Host != host) {
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
@@ -999,7 +996,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, notOwned(src, rec)
 	}
 	// Validate the cancel command against the original request binding rather
-	// than silently substituting the record's trusted values (Pro B04). A
+	// than silently substituting the record's trusted values. A
 	// cancel naming a different epoch is for a generation that no longer
 	// exists; it must not interrupt the current run.
 	if cmd.Epoch != rec.Epoch {
@@ -1056,7 +1053,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// cancel_requested (intent recorded, run not stopped) or noop_terminal
 		// (run already done, nothing to stop). Keep the disposition without
 		// going terminal; reconcile re-drives if a run is bound.
-		// Pro #5: guard against downgrading a confirmed cancel.
+		// Guard against downgrading a confirmed cancel.
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: now}
 		}
@@ -1075,9 +1072,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 const buzzHostPrefix = "buzz-"
 
 // fromOwnerShare reports whether src is the Buzz share that submitted rec.
-// An answer to an interaction (agent-message-queue-611.46) and a cancel of a
-// Buzz-submitted request (611.48) are the owner's decisions, so only the
-// owner's DM on the share whose body and channel submitted the request may
+// An answer to an interaction and a cancel of a Buzz-submitted request are
+// the owner's decisions, so only the owner's DM on the share whose body and
+// channel submitted the request may
 // make them. The AMQ mailbox carrier stamps its own origin and the local IPC
 // socket stamps none, so a local sender, the asking agent included, can
 // never pass.
@@ -1149,9 +1146,9 @@ func readableBy(src Source, rec *requests.Record) bool {
 
 // ownedBy is the cancel rule. A link record is cancelled only by the link
 // that created it, and a link cancels nothing else. A Buzz record is
-// cancelled only from the owner's share that submitted it
-// (agent-message-queue-611.48). Other records keep the local rule: local
-// senders carry no authenticated identity.
+// cancelled only from the owner's share that submitted it.
+// Other records keep the local rule: local senders carry no authenticated
+// identity.
 func ownedBy(src Source, rec *requests.Record) bool {
 	switch {
 	case isLink(src):
@@ -1215,9 +1212,9 @@ func localSubmitted(src Source, rec *requests.Record) bool {
 	return src.Host == LocalHost && len(src.Origin) == 0 && rec.CreatorHost == LocalHost && len(rec.Origin) == 0
 }
 
-// localDeny reports whether src may answer cmd as a local deny (bead
-// agent-message-queue-611.42.2): the Buzz Desktop agent (amq-acp) relays the
-// owner's ❌ over the local socket, which has no owner share. It holds only
+// localDeny reports whether src may answer cmd as a local deny: the Buzz
+// Desktop agent (amq-acp) relays the owner's ❌ over the local socket, which
+// has no owner share. It holds only
 // for a local request answered from the local socket, while t is the
 // Claude attachment the request runs on, its pending interaction is exactly
 // cmd.InteractionID, a Claude approval that takes a remote answer, and the
@@ -1273,9 +1270,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		// A recorded intent is not a delivered answer. If the runtime still
 		// holds the question, the earlier native call failed before the
 		// answer landed and this is the replay that must re-send it; only a
-		// settled answer short-circuits (gate finding on
-		// agent-message-queue-611.22.36, union 42d923a4, reopening #20 at
-		// the endpoint).
+		// settled answer short-circuits.
 		settled, lerr := e.answerSettled(rec, t, key, cmd)
 		if lerr != nil {
 			return protocol.Reply{}, lerr
@@ -1288,15 +1283,15 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
 	// A recorded answer that the runtime refused never applied: another
-	// answer may replace it (611.42.4). Asked outside the lock.
+	// answer may replace it. Asked outside the lock.
 	retired := false
 	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
 		if r, ok := t.att.(AnswerRetirer); ok {
 			retired = r.AnswerRetired(key, cmd.InteractionID, prior)
 		}
 	}
-	// Answer-INTENT contract (bead 611.22.12): the pending interaction is
-	// revalidated under the lock that owns the persist (changed since the
+	// Answer-INTENT contract: the pending interaction is revalidated under
+	// the lock that owns the persist (changed since the
 	// first read), the offered option is validated against the pending
 	// interaction BEFORE anything durable happens, and only an answer-INTENT
 	// — not a completed answer — is persisted. A positive native refusal
@@ -1352,8 +1347,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	if done && prior != cmd.Option && !retired {
 		// An earlier answer may already be with the runtime (in flight, or
 		// sent before a transport error). The runtime applies the first
-		// answer it gets, so a different one never replaces that intent
-		// (PR #919 review round 3).
+		// answer it gets, so a different one never replaces that intent.
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "an earlier answer (%s) is still being delivered; send it again or answer in the terminal", prior)
 	}
@@ -1391,8 +1385,8 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	}
 	if code != "" && replay {
 		// A replay never clears the intent it found: the earlier answer may
-		// have landed, as a second ✅ after an allow (611.42.14, code-run
-		// review of #1000). Already resolved then is that answer's end.
+		// have landed, as a second ✅ after an allow. Already resolved
+		// then is that answer's end.
 		if code != protocol.CodeAlreadyResolved {
 			return protocol.Reply{}, protocol.Refuse(code, "%s", reason)
 		}
@@ -1412,7 +1406,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
 			if opt, done := cur.Answered[cmd.InteractionID]; !done || opt == cmd.Option {
 				delete(cur.Answered, cmd.InteractionID)
-				// Pro #4: route through commitLocked — single persist path.
+				// Route through commitLocked — single persist path.
 				if _, uerr := e.commitLocked(cur, nil); uerr != nil {
 					e.mu.Unlock()
 					return protocol.Reply{}, uerr
@@ -1434,7 +1428,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 
 // bareReason says in words why the runtime refused an answer that came back
 // with a code alone. The owner read "Not sent: interaction cc-…" for a late
-// ✅ (611.42.15).
+// ✅.
 func bareReason(code protocol.Code) string {
 	switch code {
 	case protocol.CodeExpired:
@@ -1500,13 +1494,13 @@ func (e *Endpoint) Targets() []string {
 	return out
 }
 
-// Store exposes the record store for carrier-side recovery reads (Pro B09):
+// Store exposes the record store for carrier-side recovery reads:
 // the AMQ carrier reconciles claimed-but-unreceipted commands by reading the
 // durable record instead of re-executing the command. Read-only use.
 func (e *Endpoint) Store() *requests.Store { return e.store }
 
 // Sessions is the attached-target projection session.list returns, for the
-// serving process to print after attachment (611.13).
+// serving process to print after attachment.
 func (e *Endpoint) Sessions() []protocol.Session { return e.list() }
 
 func (e *Endpoint) list() []protocol.Session {
@@ -1518,9 +1512,9 @@ func (e *Endpoint) list() []protocol.Session {
 	e.mu.Unlock()
 	out := make([]protocol.Session, 0, len(ids))
 	for _, id := range ids {
-		// sessionProjection masks the steer capability the D1 gate refuses
-		// so the advertised capabilities match what the endpoint actually
-		// accepts (agent-message-queue-611.22.36, Pro r2 #22).
+		// sessionProjection masks the steer capability the v1 gate
+		// refuses so the advertised capabilities match what the endpoint
+		// actually accepts.
 		s, err := e.sessionProjection(id)
 		if err != nil {
 			continue
@@ -1531,12 +1525,12 @@ func (e *Endpoint) list() []protocol.Session {
 }
 
 // sessionProjection returns the attachment's Inspect() result with
-// capabilities masked to match what the endpoint actually accepts. The D1
-// gate (611.22.23) refuses deliver=steer at v1, so advertising Steer is a
+// capabilities masked to match what the endpoint actually accepts. The
+// v1 gate refuses deliver=steer, so advertising Steer is a
 // false capability signal — a client that picks operations from the
 // advertised capabilities is told it can steer, then every steer is
 // refused. This helper is used by BOTH list() and inspect() so the mask is
-// in one place (agent-message-queue-611.22.36, Pro r2 #22).
+// in one place.
 func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) {
 	e.mu.Lock()
 	t, ok := e.targets[targetID]
@@ -1545,7 +1539,7 @@ func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) 
 		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
 	}
 	s := t.att.Inspect()
-	// D1 gate: mask steer while the v1 gate refuses deliver=steer.
+	// Mask steer while the v1 gate refuses deliver=steer.
 	s.Capabilities.Steer = false
 	return s, nil
 }
@@ -1640,11 +1634,8 @@ func linkView(s protocol.Session, src Source) protocol.Session {
 
 // onNative applies one native observation to the bound record.
 func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
-	// B14a: no defer — every early return below unlocks explicitly, and the
-	// native ack (the slow, untrusted call) runs after the final unlock. The
-	// synchronous publishLocked stays under the lock until B14e reworks
-	// publication bounding; the ack is the unbounded-latency call and moves
-	// out now.
+	// No defer: every early return below unlocks explicitly, and the
+	// native ack (the slow, untrusted call) runs after the final unlock.
 	//
 	// A thread question is not a request record's: it is shown outside
 	// e.mu, ordered by threadPubMu.
@@ -1680,7 +1671,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// Everything else flows — including a completion for a cancelled record.
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
-		// Pro #2: the duplicate guard must compare EVIDENCE, not just presence.
+		// The duplicate guard must compare EVIDENCE, not just presence.
 		// A late FINAL result F for the same run is NOT a duplicate of partial P
 		// — the digests differ. Dropping F keeps P, memoed AckDigest(P), while
 		// the runtime holds F: digests never match, slot never releases. Drop
@@ -1725,12 +1716,12 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		// Pro #5: route through transitionLocked.
+		// Route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
 		if ev.Interaction != nil && ev.Outcome != "" && (owes(rec, ev.Interaction.InteractionID) || slices.Contains(rec.RetiredOutcomes, ev.Interaction.InteractionID)) {
 			// A late exact resolution settles an owed outcome — or corrects a
-			// retention-retired one (611.45 r2 P1) — terminal record or not;
+			// retention-retired one — terminal record or not;
 			// the run's state does not change.
 			settleOwedNative(rec, protocol.Resolution{InteractionID: ev.Interaction.InteractionID, Outcome: ev.Outcome, Option: ev.Option})
 			break
@@ -1740,8 +1731,8 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		// Pro #5: route through transitionLocked. Pro round 2 #21: the
-		// resolution carries no interaction, and causeNone treats a nil
+		// Route through transitionLocked. The resolution carries no
+		// interaction, and causeNone treats a nil
 		// interaction as "unchanged", so the clear is an explicit flag.
 		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote, outcome: ev.Outcome, option: ev.Option})
 	case EventLocalIntervention:
@@ -1749,7 +1740,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		// Pro #5: route through transitionLocked.
+		// Route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{localIntervention: true})
 	default:
 		e.mu.Unlock()
@@ -1771,7 +1762,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// ack memo (commitLocked) has already made the intent replayable, so a
 	// wedged attachment ack must not stall command handling, and a crash
 	// mid-ack is recoverable via replayTerminalAck. Publication itself also
-	// runs outside e.mu (611.22.48): publishLocked claims the publishing slot
+	// runs outside e.mu: publishLocked claims the publishing slot
 	// under the lock, snapshots, releases e.mu for the carrier publish
 	// (maildir open + fsync), then re-acquires for MarkPublished. visible
 	// advances only after successful delivery.
@@ -1785,16 +1776,16 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	ackKey, ackEpoch := ev.Key, rec.Epoch
 	terminal := rec.State.Terminal()
 	e.mu.Unlock()
-	// B14a: use the attachment captured under the lock; never re-read
+	// Use the attachment captured under the lock; never re-read
 	// e.targets after unlocking (a concurrent Register would race the map).
 	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// 611.22.34 crash window: the ack landed but the durable flag did
+		// Crash window: the ack landed but the durable flag did
 		// not. The replay path self-heals (Lookup → EvidenceNone → Mark).
 		if e.crashAt(PointAfterAck) != nil {
 			return
 		}
-		// 611.22.34: the ack DELIVERED — record it durably so the restart
+		// The ack DELIVERED — record it durably so the restart
 		// replay converges instead of re-Lookuping this record every tick
 		// (history digests never match: NativeRef suffix asymmetry). A
 		// MarkAcknowledged failure is ignored, same shape as MarkPublished:
@@ -1838,8 +1829,7 @@ type failure struct {
 // failedLocked returns the storage-failure projection for the durable record
 // cur. A durable terminal state is final, so it wins over the projection.
 // The projection carries cur's revisions: a revision that was never stored
-// must not reach a carrier that tracks revisions (Pro review of #941).
-// The caller holds e.mu.
+// must not reach a carrier that tracks revisions. The caller holds e.mu.
 func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
 	key := keyOfRecord(cur)
 	f, ok := e.failed[key]
@@ -1870,8 +1860,8 @@ func boundResult(r *protocol.Result) *protocol.Result {
 // cause is the single source of truth for why a record transitions. Every
 // call site computes a cause + evidence and hands them to transitionLocked;
 // no caller mutates rec.State/Code/Tombstone/Cancel/Result/NativeRun
-// directly. This makes derived-field hygiene impossible to forget (the root
-// cause of B14c rounds 1-3: 22 scattered sites each missed a cleanup).
+// directly. This makes derived-field hygiene impossible to forget: with scattered
+// mutation sites, each site could miss a cleanup.
 type cause string
 
 const (
@@ -1975,15 +1965,15 @@ func owes(rec *requests.Record, id string) bool {
 // normal case settles on the next Reconcile, because the bridge event file
 // still holds interaction_resolved. The unsettleable case — a bridge that
 // never wrote it, or a removed or rotated seam — would otherwise block
-// compaction forever (advisor review of #926, bead 611.45). The horizon is
-// the request-retention horizon: once a terminal record is old enough to
+// compaction forever. The horizon is the request-retention horizon: once a
+// terminal record is old enough to
 // compact anyway, an outcome no resolver has produced is recorded as an
 // explicit uncertain resolution with a visible reason, never dropped
 // silently. A resolvable owed outcome still settles normally on Reconcile.
 const owedOutcomeRetention = protocol.DefaultCompactHorizon
 
 // retireOutcomeLocked replaces an owed outcome's obligation with an explicit
-// uncertain resolution (bead 611.45). It runs inside the locked update that
+// uncertain resolution. It runs inside the locked update that
 // retires: the obligation moves to RetiredOutcomes (so recovery keeps asking
 // the resolver and a late exact resolution can still correct this), and the
 // record shows delivery_unknown with a visible provenance instead of pinning
@@ -2020,8 +2010,8 @@ func recordRetainedResolution(rec *requests.Record, id string) {
 }
 
 // settleOwedNative records an exact native resolution for an owed OR retired
-// outcome (bead 611.45 r2 P1): a retired outcome stays correctable until the
-// record compacts, so a real answered/elsewhere outcome arriving after the
+// outcome: a retired outcome stays correctable until the record compacts, so
+// a real answered/elsewhere outcome arriving after the
 // horizon replaces the uncertain one. Returns false when the id was never
 // owed or retired, or a native resolution already recorded it.
 func settleOwedNative(rec *requests.Record, r protocol.Resolution) bool {
@@ -2049,18 +2039,18 @@ func settleOwedNative(rec *requests.Record, r protocol.Resolution) bool {
 // produce and retires every one the retention horizon has outrun. It never
 // changes the record's state.
 //
-// The resolver is OPTIONAL (611.45 r2 P2): a target that is unregistered or
+// The resolver is OPTIONAL: a target that is unregistered or
 // whose attachment implements no InteractionResolver can never settle an
-// owed outcome, so the horizon still retires it — the exact case the bead
+// owed outcome, so the horizon still retires it — the exact case the horizon
 // exists for is a record that survives a restart after its target
 // disappeared. With a resolver, each owed id is asked outside the lock; the
 // final ask for an id about to be retired runs again INSIDE the locked
 // update, so an outcome the resolver gains between the two cannot be
 // retired behind its own resolution.
 //
-// A retired outcome stays correctable (611.45 r2 P1): recovery keeps asking
+// A retired outcome stays correctable: recovery keeps asking
 // the resolver for retired ids until the record compacts, and a late exact
-// native resolution replaces the uncertain one. Compaction no longer waits
+// native resolution replaces the uncertain one. Compaction does not wait
 // on retired ids.
 func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 	key := keyOfRecord(rec)
@@ -2108,8 +2098,7 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		// Final ask inside the locked update, against the CURRENT target:
 		// a live reattach may have replaced the attachment since the
 		// unlocked lookup, and the replacement may already resolve this
-		// key (review of #979 r3). Never retire an outcome a resolver can
-		// settle at this moment.
+		// key. Never retire an outcome a resolver can settle at this moment.
 		curResolver := resolver
 		if t, ok := e.targets[rec.TargetID]; ok {
 			if r, isResolver := t.att.(InteractionResolver); isResolver {
@@ -2215,8 +2204,7 @@ func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
 		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
 		if opt, sent := rec.Answered[id]; sent {
 			// The run ended while an answer was sent or in flight: the
-			// resolution that answer caused can arrive after the run's end
-			// (PR #919 review round 4).
+			// resolution that answer caused can arrive after the run's end.
 			r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: opt}
 		}
 	default:
@@ -2312,7 +2300,7 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 			run := ev.runID
 			rec.NativeRun = &run
 		}
-		// B4: retain partial output retained at cancellation. A cancelled run may
+		// Retain partial output at cancellation. A cancelled run may
 		// have produced a result (partial output) — dropping it here means NO
 		// result and NO ack digest, so the native slot is never released.
 		if ev.result != nil {
@@ -2338,7 +2326,7 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		// reconcile re-drives CancelExact. Disposition records that the stop
 		// is pending, not confirmed.
 		//
-		// Pro #3: a confirmed disposition is a promise already kept and is not
+		// A confirmed disposition is a promise already kept and is not
 		// rewritable. Guard it like the other two Disposition writers: if the
 		// cancel was already confirmed, a transient CancelExact error must NOT
 		// downgrade it to cancel_requested. A terminal, confirmed promise
@@ -2406,8 +2394,8 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 // failed looks like (onNative discards the attempted update), and neither
 // owesCancel nor OwesAck describes it — replayTerminalAck returned before
 // ever asking the attachment, so the retained result was never fetched or
-// acknowledged (Pro r2 #15 / packet 4c, agent-message-queue-611.22.36).
-// A tombstone owes nothing: compaction erased its result on purpose.
+// acknowledged. A tombstone owes nothing: compaction erased its result on
+// purpose.
 func owesResult(rec *requests.Record) bool {
 	return rec.OwesResult()
 }
@@ -2451,7 +2439,7 @@ func owesCancel(rec *requests.Record) bool {
 // not acknowledged, nothing else. Result != nil is what makes the digest
 // non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
 // owes nothing and is never re-driven — that closes the revision-churn bug
-// (Pro #4) BY CONSTRUCTION.
+// BY CONSTRUCTION.
 //
 // Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
 // Result is bound, compute the digest from Result).
@@ -2507,7 +2495,7 @@ func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error)
 // Native attachment calls happen without the endpoint lock held; a single
 // poisoned record is reported, never allowed to abort the whole pass.
 func (e *Endpoint) Reconcile() error {
-	// 611.22.47: gate Reconcile/Tick on lifecycle state and register the
+	// Gate Reconcile/Tick on lifecycle state and register the
 	// sweep as in-flight so Close's drain wait bounds it. A Tick that arrives
 	// once draining has begun is skipped (no new native work during shutdown).
 	if !e.beginReconcile() {
@@ -2532,8 +2520,8 @@ func (e *Endpoint) Reconcile() error {
 			}
 		default:
 			if len(rec.OwedOutcomes) > 0 || len(rec.RetiredOutcomes) > 0 {
-				// Retired outcomes stay correctable until compaction (611.45
-				// r2 P1), so recovery keeps asking the resolver for them too.
+				// Retired outcomes stay correctable until compaction, so
+				// recovery keeps asking the resolver for them too.
 				if rerr = e.recoverOwedOutcomes(rec); rerr != nil {
 					break
 				}
@@ -2543,13 +2531,13 @@ func (e *Endpoint) Reconcile() error {
 			// replayTerminalAck is idempotent (returns nil if the attachment
 			// already released the result). A terminal record with no result
 			// has an empty digest and replayTerminalAck returns immediately,
-			// so there is no churn (Pro #4).
+			// so there is no churn.
 			switch {
 			case owesCancel(rec):
 				rerr = e.reconcileCancelRetry(rec)
 			case owesResult(rec):
 				// A closed record with a bound run and no result: a late result
-				// whose write failed (packet 4c). Ask the attachment.
+				// whose write failed. Ask the attachment.
 				rerr = e.recoverTerminalResult(rec)
 			default:
 				rerr = e.replayTerminalAck(rec)
@@ -2557,7 +2545,7 @@ func (e *Endpoint) Reconcile() error {
 		}
 		if rerr == nil {
 			// The pass retried the write a storage failure lost and nothing
-			// failed, so the durable record is the truth again (611.50).
+			// failed, so the durable record is the truth again.
 			e.mu.Lock()
 			if f, ok := e.failed[keyOfRecord(rec)]; ok && f.seq == seen {
 				delete(e.failed, keyOfRecord(rec))
@@ -2573,11 +2561,11 @@ func (e *Endpoint) Reconcile() error {
 		}
 		e.mu.Unlock()
 	}
-	// B14e: bounded compaction. Runs once per minute (shouldCompact rate-
+	// Bounded compaction. Runs once per minute (shouldCompact rate-
 	// limit), reaps terminal+settled+old records into tombstones. e.mu is
-	// held per-record (CompactOne), never across the sweep (Pro B7).
+	// held per-record (CompactOne), never across the sweep.
 	// The candidates are the store's terminal records that are not
-	// tombstones yet (9dx.6), not the sweep's records: a settled record is
+	// tombstones yet, not the sweep's records: a settled record is
 	// exactly what compaction wants and the sweep skips, and a full list
 	// would grow with the tombstones nothing deletes. CompactOne re-reads
 	// each candidate under the store lock and re-gates (terminal +
@@ -2587,7 +2575,7 @@ func (e *Endpoint) Reconcile() error {
 		compacted := 0
 		for _, key := range e.store.CompactionCandidates() {
 			// Count only successful compactions toward the limit, not every
-			// record the loop looks at (Pro B1: records not old enough yet
+			// record the loop looks at: records not old enough yet
 			// would otherwise use it up).
 			if compacted >= 100 {
 				break
@@ -2598,8 +2586,8 @@ func (e *Endpoint) Reconcile() error {
 			if cerr != nil {
 				var rf *protocol.Refusal
 				if errors.As(cerr, &rf) && rf.Code == protocol.CodeStorageFull {
-					// 611.22.19 BK4 round-2 B2: a per-record storage_full must
-					// NOT abort the sweep. CompactOne is a settlement write
+					// A per-record storage_full must NOT abort the sweep.
+					// CompactOne is a settlement write
 					// (quota-exempt), so this should not fire, but a true
 					// disk-full still records the error and continues so bounded
 					// work per tick stays true (a refused record does not stop
@@ -2637,7 +2625,7 @@ func (e *Endpoint) Reconcile() error {
 // EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
 // case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
-	// 611.22.34: the ack was already DELIVERED (durable confirmation) — no
+	// The ack was already DELIVERED (durable confirmation) — no
 	// replay, no Lookup. This is the convergence fix: without this gate the
 	// restart case re-examines every terminal record every tick forever,
 	// because history results carry the NativeRef suffix ("codex thread
@@ -2678,13 +2666,13 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if !ev.Known || ev.Class == EvidenceNone {
 		// Nothing retained for this key: the ack already landed before the
 		// crash. Replay would acknowledge evidence the attachment discarded.
-		// 611.22.34: the delivered ack is now provable — record it durably
+		// The delivered ack is now provable — record it durably
 		// so this record never re-enters the replay path (convergence).
 		_ = e.store.MarkAcknowledged(keyOfRecord(rec))
 		return nil
 	}
-	// 611.22.34 B2 (recut): HISTORY-terminated evidence. A restarted
-	// attachment retains nothing in memory by construction, so history
+	// HISTORY-terminated evidence. A restarted attachment retains nothing in
+	// memory by construction, so history
 	// evidence IS proof the run terminated — this is the pre-upgrade
 	// convergence path (Acknowledged=false on every shipped record).
 	// The memoed AckDigest is the FULL digest of the live result, and codex
@@ -2692,8 +2680,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// or may not carry a NativeRef while the history result always does.
 	// Compare both sides in the NativeRef-stable form, recomputed from the
 	// record's own stored result; the full digest is still what the
-	// attachment is asked to release, because its own compare is full-shape
-	// (post-merge verification of #767, agent-message-queue-611.22.34).
+	// attachment is asked to release, because its own compare is full-shape.
 	if ev.Class == EvidenceHistoryTerminated && ev.State.Terminal() && ev.Result != nil {
 		if rec.Result == nil || protocol.EvidenceDigestStable(ev.Result) != protocol.EvidenceDigestStable(rec.Result) {
 			// The history outcome is not the outcome this record acked; a
@@ -2709,24 +2696,24 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		att := t.att
 		e.mu.Unlock()
 		att.AcknowledgeResult(key, epoch, digest)
-		// 611.22.34: delivered — record it (MarkPublished failure shape:
+		// Delivered — record it (MarkPublished failure shape:
 		// self-healing on the next replay).
 		_ = e.store.MarkAcknowledged(key)
 		return nil
 	}
-	// B2: validate retained terminal evidence against the bound run + digest,
+	// Validate retained terminal evidence against the bound run + digest,
 	// NOT against the client-facing state. A cancelled record keeps its
-	// promise and never flips to completed (Q2 ruling), so "endpoint cancelled
-	// + native completed" is a SUPPORTED shape. The old ev.State != rec.State
-	// gate rejected exactly that: digest matched, states differed, slot
-	// stayed occupied, later submits refused busy forever. The digest already
-	// proves it is THIS result; the run id proves it is THIS run.
+	// promise and never flips to completed, so "endpoint cancelled
+	// + native completed" is a SUPPORTED shape. Gating on ev.State !=
+	// rec.State would reject exactly that: digest matches, states differ, the
+	// slot stays occupied, later submits are refused busy forever. The digest
+	// already proves it is THIS result; the run id proves it is THIS run.
 	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != digest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
 		return nil
 	}
-	// Pro #5: identity, not content. Two runs can produce identical output
+	// Identity, not content. Two runs can produce identical output
 	// (same digest). Require the retained evidence's RunID to match the
 	// record's bound NativeRun before acking — otherwise we release another
 	// run's evidence. AcknowledgeResult's arguments carry no run id, so the
@@ -2734,7 +2721,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if rec.NativeRun == nil || ev.RunID != *rec.NativeRun {
 		return nil
 	}
-	// B14a: the native ack runs OUTSIDE e.mu like every other native call —
+	// The native ack runs OUTSIDE e.mu like every other native call —
 	// a wedged attachment ack on this recovery path must not hold the
 	// endpoint mutex forever. The ack digest was durably memoed before it was
 	// first sent, so a crash mid-ack is replayable.
@@ -2744,7 +2731,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	att := t.att
 	e.mu.Unlock()
 	att.AcknowledgeResult(key, epoch, digest)
-	// 611.22.34: delivered — record it. A MarkAcknowledged failure is
+	// Delivered — record it. A MarkAcknowledged failure is
 	// ignored (MarkPublished shape): the next replay re-Lookups, gets
 	// EvidenceNone, and re-Marks. Self-healing.
 	_ = e.store.MarkAcknowledged(key)
@@ -2765,16 +2752,15 @@ func keyOfRecord(rec *requests.Record) requests.Key {
 // runtimeInFlightLocked reports whether another request for the same target
 // is in flight at the endpoint: any record in dispatching (admission
 // unknown), running (native-owned), or uncertain (outcome unknown) state.
-// This is the B14 per-runtime reservation — the endpoint's own knowledge of
+// This is the per-runtime reservation — the endpoint's own knowledge of
 // what it has outstanding, not the attachment's Inspect() status, which is
-// advisory and racy. Scope note (B10, ratified deviation from the bead's
-// literal wording): a terminal record whose ack is pending is NOT reserved —
-// the attachment owns the native unacked-result slot (its Submit already
-// refuses on one) and the ack-replay machinery recovers it; reserving it at
-// the endpoint too double-counted and made the endpoint refuse submits the
-// attachment would accept.
-// B10 fail-closed: an enumeration error is PROPAGATED, never read as "none"
-// — a storage error must not authorize the dispatch the reservation exists
+// advisory and racy. Scope note: a terminal record whose ack is pending is
+// NOT reserved — the attachment owns the native unacked-result slot (its
+// Submit already refuses on one) and the ack-replay machinery recovers it;
+// reserving it at the endpoint too double-counted and made the endpoint
+// refuse submits the attachment would accept. Fail-closed: an enumeration
+// error is PROPAGATED, never read as "none" — a storage error must not
+// authorize the dispatch the reservation exists
 // to prevent. A POISON record for the target itself (undecodable file whose
 // identity is recovered from the path) makes the target's reservation state
 // UNDETERMINABLE — also fail-closed. Poison for other targets does not
@@ -2813,7 +2799,7 @@ var errUndeterminableReservation = errors.New("reservation state undeterminable"
 // cancel intent (cancel_requested + NativeRun bound). Works for both terminal
 // (the abort was inconclusive) and non-terminal (a cancel raced admission and
 // the record is still running) records. Bounded by NotAfter.
-// This is the B04 reconcile-cancel-retry mechanism, built once here.
+// This is the reconcile-cancel-retry mechanism, built once here.
 func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	key := keyOfRecord(rec)
 	epoch := rec.Epoch
@@ -2829,7 +2815,7 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
 		// The cancel outcome is not saved: report it so Reconcile keeps any
-		// failure projection (Pro review of #941).
+		// failure projection.
 		e.mu.Unlock()
 		return err
 	}
@@ -2868,7 +2854,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		resolver, _ = t.att.(InteractionResolver)
 	}
 
-	// B14a: no defer — every early return below unlocks explicitly, and the
+	// No defer: every early return below unlocks explicitly, and the
 	// native ack (the slow, untrusted call) runs after the final unlock. A
 	// wedged attachment must never hold the endpoint mutex: the whole
 	// endpoint (every Handle/Reconcile/cancel) deadlocks behind it.
@@ -2989,7 +2975,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	// B14a: the durable ack memo was written under the lock above
+	// The durable ack memo was written under the lock above
 	// (commitLocked), so the replay path stays correct if we crash before
 	// the native call. The native ack itself runs OUTSIDE e.mu — a wedged
 	// attachment ack must not hold the endpoint mutex forever.
@@ -3001,8 +2987,8 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	e.mu.Unlock()
 	if ackAtt != nil && ackDigest != "" {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// 611.22.34: delivered — record it durably (digest verified
-		// non-empty above). MarkAcknowledged failure ignored (MarkPublished
+		// Delivered — record it durably (digest verified non-empty above).
+		// MarkAcknowledged failure ignored (MarkPublished
 		// shape): the next replay re-Lookups and re-Marks. Self-healing.
 		_ = e.store.MarkAcknowledged(ackKey)
 	}
@@ -3057,10 +3043,11 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	// Move to dispatching under the lock, then Submit unlocked. The B14
-	// reservation applies here too: a deferred record whose sibling is still
-	// in flight stays deferred (never dispatched) — Tick retries it after
-	// the in-flight one resolves. Fail-closed on enumeration error.
+	// Move to dispatching under the lock, then Submit unlocked. The
+	// per-runtime reservation applies here too: a deferred record whose
+	// sibling is still in flight stays deferred (never dispatched) — Tick
+	// retries it after the in-flight one resolves. Fail-closed on enumeration
+	// error.
 	reserved, rerr := e.runtimeInFlightLocked(rec.TargetID, key)
 	if rerr != nil {
 		e.mu.Unlock()
@@ -3070,7 +3057,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return nil // still reserved; retry on the next tick
 	}
-	// 611.22.19 BK4: same fail-closed reservation as the live submit path —
+	// Same fail-closed reservation as the live submit path —
 	// refuse storage_full before dispatch rather than wedging or evicting a
 	// dedup tombstone. A deferred record already occupies space; reserving the
 	// bounded result headroom keeps the quota honest under retry.
@@ -3170,7 +3157,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
 	}
 	if rec.State == protocol.StateDispatching {
-		// B1: if the record carries outstanding cancel intent (a concurrent
+		// If the record carries outstanding cancel intent (a concurrent
 		// cancel got a transient error and persisted cancel_requested while the
 		// record was still dispatching), admission of a live run must abort it,
 		// not persist running. The abort condition is disposition, not state.
@@ -3194,7 +3181,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	// The record was moved by a native event while Submit was in flight
 	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
 	// on assumptions about what happened.
-	// B1: the abort condition is OUTSTANDING CANCEL INTENT, not just State ==
+	// The abort condition is OUTSTANDING CANCEL INTENT, not just State ==
 	// cancelled. A cancel that got a transient CancelExact error persists
 	// Cancel{cancel_requested} while the record is still dispatching/running.
 	// State is what we promised the caller; disposition is what we owe the
@@ -3223,7 +3210,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev, Message: rec.RefusalReason}}, nil
 	}
 	if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
-		// B3: cancellation raced admission and never got metadata, and the
+		// Cancellation raced admission and never got metadata, and the
 		// native outcome positively establishes admission never happened.
 		e.transitionLocked(rec, causeCancelledBeforeAdmission, nativeEvidence{})
 		if _, err := e.commitLocked(rec, t); err != nil {
@@ -3232,7 +3219,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			return protocol.Reply{}, err
 		}
 	}
-	// B4: reconcile moved the record to uncertain while Submit was in flight
+	// Reconcile moved the record to uncertain while Submit was in flight
 	// (attachment lost, history silent). Submit's own answer is exact native
 	// evidence and outranks that uncertainty: admitted binds the run and goes
 	// running; a definitive code goes to its terminal state and releases the
@@ -3298,7 +3285,7 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 			lookupEv, lookupErr = t.att.Lookup(key, epoch)
 		}
 		if lookupErr != nil {
-			// B3: a transient Lookup failure must NOT confirm-and-commit with
+			// A transient Lookup failure must NOT confirm-and-commit with
 			// empty evidence. Leave the disposition unconfirmed so
 			// reconcileCancelRetry re-drives CancelExact on the next tick.
 			e.mu.Lock()
@@ -3389,8 +3376,8 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 	e.mu.Unlock()
 	if ackDigest != "" {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// 611.22.34: delivered — record it durably (digest verified
-		// non-empty above). MarkAcknowledged failure ignored (MarkPublished
+		// Delivered — record it durably (digest verified non-empty above).
+		// MarkAcknowledged failure ignored (MarkPublished
 		// shape): the next replay re-Lookups and re-Marks. Self-healing.
 		_ = e.store.MarkAcknowledged(ackKey)
 	}
@@ -3456,7 +3443,7 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 // mark, so confirming publishedRev covers every earlier pending revision too.
 // Called on EVERY path that confirms the durable publication high-water mark:
 // the fresh-delivery exit, the marker-only retry path, and the already-published
-// branch (codex round-5 P2: marker-only recovery must retire the obligation,
+// branch (marker-only recovery must retire the obligation,
 // else Close reports ErrDrainIncomplete for a record that is fully published).
 // The caller holds e.mu. Never clears an unrelated key or a strictly higher
 // revision (a higher pending obligation survives a lower confirmed publish).
@@ -3472,15 +3459,14 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	key := keyOfRecord(rec)
 	// Fresh state under the lock: the caller's record may be stale, and a
 	// concurrent reconcile may already have published and marked this
-	// revision. Publishing from a stale record is the double delivery of
-	// Pro r2 #13 (packet 4a, agent-message-queue-611.22.36).
+	// revision. Publishing from a stale record is the double delivery.
 	cur, ok, err := e.store.Get(key)
 	if err != nil || !ok {
 		return
 	}
 	if cur.PublishedRevision >= rec.Revision {
 		rec.PublishedRevision = cur.PublishedRevision
-		// codex round-5 P2: a prior successful publication already discharged
+		// A prior successful publication already discharged
 		// this revision (or a strictly newer one). Retire any obligation for
 		// this key that the durable high-water mark has covered, so a later
 		// Close does not report ErrDrainIncomplete for a fully-published
@@ -3489,14 +3475,14 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		e.retireObligationLocked(key, cur.PublishedRevision)
 		return
 	}
-	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker. If a
+	// Visible means CONFIRMED DELIVERY awaiting its marker. If a
 	// confirmed delivery for this revision is already pending its marker,
 	// skip the DELIVERY (no double delivery) but still fall through to
-	// MarkPublished below — the marker may need retrying (Pro r2 #13). An
+	// MarkPublished below — the marker may need retrying. An
 	// IN-FLIGHT attempt is tracked separately in `publishing`; it does NOT
 	// count as delivered.
 	if e.visible[key] >= rec.Revision {
-		// Marker retry path (Pro r2 #13): this revision was already delivered
+		// Marker retry path: this revision was already delivered
 		// (confirmed, awaiting its marker). Skip the DELIVERY (no double
 		// delivery) and retry only the marker, honoring the crash points so
 		// a lost marker stays lost within one simulated crash.
@@ -3508,7 +3494,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			if e.visible[key] == rec.Revision {
 				delete(e.visible, key)
 			}
-			// codex round-5 P2: marker-only recovery (a prior delivery's marker
+			// Marker-only recovery (a prior delivery's marker
 			// write failed, Reconcile retries only the marker) must also retire
 			// the obligation. Without this, Close reports ErrDrainIncomplete
 			// although the durable record is now fully published.
@@ -3520,15 +3506,15 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// publishing this key, coalesce this caller's revision into the
 	// pending obligation set (max-revision semantics, not a call count)
 	// and return. This prevents two concurrent publishes for the same
-	// key without holding the global endpoint mutex (611.22.48 P1-2)
-	// while guaranteeing the skipped revision is still covered by
-	// exactly one drain obligation (Astra B784-1): the finishing
-	// publisher — the single per-key owner — adopts the pending set and
+	// key without holding the global endpoint mutex while guaranteeing the
+	// skipped revision is still covered by
+	// exactly one drain obligation: the finishing publisher — the single
+	// per-key owner — adopts the pending set and
 	// republishes before its drain obligation is released. Outside a
 	// shutdown drain the next Tick/Reconcile would also retry it, but
 	// registering the obligation uniformly keeps the invariant in every
 	// state. Coalescing by highest requested revision avoids duplicate
-	// same-revision deliveries (Astra round-2 P1-2).
+	// same-revision deliveries.
 	if e.publishing[key] {
 		if rec.Revision > e.pubPending[key] {
 			e.pubPending[key] = rec.Revision
@@ -3542,8 +3528,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// success or failure), so a concurrent caller's reservation is never
 	// clobbered. visible is advanced ONLY on a successful publish.
 	e.publishing[key] = true
-	// 611.22.48 (2nd NO-GO): account for the accepted publication work in
-	// the bounded shutdown drain. The publish runs OUTSIDE e.mu (the
+	// Account for the accepted publication work in the bounded shutdown
+	// drain. The publish runs OUTSIDE e.mu (the
 	// expensive maildir open + fsync must not block other keys), but Close
 	// must not observe zero handlers, close the store, and return while
 	// publication is still running — a successful publish could not then
@@ -3554,25 +3540,24 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	snap := rec.Snapshot
 	origin := rec.Origin
 	attemptRev := rec.Revision
-	pub := e.publish // read under e.mu (SetPublish writes under it) — round-4 fix carried over #806
+	pub := e.publish // read under e.mu (SetPublish writes under it)
 	e.mu.Unlock()
 
 	// publish ONE revision outside e.mu, then loop while skipped newer
 	// revisions exist. The drain obligation (inFlight) and the per-key
 	// publishing ownership are held CONTINUOUSLY across the whole chain —
 	// there is no unlock gap with zero drain count in which Close could
-	// observe "nothing in flight" and close the store (Astra round-2
-	// P1-1). Single iterative owner, no recursive re-entry (Astra
-	// round-2 P1-2).
+	// observe "nothing in flight" and close the store. Single iterative
+	// owner, no recursive re-entry.
 	for {
 		pubErr := pub(snap, origin)
 
 		e.mu.Lock()
 		// Success bookkeeping for THIS attempt BEFORE selecting the next
 		// obligation, so the coalescing check below sees the delivery
-		// state (Astra round-2 P1-2). A failed attempt does NOT advance
-		// visible/PublishedRevision; the durable unpublished state is
-		// preserved for Reconcile recovery (Astra round-2 answer 3).
+		// state. A failed attempt does NOT advance visible/PublishedRevision;
+		// the durable unpublished state is
+		// preserved for Reconcile recovery.
 		if pubErr == nil && e.visible[key] < attemptRev {
 			e.visible[key] = attemptRev
 		}
@@ -3581,8 +3566,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		// not retry the same revision (no spin loop) but still adopts a
 		// strictly NEWER accepted revision under the same owner: dropping the
 		// r+1 obligation because r failed would leave r+1 uncovered by any
-		// drain count and let Close return nil with it unpublished (codex
-		// round-3 P1). Reconcile/Tick owns retrying the failed revision
+		// drain count and let Close return nil with it unpublished.
+		// Reconcile/Tick owns retrying the failed revision
 		// itself (beginReconcile still refuses during drain, so the durable
 		// unpublished state simply persists for recovery after close).
 		pendingRev := e.pubPending[key]
@@ -3599,8 +3584,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			e.mu.Lock()
 			// Close may have exhausted its drain timeout and set stateClosed
 			// WHILE we were unlocked for the read: do not start a new chained
-			// attempt against a closed store (codex round-3 P2). An already
-			// running publisher is never cancelled; only a NEW attempt is
+			// attempt against a closed store. An already running publisher is
+			// never cancelled; only a NEW attempt is
 			// suppressed here.
 			if e.state == stateClosed {
 				next = nil
@@ -3613,11 +3598,11 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			// coalesced NEWER revision was NOT discharged (strictly greater
 			// than attemptRev: its continuation read failed or the endpoint
 			// closed before adoption), record it so Close reports an
-			// incomplete drain instead of silently returning nil (codex
-			// round-3 P1). A failed attempt of attemptRev ITSELF is NOT an
+			// incomplete drain instead of silently returning nil.
+			// A failed attempt of attemptRev ITSELF is NOT an
 			// undischarged obligation: the attempt ran and was counted; the
 			// durable unpublished state persists for Reconcile recovery (the
-			// contract-corpus Q18 restart flow relies on Close returning nil
+			// contract-corpus restart flow relies on Close returning nil
 			// there).
 			if pendingRev > attemptRev {
 				// Record the highest undischarged pending revision for this
@@ -3625,8 +3610,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 				// strictly newer revision) retires this entry in the
 				// MarkPublished success path below or in a later Reconcile,
 				// so Close reports incomplete ONLY if it remains genuinely
-				// unpublished (codex round-4 P2-1: the previous global
-				// drainIncomplete latch could be set while stateAccepting
+				// unpublished (a global drainIncomplete latch could be set
+				// while stateAccepting
 				// and never cleared by a later successful publish).
 				if e.drainObligations[key] < pendingRev {
 					e.drainObligations[key] = pendingRev
@@ -3657,8 +3642,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 					// this successful publication (or a strictly newer
 					// chained attempt) has now discharged. MarkPublished is
 					// a high-water mark, so attemptRev covers every earlier
-					// pending revision too (codex round-4 P2-1: a later
-					// successful publish must clear a previously-recorded
+					// pending revision too (a later successful publish must
+					// clear a previously-recorded
 					// skipped obligation rather than leave a stale latch).
 					e.retireObligationLocked(key, attemptRev)
 				}
