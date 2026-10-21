@@ -1886,7 +1886,9 @@ func commitWakeRestartReadiness(
 // wakeStart is the state of one wake startup, from flag parsing to the
 // handoff into the event loop. Its methods are the startup phases;
 // runWakeWithLoop owns every deferred release, so a phase return never
-// closes a capability, stops a listener, or releases the lock.
+// closes a capability, stops a listener, or releases the lock. The one
+// exception is reuseExistingWake, which closes its readiness publication on
+// return; its caller then returns at once.
 type wakeStart struct {
 	args  []string
 	flags *wakeStartFlags
