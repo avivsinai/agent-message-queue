@@ -19,7 +19,9 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        # AMQ_CODESIGN_SCRIPT overrides the script when release.yml builds an
+        # older tag with this config (goreleaser-config-from-workflow-ref).
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq" "{{ .Os }}"'
 
   - id: amq-keepalive
     main: ./cmd/amq-keepalive
@@ -36,7 +38,7 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-keepalive "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-keepalive" "{{ .Os }}"'
 
   - id: amq-bridge
     main: ./cmd/amq-bridge
@@ -53,7 +55,7 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-bridge "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-bridge" "{{ .Os }}"'
 
   - id: amq-acp
     main: ./cmd/amq-acp
@@ -70,7 +72,7 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-acp "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-acp" "{{ .Os }}"'
 
   - id: amq-remote
     main: ./cmd/amq-remote
@@ -87,7 +89,7 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-remote "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-remote" "{{ .Os }}"'
 
   - id: amq-owner-sign
     main: ./cmd/amq-owner-sign
@@ -104,7 +106,7 @@ builds:
       - arm64
     hooks:
       post:
-        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-owner-sign "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-owner-sign" "{{ .Os }}"'
 
 archives:
   - id: amq
