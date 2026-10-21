@@ -8,14 +8,7 @@ import "fmt"
 // directory handling tests use. Production calls the wrapped functions
 // directly.
 
-func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
-	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
-}
-
-func terminateAndRemoveOrphanedWakeLockWithRawConsent(
-	inspection wakeLockInspection,
-	allowRawOrphan bool,
-) (removed bool, retErr error) {
+func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (removed bool, retErr error) {
 	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
 	if err != nil {
@@ -28,13 +21,14 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		agentDir,
 		inspection,
-		allowRawOrphan,
+		false,
 		nil,
 	)
 }
 
 func terminateWakeProcess(inspection wakeLockInspection) error {
-	if !sameConfirmedWakeLock(inspection) {
+	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
+	if !sameWakeLockInspection(inspection, recheck) || !recheck.IdentityConfirmed {
 		return withWakeDiagnostic(
 			fmt.Errorf("wake process identity changed before SIGTERM"),
 			inspection.Root,
@@ -51,11 +45,6 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 	)
 }
 
-func sameConfirmedWakeLock(inspection wakeLockInspection) bool {
-	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
-	return sameWakeLockInspection(inspection, recheck) && recheck.IdentityConfirmed
-}
-
 func startWakeControlListener(
 	root, me string,
 	lock wakeLock,
@@ -64,36 +53,19 @@ func startWakeControlListener(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	cleanup, stop, markStopped, err := startWakeControlListenerInDirOwned(
+	cleanup, stop, markStopped, err := startWakeControlListenerInDirOwnedWithRestart(
 		agentDir,
 		root,
 		me,
 		lock,
 		true,
 		nil,
+		nil,
 	)
 	if err != nil {
 		_ = agentDir.Close()
 	}
 	return cleanup, stop, markStopped, err
-}
-
-func startWakeControlListenerInDirOwned(
-	agentDir *wakeAgentDir,
-	root, me string,
-	lock wakeLock,
-	closeAgentDir bool,
-	testHooks *darwinWakeControlTestHooks,
-) (func(), <-chan struct{}, func(), error) {
-	return startWakeControlListenerInDirOwnedWithRestart(
-		agentDir,
-		root,
-		me,
-		lock,
-		closeAgentDir,
-		testHooks,
-		nil,
-	)
 }
 
 func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {

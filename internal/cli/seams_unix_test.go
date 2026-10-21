@@ -60,20 +60,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 	root string,
 	me string,
 	options wakeLockAcquireOptions,
-) (func(), error) {
-	return acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
-		root,
-		me,
-		options,
-		prepareAuthoritativeWakeStop,
-	)
-}
-
-func acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
-	root string,
-	me string,
-	options wakeLockAcquireOptions,
-	prepareStop authoritativeWakeStopPreparer,
 ) (cleanup func(), retErr error) {
 	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
@@ -89,7 +75,7 @@ func acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
 		root,
 		me,
 		options,
-		prepareStop,
+		prepareAuthoritativeWakeStop,
 	)
 }
 
@@ -109,20 +95,16 @@ func writeWakeTarget(root, me string, target wakeTarget) error {
 		return fmt.Errorf("create wake target directory: %w", err)
 	}
 	return withWakeLifecycleGuard(root, me, func() error {
-		return writeWakeTargetGuarded(root, me, target)
+		if err := validateWakeTarget(target, root, me); err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(target, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal wake target: %w", err)
+		}
+		data = append(data, '\n')
+		return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
 	})
-}
-
-func writeWakeTargetGuarded(root, me string, target wakeTarget) error {
-	if err := validateWakeTarget(target, root, me); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(target, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal wake target: %w", err)
-	}
-	data = append(data, '\n')
-	return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
 }
 
 func withWakeLifecycleGuard(root, me string, fn func() error) error {
@@ -160,16 +142,6 @@ func validateWakePreparedFileAgainstInspection(root, me string, current wakeLock
 }
 
 func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) error {
-	return writeWakeReadyFileAgainstOwner(root, me, path, expected, nil)
-}
-
-func writeWakeReadyFileAgainstOwner(
-	root string,
-	me string,
-	path string,
-	expected wakeLockInspection,
-	requestedOwner *wakeOwner,
-) error {
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return err
@@ -181,7 +153,7 @@ func writeWakeReadyFileAgainstOwner(
 		me,
 		path,
 		expected,
-		requestedOwner,
+		nil,
 	)
 }
 

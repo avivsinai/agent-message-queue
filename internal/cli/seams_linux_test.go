@@ -9,13 +9,6 @@ import "fmt"
 // directly.
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
-	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
-}
-
-func terminateAndRemoveOrphanedWakeLockWithRawConsent(
-	inspection wakeLockInspection,
-	allowRawOrphan bool,
-) (bool, error) {
 	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
 	if err != nil {
 		return false, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
@@ -31,7 +24,7 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	removed, err := terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		agentDir,
 		inspection,
-		allowRawOrphan,
+		false,
 		nil,
 	)
 	return removed, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
