@@ -41,8 +41,7 @@ func (d *delegatingAttachment) Subscribe(fn func(core.NativeEvent)) (unsubscribe
 	return d.inner.Subscribe(fn)
 }
 
-// TestTentativeEvidenceIsReconcileNoop pins the P0 regression from review
-// 816-r2 (P0-1): reconcileLive must treat EvidenceTentative as "bound but
+// TestTentativeEvidenceIsReconcileNoop pins #816: reconcileLive must treat EvidenceTentative as "bound but
 // native ownership not yet proven" and re-check next tick WITHOUT touching
 // the durable record. A duplicated switch case once made the early return
 // unreachable, so every reconcile tick committed the record — Revision++

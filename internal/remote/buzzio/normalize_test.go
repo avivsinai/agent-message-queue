@@ -18,7 +18,7 @@ func ownerEvent(t *testing.T, secret [32]byte, channel, content string, at time.
 	return evt
 }
 
-// 611.16: an owner DM becomes a submit with a deterministic request id and a
+// An owner DM becomes a submit with a deterministic request id and a
 // two-minute window from its signed time; slash commands map to their ops;
 // a non-owner or other-channel event is ignored; a stale mutation never
 // executes.

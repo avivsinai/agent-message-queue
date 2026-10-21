@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Bead agent-message-queue-fa4 (Pro review of #956, #962): the owner key goes
+// Regression: #962, the owner key goes
 // only to AMQ_ACP_BUZZ_CLI or a verified Buzz.app CLI, never to a PATH buzz, a
 // symlinked path, or a path made from an empty HOME.
 func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
@@ -102,7 +102,7 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		refused(t, sys, home)
 	})
-	// Symlinks above the bundle root redirect the key (Pro review of #962).
+	// Symlinks above the bundle root redirect the key.
 	t.Run("symlinked home Applications is not selected", func(t *testing.T) {
 		sys, home, real := realDir(t), realDir(t), realDir(t)
 		writeBundle(t, real)
@@ -131,7 +131,7 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 	})
 }
 
-// Review of #961 r8 (agent-message-queue-bdq): a Buzz CLI whose child kept
+// Regression: #961, a Buzz CLI whose child kept
 // stderr open held cmd.Run, and with it the event's post lock, past the
 // post budget, so finals, cancels and the sweep blocked. WaitDelay ends the
 // wait inside the budget.

@@ -16,7 +16,7 @@ import (
 
 // testRegistryFIFO probes a FIFO at the session-registry leaf: refused
 // without opening (an open would block until a writer appears — the exact
-// r2 P1-1 freeze under the endpoint mutex). Unix-only: mkfifo is not in
+// freeze under the endpoint mutex). Unix-only: mkfifo is not in
 // the Windows syscall package.
 func testRegistryFIFO(t *testing.T, home, regPath string) {
 	t.Helper()
@@ -33,7 +33,7 @@ func testRegistryFIFO(t *testing.T, home, regPath string) {
 	}
 }
 
-// codex #855 r1 items 8 and receiver boundary: a FIFO at the peer-key leaf
+// Regression: #855, a FIFO at the peer-key leaf
 // or at the Stop-marker leaf is refused without blocking.
 func TestFIFOLeavesNeverBlock(t *testing.T) {
 	home := tempHome(t, 9, &sessionRegistry{Pid: 9, SessionID: "s9", Kind: "interactive"})
@@ -53,7 +53,7 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The receiver opens the marker only for an attached session. Bind
-	// first so this still reaches the FIFO refusal (bead 611.37).
+	// first so this still reaches the FIFO refusal.
 	if _, err := bindStopSession(home, "s9"); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 	}
 }
 
-// codex #858 r2: a FIFO at ~/.claude/sessions blocked discovery waiting for
+// Regression: #858, a FIFO at ~/.claude/sessions blocked discovery waiting for
 // a writer. It is now refused at open, without blocking.
 func TestDiscoverRefusesFIFOSessionsDir(t *testing.T) {
 	home := t.TempDir()

@@ -87,8 +87,8 @@ func TestSubmitStatusWaitOverSocket(t *testing.T) {
 }
 
 // A wait with --timeout 0 ("no limit") must not inherit the SHORT-verb client
-// read deadline. Pre-merge review of agent-message-queue-611.22.28 (ipc
-// bounds) reproduced it live: Call bounded every read at callReadDeadline
+// read deadline. Regression: agent-message-queue-611.22.28,
+// reproduced live: Call bounded every read at callReadDeadline
 // while the server treats TimeoutMS<=0 as 24h, so the default `amq-remote
 // wait` died at 30s with "read endpoint response: i/o timeout" — a plain
 // error, not a refusal, which cmd/amq-remote maps to exit 1 ("work failed or
@@ -181,7 +181,7 @@ func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
 }
 
 func TestServerCloseIsIdempotentOnSocketAlreadyGone(t *testing.T) {
-	// review-824-r1 P1-4: Close() must report success when the socket file
+	// Regression: #824. Close() must report success when the socket file
 	// is already unlinked (Go removes it as part of listener.Close on
 	// Unix); the pre-fix code returned ENOENT on the success path.
 	stateDir, err := os.MkdirTemp("", "amqr")

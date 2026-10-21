@@ -49,7 +49,7 @@ func newCarrierEnv(t *testing.T) (root string, carrier *Carrier, rt *fake.Runtim
 	return root, c, rt, store
 }
 
-// simulateCrashBetweenClaimAndReceipt reproduces the B09 crash gap directly:
+// simulateCrashBetweenClaimAndReceipt reproduces the crash gap directly:
 // the message has already been claimed into cur (MoveNewToCur done), but the
 // process died before receipt.EmitDeliveryRoot (and, in the worst ordering,
 // before the outcome reply reached the sender). On disk this is exactly: a
@@ -85,7 +85,7 @@ func simulateCrashBetweenClaimAndReceipt(t *testing.T, root, id, body string) {
 	_ = id
 }
 
-// TestCurRecoveryEmitsMissingReceiptAndOutcome pins the B09 cur-recovery
+// TestCurRecoveryEmitsMissingReceiptAndOutcome pins the cur-recovery
 // scan: a command claimed into cur that crashed between MoveNewToCur and the
 // receipt (and possibly before the outcome reply) is reconciled on the next
 // ImportOnce — the missing drained receipt is emitted, the sender receives a
@@ -213,7 +213,7 @@ func deliverOneSubmit(t *testing.T, root, reqID string) string {
 	return mid
 }
 
-// TestCurRecoverySteadyStateDoesNotRescan asserts the Pro #752 cost contract:
+// TestCurRecoverySteadyStateDoesNotRescan asserts the cost contract (#752):
 // the full cur sweep runs ONCE (on the first ImportOnce) and steady-state
 // ImportOnce calls do NOT re-read cur. After the first tick cur becomes
 // unreadable, so a second full sweep would fail its ReadDir.
@@ -248,7 +248,7 @@ func TestCurRecoverySteadyStateDoesNotRescan(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(cur, 0o700) })
 	n, err = carrier.ImportOnce()
 	if err != nil || n != 0 {
-		t.Fatalf("second import: n=%d err=%v (want 0 and no error — steady state must NOT re-scan cur; Pro #752 blocker)", n, err)
+		t.Fatalf("second import: n=%d err=%v (want 0 and no error — steady state must NOT re-scan cur)", n, err)
 	}
 }
 

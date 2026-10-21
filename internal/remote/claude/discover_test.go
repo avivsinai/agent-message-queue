@@ -11,7 +11,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// 611.13: discovery lists a live interactive session that exposes a
+// Discovery lists a live interactive session that exposes a
 // messaging socket, with the manifest config needed to attach it.
 func TestDiscoverListsLiveSessionWithManifestConfig(t *testing.T) {
 	pid := os.Getpid()

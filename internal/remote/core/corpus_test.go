@@ -249,7 +249,7 @@ func (h *harness) client(where string, step map[string]any) {
 		h.mu.Lock()
 		h.pending[cmd.RequestID] = ch
 		h.mu.Unlock()
-		// 611.22.8: deterministic readiness. Wait for the submit to reach the
+		// Deterministic readiness. Wait for the submit to reach the
 		// held admission gate (or begin admission) via the fake's signal
 		// instead of a wall-clock sleep. No timeout increase; the signal fires
 		// exactly when the submit is parked where the step expects it. The

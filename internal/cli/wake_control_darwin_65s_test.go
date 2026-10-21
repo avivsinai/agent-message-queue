@@ -62,7 +62,7 @@ func TestDarwinControlBindRefusesDetachedDirectoryOnSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return publishAuthoritativeWakeClaimAt(scope, root, agent, target, lock)
 	}); err != nil {
 		t.Fatal(err)

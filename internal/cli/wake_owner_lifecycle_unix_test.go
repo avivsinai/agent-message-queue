@@ -242,7 +242,7 @@ func TestConcurrentAuthoritativeAcquisitionPublishesOneGeneration(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		_, err := validateAuthoritativeWakeClaimPairAt(scope, inspection)
 		return err
 	})

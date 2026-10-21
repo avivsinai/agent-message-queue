@@ -2,7 +2,7 @@ package protocol
 
 import "testing"
 
-// Review of #972 r3: character filtering cannot make adapter text inert in
+// Regression: #972, character filtering cannot make adapter text inert in
 // the DM — the renderer (remark + remark-gfm) decodes HTML entities back
 // into bidi overrides and autolinks URLs. InertInline wraps the text in a
 // code span, where neither happens.
@@ -15,7 +15,7 @@ func TestInertInline(t *testing.T) {
 		{"leading backtick", "`quoted", "`` `quoted ``"},
 		{"trailing backtick", "quoted`", "`` quoted` ``"},
 		{"backtick run", "a ``` b", "````a ``` b````"},
-		// Review of #972 r3: InertInline must call BoundReason itself. A raw
+		// Regression: #972, InertInline must call BoundReason itself. A raw
 		// err.Error() with U+202E escaped the code span (the bidi override
 		// survives outside one) and a "line1\n\n[x](https://e.x)" payload let
 		// CommonMark block structure beat the inline span.

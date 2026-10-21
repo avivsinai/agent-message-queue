@@ -12,7 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// 611.51 (field, codex-cli 0.160): the default control socket is a symlink
+// Regression: agent-message-queue-611.51, the default control socket is a symlink
 // to the daemon's socket under a per-user tmp dir. Discovery refused it as
 // "not a unix socket (mode Lrwxr-xr-x)"; it must follow the link to a socket
 // this user owns and keep the link path in the attach config.

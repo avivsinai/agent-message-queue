@@ -40,7 +40,7 @@ func writeWakePreparedFileInDir(
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
-	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -192,7 +192,7 @@ func writeWakeReadyFileForPreparedWakeInDir(
 		}
 		prepared := false
 		var publication *wakeReadyPublication
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(expected, current) {
 				return fmt.Errorf("wake lock generation changed before existing-wake readiness publication")

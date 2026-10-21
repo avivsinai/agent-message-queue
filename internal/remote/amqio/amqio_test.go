@@ -195,7 +195,7 @@ func deliverSubmit(t *testing.T, root, id, text string) {
 	_ = droot.Close()
 }
 
-// TestImportConflictRepliesToSender reproduces Pro B09's suppressed-reply hole:
+// TestImportConflictRepliesToSender reproduces a suppressed-reply hole:
 // a request op that yields an op-specific Outcome (request_conflict) does not
 // travel as a published revision, so the carrier must still reply to the sender
 // with that outcome rather than silently claiming the command.
@@ -310,8 +310,8 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	}
 }
 
-// TestSourceHostIsInjective reproduces agent-message-queue-611.22.8 (B03
-// identities, host-collapse half): the creator host is part of the request
+// TestSourceHostIsInjective reproduces agent-message-queue-611.22.8 (identity
+// host-collapse half): the creator host is part of the request
 // KEY, but it was derived by sanitizing a readable string — every illegal
 // rune mapped to '-', including the '@' that joined handle and project. So
 // From="a" with project "b" and a bare From="a-b" both produced "amq:a-b",
@@ -360,7 +360,7 @@ func TestSourceHostIsInjective(t *testing.T) {
 }
 
 // TestImportStoreRefusalLeavesCommandInNew reproduces the blocker inside
-// agent-message-queue-611.22.13 (B09 carrier): the carrier classified
+// agent-message-queue-611.22.13 (carrier): the carrier classified
 // refusals by TYPE (errors.As *protocol.Refusal), but the store itself
 // refuses with storage_full (ENOSPC, EPERM, oversize) and store_closed
 // (shutdown). On every op EXCEPT submit-create those travel as an ERROR from
@@ -558,14 +558,14 @@ func TestImportCrossProjectRepliesToCallerRoot(t *testing.T) {
 	}
 }
 
-// TestImportFailedReplyDoesNotBlockNextCommand reproduces Pro B1+B3: one
+// TestImportFailedReplyDoesNotBlockNextCommand reproduces: one
 // command whose handling fails must NOT stop a later command in the same scan
-// (D1: never abort the scan). Message A's reply delivery fails (read-only
+// (never abort the scan). Message A's reply delivery fails (read-only
 // caller inbox), a real error rather than a DLQ; message B sorts after A and
 // must still be claimed. A's claim and receipt come before its reply
 // (agent-message-queue-611.22.37), so the next tick, with the inbox writable,
 // must still send A's reply: a receipt alone does not prove the reply landed
-// (B8, agent-message-queue-611.22.35).
+// (agent-message-queue-611.22.35).
 func TestImportFailedReplyDoesNotBlockNextCommand(t *testing.T) {
 	endpointRoot := t.TempDir()
 	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
@@ -665,10 +665,10 @@ func TestImportFailedReplyDoesNotBlockNextCommand(t *testing.T) {
 	}
 }
 
-// TestImportSameProjectEmptyFromStillWorks reproduces Pro B2: the pre-fix code
+// TestImportSameProjectEmptyFromStillWorks reproduces: the pre-fix code
 // tolerated a missing or unusable From on a same-project caller; the PR
-// regressed it to an error that propagated through B1 and deadlocked the
-// endpoint. D2 restores the tolerant handling — same-project with from:""
+// regressed it to an error that propagated and deadlocked the
+// endpoint. The fix restores the tolerant handling — same-project with from:""
 // is handled normally (no reply written, but the command is claimed).
 func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 	endpointRoot := t.TempDir()
@@ -713,7 +713,7 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 
 	n, err := carrier.ImportOnce()
 	if err != nil {
-		t.Fatalf("same-project from:\"\" returned an error (Pro B2 regression): %v", err)
+		t.Fatalf("same-project from:\"\" returned an error (regression): %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("same-project from:\"\" not handled: n=%d", n)
@@ -725,7 +725,7 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) != 1 {
 		t.Fatalf("command not claimed into cur: %d", len(entries))
 	}
-	// F2: the REAL assertion — published_revision must CONVERGE. With the B2
+	// The real assertion: published_revision must CONVERGE. With the
 	// regression (reply to "" fails, publish error swallowed), the record
 	// churns every tick and published_revision stays 0.
 	k := requests.Key{CreatorHost: SourceHost(format.Header{}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111341"}
@@ -739,11 +739,11 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 		t.Fatal("record not found")
 	}
 	if rec.PublishedRevision < rec.Revision {
-		t.Fatalf("published_revision=%d < revision=%d (F1: same-project from:\"\" publish never converges — reply to empty handle fails every tick)", rec.PublishedRevision, rec.Revision)
+		t.Fatalf("published_revision=%d < revision=%d (same-project from:\"\" publish never converges — reply to empty handle fails every tick)", rec.PublishedRevision, rec.Revision)
 	}
 }
 
-// TestImportCrossProjectPoisonDLQEmitsReceipt reproduces B2: the DLQ-receipt
+// TestImportCrossProjectPoisonDLQEmitsReceipt reproduces: the DLQ-receipt
 // fix was unguarded. After a poison route (unroutable cross-project command),
 // a DLQ receipt must exist for that message id with stage=dlq, so a caller
 // using `send --wait-for drained` does not wait forever on a consumed message.
@@ -798,19 +798,19 @@ func TestImportCrossProjectPoisonDLQEmitsReceipt(t *testing.T) {
 		t.Fatal("poison command was not DLQ'd")
 	}
 
-	// B2: a DLQ receipt must exist for this message id with stage=dlq.
+	// A DLQ receipt must exist for this message id with stage=dlq.
 	receiptPath := filepath.Join(endpointRoot, "agents", DefaultHandle, "receipts", id+"__remote__dlq.json")
 	if _, err := os.Stat(receiptPath); err != nil {
-		t.Fatalf("DLQ receipt not found at %s (B2 — every DLQ site must emit a receipt so send --wait-for drained does not hang): %v", receiptPath, err)
+		t.Fatalf("DLQ receipt not found at %s (every DLQ site must emit a receipt so send --wait-for drained does not hang): %v", receiptPath, err)
 	}
 	rc, rerr := receipt.Read(receiptPath)
 	if rerr != nil {
 		t.Fatalf("read DLQ receipt: %v", rerr)
 	}
 	if rc.Stage != receipt.StageDLQ {
-		t.Fatalf("DLQ receipt stage=%q, want %q (B2)", rc.Stage, receipt.StageDLQ)
+		t.Fatalf("DLQ receipt stage=%q, want %q", rc.Stage, receipt.StageDLQ)
 	}
 	if rc.MsgID != id {
-		t.Fatalf("DLQ receipt msg_id=%q, want %q (B2)", rc.MsgID, id)
+		t.Fatalf("DLQ receipt msg_id=%q, want %q", rc.MsgID, id)
 	}
 }

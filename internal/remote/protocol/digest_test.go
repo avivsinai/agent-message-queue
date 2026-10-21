@@ -31,7 +31,7 @@ func TestCommandDigestCanonicalBytes(t *testing.T) {
 
 	// A carrier in another language builds these bytes by hand, in exactly
 	// this key order, and must arrive at the same digest.
-	// B10: not_after is NOT in the digest payload.
+	// not_after is NOT in the digest payload.
 	canonical := `{"schema":"` + string(SchemaCommand) + `","op":"` + string(OpRequestSubmit) +
 		`","request_id":"11111111-1111-4111-8111-111111111501","target_id":"t_fake1","epoch":"e_1",` +
 		`"input":{"text":"say hi","busy":"queue","deliver":"turn"}}`
@@ -51,7 +51,7 @@ func TestCommandDigestCanonicalBytes(t *testing.T) {
 	}
 }
 
-// TestReplyShape pins the B11 reply-envelope JSON shape: the snapshot is the
+// TestReplyShape pins the reply-envelope JSON shape: the snapshot is the
 // immutable record revision and the outcome carries the op-specific code, both
 // under their own keys.
 func TestReplyShape(t *testing.T) {
@@ -89,7 +89,7 @@ func TestReplyShape(t *testing.T) {
 // cannot be stripped for a retry against an older endpoint. An omitted floor
 // (legacy) and a spelled floor are semantically DIFFERENT requests — one
 // requires a guarantee the other does not — so they MUST digest differently.
-// This is the protocol half of the Wave A.4 MinEvidence floor.
+// This is the protocol half of the MinEvidence floor.
 func TestCommandDigestMinEvidenceIsIdentity(t *testing.T) {
 	base := &Command{
 		Schema:    SchemaCommand,

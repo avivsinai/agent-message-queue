@@ -193,11 +193,15 @@ func removeWakeLockIfUnchangedGuardedAt(
 	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
 ) error {
-	committed, err := removeWakeLockIfUnchangedGuardedAtStatus(scope, inspection)
-	if !committed {
-		return err
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		scope,
+		inspection,
+		wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup},
+	)
+	if !outcome.Committed {
+		return outcome.Err
 	}
-	blocking, diagnostic := splitWakeSelfUpgradeDiagnosticResidue(err)
+	blocking, diagnostic := splitWakeSelfUpgradeDiagnosticResidue(outcome.Err)
 	if diagnostic != nil {
 		_ = writeStderr(
 			"warning: removed wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
@@ -208,16 +212,13 @@ func removeWakeLockIfUnchangedGuardedAt(
 	return blocking
 }
 
-func removeWakeLockIfUnchangedGuardedAtStatus(
-	scope wakeRetainedCleanupScope,
-	inspection wakeLockInspection,
-) (bool, error) {
-	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
-		scope,
-		inspection,
-		scope.unlinkWakeLockForCleanup,
-	)
-	return outcome.Committed, outcome.Err
+// wakeLockRemoval selects how removeWakeLockIfUnchangedGuardedAtOutcome
+// unlinks the lock and what it does after a committed removal.
+type wakeLockRemoval struct {
+	// unlink removes the lock pathname inside the scope.
+	unlink func() error
+	// durable syncs the agent directory after a committed removal.
+	durable bool
 }
 
 type wakeLockRemovalOutcome struct {
@@ -273,7 +274,7 @@ func splitWakeSelfUpgradeDiagnosticResidue(err error) (blocking, diagnostic erro
 func removeWakeLockIfUnchangedGuardedAtOutcome(
 	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
-	unlink func() error,
+	removal wakeLockRemoval,
 ) wakeLockRemovalOutcome {
 	dirfd, agentDir, err := scope.location()
 	if err != nil {
@@ -342,7 +343,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 		if err := markWakeDetachedCleanup(&detachedValidationErr, agentDir, dirfd); err != nil {
 			return err
 		}
-		return unlink()
+		return removal.unlink()
 	}
 	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
 		inspection,
@@ -378,26 +379,15 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 			),
 		)
 	}
-	return outcome
-}
-
-func removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-	scope wakeRetainedCleanupScope,
-	inspection wakeLockInspection,
-	unlink func() error,
-) wakeLockRemovalOutcome {
-	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
-		scope, inspection, unlink,
-	)
-	if !outcome.Committed {
+	if !removal.durable {
 		return outcome
 	}
-	dirfd, _, err := scope.location()
+	syncDirFD, _, err := scope.location()
 	if err != nil {
 		outcome.Err = errors.Join(outcome.Err, err)
 		return outcome
 	}
-	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
+	if err := syncWakeLockAfterCommitDirFD(syncDirFD); err != nil {
 		outcome.Err = errors.Join(
 			outcome.Err,
 			newWakeLockResidueError(

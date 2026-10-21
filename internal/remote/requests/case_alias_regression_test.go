@@ -9,7 +9,7 @@ import (
 )
 
 // TestCaseAliasKeysDoNotShareARecord is the agent-message-queue-611.49
-// regression (Pro review of #934): on a case-insensitive filesystem a key
+// regression (#934): on a case-insensitive filesystem a key
 // that differs only by case in creator_host or target_id maps to the same
 // file. Get returned the other key's record, and Create saw it as its own.
 func TestCaseAliasKeysDoNotShareARecord(t *testing.T) {

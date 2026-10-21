@@ -78,11 +78,11 @@ func (c *codexFake) send(method, params string) {
 	fn(codex.Notification{Method: method, Params: json.RawMessage(params)})
 }
 
-// TestRemoteTurnMirrorsNativeActivity is the happy path of bead
-// agent-message-queue-611.40: while a remote-mode turn runs, the native
+// TestRemoteTurnMirrorsNativeActivity is the happy path: while a remote-mode turn runs, the native
 // session's streamed text and tool call reach the ACP session as
 // session/update notifications, and the final answer ends the turn without
 // repeating the streamed text.
+// Regression: bead agent-message-queue-611.40.
 func TestRemoteTurnMirrorsNativeActivity(t *testing.T) {
 	root, err := os.MkdirTemp("", "acpm")
 	if err != nil {
@@ -182,7 +182,7 @@ func TestRemoteTurnMirrorsNativeActivity(t *testing.T) {
 	if !rt.Complete(requestID, "hello world") {
 		t.Fatal("no running request to complete")
 	}
-	// Review of 611.40 (P2-1): a local turn that starts right after the
+	// Regression: a local turn that starts right after the
 	// request, inside the stream's settle grace, is not this request's.
 	rt.send("item/agentMessage/delta", `{"threadId":"fake","turnId":"t2","itemId":"m2","delta":"later turn"}`)
 	rt.send("item/started", `{"threadId":"fake","turnId":"t2","item":{"type":"commandExecution","id":"c2","command":"pwd","status":"inProgress"}}`)

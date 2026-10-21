@@ -11,7 +11,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestRefusedAnswerDoesNotPoisonValidAnswer reproduces bead 611.22.12 (B07):
+// TestRefusedAnswerDoesNotPoisonValidAnswer reproduces agent-message-queue-611.22.12:
 // an answer that the attachment positively refuses (here: a non-offered
 // option) must not be persisted as consumed — the follow-up answer with a
 // valid option must still reach the attachment. Before the fix the endpoint
@@ -62,7 +62,7 @@ func TestRefusedAnswerDoesNotPoisonValidAnswer(t *testing.T) {
 	}
 }
 
-// 611.42.6 (Pro review of #986 r1): answer A's native call refused and
+// Regression: #986. Answer A's native call refused and
 // was paused before its rollback; answer B, the same option, recorded its
 // intent and was delivered; A's rollback then compared only the option and
 // erased B's intent. Answers to one interaction now run one at a time, so

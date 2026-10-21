@@ -187,7 +187,7 @@ func fixWakeRestartResidueWithoutLock(root, agent string) error {
 	}
 	defer func() { _ = agentDir.Close() }()
 
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		if current := inspectWakeLockAt(dirfd, agentDir, root, agent); current.Exists {
 			return fmt.Errorf("wake lock appeared before restart residue fix; preserving restart state")
 		}

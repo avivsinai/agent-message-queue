@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Review of #965: a steer recreated a handle mailbox deleted after the parent
+// Regression: #965, a steer recreated a handle mailbox deleted after the parent
 // prompt, reporting injection into a mailbox whose consumer was gone.
 func TestMailboxSteerDoesNotRecreateDeletedMailbox(t *testing.T) {
 	s, root := mailboxServer(t)

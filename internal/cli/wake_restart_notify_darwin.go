@@ -60,7 +60,7 @@ func notifyWakeRestartPlatform(
 		return err
 	}
 
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current := inspectWakeLockAt(
 			dirfd,
 			agentDir,

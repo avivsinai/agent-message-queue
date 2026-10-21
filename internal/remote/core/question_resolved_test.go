@@ -10,8 +10,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestQuestionResolvedClearsDurableInteraction reproduces Pro round 2 #21
-// (bead agent-message-queue-611.22.36): EventQuestionResolved carries no
+// TestQuestionResolvedClearsDurableInteraction reproduces agent-message-queue-611.22.36:
+// EventQuestionResolved carries no
 // interaction, and the evidence-only transition treated a nil interaction as
 // "leave unchanged", so a successfully answered question stayed pending in
 // the durable snapshot and in request.get.
@@ -52,7 +52,7 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 	if rec.Interaction != nil {
 		t.Fatalf("resolved question still pending in the durable snapshot: %+v", rec.Interaction)
 	}
-	// 611.42: the record says how it ended, so the DM can show the outcome.
+	// The record says how it ended, so the DM can show the outcome.
 	if want := (protocol.Resolution{InteractionID: "i_1", Outcome: protocol.ResolutionAnswered, Option: "yes"}); len(rec.Resolved) != 1 || rec.Resolved[0] != want {
 		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
@@ -66,7 +66,7 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 	}
 }
 
-// PR #919 review: a second approval that replaced a pending one recorded
+// Regression: #919. A second approval that replaced a pending one recorded
 // the first as answered elsewhere, though the harness still held it open.
 // Only a clear resolves an interaction.
 func TestReplacedInteractionIsNotResolved(t *testing.T) {
@@ -89,7 +89,7 @@ func TestReplacedInteractionIsNotResolved(t *testing.T) {
 	}
 }
 
-// PR #919 review round 3: while one answer could still be with the
+// Regression: #919. While one answer could still be with the
 // runtime, a different answer replaced its durable intent, and the record
 // later named the second answer for what the first one did. A different
 // answer is refused until the first is settled.
@@ -126,7 +126,7 @@ func TestSecondAnswerDoesNotReplaceLiveIntent(t *testing.T) {
 	}
 }
 
-// PR #919 review round 4: the run ended between our answer's send and its
+// Regression: #919. The run ended between our answer's send and its
 // resolution, and the record said the run ended before an answer.
 func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
 	store, now := openStore(t)
@@ -152,7 +152,7 @@ func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
 	}
 }
 
-// 611.42.14 (code-run review of #1000): a second ✅ replayed the first
+// Regression: #1000. A second ✅ replayed the first
 // one's delivered intent, the runtime said already resolved, and the
 // rollback erased that intent; the owner read "Not sent: interaction
 // cc-…" and the run's end lost the answer. The replay now hears already
@@ -203,7 +203,7 @@ func (h *heldAnswer) Respond(_ requests.Key, _, _, _ string) (protocol.Code, err
 	return protocol.CodeAlreadyResolved, nil
 }
 
-// 611.42.15 (code reading in the #1007 review): a ✅ after Claude's hook
+// Regression: #1007. A ✅ after Claude's hook
 // deadline came back as a bare expired code, and the DM read "Not sent:
 // expired: interaction cc-…". The refusal now says the approval expired.
 func TestBareExpiredRefusalSaysWhy(t *testing.T) {
