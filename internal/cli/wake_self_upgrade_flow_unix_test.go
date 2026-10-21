@@ -96,7 +96,7 @@ func TestWakeSelfUpgradeSettingAppliesLive(t *testing.T) {
 			wantReason: "self_upgrade=false",
 		},
 		{
-			// #1022 review P1: with the locator unchanged, later ticks return
+			// Regression: #1022, with the locator unchanged, later ticks return
 			// early, so the veto record outlived the veto.
 			name:        "true after false records the wake enabled again",
 			state:       selfUpgradeStateForUnchangedLocator,

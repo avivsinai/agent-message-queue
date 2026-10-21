@@ -202,7 +202,7 @@ func TestDarwinRestartStageUsesMachineLocalStateAndSurvivesCandidateRemoval(t *t
 	}
 }
 
-// #1046: a restart that a later release stages under ~/.amq/state/wake-stages
+// Regression: #1046, a restart that a later release stages under ~/.amq/state/wake-stages
 // validates and is pruned by this release, which still writes the legacy root.
 func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
 	for _, tc := range []struct {
@@ -210,7 +210,7 @@ func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
 		stateHome func(root string) string
 	}{
 		{name: "legacy root elsewhere", stateHome: func(string) string { return t.TempDir() }},
-		// #1046 review: a legacy plan that fails (legacy root inside AM_ROOT)
+		// Regression: #1046, a legacy plan that fails (legacy root inside AM_ROOT)
 		// must not refuse a stage under ~/.amq/state.
 		{name: "legacy root inside AM_ROOT", stateHome: func(root string) string {
 			return filepath.Join(root, "state")

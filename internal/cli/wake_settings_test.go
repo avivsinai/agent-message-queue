@@ -57,7 +57,7 @@ func TestWakeSettingsStartupMerge(t *testing.T) {
 		}
 	})
 
-	// Review finding (live-apply P1): a resume from an image that kept its
+	// Regression: #1017, a resume from an image that kept its
 	// settings only in argv found no file and ran on defaults.
 	t.Run("resume with no file seeds it from flags", func(t *testing.T) {
 		plan, err := planWakeSettingsStartup(nil, false, nil, wakeSettingsObservation{}, flags, explicit, true)
@@ -100,7 +100,7 @@ func TestWakeSettingsMachineLayer(t *testing.T) {
 	}
 }
 
-// review r1: a cached agent refusal is reused when only the machine file
+// Regression: #1036, a cached agent refusal is reused when only the machine file
 // changes. The agent file is invalid alone (interrupt is on by default) and
 // valid over a machine file that turns interrupt off; once that machine file
 // appears, the wake must take the agent file.

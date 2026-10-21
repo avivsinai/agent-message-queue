@@ -9,15 +9,15 @@ import (
 	"testing"
 )
 
-// TestPgnChangedStageDoesNotDeadEndLockRemoval verifies that when
+// TestChangedStageDoesNotDeadEndLockRemoval verifies that when
 // reclaimWakeRestartStateForLockRemovalAt encounters a changed restart-stage
 // identity (wakeRestartStageIdentityError), the authoritative lock removal
 // does not dead-end: the stage is preserved and the lock is released.
-// Bead agent-message-queue-pgn.
+// Regression: #797.
 //
 // This exercises the production code path (removeAuthoritativeWakeClaimAt),
 // not a manually constructed error string.
-func TestPgnChangedStageDoesNotDeadEndLockRemoval(t *testing.T) {
+func TestChangedStageDoesNotDeadEndLockRemoval(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
 
 	// Capture valid image evidence from the test binary so the restart

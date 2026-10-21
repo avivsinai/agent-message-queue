@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Regression: the 2026-09-05 reboot report had a dead wake and an unchanged
+// Regression: #719, a reboot report had a dead wake and an unchanged
 // staged executable whose device number differed from the persisted evidence.
 func TestStaleWakeReleasePreservesChangedDarwinStage(t *testing.T) {
 	for _, source := range []string{"running image", "persisted restart"} {

@@ -341,7 +341,7 @@ func TestWakeHoldFutureMtimeIsNeverPostponedByRestart(t *testing.T) {
 	}
 }
 
-// PR #1008 review: a parked cohort revived by low mail stored the hold in
+// Regression: #1008, a parked cohort revived by low mail stored the hold in
 // the retry deadline. A later normal arrival could then wait 24 minutes past
 // its own deadline because held additions did not pull the retry ladder forward.
 func TestWakeHoldParkedAdditionCanPullHoldEarlier(t *testing.T) {
@@ -377,7 +377,7 @@ func TestWakeHoldParkedAdditionCanPullHoldEarlier(t *testing.T) {
 	}
 }
 
-// PR #1008 review: the announced-cohort hold lookup skipped filenames even
+// Regression: #1008, the announced-cohort hold lookup skipped filenames even
 // when they identified a new physical message, so a replacement bypassed its hold.
 func TestWakeHoldAnnouncedReplacementUsesNewArrival(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldRecommended)
@@ -417,7 +417,7 @@ func (h *wakeHoldHarness) useSettingsFile(raw string) {
 // the file holds the next normal message; a hold removed from the file rings
 // an already-held cohort at the next scan.
 func TestWakeSettingsLiveHoldChange(t *testing.T) {
-	// Review finding (live-apply P2): a read that a concurrent wake config
+	// Regression: #1017, a read that a concurrent wake config
 	// rename changed was logged and recorded as a refused file.
 	t.Run("read changed by a concurrent write is no observation", func(t *testing.T) {
 		h := newWakeHoldHarness(t, wakeHoldRecommended)
@@ -494,7 +494,7 @@ func TestWakeSettingsLiveHoldChange(t *testing.T) {
 		}
 	})
 
-	// Design review (precedence races P1): the re-time after a policy change
+	// Regression: #1017, the re-time after a policy change
 	// counted the messages an announced cohort already covered, so a held
 	// addition rang at once after any policy change.
 	t.Run("announced cohort addition keeps its hold", func(t *testing.T) {

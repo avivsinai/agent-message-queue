@@ -16,8 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// #1014 round-3 review finding 4a: a held guard must not end the seed retry.
-// #1014 round-3 review finding 1: neither must a refused file that appears
+// Regression: #1014, a held guard must not end the seed retry.
+// Neither must a refused file that appears
 // and is removed again; the next tick dropped the argv settings to defaults.
 func TestWakeSettingsSeedRetryKeepsArgvSettings(t *testing.T) {
 	root := t.TempDir()
