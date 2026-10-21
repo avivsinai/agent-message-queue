@@ -47,11 +47,6 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	return info
 }
 
-func linuxProcStartToken(stat string) (string, error) {
-	token, _, err := linuxProcIdentity(stat)
-	return token, err
-}
-
 func linuxProcIdentity(stat string) (startToken string, state string, err error) {
 	endComm := strings.LastIndex(stat, ")")
 	if endComm < 0 || endComm+2 >= len(stat) {

@@ -76,10 +76,7 @@ func findProjectLaunchJSONPath() (string, bool, error) {
 	}
 
 	dir := cwd
-	for ceiling != "" || !isHomeConfigDir(dir) {
-		if atWalkCeilingForTests(dir) {
-			break
-		}
+	for walkInspectsDir(dir, ceiling) {
 		path := filepath.Join(dir, setupConfigPath)
 		info, statErr := os.Stat(path)
 		if statErr == nil && info.Mode().IsRegular() {

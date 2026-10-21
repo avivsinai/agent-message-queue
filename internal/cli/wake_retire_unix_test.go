@@ -50,7 +50,7 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 	})
 	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-b"})
 
-	result, err := retireWake(root, "codex", requested)
+	result, err := retireWakeIfGeneration(root, "codex", requested, "")
 	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "different injector identity") {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -84,7 +84,7 @@ func TestRetireWakeRemovesBoundTargetAndStateSoTargetlessWakeCanStart(t *testing
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 
-	result, err := retireWake(fixture.root, fixture.me, requested)
+	result, err := retireWakeIfGeneration(fixture.root, fixture.me, requested, "")
 	if err != nil || result.Status != "retired" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

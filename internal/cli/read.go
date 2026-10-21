@@ -12,8 +12,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
-var moveReadMessageToDLQ = fsq.MoveToDLQ
-
 func runRead(args []string) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -157,7 +155,7 @@ func runRead(args []string) error {
 }
 
 func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reason, detail string, header *format.Header) (*inboxItem, error) {
-	dlqPath, transitionErr := moveReadMessageToDLQ(root, me, filename, fallbackID, reason, detail)
+	dlqPath, transitionErr := fsq.MoveToDLQ(root, me, filename, fallbackID, reason, detail)
 	item := &inboxItem{
 		ID:            fallbackID,
 		Filename:      filename,

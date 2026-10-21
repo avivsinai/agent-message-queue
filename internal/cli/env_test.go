@@ -186,7 +186,7 @@ func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	rootVal, _, err := resolveEnvConfig("", "")
+	rootVal, _, _, err := resolveEnvConfigWithSource("", "")
 	if err != nil {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestResolveEnvConfigFlagOverridesEnv(t *testing.T) {
 	}
 
 	// Flags should override both env and .amqrc
-	rootVal, meVal, err := resolveEnvConfig("/flag/root", "flagagent")
+	rootVal, _, meVal, err := resolveEnvConfigWithSource("/flag/root", "flagagent")
 	if err != nil {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}

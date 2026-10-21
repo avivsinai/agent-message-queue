@@ -169,15 +169,6 @@ func sameWakeRepairSuppression(first, second wakeRepairFloor) bool {
 	return true
 }
 
-func writeWakeRepairFloor(root, me string, floor wakeRepairFloor) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return writeWakeRepairFloorInDir(agentDir, root, floor)
-}
-
 func writeWakeRepairFloorInDir(
 	agentDir *wakeAgentDir,
 	root string,

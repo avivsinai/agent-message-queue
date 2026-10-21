@@ -45,7 +45,7 @@ type wakeInboxDir struct {
 	closed              bool
 }
 
-var newWakeInboxEventWatcher = func(inbox *wakeInboxDir) (wakeEventWatcher, error) {
+func newWakeInboxEventWatcher(inbox *wakeInboxDir) (wakeEventWatcher, error) {
 	return inbox.NewWatcher()
 }
 
@@ -57,7 +57,7 @@ type wakeEventWatcher interface {
 	Close() error
 }
 
-var snapshotWakeRetainedFileInfo = func(
+func snapshotWakeRetainedFileInfo(
 	inbox *wakeInboxDir,
 	name string,
 ) (os.FileInfo, error) {

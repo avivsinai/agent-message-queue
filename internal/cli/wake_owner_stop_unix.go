@@ -36,4 +36,3 @@ func (capability *authoritativeWakeStopCapability) Close() error {
 }
 
 var prepareAuthoritativeWakeStop = prepareAuthoritativeWakeStopPlatform
-var inspectWakeLockForOwnerTransition = inspectWakeLockForOwnerTransitionPlatform

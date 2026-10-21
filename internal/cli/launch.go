@@ -282,7 +282,3 @@ func outputLaunchResult(jsonOutput bool, result launch.ReconcileResult) error {
 	}
 	return nil
 }
-
-func defaultLaunchStateDir() (string, error) {
-	return launch.DefaultLaunchStateDir()
-}

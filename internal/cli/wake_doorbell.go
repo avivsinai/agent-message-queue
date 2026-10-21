@@ -59,13 +59,6 @@ type wakeDoorbellPlan struct {
 	progress      bool
 }
 
-func (state *wakeDoorbellState) plan(
-	now time.Time,
-	current map[string]os.FileInfo,
-) wakeDoorbellPlan {
-	return state.planHeld(now, current, nil)
-}
-
 // planHeld is plan with hold-by-priority. holds maps an inbox file name to
 // its hold; nil means no holds, which is exactly plan().
 func (state *wakeDoorbellState) planHeld(

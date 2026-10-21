@@ -23,10 +23,6 @@ type wakeAgentDir struct {
 	closed bool
 }
 
-func wakeLifecycleGuardPath(root, me string) string {
-	return filepath.Join(fsq.AgentBase(root, me), wakeLifecycleGuardFileName)
-}
-
 func openWakeAgentDir(root, me string) (*wakeAgentDir, error) {
 	if err := fsq.ValidateHandle(me); err != nil {
 		return nil, err
@@ -116,14 +112,6 @@ func (d *wakeAgentDir) Close() error {
 // control wait. Child/cooperative wake paths reacquire it for exact-generation
 // cleanup and final readiness publication. Never wait on a child while holding
 // the lifecycle guard.
-func withWakeLifecycleGuard(root, me string, fn func() error) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(int) error { return fn() })
-}
 
 // wakeGuardOptions selects how the lifecycle guard is acquired.
 type wakeGuardOptions struct {

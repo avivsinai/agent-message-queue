@@ -16,8 +16,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
-var deliverToExistingInbox = fsq.DeliverToExistingInbox
-
 func runSend(args []string) error {
 	return runSendWithAfterBodyRead(args, nil)
 }

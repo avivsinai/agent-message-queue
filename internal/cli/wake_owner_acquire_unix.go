@@ -5,9 +5,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
-
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func classifyPersistedWakeClaim(inspection wakeLockInspection) wakeClaimClass {
@@ -124,43 +121,6 @@ func authoritativeWakeRecoveryTargetAt(
 	return &target, nil
 }
 
-func acquireAuthoritativeWakeLockWithOptions(
-	root string,
-	me string,
-	options wakeLockAcquireOptions,
-) (func(), error) {
-	return acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
-		root,
-		me,
-		options,
-		prepareAuthoritativeWakeStop,
-	)
-}
-
-func acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
-	root string,
-	me string,
-	options wakeLockAcquireOptions,
-	prepareStop authoritativeWakeStopPreparer,
-) (cleanup func(), retErr error) {
-	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
-	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create agent directory: %w", err)
-	}
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
-		agentDir,
-		root,
-		me,
-		options,
-		prepareStop,
-	)
-}
-
 func acquireAuthoritativeWakeLockWithOptionsInDir(
 	agentDir *wakeAgentDir,
 	root string,
@@ -204,7 +164,7 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 			if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 				return fmt.Errorf("validate canonical wake agent directory before owner acquisition: %w", err)
 			}
-			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
+			inspection := inspectWakeLockForOwnerTransitionPlatform(dirfd, agentDir, root, me)
 			claimClass := classifyPersistedWakeClaim(inspection)
 			switch claimClass {
 			case wakeClaimGeneric:

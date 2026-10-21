@@ -86,17 +86,6 @@ const (
 	wakeIdentityGoneOrDifferent
 )
 
-func (state wakeIdentityState) String() string {
-	switch state {
-	case wakeIdentitySame:
-		return "same"
-	case wakeIdentityGoneOrDifferent:
-		return "gone or different"
-	default:
-		return "unknown"
-	}
-}
-
 type wakeOwnerIdentityState uint8
 
 const (

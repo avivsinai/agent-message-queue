@@ -183,15 +183,9 @@ type wakeSelfUpgradeDiagnosticDecision struct {
 }
 
 var (
-	wakeSelfUpgradeLookPath         = exec.LookPath
 	wakeSelfUpgradeEvalSymlinks     = filepath.EvalSymlinks
-	wakeSelfUpgradeLstat            = os.Lstat
-	wakeSelfUpgradeStat             = os.Stat
 	wakeSelfUpgradeCaptureCandidate = selfupgrade.CaptureImageEvidenceWithEmbeddedVersion
 	wakeSelfUpgradeNow              = time.Now
-	wakeSelfUpgradeLiveDifference   = inspectWakeSelfUpgradeLiveDifference
-	wakeSelfUpgradeReadPublished    = readWakeRestartRecordAt
-	wakeSelfUpgradeInspectLockAt    = inspectWakeLockAt
 )
 
 func coopWakeLaunchLocator(argv0 string) string {
@@ -249,7 +243,7 @@ func captureWakeSelfUpgradeStartupState(
 		state.Reason = "running image evidence is unavailable"
 		return state
 	}
-	locator, err := wakeSelfUpgradeLookPath(strings.TrimSpace(argv0))
+	locator, err := exec.LookPath(strings.TrimSpace(argv0))
 	if err != nil {
 		state.Reason = "launch locator is unavailable"
 		return state
@@ -259,7 +253,7 @@ func captureWakeSelfUpgradeStartupState(
 		state.Reason = "launch locator is not an absolute canonical path"
 		return state
 	}
-	locatorInfo, err := wakeSelfUpgradeLstat(locator)
+	locatorInfo, err := os.Lstat(locator)
 	if err != nil {
 		state.Reason = "launch locator is unavailable"
 		return state
@@ -295,7 +289,7 @@ func captureWakeSelfUpgradeStartupState(
 			RunningImageEvidence: &running,
 		},
 	}
-	if different, comparisonErr := wakeSelfUpgradeLiveDifference(startupInspection, probe); comparisonErr == nil && !different {
+	if different, comparisonErr := inspectWakeSelfUpgradeLiveDifference(startupInspection, probe); comparisonErr == nil && !different {
 		state.lastProbe = probe
 	}
 	return state
@@ -385,7 +379,7 @@ func constrainWakeSelfUpgradeEligibility(
 }
 
 func probeWakeSelfUpgradeLocator(locator string) (wakeSelfUpgradeProbe, error) {
-	locatorInfo, err := wakeSelfUpgradeLstat(locator)
+	locatorInfo, err := os.Lstat(locator)
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
 	}
@@ -396,7 +390,7 @@ func probeWakeSelfUpgradeLocator(locator string) (wakeSelfUpgradeProbe, error) {
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
 	}
-	confirmedLocatorInfo, err := wakeSelfUpgradeLstat(locator)
+	confirmedLocatorInfo, err := os.Lstat(locator)
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
 	}
@@ -407,7 +401,7 @@ func probeWakeSelfUpgradeLocator(locator string) (wakeSelfUpgradeProbe, error) {
 	if resolved == "" || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
 		return wakeSelfUpgradeProbe{}, fmt.Errorf("resolved launch locator is not an absolute canonical path")
 	}
-	info, err := wakeSelfUpgradeStat(resolved)
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
 	}
@@ -562,7 +556,7 @@ func maintainWakeSelfUpgrade(
 		decision.Reason = "candidate was already refused for this wake generation"
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
-	different, comparisonErr := wakeSelfUpgradeLiveDifference(inspection, probe)
+	different, comparisonErr := inspectWakeSelfUpgradeLiveDifference(inspection, probe)
 	if comparisonErr != nil {
 		// Inconclusive identity is transient (Homebrew Cellar unlink, proc_pidpath
 		// ESRCH). Do not remember the probe or write refusal memory; retry next tick.
@@ -695,7 +689,7 @@ func publishWakeSelfUpgradePending(
 		if err := writeWakeRestartRecordAt(scope, record); err != nil {
 			return err
 		}
-		installed, installedExists, err := wakeSelfUpgradeReadPublished(dirfd, agentDir)
+		installed, installedExists, err := readWakeRestartRecordAt(dirfd, agentDir)
 		if err != nil || !installedExists || !sameWakeRestartRecord(record, installed) {
 			return fmt.Errorf("self-upgrade restart request changed after publication")
 		}

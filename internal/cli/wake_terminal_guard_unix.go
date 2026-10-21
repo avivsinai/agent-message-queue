@@ -4,11 +4,6 @@ package cli
 
 import "strings"
 
-func authorizeTerminalWritePlatform(cfg *wakeConfig) bool {
-	allowed, _ := authorizeTerminalWritePlatformState(cfg)
-	return allowed
-}
-
 func classifyWakeGenerationPlatformState(
 	cfg *wakeConfig,
 ) (wakeLockInspection, bool, error) {
@@ -70,7 +65,7 @@ func authorizeTerminalWritePlatformState(cfg *wakeConfig) (bool, error) {
 		// Legacy "unknown" locks retain the prior fail-open behavior because
 		// writes use the wake's already-bound controlling-terminal capability.
 		return !strings.HasPrefix(cfg.terminalTTY, "/dev/") ||
-			getWakeCurrentTTY() == cfg.terminalTTY, nil
+			getCurrentTTY() == cfg.terminalTTY, nil
 	default:
 		return false, nil
 	}

@@ -14,10 +14,6 @@ var (
 	linuxPidfdOpen  = unix.PidfdOpen
 	linuxPidfdSend  wakemutation.PidfdSenderFunc
 	linuxPidfdClose = unix.Close
-
-	// Tests use this barrier to force a successor publication between the
-	// missing-guard probe and acquisition of the permanent guard.
-	wakeMutationAfterLifecycleGuardProbe = func(*wakeAgentDir, bool) {}
 )
 
 // detachedWakeCleanupScope intentionally carries only the retained directory
@@ -132,7 +128,6 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 	if err != nil {
 		return err
 	}
-	wakeMutationAfterLifecycleGuardProbe(agentDir, missing)
 	if missing {
 		return withWakeMutationScopeInDir(agentDir, wakeGuardNoWait, fn)
 	}

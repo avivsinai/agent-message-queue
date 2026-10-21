@@ -10,18 +10,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// afterWakeStateDualReadDocument is a test seam between the shadow-document
-// observation and the closing legacy observation.
-var afterWakeStateDualReadDocument = func() {}
-
-// afterWakeStateBoundSelection is a test seam after the state and legacy
-// snapshots are stable but before the lock binding is confirmed again.
-var afterWakeStateBoundSelection = func() {}
-
-// These seams let tests deterministically exercise failures at the two
-// directory-capability boundaries without relying on permission behavior.
-var openWakeStateInspectionDirectory = openWakeDirectory
-var withWakeStateInspectionDirectoryFD = func(agentDir *wakeAgentDir, fn func(int) error) error {
+func withWakeStateInspectionDirectoryFD(agentDir *wakeAgentDir, fn func(int) error) error {
 	return agentDir.withFD(fn)
 }
 
@@ -101,7 +90,6 @@ func readWakeStateSelectionAtWithCanonicalValidation(
 			return wakeStateReadSelection{}, err
 		}
 	}
-	afterWakeStateDualReadDocument()
 	after, afterPreparedErr, err := readWakeStateLegacyPairAtWithCanonicalValidation(
 		dirfd, agentDir, root, me, validateCanonical,
 	)
@@ -160,7 +148,7 @@ func readWakeStateSelectionForInspection(
 	if err != nil {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
 	}
-	agentDir, err := openWakeStateInspectionDirectory(fsq.AgentBase(root, me), "wake agent directory")
+	agentDir, err := openWakeDirectory(fsq.AgentBase(root, me), "wake agent directory")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if bound {
@@ -223,7 +211,6 @@ func readWakeStateSelectionForInspectionAt(
 	if err != nil {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
 	}
-	afterWakeStateBoundSelection()
 	confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
 	if !sameWakeLockGeneration(inspection, confirmed) {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(

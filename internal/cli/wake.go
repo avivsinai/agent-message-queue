@@ -409,7 +409,6 @@ func validateStoredWakeRetryUntil(raw string) error {
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
 	waitForRawInputDrained = waitForTTYInputDrain
-	waitForWakeInputQuiet  = waitForTTYInputQuiet
 	rawInjectSleep         = time.Sleep
 )
 
@@ -1619,21 +1618,6 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 	}
 }
 
-// injectNotification preserves the legacy test/internal string helper. New
-// production routing uses deliverWakeNotification so input and output sources
-// remain explicit.
-func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
-	payload := wakePayload{
-		text:       text,
-		provenance: wakePayloadSystemFixed,
-	}
-	return deliverWakeNotification(
-		cfg,
-		wakeNotification{input: payload, output: payload},
-		deferForInput,
-	)
-}
-
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	cfg.lastAttemptAttention = false
 	cfg.lastAttemptTransientAttention = false
@@ -1670,7 +1654,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
-		if !waitForWakeInputQuiet(cfg) {
+		if !waitForTTYInputQuiet(cfg) {
 			return deliverWakeTransientAttention(cfg, notice.output, nil)
 		}
 	}

@@ -30,13 +30,15 @@ const (
 var (
 	readDarwinKinfoProc             = unix.SysctlKinfoProc
 	readDarwinProcessExecutablePath = readDarwinProcessExecutablePathDefault
-	readDarwinBootSessionUUID       = func() (string, error) {
-		return unix.Sysctl("kern.bootsessionuuid")
-	}
-	readDarwinBootTime = func() (*unix.Timeval, error) {
-		return unix.SysctlTimeval("kern.boottime")
-	}
 )
+
+func readDarwinBootTime() (*unix.Timeval, error) {
+	return unix.SysctlTimeval("kern.boottime")
+}
+
+func readDarwinBootSessionUUID() (string, error) {
+	return unix.Sysctl("kern.bootsessionuuid")
+}
 
 func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	info := wakeProcessInfo{PID: pid}

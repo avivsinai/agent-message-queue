@@ -87,7 +87,6 @@ var (
 	errWakeRestartSchemaTooNew = errors.New("wake restart schema is newer than supported")
 	errWakeImageRefused        = errors.New("wake restart image refused")
 
-	wakeRestartNow            = time.Now
 	wakeRestartSleep          = time.Sleep
 	wakeRestartNotify         = notifyWakeRestartPlatform
 	wakeRestartExec           = syscall.Exec
@@ -95,12 +94,10 @@ var (
 	wakeRestartBind           = bindWakeRestartCandidateForRecord
 	wakeRestartBoundPreflight = preflightBoundWakeRestartCandidate
 	wakeRestartIgnore         = signal.Ignore
-	wakeRestartSignalNotify   = signal.Notify
-	// Test seams for the readiness/record readers in the requestWakeRestart
-	// poll loop. Production wires them to the real readers; tests swap them to
-	// inject transient wakeSnapshotReadChangedError and refused records.
+	// Test seam for the readiness reader in the requestWakeRestart poll loop.
+	// Production wires it to the real reader; tests swap it to inject a
+	// transient wakeSnapshotReadChangedError.
 	wakeRestartObserveReadiness = observeWakeRestartReadinessInDir
-	wakeRestartReadRecord       = readWakeRestartRecordAt
 )
 
 func runWakeRestart(args []string) error {
@@ -263,8 +260,8 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		}
 	}
 
-	deadline := wakeRestartNow().Add(wakeRestartWaitTimeout)
-	for wakeRestartNow().Before(deadline) {
+	deadline := time.Now().Add(wakeRestartWaitTimeout)
+	for time.Now().Before(deadline) {
 		current := inspectWakeLock(root, me)
 		if current.Exists && current.Status == wakeLockValid && current.IdentityConfirmed &&
 			current.PID == expected.PID && current.Lock.Generation != record.Generation {
@@ -309,7 +306,7 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		var exists bool
 		readErr := agentDir.withFD(func(dirfd int) error {
 			var err error
-			observed, exists, err = wakeRestartReadRecord(dirfd, agentDir)
+			observed, exists, err = readWakeRestartRecordAt(dirfd, agentDir)
 			return err
 		})
 		if readErr != nil {
@@ -1053,7 +1050,7 @@ func retryWakeSelfUpgradeRefusal(
 			return err
 		}
 		agentDir = scopedAgentDir
-		currentLock := wakeSelfUpgradeInspectLockAt(
+		currentLock := inspectWakeLockAt(
 			dirfd,
 			agentDir,
 			canonicalWakeRoot(cfg.root),
@@ -1475,7 +1472,7 @@ func executeWakeRestart(
 	wakeRestartIgnore(syscall.SIGUSR1)
 	if err := revalidateBoundWakeRestartImagePlatform(bound); err != nil {
 		if restartSignals != nil {
-			wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+			signal.Notify(restartSignals, syscall.SIGUSR1)
 		}
 		return fmt.Errorf("%w: revalidate wake restart image: %w", errWakeImageRefused, err)
 	}
@@ -1484,14 +1481,14 @@ func executeWakeRestart(
 	if armSelfUpgradeAttempt != nil {
 		if err := armSelfUpgradeAttempt(record); err != nil {
 			if restartSignals != nil {
-				wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+				signal.Notify(restartSignals, syscall.SIGUSR1)
 			}
 			return fmt.Errorf("arm wake self-upgrade attempt: %w", err)
 		}
 	}
 	err = wakeRestartExec(bound.executionPath, append([]string(nil), argv...), env)
 	if restartSignals != nil {
-		wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+		signal.Notify(restartSignals, syscall.SIGUSR1)
 	}
 	if err != nil {
 		return fmt.Errorf("exec wake restart candidate: %w", err)
@@ -1551,7 +1548,7 @@ func pendingWakeSelfUpgradeForProcess(
 			cfg.wakeOwner == nil || !sameWakeOwner(cfg.wakeOwner, &current.Owner) {
 			return nil
 		}
-		incumbent := wakeSelfUpgradeInspectLockAt(dirfd, agentDir, root, cfg.me)
+		incumbent := inspectWakeLockAt(dirfd, agentDir, root, cfg.me)
 		if !incumbent.Exists || incumbent.Status != wakeLockValid ||
 			!incumbent.IdentityConfirmed || incumbent.PID != os.Getpid() ||
 			incumbent.Lock.Generation != cfg.terminalGeneration ||

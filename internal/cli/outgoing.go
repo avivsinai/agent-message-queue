@@ -142,7 +142,7 @@ func deliverOutgoing(m outgoingMessage) error {
 			return err
 		}
 		for _, r := range m.recipients {
-			if _, err := deliverToExistingInbox(m.deliveryFS, r, filename, data); err != nil {
+			if _, err := fsq.DeliverToExistingInbox(m.deliveryFS, r, filename, data); err != nil {
 				var committed *fsq.CommittedDurabilityError
 				if !errors.As(err, &committed) && m.explainPeerDeliveryError != nil {
 					if explained := m.explainPeerDeliveryError(r); explained != nil {

@@ -19,17 +19,19 @@ import (
 const coopNamedTUIStartupDelay = 3 * time.Second
 
 var (
-	openCoopNamedTTY = func() (*os.File, error) {
-		return os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	}
 	coopNamedTTYReady = func() bool {
 		return tiocsti.Available() && coopNamedHasControllingTTY()
 	}
 	coopNamedTTYInject = func(me, binaryBase string) error {
 		return injectCoopNamedSlashCommand(me, binaryBase)
 	}
-	coopNamedStartupSleep = func(delay time.Duration) { time.Sleep(delay) }
 )
+
+func openCoopNamedTTY() (*os.File, error) {
+	return os.OpenFile("/dev/tty", os.O_RDWR, 0)
+}
+
+func coopNamedStartupSleep(delay time.Duration) { time.Sleep(delay) }
 
 var startCoopNamedTUIInjector = func(name, cmdName string, execStart time.Time) error {
 	return startCoopNamedTUIInjectorProcess(name, cmdName, execStart)

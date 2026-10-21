@@ -19,32 +19,6 @@ type wakeReady struct {
 	TargetDigest string `json:"target_digest,omitempty"`
 }
 
-func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) error {
-	return writeWakeReadyFileAgainstOwner(root, me, path, expected, nil)
-}
-
-func writeWakeReadyFileAgainstOwner(
-	root string,
-	me string,
-	path string,
-	expected wakeLockInspection,
-	requestedOwner *wakeOwner,
-) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return writeWakeReadyFileAgainstOwnerInDir(
-		agentDir,
-		root,
-		me,
-		path,
-		expected,
-		requestedOwner,
-	)
-}
-
 func writeWakeReadyFileAgainstOwnerInDir(
 	agentDir *wakeAgentDir,
 	root string,

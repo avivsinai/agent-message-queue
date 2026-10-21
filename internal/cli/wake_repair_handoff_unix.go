@@ -425,10 +425,6 @@ func (prepared wakeRepairHandoffPrepared) ChildPID() int {
 	return prepared.childPID
 }
 
-func (prepared wakeRepairHandoffPrepared) SourceDigest() string {
-	return prepared.sourceDigest
-}
-
 func (prepared wakeRepairHandoffPrepared) ChildGeneration() string {
 	return prepared.childGeneration
 }
@@ -1531,5 +1527,3 @@ func (capability *wakeRepairChildCapability) Close() error {
 	capability.close = nil
 	return closeFn()
 }
-
-var prepareWakeRepairChildCapability = prepareWakeRepairChildCapabilityPlatform

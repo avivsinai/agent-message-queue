@@ -35,25 +35,6 @@ const (
 	wakeOwnerActionCleanOrphan
 )
 
-func (action wakeOwnerTransitionAction) String() string {
-	switch action {
-	case wakeOwnerActionLegacy:
-		return "legacy"
-	case wakeOwnerActionPublish:
-		return "publish"
-	case wakeOwnerActionReuse:
-		return "reuse"
-	case wakeOwnerActionRelease:
-		return "release"
-	case wakeOwnerActionStopAndRelease:
-		return "stop and release"
-	case wakeOwnerActionCleanOrphan:
-		return "clean orphan"
-	default:
-		return "refuse"
-	}
-}
-
 type wakeOwnerTransitionEvidence struct {
 	Request            wakeOwnerTransitionRequest
 	Claim              wakeClaimClass

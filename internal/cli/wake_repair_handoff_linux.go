@@ -8,12 +8,11 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-var (
-	stopWakeRepairChildPidfd  = terminateWakePidfd
-	closeWakeRepairChildPidfd = linuxPidfdClose
-)
+var ()
 
 func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCapability, error) {
 	if cmd == nil {
@@ -57,7 +56,7 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 			if !bound || pidfd < 0 || detached {
 				return fmt.Errorf("wake repair child pidfd is unavailable")
 			}
-			return stopWakeRepairChildPidfd(pidfd)
+			return terminateWakePidfd(pidfd)
 		},
 		detach: func() error {
 			mutex.Lock()
@@ -71,7 +70,7 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 			// and never retain, retry, or signal through the numeric fd again.
 			pidfd = -1
 			detached = true
-			_ = closeWakeRepairChildPidfd(fd)
+			_ = unix.Close(fd)
 			return nil
 		},
 		close: func() error {
@@ -82,7 +81,7 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 			}
 			fd := pidfd
 			pidfd = -1
-			return closeWakeRepairChildPidfd(fd)
+			return unix.Close(fd)
 		},
 	}, nil
 }

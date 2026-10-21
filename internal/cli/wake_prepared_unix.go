@@ -5,10 +5,7 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
-
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const wakePreparedFileName = ".wake.prepared"
@@ -17,20 +14,6 @@ const wakePreparedPollInterval = 25 * time.Millisecond
 
 var waitForWakePreparedRetry = sleepUntilWakePreparedRetry
 var afterGenericWakeLockRemoval = func(int, *wakeAgentDir) error { return nil }
-var afterWakePreparedBoundValidation = func() {}
-
-func wakePreparedPath(root, me string) string {
-	return filepath.Join(fsq.AgentBase(root, me), wakePreparedFileName)
-}
-
-func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return writeWakePreparedFileInDir(agentDir, root, me, expected)
-}
 
 func writeWakePreparedFileInDir(
 	agentDir *wakeAgentDir,
@@ -50,7 +33,6 @@ func writeWakePreparedFileInDir(
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before preparation publication")
 		}
-		afterWakePreparedBoundValidation()
 		confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, confirmed) {
 			return newWakeStateBoundInconclusiveError(
@@ -118,14 +100,6 @@ func freezeGenericWakePreparedCleanupAt(
 		return nil, fmt.Errorf("validate wake prepared marker before cleanup: %w", err)
 	}
 	return &snapshot, nil
-}
-
-func validateWakePreparedFileAgainstInspection(root, me string, current wakeLockInspection) (bool, error) {
-	selection, err := readWakeStateSelectionForInspection(root, me, current)
-	if err != nil {
-		return false, err
-	}
-	return validateWakePreparedSelection(current, selection)
 }
 
 func validateWakePreparedFileAgainstInspectionAt(

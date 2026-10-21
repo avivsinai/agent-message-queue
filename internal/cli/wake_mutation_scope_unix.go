@@ -31,8 +31,6 @@ type wakeRetainedCleanupScope interface {
 	unlinkWakeLockForCleanup() error
 }
 
-var wakeRetireUnlinkWakeLockAt wakemutation.UnlinkAtFunc = wakeUnlinkAt
-
 func newWakeMutationScope(
 	agentDir *wakeAgentDir,
 	dirfd int,
@@ -193,7 +191,7 @@ func (scope *wakeMutationScope) unlinkWakeLockForRetire() error {
 	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
-	return scope.unlinkAtWith(wakeRetireUnlinkWakeLockAt, wakeLockFileName, 0)
+	return scope.unlinkAtWith(wakeUnlinkAt, wakeLockFileName, 0)
 }
 
 func assertNotWakeLockName(name string) error {

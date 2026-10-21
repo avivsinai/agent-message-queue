@@ -138,7 +138,7 @@ func recoverOwnerWakeWithStopPreparer(
 				return err
 			}
 			agentDir = scopedAgentDir
-			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
+			inspection := inspectWakeLockForOwnerTransitionPlatform(dirfd, agentDir, root, me)
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
 			case wakeClaimAbsent:

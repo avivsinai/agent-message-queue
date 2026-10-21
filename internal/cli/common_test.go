@@ -290,7 +290,7 @@ func TestEnvAndBareSendAgreeWithCompetingSourcesInsideAndOutsideGit(t *testing.T
 			for name, root := range roots {
 				before[name] = snapshotTreeDigest(t, root)
 			}
-			resolvedEnv, _, envErr := resolveEnvConfig("", "alice")
+			resolvedEnv, _, _, envErr := resolveEnvConfigWithSource("", "alice")
 			body := test.name
 			if test.wantError {
 				body = "@missing-body-must-not-be-read"

@@ -32,15 +32,10 @@ const (
 )
 
 var (
-	closeWakeReloadReceivedFD  = unix.Close
-	linuxWakeReloadGetPeerSID  = getWakeProcessSID
 	linuxWakeReloadPeerProcess = func(pid int) wakeProcessInfo {
 		return inspectWakeProcess(pid)
 	}
-	linuxWakeReloadGetPeerCred   = getLinuxWakeReloadPeerCred
-	linuxWakeReloadBeforePublish func(dirfd int, stagingName, publicName string) error
-	linuxWakeReloadAfterRetire   func(dirfd int, retiredName, publicName string) error
-	linuxWakeReloadBeforeGuard   func()
+	linuxWakeReloadGetPeerCred = getLinuxWakeReloadPeerCred
 )
 
 type linuxWakeReloadSocketIdentity struct {
@@ -294,11 +289,6 @@ func listenLinuxWakeReloadTransportAt(
 		if err := unix.Listen(fd, linuxWakeReloadListenBacklog); err != nil {
 			return fmt.Errorf("listen on wake reload endpoint %s: %w", path, err)
 		}
-		if linuxWakeReloadBeforePublish != nil {
-			if err := linuxWakeReloadBeforePublish(dirfd, stagingName, name); err != nil {
-				return err
-			}
-		}
 		if err := renameWakeNoReplaceAt(dirfd, stagingName, dirfd, name); err != nil {
 			return fmt.Errorf("publish wake reload endpoint %s: %w", path, err)
 		}
@@ -421,11 +411,6 @@ func removeLinuxWakeReloadSocketIfSameAt(
 		return nil
 	} else if err != nil {
 		return err
-	}
-	if linuxWakeReloadAfterRetire != nil {
-		if err := linuxWakeReloadAfterRetire(dirfd, retiredName, name); err != nil {
-			return err
-		}
 	}
 	retired, inspectErr := inspectLinuxWakeReloadSocketAt(
 		dirfd,
@@ -569,9 +554,6 @@ func (transport *linuxWakeReloadTransport) authorize(request wakeReloadTransport
 			observation.Close(),
 		)
 	}
-	if linuxWakeReloadBeforeGuard != nil {
-		linuxWakeReloadBeforeGuard()
-	}
 	// Reload authentication runs in a handler that Close must be able to drain
 	// promptly. It refuses a held guard instead of waiting for another owner.
 	authErr := withWakeLifecycleGuardInDir(transport.agentDir, wakeGuardOptions{noWait: true}, func(dirfd int) error {
@@ -627,7 +609,7 @@ func (peer *linuxWakeReloadPeer) captureStableOwner(pid int) error {
 		return fmt.Errorf("wake reload peer is not live: %w", err)
 	}
 	first := linuxWakeReloadPeerProcess(pid)
-	firstSID, firstSIDErr := linuxWakeReloadGetPeerSID(pid)
+	firstSID, firstSIDErr := unix.Getsid(pid)
 	owner := wakeOwner{
 		PID:          pid,
 		ProcessStart: first.StartToken,
@@ -638,7 +620,7 @@ func (peer *linuxWakeReloadPeer) captureStableOwner(pid int) error {
 		return fmt.Errorf("wake reload peer identity is incomplete: %w", err)
 	}
 	second := linuxWakeReloadPeerProcess(pid)
-	secondSID, secondSIDErr := linuxWakeReloadGetPeerSID(pid)
+	secondSID, secondSIDErr := unix.Getsid(pid)
 	exited, err = linuxPidfdPoll(peer.pidfd, 0)
 	if err != nil || exited {
 		return fmt.Errorf("wake reload peer changed during inspection: %w", err)
@@ -668,9 +650,9 @@ func (peer *linuxWakeReloadPeer) Revalidate() error {
 		return fmt.Errorf("wake reload peer is not live: %w", err)
 	}
 	first := linuxWakeReloadPeerProcess(peer.owner.PID)
-	firstSID, firstSIDErr := linuxWakeReloadGetPeerSID(peer.owner.PID)
+	firstSID, firstSIDErr := unix.Getsid(peer.owner.PID)
 	second := linuxWakeReloadPeerProcess(peer.owner.PID)
-	secondSID, secondSIDErr := linuxWakeReloadGetPeerSID(peer.owner.PID)
+	secondSID, secondSIDErr := unix.Getsid(peer.owner.PID)
 	state, reason := classifyStableAuthoritativeWakeOwner(
 		peer.owner,
 		first,
@@ -770,7 +752,7 @@ func closeLinuxWakeReloadAncillary(oob []byte) (bool, error) {
 			continue
 		}
 		for _, fd := range fds {
-			closeErr = errors.Join(closeErr, closeWakeReloadReceivedFD(fd))
+			closeErr = errors.Join(closeErr, unix.Close(fd))
 		}
 	}
 	return len(messages) > 0, closeErr

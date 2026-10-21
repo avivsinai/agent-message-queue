@@ -14,23 +14,19 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-var syncDLQPurgeDir = func(root *fsq.DeliveryRoot, dir string) error {
+func syncDLQPurgeDir(root *fsq.DeliveryRoot, dir string) error {
 	return root.SyncDir(dir)
 }
 
-var removeDLQPurgeCandidate = func(root *fsq.DeliveryRoot, path string) error {
+func removeDLQPurgeCandidate(root *fsq.DeliveryRoot, path string) error {
 	return root.Remove(path)
 }
 
-var statDLQPurgeCandidate = func(root *fsq.DeliveryRoot, path string) (os.FileInfo, error) {
+func statDLQPurgeCandidate(root *fsq.DeliveryRoot, path string) (os.FileInfo, error) {
 	return root.Stat(path)
 }
 
-var retryDLQMessage = fsq.RetryFromDLQ
-
-var inspectDLQMessage = fsq.InspectDLQEnvelope
-
-var readDLQRetryDir = func(root *fsq.DeliveryRoot, dir string) ([]os.DirEntry, error) {
+func readDLQRetryDir(root *fsq.DeliveryRoot, dir string) ([]os.DirEntry, error) {
 	return root.ReadDir(dir)
 }
 
@@ -180,10 +176,6 @@ func runDLQList(args []string) error {
 	return nil
 }
 
-func collectDLQListItems(root *fsq.DeliveryRoot, me string, boxes []string) ([]dlqListItem, error) {
-	return collectDLQListItemsWithPrecedence(root, me, boxes, false)
-}
-
 func collectDLQListItemsWithPrecedence(root *fsq.DeliveryRoot, me string, boxes []string, dedupeByFilename bool) ([]dlqListItem, error) {
 	var items []dlqListItem
 	seen := make(map[string]struct{})
@@ -316,7 +308,7 @@ func runDLQRead(args []string) error {
 		return UsageError("--id: %v", err)
 	}
 
-	env, originalContent, box, inspectErr := inspectDLQMessage(deliveryRoot, me, filename)
+	env, originalContent, box, inspectErr := fsq.InspectDLQEnvelope(deliveryRoot, me, filename)
 	if inspectErr != nil && env == nil {
 		if os.IsNotExist(inspectErr) {
 			return fmt.Errorf("DLQ message not found: %s", *idFlag)
@@ -451,7 +443,7 @@ func runDLQRetry(args []string) error {
 		return UsageError("--id: %v", err)
 	}
 
-	retryErr := retryDLQMessage(deliveryRoot, me, filename, *forceFlag)
+	retryErr := fsq.RetryFromDLQ(deliveryRoot, me, filename, *forceFlag)
 	alreadyDelivered := errors.Is(retryErr, fsq.ErrDLQRetryDelivered)
 	if retryErr != nil && !alreadyDelivered && !committedDLQRetry(deliveryRoot, me, retryErr) {
 		return retryErr
@@ -523,7 +515,7 @@ func retryAllDLQ(root *fsq.DeliveryRoot, me string, force, jsonOutput bool) erro
 	var skipped []string
 	var retryErr error
 	for _, candidate := range candidates {
-		err := retryDLQMessage(root, me, candidate.filename, force)
+		err := fsq.RetryFromDLQ(root, me, candidate.filename, force)
 		if err == nil || committedDLQRetry(root, me, err) {
 			retried = append(retried, strings.TrimSuffix(candidate.filename, ".md"))
 		} else if errors.Is(err, fsq.ErrDLQRetryDelivered) {

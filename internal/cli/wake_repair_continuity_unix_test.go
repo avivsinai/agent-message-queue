@@ -56,7 +56,7 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		_ = initial.Process.Kill()
 		_ = initialWaiter.waitForExit(time.Second)
 	})
-	if err := waitForWakeReadyWithWaiter(initialWaiter, readyPath, root, "codex", 5*time.Second); err != nil {
+	if err := waitForWakeReadyWithOwner(initialWaiter, readyPath, root, "codex", nil, 5*time.Second); err != nil {
 		t.Fatalf("wait for initial wake: %v\ninspection: %#v", err, inspectWakeLock(root, "codex"))
 	}
 

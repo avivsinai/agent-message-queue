@@ -438,7 +438,7 @@ func findRootInParents(startDir, relative string) (string, bool) {
 		}
 	}
 	dir := startDir
-	for !atWalkCeilingForTests(dir) {
+	for !atWalkBoundary(dir) {
 		candidate := filepath.Join(dir, relative)
 		if dirExists(candidate) {
 			return absPath(candidate), true

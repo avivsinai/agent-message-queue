@@ -23,10 +23,10 @@ const (
 )
 
 var (
-	writeWakeRepairDarwinChildControl = writeWakeRepairChildControl
-	closeWakeRepairDarwinChildControl = func(file *os.File) error { return file.Close() }
-	killWakeRepairDarwinChild         = killWakeRepairDarwinChildWithHandle
+	killWakeRepairDarwinChild = killWakeRepairDarwinChildWithHandle
 )
+
+func closeWakeRepairDarwinChildControl(file *os.File) error { return file.Close() }
 
 func killWakeRepairDarwinChildWithHandle(process *os.Process) error { return killWakeProcess(process) }
 
@@ -86,7 +86,7 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 				return fmt.Errorf("wake repair child control capability is unavailable")
 			}
 			if !writeClosed {
-				_ = writeWakeRepairDarwinChildControl(writeEnd, wakeRepairChildControlStop)
+				_ = writeWakeRepairChildControl(writeEnd, wakeRepairChildControlStop)
 				_ = closeWrite()
 			}
 			if err := killWakeRepairDarwinChild(process); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -103,7 +103,7 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 			if !bound || detached || stopped || writeClosed {
 				return fmt.Errorf("wake repair child control capability is unavailable")
 			}
-			if err := writeWakeRepairDarwinChildControl(writeEnd, wakeRepairChildControlDetach); err != nil {
+			if err := writeWakeRepairChildControl(writeEnd, wakeRepairChildControlDetach); err != nil {
 				return err
 			}
 			// A complete DETACH frame is observable by the child immediately.

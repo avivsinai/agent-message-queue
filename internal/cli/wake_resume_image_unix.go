@@ -13,10 +13,6 @@ import (
 
 var errWakeImageChangedWhileHashing = selfupgrade.ErrImageChangedWhileHashing
 
-// Tests may set this to mutate the image between the before-hash and after-hash
-// stats. Production leaves it nil.
-var wakeImageHashMutator func()
-
 var captureCurrentWakeImageEvidence = captureCurrentWakeImageEvidenceDefault
 
 func captureCurrentWakeImageEvidenceDefault() (wakeImageEvidenceV1, error) {
@@ -38,7 +34,7 @@ func captureCurrentWakeImageEvidenceDefault() (wakeImageEvidenceV1, error) {
 }
 
 func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1, error) {
-	return selfupgrade.CaptureImageEvidenceWithMutator(path, embeddedVersion, wakeImageHashMutator)
+	return selfupgrade.CaptureImageEvidenceWithMutator(path, embeddedVersion, nil)
 }
 
 func captureWakeImageEvidenceFromOpenFile(
@@ -50,6 +46,6 @@ func captureWakeImageEvidenceFromOpenFile(
 		executionPath,
 		embeddedVersion,
 		method,
-		wakeImageHashMutator,
+		nil,
 	)
 }

@@ -20,8 +20,6 @@ const wakeQuarantineTimestampLayout = "20060102T150405.000000000Z"
 
 const wakeMalformedLockQuarantineAge = 2 * time.Second
 
-var wakeQuarantineNow = time.Now
-
 type wakeQuarantineSnapshot struct {
 	Raw      []byte
 	FileInfo os.FileInfo
@@ -40,7 +38,6 @@ type wakeQuarantineCleanupCandidate struct {
 }
 
 var beforeWakeQuarantineCleanupRevalidation = func(wakeQuarantineCleanupCandidate) {}
-var beforeWakeRestartQuarantineRevalidation = func(wakeRestartRecordSnapshot) {}
 
 func parseWakeQuarantineName(name string) (time.Time, bool) {
 	for _, source := range []string{wakeLockFileName, wakeTargetFileName, wakeRestartFileName} {
@@ -422,7 +419,7 @@ func moveWakeQuarantineAt(
 	label string,
 	expected wakeQuarantineSnapshot,
 ) (string, error) {
-	quarantine, err := wakeQuarantineName(source, wakeQuarantineNow())
+	quarantine, err := wakeQuarantineName(source, time.Now())
 	if err != nil {
 		return "", err
 	}
@@ -484,7 +481,6 @@ func quarantineWakeRestartRecordAt(
 	agentDir *wakeAgentDir,
 	expected wakeRestartRecordSnapshot,
 ) (string, error) {
-	beforeWakeRestartQuarantineRevalidation(expected)
 	current, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
 	if err != nil && (!exists || current.Object.FileInfo == nil) {
 		return "", err
@@ -514,7 +510,7 @@ func quarantineMalformedWakeLockAt(
 			fmt.Errorf("wake lock changed before quarantine"),
 		)
 	}
-	if !wakeLockEligibleForQuarantine(current, wakeQuarantineNow()) {
+	if !wakeLockEligibleForQuarantine(current, time.Now()) {
 		return "", fmt.Errorf("wake lock is not eligible for quarantine")
 	}
 	return moveWakeQuarantineAt(
