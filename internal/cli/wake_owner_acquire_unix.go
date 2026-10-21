@@ -236,83 +236,9 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 			}
 
 			if claimClass == wakeClaimAuthoritative {
-				persisted, err := validateAuthoritativeWakeClaimPairAt(scope, inspection)
-				if err != nil {
-					return fmt.Errorf("persisted owner claim is unverified: %w", err)
-				}
-				persistedState := requestedObservation.State
-				persistedReason := requestedObservation.Reason
-				if !sameWakeOwner(inspection.Lock.Owner, requested.Owner) {
-					persistedObservation, err := observeAuthoritativeWakeOwner(*inspection.Lock.Owner)
-					if err != nil {
-						return errors.Join(err, persistedObservation.Close())
-					}
-					persistedState = persistedObservation.State
-					persistedReason = persistedObservation.Reason
-					if err := persistedObservation.Close(); err != nil {
-						return err
-					}
-				}
-				ownersEqual := sameWakeOwner(inspection.Lock.Owner, requested.Owner)
-				wakeCapability, err := prepareStop(scope, inspection)
-				if err != nil {
-					return fmt.Errorf("inspect authoritative wake through stable capability: %w", err)
-				}
-				keepWakeCapability := false
-				defer func() {
-					if !keepWakeCapability {
-						_ = wakeCapability.Close()
-					}
-				}()
-				classified := wakeCapability.Inspection
-				wakeUsable := classified.Status == wakeLockValid &&
-					classified.IdentityConfirmed &&
-					wakeLockHasUsableNotificationPath(classified) &&
-					ownersEqual &&
-					sameWakeInjectorIdentity(persisted, requested)
-				evidence := wakeOwnerTransitionEvidence{
-					Request:            wakeOwnerRequestAcquire,
-					Claim:              wakeClaimAuthoritative,
-					RequestedState:     requestedObservation.State,
-					PersistedState:     persistedState,
-					OwnersEqual:        ownersEqual,
-					WakeUsable:         wakeUsable,
-					WakeExactStoppable: classified.Status == wakeLockValid && classified.IdentityConfirmed,
-					WakeAbsent:         wakeCapability.Absent,
-				}
-				switch decideOwnerLifecycleTransition(evidence) {
-				case wakeOwnerActionReuse:
-					return wakeLockAlreadyRunningError(me, classified)
-				case wakeOwnerActionRelease:
-					if err := removeAuthoritativeWakeClaimAt(scope, classified, &persisted); err != nil {
-						return err
-					}
-					retry = true
-					return nil
-				case wakeOwnerActionStopAndRelease:
-					if wakeCapability.Absent {
-						if err := removeAuthoritativeWakeClaimAt(scope, classified, &persisted); err != nil {
-							return err
-						}
-						retry = true
-						return nil
-					}
-					stopCapability = &wakeCapability
-					keepWakeCapability = true
-					return nil
-				default:
-					switch persistedState {
-					case wakeOwnerSame:
-						if !ownersEqual {
-							return fmt.Errorf("wake handle %s is owned by live process pid %d, OS session %d", me, inspection.Lock.Owner.PID, inspection.Lock.Owner.SessionID)
-						}
-						return fmt.Errorf("wake handle %s has a live owner but an unusable wake; run %s", me, wakeRecoverOwnerCommand(root, me))
-					case wakeOwnerUnknown:
-						return fmt.Errorf("wake owner for %s is unknown (%s); preserving owner claim", me, persistedReason)
-					default:
-						return fmt.Errorf("wake owner for %s cannot be safely reclaimed; run %s", me, wakeRecoverOwnerCommand(root, me))
-					}
-				}
+				return reconcileAuthoritativeWakeClaimForAcquireAt(
+					scope, inspection, requested, &requestedObservation, prepareStop, root, me, &retry, &stopCapability,
+				)
 			}
 
 			if orphan, exists, readErr := readWakeTargetAt(dirfd, agentDir, root, me); readErr != nil {
@@ -394,5 +320,99 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 		// Ordinary wake-loop termination is not an owner release. Recovery or
 		// an exact in-process rollback owns authoritative claim removal.
 		return func() {}, nil
+	}
+}
+
+// reconcileAuthoritativeWakeClaimForAcquireAt decides what an owner-bound
+// acquisition does with an existing authoritative claim: reuse is refused,
+// a dead or exact claim is released (retry), or the wake is stopped first
+// (stopCapability). The caller holds the mutation scope.
+func reconcileAuthoritativeWakeClaimForAcquireAt(
+	scope *wakeMutationScope,
+	inspection wakeLockInspection,
+	requested wakeTarget,
+	requestedObservation *wakeOwnerObservation,
+	prepareStop authoritativeWakeStopPreparer,
+	root string,
+	me string,
+	retry *bool,
+	stopCapability **authoritativeWakeStopCapability,
+) error {
+	persisted, err := validateAuthoritativeWakeClaimPairAt(scope, inspection)
+	if err != nil {
+		return fmt.Errorf("persisted owner claim is unverified: %w", err)
+	}
+	persistedState := requestedObservation.State
+	persistedReason := requestedObservation.Reason
+	if !sameWakeOwner(inspection.Lock.Owner, requested.Owner) {
+		persistedObservation, err := observeAuthoritativeWakeOwner(*inspection.Lock.Owner)
+		if err != nil {
+			return errors.Join(err, persistedObservation.Close())
+		}
+		persistedState = persistedObservation.State
+		persistedReason = persistedObservation.Reason
+		if err := persistedObservation.Close(); err != nil {
+			return err
+		}
+	}
+	ownersEqual := sameWakeOwner(inspection.Lock.Owner, requested.Owner)
+	wakeCapability, err := prepareStop(scope, inspection)
+	if err != nil {
+		return fmt.Errorf("inspect authoritative wake through stable capability: %w", err)
+	}
+	keepWakeCapability := false
+	defer func() {
+		if !keepWakeCapability {
+			_ = wakeCapability.Close()
+		}
+	}()
+	classified := wakeCapability.Inspection
+	wakeUsable := classified.Status == wakeLockValid &&
+		classified.IdentityConfirmed &&
+		wakeLockHasUsableNotificationPath(classified) &&
+		ownersEqual &&
+		sameWakeInjectorIdentity(persisted, requested)
+	evidence := wakeOwnerTransitionEvidence{
+		Request:            wakeOwnerRequestAcquire,
+		Claim:              wakeClaimAuthoritative,
+		RequestedState:     requestedObservation.State,
+		PersistedState:     persistedState,
+		OwnersEqual:        ownersEqual,
+		WakeUsable:         wakeUsable,
+		WakeExactStoppable: classified.Status == wakeLockValid && classified.IdentityConfirmed,
+		WakeAbsent:         wakeCapability.Absent,
+	}
+	switch decideOwnerLifecycleTransition(evidence) {
+	case wakeOwnerActionReuse:
+		return wakeLockAlreadyRunningError(me, classified)
+	case wakeOwnerActionRelease:
+		if err := removeAuthoritativeWakeClaimAt(scope, classified, &persisted); err != nil {
+			return err
+		}
+		*retry = true
+		return nil
+	case wakeOwnerActionStopAndRelease:
+		if wakeCapability.Absent {
+			if err := removeAuthoritativeWakeClaimAt(scope, classified, &persisted); err != nil {
+				return err
+			}
+			*retry = true
+			return nil
+		}
+		*stopCapability = &wakeCapability
+		keepWakeCapability = true
+		return nil
+	default:
+		switch persistedState {
+		case wakeOwnerSame:
+			if !ownersEqual {
+				return fmt.Errorf("wake handle %s is owned by live process pid %d, OS session %d", me, inspection.Lock.Owner.PID, inspection.Lock.Owner.SessionID)
+			}
+			return fmt.Errorf("wake handle %s has a live owner but an unusable wake; run %s", me, wakeRecoverOwnerCommand(root, me))
+		case wakeOwnerUnknown:
+			return fmt.Errorf("wake owner for %s is unknown (%s); preserving owner claim", me, persistedReason)
+		default:
+			return fmt.Errorf("wake owner for %s cannot be safely reclaimed; run %s", me, wakeRecoverOwnerCommand(root, me))
+		}
 	}
 }

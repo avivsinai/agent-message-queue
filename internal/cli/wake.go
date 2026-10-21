@@ -705,65 +705,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if cfg.injectMode == wakeInjectModeNone {
 			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 		}
-		now := time.Now()
-		if !usesCoopDoorbell(cfg) &&
-			cfg.interruptKey != "" &&
-			shouldInterruptNow(cfg, now) {
-			if cfg.injectVia != "" {
-				allowed, guardErr := authorizeTerminalWrite(cfg)
-				if guardErr != nil {
-					return guardErr
-				}
-				if allowed {
-					err := injectVia(cfg, cfg.interruptKey)
-					cfg.lastInjectorOutcome = classifyWakeInjectorOutcome(err)
-					if err != nil {
-						cfg.lastInjectorDetail = err.Error()
-					}
-					switch cfg.lastInjectorOutcome {
-					case wakeInjectorOutcomeAccepted, wakeInjectorOutcomeLegacy:
-						// A legacy zero exit is transport success for compatibility;
-						// only the accepted marker claims provider acceptance.
-						cfg.lastInterrupt = now
-						time.Sleep(50 * time.Millisecond)
-					case wakeInjectorOutcomeDeferred:
-						// Provider-side busy/transition is replayable, but must not
-						// fall back to a second notification in this scan. Record the
-						// deferral exactly like the notification path: arm the cohort
-						// if this was its first attempt and advance the input retry
-						// ladder with backoff, so the doorbell deadline stays armed
-						// (no silent stall) and the injector is not re-invoked hot
-						// against a provider that just declared busy. The ledger keeps
-						// tracking the payload notification, not this control effect.
-						recordWakeAttempt(cfg, cfg.wakeDoorbellNow(), currentPending, err)
-						return err
-					case wakeInjectorOutcomeUncertain:
-						// The key may have landed. Hold the exact completion debt
-						// and use recovery attention; never replay it.
-						cfg.inputDelivery.acceptanceUncertain = true
-						cfg.fallbackWarn = false
-						return enterWakeInputRecovery(
-							cfg,
-							currentPending,
-							&wakeInputDemotionBlockedError{err: err},
-						)
-					}
-				}
-			} else {
-				wrote, writeErr := writeTerminalChunk(cfg, cfg.interruptKey)
-				if writeErr != nil {
-					var authorityErr *wakeTerminalAuthorityError
-					if errors.As(writeErr, &authorityErr) {
-						return writeErr
-					}
-				}
-				// The raw path can require positive terminal-write evidence
-				// instead of inferring acceptance from a process exit status.
-				if writeErr == nil && wrote {
-					cfg.lastInterrupt = now
-					time.Sleep(50 * time.Millisecond)
-				}
-			}
+		if done, err := injectWakeInterruptKey(cfg, currentPending); done {
+			return err
 		}
 		return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 	}
@@ -780,6 +723,73 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	return deliverWithNotificationLedger(cfg, wakeMessageIDs(messages), notice, true, currentPending)
+}
+
+// injectWakeInterruptKey sends the configured interrupt key ahead of an
+// interrupt notification when the interrupt window allows it. It reports
+// whether the scan must end here, and with what result.
+func injectWakeInterruptKey(cfg *wakeConfig, currentPending map[string]os.FileInfo) (bool, error) {
+	now := time.Now()
+	if !usesCoopDoorbell(cfg) &&
+		cfg.interruptKey != "" &&
+		shouldInterruptNow(cfg, now) {
+		if cfg.injectVia != "" {
+			allowed, guardErr := authorizeTerminalWrite(cfg)
+			if guardErr != nil {
+				return true, guardErr
+			}
+			if allowed {
+				err := injectVia(cfg, cfg.interruptKey)
+				cfg.lastInjectorOutcome = classifyWakeInjectorOutcome(err)
+				if err != nil {
+					cfg.lastInjectorDetail = err.Error()
+				}
+				switch cfg.lastInjectorOutcome {
+				case wakeInjectorOutcomeAccepted, wakeInjectorOutcomeLegacy:
+					// A legacy zero exit is transport success for compatibility;
+					// only the accepted marker claims provider acceptance.
+					cfg.lastInterrupt = now
+					time.Sleep(50 * time.Millisecond)
+				case wakeInjectorOutcomeDeferred:
+					// Provider-side busy/transition is replayable, but must not
+					// fall back to a second notification in this scan. Record the
+					// deferral exactly like the notification path: arm the cohort
+					// if this was its first attempt and advance the input retry
+					// ladder with backoff, so the doorbell deadline stays armed
+					// (no silent stall) and the injector is not re-invoked hot
+					// against a provider that just declared busy. The ledger keeps
+					// tracking the payload notification, not this control effect.
+					recordWakeAttempt(cfg, cfg.wakeDoorbellNow(), currentPending, err)
+					return true, err
+				case wakeInjectorOutcomeUncertain:
+					// The key may have landed. Hold the exact completion debt
+					// and use recovery attention; never replay it.
+					cfg.inputDelivery.acceptanceUncertain = true
+					cfg.fallbackWarn = false
+					return true, enterWakeInputRecovery(
+						cfg,
+						currentPending,
+						&wakeInputDemotionBlockedError{err: err},
+					)
+				}
+			}
+		} else {
+			wrote, writeErr := writeTerminalChunk(cfg, cfg.interruptKey)
+			if writeErr != nil {
+				var authorityErr *wakeTerminalAuthorityError
+				if errors.As(writeErr, &authorityErr) {
+					return true, writeErr
+				}
+			}
+			// The raw path can require positive terminal-write evidence
+			// instead of inferring acceptance from a process exit status.
+			if writeErr == nil && wrote {
+				cfg.lastInterrupt = now
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}
+	return false, nil
 }
 
 // wakeMessageIDs collects the non-empty IDs from a slice of wakeMsgInfo.
@@ -1672,68 +1682,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	// ambiguity is AMQ_INJECT_PROGRESS=uncertain. Neither may replay the
 	// payload.
 	if cfg.injectVia != "" || cfg.injectViaHook != nil {
-		if cfg.skipExternalInjector {
-			return deliverWakeAttentionOnly(cfg, notice.output)
-		}
-		if cfg.inputDelivery.acceptanceUncertain {
-			cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
-			return &wakeInputDemotionBlockedError{
-				err: errors.New("a prior terminal write has uncertain acceptance"),
-			}
-		}
-		allowed, guardErr := authorizeTerminalWrite(cfg)
-		if guardErr != nil {
-			return deliverWakeAttentionAfterInputRefusal(
-				cfg,
-				notice.output,
-				guardErr,
-			)
-		}
-		if !allowed {
-			return deliverWakeAttentionOnly(cfg, notice.output)
-		}
-		if err := injectVia(cfg, plainText); err != nil {
-			cfg.lastInjectorDetail = err.Error()
-			switch classifyWakeInjectorOutcome(err) {
-			case wakeInjectorOutcomeDeferred:
-				cfg.lastInjectorOutcome = wakeInjectorOutcomeDeferred
-				return err
-			case wakeInjectorOutcomeLegacy:
-				cfg.lastInjectorOutcome = wakeInjectorOutcomeLegacy
-				// Preserve the v1 external-injector contract: a marker-less
-				// exit-zero command is a successful transport result. The
-				// lifecycle ledger records it as written/uncertain, while the
-				// wake loop keeps its existing retry-until policy.
-				// Clear fallback-only degradation after successful injection
-				// resumes.
-				clearDegradedWakeNotifierStatus(cfg)
-				return nil
-			case wakeInjectorOutcomeUncertain:
-				var uncertain *wakeTerminalProgressUncertainError
-				if !errors.As(err, &uncertain) {
-					uncertain = &wakeTerminalProgressUncertainError{err: err}
-				}
-				if cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
-					cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
-				}
-				cfg.inputDelivery.acceptanceUncertain = true
-				_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
-				cfg.fallbackWarn = false
-				return &wakeInputDemotionBlockedError{err: uncertain}
-			default:
-				cfg.lastInjectorOutcome = wakeInjectorOutcomeFailed
-			}
-			if cfg.fallbackWarn {
-				_ = writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: %v\n", err)
-				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
-				cfg.fallbackWarn = false
-			}
-			return deliverWakeAttentionOnly(cfg, notice.output)
-		}
-		cfg.lastInjectorOutcome = wakeInjectorOutcomeAccepted
-		// Clear fallback-only degradation after successful injection resumes.
-		clearDegradedWakeNotifierStatus(cfg)
-		return nil
+		return deliverWakeNotificationViaInjector(cfg, notice, plainText)
 	}
 
 	mode := effectiveInjectMode(cfg)
@@ -1862,6 +1811,74 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	// Clear fallback-only degradation after successful native injection.
+	clearDegradedWakeNotifierStatus(cfg)
+	return nil
+}
+
+// deliverWakeNotificationViaInjector hands plainText to the external
+// --inject-via command and maps its acceptance marker to the delivery result,
+// falling back to output-only attention on failure.
+func deliverWakeNotificationViaInjector(cfg *wakeConfig, notice wakeNotification, plainText string) error {
+	if cfg.skipExternalInjector {
+		return deliverWakeAttentionOnly(cfg, notice.output)
+	}
+	if cfg.inputDelivery.acceptanceUncertain {
+		cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
+		return &wakeInputDemotionBlockedError{
+			err: errors.New("a prior terminal write has uncertain acceptance"),
+		}
+	}
+	allowed, guardErr := authorizeTerminalWrite(cfg)
+	if guardErr != nil {
+		return deliverWakeAttentionAfterInputRefusal(
+			cfg,
+			notice.output,
+			guardErr,
+		)
+	}
+	if !allowed {
+		return deliverWakeAttentionOnly(cfg, notice.output)
+	}
+	if err := injectVia(cfg, plainText); err != nil {
+		cfg.lastInjectorDetail = err.Error()
+		switch classifyWakeInjectorOutcome(err) {
+		case wakeInjectorOutcomeDeferred:
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeDeferred
+			return err
+		case wakeInjectorOutcomeLegacy:
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeLegacy
+			// Preserve the v1 external-injector contract: a marker-less
+			// exit-zero command is a successful transport result. The
+			// lifecycle ledger records it as written/uncertain, while the
+			// wake loop keeps its existing retry-until policy.
+			// Clear fallback-only degradation after successful injection
+			// resumes.
+			clearDegradedWakeNotifierStatus(cfg)
+			return nil
+		case wakeInjectorOutcomeUncertain:
+			var uncertain *wakeTerminalProgressUncertainError
+			if !errors.As(err, &uncertain) {
+				uncertain = &wakeTerminalProgressUncertainError{err: err}
+			}
+			if cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
+				cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
+			}
+			cfg.inputDelivery.acceptanceUncertain = true
+			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
+			cfg.fallbackWarn = false
+			return &wakeInputDemotionBlockedError{err: uncertain}
+		default:
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeFailed
+		}
+		if cfg.fallbackWarn {
+			_ = writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: %v\n", err)
+			_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
+			cfg.fallbackWarn = false
+		}
+		return deliverWakeAttentionOnly(cfg, notice.output)
+	}
+	cfg.lastInjectorOutcome = wakeInjectorOutcomeAccepted
+	// Clear fallback-only degradation after successful injection resumes.
 	clearDegradedWakeNotifierStatus(cfg)
 	return nil
 }

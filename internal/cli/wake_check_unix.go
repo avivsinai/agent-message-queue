@@ -792,78 +792,7 @@ func classifyWakeCheckRestart(
 	}
 	switch inspection.Status {
 	case wakeLockStale:
-		if decision.Wake.OwnerBound {
-			message := wakeRecoverOwnerCommand(decision.Root, decision.Agent)
-			decision.RestartCapability = wakeRestartUnavailable
-			decision.Action = wakeCheckActionDecision{
-				Kind:       wakeActionRecoverOwner,
-				Actor:      wakeActionActorOperator,
-				ReasonCode: wakeReasonOwnerRecoveryRequired,
-				Command:    wakeRecoverOwnerRemedy(decision.Root, decision.Agent).actionCommand(),
-				Message:    message,
-			}
-			return
-		}
-		if wakeInspectionBinaryDirGone(inspection) {
-			fixRemedy := wakeDoctorStaleWakeRemedy(decision.Root)
-			legacyMessage := wakeBinaryDirGoneMessage + "; run " + doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
-			decision.RestartCapability = wakeRestartAgentSafe
-			decision.Action = wakeCheckActionDecision{
-				Kind:          wakeActionManualStaleCleanup,
-				Actor:         wakeActionActorAgent,
-				ReasonCode:    wakeReasonBinaryDirGone,
-				Command:       fixRemedy.actionCommand(),
-				Message:       wakeBinaryDirGoneMessage + "; run " + fixRemedy.String(),
-				legacyMessage: legacyMessage,
-			}
-			return
-		}
-		if wakeCheckStringValue(decision.Wake.Mode, "") == wakeTargetInjectVia {
-			decision.RestartCapability = wakeRestartUnavailable
-			legacyMessage := "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection"
-			decision.Action = wakeCheckActionDecision{
-				Kind:          wakeActionConfigureInjector,
-				Actor:         wakeActionActorOperator,
-				ReasonCode:    wakeReasonFullStrengthUnavailable,
-				Command:       diagnosticArgv,
-				Message:       legacyMessage + "; inspect with " + diagnosticCommand,
-				legacyMessage: legacyMessage,
-			}
-			return
-		}
-		if decision.Start.Mode == wakeInjectModeNone {
-			decision.RestartCapability = wakeRestartUnavailable
-			legacyMessage := "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade"
-			decision.Action = wakeCheckActionDecision{
-				Kind:          wakeActionConfigureInjector,
-				Actor:         wakeActionActorOperator,
-				ReasonCode:    wakeReasonFullStrengthUnavailable,
-				Command:       diagnosticArgv,
-				Message:       legacyMessage + "; inspect with " + diagnosticCommand,
-				legacyMessage: legacyMessage,
-			}
-			return
-		}
-		message := fmt.Sprintf(
-			"from the owning terminal, remove the proven-stale lock with %s, then run %s",
-			wakeDoctorStaleWakeRemedy(decision.Root).String(),
-			startCommand,
-		)
-		legacyMessage := fmt.Sprintf(
-			"from the owning terminal, remove the proven-stale lock with %s, then run %s",
-			doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
-			startCommand,
-		)
-		decision.RestartCapability = wakeRestartOperatorOnly
-		decision.Action = wakeCheckActionDecision{
-			Kind:             wakeActionManualStaleCleanup,
-			Actor:            wakeActionActorOperator,
-			ReasonCode:       wakeReasonStaleManualCleanupRequired,
-			Command:          diagnosticArgv,
-			TerminalRequired: true,
-			Message:          message + "; inspect with " + diagnosticCommand,
-			legacyMessage:    legacyMessage,
-		}
+		classifyStaleWakeCheckRestart(decision, inspection, startCommand, diagnosticCommand, diagnosticArgv)
 	case wakeLockCreating:
 		decision.RestartCapability = wakeRestartUnavailable
 		decision.Action = wakeCheckActionDecision{
@@ -907,6 +836,90 @@ func classifyWakeCheckRestart(
 			Message:       "preserve the unverified wake state and inspect it with " + diagnosticCommand,
 			legacyMessage: legacyMessage,
 		}
+	}
+}
+
+// classifyStaleWakeCheckRestart decides the action for a proven-stale wake
+// lock: owner recovery, binary-gone cleanup, injector repair, or manual
+// cleanup from the owning terminal.
+func classifyStaleWakeCheckRestart(
+	decision *wakeCheckDecision,
+	inspection wakeLockInspection,
+	startCommand string,
+	diagnosticCommand string,
+	diagnosticArgv *wakeCheckCommand,
+) {
+	if decision.Wake.OwnerBound {
+		message := wakeRecoverOwnerCommand(decision.Root, decision.Agent)
+		decision.RestartCapability = wakeRestartUnavailable
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionRecoverOwner,
+			Actor:      wakeActionActorOperator,
+			ReasonCode: wakeReasonOwnerRecoveryRequired,
+			Command:    wakeRecoverOwnerRemedy(decision.Root, decision.Agent).actionCommand(),
+			Message:    message,
+		}
+		return
+	}
+	if wakeInspectionBinaryDirGone(inspection) {
+		fixRemedy := wakeDoctorStaleWakeRemedy(decision.Root)
+		legacyMessage := wakeBinaryDirGoneMessage + "; run " + doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+		decision.RestartCapability = wakeRestartAgentSafe
+		decision.Action = wakeCheckActionDecision{
+			Kind:          wakeActionManualStaleCleanup,
+			Actor:         wakeActionActorAgent,
+			ReasonCode:    wakeReasonBinaryDirGone,
+			Command:       fixRemedy.actionCommand(),
+			Message:       wakeBinaryDirGoneMessage + "; run " + fixRemedy.String(),
+			legacyMessage: legacyMessage,
+		}
+		return
+	}
+	if wakeCheckStringValue(decision.Wake.Mode, "") == wakeTargetInjectVia {
+		decision.RestartCapability = wakeRestartUnavailable
+		legacyMessage := "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection"
+		decision.Action = wakeCheckActionDecision{
+			Kind:          wakeActionConfigureInjector,
+			Actor:         wakeActionActorOperator,
+			ReasonCode:    wakeReasonFullStrengthUnavailable,
+			Command:       diagnosticArgv,
+			Message:       legacyMessage + "; inspect with " + diagnosticCommand,
+			legacyMessage: legacyMessage,
+		}
+		return
+	}
+	if decision.Start.Mode == wakeInjectModeNone {
+		decision.RestartCapability = wakeRestartUnavailable
+		legacyMessage := "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade"
+		decision.Action = wakeCheckActionDecision{
+			Kind:          wakeActionConfigureInjector,
+			Actor:         wakeActionActorOperator,
+			ReasonCode:    wakeReasonFullStrengthUnavailable,
+			Command:       diagnosticArgv,
+			Message:       legacyMessage + "; inspect with " + diagnosticCommand,
+			legacyMessage: legacyMessage,
+		}
+		return
+	}
+	message := fmt.Sprintf(
+		"from the owning terminal, remove the proven-stale lock with %s, then run %s",
+		wakeDoctorStaleWakeRemedy(decision.Root).String(),
+		startCommand,
+	)
+	legacyMessage := fmt.Sprintf(
+		"from the owning terminal, remove the proven-stale lock with %s, then run %s",
+		doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+		startCommand,
+	)
+	decision.RestartCapability = wakeRestartOperatorOnly
+	decision.Action = wakeCheckActionDecision{
+		Kind:             wakeActionManualStaleCleanup,
+		Actor:            wakeActionActorOperator,
+		ReasonCode:       wakeReasonStaleManualCleanupRequired,
+		Command:          diagnosticArgv,
+		TerminalRequired: true,
+		Message:          message + "; inspect with " + diagnosticCommand,
+		legacyMessage:    legacyMessage,
 	}
 }
 
