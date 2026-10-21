@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.103.0](https://github.com/avivsinai/agent-message-queue/compare/v0.102.0...v0.103.0) (2026-10-21)
+
+
+### Features
+
+* **release:** Developer ID signing and notarization for macOS binaries ([#1101](https://github.com/avivsinai/agent-message-queue/issues/1101)) ([44e46b1](https://github.com/avivsinai/agent-message-queue/commit/44e46b17bc8d23e1fc7ed02aa8d9a67879c86ea6))
+
+
+### Bug Fixes
+
+* **build:** use Go 1.26.10 for the crypto/x509 fix ([#1111](https://github.com/avivsinai/agent-message-queue/issues/1111)) ([4205f08](https://github.com/avivsinai/agent-message-queue/commit/4205f0836a2fd244d5dd723b8041a8f400ef6aae))
+* leave panicked approvals to the terminal and remove dead code ([#1110](https://github.com/avivsinai/agent-message-queue/issues/1110)) ([75e85ad](https://github.com/avivsinai/agent-message-queue/commit/75e85ad0abbd9f7af5ebd2859d77de2706749c11))
+* remove internal names and keep testing out of the amq binary ([#1103](https://github.com/avivsinai/agent-message-queue/issues/1103)) ([141807c](https://github.com/avivsinai/agent-message-queue/commit/141807c2443888ea68af910ad3251033545b0abb))
+
 ## [0.102.0](https://github.com/avivsinai/agent-message-queue/compare/v0.101.2...v0.102.0) (2026-10-20)
 
 
