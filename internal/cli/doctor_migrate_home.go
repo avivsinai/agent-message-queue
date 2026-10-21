@@ -16,8 +16,8 @@ import (
 )
 
 // migrateHomeVersionFloor is the first release that keeps launch trust in
-// ~/.amq/state on a fresh machine (#1049) and the keepalive home in
-// ~/.amq/keepalive (#1052). An older binary uses only the legacy locations,
+// ~/.amq/state on a fresh machine and the keepalive home in
+// ~/.amq/keepalive. An older binary uses only the legacy locations,
 // so it would write <legacy>/launch or ~/.amq-keepalive again after the move.
 const migrateHomeVersionFloor = "0.97.0"
 

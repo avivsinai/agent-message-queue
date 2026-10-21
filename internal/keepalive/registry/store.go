@@ -256,7 +256,7 @@ func (s *Store) Load() (File, error) {
 }
 
 // LoadSnapshot reads the registry WITHOUT taking the write lock or creating
-// any file or directory (codex P2: a passive diagnostic such as doctor must
+// any file or directory (a passive diagnostic such as doctor must
 // not create the home registry or its lock; absence of the file is an empty
 // registry, other read errors are reported). It is a point-in-time snapshot
 // suitable for diagnostics only — writers must use Load/WithRegistrationLock.

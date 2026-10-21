@@ -59,18 +59,21 @@ var ErrNotRegularFile = errors.New("not a regular file")
 
 // OpenRegularNoFollowBounded opens path for reading only if it is a regular
 // file, never through a symlink at the last path component (symlinks in the
-// parent directories are followed), and still the very file its lstat saw:
+// parent directories are followed):
 //
 //  1. Lstat gate: the leaf must exist and be a regular file, and with
 //     max > 0 be no larger than max. A symlink, FIFO, directory or huge
 //     file is refused before any open.
-//  2. On unix the open is no-follow and non-blocking, so a symlink or FIFO
-//     swapped in after the gate is refused or cannot block. Elsewhere
-//     (Windows) the open follows links and only step 3 stands, and a
+//  2. The opened file must be a regular file and, with max > 0, no larger
+//     than max.
+//  3. On unix the open is no-follow and non-blocking, so a symlink swapped
+//     in after the gate fails the open and a FIFO cannot block it. A regular
+//     file renamed over the path after the gate is read, since it passes the
+//     same checks; a writer that replaces a file atomically therefore never
+//     fails its readers. Elsewhere (Windows) the open follows links, so the
+//     opened file must also be os.SameFile with the lstat result, and a
 //     Windows Lstat identity is not reliable, so a caller that needs the
 //     no-follow guarantee refuses on those platforms itself.
-//  3. The opened file must be a regular file and os.SameFile with the lstat
-//     result.
 //
 // max <= 0 sets no size bound. The lstat error passes through unwrapped, so
 // errors.Is(err, os.ErrNotExist) reports a missing file. The caller owns
@@ -98,9 +101,13 @@ func OpenRegularNoFollowBounded(path string, max int64) (*os.File, os.FileInfo, 
 		_ = file.Close()
 		return nil, nil, err
 	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+	if !openedInfo.Mode().IsRegular() || !openedIsLstatFile(info, openedInfo) {
 		_ = file.Close()
 		return nil, nil, fmt.Errorf("%s: replaced between lstat and open; refusing", path)
+	}
+	if max > 0 && openedInfo.Size() > max {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%s: %d bytes exceeds %d; refusing", path, openedInfo.Size(), max)
 	}
 	return file, openedInfo, nil
 }

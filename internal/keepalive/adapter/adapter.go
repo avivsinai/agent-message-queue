@@ -116,7 +116,7 @@ func DefaultRegistry() Registry {
 	// delivery/session minima at or below what the target declares. With the
 	// default zero-value minimum both are refused automatically, and a
 	// submitted/unattended caller is refused too. (The Codex app's dead
-	// execute-javascript path stays dead — issue #640 — but its live codex://
+	// execute-javascript path stays dead, but its live codex://
 	// deep-link prefill seat is shipped here.)
 	//
 	// codex-queue is the honest submitted GUI/TUI seat: it enqueues into a
@@ -125,7 +125,7 @@ func DefaultRegistry() Registry {
 	// claude-print is the honest submitted CLI seat into an exact existing
 	// Claude Code session. It satisfies a submitted + existing-exact
 	// unattended minimum without --accept-requires-human. CLAUDE_CONFIG_DIR
-	// is ambient (docs/wake-lifecycle.md §9.4).
+	// is ambient (docs/wake-operations.md#injector-identity).
 	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{}, ClaudePrint{})
 }
 
