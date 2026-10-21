@@ -70,82 +70,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// record: the deferred/Tick machinery owns it from here. A link
 		// record never gets here (retryable is false for it), so this third
 		// entrance to native Submit needs no signed-handoff check.
-		t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
-		if code != "" {
-			e.mu.Unlock()
-			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
-		}
-		if t == nil {
-			e.mu.Unlock()
-			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-		}
-		reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
-		if rerr != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
-		}
-		if reserved {
-			// Still reserved: refresh the terminal busy tombstone and refuse
-			// again — never a Tick-admissible placeholder.
-			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
-			if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
-				e.mu.Unlock()
-				return protocol.Reply{}, err
-			}
-			snap := rec.Snapshot
-			e.mu.Unlock()
-			e.publishRevision(rec)
-			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
-		}
-		// Same reservation as a fresh admission: the room
-		// for the result is taken before dispatch, and released on every
-		// exit that does not reach the dispatching write. Storage full
-		// leaves the busy tombstone as it was, still re-admittable.
-		if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
-			e.mu.Unlock()
-			var r *protocol.Refusal
-			if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
-				return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
-			}
-			return protocol.Reply{}, err
-		}
-		rec.Revision++
-		rec.NativeDispatches = 1
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		e.transitionLocked(rec, causeDispatching, nativeEvidence{})
-		if err := e.crashAt(PointBeforeDispatching); err != nil {
-			e.store.ReleaseReservation(key)
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		// Cannot use commitLocked: crash-point ordering requires Update between
-		// PointBeforeDispatching and PointAfterDispatching.
-		if err := e.store.Update(rec); err != nil {
-			e.store.ReleaseReservation(key)
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		e.notifyLocked(rec)
-		if err := e.crashAt(PointAfterDispatching); err != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		input, origin := *cmd.Input, maps.Clone(rec.Origin)
-		e.mu.Unlock()
-		if err := e.crashAt(PointBeforeNative); err != nil {
-			return protocol.Reply{}, err
-		}
-		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin})
-		if err := e.crashAt(PointAfterNative); err != nil {
-			return protocol.Reply{}, err
-		}
-		e.mu.Lock()
-		rec, exists, err = e.store.Get(key)
-		if err != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		return e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+		return e.resubmitTombstoneLocked(cmd, key, rec)
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -260,6 +185,95 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 	}
+	return e.dispatchReceivedLocked(cmd, key, rec, t)
+}
+
+// resubmitTombstoneLocked admits an identical resubmit of the busy-rejected
+// tombstone rec. The caller holds e.mu; it unlocks exactly once on every
+// return.
+func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
+	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
+	if code != "" {
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
+	}
+	if t == nil {
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	}
+	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+	if rerr != nil {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
+	}
+	if reserved {
+		// Still reserved: refresh the terminal busy tombstone and refuse
+		// again — never a Tick-admissible placeholder.
+		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		snap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	// Same reservation as a fresh admission: the room
+	// for the result is taken before dispatch, and released on every
+	// exit that does not reach the dispatching write. Storage full
+	// leaves the busy tombstone as it was, still re-admittable.
+	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
+		e.mu.Unlock()
+		var r *protocol.Refusal
+		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
+		}
+		return protocol.Reply{}, err
+	}
+	rec.Revision++
+	rec.NativeDispatches = 1
+	rec.ObservedAt = protocol.FormatTime(e.now())
+	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	if err := e.crashAt(PointBeforeDispatching); err != nil {
+		e.store.ReleaseReservation(key)
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	// Cannot use commitLocked: crash-point ordering requires Update between
+	// PointBeforeDispatching and PointAfterDispatching.
+	if err := e.store.Update(rec); err != nil {
+		e.store.ReleaseReservation(key)
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	e.notifyLocked(rec)
+	if err := e.crashAt(PointAfterDispatching); err != nil {
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	input, origin := *cmd.Input, maps.Clone(rec.Origin)
+	e.mu.Unlock()
+	if err := e.crashAt(PointBeforeNative); err != nil {
+		return protocol.Reply{}, err
+	}
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin})
+	if err := e.crashAt(PointAfterNative); err != nil {
+		return protocol.Reply{}, err
+	}
+	e.mu.Lock()
+	rec, exists, err := e.store.Get(key)
+	if err != nil {
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	return e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+}
+
+// dispatchReceivedLocked reserves room for the admissible new request rec,
+// creates it as received, dispatches it to t and finishes the admission. The
+// caller holds e.mu; it unlocks exactly once on every return.
+func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Key, rec *requests.Record, t *target) (protocol.Reply, error) {
 	// Reserve room for the accepted work plus its bounded
 	// result BEFORE dispatch, so storage pressure fails closed with
 	// storage_full here rather than wedging mid-flight or silently evicting
@@ -328,7 +342,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 
 	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	rec, _, err = e.store.Get(key)
+	rec, _, err := e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err

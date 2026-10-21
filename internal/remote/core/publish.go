@@ -104,24 +104,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// IN-FLIGHT attempt is tracked separately in `publishing`; it does NOT
 	// count as delivered.
 	if e.visible[key] >= rec.Revision {
-		// Marker retry path: this revision was already delivered
-		// (confirmed, awaiting its marker). Skip the DELIVERY (no double
-		// delivery) and retry only the marker, honoring the crash points so
-		// a lost marker stays lost within one simulated crash.
-		if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
-			return
-		}
-		if err := e.store.MarkPublished(key, rec.Revision); err == nil {
-			rec.PublishedRevision = rec.Revision
-			if e.visible[key] == rec.Revision {
-				delete(e.visible, key)
-			}
-			// Marker-only recovery (a prior delivery's marker
-			// write failed, Reconcile retries only the marker) must also retire
-			// the obligation. Without this, Close reports ErrDrainIncomplete
-			// although the durable record is now fully published.
-			e.retireObligationLocked(key, rec.Revision)
-		}
+		e.retryMarkerLocked(key, rec)
 		return
 	}
 	// Serialize per-key publication: if another caller is already
@@ -278,6 +261,27 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		snap = next.Snapshot
 		origin = next.Origin
 		e.mu.Unlock()
+	}
+}
+
+// retryMarkerLocked is the marker retry path: rec's revision was already
+// delivered (confirmed, awaiting its marker). It skips the DELIVERY (no
+// double delivery) and retries only the marker, honoring the crash points so
+// a lost marker stays lost within one simulated crash. The caller holds e.mu.
+func (e *Endpoint) retryMarkerLocked(key requests.Key, rec *requests.Record) {
+	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
+		return
+	}
+	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
+		rec.PublishedRevision = rec.Revision
+		if e.visible[key] == rec.Revision {
+			delete(e.visible, key)
+		}
+		// Marker-only recovery (a prior delivery's marker
+		// write failed, Reconcile retries only the marker) must also retire
+		// the obligation. Without this, Close reports ErrDrainIncomplete
+		// although the durable record is now fully published.
+		e.retireObligationLocked(key, rec.Revision)
 	}
 }
 

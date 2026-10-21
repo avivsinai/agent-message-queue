@@ -205,7 +205,7 @@ func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
 
 // TestCompletionCallbackMayReacquireMutex pins codex #855 r1 item 6: the
 // endpoint acknowledges a completed run synchronously from the event
-// callback (core/endpoint.go AcknowledgeResult path), which takes a.mu.
+// callback (core onNative AcknowledgeResult path), which takes a.mu.
 // Emitting under a.mu deadlocked exactly when confirmation worked.
 func TestCompletionCallbackMayReacquireMutex(t *testing.T) {
 	ft := newFakeTarget(t, 4242, nil)
