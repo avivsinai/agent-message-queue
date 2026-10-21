@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// 7ja (field, 2026-10-05): every seat of a downstream CLI printed a manual
+// Regression: #949, every seat of a downstream CLI printed a manual
 // naming reminder although naming was only the default. Default naming of
 // an unknown CLI is quiet; an explicit --named keeps the reminder.
 func TestCoopNamedUnknownCLIIsQuietByDefault(t *testing.T) {

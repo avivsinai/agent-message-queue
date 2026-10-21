@@ -12,7 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
-// Regression observed on 2026-10-19: unrelated Claude/Cursor agents directories
+// Regression: #1080, unrelated Claude/Cursor agents directories
 // made who scan the base's parent and report no sessions. Classifier-only tests
 // missed the display heuristic used by the command.
 func TestRunWhoPreservesBaseBesideUnrelatedAgents(t *testing.T) {
@@ -25,7 +25,7 @@ func TestRunWhoPreservesBaseBesideUnrelatedAgents(t *testing.T) {
 		{name: "default", base: defaultCoopRoot, sibling: ".claude"},
 		{name: "environment", base: "mail", sibling: ".cursor", source: "env"},
 		{name: "configuration", base: "mail", sibling: ".claude", source: "config"},
-		// PR #1080 review P2-2: an unconfigured custom base beside ~/.claude/agents
+		// #1080: an unconfigured custom base beside ~/.claude/agents
 		// still showed HOME as the base and no sessions.
 		{name: "custom", base: "mail", sibling: ".claude"},
 	} {

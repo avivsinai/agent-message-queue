@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// TestSetupPreservesUnmodelledConfigKeys pins 611.22.57 (the setup/apply
-// half of review-821-r1 P1-b): a config.json that an operator hand-enriched
-// with unmodelled keys (default_agent/project/routing) survives `amq setup`
-// byte-identical in value. Live-proven failure: immediately after a
-// registration preserved the keys, `amq setup` wiped them.
+// TestSetupPreservesUnmodelledConfigKeys pins that a config.json that an
+// operator hand-enriched with unmodelled keys (default_agent/project/routing)
+// survives `amq setup` byte-identical in value. Live-proven failure:
+// immediately after a registration preserved the keys, `amq setup` wiped them.
+// Regression: #823.
 func TestSetupPreservesUnmodelledConfigKeys(t *testing.T) {
 	project := setupProjectFixture(t, "claude", "codex", "grok")
 	cfgPath := filepath.Join(project, ".agent-mail", "meta", "config.json")

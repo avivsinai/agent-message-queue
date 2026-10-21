@@ -146,7 +146,7 @@ func TestReadPassiveExtensionManifestRejectsSymlink(t *testing.T) {
 	}
 }
 
-// TestReadPassiveExtensionManifestDefaultsMissingLayer (611.13 r4) pins the
+// TestReadPassiveExtensionManifestDefaultsMissingLayer pins the
 // passive-reader contract for the valid optional-layer form: a manifest
 // without a layer field (exactly what the companion's serve writes at
 // extensions/remote/manifest.json) is read by doctor with the layer defaulted
@@ -188,11 +188,12 @@ func TestReadPassiveExtensionManifestDefaultsMissingLayer(t *testing.T) {
 }
 
 // TestReadPassiveExtensionManifestAcceptsMissingAndZeroSchemaVersion
-// (review-824-r1 P1-5 + P2-1): a manifest with the schema_version field
-// OMITTED (the review-b7 gap, now accepted) and one with an EXPLICIT 0 (the
+// pins that a manifest with the schema_version field
+// OMITTED (accepted) and one with an EXPLICIT 0 (the
 // companion defaults 0 to 1 and cannot tell the two apart) both read with
 // one manifest and zero diagnostics — the same file must not serve
 // targets=1 and draw a doctor warning simultaneously.
+// Regression: #824.
 func TestReadPassiveExtensionManifestAcceptsMissingAndZeroSchemaVersion(t *testing.T) {
 	root := t.TempDir()
 	layer := "remote"

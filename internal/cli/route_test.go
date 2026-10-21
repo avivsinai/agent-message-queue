@@ -133,10 +133,10 @@ func expectStringSlice(t *testing.T, got, want []string) {
 	}
 }
 
-// TestB7ResolveReplyRouteSessionRootSource covers the case where the source
+// TestResolveReplyRouteSessionRootSource covers the case where the source
 // endpoint is running inside a session root (.agent-mail/s1). A reply to
 // handle@qa must resolve to the qa session root under the same base.
-func TestB7ResolveReplyRouteSessionRootSource(t *testing.T) {
+func TestResolveReplyRouteSessionRootSource(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	// source session s1
 	sourceRoot := filepath.Join(baseRoot, "s1")
@@ -156,11 +156,11 @@ func TestB7ResolveReplyRouteSessionRootSource(t *testing.T) {
 	expectSamePath(t, root, destRoot)
 }
 
-// TestB7ResolveReplyRouteBaseRootSource covers the addendum: an endpoint
+// TestResolveReplyRouteBaseRootSource covers the addendum: an endpoint
 // running at the BASE root (.agent-mail, not a session root) replying to a
 // caller in session qa of the same project. classifyRoot returns "" for a
 // base root; the fix uses sourceRoot as the base directly.
-func TestB7ResolveReplyRouteBaseRootSource(t *testing.T) {
+func TestResolveReplyRouteBaseRootSource(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	// base root has agents directly
 	ensureRouteAgents(t, baseRoot, "alice")
@@ -179,9 +179,9 @@ func TestB7ResolveReplyRouteBaseRootSource(t *testing.T) {
 	expectSamePath(t, root, destRoot)
 }
 
-// TestB7ResolveReplyRouteSessionNotFoundIsRetryable verifies that a missing
+// TestResolveReplyRouteSessionNotFoundIsRetryable verifies that a missing
 // session returns a retryable error (ErrPeerRootUnreachable), not a poison.
-func TestB7ResolveReplyRouteSessionNotFoundIsRetryable(t *testing.T) {
+func TestResolveReplyRouteSessionNotFoundIsRetryable(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	sourceRoot := filepath.Join(baseRoot, "s1")
 	ensureRouteAgents(t, sourceRoot, "alice")

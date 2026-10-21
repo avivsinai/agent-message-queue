@@ -12,7 +12,7 @@ import (
 // TestSendStatusKindDefaultsToLowPriority pins the documented default: a
 // status message sent with no explicit --priority carries priority low
 // (CLAUDE.md message-kinds table; skills/amq-cli/references/operations.md).
-// Found during the docs editorial reset on 2026-09-19: send and reply
+// Regression: #820, send and reply
 // assigned normal to every kind, so the published contract was false.
 func TestSendStatusKindDefaultsToLowPriority(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".agent-mail", "collab")

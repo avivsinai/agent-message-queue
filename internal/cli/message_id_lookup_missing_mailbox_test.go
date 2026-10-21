@@ -2,7 +2,7 @@ package cli
 
 import "testing"
 
-// Regression for review-849-r2 P1-a: a handle with no mailbox reaches the
+// Regression: #849, a handle with no mailbox reaches the
 // header-ID scan in reply (reply has no requireMailboxDeliveryRoot guard).
 // A missing candidate directory is definitive absence, so the lookup must
 // report not-found (exit 3), not a raw open failure (exit 1). read --id is

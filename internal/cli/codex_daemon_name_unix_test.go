@@ -110,7 +110,7 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 		{[]string{"--yolo", "-m", "gpt-5"}, wd, true},
 		{[]string{"-C", "sub"}, sub, true},
 		{[]string{"--cd=" + sub}, sub, true},
-		// Review of #975 (Pro, P2): Codex refuses these at argument parsing,
+		// #975: Codex refuses these at argument parsing,
 		// after AMQ would have started and named a thread.
 		{[]string{"--yolo", "-a", "on-request"}, "", false},
 		{[]string{"-a", "untrusted"}, "", false},
@@ -134,25 +134,25 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 // TUI starts like a plain launch, runs the rollout watcher only for an
 // embedded Codex (it cannot see a daemon thread), and otherwise says once why
 // the session is not named.
-//   - Review of #950 r5 (Pro, P1 trust): thread/start records trust for a
+//   - #950: thread/start records trust for a
 //     directory with no trust decision, before the TUI asks the user.
-//   - Review of #950 r6 (Pro, P1): Codex trims git pointers with trim_ascii;
+//   - #950: Codex trims git pointers with trim_ascii;
 //     a pointer ending in U+00A0 resolves to nothing in Codex.
-//   - Review of #950 r6 (Pro, P2): with terminal_visualization_instructions
+//   - #950: with terminal_visualization_instructions
 //     on, the TUI resumes with developer instructions.
 //   - Bead agent-message-queue-38l: with no daemon running and auto-start on,
-//     the TUI starts one; AMQ never starts it itself (review of #975 r1-r2,
-//     Pro P1: `codex app-server daemon start` replaces saved overrides).
-//   - Review of #975 r2-r3 (Pro): bedrock_setup_wizard makes the backend
+//     the TUI starts one; AMQ never starts it itself (#975: `codex app-server daemon start`
+//     replaces saved overrides).
+//   - #975: bedrock_setup_wizard makes the backend
 //     depend on sign-in, and a daemon that refuses the thread still runs
 //     the TUI; neither may start the watcher.
-//   - Review of #975 r4 (Pro): a command-line override of a gating feature,
+//   - #975: a command-line override of a gating feature,
 //     --remote, a failed feature probe, and an option after "--" (a prompt)
 //     do not establish an embedded Codex.
-//   - Review of #975 r5 (Pro): an embedded option before --remote, an
+//   - #975: an embedded option before --remote, an
 //     exclusion env var with --remote, and an allowed key with a commented
 //     TOML boolean do not establish an embedded Codex either.
-//   - Review of #975 r6 (Pro): a subcommand such as agents is not a prompt.
+//   - #975: a subcommand such as agents is not a prompt.
 func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 	const plain = "daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x false\n"
 	for name, tc := range map[string]struct {

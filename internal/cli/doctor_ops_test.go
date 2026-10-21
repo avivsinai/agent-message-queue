@@ -303,8 +303,8 @@ func establishDoctorWakeLifecycleGuardForTest(t *testing.T, root, agent string) 
 	}
 }
 
-// TestRunOpsChecks_ReportsRemoteCompanion pins the observed gap (codex P2):
-// correction 4 promised doctor --ops visibility of companion-supervised
+// TestRunOpsChecks_ReportsRemoteCompanion pins an observed gap (#815):
+// doctor --ops promised visibility of companion-supervised
 // amq-remote up registrations, but nothing read the keepalive registry.
 // The doctor must project adapter "remote" entries for the inspected root.
 func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
@@ -341,12 +341,12 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 		t.Fatalf("companion = %#v, want amq-remote/remote/%s", c, root)
 	}
 	// The test's registry row holds no lifetime lock (no companion process
-	// exists here). On flock platforms the P1-1 projection reports the
+	// exists here). On flock platforms the lock projection reports the
 	// truth: stale + not-held, never a phantom "active". On platforms
 	// without a lock probe the contract is fail-closed: the recorded state
-	// is kept verbatim with lock "unknown" (review 19:21Z: do not weaken
-	// the Unix assertion, do not fake a verdict anywhere). The State field
-	// is asserted too (review r3 P2-4); CI runs this branch compile-only on
+	// is kept verbatim with lock "unknown". Do not weaken
+	// the Unix assertion or fake a verdict anywhere. The State field
+	// is asserted too; CI runs this branch compile-only on
 	// windows-latest, so its value there is compile-time.
 	switch runtime.GOOS {
 	case "windows", "plan9", "js":
@@ -371,7 +371,7 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 }
 
 // TestRunOpsChecks_CompanionRegistryAbsentCreatesNothingAndUnreadableWarns
-// pins the observed defect (codex P2): doctor used Store.Load, whose withLock
+// pins an observed defect (#815): doctor used Store.Load, whose withLock
 // creates the home registry directory and its lock file and chmods the lock —
 // a passive diagnostic must not create files. Absence must be an empty
 // companion list; a corrupt registry must surface as a hint, never silently
