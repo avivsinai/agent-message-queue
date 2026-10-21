@@ -253,7 +253,8 @@ does not import it, and Core `amq` stays socket-free. Envelope v2,
 The v3 record, id, signature, receipt, offer page, seed-to-X25519 derivation,
 and Noise IK handshake are the layouts in
 `internal/bridge/xferv3/testdata/vectors.json`. That file is the byte
-authority, and `make check-xferv3` fails if any vector drifts.
+authority. `TestVectors` in `internal/bridge/xferv3` fails if any vector
+drifts; it runs with the package tests in CI.
 
 The record is eight length-prefixed fields in this order: `amq-xfer-v3`,
 source host, handle, dest alias (`host/agent`), source message id, thread id,
