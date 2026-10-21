@@ -534,7 +534,8 @@ applies with these differences:
   session.
 - The host is idle when no turn is in flight and its AMQ inbox holds no
   message. Only then does it run a request; otherwise it refuses `busy`. A
-  request that arrives during a turn is refused `busy` within a second. Peer
+  request published while any turn is in flight is refused `busy` within a
+  second, and at the latest when that turn ends, and never runs. Peer
   messages keep their order in the inbox; a request is never queued.
 - The receipt and the `started` event are written immediately before the
   `session/prompt` bytes, so `started` needs no text matching. The request
@@ -547,7 +548,7 @@ applies with these differences:
 - Each `session/request_permission` during a request's turn is an
   `interaction` line with `interaction_id` `tool-<n>`, `options` the names
   of the offered ACP options, `approve_option` the first `allow_once`,
-  `reject_option` the first `reject_once` (else `reject_always`),
+  `reject_option` the first `reject_once`,
   `manifest_hash` the SHA-256 of the ACP tool call as received, `expires_at`
   five minutes out, and `presence: local_only`. The host's policy is its
   local face: it rejects. The first of a matching answer file and the expiry
@@ -555,8 +556,9 @@ applies with these differences:
   answer gives the owner the reject at once. An answer file that does not
   match is refused as `answered_elsewhere`. A cancelled turn answers a
   pending approval `cancelled` and writes no resolution; the terminal event
-  closes it. An agent that offers no reject option gets `cancelled` with no
-  `interaction` line. A message turn rejects at once and raises no line.
+  closes it. An approval with no `reject_once` option raises no line: the
+  host's policy answers at once with the first `reject_always`, else
+  `cancelled`. A message turn rejects at once and raises no line.
 
 ## Capabilities
 

@@ -112,8 +112,10 @@ type turnCollect struct {
 	text      strings.Builder
 	refused   int
 	// cancelled is closed when the host cancels the turn, so an approval
-	// waiting for the owner answers cancelled.
+	// waiting for the owner answers cancelled; done is closed when the turn
+	// ends, so no approval outlives it.
 	cancelled chan struct{}
+	done      chan struct{}
 	// bridge is the remote request this turn serves; nil for a mailbox turn.
 	bridge *bridgeTurn
 }
@@ -392,8 +394,10 @@ type CheckResult struct {
 // Check probes an agent on in and out: initialize only, no session and no
 // AMQ root. A refusal says why the host could not serve this agent.
 func Check(ctx context.Context, in io.Reader, out io.Writer, version string) (CheckResult, error) {
-	c := newConn(in, out, func(method string, _ json.RawMessage) (any, *rpcError) {
-		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+	c := newConn(in, out, func(method string, _ json.RawMessage) func() (any, *rpcError) {
+		return func() (any, *rpcError) {
+			return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+		}
 	}, func(string, json.RawMessage) {})
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
@@ -427,14 +431,20 @@ type permissionRequest struct {
 	} `json:"options"`
 }
 
-// onRequest answers the agent's requests. Only session/request_permission is
-// served, and it is always refused; the host advertises no fs or terminal
-// methods, so every other method is not found. During a remote request's
-// turn the owner sees the approval and may reject it from the remote face
-// first; the answer is the same reject either way.
-func (h *Host) onRequest(method string, params json.RawMessage) (any, *rpcError) {
+// onRequest takes the agent's requests on the connection's reader, so a
+// request belongs to the turn in flight when it arrived; the function it
+// returns gives the answer. Only session/request_permission is served, and
+// it is always refused: the host's policy selects the first reject_once
+// option, else the first reject_always, else cancelled. The host advertises
+// no fs or terminal methods, so every other method is not found. During a
+// remote request's turn the owner sees an approval that offers reject_once
+// and may give it from the remote face first; the agent gets that same
+// reject either way.
+func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rpcError) {
 	if method != "session/request_permission" {
-		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+		return func() (any, *rpcError) {
+			return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+		}
 	}
 	h.mu.Lock()
 	turn := h.turn
@@ -444,22 +454,33 @@ func (h *Host) onRequest(method string, params json.RawMessage) (any, *rpcError)
 	h.mu.Unlock()
 	var req permissionRequest
 	_ = json.Unmarshal(params, &req)
-	reject := -1
-	for _, kind := range []string{"reject_once", "reject_always"} {
+	first := func(kind string) int {
 		for i, option := range req.Options {
-			if reject < 0 && option.Kind == kind && option.OptionID != "" {
-				reject = i
+			if option.Kind == kind && option.OptionID != "" {
+				return i
 			}
 		}
+		return -1
+	}
+	once := first("reject_once")
+	policy := once
+	if policy < 0 {
+		policy = first("reject_always")
 	}
 	cancelled := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
-	if reject < 0 {
-		return cancelled, nil
+	selected := func(i int) map[string]any {
+		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": req.Options[i].OptionID}}
 	}
-	if turn != nil && turn.bridge != nil && !h.askOwner(turn, req, reject) {
-		return cancelled, nil
+	return func() (any, *rpcError) {
+		if policy < 0 {
+			return cancelled, nil
+		}
+		// The remote face offers only reject_once, never a wider scope.
+		if turn != nil && turn.bridge != nil && once >= 0 && !h.askOwner(turn, req, once) {
+			return cancelled, nil
+		}
+		return selected(policy), nil
 	}
-	return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": req.Options[reject].OptionID}}, nil
 }
 
 // onNotify collects the text of agent_message_chunk updates for the turn in
@@ -744,7 +765,7 @@ func (h *Host) prompt(ctx context.Context, root *fsq.DeliveryRoot, text string, 
 	h.setPresence(root, "busy")
 	defer h.setPresence(root, "idle")
 
-	collect := &turnCollect{sessionID: h.sessionID, cancelled: make(chan struct{}), bridge: bridge}
+	collect := &turnCollect{sessionID: h.sessionID, cancelled: make(chan struct{}), done: make(chan struct{}), bridge: bridge}
 	h.mu.Lock()
 	h.turn = collect
 	h.mu.Unlock()
@@ -752,6 +773,7 @@ func (h *Host) prompt(ctx context.Context, root *fsq.DeliveryRoot, text string, 
 		h.mu.Lock()
 		h.turn = nil
 		h.mu.Unlock()
+		close(collect.done)
 	}()
 
 	params := map[string]any{
@@ -821,6 +843,9 @@ wait:
 		}
 	}
 
+	// A request published while this turn ran is refused busy now, before
+	// the host is idle again: it never runs after the turn.
+	h.refuseBusy(root)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return turnResult{raw: result.raw, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused}, nil
