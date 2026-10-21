@@ -207,7 +207,7 @@ func storeDir(create bool) (string, error) {
 }
 
 // readStrict decodes a small regular 0600 file at path into v, opened
-// without following a symlink and checked against the file it inspected.
+// without following a symlink; the opened file must be regular and 0600.
 func readStrict(path string, v any) error {
 	f, fi, err := fsq.OpenRegularNoFollowBounded(path, maxBytes)
 	if errors.Is(err, os.ErrNotExist) {
