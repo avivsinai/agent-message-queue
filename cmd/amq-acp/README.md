@@ -389,7 +389,26 @@ and `BUZZ_*` variable removed, so it cannot act as the host's handle.
 
 State lives in `<root>/agents/<me>/extensions/acp-host/`: `host.lock` (one
 host per handle; a second one exits 6), `session.json`, and one journal
-record per message under `turns/`. A turn whose prompt may have reached the
+record per message under `turns/`.
+
+`session.json` records the ACP session the host created, with the agent
+executable name and the working directory. A restarted host resumes that
+session with `session/load` when the agent advertises `loadSession` and the
+agent and directory match, so the agent keeps the conversation. The history
+the agent replays during the load never goes into a reply. When the agent
+cannot load sessions, the record belongs to another agent or directory, or
+the load fails, the host opens a new session and says so on stderr. The
+startup line says whether the session is `new` or `resumed`.
+
+`amq-acp host --check -- <agent command>` probes a harness before you use
+it: it runs only `initialize`, with no AMQ root, handle, or session, prints
+the agent's protocol version, info, `load_session`, and capabilities as
+JSON, and exits 0. It exits 6 with the reason when the agent speaks another
+protocol version, does not answer within 60 seconds, or exits.
+
+```sh
+amq-acp host --check -- grok agent --no-leader stdio
+``` A turn whose prompt may have reached the
 agent before a crash never runs again; on restart the host replies that it
 restarted during the turn. A reply that can never be delivered is recorded
 as `undeliverable` with the reason, and the host goes on to the next

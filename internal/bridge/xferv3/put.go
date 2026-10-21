@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func PutTx(root string, priv ed25519.PrivateKey, rec Record, payload []byte) (ID, error) {
@@ -22,8 +24,7 @@ func PutTx(root string, priv ed25519.PrivateKey, rec Record, payload []byte) (ID
 	}
 	id := rec.ID()
 	dir := filepath.Join(root, "bridge", txDirName, rec.dest.host.s)
-	tmpDir := filepath.Join(dir, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ID{}, fmt.Errorf("create tx directory: %w", err)
 	}
 	body, err := MarshalBundle(sealed, signed.sig)
@@ -31,62 +32,25 @@ func PutTx(root string, priv ed25519.PrivateKey, rec Record, payload []byte) (ID
 		return ID{}, err
 	}
 	final := filepath.Join(dir, id.String())
-	tmp, err := os.CreateTemp(tmpDir, "tx-*")
+	created, err := fsq.CreateNewFile(final, body, 0o600)
 	if err != nil {
 		return ID{}, err
 	}
-	tmpName := tmp.Name()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return ID{}, err
+	if created {
+		return id, nil
 	}
-	if _, err := tmp.Write(body); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return ID{}, err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return ID{}, err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return ID{}, err
-	}
-	if err := os.Link(tmpName, final); err != nil {
-		if !os.IsExist(err) {
-			_ = os.Remove(tmpName)
-			return ID{}, err
-		}
-		existing, readErr := os.ReadFile(final)
-		if readErr != nil {
-			_ = os.Remove(tmpName)
-			return ID{}, readErr
-		}
-		got, payloadGot, parseErr := ParseBundle(existing)
-		if parseErr != nil || !sameRecord(got.rec, rec) || !bytes.Equal(payloadGot, payload) {
-			_ = os.Remove(tmpName)
-			return ID{}, ErrTxDiff
-		}
-		if bytes.Equal(got.sig.raw[:], signed.sig.raw[:]) {
-			_ = os.Remove(tmpName)
-			return id, nil
-		}
-		if err := os.Rename(tmpName, final); err != nil {
-			_ = os.Remove(tmpName)
-			return ID{}, err
-		}
-	} else {
-		_ = os.Remove(tmpName)
-	}
-	dirFile, err := os.Open(dir)
+	existing, err := fsq.ReadRegularNoFollowBounded(final, maxBundleBytes)
 	if err != nil {
 		return ID{}, err
 	}
-	defer func() { _ = dirFile.Close() }()
-	if err := dirFile.Sync(); err != nil {
+	got, payloadGot, parseErr := ParseBundle(existing)
+	if parseErr != nil || !sameRecord(got.rec, rec) || !bytes.Equal(payloadGot, payload) {
+		return ID{}, ErrTxDiff
+	}
+	if bytes.Equal(got.sig.raw[:], signed.sig.raw[:]) {
+		return id, nil
+	}
+	if _, err := fsq.WriteFileAtomic(dir, id.String(), body, 0o600); err != nil {
 		return ID{}, err
 	}
 	return id, nil
