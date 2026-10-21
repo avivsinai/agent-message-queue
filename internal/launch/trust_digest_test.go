@@ -9,15 +9,15 @@ func TestExecutionTrustDigestBindsSessionAndPhysicalRoot(t *testing.T) {
 	_, firstRoot := openTestRoot(t)
 	_, secondRoot := openTestRoot(t)
 	plan := validPlan()
-	first, err := ExecutionTrustDigest(plan, "collab", firstRoot)
+	first, err := ExecutionTrustDigestWithAuthority(plan, "collab", firstRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherSession, err := ExecutionTrustDigest(plan, "empty", firstRoot)
+	otherSession, err := ExecutionTrustDigestWithAuthority(plan, "empty", firstRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherRoot, err := ExecutionTrustDigest(plan, "collab", secondRoot)
+	otherRoot, err := ExecutionTrustDigestWithAuthority(plan, "collab", secondRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,11 +40,11 @@ func TestPrepareTrustDigestMatchesExistingTrustSubjectForPresentRoot(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := PrepareTrustDigest(planDigest, "collab", root.Base(), rootIdentity, nil)
+	prepared, err := PrepareTrustDigestWithAuthority(planDigest, "collab", root.Base(), rootIdentity, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	existing, err := ExecutionTrustDigest(plan, "collab", root)
+	existing, err := ExecutionTrustDigestWithAuthority(plan, "collab", root, "")
 	if err != nil {
 		t.Fatal(err)
 	}

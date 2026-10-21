@@ -185,7 +185,7 @@ exec /bin/sleep 60
 
 func trustPlan(t *testing.T, store *launch.TrustStore, plan launch.Plan, root *fsq.DeliveryRoot) {
 	t.Helper()
-	digest, err := launch.ExecutionTrustDigest(plan, "collab", root)
+	digest, err := launch.ExecutionTrustDigestWithAuthority(plan, "collab", root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
