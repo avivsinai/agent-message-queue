@@ -56,11 +56,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		fi, err := os.Lstat(filepath.Join(dir, e.Name()))
-		if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxMarkerBytes {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, e.Name()), maxMarkerBytes)
 		var m struct {
 			DisplayName string `json:"display_name"`
 			Updated     string `json:"updated"`

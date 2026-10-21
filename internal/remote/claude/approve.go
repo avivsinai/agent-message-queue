@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/secretscan"
 )
@@ -344,30 +345,15 @@ func createNew(dir, name string, data []byte) error {
 	if !noFollowSupported {
 		return errUnsupportedPlatform
 	}
-	f, err := os.CreateTemp(dir, ".tmp-")
-	if err != nil {
+	created, err := fsq.CreateNewFile(filepath.Join(dir, name), data, 0o600)
+	switch {
+	case created:
+		return nil // visible to readers; a failed directory sync cannot take it back
+	case err != nil:
 		return err
+	default:
+		return errFileExists
 	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }()
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(tmp, filepath.Join(dir, name)); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return errFileExists
-		}
-		return err
-	}
-	return nil
 }
 
 // createNewJSON is createNew for one JSON record.

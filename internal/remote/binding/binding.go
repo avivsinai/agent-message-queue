@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -386,36 +385,18 @@ func confinedPath(create bool) (string, error) {
 	return path, nil
 }
 
-// read opens the leaf no-follow and bounded, and checks it is the file the
+// read reads the leaf no-follow and bounded, checked to be the file the
 // lstat gate saw.
 func read(path string) (Binding, error) {
 	if !noFollowSupported {
 		return Binding{}, errors.New("the binding needs a no-follow file open, which this platform lacks")
 	}
-	fi, err := os.Lstat(path)
+	raw, err := fsq.ReadRegularNoFollowBounded(path, maxBindingBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return Binding{}, ErrNone
 	}
 	if err != nil {
-		return Binding{}, err
-	}
-	if !fi.Mode().IsRegular() || fi.Size() > maxBindingBytes {
-		return Binding{}, fmt.Errorf("binding %s is not a small regular file; refusing", path)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollowFlag, 0)
-	if err != nil {
-		return Binding{}, err
-	}
-	defer func() { _ = f.Close() }()
-	if fi2, err := f.Stat(); err != nil || !os.SameFile(fi, fi2) {
-		return Binding{}, fmt.Errorf("binding %s was replaced while opening; refusing", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxBindingBytes+1))
-	if err != nil {
-		return Binding{}, err
-	}
-	if len(raw) > maxBindingBytes {
-		return Binding{}, fmt.Errorf("binding %s is larger than %d bytes; refusing", path, maxBindingBytes)
+		return Binding{}, fmt.Errorf("binding: %w", err)
 	}
 	var b Binding
 	if err := json.Unmarshal(raw, &b); err != nil {
