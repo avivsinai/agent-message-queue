@@ -459,7 +459,7 @@ func terminateWakePidfdWithSignalAuthorization(
 			// signaled: if it exits within the graceful-exit confirm window
 			// the retire succeeded and nothing else is signaled. Only a process that is
 			// still alive with its lock gone is genuinely ambiguous, and that
-			// keeps the refusal (issue #714).
+			// keeps the refusal.
 			exited, pollErr := linuxPidfdPoll(pidfd, wakeTerminateGracefulExitConfirm)
 			if pollErr != nil {
 				return fmt.Errorf("poll pidfd after lost authorization: %w", pollErr)

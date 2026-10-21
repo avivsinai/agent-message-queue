@@ -1878,7 +1878,7 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 	}
 	if cfg.selfUpgrade.settingsVetoed {
 		// Later ticks return early while the locator is unchanged, so the
-		// veto record would otherwise outlive the veto (#1022 review P1).
+		// veto record would otherwise outlive the veto.
 		if err := recordWakeSelfUpgradeDecision(
 			agentDir,
 			cfg.inspectTerminalGeneration(),

@@ -16,7 +16,7 @@ import (
 // ClaimCollisionError and both copies survive.
 //
 // The Windows implementation must provide the same winner/loser contract
-// without path-atomic rename: see claim_rename_windows.go and issue #485.
+// without path-atomic rename: see claim_rename_windows.go.
 func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 	err := root.renameNoReplace(newPath, curPath)
 	if err == nil {

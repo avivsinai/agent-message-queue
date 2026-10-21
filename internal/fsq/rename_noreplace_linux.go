@@ -9,7 +9,7 @@ import (
 )
 
 // renameat2 is a var so a test can stand in for a filesystem that refuses
-// RENAME_NOREPLACE (issue #1034); production always calls unix.Renameat2.
+// RENAME_NOREPLACE; production always calls unix.Renameat2.
 var renameat2 = unix.Renameat2
 
 // renameatNoReplace renames without replacing an existing destination. Some

@@ -16,7 +16,7 @@ import (
 const codexNotifyTestID = "019c8a2f-2b13-7000-8000-000000000001"
 
 func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
-	session, root, nonce, amq := seedCodexNotifyCLI(t)
+	session, root, nonce, amq := seedCodexNotifyCLI(t, "0.147.0")
 	payload := []byte(`{"type":"agent-turn-complete","thread-id":"` + codexNotifyTestID + `","turn-id":"turn-1","cwd":"` + filepath.Join(session, "work") + `","input-messages":["reply with ok"],"last-assistant-message":"ok"}`)
 	original := codexNotifyForward
 	t.Cleanup(func() { codexNotifyForward = original })
@@ -39,6 +39,27 @@ func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
 	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", string(payload)}, "test"); err != nil {
 		t.Fatalf("run notify with failed operator hook: %v", err)
+	}
+}
+
+// TestCodexNotifyHonorsVerifiedVersionFloor protects the verified-floor
+// contract at the __codex-notify boundary: a ticket minted on codex-cli
+// 0.154.0, above the floor, records the 0.154.0 notify payload and keeps the
+// observed version. Issue #1107.
+func TestCodexNotifyHonorsVerifiedVersionFloor(t *testing.T) {
+	original := codexNotifyForward
+	t.Cleanup(func() { codexNotifyForward = original })
+	codexNotifyForward = func(string, []byte) error { return nil }
+	const threadID = "01a15ab3-228d-7003-9961-befa20b739a6"
+	session, root, nonce, _ := seedCodexNotifyCLI(t, "0.154.0")
+	payload := `{"type":"agent-turn-complete","thread-id":"` + threadID + `","turn-id":"01a15ab3-22e7-7a40-91a6-116eb12eb612","cwd":"` + filepath.Join(session, "work") + `","client":"codex_exec","input-messages":["Reply with exactly the word OK and nothing else."],"last-assistant-message":"OK"}`
+	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
+	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", payload}, "test"); err != nil {
+		t.Fatalf("notify at 0.154.0: %v", err)
+	}
+	record, err := launch.LoadConversation(root, "codex")
+	if err != nil || record.State != launch.CaptureReady || record.Identity.ID != threadID || record.ProviderVersion != "0.154.0" {
+		t.Fatalf("conversation at 0.154.0 = %#v, %v", record, err)
 	}
 }
 
@@ -77,7 +98,7 @@ func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	}
 }
 
-func seedCodexNotifyCLI(t *testing.T) (string, *fsq.DeliveryRoot, string, string) {
+func seedCodexNotifyCLI(t *testing.T, providerVersion string) (string, *fsq.DeliveryRoot, string, string) {
 	t.Helper()
 	project := t.TempDir()
 	session := filepath.Join(t.TempDir(), "collab")
@@ -121,7 +142,7 @@ func seedCodexNotifyCLI(t *testing.T) (string, *fsq.DeliveryRoot, string, string
 	}
 	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{
 		Handle: "codex", LaunchNonce: nonce, Mode: launch.AdapterModeCapture, Provider: launch.CodexProvider,
-		ProviderVersion: "0.147.0", Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
+		ProviderVersion: providerVersion, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 		ProjectRoot: project, SessionRoot: session, Cwd: cwd, ProviderExecutable: provider, AMQExecutable: amq,
 		TargetArgv: []string{provider, "-c", "notify=" + string(encoded)}, State: launch.ExecutionSpawnAttempted, Reason: "spawn_attempted",
 	})
@@ -140,7 +161,7 @@ func seedCodexNotifyCLI(t *testing.T) (string, *fsq.DeliveryRoot, string, string
 	}
 	if err := launch.WriteConversation(root, lease, launch.ConversationRecord{
 		Version: launch.ConversationVersion, Handle: "codex", State: launch.CapturePending,
-		ProviderVersion: "0.147.0", LaunchNonce: nonce,
+		ProviderVersion: providerVersion, LaunchNonce: nonce,
 	}); err != nil {
 		t.Fatal(err)
 	}
