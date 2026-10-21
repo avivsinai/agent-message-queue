@@ -42,16 +42,26 @@ func fakeACPList(t *testing.T, installed execIdentity) {
 
 var testInstalled = execIdentity{Dev: 16777232, Inode: 183321562}
 
+// inspectStaleACP runs one inspection pass under the probe's total deadline,
+// as doctor does, and returns its probes.
+func inspectStaleACP(t *testing.T) []staleProbe {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	insp := staleACPInspect(ctx)
+	if insp.IdentErr != nil || insp.ListErr != nil {
+		t.Fatalf("inspect: ident %v, list %v", insp.IdentErr, insp.ListErr)
+	}
+	return insp.Probes
+}
+
 // bbn: after `brew upgrade amq`, a Buzz agent can keep running the old
 // amq-acp, which answers "Not connected" with no hint. Doctor must name that
 // exact process and say to Stop and Start the agent in Buzz Desktop.
 func TestDoctorNamesAStaleACP(t *testing.T) {
 	fakeACPList(t, testInstalled)
 
-	probes, err := staleACPProbe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	probes := inspectStaleACP(t)
 	notes := staleACPNotes(probes, "/opt/homebrew/bin/amq-acp")
 	if len(notes) != 2 {
 		t.Fatalf("notes = %d (%v), want a stale note and an unknown note", len(notes), notes)
@@ -82,10 +92,7 @@ func TestDoctorNamesAStaleACP(t *testing.T) {
 func TestUnknownProcessesAreReportedNotGuessed(t *testing.T) {
 	fakeACPList(t, testInstalled)
 
-	probes, err := staleACPProbe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	probes := inspectStaleACP(t)
 	var unknowns int
 	for _, p := range probes {
 		switch {
@@ -122,10 +129,7 @@ func TestSameInodeDifferentDevIsStale(t *testing.T) {
 	}
 	installedIdentity = func() (execIdentity, error) { return installed, nil }
 
-	probes, err := staleACPProbe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	probes := inspectStaleACP(t)
 	if len(probes) != 1 || !probes[0].Stale || probes[0].Reason != "" {
 		t.Fatalf("probes = %v, want pid 222 stale (same inode, different dev)", probes)
 	}

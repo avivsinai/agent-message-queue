@@ -124,13 +124,6 @@ type ReplyRouter func(replyProject, replyTo string) (root, handle string, err er
 // endpoint's own root.
 func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
 
-// SetSyncDirFaultForTest installs a fault into every DeliveryRoot the carrier
-// opens. Tests use it to force a CommittedDurabilityError
-// through the real Publish path (which opens its own root internally).
-func (c *Carrier) SetSyncDirFaultForTest(fn func(dir string) error) {
-	c.syncDirFaultForTest = fn
-}
-
 // errNoReplyRoute reports that a cross-project reply cannot be routed.
 // The error wraps the specific cause. The carrier distinguishes POISON (DLQ)
 // from TRANSIENT (stays in new): a poison error is about the message itself
