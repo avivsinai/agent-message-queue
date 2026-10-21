@@ -182,7 +182,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err

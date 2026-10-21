@@ -377,7 +377,8 @@ func readWakeTargetAt(
 	root string,
 	me string,
 ) (wakeTarget, bool, error) {
-	target, exists, err := readWakeTargetRawAt(dirfd, agentDir, root, me)
+	snapshot, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
+	target := snapshot.Target
 	if err != nil || !exists {
 		return target, exists, err
 	}
@@ -385,16 +386,6 @@ func readWakeTargetAt(
 		return wakeTarget{}, true, err
 	}
 	return target, true, nil
-}
-
-func readWakeTargetRawAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
-	root string,
-	me string,
-) (wakeTarget, bool, error) {
-	snapshot, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
-	return snapshot.Target, exists, err
 }
 
 func readWakeTargetSnapshotAt(

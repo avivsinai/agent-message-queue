@@ -122,37 +122,57 @@ func withWakeLifecycleGuard(root, me string, fn func() error) error {
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
-	return withWakeLifecycleGuardInDir(agentDir, func(int) error { return fn() })
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(int) error { return fn() })
 }
 
-func withWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
-	return withWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
+// wakeGuardOptions selects how the lifecycle guard is acquired.
+type wakeGuardOptions struct {
+	// existing opens only an existing guard file and never creates one.
+	existing bool
+	// noWait takes the lock with LOCK_NB and polls a held guard until
+	// retryTimeout elapses; a zero retryTimeout makes exactly one attempt.
+	// Without noWait, acquisition blocks and retryTimeout is unused.
+	noWait       bool
+	retryTimeout time.Duration
 }
 
-func withWakeLifecycleGuardModeInDir(
+var (
+	// wakeGuardWait creates the guard file if needed and blocks until held.
+	wakeGuardWait = wakeGuardOptions{}
+	// wakeGuardNoWait creates the guard file if needed and refuses a guard
+	// still held after wakeLifecycleGuardRetryTimeout.
+	wakeGuardNoWait = wakeGuardOptions{
+		noWait:       true,
+		retryTimeout: wakeLifecycleGuardRetryTimeout,
+	}
+	// wakeGuardExisting requires an existing guard file and blocks until held.
+	wakeGuardExisting = wakeGuardOptions{existing: true}
+	// wakeGuardExistingNoWait requires an existing guard file and refuses a
+	// guard still held after wakeLifecycleGuardRetryTimeout.
+	wakeGuardExistingNoWait = wakeGuardOptions{
+		existing:     true,
+		noWait:       true,
+		retryTimeout: wakeLifecycleGuardRetryTimeout,
+	}
+)
+
+func (opts wakeGuardOptions) lockMode() int {
+	if opts.noWait {
+		return unix.LOCK_EX | unix.LOCK_NB
+	}
+	return unix.LOCK_EX
+}
+
+// withWakeLifecycleGuardInDir runs fn under the lifecycle guard and releases
+// the guard when fn returns.
+func withWakeLifecycleGuardInDir(
 	agentDir *wakeAgentDir,
-	lockMode int,
+	opts wakeGuardOptions,
 	fn func(int) error,
 ) error {
-	return withWakeLifecycleGuardModeAndTimeoutInDir(
+	return withWakeLifecycleGuardLeaseInDir(
 		agentDir,
-		lockMode,
-		wakeLifecycleGuardRetryTimeout,
-		fn,
-	)
-}
-
-func withWakeLifecycleGuardModeAndTimeoutInDir(
-	agentDir *wakeAgentDir,
-	lockMode int,
-	retryTimeout time.Duration,
-	fn func(int) error,
-) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
-		agentDir,
-		false,
-		lockMode,
-		retryTimeout,
+		opts,
 		func(dirfd int, lease *wakeLifecycleGuardLease) (retErr error) {
 			defer func() { retErr = errors.Join(retErr, lease.release()) }()
 			return fn(dirfd)
@@ -183,11 +203,11 @@ func (lease *wakeLifecycleGuardLease) release() error {
 	return errors.Join(unlockErr, closeErr)
 }
 
-func withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+// withWakeLifecycleGuardLeaseInDir acquires the lifecycle guard and passes
+// its lease to fn, which owns the release.
+func withWakeLifecycleGuardLeaseInDir(
 	agentDir *wakeAgentDir,
-	existing bool,
-	lockMode int,
-	retryTimeout time.Duration,
+	opts wakeGuardOptions,
 	fn func(int, *wakeLifecycleGuardLease) error,
 ) error {
 	return agentDir.withFD(func(dirfd int) error {
@@ -196,9 +216,9 @@ func withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
 			dirfd,
 			path,
 			agentDir,
-			existing,
-			lockMode,
-			retryTimeout,
+			opts.existing,
+			opts.lockMode(),
+			opts.retryTimeout,
 		)
 		if err != nil {
 			return err

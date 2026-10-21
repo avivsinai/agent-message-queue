@@ -103,7 +103,7 @@ func writeWakeStateTargetForTest(t *testing.T, fixture wakeStateUnixFixture, arg
 func captureWakeStateLegacyForTest(t *testing.T, fixture wakeStateUnixFixture) wakeStateLegacySnapshot {
 	t.Helper()
 	var snapshot wakeStateLegacySnapshot
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, wakeGuardWait, func(dirfd int) error {
 		var err error
 		snapshot, err = captureWakeStateLegacySnapshotAt(
 			dirfd,
@@ -123,7 +123,7 @@ func publishWakeStateForTest(
 	expected wakeStateLegacySnapshot,
 ) (wakeStateFileSnapshot, error) {
 	var snapshot wakeStateFileSnapshot
-	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		var err error
 		snapshot, err = publishWakeStateAt(
 			scope,

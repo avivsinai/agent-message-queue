@@ -20,7 +20,7 @@ type wakeGenerationSnapshotFixture struct {
 
 func TestRemoveWakeGenerationFileIfSnapshotMatchesPreservesNewInodeReplacement(t *testing.T) {
 	fixture := newWakeGenerationSnapshotFixture(t)
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeGenerationFileAt(
 			scope,
 			testWakeGenerationSnapshotName,
@@ -65,7 +65,7 @@ func newWakeGenerationSnapshotFixture(t *testing.T) wakeGenerationSnapshotFixtur
 			TargetDigest: "sha256:" + strings.Repeat("a", 64),
 		},
 	}
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeGenerationFileAt(
 			scope,
 			testWakeGenerationSnapshotName,
@@ -101,7 +101,7 @@ func removeWakeGenerationSnapshotForTest(
 	t.Helper()
 	var removed bool
 	var removeErr error
-	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		removed, removeErr = removeWakeGenerationFileIfSnapshotMatchesAt(
 			scope,
 			testWakeGenerationSnapshotName,

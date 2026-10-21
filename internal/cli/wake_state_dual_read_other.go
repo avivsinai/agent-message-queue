@@ -12,14 +12,10 @@ func readWakeStateSelectionForInspection(
 	return wakeStateReadSelection{}, nil
 }
 
-func readWakeTargetFromState(root, me string) (wakeTarget, bool, error) {
-	return readWakeTarget(root, me)
-}
-
 func readWakeTargetFromStateForInspection(
 	root string,
 	me string,
 	_ wakeLockInspection,
 ) (wakeTarget, bool, error) {
-	return readWakeTargetFromState(root, me)
+	return readWakeTarget(root, me)
 }
