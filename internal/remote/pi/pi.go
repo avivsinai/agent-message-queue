@@ -3,6 +3,10 @@
 // `{"kind":"pi","target":"pi-1","config":{"handle":"<session handle>"}}`
 // builds an Attachment without editing serve.
 //
+// The same adapter registers kind "acp" over the identical seam under its own
+// directory (extensions/acp-host/) and protocol string (amq:acp-host:v1); its
+// extension side is an amq-acp host serving one ACP agent.
+//
 // The adapter implements the pi-bridge protocol v1. The bridge is a pi
 // extension; this adapter is extension-only: it does not spawn, own, or
 // supervise the pi process (ADR invariant 1 — up supervises serve only;
@@ -164,10 +168,14 @@ var Version = "dev"
 
 // oldBridgeMessage is the refusal an owner sees when the live extension
 // predates MinBridgeRevision.
-func oldBridgeMessage(handle string, live livenessState, hint string) string {
+func oldBridgeMessage(names wireNames, handle string, live livenessState, hint string) string {
 	have := "publishes no bridge_revision"
 	if live.revision > 0 {
 		have = fmt.Sprintf("is bridge_revision %d", live.revision)
+	}
+	if names.harness == acpWire.harness {
+		return fmt.Sprintf("the amq-acp host for handle %q %s; this amq-remote needs bridge_revision %d or later: restart the host with the amq-acp of this AMQ release",
+			handle, have, MinBridgeRevision)
 	}
 	// The remedy the bridge publishes names its own install path; then the
 	// manifest's hint; then this repo's stock extension. A supplied remedy
@@ -273,6 +281,13 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 	return build(cfg, piWire)
 }
 
+// ACPFactory builds a kind "acp" Attachment: the same seam, served by an
+// amq-acp host for its ACP agent
+// (`{"kind":"acp","target":"grok","config":{"handle":"grok"}}`).
+func ACPFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+	return build(cfg, acpWire)
+}
+
 func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	var c config
 	if len(cfg.Config) > 0 {
@@ -281,14 +296,18 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 		}
 	}
 	if c.Handle == "" {
-		return nil, fmt.Errorf("pi config: handle is required (the pi session handle)")
+		return nil, fmt.Errorf("%s config: handle is required (the %s session handle)", names.harness, names.harness)
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return nil, fmt.Errorf("pi config: invalid handle: %v", err)
+		return nil, fmt.Errorf("%s config: invalid handle: %v", names.harness, err)
 	}
 	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle, names), names: names}
 	if st, err := os.Stat(dir.dir); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("pi: bridge extension directory not found at %s (is the %s extension running for handle %q?)", dir.dir, names.dir, c.Handle)
+		running := fmt.Sprintf("is the %s extension running for handle %q?", names.dir, c.Handle)
+		if names.harness == acpWire.harness {
+			running = fmt.Sprintf("has amq-acp host run for handle %q?", c.Handle)
+		}
+		return nil, fmt.Errorf("%s: bridge extension directory not found at %s (%s)", names.harness, dir.dir, running)
 	}
 	a, err := New(cfg.Target, c.Handle, dir)
 	if err != nil {
@@ -300,6 +319,7 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 
 func init() {
 	registry.Register("pi", Factory)
+	registry.Register("acp", ACPFactory)
 }
 
 // clientRef is the request identity: protocol.EncodeRef of the record key,
@@ -1060,7 +1080,7 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	submit := !live.live || live.revision >= MinBridgeRevision
 	blocked := ""
 	if !submit {
-		blocked = oldBridgeMessage(a.handle, live, a.upgradeHint)
+		blocked = oldBridgeMessage(a.dir.names, a.handle, live, a.upgradeHint)
 	}
 	att, status := "live", "idle"
 	if !live.live {
@@ -1074,8 +1094,8 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 		Schema:             protocol.SchemaSession,
 		TargetID:           a.target,
 		Epoch:              epoch,
-		Harness:            "pi",
-		DisplayName:        "pi " + a.handle,
+		Harness:            a.dir.names.harness,
+		DisplayName:        a.dir.names.harness + " " + a.handle,
 		Attachment:         att,
 		Status:             status,
 		PendingInteraction: pending,
@@ -1162,7 +1182,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			// UNCERTAIN-shaped refusal — the endpoint keeps the correlation
 			// (admissionCause maps any native error to attachment_lost).
 			return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-				"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
+				"no live %s bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.dir.names.harness, a.handle, live.reason, r.ref)
 		}
 		return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", r.ref)
 	}
@@ -1179,12 +1199,12 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Unlock()
 	live := a.dir.liveness(a.now())
 	if !live.live {
-		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live pi bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
+		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live %s bridge for handle %q (bridge.liveness %s)", a.dir.names.harness, a.handle, live.reason)}, nil
 	}
 	if live.revision < MinBridgeRevision {
 		// A missing or lower revision is never read as compatible: the
 		// extension lacks the rules this adapter's evidence relies on.
-		return core.Admission{Code: protocol.CodeUnsupported, Message: oldBridgeMessage(a.handle, live, a.upgradeHint)}, nil
+		return core.Admission{Code: protocol.CodeUnsupported, Message: oldBridgeMessage(a.dir.names, a.handle, live, a.upgradeHint)}, nil
 	}
 	if firstContact {
 		// First contact: the request addresses the generation the caller
@@ -1250,7 +1270,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 				// bridge can still deliver; admissionCause keeps the
 				// correlation (never a terminal rejected record).
 				return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-					"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+					"no live %s bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.dir.names.harness, a.handle, live.reason, refOfRun)
 			}
 			return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 		}
@@ -1295,7 +1315,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// still possible from a later bridge scan, so the refusal is
 		// UNCERTAIN-shaped (admissionCause keeps the correlation).
 		return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-			"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+			"no live %s bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.dir.names.harness, a.handle, live.reason, refOfRun)
 	}
 	return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 }

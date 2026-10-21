@@ -58,9 +58,10 @@ type reply struct {
 
 // conn is the client side of one ACP connection: newline-delimited JSON-RPC
 // in both directions. One reader goroutine routes responses to their calls by
-// id, answers the agent's requests through onRequest, and hands notifications
-// to onNotify in arrival order, so every session/update the agent writes
-// before a response is delivered before that response.
+// id and hands notifications to onNotify in arrival order, so every
+// session/update the agent writes before a response is delivered before that
+// response. The agent's requests are answered through onRequest, each on its
+// own goroutine.
 type conn struct {
 	writeMu sync.Mutex
 	out     *bufio.Writer
@@ -169,13 +170,17 @@ func (c *conn) read(in io.Reader) {
 		hasID := len(msg.ID) > 0 && string(msg.ID) != "null"
 		switch {
 		case msg.Method != "" && hasID:
-			result, rerr := c.onRequest(msg.Method, msg.Params)
-			id := msg.ID
-			if rerr != nil {
-				_ = c.write(outgoing{ID: &id, Error: rerr})
-			} else {
-				_ = c.write(outgoing{ID: &id, Result: result})
-			}
+			// A request may wait (an approval waits for the owner), so it
+			// is answered off the reader: responses and notifications keep
+			// flowing while it waits.
+			go func(id json.RawMessage, method string, params json.RawMessage) {
+				result, rerr := c.onRequest(method, params)
+				if rerr != nil {
+					_ = c.write(outgoing{ID: &id, Error: rerr})
+				} else {
+					_ = c.write(outgoing{ID: &id, Result: result})
+				}
+			}(msg.ID, msg.Method, msg.Params)
 		case msg.Method != "":
 			c.onNotify(msg.Method, msg.Params)
 		case hasID:

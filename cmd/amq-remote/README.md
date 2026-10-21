@@ -102,6 +102,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Optional `approve` advertises `ApproveTool`: the Buzz DM can deny a tool call through the PermissionRequest hook, and allow one when the hook pins the owner (see [Approvals from the Buzz DM](#approvals-from-the-buzz-dm)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` is false. Submit evidence is `submitted`. |
+| `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `ApproveTool`, reject only: the owner can reject a tool call from Buzz; the host's policy rejects at expiry. `CancelRequest` is false. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
@@ -127,6 +128,11 @@ adapters that attached, writes `refusals.json`, and prints the refusal.
       "kind": "pi",
       "target": "pi-1",
       "config": {"handle": "pi-agent"}
+    },
+    {
+      "kind": "acp",
+      "target": "grok",
+      "config": {"handle": "grok"}
     }
   ]
 }

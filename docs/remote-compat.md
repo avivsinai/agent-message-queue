@@ -99,6 +99,26 @@ observed on Claude Code 2.1.278. The adapter is `internal/remote/claude`.
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | `claude agents --help` |
 | Observation | Transcript JSONL tail (`~/.claude/projects/<slug>/<uuid>.jsonl`) plus `~/.claude/sessions/<pid>.json` process metadata (`messagingSocketPath`, `peerProtocol`, `peerFeatures`) | delivered | Capture §1, §3.2; `transcriptPath` |
 
+### 3.4 ACP host
+
+The adapter is kind `acp` in `internal/remote/pi`, over the bridge seam of
+[the pi bridge protocol](pi-bridge-protocol.md) ("The acp-host wire"). The
+extension side is `amq-acp host` (`internal/acp/host`), the only ACP client
+of its agent. ACP facts are from agentclientprotocol.com.
+
+| Row | Mechanism | Evidence class | Citation |
+| --- | --- | --- | --- |
+| Submit entry | The host writes the receipt, then sends one `session/prompt` with the request text | delivered | `Host.runRequest` |
+| Acceptance evidence | None native: `session/prompt` returns only at the end of the turn | submitted | ACP `/protocol/prompt-turn` |
+| Native run identity | `unavailable`: ACP returns no run id at prompt time | n/a | ACP `/protocol/prompt-turn` |
+| Completion evidence | The `session/prompt` response `stopReason` | completed | ACP `/protocol/prompt-turn`; `requestOutcome` |
+| Exact cancellation gate | `session/cancel` is session-wide; the bridge has no cancel request, so the adapter answers `unsupported` | `unsupported` | ACP `/protocol/prompt-turn` |
+| Steer | `unavailable` | n/a | - |
+| Approvals | `session/request_permission` during a request's turn becomes an `interaction` line with `presence: local_only`; the owner can reject from the remote face, and the host's policy rejects at expiry. Not live-verified against a real harness | approvals: reject only | ACP `/protocol/tool-calls`; `Host.askOwner` |
+| Native session identity | The ACP `sessionId`, published as `session_id` in `bridge.liveness` | delivered | `Host.writeLiveness` |
+| Session-switch epoch triggers | A host start mints a new `session_generation` | delivered | `Host.startBridge` |
+| Local draft access (must not submit) | n/a: the host has no editor | n/a | - |
+
 ## 4. Measured adapter constraints
 
 These observations constrain the adapters and remain part of the compatibility
@@ -154,6 +174,7 @@ valid value for the runtime `terminal` enum.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | opt-in | false | unavailable |
 | pi | true | true | false | false | bridge revision 4 | false | unavailable |
+| ACP host | true | submitted | false | false | reject only | false | unavailable |
 | Claude Code | true | submitted | false | false | opt-in, reject only | false | unavailable |
 
 The v1 endpoint masks `steer` to false, even where an attachment declares it
@@ -197,6 +218,12 @@ Reasons for every `false` (source: as cited per row in §3):
 - `pi.answer_question`: the bridge has no external decision seam for the
   in-process `ctx.ui.select` await (source: §3.2 "Approvals/questions").
 - `pi.terminal`: no terminal binding is part of this adapter contract.
+- `acp.cancel_request`: the bridge has no cancel request (§3.4).
+- `acp.approve_tool` is advertised (the host is bridge revision 4), with a
+  remote reject only: every approval is `presence: local_only` until a live
+  capture shows that a harness puts the whole call in `rawInput`.
+- `acp.answer_question`: ACP has no question seam the host serves.
+- `acp.terminal`: no terminal binding is part of this adapter contract.
 - `claude_code.cancel_request`: no user-level interrupt exists at all
   (§3.3 "Exact cancellation gate").
 - `claude_code.approve_tool`: opt-in through the manifest `approve` and the

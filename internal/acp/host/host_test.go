@@ -348,3 +348,121 @@ func TestCheckReportsTheAgentsCapabilities(t *testing.T) {
 		t.Fatalf("check result=%+v; want protocol 1, agent fake, load_session true", res)
 	}
 }
+
+const testRef = "amqr1_abcdefghijklmnopqrst"
+
+// publishRequest plays the amq-remote adapter: it reads the live session
+// generation and publishes one request for it.
+func publishRequest(t *testing.T, root, text string) {
+	t.Helper()
+	dir := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
+	var live bridgeLiveness
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "bridge.liveness"))
+		if err == nil && json.Unmarshal(data, &live) == nil && live.Live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the host published no live bridge.liveness")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	req, err := json.Marshal(bridgeRequest{
+		Ref: testRef, Text: text, DeliverAs: "followUp", EpochHint: live.SessionGeneration, BridgeRevision: 3,
+		NotAfter: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "requests"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requests", testRef+".json"), req, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitEvent waits for an event line of the given type on the test request.
+func waitEvent(t *testing.T, root, event string) []bridgeEvent {
+	t.Helper()
+	path := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "events", testRef+".jsonl")
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		data, _ := os.ReadFile(path)
+		var events []bridgeEvent
+		for _, line := range strings.Split(string(data), "\n") {
+			var ev bridgeEvent
+			if json.Unmarshal([]byte(line), &ev) == nil {
+				events = append(events, ev)
+			}
+		}
+		if slices.ContainsFunc(events, func(ev bridgeEvent) bool { return ev.Event == event }) {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s event; stream: %s", event, data)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHostRunsARemoteRequest(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{}
+	startHost(t, root, agent)
+	publishRequest(t, root, "summarize the diff")
+
+	events := waitEvent(t, root, "completed")
+	if _, err := os.Stat(filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "receipts", testRef+".json")); err != nil {
+		t.Fatalf("no receipt for the request: %v", err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, ev.Event)
+	}
+	if !slices.Equal(kinds, []string{"started", "completed"}) || events[1].Text != "four, as asked" {
+		t.Fatalf("events=%v text=%q; want started then completed with the answer", kinds, events[len(events)-1].Text)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if !slices.Equal(agent.prompts, []string{"summarize the diff"}) {
+		t.Fatalf("agent prompts=%q; want the request text verbatim", agent.prompts)
+	}
+}
+
+func TestHostTakesARejectFromTheRemoteFace(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{askPermission: true}
+	startHost(t, root, agent)
+	publishRequest(t, root, "clean the build")
+
+	events := waitEvent(t, root, "interaction")
+	ask := events[len(events)-1]
+	answer, err := json.Marshal(map[string]string{
+		"protocol": BridgeProtocol, "ref": testRef, "interaction_id": ask.InteractionID,
+		"manifest_hash": ask.ManifestHash, "option": ask.RejectOption,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "answers")
+	if err := os.MkdirAll(answers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(answers, answerName(testRef, ask.InteractionID)), answer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	events = waitEvent(t, root, "completed")
+	if !slices.ContainsFunc(events, func(ev bridgeEvent) bool {
+		return ev.Event == "interaction_resolved" && ev.Outcome == "answered" && ev.Option == ask.RejectOption
+	}) {
+		t.Fatalf("no interaction_resolved answered with the reject option; events=%+v", events)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.selected != "reject" {
+		t.Fatalf("host selected option %q; want the reject_once option", agent.selected)
+	}
+}
