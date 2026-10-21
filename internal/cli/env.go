@@ -604,7 +604,7 @@ func gitWorktreeRootFrom(path string) (string, bool) {
 	}
 	bareCandidate := ""
 	for dir := path; ; dir = filepath.Dir(dir) {
-		if atWalkCeilingForTests(dir) {
+		if atWalkBoundary(dir) {
 			if bareCandidate != "" {
 				return bareCandidate, true
 			}
@@ -772,10 +772,7 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	// mislabeled the global queue as project-local and let it shadow a repo's
 	// own .agent-mail. When HOME is itself the Git worktree root, however, the
 	// file is worktree-local authority and the inclusive Git ceiling wins.
-	for ceiling != "" || !isHomeConfigDir(dir) {
-		if atWalkCeilingForTests(dir) {
-			break
-		}
+	for walkInspectsDir(dir, ceiling) {
 		rcPath := filepath.Join(dir, ".amqrc")
 		// Refuse configuration whose provenance cannot be established. In
 		// particular, symlinks and group/world-writable files are attacker
@@ -855,10 +852,7 @@ func detectAgentMailDir() string {
 	// A home-level .agent-mail is global state, not evidence that the current
 	// repository owns that queue. If HOME is the Git worktree root, it is local
 	// evidence and must be inspected at the inclusive ceiling.
-	for ceiling != "" || !isHomeConfigDir(dir) {
-		if atWalkCeilingForTests(dir) {
-			break
-		}
+	for walkInspectsDir(dir, ceiling) {
 		candidate := filepath.Join(dir, ".agent-mail")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			// Return relative path if in cwd, absolute otherwise
@@ -882,23 +876,32 @@ func detectAgentMailDir() string {
 }
 
 // walkCeilingForTests is a test-only hard boundary for the cwd-ancestor
-// resolution walks (findAndLoadAmqrc, detectAgentMailDir, findAmqrcForRoot,
-// findRootInParents, findProjectLaunchJSONPath) and the git worktree search
-// (gitWorktreeRootFrom). When non-empty, none of those walks inspects this
-// directory or anything above it. Test seams re-point HOME at per-test
-// sibling temp dirs, which moves the home stop off the walk's ancestor chain
-// and lets a walk climb out of the isolated test home into the operator's
-// real ~/.amqrc / ~/.agent-mail. TestMain sets it to the isolated test home;
-// production binaries never set it, so live
-// resolution behavior is unchanged.
+// resolution walks. Test seams re-point HOME at per-test sibling temp dirs,
+// which moves the home stop off the walk's ancestor chain and would let a walk
+// climb out of the isolated test home into the operator's real ~/.amqrc or
+// ~/.agent-mail. TestMain sets it to the isolated test home; production never
+// sets it. atWalkBoundary is its only production reader.
 var walkCeilingForTests string
 
-// atWalkCeilingForTests reports whether dir is the test-only walk boundary.
-// The boundary's own directory entries are never inspected (home-stop
-// semantics): it separates the test tree from the operator's real home.
-func atWalkCeilingForTests(dir string) bool {
+// atWalkBoundary reports whether a cwd-ancestor walk must stop before
+// inspecting dir. Every resolution walk (findAndLoadAmqrc, detectAgentMailDir,
+// findAmqrcForRoot, findRootInParents, findProjectLaunchJSONPath,
+// gitWorktreeRootFrom) checks it. The boundary's own entries are never
+// inspected. It is false in production, where walks stop at the home
+// directory, the Git ceiling, or the filesystem root.
+func atWalkBoundary(dir string) bool {
 	stop := walkCeilingForTests
 	return stop != "" && sameCleanPath(dir, stop)
+}
+
+// walkInspectsDir reports whether a walk that stops at the home directory may
+// inspect dir. Inside a Git worktree (gitCeiling non-empty) the inclusive Git
+// ceiling replaces the home stop.
+func walkInspectsDir(dir, gitCeiling string) bool {
+	if atWalkBoundary(dir) {
+		return false
+	}
+	return gitCeiling != "" || !isHomeConfigDir(dir)
 }
 
 func sameCleanPath(left, right string) bool {
@@ -1124,10 +1127,7 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 			}
 		}
 		dir := absRoot
-		for ceiling != "" || !isHomeConfigDir(dir) {
-			if atWalkCeilingForTests(dir) {
-				break
-			}
+		for walkInspectsDir(dir, ceiling) {
 			rcPath := filepath.Join(dir, ".amqrc")
 			if info, statErr := os.Lstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {
