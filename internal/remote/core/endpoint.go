@@ -2951,10 +2951,10 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	case ev.Admitted:
 		// The same-run early return goes FIRST. A healthy running record
 		// matches neither owesCancel nor owesAck and is a noop. Only a record
-		// that OWES A CANCEL may route to reconcileCancelRetry: NativeRun !=
-		// nil && AckDigest == "" is also true for a simply-running record,
-		// and routing on that would let CancelExact kill every prompt within
-		// one tick.
+		// that OWES A CANCEL may route to reconcileCancelRetry. Routing on
+		// NativeRun != nil && AckDigest == "" would be wrong: that is true
+		// for a simply-running record, so CancelExact would kill every prompt
+		// within one tick.
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
 			if owesCancel(rec) {
 				e.mu.Unlock()
