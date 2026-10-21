@@ -294,3 +294,127 @@ func prepareTreeSnapshot(t *testing.T, root string) string {
 	sum := sha256.Sum256(snapshot.Bytes())
 	return hex.EncodeToString(sum[:])
 }
+
+// TestPrepareSurfacesCodexCaptureVersionRefusal protects issue #1107: Prepare
+// probes a capture adapter before planning a fresh seat and reports the
+// capture_version_unsupported refusal on that participant alone. The refused
+// seat contributes no plan agent and does not make the whole launch
+// unsupported, so the other seats still proceed and Reconcile refuses only it.
+func TestPrepareSurfacesCodexCaptureVersionRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		version, planned, reason string
+	}{
+		{"0.146.0", "unsupported", "capture_version_unsupported"},
+		{"0.154.0", "fresh", ""},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			fixture := newInternalPrepareFixture(t)
+			if err := fsq.EnsureAgentDirs(fixture.sessionRoot, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			_, executable := testExecutable(t, CodexProvider)
+			fixture.request.Participants = append(fixture.request.Participants, PrepareParticipant{
+				Handle: "codex", Runnable: true, Provider: CodexProvider, Executable: executable,
+				Cwd: fixture.cwd, ResumePolicy: ResumeEnabled,
+				Execution: PrepareExecutionOptions{WakeMode: "enabled"},
+			})
+			dependencies := fixture.dependencies(&prepareTestBackend{})
+			dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+				if provider != CodexProvider {
+					return prepareTestAdapter{provider: provider}
+				}
+				adapter := NewCodexAdapter(executable)
+				adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{
+					"--version": "codex-cli " + tc.version + "\n", "--help": "commands: resume",
+					"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
+				}}
+				return adapter
+			}
+			result, err := Prepare(context.Background(), fixture.request, dependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome == PrepareOutcomeUnsupported {
+				t.Fatalf("Prepare at %s made the whole launch unsupported: %q", tc.version, result.Reason)
+			}
+			claude, codex := result.Participants[0], result.Participants[1]
+			if claude.PlannedOutcome != "fresh" || claude.Command == nil {
+				t.Fatalf("claude seat at %s = %#v", tc.version, claude)
+			}
+			if codex.PlannedOutcome != tc.planned || result.Observations[1].ReasonCode != tc.reason || (codex.Command == nil) != (tc.reason != "") {
+				t.Fatalf("codex seat at %s = planned %q reason %q command %#v", tc.version, codex.PlannedOutcome, result.Observations[1].ReasonCode, codex.Command)
+			}
+			wantPlanned := []string{"claude", "codex"}
+			if tc.reason != "" {
+				wantPlanned = []string{"claude"}
+			}
+			var trust *PrepareRequiredAction
+			for i := range result.RequiredActions {
+				if result.RequiredActions[i].Kind == ActionTrustConfirmation {
+					trust = &result.RequiredActions[i]
+				}
+			}
+			if trust == nil || !slices.Equal(trust.Handles, wantPlanned) {
+				t.Fatalf("planned agents at %s = %#v, want %v", tc.version, trust, wantPlanned)
+			}
+		})
+	}
+}
+
+type countingCommandProbe struct {
+	fakeCommandProbe
+	runs *int
+}
+
+func (probe countingCommandProbe) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	*probe.runs++
+	return probe.fakeCommandProbe.Output(ctx, executable, args...)
+}
+
+// TestPrepareChecksCaptureContainmentBeforeProbe protects the PR #1108 review
+// findings: Prepare refuses a project-contained capture provider before its
+// capability probe executes it, and refuses only that seat, as Reconcile does.
+func TestPrepareChecksCaptureContainmentBeforeProbe(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	if err := fsq.EnsureAgentDirs(fixture.sessionRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(fixture.projectRoot, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(bin, CodexProvider)
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Participants = append(fixture.request.Participants, PrepareParticipant{
+		Handle: "codex", Runnable: true, Provider: CodexProvider, Executable: executable,
+		Cwd: fixture.cwd, ResumePolicy: ResumeEnabled,
+		Execution: PrepareExecutionOptions{WakeMode: "enabled"},
+	})
+	runs := 0
+	dependencies := fixture.dependencies(&prepareTestBackend{})
+	dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+		if provider != CodexProvider {
+			return prepareTestAdapter{provider: provider}
+		}
+		adapter := NewCodexAdapter(executable)
+		adapter.probe = countingCommandProbe{runs: &runs, fakeCommandProbe: fakeCommandProbe{path: executable, outputs: map[string]string{
+			"--version": "codex-cli 0.163.0\n", "--help": "commands: resume",
+			"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
+		}}}
+		return adapter
+	}
+	result, err := Prepare(context.Background(), fixture.request, dependencies)
+	if err != nil {
+		t.Fatalf("Prepare failed the whole launch: %v", err)
+	}
+	if runs != 0 {
+		t.Fatalf("Prepare executed the contained provider %d times", runs)
+	}
+	claude, codex := result.Participants[0], result.Participants[1]
+	if claude.PlannedOutcome != "fresh" || codex.PlannedOutcome != "unsupported" || codex.Command != nil ||
+		result.Observations[1].ReasonCode != ProviderProjectContainedCode {
+		t.Fatalf("seats = claude %q, codex %q reason %q", claude.PlannedOutcome, codex.PlannedOutcome, result.Observations[1].ReasonCode)
+	}
+}

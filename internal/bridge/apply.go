@@ -17,15 +17,14 @@ type ApplyResult struct {
 	// payload IS published at Path (rename succeeded or matching destination
 	// bytes were proven), but the directory-sync guarantee could not be
 	// verified. The caller records the distinct published_durability_unknown
-	// state — never committed-on-faith and never a retryable rejection
-	// (review-827-r2 P0, tightened per review-827-r3 P1).
+	// state — never committed-on-faith and never a retryable rejection.
 	DurabilityIndeterminate bool
 }
 
 // ErrCollisionUnproven marks an os.ErrExist whose existing bytes could not
 // be read: the transfer may or may not conflict. The owning layer records
 // uncertain for this class — never a terminal conflict and never a retryable
-// non-delivery (codex r2-r2 finding 2).
+// non-delivery.
 var ErrCollisionUnproven = errors.New("transfer collision unproven")
 
 // ApplyEnvelope commits the payload into the local agent's inbox under a
@@ -52,8 +51,7 @@ func ApplyEnvelope(root *fsq.DeliveryRoot, localHost, localAgent string, env Env
 	if err != nil {
 		var committed *fsq.CommittedDurabilityError
 		if errors.As(err, &committed) {
-			// review-827-r2 P0 (tightened per review-827-r3 P1): the
-			// publication SUCCEEDED (rename done, or matching destination
+			// The publication SUCCEEDED (rename done, or matching destination
 			// bytes proven) but the destination directory sync did not
 			// complete. Durability is INDETERMINATE — the repo-wide
 			// CommittedDurabilityError contract treats this as delivered for
@@ -74,8 +72,8 @@ func ApplyEnvelope(root *fsq.DeliveryRoot, localHost, localAgent string, env Env
 	}
 	existing, readErr := root.ReadRegularNoFollow(rel)
 	if readErr != nil {
-		// review-827-r2 (codex r2-r2 finding 2): a collision whose existing
-		// bytes cannot be read is post-publication ambiguity, not a proven
+		// A collision whose existing bytes cannot be read is post-publication
+		// ambiguity, not a proven
 		// conflict. Distinguish it so the owning layer can record uncertain
 		// instead of terminal conflict.
 		return ApplyResult{}, fmt.Errorf("%w (collision bytes unreadable: %w)", ErrCollisionUnproven, readErr)

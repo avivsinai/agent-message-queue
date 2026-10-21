@@ -309,7 +309,7 @@ func resolveSessionRoot(base, session string) (string, error) {
 		if os.IsNotExist(err) {
 			return "", NotFoundError("session %q not found at %s", session, target)
 		}
-		// 611.22.42: a non-ENOENT Lstat on the session directory (EACCES/EIO/ESTALE)
+		// A non-ENOENT Lstat on the session directory (EACCES/EIO/ESTALE)
 		// is transient, not a permanent context mismatch. Classify it as
 		// ErrPeerRootUnreachable so retryableRouteError rescues it and the carrier
 		// retries instead of DLQing the command. Actual symlink, non-directory, and

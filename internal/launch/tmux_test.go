@@ -83,7 +83,7 @@ func TestTmuxBackendLifecycleAndRecovery(t *testing.T) {
 		t.Fatalf("duplicate Create changed live resource: %#v", afterDuplicate)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	name, err := tmuxSessionName(project, "collab")
 	if err != nil {
@@ -207,7 +207,7 @@ func tmuxTestRoot(t *testing.T, handles ...string) *fsq.DeliveryRoot {
 
 func stopTmuxTestServer(t *testing.T, backend *TmuxBackend) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	output, err := backend.run(ctx, backend.args("list-panes", "-a", "-F", "#{pane_pid}")...)
 	if err != nil {
@@ -227,7 +227,7 @@ func stopTmuxTestServer(t *testing.T, backend *TmuxBackend) {
 	if output, err := backend.run(ctx, backend.args("kill-server")...); err != nil {
 		t.Fatalf("kill tmux test server: %v\n%s", err, output)
 	}
-	deadline := time.Now().Add(tmuxCommandTimeout)
+	deadline := time.Now().Add(backendCommandTimeout)
 	for {
 		live := pids[:0]
 		for _, pid := range pids {
@@ -240,7 +240,7 @@ func stopTmuxTestServer(t *testing.T, backend *TmuxBackend) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("tmux test teardown left pane pids alive after %s: %v", tmuxCommandTimeout, pids)
+			t.Fatalf("tmux test teardown left pane pids alive after %s: %v", backendCommandTimeout, pids)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

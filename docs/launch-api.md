@@ -72,8 +72,9 @@ providers without executing a caller-supplied provider.
   changes when the allowed argument forms, configuration overrides, or carrier
   support change. The adapter table in `internal/launch/adapter.go` owns the
   values.
-- `verified_provider_version` is informational. It names the provider release
-  on which AMQ verified the grammar, not the installed version.
+- `verified_provider_version` is informational. It names the newest provider
+  release on which AMQ verified the grammar. It is neither an exact pin nor
+  the installed version.
 
 Provider argument grammar:
 
@@ -86,6 +87,8 @@ Provider argument grammar:
 - Codex admits ordered `-c model_reasoning_effort=<value>` pairs with the
   values `minimal`, `low`, `medium`, `high`, or `xhigh`. Duplicate keys and
   unknown keys or values are rejected.
+- Codex `--ask-for-approval` admits only `on-request`. codex-cli refuses
+  `untrusted` at start, and `never` is not admitted.
 - Every `env_overlay` key matches the POSIX environment grammar
   `[A-Za-z_][A-Za-z0-9_]*`. A key with shell syntax, such as `a;b c`, is
   refused.
@@ -213,15 +216,18 @@ Each provider owns its conversation identity:
 
 - Claude Code and Grok Build mint session IDs from the launch nonce.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
-  hook, at the verified version `codexCaptureVersion`
-  (`internal/launch/adapter_codex.go`). AMQ adds one static hook override
-  bound to the session root, handle, launch nonce, and AMQ executable. The
-  private hook validates the exact ticket and payload, persists immutable
-  evidence, and only then publishes the conversation identity. It then
-  forwards the identical payload to the operator's configured Codex notify
-  command; a missing command is a no-op, and a forwarding failure cannot
-  undo or fail the evidence path. An unused Codex launch stays pending and
-  cannot be resumed.
+  hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
+  newer, verified through `codexCaptureVerifiedVersion`
+  (`internal/launch/adapter_codex.go`). An older or non-release version is
+  refused with `capture_version_unsupported`. Prepare reports that refusal on
+  the Codex participant, and Apply refuses only that seat with Code 6; the
+  refusal does not block other seats. AMQ adds one static hook override bound to
+  the session root, handle, launch nonce, and AMQ executable. The private hook
+  validates the exact ticket and payload, persists immutable evidence, and only
+  then publishes the conversation identity. It then forwards the identical
+  payload to the operator's configured Codex notify command; a missing command
+  is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
+  unused Codex launch stays pending and cannot be resumed.
 - Cursor CLI acquires its chat ID before process start through `create-chat`
   at the exact version `cursorCaptureVersion`
   (`internal/launch/adapter_cursor.go`). Its provider identity is
@@ -254,6 +260,17 @@ trust digests, a preview, current observations, and required actions. Apply
 accepts the original Prepare request, the returned subject schema and digest,
 and one explicit decision for each required action. It recomputes the subject
 under that schema and fails closed if state changed.
+
+For a capture-mode participant planned fresh, Prepare runs the provider
+identity probe after the executable-containment check, and otherwise writes
+nothing. Each provider probes with its own arguments: Codex runs `--version`,
+`--help`, and `resume --help`; Cursor runs `--version`, `--help`, and
+`create-chat --help`. Prepare refuses only that seat, with `planned_outcome`
+`unsupported`, when the provider is project-contained
+(`provider_project_contained`, and the probe never runs) or its version is
+outside the capture range (`capture_version_unsupported`: Codex below its
+floor, Cursor other than its exact version). The other seats still plan, and a
+`stale_conversation` action for the refused seat stays.
 
 `SubjectSchemaV2` is the schema for new Prepare calls. A caller copies the
 returned schema and never omits the field to select legacy behavior. An Apply

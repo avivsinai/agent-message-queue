@@ -776,7 +776,7 @@ func normalizeRecord(rec *Record) {
 // Reconcile sweep is the only production caller.
 //
 // The whole read-mutate-write runs under s.mu. The endpoint mutex (e.mu)
-// does not serialize CompactOne against the async ack markers (endpoint.go
+// does not serialize CompactOne against the async ack markers (the endpoint
 // calls MarkAcknowledged after e.mu.Unlock on the native-event goroutine),
 // and a lost += on s.used would drift the quota counter for the life of the
 // process, so CompactOne takes s.mu like every other writer.

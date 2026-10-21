@@ -81,11 +81,11 @@ func TestPutTxWritesIdempotentBundle(t *testing.T) {
 	if again.String() != id.String() {
 		t.Fatalf("retry id = %s, want %s", again, id)
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "bridge", "tx", "box", "tmp"))
+	entries, err := os.ReadDir(filepath.Join(root, "bridge", "tx", "box"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("tmp leftovers = %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("tx directory holds %d entries, want only the bundle", len(entries))
 	}
 }

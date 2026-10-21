@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -379,10 +380,35 @@ func (f *approvalFixture) resolvedOnDisk() approvalResolved {
 // delivery. The terminal approved, the tool_result appeared and a Buzz answer
 // landed before the hook read it: the terminal's closure wins the resolved
 // file, and the hook prints nothing.
+//
+// The hook is parked inside a poll pass, on its clock, before it reads the
+// answer, and released only after the terminal's closure is on disk. A tick
+// cannot hold it: the pass a tick starts runs concurrently with the test, and
+// in CI run 39592395358 that pass ran late, saw the resolved file and exited,
+// so the next unbounded tick send waited for the 10m test timeout.
 func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
-	ticks := make(chan time.Time)
-	f.raiseWith("go test ./...", ticks)
+	var park atomic.Bool
+	parked := make(chan struct{}, 1)
+	release := make(chan struct{})
+	unpark := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unpark)
+	f.hookNow = func() time.Time {
+		if park.CompareAndSwap(true, false) {
+			parked <- struct{}{}
+			<-release
+		}
+		return f.base
+	}
+	f.raise("go test ./...")
+	park.Store(true)
+	select {
+	case <-parked:
+	case <-f.exited:
+		t.Fatalf("the hook ended before the answer; printed %q", f.out.String())
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook stopped polling")
+	}
 	f.question()
 	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != "" {
 		t.Fatalf("respond = %q, %v; want the answer written", code, err)
@@ -391,7 +417,7 @@ func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
 		t.Fatalf("resolution = %+v, want answered_elsewhere", ev)
 	}
-	ticks <- time.Time{} // the hook now reads the answer
+	unpark() // the hook now reads the answer
 	f.hookExited()
 	if f.out.Len() != 0 {
 		t.Fatalf("hook printed %q, want no decision", f.out.String())

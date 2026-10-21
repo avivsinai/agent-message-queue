@@ -5,12 +5,66 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const CodexNotifyV1 CaptureEvidenceSource = "codex_notify_v1"
 
-const codexCaptureVersion = "0.147.0"
+// codexCaptureMinimumVersion is the oldest codex-cli release on which the
+// legacy notify capture contract was verified. Capture accepts this release
+// and every newer strict MAJOR.MINOR.PATCH release.
+const codexCaptureMinimumVersion = "0.147.0"
+
+// codexCaptureVerifiedVersion is the newest codex-cli release on which the
+// notify capture contract was verified. It is informational only and never
+// gates capture.
+const codexCaptureVerifiedVersion = "0.163.0"
+
+// codexCaptureVersionSupported reports whether version is a strict decimal
+// MAJOR.MINOR.PATCH release at or above codexCaptureMinimumVersion. Any other
+// form, including a "v" prefix, a pre-release or build suffix, or surrounding
+// whitespace, fails closed.
+func codexCaptureVersionSupported(version string) bool {
+	got, ok := parseCodexReleaseVersion(version)
+	if !ok {
+		return false
+	}
+	floor, ok := parseCodexReleaseVersion(codexCaptureMinimumVersion)
+	if !ok {
+		return false
+	}
+	for i := range got {
+		if got[i] != floor[i] {
+			return got[i] > floor[i]
+		}
+	}
+	return true
+}
+
+func parseCodexReleaseVersion(version string) ([3]uint64, bool) {
+	var result [3]uint64
+	parts := strings.Split(version, ".")
+	if len(parts) != len(result) {
+		return result, false
+	}
+	for i, part := range parts {
+		if part == "" || len(part) > 9 {
+			return result, false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return result, false
+			}
+		}
+		value, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return result, false
+		}
+		result[i] = value
+	}
+	return result, true
+}
 
 type CodexAdapter struct {
 	executable string
@@ -62,7 +116,7 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 	}
 	result.Fresh = true
 	result.Resume = true
-	if result.ProviderVersion != codexCaptureVersion {
+	if !codexCaptureVersionSupported(result.ProviderVersion) {
 		result.Reason = "capture_version_unsupported"
 		return result
 	}
@@ -162,7 +216,7 @@ func codexEnvRules() map[string]valueRule { return commonCommittedEnvRules() }
 func codexArgRules() map[string]argumentRule {
 	return map[string]argumentRule{
 		"-c":                 {value: true, validate: validCodexConfigOverride},
-		"--ask-for-approval": {value: true, validate: oneOf("untrusted", "on-request")},
+		"--ask-for-approval": {value: true, validate: oneOf("on-request")},
 		"--model":            {value: true, validate: safeArgumentValue},
 		"--no-alt-screen":    {},
 		"--sandbox":          {value: true, validate: oneOf("read-only", "workspace-write")},

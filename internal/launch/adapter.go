@@ -86,7 +86,7 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 		reasoningValues := slices.Clone(codexReasoningEffortValues)
 		reviewerValues := slices.Clone(codexApprovalsReviewerValues)
 		return StaticInputCapabilities{
-			GrammarVersion: 1, VerifiedProviderVersion: codexCaptureVersion,
+			GrammarVersion: 2, VerifiedProviderVersion: codexCaptureVerifiedVersion,
 			AllowedArgumentForms: []string{"-c"},
 			ConfigOverrides: []ConfigOverrideCapability{
 				{Key: "model_reasoning_effort", AllowedValues: reasoningValues},

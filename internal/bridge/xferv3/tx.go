@@ -2,9 +2,13 @@ package xferv3
 
 import (
 	"crypto/ed25519"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type Owed struct {
@@ -33,17 +37,16 @@ func ListTx(root string, peer Host) ([]Owed, error) {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
 		facts, torn, ledErr := readLedger(ledgerPath(root, id))
 		if ledErr == nil && !torn && foldState(facts) == StateDiscard {
 			continue
 		}
-		raw, err := os.ReadFile(path)
+		raw, ok, err := readBundle(path)
 		if err != nil {
 			return nil, err
+		}
+		if !ok {
+			continue
 		}
 		signed, payload, err := ParseBundle(raw)
 		if err != nil || signed.ID() != id {
@@ -55,6 +58,29 @@ func ListTx(root string, peer Host) ([]Owed, error) {
 		return owed[i].Signed.ID().String() < owed[j].Signed.ID().String()
 	})
 	return owed, nil
+}
+
+// maxBundleBytes is the largest bundle ParseBundle can accept: three
+// length-prefixed fields holding a record, a signature and a payload.
+const maxBundleBytes = 3*4 + MaxRecordBytes + ed25519.SignatureSize + MaxPayloadBytes
+
+// readBundle reads a tx bundle without following a symlink at its name. ok
+// is false for a missing, non-regular or oversized file, which holds no
+// valid bundle.
+func readBundle(path string) (raw []byte, ok bool, err error) {
+	file, _, err := fsq.OpenRegularNoFollowBounded(path, 0)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, fsq.ErrNotRegularFile) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	raw, err = io.ReadAll(io.LimitReader(file, maxBundleBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	return raw, len(raw) <= maxBundleBytes, nil
 }
 
 func ConsumeTx(path string) error {

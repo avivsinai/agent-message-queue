@@ -30,7 +30,7 @@ type doctorExtensionDiagnostic struct {
 
 type passiveExtensionManifest struct {
 	// Pointer so a missing schema_version (accepted, defaults to 1 like the
-	// companion's manifest.Parse - 611.13.4-6) is distinguishable from an
+	// companion's manifest.Parse) is distinguishable from an
 	// explicit incompatible value (warned).
 	SchemaVersion *int     `json:"schema_version"`
 	Layer         string   `json:"layer"`
@@ -225,10 +225,9 @@ func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExten
 			Message: fmt.Sprintf("malformed manifest: %v", err),
 		}, false
 	}
-	// 611.13.4-6: align with the companion, which defaults a missing
-	// schema_version to 1 (manifest.Parse) - the same direction the late
-	// commit took for layer. A MISSING field is accepted; an EXPLICIT
-	// incompatible value still warns. Review-824-r1 P2-1: the companion
+	// Align with the companion, which defaults a missing schema_version to
+	// 1 (manifest.Parse), as layer does. A MISSING field is accepted; an
+	// EXPLICIT incompatible value still warns. The companion
 	// cannot distinguish a missing field from an explicit 0 (both unmarshal
 	// to 0 and Parse defaults 0 to 1), so an explicit 0 is accepted here
 	// too — one file must not serve targets=1 and draw a doctor warning
