@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implemented).
+Accepted.
 
 ## Context
 
@@ -18,15 +18,16 @@ That boundary is important:
 - Layers own team composition, roles, task decomposition, launch UX, restore
   UX, project-specific rules, and workflow policy.
 
-The current implicit integration points are too fragile for external layers:
+Implicit integration points are too fragile for external layers:
 
-- `amq env --json` is useful but not documented as a stable machine contract.
+- Without a stable machine contract for `amq env --json`, layers parse output
+  that can change.
 - Layers that write metadata under AMQ-owned mailbox directories can collide
-  with future AMQ files or cleanup logic.
+  with AMQ files or cleanup logic.
 - Layers that explain routes must reimplement AMQ's root, session, project,
   and peer routing rules.
-- Sending from a setup terminal to another session still lacks a clean way to
-  stamp the source session before the sender process is inside `coop exec`.
+- A setup terminal has no clean way to stamp the source session on a send
+  before the sender process is inside `coop exec`.
 
 ## Decision
 
@@ -79,7 +80,7 @@ Example:
 ```json
 {
   "schema_version": 1,
-  "amq_version": "0.33.0",
+  "amq_version": "<version>",
   "root": "/repo/.agent-mail/cto",
   "base_root": "/repo/.agent-mail",
   "session_name": "cto",
@@ -88,7 +89,7 @@ Example:
   "project": "app",
   "root_source": "project_amqrc",
   "peers": {
-    "infra": "/Users/me/src/infra/.agent-mail"
+    "infra": "/work/infra/.agent-mail"
   }
 }
 ```
@@ -121,15 +122,14 @@ Root or session metadata:
 
 The `<layer>` name must be identifier-like: lowercase ASCII letters, digits,
 hyphen, underscore, and dot. Reverse-DNS names are allowed, for example
-`io.github.omriariav.amq-squad` — the namespace used by
+`io.github.example.team-launcher`.
 [amq-squad](https://github.com/omriariav/amq-squad), a role-aware agent team
-launcher built on AMQ and a live implementation of this extension contract.
+launcher built on AMQ, implements this extension contract.
 
 AMQ guarantees:
 
 - Core AMQ will not create layer-owned files inside these directories.
-- Cleanup will not remove extension directories unless a future command
-  explicitly says it is cleaning extension metadata.
+- Cleanup does not remove extension directories.
 - Doctor commands may inspect manifests, report unknown extension files, and
   warn about malformed extension metadata.
 
@@ -163,11 +163,11 @@ Manifest v1:
 ```json
 {
   "schema_version": 1,
-  "layer": "io.github.omriariav.amq-squad",
-  "version": "0.3.1",
+  "layer": "io.github.example.team-launcher",
+  "version": "<version>",
   "owns": [
-    "agents/*/extensions/io.github.omriariav.amq-squad/launch.json",
-    "agents/*/extensions/io.github.omriariav.amq-squad/role.md"
+    "agents/*/extensions/io.github.example.team-launcher/launch.json",
+    "agents/*/extensions/io.github.example.team-launcher/role.md"
   ]
 }
 ```
@@ -305,10 +305,8 @@ Non-goals:
 
 - AMQ does not create missing source or target sessions as a side effect of
   `send`.
-- AMQ does not accept `--from-session` for cross-project peer claims unless a
-  future ADR defines that contract.
-- AMQ does not route `--from-session` across distinct base roots. Cross-base-root
-  pre-boot sends are future work.
+- AMQ does not accept `--from-session` for cross-project peer claims.
+- AMQ does not route `--from-session` across distinct base roots.
 - AMQ does not read layer metadata to decide the source session.
 
 ## Alternatives Considered

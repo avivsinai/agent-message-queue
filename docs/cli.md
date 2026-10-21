@@ -406,7 +406,7 @@ Usage:
 
 Join current on-disk evidence for one message without mutating the queue.
 
-Phase A reports message copies, route fields, visible delivery artifacts, DLQ entries,
+It reports message copies, route fields, visible delivery artifacts, DLQ entries,
 delivery receipts, thread references, and durable agent-owned notification write attempts.
 Notification evidence never proves that a TUI or person saw, displayed, or submitted it.
 
