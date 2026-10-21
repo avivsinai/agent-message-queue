@@ -671,27 +671,26 @@ func (a *Attachment) confirmRun(r *run, turnID string) (cancelPending bool) {
 // deliverPendingCancel sends the interrupt for a cancel that arrived while the
 // run was tentative, now that ownership is confirmed. No lock held.
 //
-// BK5 (agent-message-queue-611.22.20): this runs on a goroutine spawned from
-// the read loop, so it can be scheduled before Attach finishes publishing
-// a.client (the store happens after Dial returns, while the pump is already
-// live). The nil check makes that ordering harmless — a pre-publication
-// spawn gives up the interrupt (same failure shape as the transport error
-// below; TODO(B04) covers the lost intent) instead of racing the store.
-func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
+// It is an early interrupt, not the owner of the cancel. CancelExact answered
+// that cancel with cancel_requested, which the endpoint keeps on the record;
+// admission of a cancel_requested record calls CancelExact again, and while
+// the record owes the cancel, reconcile re-drives CancelExact each tick. Once
+// the run is confirmed those calls send turn/interrupt themselves, so a
+// failed send here, or a nil client, changes no state and loses no intent.
+//
+// This runs on a goroutine spawned from the read loop, so it can be scheduled
+// before Attach finishes publishing a.client (the store happens after Dial
+// returns, while the pump is already live). The nil check makes that ordering
+// harmless instead of racing the store.
+func (a *Attachment) deliverPendingCancel(turnID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	client := a.client.Load()
 	if client == nil {
 		return
 	}
-	if err := client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
-		// TODO(B04): a pending cancel that confirmed then raced completion is
-		// lost here with no state mutation; re-record the intent or emit an
-		// uncertain-cancel event so it is not silently dropped.
-		return
-	}
 	// The resulting turn/completed(interrupted) drives the cancelled state.
-	_ = key
+	_ = client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil)
 }
 
 // runIDLocked returns the run's correlation id. The caller MUST hold a.mu:
@@ -1578,9 +1577,7 @@ func (a *Attachment) onItem(n Notification) {
 			r.queued = false
 			// Our text is confirmed in this turn: bind byTurn and mark owned.
 			if a.confirmRun(r, p.TurnID) {
-				key := r.key
-				turnID := r.turnID
-				go a.deliverPendingCancel(key, turnID)
+				go a.deliverPendingCancel(r.turnID)
 			}
 			return
 		}

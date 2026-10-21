@@ -16,6 +16,7 @@ import (
 )
 
 func TestStartWakeWaitsForReadyFileAndPassesTarget(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	argsLog := filepath.Join(dir, "args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
@@ -90,6 +91,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 }
 
 func TestStartWakeDoesNotInheritCoopOwnerToken(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	t.Setenv("AMQ_WAKE_OWNER", "owner-for-the-calling-session")
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
@@ -121,6 +123,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 }
 
 func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
+	requireWakeProcessLane(t)
 	cases := []struct {
 		name          string
 		checkOutput   string
@@ -316,6 +319,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 }
 
 func TestStartWakeFailsWhenProcessExitsBeforeReady(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 printf 'invalid wake target for this surface\n' >&2
@@ -342,6 +346,7 @@ exit 7
 }
 
 func TestStartWakePreservesAlreadyTextWithoutRelabelingFailure(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 printf 'configuration was already migrated but target is invalid\n' >&2
@@ -362,6 +367,7 @@ exit 7
 }
 
 func TestStartWakeCancelAfterReadyDoesNotKillEstablishedWake(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	readyPathLog := filepath.Join(dir, "ready-path.log")
 	check := filepath.Join(dir, "check")
@@ -420,6 +426,7 @@ done
 }
 
 func TestStartWakeTimesOutWhenReadyFileNeverAppears(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	release := filepath.Join(dir, "release")
 	pidFile := filepath.Join(dir, "pid")
@@ -448,6 +455,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 }
 
 func TestStartWakeDrainSurvivesLauncherProcessExit(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	trigger := filepath.Join(dir, "trigger")
 	survived := filepath.Join(dir, "survived")
@@ -465,10 +473,9 @@ done
 umask 077
 printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
-# Phase markers (review 19:57:44Z, corrected 20:10:22Z): a failed stderr
-# write must FAIL this regression, not pass it. dd's exit code is recorded
-# and, if nonzero, the script exits with that code BEFORE either success
-# marker (phase-dd-ok / survived) is written.
+# Phase markers: a failed stderr write must FAIL this regression, not pass
+# it. dd's exit code is recorded and, if nonzero, the script exits with that
+# code BEFORE either success marker (phase-dd-ok / survived) is written.
 : > "$AMQ_KEEPALIVE_PHASE_BEFORE"
 dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null
 dd_exit=$?
@@ -517,9 +524,9 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 }
 
 // waitForFileWithDiagnostics is waitForFile with a bounded failure report at
-// the observed CI-failure boundary (review ruling 19:47:51Z): when the
-// marker does not appear, dump the test dir tree, the wake's recorded PID
-// and its liveness, and any leftover wake-stderr capture/diagnostic files.
+// the observed CI-failure boundary: when the marker does not appear, dump the
+// test dir tree, the wake's recorded PID and its liveness, and any leftover
+// wake-stderr capture/diagnostic files.
 // Diagnostic only - no behavior change, no timeout tuning.
 func retainedDirPath(dir string) string { return filepath.Join(dir, "retained-captures") }
 
@@ -534,7 +541,7 @@ func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration
 	}
 	var report strings.Builder
 	fmt.Fprintf(&report, "file %q did not appear within %s\n", path, timeout)
-	// Phase markers (review 19:57:44Z): state machine of the fake wake.
+	// Phase markers: state machine of the fake wake.
 	for _, name := range []string{"phase-before-stderr", "phase-dd-ok", "phase-dd-fail"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -558,8 +565,8 @@ func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration
 	}
 	// Retained captures: the launcher helper copies the wake-stderr capture
 	// and diagnostic files to a test-owned directory before StartWake's
-	// deferred Close unlinks them (review 19:57:44Z: the later scan cannot
-	// recover them from cache/amq-keepalive/readiness once unlinked).
+	// deferred Close unlinks them (the later scan cannot recover them from
+	// cache/amq-keepalive/readiness once unlinked).
 	if retainedEntries, err := os.ReadDir(filepath.Join(dir, "retained-captures")); err == nil {
 		report.WriteString("retained captures:\n")
 		for _, entry := range retainedEntries {
@@ -626,9 +633,9 @@ func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration
 }
 
 // retainCapturedWakeStderr installs a test-only replacement of
-// newWakeStartupStderrForStart (review ruling 20:02:35Z): the production
-// deferred Close unlinks the capture and diagnostic files before the launcher
-// helper returns, destroying the failure evidence. The wrapper hardlinks the
+// newWakeStartupStderrForStart: the production deferred Close unlinks the
+// capture and diagnostic files before the launcher helper returns, destroying
+// the failure evidence. The wrapper hardlinks the
 // two still-open files into the test-owned AMQ_KEEPALIVE_RETAINED_CAPTURES
 // directory immediately after creation, so the unlink leaves the test's own
 // links intact. No shared file description is read, seeked, or copied: the
@@ -719,6 +726,7 @@ func TestNewWakeReadyPathRejectsSymlinkAndRegularFile(t *testing.T) {
 }
 
 func TestRetireWakeEmitsExactArgvAndParsesRetired(t *testing.T) {
+	requireWakeProcessLane(t)
 	dir := t.TempDir()
 	argsLog := filepath.Join(dir, "args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
@@ -761,6 +769,18 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v\nwant %#v", got, want)
+	}
+}
+
+// requireWakeProcessLane gates the tests that run StartWake and RetireWake
+// against a fake amq shell script. Starting, detaching and reaping that child
+// is the contract under test, so these tests cannot avoid the process
+// boundary; they are wall-clock sensitive and run in their own serial CI
+// lane.
+func requireWakeProcessLane(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AMQ_WAKE_PROCESS_TESTS") != "1" {
+		t.Skip("wake process lane: set AMQ_WAKE_PROCESS_TESTS=1 and run this package with -p 1")
 	}
 }
 

@@ -3,8 +3,6 @@ package codex
 import (
 	"sync"
 	"testing"
-
-	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // Regression for BEAD BK5 (agent-message-queue-611.22.20): deliverPendingCancel
@@ -14,8 +12,8 @@ import (
 // unsynchronized field, that spawn raced the store (deterministic under
 // -race) and a fast-enough spawn read nil and panicked. The field is now an
 // atomic.Pointer published before Attach returns, and the spawned path
-// nil-checks and gives up the interrupt (the same lost-intent shape as the
-// TODO(B04) transport-error arm).
+// nil-checks and gives up the early interrupt; the endpoint still owns the
+// cancel and re-drives it through CancelExact.
 //
 // The test drives the window directly: readers run deliverPendingCancel
 // concurrently with the publication store, under -race. On the pre-fix form
@@ -42,7 +40,7 @@ func TestDeliverPendingCancelBeforePublicationIsSafe(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					a.deliverPendingCancel(bk5Key(), "turn-1")
+					a.deliverPendingCancel("turn-1")
 				}
 			}
 		}()
@@ -72,10 +70,4 @@ func TestDeliverPendingCancelBeforePublicationIsSafe(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	_ = srv
-}
-
-// bk5Key is the correlation key the spawned cancel carries; deliverPendingCancel
-// only forwards it, so the value is inert here.
-func bk5Key() requests.Key {
-	return requests.Key{CreatorHost: "local", TargetID: "codex:t1", RequestID: "11111111-1111-4111-8111-111111111501"}
 }

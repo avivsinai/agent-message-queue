@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/flynn/noise"
 )
@@ -12,8 +11,6 @@ import (
 const (
 	MaxFrameBytes          = MaxPayloadBytes + 64*1024
 	MaxHandshakeBytes      = 256
-	HandshakeDeadline      = 10 * time.Second
-	RoundDeadline          = 2 * time.Minute
 	frameOffer        byte = 1
 	frameWant         byte = 2
 	framePut          byte = 3

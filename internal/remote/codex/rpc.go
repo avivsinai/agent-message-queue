@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -188,14 +190,38 @@ func (c *Client) respondErrorCtx(ctx context.Context, id json.RawMessage, msg st
 	return c.ws.writeTextCtx(ctx, data)
 }
 
+// humanAnswerable reports whether a person can answer a server request in
+// another client on the thread: the approvals and questions the attachment
+// raises as interactions. The app-server applies the first answer from any
+// client, so an answer from us decides it for the owner.
+func humanAnswerable(method string) bool {
+	switch method {
+	case methodCommandApproval, methodFileChangeApproval, methodLegacyExecApproval,
+		methodPermissionsApproval, methodToolUserInput, methodMcpElicitation:
+		return true
+	}
+	return false
+}
+
 // reqWorker drains the reply-required queue. It exits when reqQ is closed.
+// A handler that panics has not answered its request and the worker keeps
+// draining. It answers that request with an error unless a person can answer
+// it elsewhere: a panic must never decide an approval or a question for the
+// owner, so the terminal keeps it.
 func (c *Client) reqWorker() {
 	defer close(c.reqWorkerDone)
 	for sr := range c.reqQ {
 		c.reqInFlight.Add(1)
 		func() {
 			defer func() {
-				_ = recover()
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "codex: server request %s handler panicked: %v\n%s", sr.Method, r, debug.Stack())
+					if !humanAnswerable(sr.Method) {
+						ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+						_ = c.respondErrorCtx(ctx, sr.ID, "server request handler failed: "+sr.Method)
+						cancel()
+					}
+				}
 				c.reqInFlight.Add(-1)
 			}()
 			if c.onServerRequest != nil {
