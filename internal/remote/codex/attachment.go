@@ -895,12 +895,10 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 			if existing.turnID == "" {
 				existing.turnID = t.ID
 			}
-			// A run installed by the submit path always has an epoch, but a
-			// run recovered by a concurrent history call that lost the race
-			// may have an empty epoch. Fill it from the requested epoch —
-			// history has proven this
-			// is the same native turn, so the entry answers for the epoch
-			// the endpoint holds.
+			// Every install path sets an epoch; an empty one is filled
+			// defensively from the requested epoch: history has proven this
+			// is the same native turn, so the entry answers for the epoch the
+			// endpoint holds.
 			if existing.epoch == "" {
 				existing.epoch = epoch
 			}

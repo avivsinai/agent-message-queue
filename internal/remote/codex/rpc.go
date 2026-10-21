@@ -343,9 +343,9 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	if err != nil {
 		return err
 	}
-	// writeText acquires the writer slot and writes with no ctx or deadline,
-	// so a wedged peer could stall the approval worker forever. Bound it like
-	// every other frame: slot acquisition + write under a 3s deadline.
+	// An unbounded write would let a wedged peer stall the approval worker
+	// forever, so this frame is bounded like every other: slot acquisition +
+	// write under a 3s deadline.
 	return c.ws.writeTextBounded(data)
 }
 
