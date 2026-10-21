@@ -112,7 +112,7 @@ of its agent. ACP facts are from agentclientprotocol.com.
 | Acceptance evidence | None native: `session/prompt` returns only at the end of the turn | submitted | ACP `/protocol/prompt-turn` |
 | Native run identity | `unavailable`: ACP returns no run id at prompt time | n/a | ACP `/protocol/prompt-turn` |
 | Completion evidence | The `session/prompt` response `stopReason` | completed | ACP `/protocol/prompt-turn`; `requestOutcome` |
-| Exact cancellation gate | `session/cancel` is session-wide; the bridge has no cancel request, so the adapter answers `unsupported` | `unsupported` | ACP `/protocol/prompt-turn` |
+| Exact cancellation gate | The adapter writes `cancels/<ref>.json` (bridge revision 5). The host sends `session/cancel`, which is session-wide, only after checking that the ref is its prompt in flight; it is the agent's only client and keeps one prompt in flight, so the cancel stops that request alone. A ref that has not run is refused `cancelled` | completed (`stopReason: cancelled`) | ACP `/protocol/prompt-turn`; `Host.prompt`, `Attachment.CancelExact` |
 | Steer | `unavailable` | n/a | - |
 | Approvals | `session/request_permission` during a request's turn becomes an `interaction` line with `presence: local_only`; the owner can reject from the remote face, and the host's policy rejects at expiry. Not live-verified against a real harness | approvals: reject only | ACP `/protocol/tool-calls`; `Host.askOwner` |
 | Native session identity | The ACP `sessionId`, published as `session_id` in `bridge.liveness` | delivered | `Host.writeLiveness` |
@@ -173,8 +173,8 @@ valid value for the runtime `terminal` enum.
 | Harness | inspect | submit | cancel_request | answer_question | approve_tool | steer | terminal |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | opt-in | false | unavailable |
-| pi | true | true | false | false | bridge revision 4 | false | unavailable |
-| ACP host | true | true | false | false | reject only | false | unavailable |
+| pi | true | true | bridge revision 5 | false | bridge revision 4 | false | unavailable |
+| ACP host | true | true | true | false | reject only | false | unavailable |
 | Claude Code | true | submitted | false | false | opt-in, reject only | false | unavailable |
 
 The v1 endpoint masks `steer` to false, even where an attachment declares it
@@ -203,10 +203,11 @@ Reasons for every `false` (source: as cited per row in §3):
   live-verified against a running Codex terminal.
 - `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: the app-server protocol has no PTY concept.
-- `pi.cancel_request`: the bridge has no cancel request. `ctx.abort()`
-  aborts the current operation, not one request, and the extension context
-  has no dequeue primitive for a queued request that has not started
-  (source: §3.2 "Exact cancellation gate").
+- `pi.cancel_request`: the reference bridge (revision 3) has no cancel
+  request, and the adapter advertises it only for a live bridge of revision
+  5. `ctx.abort()` aborts the current operation, not one request, and the
+  extension context has no dequeue primitive for a queued request that has
+  not started (source: §3.2 "Exact cancellation gate").
 - `pi.approve_tool` is true only while the live bridge advertises
   `bridge_revision` 4 or higher. That extension raises each approval under a
   request it owns as an `interaction` line and applies the first decision
@@ -218,7 +219,6 @@ Reasons for every `false` (source: as cited per row in §3):
 - `pi.answer_question`: the bridge has no external decision seam for the
   in-process `ctx.ui.select` await (source: §3.2 "Approvals/questions").
 - `pi.terminal`: no terminal binding is part of this adapter contract.
-- `acp.cancel_request`: the bridge has no cancel request (§3.4).
 - `acp.approve_tool` is advertised (the host is bridge revision 4), with a
   remote reject only: every approval is `presence: local_only` until a live
   capture shows that a harness puts the whole call in `rawInput`.

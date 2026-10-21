@@ -22,10 +22,12 @@ import (
 // updates and end_turn. With askPermission it first asks the client to allow
 // a tool call and records the option the client selected. With loadSession it
 // advertises session loading and answers session/load after replaying an
-// earlier answer.
+// earlier answer. With holdUntilCancel it answers a prompt only after
+// session/cancel, with stop reason cancelled.
 type fakeAgent struct {
-	askPermission bool
-	loadSession   bool
+	askPermission   bool
+	loadSession     bool
+	holdUntilCancel bool
 
 	mu       sync.Mutex
 	methods  []string
@@ -40,6 +42,7 @@ func (f *fakeAgent) serve(in io.Reader, out io.WriteCloser) {
 	respond := func(id json.RawMessage, result any) {
 		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	}
+	var held json.RawMessage
 	for scanner.Scan() {
 		var msg struct {
 			ID     json.RawMessage `json:"id"`
@@ -72,10 +75,19 @@ func (f *fakeAgent) serve(in io.Reader, out io.WriteCloser) {
 			respond(msg.ID, map[string]any{})
 		case "session/new":
 			respond(msg.ID, map[string]string{"sessionId": "s1"})
+		case "session/cancel":
+			if held != nil {
+				respond(held, map[string]string{"stopReason": "cancelled"})
+				held = nil
+			}
 		case "session/prompt":
 			f.mu.Lock()
 			f.prompts = append(f.prompts, msg.Params.Prompt[0].Text)
 			f.mu.Unlock()
+			if f.holdUntilCancel {
+				held = msg.ID
+				continue
+			}
 			if f.askPermission {
 				_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission", "params": map[string]any{
 					"sessionId": "s1",
@@ -464,5 +476,32 @@ func TestHostTakesARejectFromTheRemoteFace(t *testing.T) {
 	defer agent.mu.Unlock()
 	if agent.selected != "reject" {
 		t.Fatalf("host selected option %q; want the reject_once option", agent.selected)
+	}
+}
+
+func TestHostCancelsTheRemoteRequestInFlight(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{holdUntilCancel: true}
+	startHost(t, root, agent)
+	publishRequest(t, root, "a long task")
+	waitEvent(t, root, "started")
+
+	cancel, err := json.Marshal(map[string]string{"protocol": BridgeProtocol, "ref": testRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancels := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "cancels")
+	if err := os.MkdirAll(cancels, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cancels, testRef+".json"), cancel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	waitEvent(t, root, "cancelled")
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if !slices.Contains(agent.methods, "session/cancel") {
+		t.Fatalf("agent methods=%v; want session/cancel", agent.methods)
 	}
 }

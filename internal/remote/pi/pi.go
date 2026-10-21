@@ -966,6 +966,10 @@ func refusalCodeFor(reason string) protocol.Code {
 	case "revision":
 		// The extension does not accept this adapter's bridge_revision.
 		return protocol.CodeUnsupported
+	case "cancelled":
+		// A cancel file reached the extension before the request ran
+		// (protocol: bridge revision 5).
+		return protocol.CodeCancelledBeforeAdmission
 	default:
 		return protocol.CodeNativeError
 	}
@@ -1090,6 +1094,9 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	// answers/ (protocol: bridge revision 4). A weaker bridge is refused the
 	// capability, never given a substitute.
 	approve := live.live && live.revision >= ApproveBridgeRevision
+	// Exact cancel needs a live bridge that reads cancels/ (protocol:
+	// bridge revision 5).
+	cancel := live.live && live.revision >= CancelBridgeRevision
 	return protocol.Session{
 		Schema:             protocol.SchemaSession,
 		TargetID:           a.target,
@@ -1101,11 +1108,11 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 		PendingInteraction: pending,
 		// Capability projection: Steer is FALSE (v1 is followUp-only; the
 		// endpoint's v1 gate refuses deliver=steer pre-adapter and the
-		// adapter refuses it again pre-side-effect), cancel/question are
-		// false (no native seam; keystrokes are forbidden), approve needs
-		// bridge revision 4, terminal is unavailable.
+		// adapter refuses it again pre-side-effect), question is false (no
+		// native seam; keystrokes are forbidden), approve needs bridge
+		// revision 4, cancel needs revision 5, terminal is unavailable.
 		Capabilities: protocol.Capabilities{
-			Inspect: true, Submit: submit, CancelRequest: false, Steer: false,
+			Inspect: true, Submit: submit, CancelRequest: cancel, Steer: false,
 			ApproveTool: approve, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		// The adapter never claims `admitted` in Inspect — the per-ref
@@ -1415,12 +1422,17 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 	return ev, nil
 }
 
-// CancelExact implements core.Attachment. There is no native cancel seam
-// (keystrokes are forbidden; protocol: capabilities): a cancel is intent only and resolved when
-// the run is already terminal.
+// CancelExact implements core.Attachment. A live bridge of revision 5 or
+// later reads cancels/: the adapter publishes the ref's cancel and the
+// extension cancels the request if it is the one running, or refuses it
+// with reason cancelled if it has not run (protocol: bridge revision 5). The
+// outcome arrives on the event stream. Below revision 5 there is no cancel
+// seam (keystrokes are forbidden): a cancel resolves only a run that is
+// already terminal.
 func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
 	a.consume()     // 9a: seam reads outside a.mu; apply under it
 	a.lateBind(key) // 9a: same, for a key not yet bound
+	live := a.dir.liveness(a.now())
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	r, ok := a.runs[key]
@@ -1432,6 +1444,12 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	}
 	if r.state.Terminal() {
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
+	}
+	if live.live && live.revision >= CancelBridgeRevision {
+		if err := a.dir.publishCancel(r.ref, a.now()); err != nil && !errors.Is(err, ErrAlreadyDelivered) {
+			return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: err.Error()}, nil
+		}
+		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "cancel published for " + r.ref}, nil
 	}
 	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
 }

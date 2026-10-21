@@ -409,6 +409,9 @@ and is otherwise refused `busy`. Its text goes to the agent verbatim, and the
 answer comes back as the request's result. A tool call during a remote
 request shows in Buzz as an approval the owner can reject; the host rejects
 it anyway after five minutes, and approve from Buzz is not offered.
+Cancelling the request from Buzz (`/cancel <ref>`) or with
+`amq-remote cancel` sends ACP `session/cancel` for that turn only; a request
+that has not run never runs.
 
 `amq-acp host --check -- <agent command>` probes a harness before you use
 it: it runs only `initialize`, with no AMQ root, handle, or session, prints

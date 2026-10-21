@@ -803,6 +803,12 @@ wait:
 			cancelled = "the turn timed out after " + h.timeout.String()
 			break wait
 		case <-busy.C:
+			// The owner's cancel applies only to the request in flight:
+			// this loop runs exactly that turn.
+			if bridge != nil && h.cancelRequested(root, bridge.ref) {
+				cancelled = "the owner cancelled it"
+				break wait
+			}
 			// A remote request that arrives during a turn is refused busy
 			// at once, never queued behind it.
 			h.refuseBusy(root)
@@ -810,8 +816,10 @@ wait:
 	}
 	if cancelled != "" {
 		// A pending approval answers cancelled before the cancel goes out.
+		// The write runs apart: an agent that stopped reading its stdin
+		// cannot hold the turn past the grace.
 		close(collect.cancelled)
-		_ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID})
+		go func() { _ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID}) }()
 		grace := time.NewTimer(cancelGrace)
 		defer grace.Stop()
 		select {

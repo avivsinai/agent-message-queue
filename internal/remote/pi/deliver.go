@@ -75,6 +75,11 @@ const MinBridgeRevision = 3
 // revision 4). Below it the adapter advertises no approve_tool.
 const ApproveBridgeRevision = 4
 
+// CancelBridgeRevision is the lowest bridge_revision that reads cancels/
+// and cancels the request it names (protocol: bridge revision 5). Below it
+// the adapter advertises no cancel_request.
+const CancelBridgeRevision = 5
+
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
@@ -209,6 +214,25 @@ func validSessionID(id string) bool {
 func answerName(ref, interactionID string) string {
 	sum := sha256.Sum256([]byte(ref + "\x00" + interactionID))
 	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+// cancelRecord is the cancels/<ref>.json contract (protocol: bridge
+// revision 5).
+type cancelRecord struct {
+	Protocol string `json:"protocol"`
+	Ref      string `json:"ref"`
+	At       string `json:"at"`
+}
+
+// publishCancel writes the cancel of one ref create-new (the writeAtomicNew
+// rules). An existing file returns ErrAlreadyDelivered: the cancel was
+// already published and is never rewritten.
+func (b bridgeDir) publishCancel(ref string, now time.Time) error {
+	payload, err := json.Marshal(cancelRecord{Protocol: b.names.protocol, Ref: ref, At: protocol.FormatTime(now)})
+	if err != nil {
+		return fmt.Errorf("pi: marshal cancel %s: %v", ref, err)
+	}
+	return writeAtomicNew(filepath.Join(b.dir, "cancels", refSanitize(ref)+".json"), payload)
 }
 
 // answerPath is the answer file for one interaction of one ref.
