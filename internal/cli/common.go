@@ -698,8 +698,8 @@ func splitList(raw string) []string {
 // A send that loses its body should fail visibly, not deliver silently. When
 // the resolved body is empty after trimming, readBody returns an error unless
 // allowEmpty is set, so a dropped or mistyped body never ships as a blank
-// message. The lone "-" footgun (previously delivered as a literal hyphen) is
-// now treated as stdin and caught by the same empty check.
+// message. The lone "-" is treated as stdin and caught by the same empty
+// check.
 func readBody(bodyFlag string, allowEmpty bool) (string, error) {
 	body, err := resolveBody(bodyFlag)
 	if err != nil {

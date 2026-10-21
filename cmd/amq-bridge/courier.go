@@ -127,15 +127,16 @@ type PollResult struct {
 	// still apply and ACK.
 	//
 	// Retirement of a CONFLICTED transfer: there is no destination_rejected
-	// wire contract in this protocol — the ADR table row names an outcome
-	// stage the receiver never emits, and a redelivery loop cannot be closed
-	// from the wire. The refused envelope stays in the receiver's rendezvous
+	// wire contract in this protocol — the destination_rejected row of
+	// docs/adr-bridge-protocol.md#receipts is reserved and never emitted, and
+	// a redelivery loop cannot be closed from the wire. The refused envelope stays in the receiver's rendezvous
 	// queue and is re-reported on every poll; removing the LOCAL spool copy
 	// does NOT retire the posted remote item (this code has no
 	// source-deletion notification). Recovery is a rendezvous-operator action
 	// — clearing the conflicting envelope from the RENDEZVOUS queue (or
 	// replacing it with a corrected payload) — which the courier does not
-	// automate; the refusal is the steady-state signal until then.
+	// automate; the refusal is the steady-state signal until an operator
+	// clears the envelope.
 	Refused []RefusedTransfer `json:"refused,omitempty"`
 }
 
@@ -155,8 +156,8 @@ type RunResult struct {
 	// machine receipts: stuck retryable transfers, prepared/uncertain ledger
 	// histories, and torn ledger states from
 	// UnresolvedTransfers. writeRunResult serializes it after the
-	// receipts; without it the ledger diagnostic surface had no production
-	// caller.
+	// receipts; it is the production caller of the ledger diagnostic
+	// surface.
 	Diagnostics []LedgerDiagnostic `json:"diagnostics,omitempty"`
 }
 

@@ -141,8 +141,8 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 // config lock. It reads via the DeliveryRoot (regular-file, no-follow),
 // preserves Version/CreatedUTC AND every unmodelled key (the
 // Config struct models version/created_utc/agents only; re-marshalling the
-// bare struct dropped any other key an operator hand-added or a newer
-// writer emitted - probe names default_agent, project, wake, extensions,
+// bare struct would drop any other key an operator hand-added or a newer
+// writer emitted — for example default_agent, project, wake, extensions,
 // routing). The read decodes the file into a raw key map, the known fields
 // are overlaid, agents is mutated, and the full map is re-marshalled
 // (keys sorted by encoding/json - deterministic). Unknown keys are

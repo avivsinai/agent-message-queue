@@ -979,7 +979,7 @@ func ensureNotificationAttempt(
 	}
 	if err != nil {
 		// Begin may return the built identity with the error (append failure).
-		// Pass it through so the caller can record "recording failed"
+		// Pass it through so the caller can record "recording failed",
 		// but do NOT cache an unpersisted lifecycle.
 		return lifecycle, err
 	}

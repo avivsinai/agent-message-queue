@@ -102,8 +102,8 @@ func flushDirHandle(handle windows.Handle, name string) error {
 // is the mechanism that makes the NT rename-information-class renames
 // (maildir claim, no-replace publication, renameDirectChildNoReplace,
 // DeliveryRoot.WriteFileAtomic) durable — those classes have no
-// write-through flag — and it establishes the directory chain the ADR
-// requires.
+// write-through flag — and it establishes the directory-chain durability
+// that docs/adr-bridge-protocol.md#transfer-ledger requires.
 func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	clean := filepath.ToSlash(filepath.Clean(dir))
 	if clean == "." || clean == "/" || clean == "" {
