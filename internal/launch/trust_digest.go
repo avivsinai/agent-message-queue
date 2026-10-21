@@ -50,14 +50,12 @@ func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.Deli
 	return executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest, nil)
 }
 
-// PrepareTrustDigest binds a nonce-free plan digest to the canonical target
-// and its physical identity. For an absent session, rootIdentity is a stable
-// intended-child identity derived from the pinned parent and child name.
-// onLiveKeep is sorted handles with explicit keep; empty preserves the v0.61 digest.
-func PrepareTrustDigest(planDigest, session, rootPath, rootIdentity string, onLiveKeep []string) (string, error) {
-	return PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, "", onLiveKeep)
-}
-
+// PrepareTrustDigestWithAuthority binds a nonce-free plan digest to the
+// canonical target and its physical identity. For an absent session,
+// rootIdentity is a stable intended-child identity derived from the pinned
+// parent and child name. onLiveKeep is sorted handles with explicit keep;
+// empty preserves the v0.61 digest. An empty authorityDigest keeps the
+// pre-authority digest.
 func PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string, onLiveKeep []string) (string, error) {
 	if !validDigest(planDigest) {
 		return "", fmt.Errorf("invalid prepare plan digest")

@@ -960,7 +960,7 @@ func (a App) adapterRegistry() adapter.Registry {
 	if state == nil {
 		state = &adapterLogState{last: map[string]time.Time{}}
 	}
-	return adapter.DefaultRegistryWithLogf(a.rateLimitedAdapterLogf(state))
+	return adapter.DefaultRegistry(a.rateLimitedAdapterLogf(state))
 }
 
 type ownershipRememberer interface {

@@ -122,10 +122,6 @@ type LeaseInspection struct {
 	Nonce    string
 }
 
-func LeasePath(sessionRoot string) string {
-	return filepath.Join(sessionRoot, bindingDirectory, leaseFilename)
-}
-
 func AcquireLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
 	if root == nil {
 		return nil, fmt.Errorf("missing pinned session root")
@@ -172,19 +168,6 @@ func AcquireLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
 	}
 	lease := &Lease{root: root, nonce: nonce, holder: holder, secret: secret}
 	return lease, nil
-}
-
-func InspectLease(root *fsq.DeliveryRoot) (LeaseInspection, error) {
-	if root == nil {
-		return LeaseInspection{}, fmt.Errorf("missing pinned session root")
-	}
-	var inspection LeaseInspection
-	err := withLeaseInterlock(root, func() error {
-		var inspectErr error
-		inspection, inspectErr = inspectLeaseLocked(root)
-		return inspectErr
-	})
-	return inspection, err
 }
 
 func (l *Lease) LockHandles(handles ...string) error {
