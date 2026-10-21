@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
 )
@@ -294,7 +293,7 @@ func acquireWakeLockWithOptionsInDir(
 		var replace wakeLockInspection
 		var created wakeLockInspection
 		quarantined := false
-		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err
@@ -332,63 +331,16 @@ func acquireWakeLockWithOptionsInDir(
 				}
 			}
 			if inspection.Exists {
-				switch inspection.Status {
-				case wakeLockStale:
-					if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
-						return err
-					}
-					if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, inspection); err != nil {
-						return err
-					}
-					if err := removeWakeLockIfUnchangedGuardedAt(scope, inspection); err != nil {
-						return err
-					}
-				case wakeLockCreating:
-					return &wakeLockCreatingError{}
-				case wakeLockValid:
-					if options.acceptExistingValid {
-						if options.requestedOwner != nil &&
-							(inspection.Lock.WakeMode != wakeOwnerWakeMode ||
-								!sameWakeOwner(inspection.Lock.Owner, options.requestedOwner)) {
-							return fmt.Errorf(
-								"existing wake for %s is not bound to the requested exact owner; refusing readiness reuse",
-								me,
-							)
-						}
-						if err := requireWakeLockUsableAt(
-							dirfd, agentDir, inspection, options.wakeMode, options.target,
-						); err != nil {
-							return err
-						}
-						return wakeLockAlreadyRunningError(me, inspection)
-					}
-					replaceNeeded, replaceErr := wakeLockReplacementNeededAt(
-						dirfd, agentDir, inspection,
-					)
-					if replaceErr != nil {
-						return replaceErr
-					}
-					if replaceNeeded {
-						replace = inspection
-						return nil
-					}
-					return wakeLockAlreadyRunningError(me, inspection)
-				case wakeLockUnverified:
-					if options.refuseUnverifiedGeneric {
-						return fmt.Errorf(
-							"wake lock for %s cannot be verified; lock: %s; root: %s; retry coop exec with -y",
-							me,
-							inspection.LockPath,
-							inspection.Root,
-						)
-					}
-					if err := supersedeUnverifiedGenericWakeAt(scope, inspection); err != nil {
-						return err
-					}
+				replaceNeeded, settleErr := settleExistingGenericWakeLockAt(
+					scope, dirfd, agentDir, me, inspection, options,
+				)
+				if settleErr != nil {
+					return settleErr
 				}
-			}
-			if replace.Exists {
-				return nil
+				if replaceNeeded {
+					replace = inspection
+					return nil
+				}
 			}
 			if !inspection.Exists && options.target == nil && options.repairLineage == nil {
 				orphan, exists, readErr := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
@@ -441,69 +393,9 @@ func acquireWakeLockWithOptionsInDir(
 				return err
 			}
 
-			// Stage target metadata first. The lock is the transaction commit point.
-			if options.target != nil {
-				if err := debugWakeNoLockShadowReplacementAt(
-					dirfd, agentDir, root, me, "generic", options.debug,
-				); err != nil {
-					return fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
-				}
-				if err := writeWakeTargetGuardedAt(scope, root, me, *options.target); err != nil {
-					return err
-				}
-			} else {
-				// Revalidate canonical identity before the targetless
-				// blind-unlink. A directory swap leaves the retained dirfd
-				// pointing at the detached OLD directory; unlinking there
-				// misses the canonical namespace. Refuse.
-				if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-					return err
-				}
-				_, targetExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
-				if err != nil {
-					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", err)
-				}
-				if targetExists {
-					return fmt.Errorf("orphan wake target is preserved because it may be an uncommitted bound-claim shadow")
-				}
-				if err := removeWakeTargetGuardedAt(scope); err != nil {
-					return err
-				}
-			}
-
-			lock, err := newWakeLock(root, me, options)
-			if err != nil {
-				return err
-			}
-			if options.target != nil {
-				if err := publishWakeStateAndBindLockAt(scope, root, me, &lock); err != nil {
-					return fmt.Errorf("publish wake state before generic wake lock: %w", err)
-				}
-			}
-			if options.repairLineage != nil {
-				err = createWakeRepairLockAt(
-					scope,
-					root,
-					me,
-					options.repairLineage.source.RootIdentity,
-					lock,
-				)
-			} else {
-				err = createWakeLockAt(scope, root, me, lock)
-			}
-			if err != nil {
-				return err
-			}
-			created = inspectWakeLockAt(dirfd, agentDir, root, me)
-			if !created.Exists || created.Lock.Generation != lock.Generation {
-				return fmt.Errorf("failed to verify created wake lock generation")
-			}
-			if options.target != nil {
-				if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
-					return fmt.Errorf("verify created generic wake binding: %w", err)
-				}
-			}
-			return nil
+			var createErr error
+			created, createErr = createGenericWakeLockAt(scope, dirfd, agentDir, root, me, options)
+			return createErr
 		})
 		if err != nil {
 			return nil, err
@@ -522,7 +414,7 @@ func acquireWakeLockWithOptionsInDir(
 		}
 
 		cleanup = func() {
-			if cleanupErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			if cleanupErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 				return cleanupGenericWakeGenerationAt(
 					scope,
 					root,
@@ -536,6 +428,147 @@ func acquireWakeLockWithOptionsInDir(
 		}
 		return cleanup, nil
 	}
+}
+
+// createGenericWakeLockAt stages target metadata, then creates and verifies
+// the generic lock inside the caller's mutation scope.
+func createGenericWakeLockAt(
+	scope *wakeMutationScope,
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root, me string,
+	options wakeLockAcquireOptions,
+) (wakeLockInspection, error) {
+	// Stage target metadata first. The lock is the transaction commit point.
+	if options.target != nil {
+		if err := debugWakeNoLockShadowReplacementAt(
+			dirfd, agentDir, root, me, "generic", options.debug,
+		); err != nil {
+			return wakeLockInspection{}, fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
+		}
+		if err := writeWakeTargetGuardedAt(scope, root, me, *options.target); err != nil {
+			return wakeLockInspection{}, err
+		}
+	} else {
+		// Revalidate canonical identity before the targetless
+		// blind-unlink. A directory swap leaves the retained dirfd
+		// pointing at the detached OLD directory; unlinking there
+		// misses the canonical namespace. Refuse.
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return wakeLockInspection{}, err
+		}
+		_, targetExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+		if err != nil {
+			return wakeLockInspection{}, fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", err)
+		}
+		if targetExists {
+			return wakeLockInspection{}, fmt.Errorf("orphan wake target is preserved because it may be an uncommitted bound-claim shadow")
+		}
+		if err := removeWakeTargetGuardedAt(scope); err != nil {
+			return wakeLockInspection{}, err
+		}
+	}
+
+	lock, err := newWakeLock(root, me, options)
+	if err != nil {
+		return wakeLockInspection{}, err
+	}
+	if options.target != nil {
+		if err := publishWakeStateAndBindLockAt(scope, root, me, &lock); err != nil {
+			return wakeLockInspection{}, fmt.Errorf("publish wake state before generic wake lock: %w", err)
+		}
+	}
+	if options.repairLineage != nil {
+		err = createWakeRepairLockAt(
+			scope,
+			root,
+			me,
+			options.repairLineage.source.RootIdentity,
+			lock,
+		)
+	} else {
+		err = createWakeLockAt(scope, root, me, lock)
+	}
+	if err != nil {
+		return wakeLockInspection{}, err
+	}
+	created := inspectWakeLockAt(dirfd, agentDir, root, me)
+	if !created.Exists || created.Lock.Generation != lock.Generation {
+		return wakeLockInspection{}, fmt.Errorf("failed to verify created wake lock generation")
+	}
+	if options.target != nil {
+		if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
+			return wakeLockInspection{}, fmt.Errorf("verify created generic wake binding: %w", err)
+		}
+	}
+	return created, nil
+}
+
+// settleExistingGenericWakeLockAt clears a stale or unverified generic lock
+// inside the caller's mutation scope, or refuses. It returns true when a valid
+// lock must be terminated and replaced after the scope is released.
+func settleExistingGenericWakeLockAt(
+	scope *wakeMutationScope,
+	dirfd int,
+	agentDir *wakeAgentDir,
+	me string,
+	inspection wakeLockInspection,
+	options wakeLockAcquireOptions,
+) (bool, error) {
+	switch inspection.Status {
+	case wakeLockStale:
+		if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
+			return false, err
+		}
+		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, inspection); err != nil {
+			return false, err
+		}
+		if err := removeWakeLockIfUnchangedGuardedAt(scope, inspection); err != nil {
+			return false, err
+		}
+	case wakeLockCreating:
+		return false, &wakeLockCreatingError{}
+	case wakeLockValid:
+		if options.acceptExistingValid {
+			if options.requestedOwner != nil &&
+				(inspection.Lock.WakeMode != wakeOwnerWakeMode ||
+					!sameWakeOwner(inspection.Lock.Owner, options.requestedOwner)) {
+				return false, fmt.Errorf(
+					"existing wake for %s is not bound to the requested exact owner; refusing readiness reuse",
+					me,
+				)
+			}
+			if err := requireWakeLockUsableAt(
+				dirfd, agentDir, inspection, options.wakeMode, options.target,
+			); err != nil {
+				return false, err
+			}
+			return false, wakeLockAlreadyRunningError(me, inspection)
+		}
+		replaceNeeded, replaceErr := wakeLockReplacementNeededAt(
+			dirfd, agentDir, inspection,
+		)
+		if replaceErr != nil {
+			return false, replaceErr
+		}
+		if replaceNeeded {
+			return true, nil
+		}
+		return false, wakeLockAlreadyRunningError(me, inspection)
+	case wakeLockUnverified:
+		if options.refuseUnverifiedGeneric {
+			return false, fmt.Errorf(
+				"wake lock for %s cannot be verified; lock: %s; root: %s; retry coop exec with -y",
+				me,
+				inspection.LockPath,
+				inspection.Root,
+			)
+		}
+		if err := supersedeUnverifiedGenericWakeAt(scope, inspection); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func cleanupGenericWakeGenerationAt(
@@ -564,7 +597,12 @@ func cleanupGenericWakeGenerationAt(
 		me,
 		current,
 	)
-	committed, lockRemovalErr := removeWakeLockIfUnchangedGuardedAtStatus(scope, current)
+	removal := removeWakeLockIfUnchangedGuardedAtOutcome(
+		scope,
+		current,
+		wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup},
+	)
+	committed, lockRemovalErr := removal.Committed, removal.Err
 	blockingRemovalErr, diagnosticRemovalErr := splitWakeSelfUpgradeDiagnosticResidue(lockRemovalErr)
 	if blockingRemovalErr != nil {
 		return errors.Join(
@@ -1097,171 +1135,15 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	}
 	defer func() { _ = agentDir.Close() }()
 
-	var target wakeTarget
-	var repairFloor wakeRepairFloor
-	var lineage wakeRepairLineage
-	var unverifiedSupersession wakeLockInspection
-	var inboxDir *wakeInboxDir
-	defer func() { _ = inboxDir.Close() }()
-	prepareErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	prep := wakeRepairPreparation{result: &result}
+	defer func() { _ = prep.inboxDir.Close() }()
+	prepareErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
 		}
 		agentDir = scopedAgentDir
-		inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
-		if !inspection.Exists {
-			result.Status = "refused"
-			result.Reason = "no wake lock present; start wake normally"
-			return errors.New(result.Reason)
-		}
-		switch inspection.Status {
-		case wakeLockValid:
-			result.Status = "refused"
-			result.PID = inspection.PID
-			result.Reason = "wake lock is already valid; refusing repair"
-			return errors.New(result.Reason)
-		case wakeLockStale:
-			if err := validateWakeLockRepairable(inspection); err != nil {
-				result.Status = "refused"
-				result.PID = inspection.PID
-				result.Reason = err.Error()
-				return err
-			}
-		case wakeLockCreating:
-			result.Status = "refused"
-			result.Reason = "wake lock is being created; retry shortly"
-			return errors.New(result.Reason)
-		case wakeLockUnverified:
-			if classifyPersistedWakeClaim(inspection) != wakeClaimGeneric {
-				result.Status = "refused"
-				result.PID = inspection.PID
-				result.Reason = fmt.Sprintf(
-					"unverified wake is not an ownerless generic claim; use %s for an owner-bound claim",
-					wakeRecoverOwnerCommand(root, me),
-				)
-				return errors.New(result.Reason)
-			}
-			unverifiedSupersession = inspection
-		default:
-			result.Status = "refused"
-			result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
-			return errors.New(result.Reason)
-		}
-		if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
-			result.Status = "refused"
-			result.PID = inspection.PID
-			result.Reason = err.Error()
-			return err
-		}
-
-		var exists bool
-		target, exists, err = readWakeTargetFromStateForInspectionAt(
-			dirfd, agentDir, root, me, inspection,
-		)
-		if err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		if !exists {
-			result.Status = "refused"
-			result.Reason = "no inject-via wake target; restart wake manually"
-			return errors.New(result.Reason)
-		}
-		if err := validateWakeTarget(target, root, me); err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		if target.Owner != nil {
-			result.Status = "refused"
-			result.PID = inspection.PID
-			result.Reason = fmt.Sprintf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
-			return errors.New(result.Reason)
-		}
-		if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		repairFloor, exists, err = readWakeRepairFloorAt(dirfd, agentDir)
-		if err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		if !exists {
-			result.Status = "refused"
-			result.Reason = "wake repair floor is missing; restart wake manually"
-			return errors.New(result.Reason)
-		}
-		if err := validateWakeRepairFloor(repairFloor, root, me, inspection.Lock, target); err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		if err := validateWakeRepairFloorCurrentBoot(repairFloor); err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		inboxDir, err = openWakeRepairInboxDir(agentDir)
-		if err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		handoffSource, err := newWakeRepairHandoffSource(
-			repairFloor,
-			target,
-			agentDir,
-			inboxDir,
-		)
-		if err != nil {
-			result.Status = "refused"
-			result.Reason = err.Error()
-			return err
-		}
-		lineage = wakeRepairLineage{
-			source: wakeRepairSource{
-				Root:                 handoffSource.Root(),
-				RootIdentity:         handoffSource.RootIdentity(),
-				Agent:                handoffSource.Agent(),
-				DeadGeneration:       handoffSource.SourceGeneration(),
-				BootID:               handoffSource.BootID(),
-				Owner:                handoffSource.Owner(),
-				SourceTargetDigest:   handoffSource.SourceTargetDigest(),
-				SourceFloorDigest:    handoffSource.SourceFloorDigest(),
-				AgentDirDevice:       handoffSource.agentDirDevice,
-				AgentDirInode:        handoffSource.agentDirInode,
-				InboxParentDirDevice: handoffSource.inboxParentDirDevice,
-				InboxParentDirInode:  handoffSource.inboxParentDirInode,
-				InboxDirDevice:       handoffSource.inboxDirDevice,
-				InboxDirInode:        handoffSource.inboxDirInode,
-			},
-			floor: repairFloor,
-		}
-		result.RepairAvailable = true
-		var removeErr error
-		if unverifiedSupersession.Exists {
-			removeErr = supersedeUnverifiedGenericWakeAt(scope, unverifiedSupersession)
-		} else {
-			removeErr = removeWakeLockIfUnchangedGuardedAt(scope, inspection)
-		}
-		if removeErr != nil {
-			result.Status = "refused"
-			result.RepairAvailable = false
-			result.PID = inspectWakeLockAt(dirfd, agentDir, root, me).PID
-			var detachedCleanup *wakeDetachedCleanupOnlyError
-			if errors.As(removeErr, &detachedCleanup) {
-				result.Reason = removeErr.Error()
-				return removeErr
-			}
-			result.Reason = "wake lock changed before repair"
-			return errors.New(result.Reason)
-		}
-		return nil
+		return prep.prepareAt(scope, dirfd, agentDir, root, me)
 	})
 	if prepareErr != nil {
 		prepareErr = withWakeDiagnostic(prepareErr, result.Root, result.Agent)
@@ -1271,7 +1153,8 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 
 	// Spawning and the private prepared handshake happen without the lifecycle
 	// guard. The retained directory capability remains open across the wait.
-	child, startErr := startWakeFromTarget(agentDir, inboxDir, root, me, target, lineage)
+	target, lineage := prep.target, prep.lineage
+	child, startErr := startWakeFromTarget(agentDir, prep.inboxDir, root, me, target, lineage)
 	if startErr != nil {
 		if child != nil {
 			_ = cleanupFailedWakeRepairChild(agentDir, root, me, child)
@@ -1345,6 +1228,181 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	return result, nil
 }
 
+// wakeRepairPreparation carries what repairWake proves inside its mutation
+// scope to the unguarded child start. repairWake defers the inbox release.
+type wakeRepairPreparation struct {
+	result   *wakeRepairResult
+	target   wakeTarget
+	lineage  wakeRepairLineage
+	inboxDir *wakeInboxDir
+}
+
+func (p *wakeRepairPreparation) prepareAt(
+	scope *wakeMutationScope,
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root, me string,
+) error {
+	result := p.result
+	var repairFloor wakeRepairFloor
+	var unverifiedSupersession wakeLockInspection
+	var err error
+	inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
+	if !inspection.Exists {
+		result.Status = "refused"
+		result.Reason = "no wake lock present; start wake normally"
+		return errors.New(result.Reason)
+	}
+	switch inspection.Status {
+	case wakeLockValid:
+		result.Status = "refused"
+		result.PID = inspection.PID
+		result.Reason = "wake lock is already valid; refusing repair"
+		return errors.New(result.Reason)
+	case wakeLockStale:
+		if err := validateWakeLockRepairable(inspection); err != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = err.Error()
+			return err
+		}
+	case wakeLockCreating:
+		result.Status = "refused"
+		result.Reason = "wake lock is being created; retry shortly"
+		return errors.New(result.Reason)
+	case wakeLockUnverified:
+		if classifyPersistedWakeClaim(inspection) != wakeClaimGeneric {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = fmt.Sprintf(
+				"unverified wake is not an ownerless generic claim; use %s for an owner-bound claim",
+				wakeRecoverOwnerCommand(root, me),
+			)
+			return errors.New(result.Reason)
+		}
+		unverifiedSupersession = inspection
+	default:
+		result.Status = "refused"
+		result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
+		return errors.New(result.Reason)
+	}
+	if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
+		result.Status = "refused"
+		result.PID = inspection.PID
+		result.Reason = err.Error()
+		return err
+	}
+
+	var exists bool
+	selection, err := readWakeStateSelectionForInspectionAt(
+		dirfd, agentDir, root, me, inspection,
+	)
+	p.target, exists = selection.Target, selection.TargetPresent
+	if err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	if !exists {
+		result.Status = "refused"
+		result.Reason = "no inject-via wake target; restart wake manually"
+		return errors.New(result.Reason)
+	}
+	if err := validateWakeTarget(p.target, root, me); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	if p.target.Owner != nil {
+		result.Status = "refused"
+		result.PID = inspection.PID
+		result.Reason = fmt.Sprintf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
+		return errors.New(result.Reason)
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, p.target); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	repairFloor, exists, err = readWakeRepairFloorAt(dirfd, agentDir)
+	if err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	if !exists {
+		result.Status = "refused"
+		result.Reason = "wake repair floor is missing; restart wake manually"
+		return errors.New(result.Reason)
+	}
+	if err := validateWakeRepairFloor(repairFloor, root, me, inspection.Lock, p.target); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	if err := validateWakeRepairFloorCurrentBoot(repairFloor); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	p.inboxDir, err = openWakeRepairInboxDir(agentDir)
+	if err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	handoffSource, err := newWakeRepairHandoffSource(
+		repairFloor,
+		p.target,
+		agentDir,
+		p.inboxDir,
+	)
+	if err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return err
+	}
+	p.lineage = wakeRepairLineage{
+		source: wakeRepairSource{
+			Root:                 handoffSource.Root(),
+			RootIdentity:         handoffSource.RootIdentity(),
+			Agent:                handoffSource.Agent(),
+			DeadGeneration:       handoffSource.SourceGeneration(),
+			BootID:               handoffSource.BootID(),
+			Owner:                handoffSource.Owner(),
+			SourceTargetDigest:   handoffSource.SourceTargetDigest(),
+			SourceFloorDigest:    handoffSource.SourceFloorDigest(),
+			AgentDirDevice:       handoffSource.agentDirDevice,
+			AgentDirInode:        handoffSource.agentDirInode,
+			InboxParentDirDevice: handoffSource.inboxParentDirDevice,
+			InboxParentDirInode:  handoffSource.inboxParentDirInode,
+			InboxDirDevice:       handoffSource.inboxDirDevice,
+			InboxDirInode:        handoffSource.inboxDirInode,
+		},
+		floor: repairFloor,
+	}
+	result.RepairAvailable = true
+	var removeErr error
+	if unverifiedSupersession.Exists {
+		removeErr = supersedeUnverifiedGenericWakeAt(scope, unverifiedSupersession)
+	} else {
+		removeErr = removeWakeLockIfUnchangedGuardedAt(scope, inspection)
+	}
+	if removeErr != nil {
+		result.Status = "refused"
+		result.RepairAvailable = false
+		result.PID = inspectWakeLockAt(dirfd, agentDir, root, me).PID
+		var detachedCleanup *wakeDetachedCleanupOnlyError
+		if errors.As(removeErr, &detachedCleanup) {
+			result.Reason = removeErr.Error()
+			return removeErr
+		}
+		result.Reason = "wake lock changed before repair"
+		return errors.New(result.Reason)
+	}
+	return nil
+}
+
 func validatePreparedRepairWakeWinnerInDir(
 	agentDir *wakeAgentDir,
 	root, me string,
@@ -1365,7 +1423,7 @@ func validatePreparedRepairWakeWinnerInDir(
 		child.Source.RootIdentity() != lineage.source.RootIdentity {
 		return winner, fmt.Errorf("started wake repair child source lineage mismatch")
 	}
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		if err := revalidateWakeRepairRootIdentity(root, lineage.source.RootIdentity); err != nil {
 			return err
 		}
@@ -1482,7 +1540,7 @@ func cleanupFailedWakeRepairChild(
 	if child.Process == nil || child.Process.Pid <= 0 {
 		return cleanupErr
 	}
-	metadataErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	metadataErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1832,6 +1890,213 @@ func commitWakeRestartReadiness(
 	return nil
 }
 
+// wakeStart is the state of one wake startup, from flag parsing to the
+// handoff into the event loop. Its methods are the startup phases;
+// runWakeWithLoop owns every deferred release, so a phase return never
+// closes a capability, stops a listener, or releases the lock. The one
+// exception is reuseExistingWake, which closes its readiness publication on
+// return; its caller then returns at once.
+type wakeStart struct {
+	args  []string
+	flags *wakeStartFlags
+
+	resumeBootstrap      *wakeResumeBootstrap
+	resumePreflight      *wakeResumeBootstrap
+	resumeContext        *wakeResumeBootstrap
+	restartSignals       chan os.Signal
+	privateStop          <-chan struct{}
+	attention            *os.File
+	repairHandoff        *wakeRepairChildHandoff
+	repairHandoffPresent bool
+
+	injectMode          string
+	requestedInjectMode string
+	retryUntil          string
+	flagSettings        wakeSettings
+	explicitSettings    []string
+	me                  string
+	root                string
+	injectVia           string
+	readyFile           string
+	repairGeneration    string
+	interruptKey        string
+
+	resumeImageEvidence *wakeImageEvidenceV1
+	cleanupResumeStage  func() error
+	// A resumed generation keeps its lock until the previous stage is reclaimed
+	// and the exact restart record is consumed at the readiness boundary.
+	retainLockOnRestartCleanupError *bool
+
+	requestedOwner   *wakeOwner
+	ownerObservation wakeOwnerObservation
+
+	initialNotifierStatus string
+	initialNotifierMode   string
+	initialNotifierReason string
+
+	target         *wakeTarget
+	repairLineage  *wakeRepairLineage
+	repairAgentDir *wakeAgentDir
+	repairInboxDir *wakeInboxDir
+	activeAgentDir *wakeAgentDir
+
+	// cleanup releases the acquired lock. The deferred stage cleanup reads it
+	// when runWakeWithLoop returns, after acquireLock has set it.
+	cleanup                 func()
+	resumeEligible          bool
+	reloadTransportEligible bool
+	// The lock options hold this field's address and onBaselineReady writes
+	// through it, so the generation cleanup sees the published floor.
+	repairFloorAuthority wakeRepairFloorAuthority
+
+	controlStop                   <-chan struct{}
+	currentWake                   wakeLockInspection
+	startupSettings               wakeSettingsStartup
+	machineSettingsPath           string
+	pendingStartupSettingsApplied *wakeSettingsAppliedStatus
+	selfUpgrade                   wakeSelfUpgradeState
+	terminalAuthority             *wakeTerminalAuthority
+}
+
+type wakeStartFlags struct {
+	fs                   *flag.FlagSet
+	common               *commonFlags
+	settings             *wakeSettings
+	injectCmd            *string
+	injectVia            *string
+	injectArgs           multiStringFlag
+	retryUntil           *string
+	injectMode           *string
+	interruptCmd         *string
+	readyFile            *string
+	debug                *bool
+	acceptExistingWake   *bool
+	refuseUnverifiedWake *bool
+	repairLineage        *string
+	baselineExisting     *bool
+	noSelfUpgrade        *bool
+	resumePreflight      *bool
+	usage                func()
+}
+
+func newWakeStartFlags() *wakeStartFlags {
+	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
+	f := &wakeStartFlags{fs: fs}
+	f.common = addCommonFlags(fs)
+	f.settings = registerWakeSettingsFlags(fs)
+	f.injectCmd = fs.String("inject-cmd", "", "Command to inject (power user mode)")
+	f.injectVia = fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
+	fs.Var(&f.injectArgs, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
+	f.retryUntil = fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
+	f.injectMode = fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
+	f.interruptCmd = fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
+	f.readyFile = fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
+	f.debug = fs.Bool("debug", false, "Log injection diagnostics to stderr")
+	f.acceptExistingWake = fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
+	f.refuseUnverifiedWake = fs.Bool("refuse-unverified-wake", false, "Internal: refuse unverified wake locks instead of superseding them")
+	f.repairLineage = fs.String("repair-lineage", "", "Internal: inherit the suppression floor from an exact dead wake generation")
+	f.baselineExisting = fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
+	f.noSelfUpgrade = fs.Bool("no-self-upgrade", false, "Disable automatic replacement by a newer installed AMQ image")
+	f.resumePreflight = fs.Bool(wakeResumePreflightFlag, false, "Internal: validate an exact wake resume without starting")
+
+	f.usage = usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
+		[]string{"ready-file", "accept-existing-wake", "refuse-unverified-wake", "repair-lineage", wakeResumePreflightFlag},
+		wakeUsageNotes...)
+	return f
+}
+
+var wakeUsageNotes = []string{
+	"Background waker: injects terminal notification when messages arrive.",
+	"Run as background job before starting CLI: amq wake --me claude --interrupt-cmd none &",
+	"",
+	"Inject modes:",
+	"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
+	"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
+	"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
+	"  none  - Output notice on wake stderr; zero terminal input injection",
+	"          (urgent interrupts degrade to one bell + output notice)",
+	"",
+	"External injection:",
+	"  --inject-via runs a local executable for each notification, bypassing",
+	"  the TIOCSTI/stdin-TTY startup requirement. Fixed arguments use repeatable",
+	"  --inject-arg; AMQ appends the sanitized notification payload as the",
+	"  final argv element. The command is not run through a shell.",
+	"  --retry-until drained (default) reannounces until inbox progress.",
+	"  --retry-until injected stops reannouncing an unchanged cohort after",
+	"  the injector proves acceptance (stderr AMQ_INJECT_PROGRESS=accepted,",
+	"  exit 0) or, for marker-less legacy injectors, after a bare exit 0.",
+	"  AMQ_INJECT_PROGRESS=deferred retains the cohort and retries through",
+	"  the wake loop; failed and uncertain outcomes are terminal for that",
+	"  unchanged cohort and are never silently replayed — a new inbox",
+	"  change re-arms delivery. Standalone ownerless wakes execute the",
+	"  injector once per physical inbox cohort.",
+	"  Example: amq wake --me orchestrator --inject-via /path/to/ghostty-bridge \\",
+	"    --inject-arg exec --inject-arg \"$TERMINAL_ID\"",
+	"  Trust boundary: --inject-via executes local code, and the payload can",
+	"  contain sanitized but message-derived header content.",
+	"",
+	"Input deferral (default on): wake samples terminal input only after",
+	"  a message is pending, then injects after a short quiet window.",
+	"  Collision reduction only: it cannot detect permission/approval dialogs.",
+	"  A pause longer than --input-quiet-for can still inject while a prompt",
+	"  is being composed. If input remains active through --input-max-hold,",
+	"  wake emits the notice out-of-band and skips synthetic input. If input",
+	"  sampling is unavailable, injection remains best-effort. Interrupt",
+	"  messages bypass deferral.",
+	"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
+	"  Linux tty atime is updated at ~8s granularity, so it cannot establish",
+	"  a precise 1200ms idle window. On Linux this heuristic is advisory.",
+	"",
+	"Hold by priority (default off): --hold-normal and --hold-low delay the",
+	"  first doorbell for routine mail. Its deadline is the inbox file's mtime",
+	"  plus its priority's hold; missing priority counts as normal. A later",
+	"  message can only pull the deadline earlier. A future-dated mtime gets",
+	"  no hold. Urgent mail skips the hold, even behind a parked cohort.",
+	"  Ordinary urgent mail still follows debounce and input deferral; mail",
+	"  with the configured interrupt label uses the interrupt path. After the",
+	"  first attempt, the configured retry policy applies. A drain can take held",
+	"  mail, up to its limit (default 20, filename order). The hold never acks",
+	"  or deletes mail or guarantees consumption time.",
+	"  Example: --hold-normal 5m --hold-low 30m; use --priority urgent for",
+	"  time-critical unblocking requests or verdicts.",
+	"",
+	"Settings (hold, debounce, preview, bell, input deferral, interrupt notice,",
+	"  inject timeout, self-upgrade) live in <root>/agents/<me>/.wake.settings,",
+	"  over the machine file ~/.amq/wake.settings (every wake of this user on this",
+	"  machine), over the built-in defaults, key by key. Explicit settings flags on",
+	"  a fresh start write their keys to the agent file. A resume (self-upgrade or",
+	"  restart) reads the file and ignores settings flags in argv; if the file is",
+	"  absent it writes them once. Repair, coop exec and keepalive pass no settings",
+	"  flags and use the stored files. A refused machine file never stops a start;",
+	"  the wake runs without it. Change running wakes with amq wake config",
+	"  (--machine for all).",
+	"",
+	"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
+	"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
+	"  --interrupt-cmd ctrl-c; it sends real SIGINT to the foreground process",
+	"  group and can interrupt or crash the agent.",
+	"",
+	"Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C",
+	"  can activate a focused permission/approval dialog. With the Claude Code",
+	"  dialog hook (amq wake install-dialog-hook), the wake writes no input while",
+	"  AskUserQuestion, ExitPlanMode, or a permission dialog is open, and rings",
+	"  about 2s after it closes; after a permission dialog it rings when the turn",
+	"  ends or the person types. A marker older than 10m gets attention output,",
+	"  still no input. Dialogs without a hook (workspace trust, pickers, MCP",
+	"  elicitation) are not guarded. amq wake dialog is the hook receiver; amq wake",
+	"  uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce",
+	"  zero synthetic input; stderr output may scribble until redraw.",
+	"",
+	"Self-upgrade: eligible co-op wakes observe their stable launch symlink and",
+	"  replace the running image only with a strictly newer installed AMQ while",
+	"  preserving PID, terminal ownership, and unread work. Disable at start with",
+	"  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1, or live with amq wake config",
+	"  --self-upgrade=false (--machine for every wake). A live true does not enable",
+	"  a wake started with --no-self-upgrade; restart it to enable.",
+	"",
+	"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.",
+}
+
 func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	// The short-lived companion launcher owns the startup stderr reader. If its
 	// detached drain process later disappears, established wakes must receive
@@ -1839,309 +2104,92 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	restoreBrokenPipe := ignoreWakeBrokenPipe()
 	defer restoreBrokenPipe()
 
-	resumeBootstrap, err := wakeResumeBootstrapFromEnv()
+	s := &wakeStart{args: args}
+	var err error
+	s.resumeBootstrap, err = wakeResumeBootstrapFromEnv()
 	if err != nil {
 		return err
 	}
-	resumePreflight, err := wakeResumePreflightFromEnv()
+	s.resumePreflight, err = wakeResumePreflightFromEnv()
 	if err != nil {
 		return err
 	}
-	if resumeBootstrap != nil && resumePreflight != nil {
+	if s.resumeBootstrap != nil && s.resumePreflight != nil {
 		return fmt.Errorf("wake resume bootstrap and preflight cannot be combined")
 	}
 	// Install restart delivery before a resumable generation can be published.
 	// SIGUSR1's default disposition is termination, so advertising first would
 	// create a small but real kill window.
-	restartSignals := make(chan os.Signal, 1)
-	signal.Notify(restartSignals, syscall.SIGUSR1)
-	defer signal.Stop(restartSignals)
+	s.restartSignals = make(chan os.Signal, 1)
+	signal.Notify(s.restartSignals, syscall.SIGUSR1)
+	defer signal.Stop(s.restartSignals)
 	privateStop, cleanupPrivateStop, err := authoritativeWakePrivateStopFromEnv()
 	if err != nil {
 		return err
 	}
 	defer cleanupPrivateStop()
-	attention, err := wakeAttentionFromEnv()
+	s.attention, err = wakeAttentionFromEnv()
 	if err != nil {
 		return err
 	}
-	if attention != nil {
-		defer func() { _ = attention.Close() }()
+	if s.attention != nil {
+		defer func() { _ = s.attention.Close() }()
 	}
-	repairHandoff, repairHandoffPresent, err := wakeRepairChildHandoffFromEnv()
+	s.repairHandoff, s.repairHandoffPresent, err = wakeRepairChildHandoffFromEnv()
 	if err != nil {
 		return err
 	}
-	if repairHandoff != nil {
-		defer func() { _ = repairHandoff.Close() }()
+	if s.repairHandoff != nil {
+		defer func() { _ = s.repairHandoff.Close() }()
 	}
 	repairPrivateStop, cleanupRepairPrivateStop, err := wakeRepairChildStopFromEnv()
 	if err != nil {
 		return err
 	}
 	defer cleanupRepairPrivateStop()
-	privateStop = mergeWakeStopChannels(privateStop, repairPrivateStop)
+	s.privateStop = mergeWakeStopChannels(privateStop, repairPrivateStop)
 
-	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
-	common := addCommonFlags(fs)
-	settingsFlags := registerWakeSettingsFlags(fs)
-	injectCmdFlag := fs.String("inject-cmd", "", "Command to inject (power user mode)")
-	injectViaFlag := fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
-	var injectArgFlags multiStringFlag
-	fs.Var(&injectArgFlags, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
-	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
-	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
-	interruptCmdFlag := fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
-	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
-	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
-	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
-	refuseUnverifiedWakeFlag := fs.Bool("refuse-unverified-wake", false, "Internal: refuse unverified wake locks instead of superseding them")
-	repairLineageFlag := fs.String("repair-lineage", "", "Internal: inherit the suppression floor from an exact dead wake generation")
-	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
-	noSelfUpgradeFlag := fs.Bool("no-self-upgrade", false, "Disable automatic replacement by a newer installed AMQ image")
-	resumePreflightFlag := fs.Bool(wakeResumePreflightFlag, false, "Internal: validate an exact wake resume without starting")
-
-	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
-		[]string{"ready-file", "accept-existing-wake", "refuse-unverified-wake", "repair-lineage", wakeResumePreflightFlag},
-		"Background waker: injects terminal notification when messages arrive.",
-		"Run as background job before starting CLI: amq wake --me claude --interrupt-cmd none &",
-		"",
-		"Inject modes:",
-		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
-		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
-		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
-		"  none  - Output notice on wake stderr; zero terminal input injection",
-		"          (urgent interrupts degrade to one bell + output notice)",
-		"",
-		"External injection:",
-		"  --inject-via runs a local executable for each notification, bypassing",
-		"  the TIOCSTI/stdin-TTY startup requirement. Fixed arguments use repeatable",
-		"  --inject-arg; AMQ appends the sanitized notification payload as the",
-		"  final argv element. The command is not run through a shell.",
-		"  --retry-until drained (default) reannounces until inbox progress.",
-		"  --retry-until injected stops reannouncing an unchanged cohort after",
-		"  the injector proves acceptance (stderr AMQ_INJECT_PROGRESS=accepted,",
-		"  exit 0) or, for marker-less legacy injectors, after a bare exit 0.",
-		"  AMQ_INJECT_PROGRESS=deferred retains the cohort and retries through",
-		"  the wake loop; failed and uncertain outcomes are terminal for that",
-		"  unchanged cohort and are never silently replayed — a new inbox",
-		"  change re-arms delivery. Standalone ownerless wakes execute the",
-		"  injector once per physical inbox cohort.",
-		"  Example: amq wake --me orchestrator --inject-via /path/to/ghostty-bridge \\",
-		"    --inject-arg exec --inject-arg \"$TERMINAL_ID\"",
-		"  Trust boundary: --inject-via executes local code, and the payload can",
-		"  contain sanitized but message-derived header content.",
-		"",
-		"Input deferral (default on): wake samples terminal input only after",
-		"  a message is pending, then injects after a short quiet window.",
-		"  Collision reduction only: it cannot detect permission/approval dialogs.",
-		"  A pause longer than --input-quiet-for can still inject while a prompt",
-		"  is being composed. If input remains active through --input-max-hold,",
-		"  wake emits the notice out-of-band and skips synthetic input. If input",
-		"  sampling is unavailable, injection remains best-effort. Interrupt",
-		"  messages bypass deferral.",
-		"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
-		"  Linux tty atime is updated at ~8s granularity, so it cannot establish",
-		"  a precise 1200ms idle window. On Linux this heuristic is advisory.",
-		"",
-		"Hold by priority (default off): --hold-normal and --hold-low delay the",
-		"  first doorbell for routine mail. Its deadline is the inbox file's mtime",
-		"  plus its priority's hold; missing priority counts as normal. A later",
-		"  message can only pull the deadline earlier. A future-dated mtime gets",
-		"  no hold. Urgent mail skips the hold, even behind a parked cohort.",
-		"  Ordinary urgent mail still follows debounce and input deferral; mail",
-		"  with the configured interrupt label uses the interrupt path. After the",
-		"  first attempt, the configured retry policy applies. A drain can take held",
-		"  mail, up to its limit (default 20, filename order). The hold never acks",
-		"  or deletes mail or guarantees consumption time.",
-		"  Example: --hold-normal 5m --hold-low 30m; use --priority urgent for",
-		"  time-critical unblocking requests or verdicts.",
-		"",
-		"Settings (hold, debounce, preview, bell, input deferral, interrupt notice,",
-		"  inject timeout, self-upgrade) live in <root>/agents/<me>/.wake.settings,",
-		"  over the machine file ~/.amq/wake.settings (every wake of this user on this",
-		"  machine), over the built-in defaults, key by key. Explicit settings flags on",
-		"  a fresh start write their keys to the agent file. A resume (self-upgrade or",
-		"  restart) reads the file and ignores settings flags in argv; if the file is",
-		"  absent it writes them once. Repair, coop exec and keepalive pass no settings",
-		"  flags and use the stored files. A refused machine file never stops a start;",
-		"  the wake runs without it. Change running wakes with amq wake config",
-		"  (--machine for all).",
-		"",
-		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
-		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
-		"  --interrupt-cmd ctrl-c; it sends real SIGINT to the foreground process",
-		"  group and can interrupt or crash the agent.",
-		"",
-		"Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C",
-		"  can activate a focused permission/approval dialog. With the Claude Code",
-		"  dialog hook (amq wake install-dialog-hook), the wake writes no input while",
-		"  AskUserQuestion, ExitPlanMode, or a permission dialog is open, and rings",
-		"  about 2s after it closes; after a permission dialog it rings when the turn",
-		"  ends or the person types. A marker older than 10m gets attention output,",
-		"  still no input. Dialogs without a hook (workspace trust, pickers, MCP",
-		"  elicitation) are not guarded. amq wake dialog is the hook receiver; amq wake",
-		"  uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce",
-		"  zero synthetic input; stderr output may scribble until redraw.",
-		"",
-		"Self-upgrade: eligible co-op wakes observe their stable launch symlink and",
-		"  replace the running image only with a strictly newer installed AMQ while",
-		"  preserving PID, terminal ownership, and unread work. Disable at start with",
-		"  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1, or live with amq wake config",
-		"  --self-upgrade=false (--machine for every wake). A live true does not enable",
-		"  a wake started with --no-self-upgrade; restart it to enable.",
-		"",
-		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
-	if handled, err := parseFlags(fs, args, usage); err != nil {
+	s.flags = newWakeStartFlags()
+	if handled, err := parseFlags(s.flags.fs, args, s.flags.usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	if *resumePreflightFlag != (resumePreflight != nil) {
-		return fmt.Errorf("wake resume preflight flag and environment must be paired")
-	}
-	injectMode, err := normalizeWakeInjectMode(*injectModeFlag)
-	if err != nil {
-		return UsageError("%v", err)
-	}
-	requestedInjectMode := injectMode
-	retryUntil, err := normalizeWakeRetryUntil(*retryUntilFlag)
-	if err != nil {
-		return UsageError("%v", err)
-	}
-	flagSettings, err := settingsFlags.validate()
-	if err != nil {
-		return UsageError("%v", err)
-	}
-	explicitSettings := visitedWakeSettingsKeys(fs)
-
-	if err := requireMe(common.Me); err != nil {
+	if err := s.validateFlags(); err != nil {
 		return err
 	}
-	me, err := normalizeHandle(common.Me)
-	if err != nil {
-		return UsageError("--me: %v", err)
-	}
-
-	root := resolveRoot(common.Root)
-	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+	if err := s.prepareResume(); err != nil {
 		return err
 	}
-	injectVia := strings.TrimSpace(*injectViaFlag)
-	if *injectViaFlag != "" && injectVia == "" {
-		return UsageError("--inject-via must not be blank")
-	}
-	if injectMode == wakeInjectModeNone && injectVia != "" {
-		return UsageError("--inject-via cannot be used with --inject-mode none")
-	}
-	if injectMode == wakeInjectModeNone && len(injectArgFlags) > 0 {
-		return UsageError("--inject-arg cannot be used with --inject-mode none")
-	}
-	if injectMode == wakeInjectModeNone && *injectCmdFlag != "" {
-		return UsageError("--inject-cmd cannot be used with --inject-mode none")
-	}
-	if injectVia == "" && len(injectArgFlags) > 0 {
-		return UsageError("--inject-arg requires --inject-via")
-	}
-	if retryUntil == wakeRetryUntilInjected && injectVia == "" {
-		return UsageError("--retry-until injected requires --inject-via")
-	}
-	readyFile := strings.TrimSpace(*readyFileFlag)
-	if *readyFileFlag != "" && readyFile == "" {
-		return UsageError("--ready-file must not be blank")
-	}
-	repairGeneration := strings.TrimSpace(*repairLineageFlag)
-	if *repairLineageFlag != "" && repairGeneration == "" {
-		return UsageError("--repair-lineage must not be blank")
-	}
-	if repairGeneration != "" && injectVia == "" {
-		return UsageError("--repair-lineage requires --inject-via")
-	}
-	if repairGeneration != "" && *baselineExistingFlag {
-		return UsageError("--repair-lineage cannot be combined with --baseline-existing")
-	}
-	if repairGeneration != "" && !repairHandoffPresent {
-		return fmt.Errorf("wake repair requires a private source/admission handoff")
-	}
-	if repairGeneration == "" && repairHandoffPresent {
-		return fmt.Errorf("wake repair handoff requires --repair-lineage")
-	}
-	resumeContext := resumeBootstrap
-	if resumeContext == nil {
-		resumeContext = resumePreflight
-	}
-	var cleanup func()
-	var resumeImageEvidence *wakeImageEvidenceV1
-	var cleanupResumeStage func() error
 	resumeStageCleanupTransferred := false
-	// A resumed generation keeps its lock until the previous stage is reclaimed
-	// and the exact restart record is consumed at the readiness boundary.
-	retainLockOnRestartCleanupError := newWakeRestartCleanupRetention(resumeBootstrap)
-	if resumeContext != nil {
-		if repairGeneration != "" || repairHandoffPresent {
-			return fmt.Errorf("wake resume cannot inherit repair state")
-		}
-		// Readiness files and startup baselines are one-shot launch inputs. A
-		// self-resume republishes readiness for its new generation and treats all
-		// durable inbox/new entries as pending.
-		readyFile = ""
-		*acceptExistingWakeFlag = false
-		*baselineExistingFlag = false
-		if resumeBootstrap != nil || resumeContext.BoundImage != nil {
-			verified, verifyErr := verifyWakeResumeBoundImage(*resumeContext)
-			if verifyErr != nil {
-				return verifyErr
+	if s.cleanupResumeStage != nil {
+		defer func() {
+			if !resumeStageCleanupTransferred {
+				returnErr = errors.Join(returnErr, s.cleanupResumeStage())
 			}
-			resumeImageEvidence = &verified
-		}
-		if resumeBootstrap != nil {
-			cleanupBootstrap := *resumeBootstrap
-			cleanupBootstrap.BoundImage = resumeImageEvidence
-			cleanupResumeStage = func() error {
-				return cleanupWakeResumeBoundImage(cleanupBootstrap)
-			}
-			defer func() {
-				if !resumeStageCleanupTransferred {
-					returnErr = errors.Join(returnErr, cleanupResumeStage())
-				}
-			}()
-		}
+		}()
 	}
 
-	requestedOwner, err := wakeOwnerFromEnv()
+	s.requestedOwner, err = wakeOwnerFromEnv()
 	if err != nil {
 		return err
 	}
-	if resumePreflight != nil {
-		if requestedOwner == nil {
-			return fmt.Errorf("wake resume preflight requires the exact coop owner environment")
-		}
-		if len(args) == 0 || args[len(args)-1] != "--"+wakeResumePreflightFlag {
-			return fmt.Errorf("wake resume preflight must be the final internal argument")
-		}
-		preservedArgv := append([]string{os.Args[0], "wake"}, args[:len(args)-1]...)
-		if err := validateWakeRestartArgv(preservedArgv, canonicalWakeRoot(root), me); err != nil {
-			return err
-		}
-		if err := checkWakeSettingsForResume(root, me); err != nil {
-			return err
-		}
-		return writeStdoutLine(wakeResumePreflightOK)
+	if s.resumePreflight != nil {
+		return s.runResumePreflight()
 	}
-	if repairGeneration != "" && requestedOwner != nil {
-		return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
+	if s.repairGeneration != "" && s.requestedOwner != nil {
+		return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(s.root, s.me))
 	}
-	var ownerObservation wakeOwnerObservation
-	if requestedOwner != nil {
-		ownerObservation, err = observeLiveWakeOwner(
-			*requestedOwner,
+	if s.requestedOwner != nil {
+		s.ownerObservation, err = observeLiveWakeOwner(
+			*s.requestedOwner,
 			"inspect requested wake owner before lock acquisition",
 		)
 		if err != nil {
 			return err
 		}
 		defer func() {
-			if err := ownerObservation.Close(); err != nil {
+			if err := s.ownerObservation.Close(); err != nil {
 				returnErr = errors.Join(
 					returnErr,
 					fmt.Errorf("requested wake owner observation failed: %w", err),
@@ -2150,232 +2198,442 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}()
 	}
 
-	var initialNotifierStatus string
-	var initialNotifierMode string
-	var initialNotifierReason string
-
-	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead).
-	// Linux's legacy_tiocsti sysctl is advisory: a readable zero degrades this
-	// wake to a useful non-input notifier, while absence, read errors, and every
-	// other value remain unknown and do not block startup.
-	if injectVia == "" && injectMode != wakeInjectModeNone {
-		if !wakeTIOCSTIAvailable() {
-			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
-		}
-
-		if tiocstiLegacyDisabledHint() {
-			initialNotifierStatus = wakeInjectorUnsupportedStatus
-			initialNotifierMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
-			initialNotifierReason = wakeInjectorUnsupportedReason(
-				initialNotifierMode,
-				fmt.Errorf("%s is 0", tiocstiLegacySysctlPath),
-			)
-			injectMode = wakeInjectModeNone
-		} else if !wakeInputIsTTY() {
-			// Verify we have a real TTY when synthetic input remains enabled.
-			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
-		}
+	if err := s.checkTerminalInjection(); err != nil {
+		return err
 	}
-
-	interruptKey, err := parseInterruptKey(*interruptCmdFlag)
+	s.interruptKey, err = parseInterruptKey(*s.flags.interruptCmd)
 	if err != nil {
 		return UsageError("%v", err)
 	}
 
-	var target *wakeTarget
-	var repairLineage *wakeRepairLineage
-	var repairAgentDir *wakeAgentDir
-	var repairInboxDir *wakeInboxDir
-	if injectVia != "" {
-		value, err := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
-		if err != nil {
+	if s.injectVia != "" {
+		if err := s.bindTarget(); err != nil {
 			return err
 		}
-		if retryUntil == wakeRetryUntilInjected {
-			value.RetryUntil = retryUntil
-		}
-		value.Owner = requestedOwner
-		if err := validateWakeTarget(value, root, me); err != nil {
-			return err
-		}
-		injectVia = value.InjectVia
-		target = &value
-		if repairGeneration != "" {
-			source, err := repairHandoff.ReceiveSource()
-			if err != nil {
-				return fmt.Errorf("receive wake repair source: %w", err)
-			}
-			if source.Root() != canonicalWakeRoot(root) ||
-				source.Agent() != me ||
-				source.SourceGeneration() != repairGeneration {
-				return fmt.Errorf("wake repair source does not match requested root, agent, and generation")
-			}
-			repairAgentDir, repairInboxDir, err = repairHandoff.TakeRetainedDirectories(source)
+		if s.repairGeneration != "" {
+			source, err := s.takeRepairDirectories()
 			if err != nil {
 				return err
 			}
-			defer func() { _ = repairAgentDir.Close() }()
-			defer func() { _ = repairInboxDir.Close() }()
-			var persisted wakeTarget
-			var floor wakeRepairFloor
-			err = withWakeLifecycleGuardInDir(repairAgentDir, func(dirfd int) error {
-				if err := revalidateWakeRepairRootIdentity(root, source.RootIdentity()); err != nil {
-					return err
-				}
-				var exists bool
-				persisted, exists, err = readWakeTargetAt(dirfd, repairAgentDir, root, me)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					return fmt.Errorf("wake repair target is missing")
-				}
-				floor, exists, err = readWakeRepairFloorAt(dirfd, repairAgentDir)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					return fmt.Errorf("wake repair floor is missing")
-				}
-				return nil
-			})
-			if err != nil {
+			defer func() { _ = s.repairAgentDir.Close() }()
+			defer func() { _ = s.repairInboxDir.Close() }()
+			if err := s.bindRepairLineage(source); err != nil {
 				return err
 			}
-			if value.Schema != persisted.Schema ||
-				value.Mode != persisted.Mode ||
-				value.Root != persisted.Root ||
-				value.Agent != persisted.Agent ||
-				!sameWakeInjectorIdentity(value, persisted) ||
-				!sameWakeOwner(value.Owner, persisted.Owner) {
-				return fmt.Errorf("wake repair target changed before child start")
-			}
-			// The repair CLI carries the requested injector behavior, not the
-			// persisted instance timestamp. Continue with the exact retained
-			// target whose digest is bound into the source handoff.
-			value = persisted
-			target = &value
-			targetDigest, err := wakeTargetDigest(persisted)
-			if err != nil {
-				return err
-			}
-			floorDigest, err := wakeRepairFloorDigest(floor)
-			if err != nil {
-				return err
-			}
-			if targetDigest != source.SourceTargetDigest() ||
-				floorDigest != source.SourceFloorDigest() ||
-				floor.Generation != source.SourceGeneration() ||
-				floor.RootIdentity != source.RootIdentity() ||
-				floor.BootID != source.BootID() ||
-				!sameWakeOwner(floor.Owner, source.Owner()) {
-				return fmt.Errorf("wake repair source lineage changed before child acquisition")
-			}
-			repairLineage = &wakeRepairLineage{
-				source: wakeRepairSource{
-					Root:                 source.Root(),
-					RootIdentity:         source.RootIdentity(),
-					Agent:                source.Agent(),
-					DeadGeneration:       source.SourceGeneration(),
-					BootID:               source.BootID(),
-					Owner:                source.Owner(),
-					SourceTargetDigest:   source.SourceTargetDigest(),
-					SourceFloorDigest:    source.SourceFloorDigest(),
-					AgentDirDevice:       source.agentDirDevice,
-					AgentDirInode:        source.agentDirInode,
-					InboxParentDirDevice: source.inboxParentDirDevice,
-					InboxParentDirInode:  source.inboxParentDirInode,
-					InboxDirDevice:       source.inboxDirDevice,
-					InboxDirInode:        source.inboxDirInode,
-				},
-				floor: floor,
-			}
-			target = &persisted
-			injectVia = persisted.InjectVia
-			injectArgFlags = append(multiStringFlag(nil), persisted.InjectArgs...)
 		}
 	}
-	activeAgentDir := repairAgentDir
-	if activeAgentDir == nil {
-		activeAgentDir, err = openWakeAgentDir(root, me)
+	s.activeAgentDir = s.repairAgentDir
+	if s.activeAgentDir == nil {
+		s.activeAgentDir, err = openWakeAgentDir(s.root, s.me)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = activeAgentDir.Close() }()
+		defer func() { _ = s.activeAgentDir.Close() }()
 	}
 	defer func() {
 		returnErr = errors.Join(
 			returnErr,
 			cleanupWakeResumeStageBeforeLock(
-				cleanupResumeStage,
-				cleanup,
-				retainLockOnRestartCleanupError,
+				s.cleanupResumeStage,
+				s.cleanup,
+				s.retainLockOnRestartCleanupError,
 			),
 		)
 	}()
 	resumeStageCleanupTransferred = true
 
+	if reused, err := s.acquireLock(); reused || err != nil {
+		return err
+	}
+	if err := s.inspectAcquiredWake(); err != nil {
+		return err
+	}
+	if err := s.loadStartupSettings(); err != nil {
+		return err
+	}
+	if s.currentWake.Lock.ControlSocket != "" {
+		controlCleanup, stop, markStopped, controlErr := startWakeControlListenerInDirWithRestart(
+			s.activeAgentDir, s.root, s.me, s.currentWake.Lock, s.restartSignals,
+		)
+		if controlErr != nil {
+			return controlErr
+		}
+		defer controlCleanup()
+		defer markStopped()
+		if stop != nil {
+			s.controlStop = mergeWakeStopChannels(s.controlStop, stop)
+		}
+	}
+
+	if err := s.prepareNotifier(); err != nil {
+		return err
+	}
+	if err := s.bindTerminalAuthority(); err != nil {
+		return err
+	}
+	if s.terminalAuthority != nil {
+		defer func() { _ = s.terminalAuthority.Close() }()
+	}
+	cfg := s.newLoopConfig()
+
+	stopReloadTransport, err := s.startReloadTransport()
+	if err != nil {
+		return err
+	}
+	if stopReloadTransport != nil {
+		defer stopReloadTransport()
+	}
+
+	defer func() {
+		_ = setWakeDoorbellStatusInDir(s.activeAgentDir, s.me, false, 0)
+	}()
+	s.recordStartupSelfUpgrade(&cfg)
+	return loop(cfg)
+}
+
+func (s *wakeStart) validateFlags() error {
+	f := s.flags
+	if *f.resumePreflight != (s.resumePreflight != nil) {
+		return fmt.Errorf("wake resume preflight flag and environment must be paired")
+	}
+	injectMode, err := normalizeWakeInjectMode(*f.injectMode)
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	s.injectMode = injectMode
+	s.requestedInjectMode = injectMode
+	s.retryUntil, err = normalizeWakeRetryUntil(*f.retryUntil)
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	s.flagSettings, err = f.settings.validate()
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	s.explicitSettings = visitedWakeSettingsKeys(f.fs)
+
+	if err := requireMe(f.common.Me); err != nil {
+		return err
+	}
+	s.me, err = normalizeHandle(f.common.Me)
+	if err != nil {
+		return UsageError("--me: %v", err)
+	}
+
+	s.root = resolveRoot(f.common.Root)
+	if err := validateKnownHandles(s.root, f.common.Strict, s.me); err != nil {
+		return err
+	}
+	s.injectVia = strings.TrimSpace(*f.injectVia)
+	if *f.injectVia != "" && s.injectVia == "" {
+		return UsageError("--inject-via must not be blank")
+	}
+	if s.injectMode == wakeInjectModeNone && s.injectVia != "" {
+		return UsageError("--inject-via cannot be used with --inject-mode none")
+	}
+	if s.injectMode == wakeInjectModeNone && len(f.injectArgs) > 0 {
+		return UsageError("--inject-arg cannot be used with --inject-mode none")
+	}
+	if s.injectMode == wakeInjectModeNone && *f.injectCmd != "" {
+		return UsageError("--inject-cmd cannot be used with --inject-mode none")
+	}
+	if s.injectVia == "" && len(f.injectArgs) > 0 {
+		return UsageError("--inject-arg requires --inject-via")
+	}
+	if s.retryUntil == wakeRetryUntilInjected && s.injectVia == "" {
+		return UsageError("--retry-until injected requires --inject-via")
+	}
+	s.readyFile = strings.TrimSpace(*f.readyFile)
+	if *f.readyFile != "" && s.readyFile == "" {
+		return UsageError("--ready-file must not be blank")
+	}
+	s.repairGeneration = strings.TrimSpace(*f.repairLineage)
+	if *f.repairLineage != "" && s.repairGeneration == "" {
+		return UsageError("--repair-lineage must not be blank")
+	}
+	if s.repairGeneration != "" && s.injectVia == "" {
+		return UsageError("--repair-lineage requires --inject-via")
+	}
+	if s.repairGeneration != "" && *f.baselineExisting {
+		return UsageError("--repair-lineage cannot be combined with --baseline-existing")
+	}
+	if s.repairGeneration != "" && !s.repairHandoffPresent {
+		return fmt.Errorf("wake repair requires a private source/admission handoff")
+	}
+	if s.repairGeneration == "" && s.repairHandoffPresent {
+		return fmt.Errorf("wake repair handoff requires --repair-lineage")
+	}
+	return nil
+}
+
+// prepareResume applies a resume bootstrap or preflight. On success with a
+// bootstrap it sets cleanupResumeStage; runWakeWithLoop defers that call.
+func (s *wakeStart) prepareResume() error {
+	s.resumeContext = s.resumeBootstrap
+	if s.resumeContext == nil {
+		s.resumeContext = s.resumePreflight
+	}
+	s.retainLockOnRestartCleanupError = newWakeRestartCleanupRetention(s.resumeBootstrap)
+	if s.resumeContext == nil {
+		return nil
+	}
+	if s.repairGeneration != "" || s.repairHandoffPresent {
+		return fmt.Errorf("wake resume cannot inherit repair state")
+	}
+	// Readiness files and startup baselines are one-shot launch inputs. A
+	// self-resume republishes readiness for its new generation and treats all
+	// durable inbox/new entries as pending.
+	s.readyFile = ""
+	*s.flags.acceptExistingWake = false
+	*s.flags.baselineExisting = false
+	if s.resumeBootstrap != nil || s.resumeContext.BoundImage != nil {
+		verified, verifyErr := verifyWakeResumeBoundImage(*s.resumeContext)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		s.resumeImageEvidence = &verified
+	}
+	if s.resumeBootstrap != nil {
+		cleanupBootstrap := *s.resumeBootstrap
+		cleanupBootstrap.BoundImage = s.resumeImageEvidence
+		s.cleanupResumeStage = func() error {
+			return cleanupWakeResumeBoundImage(cleanupBootstrap)
+		}
+	}
+	return nil
+}
+
+func (s *wakeStart) runResumePreflight() error {
+	if s.requestedOwner == nil {
+		return fmt.Errorf("wake resume preflight requires the exact coop owner environment")
+	}
+	args := s.args
+	if len(args) == 0 || args[len(args)-1] != "--"+wakeResumePreflightFlag {
+		return fmt.Errorf("wake resume preflight must be the final internal argument")
+	}
+	preservedArgv := append([]string{os.Args[0], "wake"}, args[:len(args)-1]...)
+	if err := validateWakeRestartArgv(preservedArgv, canonicalWakeRoot(s.root), s.me); err != nil {
+		return err
+	}
+	if err := checkWakeSettingsForResume(s.root, s.me); err != nil {
+		return err
+	}
+	return writeStdoutLine(wakeResumePreflightOK)
+}
+
+// checkTerminalInjection verifies TIOCSTI is available (skip in inject-via
+// mode — uses external command instead). Linux's legacy_tiocsti sysctl is
+// advisory: a readable zero degrades this wake to a useful non-input
+// notifier, while absence, read errors, and every other value remain unknown
+// and do not block startup.
+func (s *wakeStart) checkTerminalInjection() error {
+	if s.injectVia != "" || s.injectMode == wakeInjectModeNone {
+		return nil
+	}
+	if !wakeTIOCSTIAvailable() {
+		return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
+	}
+
+	if tiocstiLegacyDisabledHint() {
+		s.initialNotifierStatus = wakeInjectorUnsupportedStatus
+		s.initialNotifierMode = effectiveInjectMode(&wakeConfig{me: s.me, injectMode: s.injectMode})
+		s.initialNotifierReason = wakeInjectorUnsupportedReason(
+			s.initialNotifierMode,
+			fmt.Errorf("%s is 0", tiocstiLegacySysctlPath),
+		)
+		s.injectMode = wakeInjectModeNone
+	} else if !wakeInputIsTTY() {
+		// Verify we have a real TTY when synthetic input remains enabled.
+		return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
+	}
+	return nil
+}
+
+func (s *wakeStart) bindTarget() error {
+	value, err := newWakeTarget(s.root, s.me, s.injectVia, []string(s.flags.injectArgs))
+	if err != nil {
+		return err
+	}
+	if s.retryUntil == wakeRetryUntilInjected {
+		value.RetryUntil = s.retryUntil
+	}
+	value.Owner = s.requestedOwner
+	if err := validateWakeTarget(value, s.root, s.me); err != nil {
+		return err
+	}
+	s.injectVia = value.InjectVia
+	s.target = &value
+	return nil
+}
+
+// takeRepairDirectories receives the repair source and, on success, sets the
+// retained repair directories; runWakeWithLoop defers their release.
+func (s *wakeStart) takeRepairDirectories() (wakeRepairHandoffSource, error) {
+	source, err := s.repairHandoff.ReceiveSource()
+	if err != nil {
+		return source, fmt.Errorf("receive wake repair source: %w", err)
+	}
+	if source.Root() != canonicalWakeRoot(s.root) ||
+		source.Agent() != s.me ||
+		source.SourceGeneration() != s.repairGeneration {
+		return source, fmt.Errorf("wake repair source does not match requested root, agent, and generation")
+	}
+	repairAgentDir, repairInboxDir, err := s.repairHandoff.TakeRetainedDirectories(source)
+	if err != nil {
+		return source, err
+	}
+	s.repairAgentDir = repairAgentDir
+	s.repairInboxDir = repairInboxDir
+	return source, nil
+}
+
+func (s *wakeStart) bindRepairLineage(source wakeRepairHandoffSource) error {
+	root, me := s.root, s.me
+	value := *s.target
+	var persisted wakeTarget
+	var floor wakeRepairFloor
+	err := withWakeLifecycleGuardInDir(s.repairAgentDir, wakeGuardWait, func(dirfd int) error {
+		if err := revalidateWakeRepairRootIdentity(root, source.RootIdentity()); err != nil {
+			return err
+		}
+		var exists bool
+		var err error
+		persisted, exists, err = readWakeTargetAt(dirfd, s.repairAgentDir, root, me)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("wake repair target is missing")
+		}
+		floor, exists, err = readWakeRepairFloorAt(dirfd, s.repairAgentDir)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("wake repair floor is missing")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if value.Schema != persisted.Schema ||
+		value.Mode != persisted.Mode ||
+		value.Root != persisted.Root ||
+		value.Agent != persisted.Agent ||
+		!sameWakeInjectorIdentity(value, persisted) ||
+		!sameWakeOwner(value.Owner, persisted.Owner) {
+		return fmt.Errorf("wake repair target changed before child start")
+	}
+	// The repair CLI carries the requested injector behavior, not the
+	// persisted instance timestamp. Continue with the exact retained
+	// target whose digest is bound into the source handoff.
+	targetDigest, err := wakeTargetDigest(persisted)
+	if err != nil {
+		return err
+	}
+	floorDigest, err := wakeRepairFloorDigest(floor)
+	if err != nil {
+		return err
+	}
+	if targetDigest != source.SourceTargetDigest() ||
+		floorDigest != source.SourceFloorDigest() ||
+		floor.Generation != source.SourceGeneration() ||
+		floor.RootIdentity != source.RootIdentity() ||
+		floor.BootID != source.BootID() ||
+		!sameWakeOwner(floor.Owner, source.Owner()) {
+		return fmt.Errorf("wake repair source lineage changed before child acquisition")
+	}
+	s.repairLineage = &wakeRepairLineage{
+		source: wakeRepairSource{
+			Root:                 source.Root(),
+			RootIdentity:         source.RootIdentity(),
+			Agent:                source.Agent(),
+			DeadGeneration:       source.SourceGeneration(),
+			BootID:               source.BootID(),
+			Owner:                source.Owner(),
+			SourceTargetDigest:   source.SourceTargetDigest(),
+			SourceFloorDigest:    source.SourceFloorDigest(),
+			AgentDirDevice:       source.agentDirDevice,
+			AgentDirInode:        source.agentDirInode,
+			InboxParentDirDevice: source.inboxParentDirDevice,
+			InboxParentDirInode:  source.inboxParentDirInode,
+			InboxDirDevice:       source.inboxDirDevice,
+			InboxDirInode:        source.inboxDirInode,
+		},
+		floor: floor,
+	}
+	s.target = &persisted
+	s.injectVia = persisted.InjectVia
+	s.flags.injectArgs = append(multiStringFlag(nil), persisted.InjectArgs...)
+	return nil
+}
+
+// acquireLock takes the wake lock and sets cleanup. It returns true when an
+// existing wake satisfied readiness instead; runWakeWithLoop then returns the
+// error without running the loop.
+func (s *wakeStart) acquireLock() (bool, error) {
 	// Acquire lock to prevent duplicate wake processes
-	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
-	lockWakeMode := injectMode
-	if target != nil {
+	acceptExistingWake := s.readyFile != "" && *s.flags.acceptExistingWake
+	lockWakeMode := s.injectMode
+	if s.target != nil {
 		lockWakeMode = wakeTargetInjectVia
 	} else if lockWakeMode != wakeInjectModeNone {
-		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
+		lockWakeMode = effectiveInjectMode(&wakeConfig{me: s.me, injectMode: lockWakeMode})
 	}
 	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
-	resumeEligible := target == nil && wakeResumeStartupEligible(
-		requestedOwner,
-		repairLineage != nil,
-		*injectCmdFlag,
-		interruptKey,
+	s.resumeEligible = s.target == nil && wakeResumeStartupEligible(
+		s.requestedOwner,
+		s.repairLineage != nil,
+		*s.flags.injectCmd,
+		s.interruptKey,
 		lockWakeMode,
 	)
-	reloadTransportEligible := resumeEligible && target == nil
-	var repairFloorAuthority wakeRepairFloorAuthority
+	s.reloadTransportEligible = s.resumeEligible && s.target == nil
 	for {
-		if requestedOwner != nil {
+		if s.requestedOwner != nil {
 			select {
-			case <-ownerObservation.Done():
-				return fmt.Errorf("requested wake owner observation ended before lock acquisition")
+			case <-s.ownerObservation.Done():
+				return false, fmt.Errorf("requested wake owner observation ended before lock acquisition")
 			default:
 			}
 		}
 		options := wakeLockAcquireOptions{
 			acceptExistingValid:     acceptExistingWake,
-			refuseUnverifiedGeneric: *refuseUnverifiedWakeFlag,
-			target:                  target,
+			refuseUnverifiedGeneric: *s.flags.refuseUnverifiedWake,
+			target:                  s.target,
 			wakeMode:                lockWakeMode,
-			debug:                   *debugFlag,
-			requestedOwner:          requestedOwner,
-			repairLineage:           repairLineage,
-			resumeEligible:          resumeEligible,
-			resumeImageEvidence:     resumeImageEvidence,
+			debug:                   *s.flags.debug,
+			requestedOwner:          s.requestedOwner,
+			repairLineage:           s.repairLineage,
+			resumeEligible:          s.resumeEligible,
+			resumeImageEvidence:     s.resumeImageEvidence,
 		}
-		if repairLineage != nil {
-			options.repairFloorAuthority = &repairFloorAuthority
+		if s.repairLineage != nil {
+			options.repairFloorAuthority = &s.repairFloorAuthority
 		}
-		if resumeBootstrap != nil {
-			cleanup, err = acquireWakeLockAfterResumeInDir(
-				activeAgentDir,
-				root,
-				me,
+		var err error
+		if s.resumeBootstrap != nil {
+			s.cleanup, err = acquireWakeLockAfterResumeInDir(
+				s.activeAgentDir,
+				s.root,
+				s.me,
 				options,
-				*resumeBootstrap,
+				*s.resumeBootstrap,
 			)
 		} else {
-			cleanup, err = acquireWakeLockWithOptionsInDir(activeAgentDir, root, me, options)
+			s.cleanup, err = acquireWakeLockWithOptionsInDir(s.activeAgentDir, s.root, s.me, options)
 		}
 		if err == nil {
-			break
+			return false, nil
 		}
-		if resumeBootstrap != nil {
-			return err
+		if s.resumeBootstrap != nil {
+			return false, err
 		}
 		var creating *wakeLockCreatingError
 		if acceptExistingWake && errors.As(err, &creating) {
 			if !waitForWakePreparedRetry(acceptExistingDeadline) {
-				return fmt.Errorf("wake lock did not finish creation within %s", wakeReadyTimeout)
+				return false, fmt.Errorf("wake lock did not finish creation within %s", wakeReadyTimeout)
 			}
 			continue
 		}
@@ -2383,7 +2641,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		var boundInconclusive *wakeStateBoundInconclusiveError
 		if acceptExistingWake && (errors.As(err, &snapshotChanged) || errors.As(err, &boundInconclusive)) {
 			if !waitForWakePreparedRetry(acceptExistingDeadline) {
-				return fmt.Errorf(
+				return false, fmt.Errorf(
 					"wake lock did not stabilize within %s: %w",
 					wakeReadyTimeout,
 					err,
@@ -2393,86 +2651,100 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}
 		var alreadyRunning *wakeAlreadyRunningError
 		if acceptExistingWake && errors.As(err, &alreadyRunning) {
-			if requestedOwner != nil {
-				select {
-				case <-ownerObservation.Done():
-					return fmt.Errorf("requested wake owner observation ended before existing-wake readiness")
-				default:
-				}
-			}
-			publication, err := writeWakeReadyFileForPreparedWakeInDir(
-				activeAgentDir,
-				root,
-				me,
-				readyFile,
-				alreadyRunning.Inspection,
-				acceptExistingDeadline,
-			)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = publication.Close() }()
-			cleanupReady := func(cause error) error {
-				return errors.Join(cause, publication.removeIfUnchanged())
-			}
-			afterExistingWakeReadyPublication()
-			if requestedOwner != nil {
-				ready, readyErr := validateWakeReadyFileAgainstOwnerInDir(
-					activeAgentDir,
-					root,
-					me,
-					readyFile,
-					requestedOwner,
-				)
-				if readyErr != nil {
-					return cleanupReady(readyErr)
-				}
-				if !ready {
-					return cleanupReady(fmt.Errorf("existing wake readiness disappeared before owner validation"))
-				}
-			}
-			if err := validateCanonicalWakeAgentDir(activeAgentDir); err != nil {
-				return cleanupReady(err)
-			}
-			if *baselineExistingFlag {
-				_ = writeStderr("warning: reusing existing amq wake; this launch did not re-baseline it, so pending backlog may still notify\n")
-			}
-			if len(explicitSettings) > 0 {
-				_ = writeStderr(
-					"warning: reusing existing amq wake; its settings flags were not applied; use amq wake config --root %s --me %s to change the running wake\n",
-					shellQuoteArg(root),
-					shellQuoteArg(me),
-				)
-			}
-			return nil
+			return true, s.reuseExistingWake(alreadyRunning, acceptExistingDeadline)
 		}
-		return err
+		return false, err
 	}
-	controlStop := privateStop
-	if requestedOwner != nil {
-		controlStop = mergeWakeStopChannels(controlStop, ownerObservation.Done())
+}
+
+// reuseExistingWake publishes readiness for a usable existing wake. The
+// caller returns at once, so its deferred publication close runs before every
+// release that runWakeWithLoop defers.
+func (s *wakeStart) reuseExistingWake(
+	alreadyRunning *wakeAlreadyRunningError,
+	acceptExistingDeadline time.Time,
+) error {
+	if s.requestedOwner != nil {
+		select {
+		case <-s.ownerObservation.Done():
+			return fmt.Errorf("requested wake owner observation ended before existing-wake readiness")
+		default:
+		}
 	}
-	var currentWake wakeLockInspection
-	if err := activeAgentDir.withFD(func(dirfd int) error {
-		currentWake = inspectWakeLockAt(dirfd, activeAgentDir, root, me)
-		return nil
-	}); err != nil {
-		return err
-	}
-	// The file owns settings. Only a fresh start that holds the lock stores
-	// its explicit settings flags; every other start reads the file.
-	startupSettings, err := loadWakeSettingsAtStartup(
-		activeAgentDir,
-		flagSettings,
-		explicitSettings,
-		resumeContext != nil,
+	publication, err := writeWakeReadyFileForPreparedWakeInDir(
+		s.activeAgentDir,
+		s.root,
+		s.me,
+		s.readyFile,
+		alreadyRunning.Inspection,
+		acceptExistingDeadline,
 	)
 	if err != nil {
 		return err
 	}
-	machineSettingsPath, err := machineWakeSettingsPath()
+	defer func() { _ = publication.Close() }()
+	cleanupReady := func(cause error) error {
+		return errors.Join(cause, publication.removeIfUnchanged())
+	}
+	afterExistingWakeReadyPublication()
+	if s.requestedOwner != nil {
+		ready, readyErr := validateWakeReadyFileAgainstOwnerInDir(
+			s.activeAgentDir,
+			s.root,
+			s.me,
+			s.readyFile,
+			s.requestedOwner,
+		)
+		if readyErr != nil {
+			return cleanupReady(readyErr)
+		}
+		if !ready {
+			return cleanupReady(fmt.Errorf("existing wake readiness disappeared before owner validation"))
+		}
+	}
+	if err := validateCanonicalWakeAgentDir(s.activeAgentDir); err != nil {
+		return cleanupReady(err)
+	}
+	if *s.flags.baselineExisting {
+		_ = writeStderr("warning: reusing existing amq wake; this launch did not re-baseline it, so pending backlog may still notify\n")
+	}
+	if len(s.explicitSettings) > 0 {
+		_ = writeStderr(
+			"warning: reusing existing amq wake; its settings flags were not applied; use amq wake config --root %s --me %s to change the running wake\n",
+			shellQuoteArg(s.root),
+			shellQuoteArg(s.me),
+		)
+	}
+	return nil
+}
+
+func (s *wakeStart) inspectAcquiredWake() error {
+	s.controlStop = s.privateStop
+	if s.requestedOwner != nil {
+		s.controlStop = mergeWakeStopChannels(s.controlStop, s.ownerObservation.Done())
+	}
+	return s.activeAgentDir.withFD(func(dirfd int) error {
+		s.currentWake = inspectWakeLockAt(dirfd, s.activeAgentDir, s.root, s.me)
+		return nil
+	})
+}
+
+func (s *wakeStart) loadStartupSettings() error {
+	// The file owns settings. Only a fresh start that holds the lock stores
+	// its explicit settings flags; every other start reads the file.
+	startupSettings, err := loadWakeSettingsAtStartup(
+		s.activeAgentDir,
+		s.flagSettings,
+		s.explicitSettings,
+		s.resumeContext != nil,
+	)
 	if err != nil {
-		machineSettingsPath = wakeMachineSettingsDisplayPath
+		return err
+	}
+	s.startupSettings = startupSettings
+	s.machineSettingsPath, err = machineWakeSettingsPath()
+	if err != nil {
+		s.machineSettingsPath = wakeMachineSettingsDisplayPath
 	}
 	if startupSettings.layers.agentErr != nil {
 		_ = writeStderr(
@@ -2484,14 +2756,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if startupSettings.layers.machineErr != nil {
 		_ = writeStderr(
 			"amq wake: %s refused: %v; running without the machine settings\n",
-			machineSettingsPath,
+			s.machineSettingsPath,
 			startupSettings.layers.machineErr,
 		)
 	}
 	if startupSettings.layers.machineMerge != nil {
 		_ = writeStderr(
 			"amq wake: %s refused: %v; running without the machine settings\n",
-			machineSettingsPath,
+			s.machineSettingsPath,
 			startupSettings.layers.machineMerge,
 		)
 	}
@@ -2505,11 +2777,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	// does not read this generation as an image without live settings. A
 	// failure is retried by the loop's reload. An unseeded resume publishes
 	// nothing for the absent file; the loop publishes once its seed lands.
-	var pendingStartupSettingsApplied *wakeSettingsAppliedStatus
 	if startupSettings.unseeded == nil {
 		if err := recordWakeSettingsApplied(
-			activeAgentDir,
-			currentWake,
+			s.activeAgentDir,
+			s.currentWake,
 			startupSettings.applied,
 			wakeSettingsGuardTimeout,
 		); err != nil {
@@ -2518,114 +2789,113 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 				wakeSettingsAppliedFileName,
 				err,
 			)
-			pendingStartupSettingsApplied = &startupSettings.applied
+			s.pendingStartupSettingsApplied = &s.startupSettings.applied
 		}
 	}
-	if currentWake.Lock.ControlSocket != "" {
-		var controlCleanup func()
-		var stop <-chan struct{}
-		var markStopped func()
-		var controlErr error
-		controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDirWithRestart(
-			activeAgentDir, root, me, currentWake.Lock, restartSignals,
-		)
-		if controlErr != nil {
-			return controlErr
-		}
-		defer controlCleanup()
-		defer markStopped()
-		if stop != nil {
-			controlStop = mergeWakeStopChannels(controlStop, stop)
-		}
-	}
+	return nil
+}
 
-	if injectVia != "" {
-		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
+func (s *wakeStart) prepareNotifier() error {
+	if s.injectVia != "" {
+		if err := validateResolvedWakeInjectViaPath(s.injectVia); err != nil {
 			return err
 		}
 	}
 	var runningImageEvidence wakeImageEvidenceV1
-	if currentWake.Lock.RunningImageEvidence != nil {
-		runningImageEvidence = *currentWake.Lock.RunningImageEvidence
+	if s.currentWake.Lock.RunningImageEvidence != nil {
+		runningImageEvidence = *s.currentWake.Lock.RunningImageEvidence
 	}
-	selfUpgrade := constrainWakeSelfUpgradeEligibility(
+	s.selfUpgrade = constrainWakeSelfUpgradeEligibility(
 		captureWakeSelfUpgradeStartupState(
 			os.Args[0],
-			!*noSelfUpgradeFlag && !wakeSelfUpgradeDisabledByEnv(),
+			!*s.flags.noSelfUpgrade && !wakeSelfUpgradeDisabledByEnv(),
 			runningImageEvidence,
 		),
-		resumeEligible,
+		s.resumeEligible,
 	)
 	if err := loadWakeSelfUpgradeAttemptAtStartup(
-		&selfUpgrade,
-		activeAgentDir,
-		currentWake,
+		&s.selfUpgrade,
+		s.activeAgentDir,
+		s.currentWake,
 		runningImageEvidence,
 	); err != nil {
-		selfUpgrade.Eligible = false
-		selfUpgrade.Reason = "wake self-upgrade attempt state is unavailable: " + err.Error()
+		s.selfUpgrade.Eligible = false
+		s.selfUpgrade.Reason = "wake self-upgrade attempt state is unavailable: " + err.Error()
 	}
-	if strings.Contains(selfUpgrade.Reason, "pinned resolved image") {
-		selfUpgrade.Reason += fmt.Sprintf(
+	if strings.Contains(s.selfUpgrade.Reason, "pinned resolved image") {
+		s.selfUpgrade.Reason += fmt.Sprintf(
 			"; request a safe refresh with amq wake restart --root %s --me %s",
-			shellQuoteArg(root),
-			shellQuoteArg(me),
+			shellQuoteArg(s.root),
+			shellQuoteArg(s.me),
 		)
 	}
 
 	if err := setWakeNotifierStatusInDir(
-		activeAgentDir,
-		me,
-		initialNotifierStatus,
-		initialNotifierMode,
-		initialNotifierReason,
+		s.activeAgentDir,
+		s.me,
+		s.initialNotifierStatus,
+		s.initialNotifierMode,
+		s.initialNotifierReason,
 	); err != nil {
 		return fmt.Errorf("record wake notifier status: %w", err)
 	}
-	if err := setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0); err != nil {
+	if err := setWakeDoorbellStatusInDir(s.activeAgentDir, s.me, false, 0); err != nil {
 		return fmt.Errorf("clear wake doorbell status: %w", err)
 	}
-	if initialNotifierStatus == wakeInjectorUnsupportedStatus {
-		_ = writeStderr("amq wake: warning: %s\n", initialNotifierReason)
+	if s.initialNotifierStatus == wakeInjectorUnsupportedStatus {
+		_ = writeStderr("amq wake: warning: %s\n", s.initialNotifierReason)
 	}
-	var terminalAuthority *wakeTerminalAuthority
-	effectiveMode := effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
-	if requestedOwner != nil &&
-		injectVia == "" &&
+	return nil
+}
+
+// bindTerminalAuthority sets terminalAuthority only on success;
+// runWakeWithLoop defers its release.
+func (s *wakeStart) bindTerminalAuthority() error {
+	effectiveMode := effectiveInjectMode(&wakeConfig{me: s.me, injectMode: s.injectMode})
+	if s.requestedOwner != nil &&
+		s.injectVia == "" &&
 		(effectiveMode == wakeInjectModeRaw || effectiveMode == wakeInjectModePaste) {
-		terminalAuthority, err = bindWakeTerminalAuthorityForWake(currentWake, controlStop)
+		terminalAuthority, err := bindWakeTerminalAuthorityForWake(s.currentWake, s.controlStop)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = terminalAuthority.Close() }()
+		s.terminalAuthority = terminalAuthority
 	}
+	return nil
+}
+
+func (s *wakeStart) newLoopConfig() wakeConfig {
+	root, me := s.root, s.me
+	activeAgentDir := s.activeAgentDir
+	currentWake := s.currentWake
+	startupSettings := s.startupSettings
 	cfg := wakeConfig{
 		me:                  me,
 		root:                root,
 		session:             resolveSessionName(root),
-		injectCmd:           *injectCmdFlag,
-		injectVia:           injectVia,
-		injectArgs:          []string(injectArgFlags),
-		wakeOwner:           requestedOwner,
+		injectCmd:           *s.flags.injectCmd,
+		injectVia:           s.injectVia,
+		injectArgs:          []string(s.flags.injectArgs),
+		wakeOwner:           s.requestedOwner,
 		settings:            startupSettings.settings,
-		strict:              common.Strict,
+		strict:              s.flags.common.Strict,
 		fallbackWarn:        true,
-		injectMode:          injectMode,
-		requestedInjectMode: requestedInjectMode,
-		retryUntil:          retryUntil,
-		debug:               *debugFlag,
-		interruptKey:        interruptKey,
-		controlStop:         controlStop,
-		restartSignals:      restartSignals,
+		injectMode:          s.injectMode,
+		requestedInjectMode: s.requestedInjectMode,
+		retryUntil:          s.retryUntil,
+		debug:               *s.flags.debug,
+		interruptKey:        s.interruptKey,
+		controlStop:         s.controlStop,
+		restartSignals:      s.restartSignals,
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeTerminalGeneration(root, me)
 		},
 		terminalGeneration:   currentWake.Lock.Generation,
 		terminalImageVersion: currentWake.Lock.ImageVersion,
 		terminalTTY:          currentWake.Lock.TTY,
-		selfUpgrade:          selfUpgrade,
-		baselineRequested:    *baselineExistingFlag || repairLineage != nil,
-		baselineInherited:    repairLineage != nil,
+		selfUpgrade:          s.selfUpgrade,
+		baselineRequested:    *s.flags.baselineExisting || s.repairLineage != nil,
+		baselineInherited:    s.repairLineage != nil,
 		retainedAgent:        activeAgentDir,
 		recordNotifierStatus: func(status, mode, reason string) error {
 			return setWakeNotifierStatusInDir(activeAgentDir, me, status, mode, reason)
@@ -2638,10 +2908,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		settingsObserved:        startupSettings.observed,
 		machineSettingsSource:   readMachineWakeSettings,
 		machineSettingsObserved: startupSettings.machineObserved,
-		machineSettingsPath:     machineSettingsPath,
+		machineSettingsPath:     s.machineSettingsPath,
 		settingsLayers:          startupSettings.layers,
 		settingsUnseeded:        startupSettings.unseeded != nil,
-		pendingSettingsApplied:  pendingStartupSettingsApplied,
+		pendingSettingsApplied:  s.pendingStartupSettingsApplied,
 		recordSettingsApplied: func(status wakeSettingsAppliedStatus) error {
 			return recordWakeSettingsApplied(
 				activeAgentDir,
@@ -2650,227 +2920,255 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 				wakeLifecycleGuardRetryTimeout,
 			)
 		},
-		onPrepared: func(watcher wakeAdmissionWatcher) error {
-			if repairLineage != nil {
-				if err := writeWakePreparedFileInDir(
-					repairAgentDir,
-					root,
-					me,
-					currentWake,
-				); err != nil {
-					return err
-				}
-				var prepared wakeRepairHandoffPrepared
-				err := withWakeLifecycleGuardInDir(repairAgentDir, func(dirfd int) error {
-					if err := revalidateWakeRepairRootIdentity(
-						root,
-						repairLineage.source.RootIdentity,
-					); err != nil {
-						return err
-					}
-					current := inspectWakeLockAt(dirfd, repairAgentDir, root, me)
-					if !sameWakeLockGeneration(currentWake, current) ||
-						current.PID != os.Getpid() ||
-						current.Lock.SourceGeneration != repairLineage.source.DeadGeneration ||
-						current.Lock.SourceFloorDigest != repairLineage.source.SourceFloorDigest {
-						return fmt.Errorf("wake repair lock changed before preparation")
-					}
-					persisted, exists, err := readWakeTargetAt(
-						dirfd,
-						repairAgentDir,
-						root,
-						me,
-					)
-					if err != nil {
-						return err
-					}
-					if !exists || !sameWakeTarget(persisted, *target) {
-						return fmt.Errorf("wake repair target changed before preparation")
-					}
-					targetDigest, err := wakeTargetDigest(persisted)
-					if err != nil {
-						return err
-					}
-					floorSnapshot, exists, err := readWakeRepairFloorSnapshotAt(dirfd, repairAgentDir)
-					if err != nil {
-						return err
-					}
-					floor := floorSnapshot.Floor
-					if !exists ||
-						floor.Generation != current.Lock.Generation ||
-						floor.SourceGeneration != repairLineage.source.DeadGeneration ||
-						floor.SourceFloorDigest != repairLineage.source.SourceFloorDigest ||
-						floor.RootIdentity != repairLineage.source.RootIdentity {
-						return fmt.Errorf("wake repair floor changed before preparation")
-					}
-					floorDigest, err := wakeRepairFloorDigest(floor)
-					if err != nil {
-						return err
-					}
-					floorAuthority, err := newWakeRepairFloorAuthority(floorSnapshot)
-					if err != nil {
-						return err
-					}
-					prepared, err = newWakeRepairHandoffPrepared(
-						childRepairSource(repairLineage),
-						os.Getpid(),
-						current.Lock.Generation,
-						targetDigest,
-						floorDigest,
-						floorAuthority,
-					)
-					return err
-				})
-				if err != nil {
-					return err
-				}
-				if err := repairHandoff.SendPrepared(prepared); err != nil {
-					return err
-				}
-				if err := repairHandoff.AwaitAdmitAcknowledgeAndRelease(
-					prepared,
-					func() error {
-						return validateWakeRepairChildAdmission(
-							watcher,
-							root,
-							me,
-							childRepairSource(repairLineage),
-						)
-					},
-				); err != nil {
-					return err
-				}
-				select {
-				case <-privateStop:
-					return fmt.Errorf("wake repair child stopped before admission completed")
-				default:
-				}
-				return nil
-			}
-			if err := writeWakePreparedFileInDir(activeAgentDir, root, me, currentWake); err != nil {
-				return err
-			}
-			if resumeBootstrap != nil {
-				if err := commitWakeRestartReadiness(
-					activeAgentDir,
-					root,
-					me,
-					currentWake,
-					*resumeBootstrap,
-					retainLockOnRestartCleanupError,
-					cleanupPreviousWakeResumeBoundImage,
-				); err != nil {
-					return err
-				}
-			}
-			return writeWakeReadyFileAgainstOwnerInDir(
-				activeAgentDir,
-				root,
-				me,
-				readyFile,
-				currentWake,
-				requestedOwner,
-			)
-		},
+		onPrepared: s.onPrepared,
 	}
-	if attention != nil {
+	if s.attention != nil {
+		attention := s.attention
 		cfg.attentionWrite = attention.Write
 		cfg.attentionIsTTY = func() bool {
 			return wakeAttentionFileIsTerminal(attention)
 		}
 	}
-	if terminalAuthority != nil {
-		cfg.beforeTerminalWrite = terminalAuthority.BeforeWrite
-		cfg.terminalWrite = terminalAuthority.Inject
+	if s.terminalAuthority != nil {
+		cfg.beforeTerminalWrite = s.terminalAuthority.BeforeWrite
+		cfg.terminalWrite = s.terminalAuthority.Inject
 	}
-	if repairInboxDir != nil {
-		cfg.retainedInbox = repairInboxDir
+	if s.repairInboxDir != nil {
+		repairAgentDir := s.repairAgentDir
+		cfg.retainedInbox = s.repairInboxDir
 		cfg.touchPresence = func() error {
 			return touchWakePresenceInDir(repairAgentDir, me)
 		}
 	}
-	if repairLineage != nil {
-		cfg.baselineExisting = cloneWakeFileIdentities(repairLineage.floor.Existing)
+	if s.repairLineage != nil {
+		cfg.baselineExisting = cloneWakeFileIdentities(s.repairLineage.floor.Existing)
 	}
-	if target != nil && target.Owner == nil {
-		persistedTarget := *target
+	if s.target != nil && s.target.Owner == nil {
+		persistedTarget := *s.target
 		cfg.onBaselineReady = func(existing map[string]wakeFileIdentity) error {
-			if repairLineage != nil {
-				floor, err := newInheritedWakeRepairFloor(
-					repairLineage.source,
-					currentWake.Lock,
-					persistedTarget,
-					existing,
-				)
-				if err != nil {
-					return err
-				}
-				return withWakeLifecycleGuardInDir(repairAgentDir, func(dirfd int) error {
-					current := inspectWakeLockAt(dirfd, repairAgentDir, root, me)
-					if !sameWakeLockGeneration(currentWake, current) {
-						return fmt.Errorf("wake repair lock changed before inherited floor publication")
-					}
-					authority, err := writeWakeRepairFloorAndCaptureAuthorityAt(
-						dirfd,
-						repairAgentDir,
-						root,
-						floor,
-					)
-					if err != nil {
-						return err
-					}
-					repairFloorAuthority = authority
-					return nil
-				})
+			return s.publishRepairFloor(persistedTarget, existing)
+		}
+	}
+	return cfg
+}
+
+func (s *wakeStart) onPrepared(watcher wakeAdmissionWatcher) error {
+	if s.repairLineage != nil {
+		return s.prepareRepairChild(watcher)
+	}
+	if err := writeWakePreparedFileInDir(s.activeAgentDir, s.root, s.me, s.currentWake); err != nil {
+		return err
+	}
+	if s.resumeBootstrap != nil {
+		if err := commitWakeRestartReadiness(
+			s.activeAgentDir,
+			s.root,
+			s.me,
+			s.currentWake,
+			*s.resumeBootstrap,
+			s.retainLockOnRestartCleanupError,
+			cleanupPreviousWakeResumeBoundImage,
+		); err != nil {
+			return err
+		}
+	}
+	return writeWakeReadyFileAgainstOwnerInDir(
+		s.activeAgentDir,
+		s.root,
+		s.me,
+		s.readyFile,
+		s.currentWake,
+		s.requestedOwner,
+	)
+}
+
+func (s *wakeStart) prepareRepairChild(watcher wakeAdmissionWatcher) error {
+	root, me := s.root, s.me
+	repairAgentDir := s.repairAgentDir
+	repairLineage := s.repairLineage
+	currentWake := s.currentWake
+	if err := writeWakePreparedFileInDir(
+		repairAgentDir,
+		root,
+		me,
+		currentWake,
+	); err != nil {
+		return err
+	}
+	var prepared wakeRepairHandoffPrepared
+	err := withWakeLifecycleGuardInDir(repairAgentDir, wakeGuardWait, func(dirfd int) error {
+		if err := revalidateWakeRepairRootIdentity(
+			root,
+			repairLineage.source.RootIdentity,
+		); err != nil {
+			return err
+		}
+		current := inspectWakeLockAt(dirfd, repairAgentDir, root, me)
+		if !sameWakeLockGeneration(currentWake, current) ||
+			current.PID != os.Getpid() ||
+			current.Lock.SourceGeneration != repairLineage.source.DeadGeneration ||
+			current.Lock.SourceFloorDigest != repairLineage.source.SourceFloorDigest {
+			return fmt.Errorf("wake repair lock changed before preparation")
+		}
+		persisted, exists, err := readWakeTargetAt(
+			dirfd,
+			repairAgentDir,
+			root,
+			me,
+		)
+		if err != nil {
+			return err
+		}
+		if !exists || !sameWakeTarget(persisted, *s.target) {
+			return fmt.Errorf("wake repair target changed before preparation")
+		}
+		targetDigest, err := wakeTargetDigest(persisted)
+		if err != nil {
+			return err
+		}
+		floorSnapshot, exists, err := readWakeRepairFloorSnapshotAt(dirfd, repairAgentDir)
+		if err != nil {
+			return err
+		}
+		floor := floorSnapshot.Floor
+		if !exists ||
+			floor.Generation != current.Lock.Generation ||
+			floor.SourceGeneration != repairLineage.source.DeadGeneration ||
+			floor.SourceFloorDigest != repairLineage.source.SourceFloorDigest ||
+			floor.RootIdentity != repairLineage.source.RootIdentity {
+			return fmt.Errorf("wake repair floor changed before preparation")
+		}
+		floorDigest, err := wakeRepairFloorDigest(floor)
+		if err != nil {
+			return err
+		}
+		floorAuthority, err := newWakeRepairFloorAuthority(floorSnapshot)
+		if err != nil {
+			return err
+		}
+		prepared, err = newWakeRepairHandoffPrepared(
+			childRepairSource(repairLineage),
+			os.Getpid(),
+			current.Lock.Generation,
+			targetDigest,
+			floorDigest,
+			floorAuthority,
+		)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.repairHandoff.SendPrepared(prepared); err != nil {
+		return err
+	}
+	if err := s.repairHandoff.AwaitAdmitAcknowledgeAndRelease(
+		prepared,
+		func() error {
+			return validateWakeRepairChildAdmission(
+				watcher,
+				root,
+				me,
+				childRepairSource(repairLineage),
+			)
+		},
+	); err != nil {
+		return err
+	}
+	select {
+	case <-s.privateStop:
+		return fmt.Errorf("wake repair child stopped before admission completed")
+	default:
+	}
+	return nil
+}
+
+func (s *wakeStart) publishRepairFloor(
+	persistedTarget wakeTarget,
+	existing map[string]wakeFileIdentity,
+) error {
+	root, me := s.root, s.me
+	currentWake := s.currentWake
+	if s.repairLineage != nil {
+		repairAgentDir := s.repairAgentDir
+		floor, err := newInheritedWakeRepairFloor(
+			s.repairLineage.source,
+			currentWake.Lock,
+			persistedTarget,
+			existing,
+		)
+		if err != nil {
+			return err
+		}
+		return withWakeLifecycleGuardInDir(repairAgentDir, wakeGuardWait, func(dirfd int) error {
+			current := inspectWakeLockAt(dirfd, repairAgentDir, root, me)
+			if !sameWakeLockGeneration(currentWake, current) {
+				return fmt.Errorf("wake repair lock changed before inherited floor publication")
 			}
-			floor, err := newWakeRepairFloor(root, me, currentWake.Lock, persistedTarget, existing)
+			authority, err := writeWakeRepairFloorAndCaptureAuthorityAt(
+				dirfd,
+				repairAgentDir,
+				root,
+				floor,
+			)
 			if err != nil {
 				return err
 			}
-			return writeWakeRepairFloorInDir(activeAgentDir, root, floor)
-		}
+			s.repairFloorAuthority = authority
+			return nil
+		})
 	}
+	floor, err := newWakeRepairFloor(root, me, currentWake.Lock, persistedTarget, existing)
+	if err != nil {
+		return err
+	}
+	return writeWakeRepairFloorInDir(s.activeAgentDir, root, floor)
+}
 
-	// Reload transport is additive capability. If this process cannot confirm
-	// the freshly published lock identity, keep the ordinary notifier running
-	// without opening the unadvertised endpoint.
-	if reloadTransportEligible && currentWake.IdentityConfirmed &&
-		currentWake.Lock.ResumeSignal != wakeResumeSignalUSR1 {
-		if requestedOwner == nil {
-			return fmt.Errorf("wake reload transport requires an exact owner")
+// startReloadTransport returns the transport's stop function, or nil when
+// the transport is ineligible or unavailable. Reload transport is additive
+// capability. If this process cannot confirm the freshly published lock
+// identity, keep the ordinary notifier running without opening the
+// unadvertised endpoint.
+func (s *wakeStart) startReloadTransport() (func(), error) {
+	if !s.reloadTransportEligible || !s.currentWake.IdentityConfirmed ||
+		s.currentWake.Lock.ResumeSignal == wakeResumeSignalUSR1 {
+		return nil, nil
+	}
+	if s.requestedOwner == nil {
+		return nil, fmt.Errorf("wake reload transport requires an exact owner")
+	}
+	select {
+	case <-s.ownerObservation.Done():
+		return nil, fmt.Errorf("requested wake owner observation ended before reload transport startup")
+	default:
+	}
+	stopReloadTransport, startErr := startWakeReloadTransportForWake(
+		s.activeAgentDir,
+		s.root,
+		s.me,
+		s.currentWake,
+		*s.requestedOwner,
+	)
+	if startErr != nil {
+		var unavailable *wakeReloadTransportUnavailableError
+		if !errors.As(startErr, &unavailable) {
+			return nil, startErr
 		}
-		select {
-		case <-ownerObservation.Done():
-			return fmt.Errorf("requested wake owner observation ended before reload transport startup")
-		default:
-		}
-		stopReloadTransport, startErr := startWakeReloadTransportForWake(
-			activeAgentDir,
-			root,
-			me,
-			currentWake,
-			*requestedOwner,
+		_ = writeStderr(
+			"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
+			startErr,
 		)
-		if startErr != nil {
-			var unavailable *wakeReloadTransportUnavailableError
-			if !errors.As(startErr, &unavailable) {
-				return startErr
-			}
-			_ = writeStderr(
-				"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
-				startErr,
-			)
-		} else {
-			if stopReloadTransport == nil {
-				return fmt.Errorf("wake reload transport returned no cleanup")
-			}
-			defer stopReloadTransport()
-		}
+		return nil, nil
 	}
+	if stopReloadTransport == nil {
+		return nil, fmt.Errorf("wake reload transport returned no cleanup")
+	}
+	return stopReloadTransport, nil
+}
 
-	defer func() {
-		_ = setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0)
-	}()
+func (s *wakeStart) recordStartupSelfUpgrade(cfg *wakeConfig) {
+	selfUpgrade := s.selfUpgrade
 	initialSelfUpgrade := selfUpgrade
 	initialSelfUpgradeDecision := wakeSelfUpgradeIdleDecision(selfUpgrade)
 	if state, decision, vetoed := wakeSelfUpgradeSettingsVeto(
@@ -2886,18 +3184,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		initialSelfUpgradeDecision.Reason = selfUpgrade.startupRefusalReason
 	}
 	if err := recordWakeSelfUpgradeDecision(
-		activeAgentDir,
-		currentWake,
+		s.activeAgentDir,
+		s.currentWake,
 		initialSelfUpgrade,
 		initialSelfUpgradeDecision,
 	); err != nil {
 		_ = writeWakeDiagnostic(
-			&cfg,
+			cfg,
 			"amq wake: record self-upgrade startup diagnostic: %v; continuing\n",
 			err,
 		)
 	}
-	return loop(cfg)
 }
 
 func ignoreWakeBrokenPipe() func() {
@@ -3286,962 +3583,6 @@ var waitWakeRetry = func(
 		return false
 	case <-timer.C:
 		return true
-	}
-}
-
-func runWakeLoop(cfg wakeConfig) error {
-	// Register shutdown handling before any watcher setup, baseline work, or
-	// readiness callback so an early parent death cannot be lost.
-	signal.Ignore(syscall.SIGTTOU, syscall.SIGTSTP, syscall.SIGTTIN)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-	restartCh := cfg.restartSignals
-	if restartCh == nil {
-		restartCh = make(chan os.Signal, 1)
-		signal.Notify(restartCh, syscall.SIGUSR1)
-		defer signal.Stop(restartCh)
-		cfg.restartSignals = restartCh
-	}
-	select {
-	case <-cfg.controlStop:
-		return nil
-	case <-sigCh:
-		return nil
-	default:
-	}
-
-	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
-
-	ordinaryRecoverable := cfg.retainedInbox == nil
-	var ordinaryAgentDir *wakeAgentDir
-	ownsOrdinaryAgentDir := false
-	if retained, ok := cfg.retainedAgent.(*wakeAgentDir); ok {
-		ordinaryAgentDir = retained
-	}
-	var ordinaryInboxDir *wakeInboxDir
-	var startupBaselineWatcher wakeEventWatcher
-	var watcher wakeEventWatcher
-	defer func() {
-		if startupBaselineWatcher != nil {
-			_ = startupBaselineWatcher.Close()
-		}
-		if watcher != nil {
-			_ = watcher.Close()
-		}
-		_ = ordinaryInboxDir.Close()
-		if ownsOrdinaryAgentDir && ordinaryAgentDir != nil {
-			_ = ordinaryAgentDir.Close()
-		}
-	}()
-	if ordinaryRecoverable {
-		if ordinaryAgentDir == nil {
-			// Direct loop tests and legacy in-process callers do not acquire the
-			// wake lock first. Provision only for those unowned invocations.
-			if err := os.MkdirAll(inboxNew, 0o700); err != nil {
-				return err
-			}
-			var err error
-			ordinaryAgentDir, err = openWakeAgentDir(cfg.root, cfg.me)
-			if err != nil {
-				return err
-			}
-			ownsOrdinaryAgentDir = true
-		} else if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
-			return fmt.Errorf("validate acquired wake agent authority: %w", err)
-		}
-		if cfg.touchPresence == nil {
-			cfg.touchPresence = func() error {
-				return touchWakePresenceInDir(ordinaryAgentDir, cfg.me)
-			}
-		}
-	} else if _, ok := cfg.retainedInbox.(*wakeInboxDir); !ok {
-		if err := os.MkdirAll(inboxNew, 0o700); err != nil {
-			return err
-		}
-	}
-
-	openMainWatcher := func() error {
-		if ordinaryRecoverable {
-			inboxDir, err := openWakeRepairInboxDir(ordinaryAgentDir)
-			if err != nil {
-				if validateErr := validateCanonicalWakeAgentDir(ordinaryAgentDir); validateErr != nil {
-					return errors.Join(
-						fmt.Errorf("open acquired wake inbox capability: %w", err),
-						fmt.Errorf(
-							"validate acquired wake agent authority after inbox failure: %w",
-							validateErr,
-						),
-					)
-				}
-				return fmt.Errorf(
-					"open acquired wake inbox capability: %w",
-					err,
-				)
-			}
-			nextWatcher, err := newWakeInboxEventWatcher(inboxDir)
-			if err != nil {
-				return errors.Join(err, inboxDir.Close())
-			}
-			ordinaryInboxDir = inboxDir
-			watcher = nextWatcher
-			cfg.retainedInbox = inboxDir
-			cfg.retainedInboxRebindable = true
-			return nil
-		}
-		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
-			nextWatcher, err := newWakeInboxEventWatcher(retained)
-			if err != nil {
-				if validateErr := retained.ValidateCanonical(); validateErr != nil {
-					return errors.Join(
-						err,
-						fmt.Errorf(
-							"validate retained wake inbox authority after watcher failure: %w",
-							validateErr,
-						),
-					)
-				}
-				return err
-			}
-			watcher = nextWatcher
-			return nil
-		}
-
-		nextWatcher, err := newWakePathEventWatcher(inboxNew)
-		if err == nil {
-			watcher = nextWatcher
-		}
-		return err
-	}
-	armMainWatcher := func() (bool, error) {
-		for failures := uint(1); ; failures++ {
-			err := openMainWatcher()
-			if err == nil {
-				return true, nil
-			}
-			if classifyWakeFailure(err) == wakeFailureFatal {
-				return false, err
-			}
-			delay := wakeStartupRetryBackoff(failures)
-			_ = writeWakeDiagnostic(
-				&cfg,
-				"amq wake: create wake inbox watcher: %v; retrying in %s\n",
-				err,
-				delay,
-			)
-			if !waitWakeRetry(cfg.controlStop, sigCh, delay) {
-				return false, nil
-			}
-		}
-	}
-	armed, err := armMainWatcher()
-	if err != nil {
-		return err
-	}
-	if !armed {
-		return nil
-	}
-	if cfg.baselineRequested && !cfg.baselineInherited {
-		retained, ok := cfg.retainedInbox.(*wakeInboxDir)
-		if !ok {
-			return fmt.Errorf("wake baseline requires a retained inbox capability")
-		}
-		var failures uint
-		historyUncertain := false
-		for {
-			var prepareErr error
-			startupBaselineWatcher, prepareErr = newWakeBaselineEventWatcher(retained.path)
-			if prepareErr == nil {
-				prepareErr = retained.ValidateCanonical()
-			}
-			if prepareErr == nil {
-				// The startup boundary is watcher installation, not lock
-				// acquisition; messages delivered in between are intentionally
-				// treated as startup backlog.
-				prepareErr = prepareWakeBaselineEvents(
-					&cfg,
-					startupBaselineWatcher.Events(),
-					startupBaselineWatcher.Errors(),
-					inboxNew,
-				)
-			}
-			if startupBaselineWatcher != nil {
-				closeErr := startupBaselineWatcher.Close()
-				startupBaselineWatcher = nil
-				if prepareErr == nil && closeErr != nil {
-					_ = writeWakeDiagnostic(
-						&cfg,
-						"amq wake: close startup baseline watcher: %v; continuing\n",
-						closeErr,
-					)
-				}
-			}
-			if prepareErr == nil {
-				if historyUncertain {
-					// The original watcher lost event history. Reaching a new
-					// barrier proves readiness, but treating all backlog as new
-					// is the only lossless delivery fallback.
-					cfg.baselineExisting = nil
-				}
-				break
-			}
-			cfg.baselineExisting = nil
-			if err := retained.ValidateCanonical(); err != nil {
-				validationErr := fmt.Errorf(
-					"validate startup baseline watcher authority: %w",
-					err,
-				)
-				if classifyWakeFailure(validationErr) == wakeFailureFatal {
-					return validationErr
-				}
-				prepareErr = errors.Join(prepareErr, validationErr)
-			}
-			historyUncertain = true
-			failures++
-			delay := wakeStartupRetryBackoff(failures)
-			_ = writeWakeDiagnostic(
-				&cfg,
-				"amq wake: startup baseline watcher failed: %v; retrying in %s\n",
-				prepareErr,
-				delay,
-			)
-			if !waitWakeRetry(cfg.controlStop, sigCh, delay) {
-				return nil
-			}
-		}
-	} else if err := prepareWakeBaselineEvents(
-		&cfg,
-		watcher.Events(),
-		watcher.Errors(),
-		inboxNew,
-	); err != nil {
-		return err
-	}
-	// A separate baseline watcher can take long enough for the main watcher to
-	// fail before admission. Rearm it and discard startup tombstones so messages
-	// from the uncertain interval are delivered instead of publishing false
-	// readiness with an already-dead watcher.
-	for {
-		if err := pendingWakeWatcherError(watcher); err == nil {
-			break
-		} else {
-			cfg.baselineExisting = nil
-			_ = watcher.Close()
-			watcher = nil
-			if ordinaryRecoverable {
-				_ = ordinaryInboxDir.Close()
-				ordinaryInboxDir = nil
-				cfg.retainedInbox = nil
-				cfg.retainedInboxRebindable = false
-			}
-			_ = writeWakeDiagnostic(
-				&cfg,
-				"amq wake: main watcher failed before admission: %v; rearming\n",
-				err,
-			)
-		}
-		armed, err := armMainWatcher()
-		if err != nil {
-			return err
-		}
-		if !armed {
-			return nil
-		}
-	}
-	if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
-		if err := retained.ValidateCanonical(); err != nil {
-			return fmt.Errorf("validate wake inbox before admission publication: %w", err)
-		}
-	}
-	if ordinaryAgentDir != nil {
-		if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
-			return fmt.Errorf("validate wake agent before admission publication: %w", err)
-		}
-	}
-	if cfg.onBaselineReady != nil {
-		if err := cfg.onBaselineReady(cloneWakeFileIdentities(cfg.baselineExisting)); err != nil {
-			return err
-		}
-	}
-	// This closes the already-pending stop case only; a stop or process death can
-	// still race immediately after readiness publication.
-	select {
-	case <-cfg.controlStop:
-		return nil
-	case <-sigCh:
-		return nil
-	default:
-	}
-	if cfg.onPrepared != nil {
-		if err := cfg.onPrepared(watcher); err != nil {
-			return err
-		}
-	}
-	select {
-	case <-cfg.controlStop:
-		return nil
-	case <-sigCh:
-		return nil
-	default:
-	}
-
-	// Debounce timer
-	var debounceTimer *time.Timer
-	pendingNotify := false
-	var terminalAuthorityRetryTimer *time.Timer
-	var terminalAuthorityRetryC <-chan time.Time
-	var inboxScanRetryTimer *time.Timer
-	var inboxScanRetryC <-chan time.Time
-	var inboxScanFailures uint
-	var doorbellTimer *time.Timer
-	var doorbellTimerC <-chan time.Time
-	defer func() {
-		if terminalAuthorityRetryTimer != nil {
-			terminalAuthorityRetryTimer.Stop()
-		}
-		if inboxScanRetryTimer != nil {
-			inboxScanRetryTimer.Stop()
-		}
-		if doorbellTimer != nil {
-			doorbellTimer.Stop()
-		}
-	}()
-
-	clearTerminalAuthorityRetry := func() {
-		terminalAuthorityRetryC = nil
-		if terminalAuthorityRetryTimer == nil {
-			return
-		}
-		if !terminalAuthorityRetryTimer.Stop() {
-			select {
-			case <-terminalAuthorityRetryTimer.C:
-			default:
-			}
-		}
-	}
-	scheduleTerminalAuthorityRetry := func() {
-		if terminalAuthorityRetryTimer == nil {
-			terminalAuthorityRetryTimer = time.NewTimer(wakeTerminalAuthorityRetryDelay)
-		} else {
-			if !terminalAuthorityRetryTimer.Stop() {
-				select {
-				case <-terminalAuthorityRetryTimer.C:
-				default:
-				}
-			}
-			terminalAuthorityRetryTimer.Reset(wakeTerminalAuthorityRetryDelay)
-		}
-		terminalAuthorityRetryC = terminalAuthorityRetryTimer.C
-	}
-	clearInboxScanRetry := func() {
-		inboxScanRetryC = nil
-		if inboxScanRetryTimer == nil {
-			return
-		}
-		if !inboxScanRetryTimer.Stop() {
-			select {
-			case <-inboxScanRetryTimer.C:
-			default:
-			}
-		}
-	}
-	scheduleInboxScanRetry := func(delay time.Duration) {
-		if inboxScanRetryTimer == nil {
-			inboxScanRetryTimer = time.NewTimer(delay)
-		} else {
-			if !inboxScanRetryTimer.Stop() {
-				select {
-				case <-inboxScanRetryTimer.C:
-				default:
-				}
-			}
-			inboxScanRetryTimer.Reset(delay)
-		}
-		inboxScanRetryC = inboxScanRetryTimer.C
-	}
-	clearDoorbellDeadline := func() {
-		doorbellTimerC = nil
-		if doorbellTimer != nil && !doorbellTimer.Stop() {
-			select {
-			case <-doorbellTimer.C:
-			default:
-			}
-		}
-	}
-	scheduleDoorbellDeadline := func() {
-		if terminalAuthorityRetryC != nil ||
-			inboxScanRetryC != nil {
-			clearDoorbellDeadline()
-			return
-		}
-		deadline, ok := cfg.doorbell.nextDeadline()
-		if !ok {
-			clearDoorbellDeadline()
-			return
-		}
-		delay := deadline.Sub(cfg.wakeDoorbellNow())
-		if delay < 0 {
-			delay = 0
-		}
-		if doorbellTimer == nil {
-			doorbellTimer = time.NewTimer(delay)
-		} else {
-			if !doorbellTimer.Stop() {
-				select {
-				case <-doorbellTimer.C:
-				default:
-				}
-			}
-			doorbellTimer.Reset(delay)
-		}
-		doorbellTimerC = doorbellTimer.C
-	}
-	retryWatcher := func(context string, cause error) {
-		cfg.baselineExisting = nil
-		if watcher != nil {
-			_ = watcher.Close()
-			watcher = nil
-		}
-		if ordinaryRecoverable {
-			_ = ordinaryInboxDir.Close()
-			ordinaryInboxDir = nil
-			cfg.retainedInbox = nil
-			cfg.retainedInboxRebindable = false
-		}
-		pendingNotify = true
-		clearTerminalAuthorityRetry()
-		inboxScanFailures++
-		scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
-		clearDoorbellDeadline()
-		if cause == nil {
-			_ = writeWakeDiagnostic(&cfg, "amq wake: %s; retrying watcher setup\n", context)
-			return
-		}
-		_ = writeWakeDiagnostic(&cfg, "amq wake: %s: %v; retrying watcher setup\n", context, cause)
-	}
-	scheduleWatcherRebindFailure := func(context string, cause error) {
-		pendingNotify = true
-		inboxScanFailures++
-		scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
-		clearDoorbellDeadline()
-		_ = writeWakeDiagnostic(
-			&cfg,
-			"amq wake: %s: %v; retrying watcher setup\n",
-			context,
-			cause,
-		)
-	}
-	rebindWatcher := func() (bool, error) {
-		if watcher != nil {
-			return true, nil
-		}
-		if ordinaryRecoverable {
-			if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
-				return false, failWakeOnWatcherError(
-					&cfg,
-					"ordinary wake agent authority changed while rearming watcher",
-					err,
-				)
-			}
-			inboxDir, nextWatcher, err := openWatchedWakeInboxDir(ordinaryAgentDir)
-			if err != nil {
-				scheduleWatcherRebindFailure(
-					"ordinary wake inbox is unavailable while rearming watcher",
-					err,
-				)
-				return false, nil
-			}
-			ordinaryInboxDir = inboxDir
-			watcher = nextWatcher
-			cfg.retainedInbox = inboxDir
-			cfg.retainedInboxRebindable = true
-			return true, nil
-		}
-
-		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
-			if err := retained.ValidateCanonical(); err != nil {
-				return false, failWakeOnWatcherError(
-					&cfg,
-					"retained wake inbox authority changed while rearming watcher",
-					err,
-				)
-			}
-			nextWatcher, err := newWakeInboxEventWatcher(retained)
-			if err != nil {
-				scheduleWatcherRebindFailure(
-					"retained wake inbox watcher is unavailable while rearming",
-					err,
-				)
-				return false, nil
-			}
-			watcher = nextWatcher
-			return true, nil
-		}
-
-		nextWatcher, err := newWakePathEventWatcher(inboxNew)
-		if err != nil {
-			scheduleWatcherRebindFailure(
-				"wake inbox watcher is unavailable while rearming",
-				err,
-			)
-			return false, nil
-		}
-		watcher = nextWatcher
-		return true, nil
-	}
-	enterRetainedInputRecovery := func(cause error) error {
-		markWakeInputRecoveryRequired(&cfg, cause)
-		cfg.doorbell.retainRecoveryRequired(cfg.wakeDoorbellNow())
-		pendingNotify = false
-		clearTerminalAuthorityRetry()
-		if err := emitWakeAttention(&cfg, wakePayload{
-			text:       wakeInputRecoveryNotice,
-			provenance: wakePayloadSystemFixed,
-		}); err == nil {
-			cfg.doorbell.recordRecoveryAttentionDelivered()
-		}
-		scheduleDoorbellDeadline()
-		return nil
-	}
-	var unreadableGenerationNotice wakeUnreadableGenerationNoticeState
-	attemptNotification := func() error {
-		defer func() {
-			if cfg.onNotificationAttemptComplete != nil {
-				cfg.onNotificationAttemptComplete()
-			}
-		}()
-		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
-			return nil
-		}
-		err := notifyNewMessages(&cfg)
-		// A canonical mismatch (wakeInboxCanonicalMismatchError) is handled
-		// BEFORE the ordinary scan-retry path: rebindWatcher returns at once
-		// while watcher != nil, so the watcher must be invalidated here.
-		var canonicalMismatch *wakeInboxCanonicalMismatchError
-		if errors.As(err, &canonicalMismatch) {
-			switch classifyCanonicalMismatch(err, cfg.retainedInboxRebindable) {
-			case canonicalMismatchRebindableRearm:
-				// Rebindable (ordinary-recoverable): nil the watcher + inbox so
-				// rebindWatcher re-arms on the new canonical inbox. A legitimate
-				// remove/recreate is a rearm, not a fatal swap.
-				if watcher != nil {
-					_ = watcher.Close()
-					watcher = nil
-				}
-				if ordinaryInboxDir != nil {
-					_ = ordinaryInboxDir.Close()
-					ordinaryInboxDir = nil
-				}
-				cfg.retainedInbox = nil
-				cfg.retainedInboxRebindable = false
-				pendingNotify = true
-				clearTerminalAuthorityRetry()
-				inboxScanFailures++
-				scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
-				clearDoorbellDeadline()
-				_ = writeWakeDiagnostic(&cfg, "amq wake: canonical inbox mismatch (rebindable): rearming watcher: %v\n", err)
-				return nil
-			case canonicalMismatchFatal:
-				// !Rebindable: terminal exit (mirrors rebindWatcher's retained-
-				// authority handling). classifyWakeFailure also returns fatal.
-				clearInboxScanRetry()
-				inboxScanFailures = 0
-				return err
-			}
-		}
-		var scanErr *wakeInboxScanError
-		if errors.As(err, &scanErr) {
-			pendingNotify = true
-			clearTerminalAuthorityRetry()
-			inboxScanFailures++
-			scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
-			clearDoorbellDeadline()
-			_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
-			return nil
-		}
-		clearInboxScanRetry()
-		inboxScanFailures = 0
-		disposition := classifyWakeFailure(err)
-		if disposition == wakeFailureFatal {
-			return err
-		}
-		if isWakeTerminalForegroundPGRPChanged(err) {
-			pendingNotify = true
-			scheduleTerminalAuthorityRetry()
-			clearDoorbellDeadline()
-			if cfg.debug {
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake [debug]: holding notification until foreground process group is restored: %v\n",
-					err,
-				)
-			}
-			return nil
-		}
-		if isWakeTerminalPartialProgress(err) {
-			pendingNotify = true
-			scheduleTerminalAuthorityRetry()
-			clearDoorbellDeadline()
-			if cfg.debug {
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake [debug]: holding partial terminal delivery for exact suffix retry: %v\n",
-					err,
-				)
-			}
-			return nil
-		}
-		if isWakeInjectorDeferred(err) {
-			// The provider refused before dispatch. The transport already
-			// retained the cohort and armed its input retry deadline; keep this
-			// loop silent and let that existing deadline drive the next attempt.
-			pendingNotify = false
-			clearTerminalAuthorityRetry()
-			scheduleDoorbellDeadline()
-			if cfg.debug {
-				_ = writeWakeDiagnostic(&cfg, "amq wake [debug]: provider deferred notification; retaining cohort for retry: %v\n", err)
-			}
-			return nil
-		}
-		var attentionErr *wakeAttentionDeliveryError
-		if errors.As(err, &attentionErr) &&
-			!isWakeTerminalAuthorityLoss(err) {
-			pendingNotify = false
-			clearTerminalAuthorityRetry()
-			scheduleDoorbellDeadline()
-			return nil
-		}
-		if disposition == wakeFailureDegrade {
-			return enterRetainedInputRecovery(err)
-		}
-		pendingNotify = false
-		clearTerminalAuthorityRetry()
-		scheduleDoorbellDeadline()
-		if err == nil {
-			return nil
-		}
-		_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
-		return nil
-	}
-	emitScanFallback := func() error {
-		if err := emitWakeAttention(&cfg, wakePayload{
-			text:       "AMQ messages may be pending; run amq drain --include-body",
-			provenance: wakePayloadSystemFixed,
-		}); err != nil {
-			return err
-		}
-		pendingNotify = false
-		clearInboxScanRetry()
-		return nil
-	}
-
-	// Recheck non-invasive injection preconditions and silently reconcile
-	// durable pending work every 30s. Independent doorbell deadlines keep
-	// re-notifying unread cohorts, with separate input and attention cadences.
-	maintenanceTicks := cfg.maintenanceTicks
-	var maintenanceTicker *time.Ticker
-	if maintenanceTicks == nil {
-		maintenanceTicker = time.NewTicker(30 * time.Second)
-		maintenanceTicks = maintenanceTicker.C
-		defer maintenanceTicker.Stop()
-	}
-	// Poll .wake.settings: agent-directory watch events are not delivered, so
-	// a live change is seen within one tick even with no inbox activity.
-	settingsTicks := cfg.settingsTicks
-	if settingsTicks == nil && cfg.settingsSource != nil {
-		settingsTicker := time.NewTicker(wakeSettingsPollInterval)
-		settingsTicks = settingsTicker.C
-		defer settingsTicker.Stop()
-	}
-	maintenanceOutputs := cfg.maintenanceOutputs
-	if maintenanceOutputs == nil {
-		maintenanceOutputs = []*os.File{os.Stdout, os.Stderr}
-	}
-	preconditionCheck := cfg.preconditionCheck
-	if preconditionCheck == nil {
-		preconditionCheck = func(cfg *wakeConfig) error {
-			return wakeInjectionPreconditionCheck(cfg, controllingTerminalOpenable)
-		}
-	}
-
-	// Touch presence immediately so `amq who` shows agent as active
-	if cfg.touchPresence != nil {
-		_ = cfg.touchPresence()
-	} else {
-		_ = presence.Touch(cfg.root, cfg.me)
-	}
-
-	// Notify if messages already exist
-	if err := attemptNotification(); err != nil {
-		return err
-	}
-
-	for {
-		var debounceC <-chan time.Time
-		if debounceTimer != nil {
-			debounceC = debounceTimer.C
-		}
-		var watcherEvents <-chan fsnotify.Event
-		var watcherErrors <-chan error
-		if watcher != nil {
-			watcherEvents = watcher.Events()
-			watcherErrors = watcher.Errors()
-		}
-
-		select {
-		case <-cfg.controlStop:
-			return nil
-		case <-sigCh:
-			// Clean exit on SIGHUP/SIGTERM
-			return nil
-		case <-restartCh:
-			handleWakeRestartAtLoopBoundary(
-				&cfg,
-				watcher,
-				terminalAuthorityRetryC != nil,
-				inboxScanRetryC != nil,
-			)
-
-		case event, ok := <-watcherEvents:
-			if !ok {
-				retryWatcher("wake inbox watcher closed", nil)
-				continue
-			}
-			invalidateWakeBaselineEvent(&cfg, event)
-			// Creates/additions can accelerate delivery; removals are durable
-			// progress and must rearm the generation without waiting for the
-			// maintenance reconciliation fallback.
-			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write|fsnotify.Remove) == 0 {
-				continue
-			}
-			// Skip non-.md files
-			if !strings.HasSuffix(event.Name, ".md") {
-				continue
-			}
-
-			// Start or reset debounce timer
-			pendingNotify = true
-			if cfg.onPendingNotify != nil {
-				cfg.onPendingNotify()
-			}
-			if debounceTimer == nil {
-				debounceTimer = time.NewTimer(cfg.settings.debounce)
-			} else {
-				if !debounceTimer.Stop() {
-					select {
-					case <-debounceTimer.C:
-					default:
-					}
-				}
-			}
-			debounceTimer.Reset(cfg.settings.debounce)
-
-		case err, ok := <-watcherErrors:
-			if !ok {
-				retryWatcher("wake inbox watcher closed", nil)
-				continue
-			}
-			retryWatcher("wake inbox watcher failed", err)
-			continue
-
-		case <-debounceC:
-			if !pendingNotify {
-				continue
-			}
-
-			// Collect and notify
-			if err := attemptNotification(); err != nil {
-				return err
-			}
-
-		case <-terminalAuthorityRetryC:
-			terminalAuthorityRetryC = nil
-			if !pendingNotify {
-				continue
-			}
-			if err := attemptNotification(); err != nil {
-				return err
-			}
-
-		case <-inboxScanRetryC:
-			inboxScanRetryC = nil
-			rebound, err := rebindWatcher()
-			if err != nil {
-				if classifyWakeFailure(err) == wakeFailureFatal {
-					return err
-				}
-				scheduleWatcherRebindFailure(
-					"wake inbox watcher rearm failed",
-					err,
-				)
-				continue
-			}
-			if !rebound {
-				continue
-			}
-			if err := attemptNotification(); err != nil {
-				return err
-			}
-
-		case <-doorbellTimerC:
-			doorbellTimerC = nil
-			if err := attemptNotification(); err != nil {
-				return err
-			}
-
-		case <-settingsTicks:
-			// Only a hold-policy change needs a scan now: it re-times held
-			// cohorts. A scan for any other key could resend an interrupt
-			// key for mail that is still unread; those keys apply at next use.
-			if !cfg.reloadSettings() || !cfg.holdPolicyChanged {
-				continue
-			}
-			pendingNotify = true
-			if err := attemptNotification(); err != nil {
-				return err
-			}
-
-		case <-maintenanceTicks:
-			if err := maintainWakeOutputBounds(maintenanceOutputs...); err != nil {
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake: maintain output bound: %v; continuing without truncation\n",
-					err,
-				)
-			}
-			pendingInputWork := !cfg.inputRecoveryRequired &&
-				(cfg.doorbell.pendingInput() || cfg.inputDelivery.pending())
-			hadPendingInputWork := pendingNotify || pendingInputWork
-			if pendingInputWork {
-				if err := attemptNotification(); err != nil {
-					return err
-				}
-			}
-
-			// Keep presence alive so `amq who` reports the agent as active
-			if cfg.touchPresence != nil {
-				_ = cfg.touchPresence()
-			} else {
-				_ = presence.Touch(cfg.root, cfg.me)
-			}
-			if err := retryPendingWakeNotifierStatus(&cfg); err != nil {
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake: persist notifier status: %v; retrying\n",
-					err,
-				)
-			}
-			if err := retryPendingWakeDoorbellStatus(&cfg); err != nil {
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake: persist doorbell parked status: %v; retrying\n",
-					err,
-				)
-			}
-			if cfg.inputRecoveryRequired {
-				unreadableGenerationNotice.resetWithoutStatusWrite()
-				scheduleDoorbellDeadline()
-				continue
-			}
-
-			inputModeBeforeCheck := cfg.injectMode
-			inputEnabledBeforeCheck := inputModeBeforeCheck != wakeInjectModeNone
-			inputStateBeforeCheck := cfg.inputDelivery
-			doorbellBeforeCheck := cfg.doorbell
-			preconditionErr := preconditionCheck(&cfg)
-			if inputEnabledBeforeCheck &&
-				cfg.injectMode == wakeInjectModeNone &&
-				inputStateBeforeCheck.blocksDemotion() {
-				cfg.injectMode = inputModeBeforeCheck
-				cfg.inputDelivery = inputStateBeforeCheck
-				cfg.doorbell = doorbellBeforeCheck
-				preconditionErr = errors.Join(
-					preconditionErr,
-					&wakeInputDemotionBlockedError{
-						err: errors.New("maintenance attempted output-only demotion before terminal input completed"),
-					},
-				)
-			}
-			if isWakeInputDemotionBlocked(preconditionErr) {
-				unreadableGenerationNotice.resetWithoutStatusWrite()
-				if err := enterRetainedInputRecovery(preconditionErr); err != nil {
-					return err
-				}
-				continue
-			}
-			if !inputEnabledBeforeCheck && cfg.injectMode != wakeInjectModeNone {
-				cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
-				pendingNotify = true
-				if err := attemptNotification(); err != nil {
-					return err
-				}
-			}
-			if cfg.injectMode == wakeInjectModeNone {
-				if inputEnabledBeforeCheck {
-					if err := retireWakeInputState(
-						&cfg,
-						errors.New("maintenance transferred pending work to output-only delivery"),
-					); err != nil {
-						cfg.injectMode = inputModeBeforeCheck
-						preconditionErr = errors.Join(preconditionErr, err)
-						scheduleDoorbellDeadline()
-						return preconditionErr
-					}
-				} else {
-					clearWakeInputState(&cfg)
-				}
-				clearTerminalAuthorityRetry()
-				if inputEnabledBeforeCheck && hadPendingInputWork {
-					pendingNotify = true
-					if preconditionErr != nil && inboxScanRetryC != nil {
-						preconditionErr = errors.Join(
-							preconditionErr,
-							emitScanFallback(),
-						)
-					} else {
-						if err := attemptNotification(); err != nil {
-							return err
-						}
-						if preconditionErr != nil && pendingNotify && inboxScanRetryC != nil {
-							preconditionErr = errors.Join(
-								preconditionErr,
-								emitScanFallback(),
-							)
-						}
-					}
-				} else if inputEnabledBeforeCheck {
-					pendingNotify = false
-				}
-			}
-			scheduleDoorbellDeadline()
-			if preconditionErr != nil {
-				if classifyWakeFailure(preconditionErr) == wakeFailureFatal {
-					return preconditionErr
-				}
-				_ = writeWakeDiagnostic(
-					&cfg,
-					"amq wake: maintenance precondition failed: %v; retrying\n",
-					preconditionErr,
-				)
-			}
-			if agentDir, ok := cfg.retainedAgent.(*wakeAgentDir); ok &&
-				agentDir != nil && cfg.inspectTerminalGeneration != nil {
-				if err := maintainWakeSelfUpgradeAtLoopBoundary(
-					&cfg,
-					agentDir,
-					watcher,
-					terminalAuthorityRetryC != nil,
-					inboxScanRetryC != nil,
-				); err != nil {
-					_ = writeWakeDiagnostic(
-						&cfg,
-						"amq wake: self-upgrade maintenance: %v; retrying\n",
-						err,
-					)
-				}
-			}
-			unreadableGenerationNotice.observe(&cfg)
-		}
 	}
 }
 

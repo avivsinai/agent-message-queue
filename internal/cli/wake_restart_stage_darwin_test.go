@@ -115,7 +115,7 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)

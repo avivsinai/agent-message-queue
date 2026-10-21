@@ -158,7 +158,7 @@ func loadWakeSelfUpgradeAttemptAtStartup(
 	if state == nil || agentDir == nil || !state.Enabled || !state.Eligible {
 		return nil
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade attempt inspection")
@@ -202,7 +202,7 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 		return nil, errors.New("wake self-upgrade attempt requires a self restart record")
 	}
 	var installedAttempts []selfupgrade.Attempt
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade attempt publication")
@@ -281,7 +281,7 @@ func settleWakeSelfUpgradeAttemptAtBoundary(
 		return nil
 	}
 	var settled []selfupgrade.Attempt
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade attempt settlement")

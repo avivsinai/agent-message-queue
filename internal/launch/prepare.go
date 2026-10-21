@@ -1208,7 +1208,7 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		if reason != "" {
 			prepared.PlannedOutcome = "unsupported"
 			observation.ReasonCode = reason
-			return prepared, observation, nil, nil, nil
+			return prepared, observation, nil, actions, nil
 		}
 		base.ResumePolicy = participant.ResumePolicy
 		plan, err = adapter.PlanFresh(base)
@@ -1250,14 +1250,18 @@ func prepareInitialInputUnsupported(participant PrepareParticipant) string {
 
 // prepareFreshCaptureRefusal probes a capture-mode adapter before Prepare
 // plans a fresh launch and returns the reason Apply would refuse it with. It
-// derives that reason exactly as Reconcile does so Prepare and Apply agree.
-// Executable containment holds before the probe executes the provider, and
-// mint-mode adapters are not probed.
+// derives that reason exactly as Reconcile does so Prepare and Apply agree:
+// a project-contained provider refuses only its seat, before the probe can
+// execute it. Mint-mode adapters are not probed.
 func prepareFreshCaptureRefusal(ctx context.Context, adapter HarnessAdapter, participant PrepareParticipant, projectRoot string) (string, error) {
 	if adapter.Mode() != AdapterModeCapture {
 		return "", nil
 	}
 	if err := validateExecutableContainment(participant.Executable, projectRoot, participant.Provider); err != nil {
+		var contained *LaunchPathError
+		if errors.As(err, &contained) && contained.Code == ProviderProjectContainedCode {
+			return ProviderProjectContainedCode, nil
+		}
 		return "", err
 	}
 	capabilities := adapter.Capabilities(ctx)

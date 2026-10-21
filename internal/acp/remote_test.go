@@ -22,7 +22,7 @@ import (
 )
 
 // TestRemotePromptSubmitsToTargetAndReturnsResult is the happy path for
-// remote mode (bead agent-message-queue-611.28): an ACP prompt is submitted
+// remote mode (happy path): an ACP prompt is submitted
 // to the amq-remote target through the endpoint socket, and the native result
 // comes back as the agent message. Socket paths must stay short, so the root
 // lives directly under the system temp root.
@@ -125,7 +125,7 @@ func (r noCancel) CancelExact(requests.Key, string) (core.CancelEvidence, error)
 	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "native cancel unavailable"}, nil
 }
 
-// Codex #876 P1 #1: an unsupported cancel was reported as a plain cancelled
+// Regression: #876, an unsupported cancel was reported as a plain cancelled
 // turn while the native work kept running.
 func TestRemoteUnsupportedCancelSaysWorkContinues(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -153,7 +153,7 @@ func TestRemoteUnsupportedCancelSaysWorkContinues(t *testing.T) {
 	}
 }
 
-// Codex #876 P1 #2: an error after the native run was reported as
+// Regression: #876, an error after the native run was reported as
 // not_submitted with no request reference.
 func TestRemoteErrorAfterNativeRunKeepsRequest(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -180,7 +180,7 @@ type movingNative struct {
 
 func (m *movingNative) NativeSessionID() string { return m.id }
 
-// Codex #876 P1 #3: a replacement native session behind the same target
+// Regression: #876, a replacement native session behind the same target
 // received the owner's prompts.
 func TestRemoteRefusesReplacementNativeSession(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -195,7 +195,7 @@ func TestRemoteRefusesReplacementNativeSession(t *testing.T) {
 	}
 }
 
-// Codex #876 P2 #4: a redelivered event after the endpoint reattached under a
+// Regression: #876, a redelivered event after the endpoint reattached under a
 // new epoch got request_conflict instead of its stored result.
 func TestRemoteRedeliveryAfterReattachReturnsStoredResult(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -219,7 +219,7 @@ func TestRemoteRedeliveryAfterReattachReturnsStoredResult(t *testing.T) {
 	}
 }
 
-// Codex #876 P2 #5: a cancel that settled first was overwritten by a
+// Regression: #876, a cancel that settled first was overwritten by a
 // completed snapshot.
 func TestRemoteSettledCancelWins(t *testing.T) {
 	r := &remoteTurn{s: NewServer(Config{}, "test"), emit: func(any) error { return nil }, turn: &turnState{done: make(chan struct{}), outcome: "session_cancelled"}}
@@ -233,7 +233,7 @@ func TestRemoteSettledCancelWins(t *testing.T) {
 	}
 }
 
-// Codex #876 r2 P1 #2: a redelivery whose lookup failed asserted
+// Regression: #876, a redelivery whose lookup failed asserted
 // not_submitted while the original native run existed.
 func TestRemoteRedeliveryLookupFailureIsUncertain(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -256,7 +256,7 @@ func TestRemoteRedeliveryLookupFailureIsUncertain(t *testing.T) {
 	}
 }
 
-// Codex #876 r2 P1 #3: the replay path read a completed request with a wrong
+// Regression: #876, the replay path read a completed request with a wrong
 // native pin.
 func TestRemoteReplayWithWrongPinIsRefused(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -276,7 +276,7 @@ func TestRemoteReplayWithWrongPinIsRefused(t *testing.T) {
 	}
 }
 
-// Codex #876 r2 P2 #4: a busy-rejected event could not be retried after the
+// Regression: #876, a busy-rejected event could not be retried after the
 // target became free.
 func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -306,7 +306,7 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	}
 }
 
-// TestRemoteBusyDMWaitsThenRuns is agent-message-queue-611.34: a DM that
+// TestRemoteBusyDMWaitsThenRuns covers: a DM that
 // arrives while the session is busy is queued once, then runs on the same
 // request id after the session is free.
 // The waits below are event-driven, each bounded only by a deadlock guard:
@@ -389,7 +389,7 @@ func queuedThoughts(mu *sync.Mutex, thoughts *[]string) int {
 	return n
 }
 
-// TestRemoteCancelWhileQueuedSubmitsNothing is agent-message-queue-611.34:
+// TestRemoteCancelWhileQueuedSubmitsNothing covers:
 // session/cancel during the busy wait stops retrying and never admits the DM.
 func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	rt := fake.New("fake", "e_1")
@@ -440,7 +440,7 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	if got.StopReason != StopReasonCancelled || rt.HasRun(id) {
 		t.Fatalf("cancel admitted the dm: %+v hasRun=%v", got, rt.HasRun(id))
 	}
-	// Claude #889 P2: a later delivery of the same event must not run the
+	// Regression: #889, a later delivery of the same event must not run the
 	// work the owner cancelled.
 	if !rt.Complete(occupy, "local done") {
 		t.Fatal("occupy did not complete")
@@ -454,7 +454,7 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-611.31: in binding mode a prompt answers "Not
+// In binding mode a prompt answers "Not
 // connected" until a session is bound, then runs in the bound session.
 func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -489,7 +489,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 	}
 }
 
-// Codex #885 P1 #1: a redelivered event followed the current binding, so a
+// Regression: #885, a redelivered event followed the current binding, so a
 // rebind between deliveries ran it again in the new session.
 func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -539,7 +539,7 @@ func canonicalTempDir(t *testing.T) string {
 	return dir
 }
 
-// Codex #885 r2 P1: a concurrent first delivery that lost the event claim
+// Regression: #885, a concurrent first delivery that lost the event claim
 // used its own captured binding. The loser must follow the winner.
 func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -559,7 +559,7 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	}
 }
 
-// Codex #885 r3 P1: a reader used a visible claim before its directory entry
+// Regression: #885, a reader used a visible claim before its directory entry
 // was durable. Every returned claim is synced first.
 func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 	s := NewServer(Config{RemoteBinding: true, Pin: "r", StateDir: canonicalTempDir(t)}, "test")
@@ -607,7 +607,7 @@ func (b *blockedSubmit) InspectSubmit() (protocol.Session, string) {
 	return s, b.blocked
 }
 
-// Pro delta review of e19615f2 on #923, 2026-09-29, #1: a deferred
+// Regression: #923, a deferred
 // unsupported refusal kept the adapter's reason on the record only, so the
 // owner's DM showed a bare "rejected (unsupported)".
 func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
@@ -679,7 +679,7 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-1kc, review of #959: one post marker per event
+// Regression: #959, one post marker per event
 // let a timeout notice suppress the answer a later delivery brought, and a
 // "Not connected" turn carried no event id, so it posted on every delivery.
 func TestRedeliveryPostsEachKindOnce(t *testing.T) {
@@ -732,7 +732,7 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 	})
 }
 
-// Bead agent-message-queue-1kc, review of #959 r2: an uncertain request
+// Regression: #959, an uncertain request
 // posted its notice as the final answer, so the answer it later resolved to
 // was suppressed on the next delivery.
 func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
@@ -761,7 +761,7 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-1kc, review of #959 r3: a lost reply to a busy
+// Regression: #959, a lost reply to a busy
 // resubmit was recovered from the stored busy tombstone and posted as the
 // final answer, so the answer a later delivery brought was suppressed.
 func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
@@ -841,7 +841,7 @@ func (c claudeApproval) Subscribe(fn func(core.NativeEvent)) func() {
 	})
 }
 
-// Bead agent-message-queue-611.42.2: a native Claude turn from Buzz Desktop
+// A native Claude turn from Buzz Desktop
 // shows its pending tool approval in the DM once, says it can deny only,
 // and relays the owner's ❌ as the approval's reject option.
 func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
@@ -851,7 +851,7 @@ func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
 }
 
 // remoteApprovalOwnerDeny drives one Desktop deny. With failFirst the first
-// post and the first deny fail (review of #995: a failure left the owner's
+// post and the first deny fail (#995: a failure left the owner's
 // ❌ unanswered); the approval is still posted once and denied once.
 func remoteApprovalOwnerDeny(t *testing.T, failFirst bool) {
 	owner := strings.Repeat("0b", 32)

@@ -14,7 +14,7 @@ func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
 	successorBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, ".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName)
 	residueBefore := snapshotDetachedWakeFiles(t, detachedPath, wakeTargetFileName, wakePreparedFileName)
 
-	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	assertDetachedWakeCleanupOnlyError(t, err)

@@ -91,13 +91,13 @@ func TestPgnChangedStageDoesNotDeadEndLockRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh acquire after changed-stage release: %v", err)
 	}
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return publishAuthoritativeWakeClaimAt(scope, fixture.root, fixture.me, fixture.target, freshLock)
 	}); err != nil {
 		t.Fatalf("publish fresh wake claim after changed-stage release: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		_ = withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 			freshInspection := inspectWakeLock(fixture.root, fixture.me)
 			return removeAuthoritativeWakeClaimAt(scope, freshInspection, &fixture.target)
 		})

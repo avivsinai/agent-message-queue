@@ -8,7 +8,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// Review of #964: a replay whose publication budget expired said not delivered
+// Regression: #964, a replay whose publication budget expired said not delivered
 // even when the previous attempt's prompt remained in the inbox. The timeout
 // must preserve uncertainty and must never invite a second send.
 func TestMailboxExpiredReplayDoesNotDenyDelivery(t *testing.T) {

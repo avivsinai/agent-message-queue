@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefaultRegistryRegistersClaudeDesktopBehindCapabilityGate(t *testing.T) {
-	registry := DefaultRegistry()
+	registry := DefaultRegistry(nil)
 	// claude-desktop is now registered (it is an honest prefill-only seat),
 	// but the capability gate in app.registerWithOptions refuses it under the
 	// default zero-value minimum and under a submitted/unattended minimum.
@@ -190,7 +190,7 @@ func TestCodexAppDiscoverReturnsNewSeatAfterIdentityProbe(t *testing.T) {
 // codex-app seat is registered behind the capability gate and that its new vs
 // thread targets classify correctly. Covers CapabilityForTarget for both seats.
 func TestDefaultRegistryRegistersCodexAppBehindCapabilityGate(t *testing.T) {
-	registry := DefaultRegistry()
+	registry := DefaultRegistry(nil)
 	// codex-app is now registered (deep-link prefill seat); the capability gate
 	// in app.registerWithOptions refuses it under the default zero-value minimum.
 	if _, err := registry.Get("codex-app"); err != nil {

@@ -42,8 +42,9 @@ func notifyWakeRestartPlatform(
 		}
 	}()
 
-	return withExistingWakeMutationScopeNoWaitInDir(
+	return withWakeMutationScopeInDir(
 		agentDir,
+		wakeGuardExistingNoWait,
 		func(scope *wakeMutationScope) error {
 			dirfd, _, err := scope.location()
 			if err != nil {

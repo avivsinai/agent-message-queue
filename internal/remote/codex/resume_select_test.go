@@ -27,9 +27,9 @@ func writeRollout(t *testing.T, path string) string {
 	return path
 }
 
-// Bead agent-message-queue-611.64: coop exec resolves `codex resume --last`
+// agent-message-queue-611.64: coop exec resolves `codex resume --last`
 // once, with the TUI's own thread/list on the daemon, and binds that thread.
-// Acceptance row 1: the selection is made once; a thread that becomes latest
+// The selection is made once; a thread that becomes latest
 // afterwards is never asked for.
 func TestResolveResumeThreadSelectsTheLatestThreadAsCodexDoes(t *testing.T) {
 	d := newFakeNamingDaemon(t)
@@ -60,7 +60,7 @@ func TestResolveResumeThreadSelectsTheLatestThreadAsCodexDoes(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-611.64 acceptance row 3: two threads labelled
+// Two threads labelled
 // s1/codex make the name ambiguous; Codex refuses it, and so does AMQ,
 // naming both ids.
 func TestResolveResumeThreadRefusesAnAmbiguousName(t *testing.T) {
@@ -79,7 +79,7 @@ func TestResolveResumeThreadRefusesAnAmbiguousName(t *testing.T) {
 	}
 }
 
-// Review of #1001 (P1): with CODEX_HOME set to a symlink, Codex lists thread
+// Regression: #1001, with CODEX_HOME set to a symlink, Codex lists thread
 // paths under the real home, and AMQ refused every name.
 func TestResolveResumeThreadNamesUnderASymlinkedCodexHome(t *testing.T) {
 	d := newFakeNamingDaemon(t)

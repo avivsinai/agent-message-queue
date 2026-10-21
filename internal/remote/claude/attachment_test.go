@@ -46,7 +46,7 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 		Pid: 4242, SessionID: "abc-123", Cwd: "/tmp/proj", Kind: "interactive",
 		MessagingSocketPath: "/tmp/cc-socks/4242.sock", Name: "sess/claude",
 	})
-	// cfg.Target wins (P0-3): the manifest target is the identity the
+	// cfg.Target wins: the manifest target is the identity the
 	// endpoint addresses the adapter under; the registry name crosses a
 	// trust boundary (local-process-writable file) and is only a fallback.
 	att, err := Attach(config{Pid: 4242, Home: home, Target: "cc-1"})
@@ -58,10 +58,10 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 		t.Fatalf("harness = %q, want claude_code (schema enum)", s.Harness)
 	}
 	if s.TargetID != "cc-1" {
-		t.Fatalf("target = %q, want the manifest target cc-1 (P0-3)", s.TargetID)
+		t.Fatalf("target = %q, want the manifest target cc-1", s.TargetID)
 	}
 	if s.Epoch != SentinelUnpinned {
-		t.Fatalf("epoch = %q, want the unpinned sentinel (PR1 binds nothing)", s.Epoch)
+		t.Fatalf("epoch = %q, want the unpinned sentinel (attach binds nothing)", s.Epoch)
 	}
 	// Honest projection: inspect and submit (the socket wire), nothing in
 	// the interrupt family, and no approvals without cfg.Approve.
@@ -69,8 +69,7 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want %+v", s.Capabilities, want)
 	}
 	// Submit proves delivery only, so the projection is submitted, never
-	// admitted: a relay share for Claude sets min_evidence submitted (lead
-	// ruling on bead 611.42.3).
+	// admitted: a relay share for Claude sets min_evidence submitted.
 	if s.Evidence == nil || s.Evidence.Submit != protocol.EvidenceSubmitted {
 		t.Fatalf("evidence projection = %+v, want submit evidence submitted", s.Evidence)
 	}
@@ -111,8 +110,8 @@ func TestSubmitRefusesWithoutInboundPrecondition(t *testing.T) {
 }
 
 func TestDeriveTargetValidatesAndFallsBack(t *testing.T) {
-	// A protocol-invalid registry name falls back to the pid form (P0-3:
-	// the published id must always be addressable — ValidTargetID).
+	// A protocol-invalid registry name falls back to the pid form:
+	// the published id must always be addressable (ValidTargetID).
 	got := deriveTarget(4242, &sessionRegistry{Name: "sess/claude"})
 	if got != "claude:4242" {
 		t.Fatalf("deriveTarget with invalid name = %q, want claude:4242", got)
@@ -145,8 +144,8 @@ func TestNormalizeStatusProjectionVocabulary(t *testing.T) {
 	}
 }
 
-// TestRegistryLeafMustBeRegularFile pins r2 P1-1: the session-registry path
-// is local-process-writable; a non-regular file there (FIFO, directory) is
+// TestRegistryLeafMustBeRegularFile pins that the session-registry path
+// is local-process-writable: a non-regular file there (FIFO, directory) is
 // refused by lstat BEFORE any read — os.ReadFile on a FIFO blocks
 // unbounded, and this read runs under the endpoint's mutex.
 func TestRegistryLeafMustBeRegularFile(t *testing.T) {
@@ -167,10 +166,10 @@ func TestRegistryLeafMustBeRegularFile(t *testing.T) {
 	testRegistryFIFO(t, home, regPath)
 }
 
-// TestRegistryOversizedRefusedBeforeRead pins verifier r3 P1: a registry
+// TestRegistryOversizedRefusedBeforeRead pins that a registry
 // file over the 64 KiB bound is refused on fi.Size() BEFORE any read —
 // no os.ReadFile of a multi-GB file under the endpoint mutex — and the
-// LimitReader caps the lstat-to-read growth window (r3 P2-2).
+// LimitReader caps the lstat-to-read growth window.
 func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
 	home := tempHome(t, 42, &sessionRegistry{Pid: 42, SessionID: "s42", Kind: "interactive"})
 	regPath := filepath.Join(claudeSessionsDir(home), "42.json")
@@ -178,7 +177,7 @@ func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := readSessionRegistry(home, 42); err == nil {
-		t.Fatal("accepted an oversized session registry (r3 P1)")
+		t.Fatal("accepted an oversized session registry")
 	} else if !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("refusal does not state the size bound: %v", err)
 	}

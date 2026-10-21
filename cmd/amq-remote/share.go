@@ -296,16 +296,23 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return enrollTag(*session, keyDir, *tagFile, k, st)
 	}
 
+	return mintOrRenewShare(*root, *session, keyDir, k, st, *days, daysSet, *renew, enable, stdout, stderr)
+}
+
+// mintOrRenewShare persists one pending window per kind and prints its
+// preimages for the owner to sign, or, without --renew, reprints an
+// incomplete enrollment or the enrolled state.
+func mintOrRenewShare(root, session, keyDir string, k *bodykey.BodyKey, st *shareState, days int, daysSet, renew bool, enable []uint16, stdout, stderr io.Writer) (int, error) {
 	// Mint or renew: persist one pending window per kind so doctor can warn
 	// before expiry, and print the preimages for the owner to sign. The
 	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
 	// previews exactly what a real run mints.
-	window, err := renewalWindow(st, *days, daysSet, enable)
+	window, err := renewalWindow(st, days, daysSet, enable)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	notAfter, pending := window.notAfter, window.tags
-	if rerr := reconcileStagedState(*session, keyDir, st); rerr != nil {
+	if rerr := reconcileStagedState(session, keyDir, st); rerr != nil {
 		return protocol.ExitActionRequired, rerr
 	}
 	// Re-load after reconciliation: stale leftovers may be gone. The loader
@@ -319,17 +326,17 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	pendingTags := st2.Pending.Tags
 	pendingGone := st2.Pending.State == leafAbsent
-	if !*renew {
+	if !renew {
 		if !pendingGone && len(pendingTags) > 0 {
 			// An enrollment is incomplete: reprint the OUTSTANDING pending
 			// preimages (the owner signs one kind at a time
 			// offline and must be able to recover the preimage list without
 			// rotating the window). Enrolled credentials are untouched.
 			if st2.Staged.Err != nil {
-				return protocol.ExitActionRequired, stagedCorruptRefusal(*session, st2.Staged.leafRead)
+				return protocol.ExitActionRequired, stagedCorruptRefusal(session, st2.Staged.leafRead)
 			}
 			outstanding := outstandingPending(pendingTags, st2.Staged.Tags, st2.Enrolled.Gen)
-			printShareOutstanding(stdout, *session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
+			printShareOutstanding(stdout, session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
 			return 0, nil
 		}
 		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 && len(enable) > 0 {
@@ -342,15 +349,15 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			// Fully enrolled; plain `share` does not disturb the state.
 			// Print the ENROLLED state (expiry derived from the signed
 			// conditions).
-			printShareEnrolled(stdout, *session, k, st2.Enrolled.Gen.Tags)
+			printShareEnrolled(stdout, session, k, st2.Enrolled.Gen.Tags)
 			return 0, nil
 		}
 	}
 	if err := writeSharePending(keyDir, pending, notAfter); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	printSharePending(stdout, *session, k, pending, notAfter)
-	say(stderr, "save this output, sign it in one step, then enroll the bundle:\n  amq-owner-sign --share <this-output> --out <bundle.json> --relay <wss-url>\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url> [--dm-channel <channel> --native-session <id>]", *root, *session)
+	printSharePending(stdout, session, k, pending, notAfter)
+	say(stderr, "save this output, sign it in one step, then enroll the bundle:\n  amq-owner-sign --share <this-output> --out <bundle.json> --relay <wss-url>\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url> [--dm-channel <channel> --native-session <id>]", root, session)
 	return 0, nil
 }
 
@@ -1622,7 +1629,6 @@ func doctorShareInspection(root string) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	const warnHorizon = 7 * 24 * time.Hour
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -1749,62 +1755,7 @@ func doctorShareInspection(root string) map[string]any {
 			outstanding = len(outstandingPending(pendingTags, st.Staged.Tags, gen))
 		}
 		if gen != nil && len(gen.Tags) > 0 {
-			perKind := map[string]any{}
-			earliest := time.Time{}
-			for _, t := range gen.Tags {
-				exp, err := enrolledExpiry(t)
-				if err != nil {
-					perKind[fmt.Sprint(t.Kind)] = map[string]string{"error": err.Error()}
-					continue
-				}
-				perKind[fmt.Sprint(t.Kind)] = map[string]string{"expires": exp.UTC().Format(time.RFC3339)}
-				if earliest.IsZero() || exp.Before(earliest) {
-					earliest = exp
-				}
-			}
-			renewalInProgress := len(pendingTags) > 0
-			if renewalInProgress && progressKnown && outstanding > 0 {
-				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(pendingTags)-outstanding, len(pendingTags))
-				info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, e.Name())
-			} else if renewalInProgress && !progressKnown {
-				// Whether a renewal is in progress is knowable from
-				// the pending window ALONE; only the COUNT needs the staged
-				// leaf. The known fact stays; the unknown count is never
-				// fabricated, and the do-NOT-renew warning survives.
-				info["attestation"] = "enrolled"
-				info["progress"] = "unknown: staged state unreadable (see staged_error)"
-				info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + e.Name() + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
-			} else {
-				info["attestation"] = "enrolled"
-			}
-			renewalOutstanding := renewalInProgress && (progressKnown && outstanding > 0 || !progressKnown)
-			info["kinds"] = perKind
-			if !earliest.IsZero() {
-				// The expiry FACT is always emitted — an active generation
-				// lapsing mid-renewal is exactly when the
-				// alarm matters (the staged shape makes the whole renewal an
-				// outage window). Only the REMEDY is conditional: while
-				// preimages are outstanding the remedy is plain `share`,
-				// never `--renew` (rotating the window would strand the
-				// still-unsigned preimages).
-				remaining := time.Until(earliest)
-				shareRemedy := "run `amq-remote share --session " + e.Name() + " --renew`"
-				if renewalOutstanding {
-					shareRemedy = "run `amq-remote share --session " + e.Name() + "` to complete the in-progress renewal"
-				} else if !progressKnown {
-					// While progress is unknown the renew remedy is
-					// suppressed — an unreadable staged leaf may be an
-					// in-progress renewal; renewing would rotate the window
-					// and strand preimages the owner may already be signing.
-					shareRemedy = "run `amq-remote share --session " + e.Name() + "` (renewal state unreadable; do NOT renew until the staged leaf is repaired)"
-				}
-				switch {
-				case remaining <= 0:
-					info["expiry_warning"] = "expired: " + shareRemedy
-				case remaining < warnHorizon:
-					info["expiry_warning"] = fmt.Sprintf("expires in %s: %s", remaining.Round(time.Hour), shareRemedy)
-				}
-			}
+			reportEnrolledGeneration(info, e.Name(), gen, pendingTags, outstanding, progressKnown)
 			out[e.Name()] = info
 			continue
 		}
@@ -1833,4 +1784,66 @@ func doctorShareInspection(root string) map[string]any {
 		return nil
 	}
 	return out
+}
+
+// reportEnrolledGeneration adds the attestation, per-kind expiry and expiry
+// warning rows of an enrolled generation to info.
+func reportEnrolledGeneration(info map[string]any, session string, gen *enrolledGeneration, pendingTags []shareTagFile, outstanding int, progressKnown bool) {
+	const warnHorizon = 7 * 24 * time.Hour
+	perKind := map[string]any{}
+	earliest := time.Time{}
+	for _, t := range gen.Tags {
+		exp, err := enrolledExpiry(t)
+		if err != nil {
+			perKind[fmt.Sprint(t.Kind)] = map[string]string{"error": err.Error()}
+			continue
+		}
+		perKind[fmt.Sprint(t.Kind)] = map[string]string{"expires": exp.UTC().Format(time.RFC3339)}
+		if earliest.IsZero() || exp.Before(earliest) {
+			earliest = exp
+		}
+	}
+	renewalInProgress := len(pendingTags) > 0
+	if renewalInProgress && progressKnown && outstanding > 0 {
+		info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(pendingTags)-outstanding, len(pendingTags))
+		info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, session)
+	} else if renewalInProgress && !progressKnown {
+		// Whether a renewal is in progress is knowable from
+		// the pending window ALONE; only the COUNT needs the staged
+		// leaf. The known fact stays; the unknown count is never
+		// fabricated, and the do-NOT-renew warning survives.
+		info["attestation"] = "enrolled"
+		info["progress"] = "unknown: staged state unreadable (see staged_error)"
+		info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + session + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
+	} else {
+		info["attestation"] = "enrolled"
+	}
+	renewalOutstanding := renewalInProgress && (progressKnown && outstanding > 0 || !progressKnown)
+	info["kinds"] = perKind
+	if !earliest.IsZero() {
+		// The expiry FACT is always emitted — an active generation
+		// lapsing mid-renewal is exactly when the
+		// alarm matters (the staged shape makes the whole renewal an
+		// outage window). Only the REMEDY is conditional: while
+		// preimages are outstanding the remedy is plain `share`,
+		// never `--renew` (rotating the window would strand the
+		// still-unsigned preimages).
+		remaining := time.Until(earliest)
+		shareRemedy := "run `amq-remote share --session " + session + " --renew`"
+		if renewalOutstanding {
+			shareRemedy = "run `amq-remote share --session " + session + "` to complete the in-progress renewal"
+		} else if !progressKnown {
+			// While progress is unknown the renew remedy is
+			// suppressed — an unreadable staged leaf may be an
+			// in-progress renewal; renewing would rotate the window
+			// and strand preimages the owner may already be signing.
+			shareRemedy = "run `amq-remote share --session " + session + "` (renewal state unreadable; do NOT renew until the staged leaf is repaired)"
+		}
+		switch {
+		case remaining <= 0:
+			info["expiry_warning"] = "expired: " + shareRemedy
+		case remaining < warnHorizon:
+			info["expiry_warning"] = fmt.Sprintf("expires in %s: %s", remaining.Round(time.Hour), shareRemedy)
+		}
+	}
 }

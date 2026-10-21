@@ -69,16 +69,11 @@ type ApplyResult struct {
 	CallerContext     map[string]string
 }
 
-var afterApplySessionPublishedForTest func()
 var beforeApplySessionPublishForTest func()
 var beforeApplyAuthorizeApplyForTest func()
 var beforeApplyReconcileForTest func()
-var afterApplyReconcileForTest func()
 var openPrepareTargetForApply = openPrepareTarget
-var beforeApplyRosterMutationForTest func()
-var beforeApplyBaseRootCreateForTest func()
 var afterApplyBaseRootCreatedForTest func() error
-var beforeApplyFinalPrepareForTest func()
 var collectApplyEvidenceRefs = CollectEvidenceRefs
 var publishApplySession = func(base *fsq.DeliveryRoot, session string, initialize func(*fsq.DeliveryRoot) error) (*fsq.DeliveryRoot, error) {
 	return base.PublishInitializedDirectChildExclusive(session, 0o700, initialize)
@@ -267,9 +262,6 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 			return ApplyResult{}, err
 		}
 		state.sessionRoot = root
-		if afterApplySessionPublishedForTest != nil {
-			afterApplySessionPublishedForTest()
-		}
 		lease = stagedLease
 		defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
 	} else {
@@ -323,12 +315,6 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		result.FailureDetail = err.Error()
 		return classifyApplyMutation(result, root), nil
 	}
-	if beforeApplyFinalPrepareForTest != nil {
-		beforeApplyFinalPrepareForTest()
-	}
-	if afterApplyReconcileForTest != nil {
-		afterApplyReconcileForTest()
-	}
 	finalPrepared, err := prepareApplyStatus(ctx, request.Prepare, dependencies.PrepareDependencies, state)
 	if err != nil {
 		if isPrepareAuthorityDrift(err) {
@@ -380,9 +366,6 @@ func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencie
 	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies, state)
 	if err != nil || !allowed {
 		return refusal, err
-	}
-	if beforeApplyBaseRootCreateForTest != nil {
-		beforeApplyBaseRootCreateForTest()
 	}
 	if err := state.verify(); err != nil {
 		return applyActionResult(prepared, "subject_changed"), nil
@@ -512,9 +495,6 @@ func provisionExistingApplyRoster(root *fsq.DeliveryRoot, lease *Lease, handles 
 	effective := append(authorization.ConfiguredAgents(), handles...)
 	slices.Sort(effective)
 	effective = slices.Compact(effective)
-	if beforeApplyRosterMutationForTest != nil {
-		beforeApplyRosterMutationForTest()
-	}
 	// Repair only the requested roster. Configured/discovered extras and all of
 	// their history are observations, never mutation targets for Apply.
 	repaired := fsq.RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard(root, authorization, handles, func() error {

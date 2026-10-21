@@ -8,8 +8,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// TestRecordBudgetFitsWorstCaseEncoding reproduces Pro finding B5 on
-// agent-message-queue-611.22.35 (Pro merged-stack review): MaxResultBytes and
+// TestRecordBudgetFitsWorstCaseEncoding reproduces
+// agent-message-queue-611.22.35: MaxResultBytes and
 // MaxInputBytes bound RAW text, but the store enforces MaxRecordBytes on the
 // JSON-ENCODED record. With MaxRecordBytes = result + input + overhead, a
 // 512 KiB result of ordinary newline-heavy text encoded to 1.5x and was

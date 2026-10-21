@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -265,7 +266,7 @@ func TestApprovalObserveOnlyShowsAndRefusesAnswers(t *testing.T) {
 	}
 }
 
-// Live probe 2026-09-30: a terminal approve does not signal the hook. The
+// Observed live: a terminal approve does not signal the hook. The
 // tool_result of the bound tool_use closes the approval as
 // answered_elsewhere, the hook exits with no decision, and a later ❌ is
 // refused.
@@ -302,7 +303,7 @@ func (f *approvalFixture) binding() (string, bool) {
 	return "", false
 }
 
-// Ruling on design 9.7 (lead, 2026-09-30): two unanswered identical calls
+// Design rule: two unanswered identical calls
 // in one prompt make the approval uncertain: it binds to neither, and the
 // first tool_result among them closes it as answered_elsewhere.
 func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
@@ -314,7 +315,7 @@ func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
 	if id, uncertain := f.binding(); id != "" || !uncertain {
 		t.Fatalf("binding = %q uncertain %v, want uncertain", id, uncertain)
 	}
-	// Owner ruling on bead 611.42.3: Buzz can only block a Claude tool call.
+	// Buzz can only block a Claude tool call.
 	if code, _ := f.att.Respond(pr2Key(), "", f.id, "allow"); code != protocol.CodeInvalid {
 		t.Fatalf("allow = %q, want invalid", code)
 	}
@@ -331,7 +332,7 @@ func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
 	}
 }
 
-// Lead review of bead 611.42.3: an approval binds to its tool_use when that
+// Regression: agent-message-queue-611.42.3, an approval binds to its tool_use when that
 // line appears after the request opened, and stays reject only.
 func TestApprovalBindsWhenItsToolUseAppears(t *testing.T) {
 	f := newApprovalFixture(t)
@@ -375,14 +376,39 @@ func (f *approvalFixture) resolvedOnDisk() approvalResolved {
 	return r
 }
 
-// Pro review of #929, 2026-09-30, #1: an answer file waiting on disk is not
+// Regression: #929, an answer file waiting on disk is not
 // delivery. The terminal approved, the tool_result appeared and a Buzz answer
 // landed before the hook read it: the terminal's closure wins the resolved
 // file, and the hook prints nothing.
+//
+// The hook is parked inside a poll pass, on its clock, before it reads the
+// answer, and released only after the terminal's closure is on disk. A tick
+// cannot hold it: the pass a tick starts runs concurrently with the test, and
+// in CI run 39592395358 that pass ran late, saw the resolved file and exited,
+// so the next unbounded tick send waited for the 10m test timeout.
 func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
-	ticks := make(chan time.Time)
-	f.raiseWith("go test ./...", ticks)
+	var park atomic.Bool
+	parked := make(chan struct{}, 1)
+	release := make(chan struct{})
+	unpark := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unpark)
+	f.hookNow = func() time.Time {
+		if park.CompareAndSwap(true, false) {
+			parked <- struct{}{}
+			<-release
+		}
+		return f.base
+	}
+	f.raise("go test ./...")
+	park.Store(true)
+	select {
+	case <-parked:
+	case <-f.exited:
+		t.Fatalf("the hook ended before the answer; printed %q", f.out.String())
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook stopped polling")
+	}
 	f.question()
 	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != "" {
 		t.Fatalf("respond = %q, %v; want the answer written", code, err)
@@ -391,7 +417,7 @@ func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
 		t.Fatalf("resolution = %+v, want answered_elsewhere", ev)
 	}
-	ticks <- time.Time{} // the hook now reads the answer
+	unpark() // the hook now reads the answer
 	f.hookExited()
 	if f.out.Len() != 0 {
 		t.Fatalf("hook printed %q, want no decision", f.out.String())
@@ -401,7 +427,7 @@ func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	}
 }
 
-// Pro review of #929, 2026-09-30, #2: two identical calls split across the
+// Regression: #929, two identical calls split across the
 // transcript read limit. No binding is decided before the read reaches the
 // end of the file, so the approval never binds to the first call alone.
 func TestApprovalIdenticalCallsSplitAcrossReadStayUncertain(t *testing.T) {
@@ -426,7 +452,7 @@ func TestApprovalIdenticalCallsSplitAcrossReadStayUncertain(t *testing.T) {
 	f.hookExited()
 }
 
-// Pro review of #929, 2026-09-30, #3: a tool_result and its Stop marker in
+// Regression: #929, a tool_result and its Stop marker in
 // one poll. The approval ends once, with the outcome on disk, before the
 // run completes.
 func TestApprovalToolResultAndStopInOnePollAgree(t *testing.T) {
@@ -461,7 +487,7 @@ func TestApprovalToolResultAndStopInOnePollAgree(t *testing.T) {
 	f.hookExited()
 }
 
-// Pro review of #929 r2, 2026-10-01, #1: a request found after a transcript
+// Regression: #929, a request found after a transcript
 // read must not bind against that read. Call A runs without a permission
 // request; an identical call B and its request land between a pass's
 // transcript read and its apply. B binds only against a later read, which
@@ -508,7 +534,7 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
 
-// Pro review of #929 r2, 2026-10-01, #2, and r3, 2026-10-01, #1: the
+// Regression: #929, the
 // hook's claim on the resolved file is not delivery. When its deny cannot
 // be written to stdout, the approval ends delivery_unknown, never as a
 // reject sent from Buzz and never as a terminal answer.
@@ -562,7 +588,7 @@ func (f *approvalFixture) writeRequest(hookPID int) {
 	}
 }
 
-// Pro review of #929 r5, 2026-10-01, #1: the registry moves to session B
+// Regression: #929, the registry moves to session B
 // while an approval of session A is open. The hook writes its deny and its
 // delivery record in A and exits. The approval settles from A's files as
 // answered, and nothing is arbitrated into B's directory.
@@ -606,7 +632,7 @@ func TestApprovalSettlesInItsOwnSessionAfterASwitch(t *testing.T) {
 	}
 }
 
-// Pro review of #929 r3, 2026-10-01, #1: an unfinished claim is delivery
+// Regression: #929, an unfinished claim is delivery
 // unknown. A hook stopped before its stdout write, one stopped after it but
 // before its delivery record, and one whose record write failed all leave
 // the same files: a claim and no record. With the hook gone, it settles
@@ -620,7 +646,7 @@ func TestApprovalUnfinishedClaimIsDeliveryUnknown(t *testing.T) {
 	}
 }
 
-// Pro review of #929 r3 and r4, 2026-10-01, #1 and #2: the run ends while
+// Regression: #929, the run ends while
 // a live hook's claim has no delivery record. The run's end records
 // delivery_unknown at once and stops tracking it; a record the hook writes
 // later loses to the one the run's end wrote.

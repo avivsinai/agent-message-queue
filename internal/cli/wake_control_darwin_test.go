@@ -57,7 +57,7 @@ func testDarwinOwnerControlLock(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return publishAuthoritativeWakeClaimAt(scope, root, agent, target, lock)
 	}); err != nil {
 		_ = agentDir.Close()
@@ -187,7 +187,7 @@ func writeDarwinWakeRestartRecordForTest(
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
@@ -352,7 +352,7 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer func() { _ = agentDir.Close() }()
-				if err := withWakeLifecycleGuardInDir(agentDir, func(_ int) error {
+				if err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(_ int) error {
 					return os.Remove(filepath.Join(agentDir.path, wakeRestartFileName))
 				}); err != nil {
 					t.Fatal(err)

@@ -13,7 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Review of #972 r2: adapter refusal and error fragments reach the owner's
+// Regression: #972, adapter refusal and error fragments reach the owner's
 // DM through relay /status answers and approval-failure answers. The DM
 // renderer decodes HTML entities and autolinks URLs in plain text, so every
 // such fragment must sit inside an inert code span — asserted here as a

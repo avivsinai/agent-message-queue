@@ -393,6 +393,18 @@ func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
 	}
 }
 
+// TestCodexRefusesUntrustedApproval protects bead agent-message-queue-0r5:
+// codex-cli 0.163.0 refuses `--ask-for-approval untrusted` at start, so the
+// grammar must refuse it before AMQ digests and tickets the plan.
+func TestCodexRefusesUntrustedApproval(t *testing.T) {
+	project, executable := testExecutable(t, CodexProvider)
+	request := planRequest(project, CodexProvider)
+	request.CommittedArgs = []string{"--ask-for-approval", "untrusted"}
+	if _, err := NewCodexAdapter(executable).PlanFresh(request); err == nil {
+		t.Fatal("PlanFresh admitted --ask-for-approval untrusted")
+	}
+}
+
 func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	project, executable := testExecutable(t, CodexProvider)
 	adapter := NewCodexAdapter(executable)

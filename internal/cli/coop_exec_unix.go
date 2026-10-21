@@ -983,7 +983,7 @@ func validatePreparedCoopWakeClaim(
 	beforeValidatePreparedCoopWakeClaim(agentDir)
 
 	var current wakeLockInspection
-	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1349,7 +1349,7 @@ func rollbackAuthoritativeWakeClaimInDir(
 	if currentOwner != owner {
 		return fmt.Errorf("current process is not the exact owner authorized for wake rollback")
 	}
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1407,7 +1407,7 @@ func cleanupTerminatedWakeLock(expected wakeLockInspection) error {
 }
 
 func cleanupTerminatedWakeLockInDir(agentDir *wakeAgentDir, expected wakeLockInspection) error {
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1432,7 +1432,7 @@ func cleanupTerminatedWakeLockForPIDInDir(
 	root, me string,
 	terminatedPID int,
 ) error {
-	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err

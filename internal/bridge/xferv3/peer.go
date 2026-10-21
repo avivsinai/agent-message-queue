@@ -1,14 +1,16 @@
 package xferv3
 
 import (
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
@@ -66,18 +68,13 @@ func LoadPeer(root string, host Host) (Peer, error) {
 	if host.s == "" {
 		return Peer{}, ErrName
 	}
-	path := peerPath(root, host)
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return Peer{}, ErrNoPeer
-		}
-		return Peer{}, err
+	file, _, err := fsq.OpenRegularNoFollowBounded(peerPath(root, host), 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return Peer{}, ErrNoPeer
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return Peer{}, fmt.Errorf("%w: peer %s is a symlink", ErrName, host)
+	if errors.Is(err, fsq.ErrNotRegularFile) {
+		return Peer{}, fmt.Errorf("%w: peer %s is not a regular file", ErrName, host)
 	}
-	file, err := os.Open(path)
 	if err != nil {
 		return Peer{}, err
 	}
@@ -127,7 +124,7 @@ func StorePeer(root string, peer Peer) error {
 		return err
 	}
 	body = append(body, '\n')
-	return commitBytes(dir, peer.host.s+".json", body, true)
+	return commitBytes(dir, peer.host.s+".json", body)
 }
 
 func RemovePeer(root string, host Host) error {
@@ -180,64 +177,10 @@ func peerPath(root string, host Host) string {
 	return filepath.Join(root, "bridge", peersDirName, host.s+".json")
 }
 
-func commitBytes(dir, name string, body []byte, replace bool) error {
+func commitBytes(dir, name string, body []byte) error {
 	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 		return ErrName
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		cleanup()
-		return err
-	}
-	if _, err := tmp.Write(body); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	dest := filepath.Join(dir, name)
-	if !replace {
-		if err := os.Link(tmpName, dest); err != nil {
-			if !os.IsExist(err) {
-				_ = os.Remove(tmpName)
-				return err
-			}
-			existing, readErr := os.ReadFile(dest)
-			_ = os.Remove(tmpName)
-			if readErr != nil {
-				return readErr
-			}
-			if bytes.Equal(existing, body) {
-				return nil
-			}
-			return ErrTxDiff
-		}
-	} else if err := os.Rename(tmpName, dest); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	_ = os.Remove(tmpName)
-	dirFile, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dirFile.Close() }()
-	return dirFile.Sync()
+	_, err := fsq.WriteFileAtomic(dir, name, body, 0o600)
+	return err
 }

@@ -17,7 +17,7 @@ import (
 // allowDecision is the one allow the PermissionRequest hook prints.
 const allowDecision = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
 
-// Bead 611.42.4: with the owner pinned on the hook's command line, the DM
+// With the owner pinned on the hook's command line, the DM
 // offers ✅ for a Bash call shown whole. Through the real carrier, endpoint
 // and Claude attachment, with the hook called as a function, the owner's
 // signed ✅ on the approval message makes the hook print allow, and the
@@ -44,11 +44,11 @@ func TestClaudeApprovalAllowedWithOwnerSignedReaction(t *testing.T) {
 	}
 }
 
-// Bead 611.42.4: a same-user process can write any answer file, so the
+// A same-user process can write any answer file, so the
 // file alone never allows. Each row writes an allow answer whose proof
 // fails one check, or changes the relay's history; the hook prints no
 // allow. The first row is the control: the same write with valid evidence
-// allows. The history rows (611.42.4 edit-check) put the edit or deletion
+// allows. The history rows put the edit or deletion
 // on the relay, where the hook reads it itself.
 func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 	cases := []struct {
@@ -91,12 +91,12 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			return e.reaction(e.owner, "✅", m.ID.Hex(), time.Now()), m
 		}},
 		{name: "no owner pin", pinned: false, forge: e2eValid},
-		// 611.42.10 acceptance: a typed yes in the approval's thread that
+		// a typed yes in the approval's thread that
 		// the owner did not sign.
 		{name: "typed yes by another key", pinned: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
 			return e.message(randomKey(), nostr.Tags{{"h", "dm-1"}, {"e", e.msg.ID.Hex(), "", "reply"}}, "yes"), e.msg
 		}},
-		// Pro review of #936, P1 (611.42.4): a real signed pair from another
+		// Regression: #936, a real signed pair from another
 		// share, or another channel, moved into this session's answer file.
 		{name: "message from another share's body", pinned: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
 			m := e.message(randomKey(), e.msg.Tags, e.msg.Content)
@@ -106,20 +106,20 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			m := e.message(e.body, nostr.Tags{{"h", "dm-2"}, {"p", nostr.GetPublicKey(e.owner).Hex()}}, e.msg.Content)
 			return e.reaction(e.owner, "✅", m.ID.Hex(), time.Now()), m
 		}},
-		// 611.42.4 edit-check: an edit on the relay shows another command.
+		// an edit on the relay shows another command.
 		{name: "edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.edit(e.body, strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
 		}},
-		// 611.42.4 edit-check: an edit of the trailer only still allows.
+		// an edit of the trailer only still allows.
 		{name: "edit changes only the trailer", pinned: true, allows: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.edit(e.body, e.trailerEdit())}
 		}},
-		// 611.42.4 edit-check: the relay hides a deleted edit, so any
+		// the relay hides a deleted edit, so any
 		// deletion in the channel since the message refuses.
 		{name: "deletion after the message", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.deletion(e.body, KindDeletion, nostr.Tags{{"h", "dm-1"}, {"e", strings.Repeat("0", 64)}})}
 		}},
-		// Review of #936 r3, P1: the body deletes a hidden edit with a
+		// Regression: #936, the body deletes a hidden edit with a
 		// created_at before the message; a time-bounded read missed it.
 		{name: "backdated body deletion", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			d := nostr.Event{CreatedAt: e.msg.CreatedAt - 60, Kind: KindDeletion, Tags: nostr.Tags{{"e", strings.Repeat("1", 64)}}}
@@ -128,7 +128,7 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			}
 			return []nostr.Event{d}
 		}},
-		// Review of #936 r4, P2: the relay returns its newest page of edits,
+		// Regression: #936, the relay returns its newest page of edits,
 		// so a full page may have cut an older edit that shows another call.
 		{name: "a full page of edits", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			var out []nostr.Event
@@ -141,18 +141,18 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			}
 			return out
 		}},
-		// Pro review of #936 r2, P1: Buzz lets the owner edit the agent's
+		// Regression: #936, Buzz lets the owner edit the agent's
 		// message.
 		{name: "owner edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.edit(e.owner, strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
 		}},
-		// Pro review of #936 r2, P1: a deletion with only an e tag, of an
+		// Regression: #936, a deletion with only an e tag, of an
 		// edit, as the mobile client sends it.
 		{name: "e-only deletion of an edit", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			ed := e.edit(e.body, e.trailerEdit())
 			return []nostr.Event{ed, e.deletion(e.owner, KindDeletion, nostr.Tags{{"e", ed.ID.Hex()}})}
 		}},
-		// Pro review of #936 r2, P1: the Buzz-native delete-event hides the
+		// Regression: #936, the Buzz-native delete-event hides the
 		// message like kind 5.
 		{name: "Buzz-native deletion of the message", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.deletion(e.owner, KindGroupDeletion, nostr.Tags{{"h", "dm-1"}, {"e", e.msg.ID.Hex()}})}
@@ -194,10 +194,11 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 	}
 }
 
-// 611.42.10: a typed yes reached the Claude hook as a kind 9 and the owner
+// A typed yes reached the Claude hook as a kind 9 and the owner
 // saw "reaction is not kind 7". Now yes typed in the approval message's
 // thread allows once, and an unthreaded yes in the main DM is not sent: the
 // DM says how to allow.
+// Regression: bead agent-message-queue-611.42.10.
 func TestClaudeTypedYesAllowsInTheApprovalThread(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	if err := e.c.Ingest(e.typed("yes")); err != nil {
@@ -224,8 +225,9 @@ func TestClaudeTypedYesAllowsInTheApprovalThread(t *testing.T) {
 	}
 }
 
-// 611.42.10: Claude's inspect named no pending approval, so a typed no in
+// Claude's inspect named no pending approval, so a typed no in
 // the main DM became a prompt. It now rejects the call, as ❌ does.
+// Regression: bead agent-message-queue-611.42.10.
 func TestClaudeTypedNoInTheMainDMDenies(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	if err := e.c.Ingest(e.typed("no")); err != nil {
@@ -237,7 +239,7 @@ func TestClaudeTypedNoInTheMainDMDenies(t *testing.T) {
 	}
 }
 
-// Pro review of #936, P2 (611.42.4): a failed verification consumed the
+// Regression: #936, a failed verification consumed the
 // Buzz answer. Now a ✅ whose history cannot be read is refused before
 // anything is answered: the DM says so, and a later ✅ allows.
 func TestClaudeAllowRetriesAfterAFailedVerification(t *testing.T) {
@@ -263,11 +265,11 @@ func TestClaudeAllowRetriesAfterAFailedVerification(t *testing.T) {
 	}
 }
 
-// Pro review of #936 r2, P2: the endpoint verified an allow, then the
+// Regression: #936 and #986, the endpoint verified an allow, then the
 // hook's own verification failed, and a ❌ could no longer land. The hook
-// retires exactly that proof, so the ❌ that follows denies. 611.42.6
-// (Pro review of #986 r1): the owner got no DM about that refusal; the
-// DM now shows the hook's reason and says to react again.
+// retires exactly that proof, so the ❌ that follows denies. The owner also
+// got no DM about that refusal; the DM now shows the hook's reason and says
+// to react again.
 func TestClaudeDenyLandsAfterTheHookRefusesAnAllow(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	e.hookDown.Store(true)
@@ -292,7 +294,7 @@ func TestClaudeDenyLandsAfterTheHookRefusesAnAllow(t *testing.T) {
 	}
 }
 
-// 611.42.4 edit-check: a ✅ on an altered approval message is refused with
+// A ✅ on an altered approval message is refused with
 // the altered reply, nothing is answered, and ❌ still blocks the call.
 func TestClaudeAlteredApprovalRefusesAllowAndKeepsReject(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")

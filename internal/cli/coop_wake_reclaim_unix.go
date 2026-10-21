@@ -170,7 +170,7 @@ func removeCoopWakeLockIfUnchangedInDir(
 	// The retained descriptor is the authority for this exact cleanup. This
 	// may create the permanent guard in that retained directory, never through
 	// the canonical successor pathname.
-	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
