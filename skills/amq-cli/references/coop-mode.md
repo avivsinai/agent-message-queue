@@ -92,9 +92,8 @@ phase boundaries, and finish with changes and verification.
   messages already in `inbox/new` unread and notifies only for later arrivals.
   `wake repair` keeps the dead generation's suppression floor instead, so mail
   delivered while the notifier was down still notifies. When `coop exec`
-  reuses a live owner-bound wake, it does not retroactively baseline that
-  wake, so a pending backlog can still notify; SessionStart draining
-  mitigates that. See
+  reuses a live owner-bound wake, it does not re-baseline that wake, so a
+  pending backlog can still notify. See
   [wake operations](https://github.com/avivsinai/agent-message-queue/blob/main/docs/wake-operations.md).
 
 ## Message Handling
