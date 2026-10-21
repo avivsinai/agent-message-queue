@@ -24,8 +24,7 @@ func TestPrepareWorkerEnvStripsBuzzSecrets(t *testing.T) {
 	}
 }
 
-// Desktop's Create agent gives a draft parallelism 10 (harness log
-// 2026-10-19): binding mode runs those workers, BYOH mode runs one.
+// Desktop's Create agent gives a draft parallelism 10 (binding mode runs those workers, BYOH mode runs one.
 func TestPrepareWorkerEnvRefusesParallelAgents(t *testing.T) {
 	t.Setenv("BUZZ_ACP_AGENTS", "10")
 	t.Setenv(EnvRemote, RemoteModeBinding)
