@@ -189,7 +189,28 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// Body identity: per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
 	// dir reports nothing — sessions without remote sharing are normal.
-	if bodyKeys := doctorShareInspection(c.root); bodyKeys != nil {
+	doctorBodyKeys(c.root, report, fail)
+	// Relay connections, as serve last reported them. Each state
+	// is distinct: auth_pending is not authenticated, and authenticated is
+	// not proof the relay materialized ownership.
+	doctorRelay(stateDir, report, fail, note)
+	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
+	// upgrade replaced, so it answers from the removed binding contract.
+	// A different identity can also be a byte-identical copy or another
+	// binary with the same name, so this is advice, not a failure: it lands
+	// in notes and never makes doctor exit non-zero.
+	noteStaleACP(note)
+	noteNoService(note, c.root, stateDir)
+	if len(notes) > 0 {
+		report["notes"] = notes
+	}
+	return finish()
+}
+
+// doctorBodyKeys reports the session body keys and fails each share whose
+// key, attestation or grants cannot authenticate.
+func doctorBodyKeys(root string, report map[string]any, fail func(boundary, subject, detail, remedy string)) {
+	if bodyKeys := doctorShareInspection(root); bodyKeys != nil {
 		report["body_keys"] = bodyKeys
 		sessionsWithKeys := make([]string, 0, len(bodyKeys))
 		for name := range bodyKeys {
@@ -222,9 +243,11 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			}
 		}
 	}
-	// Relay connections, as serve last reported them. Each state
-	// is distinct: auth_pending is not authenticated, and authenticated is
-	// not proof the relay materialized ownership.
+}
+
+// doctorRelay reports the relay connections and fails each share whose
+// relay, DM, publication, presence, activity or discovery boundary is broken.
+func doctorRelay(stateDir string, report map[string]any, fail, note func(boundary, subject, detail, remedy string)) {
 	switch rs, rerr := loadRelayStatus(stateDir); {
 	case rerr == nil:
 		report["relay"] = rs
@@ -257,17 +280,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["relay_error"] = rerr.Error()
 		fail("relay_auth", "relay-status.json", rerr.Error(), "restart serve; it rewrites relay-status.json")
 	}
-	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
-	// upgrade replaced, so it answers from the removed binding contract.
-	// A different identity can also be a byte-identical copy or another
-	// binary with the same name, so this is advice, not a failure: it lands
-	// in notes and never makes doctor exit non-zero.
-	noteStaleACP(note)
-	noteNoService(note, c.root, stateDir)
-	if len(notes) > 0 {
-		report["notes"] = notes
-	}
-	return finish()
 }
 
 // maxRefusedNotes bounds the refused rows doctor lists per share.

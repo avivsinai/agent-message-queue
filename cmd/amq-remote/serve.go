@@ -167,41 +167,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
 	if err != nil {
-		if manifest.IsValidation(err) {
-			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
-				// Name the actual sources: the duplicate may be two
-				// identical manifest entries with no flag passed.
-				inFlags := false
-				for _, adapter := range sugar {
-					if adapter.Target == dup.Target {
-						inFlags = true
-						break
-					}
-				}
-				inManifest := false
-				var mfBody manifest.File
-				if body, readErr := os.ReadFile(manifestFile); readErr == nil {
-					if json.Unmarshal(body, &mfBody) == nil {
-						for _, adapter := range mfBody.Adapters {
-							if adapter.Target == dup.Target {
-								inManifest = true
-								break
-							}
-						}
-					}
-				}
-				switch {
-				case inFlags && inManifest:
-					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
-				case inManifest:
-					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: manifest declares the same target id more than once", dup.Target)
-				default:
-					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: the same target id was passed more than once", dup.Target)
-				}
-			}
-			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
-		}
-		return 0, err
+		return serveStartupError(err, sugar, manifestFile)
 	}
 	// carrier.Warn and the cross-project reply router are installed
 	// inside startupSequence (wireCarrier) BEFORE Reconcile, so the startup
@@ -292,6 +258,47 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	relays.wait()
 	if cerr := ep.Close(); cerr != nil && err == nil {
 		err = cerr
+	}
+	return 0, err
+}
+
+// serveStartupError maps a failed manifest load or startup to serve's exit:
+// a validation error is exit 2, naming the sources of a duplicate target;
+// any other error is a runtime error.
+func serveStartupError(err error, sugar []manifest.Adapter, manifestFile string) (int, error) {
+	if manifest.IsValidation(err) {
+		if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
+			// Name the actual sources: the duplicate may be two
+			// identical manifest entries with no flag passed.
+			inFlags := false
+			for _, adapter := range sugar {
+				if adapter.Target == dup.Target {
+					inFlags = true
+					break
+				}
+			}
+			inManifest := false
+			var mfBody manifest.File
+			if body, readErr := os.ReadFile(manifestFile); readErr == nil {
+				if json.Unmarshal(body, &mfBody) == nil {
+					for _, adapter := range mfBody.Adapters {
+						if adapter.Target == dup.Target {
+							inManifest = true
+							break
+						}
+					}
+				}
+			}
+			switch {
+			case inFlags && inManifest:
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+			case inManifest:
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: manifest declares the same target id more than once", dup.Target)
+			default:
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: the same target id was passed more than once", dup.Target)
+			}
+		}
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	return 0, err
 }
