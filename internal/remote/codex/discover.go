@@ -29,7 +29,7 @@ func defaultControlSocket(home string) string {
 }
 
 // discoverer lists the loaded threads of the running Codex app-server
-// daemon (bead 611.13). No daemon socket means no candidates; discovery
+// daemon. No daemon socket means no candidates; discovery
 // never starts the daemon and never attaches.
 type discoverer struct {
 	// socket overrides the daemon socket for tests; empty = the default.
@@ -37,7 +37,7 @@ type discoverer struct {
 }
 
 // HintSocket is the DiscoverRequest hint serve fills from --codex-socket; it
-// replaces the default daemon socket (codex 611.13 consult, requirement 2).
+// replaces the default daemon socket.
 const HintSocket = "codex.socket"
 
 func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([]registry.Candidate, error) {
@@ -78,7 +78,7 @@ func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([
 
 // checkControlSocket accepts sock when it is a unix socket, or a symlink to a
 // unix socket owned by the current user. codex-cli 0.160 makes the default
-// path a symlink to /private/tmp/codex-daemon-<uid>/<hash> (bead 611.51); the
+// path a symlink to /private/tmp/codex-daemon-<uid>/<hash>; the
 // target sits under a shared directory, so a symlink is followed only to a
 // socket this user owns. A dangling link reports os.ErrNotExist.
 func checkControlSocket(sock string) error {

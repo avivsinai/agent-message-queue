@@ -16,8 +16,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// The attachment side of DM approvals (bead 611.42.3). The poller binds
-// each PermissionRequest the hook raised to the run whose prompt it
+// The attachment side of DM approvals. The poller binds each
+// PermissionRequest the hook raised to the run whose prompt it
 // belongs to and shows the oldest open one to the endpoint. One file
 // decides how each approval ended: the first create-new of
 // resolved/<iid>.json. The hook prints a decision only after it won that
@@ -396,8 +396,8 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 }
 
 // projectApproval is the endpoint's view of one open approval. It offers
-// allow only when ap.offersAllow (bead 611.42.4); otherwise it is reject
-// only, and the terminal allows. An observe-only approval takes no remote
+// allow only when ap.offersAllow; otherwise it is reject only, and the
+// terminal allows. An observe-only approval takes no remote
 // answer at all: the terminal decides (the shape pi uses for an approval it
 // cannot answer).
 func projectApproval(ap *approval) *protocol.Interaction {
@@ -414,7 +414,7 @@ func projectApproval(ap *approval) *protocol.Interaction {
 
 // pendingApprovalLocked is the oldest approval the endpoint shows, of any
 // run, and the request that waits on it, so a surface can name the approval
-// a typed answer refers to (611.42.10, as Codex does for 611.42.7).
+// a typed answer refers to, as Codex does.
 func (a *Attachment) pendingApprovalLocked() (pending, active *string) {
 	var at int64
 	for _, rec := range a.runs {
@@ -589,8 +589,8 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 // awaitHookVerdict waits, bounded, for the hook's verdict on the allow just
 // published, so a proof the hook's own check refuses reaches the owner as
 // the same refusal the endpoint's check gives, and the endpoint drops the
-// intent (611.42.6, independent review of #936 r3). It is nil when the hook
-// allowed, the approval closed, the hook is gone, or the bound passed: the
+// intent. It is nil when the hook allowed, the approval closed, the hook is
+// gone, or the bound passed: the
 // hook's verification plus a second. It never holds a.mu.
 func (a *Attachment) awaitHookVerdict(sessionID string, ans approvalAnswer, hookPID int) error {
 	resolvedPath := filepath.Join(approveDir(a.home, sessionID), "resolved", ans.InteractionID+".json")
@@ -620,8 +620,7 @@ const verdictPoll = 50 * time.Millisecond
 // again and written under a.mu, after the allow's verification: of a ✅ and
 // a ❌ that both found an allow the hook refused, the first write stands
 // and the other is already_resolved, so the endpoint keeps the answer that
-// is on disk (611.42.6, independent review of #936 r3). The file is tiny,
-// as in arbitrateLocked.
+// is on disk. The file is tiny, as in arbitrateLocked.
 func (a *Attachment) publishAnswer(adir string, ans approvalAnswer, isRejected func(json.RawMessage) bool) (protocol.Code, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

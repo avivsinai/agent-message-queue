@@ -20,8 +20,7 @@ import (
 // A native Claude turn driven from Buzz Desktop has no relay share, so the
 // owner's reaction cannot carry the signed proof an allow needs. amq-acp
 // shows each pending tool approval in the DM and relays only the owner's ❌
-// as a deny; allow stays in Claude's terminal (bead
-// agent-message-queue-611.42.2; allow from Desktop is 611.42.12).
+// as a deny; allow stays in Claude's terminal.
 
 // denyOnlyText follows every approval this path posts.
 const denyOnlyText = "Buzz can deny this request only. ❌ denies; to allow, answer in Claude's terminal. ✅ here cannot approve."
@@ -228,8 +227,8 @@ func (a *approvals) close() {
 
 // watch posts one approval and relays the owner's ❌ as its reject option.
 // A failed post or deny is retried on the next poll, so a network error
-// never leaves the owner's ❌ unanswered (review of #995); the approval is
-// posted once, and the watcher ends when the deny is handed over or the
+// never leaves the owner's ❌ unanswered; the approval is posted once, and the
+// watcher ends when the deny is handed over or the
 // approval is no longer pending (observe closes stop).
 func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, stop chan struct{}) {
 	defer a.wg.Done()

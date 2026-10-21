@@ -16,7 +16,7 @@ var errCarrierUnavailable = errors.New("carrier unavailable")
 type publishFunc = core.Publisher
 
 // publishRouter is the one core.Publisher: each record's publication goes to
-// the carrier named by its persisted origin (relay design §5). No origin is
+// the carrier named by its persisted origin. No origin is
 // a local IPC or CLI record: callers poll or wait, and nothing is
 // published. "amq" is the AMQ mailbox carrier and "buzz" the Buzz carrier.
 // A named carrier that is not running, or an unknown one, is an error,

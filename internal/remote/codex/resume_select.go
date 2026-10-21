@@ -178,7 +178,7 @@ func threadByName(ctx context.Context, client *Client, q ResumeQuery, provider [
 		return "", ErrNoResumeThread
 	}
 	// Codex canonicalizes CODEX_HOME, so thread paths are under its real
-	// path (utils/home-dir find_codex_home; review of #1001).
+	// path (utils/home-dir find_codex_home).
 	home := q.CodexHome
 	if real, err := filepath.EvalSymlinks(home); err == nil {
 		home = real

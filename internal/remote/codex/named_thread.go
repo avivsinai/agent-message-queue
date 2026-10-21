@@ -49,8 +49,7 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 		return "", errors.New("start thread: no thread id")
 	}
 	// From here a failure leaves a thread the user never sees: archive it,
-	// on a fresh deadline since ctx may be what ran out
-	// (agent-message-queue-611.63).
+	// on a fresh deadline since ctx may be what ran out.
 	ok := false
 	defer func() {
 		if !ok {

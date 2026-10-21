@@ -21,8 +21,8 @@ import (
 )
 
 // A binding whose consent is local runs a signed task only after the user
-// confirms it on this machine (design §7 change 8): amq-remote serves a page
-// on localhost that shows the exact text, and the user's local passkey
+// confirms it on this machine: amq-remote serves a page on localhost that
+// shows the exact text, and the user's local passkey
 // (relying party "localhost") signs a challenge bound to the digest shown.
 // An agent can run commands as the user; it cannot press Touch ID.
 

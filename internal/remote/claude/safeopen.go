@@ -18,7 +18,7 @@ var errUnsupportedPlatform = errors.New("claude adapter: unsupported on this pla
 // settings.json. maxBytes <= 0 sets no size bound.
 //
 // Windows has no no-follow open, so openRegular refuses there outright with
-// errUnsupportedPlatform (codex #855 r3 item 2).
+// errUnsupportedPlatform.
 //
 // The caller owns the returned file.
 func openRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {

@@ -23,9 +23,9 @@ import (
 
 func init() { claude.RegisterAllowFactory(allowConfig) }
 
-// allowConfig is what an allow from Buzz needs for one hook pin (bead
-// 611.42.4): the share the pin names (relay, body, DM channel, target), and
-// a verifier that checks the owner's signed ✅ against that share and then
+// allowConfig is what an allow from Buzz needs for one hook pin: the share
+// the pin names (relay, body, DM channel, target), and a verifier that checks
+// the owner's signed ✅ against that share and then
 // reads the approval message's edits and deletions from the pinned relay,
 // signed in with the share's enrolled body key as serve is. The manifest is
 // never read: a rewritten manifest changes nothing an allow must prove.

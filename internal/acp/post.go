@@ -19,7 +19,7 @@ import (
 // sends ACP answer text to the owner's activity observer, not to the
 // conversation (block/buzz crates/buzz-acp/src/acp.rs:1799, base_prompt.md:71).
 // So amq-acp posts every text the owner must read into the triggering
-// channel itself, as the managed agent (bead agent-message-queue-611.38).
+// channel itself, as the managed agent.
 
 // buzzIdentityKeys are the managed agent's credentials that the buzz CLI
 // needs. PrepareWorkerEnv captures them before it strips BUZZ_* from the
@@ -124,8 +124,8 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
 	// stderr open must not hold a status post (and its event post lock)
-	// past the budget (review of #961 r8). A CLI that keeps sending after
-	// its budget is outside the status/final ordering (README).
+	// past the budget. A CLI that keeps sending after its budget is outside
+	// the status/final ordering (README).
 	waitDelay := budget / 10
 	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
 	defer cancel()
@@ -149,7 +149,7 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 // buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
 // else the CLI inside Buzz.app under /Applications or the user's Applications.
 // There is no PATH fallback: an unrelated buzz on PATH must never receive
-// BUZZ_PRIVATE_KEY (agent-message-queue-fa4).
+// BUZZ_PRIVATE_KEY.
 func buzzCLI() (string, error) {
 	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
 		return p, nil

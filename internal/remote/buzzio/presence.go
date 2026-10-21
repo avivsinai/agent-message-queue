@@ -9,8 +9,8 @@ import (
 	"fiatjaf.com/nostr"
 )
 
-// Kinds the presence surface publishes (relay design §6). Both are
-// agent-authored and replaceable; Buzz Desktop reads the latest of each.
+// Kinds the presence surface publishes. Both are agent-authored and
+// replaceable; Buzz Desktop reads the latest of each.
 const (
 	KindProfile      = 0
 	KindAgentProfile = 10100
@@ -24,8 +24,7 @@ const (
 // agent_events.rs:37-60 ManagedAgentEventContent): name is a string,
 // parallelism a u32, respond_to one of its wire values, and
 // respond_to_allowlist a list of strings. Desktop drops a policy that fails
-// that parse (nostr_convert/agent_directory.rs:89-98), so AMQ does too
-// (codex #867 r1).
+// that parse (nostr_convert/agent_directory.rs:89-98), so AMQ does too.
 func PolicyFor(evt nostr.Event, body string) bool {
 	if evt.Kind != KindManagedAgent || tagValue(evt, "d") != body {
 		return false
@@ -47,7 +46,7 @@ func PolicyFor(evt nostr.Event, body string) bool {
 	default:
 		return false
 	}
-	// Option<String> fields: absent, null, or a string (codex #867 r2).
+	// Option<String> fields: absent, null, or a string.
 	for _, k := range []string{"persona_id", "system_prompt", "model", "provider", "persona_source_version"} {
 		if raw, ok := fields[k]; ok && !isNullOr(raw, '"') {
 			return false

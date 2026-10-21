@@ -17,8 +17,8 @@ import (
 // FILE_OPEN_REPARSE_POINT: a component that is a link, or becomes one after
 // its parent was verified, is opened as the link itself and refused. Leaves
 // open relative to the final handle the same way, so no full path is ever
-// resolved again (codex slice 1 review r3 #1, r4: holding a directory does
-// not stop FSCTL_SET_REPARSE_POINT turning it into a junction in place).
+// resolved again (holding a directory does not stop FSCTL_SET_REPARSE_POINT
+// turning it into a junction in place).
 type winDir struct {
 	path string
 	h    windows.Handle

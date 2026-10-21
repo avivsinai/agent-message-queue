@@ -25,7 +25,8 @@ import (
 const submitTimeout = 6 * time.Second
 
 // ErrNotSent marks a pre-send failure: the frame never left this process,
-// so a retry is safe and the refusal is definitive (mirrors codex B1).
+// so a retry is safe and the refusal is definitive (as the codex adapter
+// does).
 var ErrNotSent = errors.New("claude submit: frame not sent")
 
 // ErrNoInbound is the typed refusal for the documented inbound
@@ -36,8 +37,8 @@ var ErrNotSent = errors.New("claude submit: frame not sent")
 var ErrNoInbound = errors.New("claude submit: target session does not expose a messaging socket (inbound cross-session messages disabled or unsupported)")
 
 // runRecord is the adapter's retained correlation for one submitted key.
-// The evidence ladder (architect ruling 10:59Z): a socket write alone is
-// TENTATIVE; the transcript user line carrying the envelope is SUBMITTED;
+// The evidence ladder: a socket write alone is TENTATIVE; the transcript user
+// line carrying the envelope is SUBMITTED;
 // the assistant turn starting (transcript assistant line or Stop-hook
 // post) is ADMITTED.
 type runRecord struct {
@@ -60,11 +61,11 @@ type runRecord struct {
 	userTS int64
 	// fromOff is the transcript size just before the frame was written:
 	// the delivery entry can only appear at or after it, so the cursor
-	// starts there and never needs a window that could scroll past it
-	// (codex #855 r2 item 1). -1 when the size could not be read.
+	// starts there and never needs a window that could scroll past it.
+	// -1 when the size could not be read.
 	fromOff int64
 	// turnEnded/turnEndTS: a later prompt started a new turn, so no Stop
-	// after turnEndTS belongs to this run (codex #855 r2 item 2).
+	// after turnEndTS belongs to this run.
 	turnEnded bool
 	turnEndTS int64
 	// lastText is the newest non-empty assistant text of this run's turn.
@@ -72,7 +73,7 @@ type runRecord struct {
 	createdAt time.Time
 	// promptID is the promptId of the run's own delivery line: the prompt
 	// its tool calls and PermissionRequests carry. An absorbed delivery has
-	// none, so it gets no DM approval (bead 611.42.3).
+	// none, so it gets no DM approval.
 	promptID string
 	// sessionID is the session whose transcript carried the run's delivery
 	// line; its approval files live in that session's directory.
@@ -86,7 +87,7 @@ type runRecord struct {
 	calls     []*toolCall
 }
 
-// Submit implements core.Attachment over the pinned 611.2 wire: the
+// Submit implements core.Attachment over the pinned wire: the
 // mandatory auth line + one newline-JSON user frame carrying the
 // cross-session envelope (from-mode set — unset parity gating would park
 // us). The socket send is fire-and-forget: success is only ever evidence
@@ -135,7 +136,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	// The frame's msg_id is derived from the request key, not random, so a
 	// restarted endpoint can find this delivery in the transcript by key
-	// alone (611.25). The same key always yields the same id, which also
+	// alone. The same key always yields the same id, which also
 	// lets the receiver's msg_id dedup absorb a retried send.
 	frame.MsgID = frameMsgID(req.Key)
 	wire, err := EncodeFrames(token, frame)
@@ -254,7 +255,7 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 // it follows the target transcript on a ticker and upgrades evidence
 // tentative→submitted→admitted→terminal per the ladder. It stops by itself
 // when no run is left to confirm, and for good when the endpoint
-// unsubscribes (codex #855 r2 item 6: it used to run forever).
+// unsubscribes.
 func (a *Attachment) kickConfirmations() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -331,7 +332,7 @@ func transcriptSize(path string) int64 {
 // machine, then binds Stop markers to turns. File I/O happens outside a.mu
 // (the poller is the only writer of the cursor), and every native event is
 // emitted after a.mu is released: the endpoint's completion handler calls
-// AcknowledgeResult synchronously, which takes a.mu (codex #855 r1 item 6).
+// AcknowledgeResult synchronously, which takes a.mu.
 func (a *Attachment) pollConfirmations() {
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil || reg == nil || reg.SessionID == "" {
@@ -360,11 +361,11 @@ func (a *Attachment) pollConfirmations() {
 	a.mu.Unlock()
 
 	// Stop markers are read BEFORE the transcript and bound only once the
-	// cursor has reached the end of the file it read (codex #855 r3 item
-	// 1). The harness writes a turn's entries before the Stop hook runs, so
-	// every marker read here names a turn whose entries all precede the
-	// transcript read. Binding while the cursor lags would publish a result
-	// taken from a partial turn and miss a later turn boundary.
+	// cursor has reached the end of the file it read. The harness writes a
+	// turn's entries before the Stop hook runs, so every marker read here
+	// names a turn whose entries all precede the transcript read. Binding
+	// while the cursor lags would publish a result taken from a partial turn
+	// and miss a later turn boundary.
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
 	// The approval files are read BEFORE the transcript, so this poll's
 	// transcript read covers every request it discovers: a request found
@@ -473,7 +474,7 @@ func (a *Attachment) pollConfirmations() {
 //     owner of the current turn. msg_id proves delivery ownership only.
 //   - Any other non-meta prompt that starts a new turn (not absorbed) ends
 //     the current owner's turn and clears the owner: what follows answers
-//     someone else (codex #855 r2 item 2).
+//     someone else.
 //   - An assistant entry while a run owns the turn admits it and records
 //     the turn's newest text as the result.
 //   - The interrupt line of the owner's prompt cancels the owner: Claude
@@ -635,7 +636,7 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		a.stopConsumed = s.end
 		// A Stop ends the turn it belongs to. A newer user boundary in the
 		// same batch has already replaced activityTurn; an older Stop must
-		// leave that turn in place (codex #868 r2).
+		// leave that turn in place.
 		if a.activityTurnTS == 0 || s.ts >= a.activityTurnTS {
 			a.activityTurn = ""
 			a.activityTurnTS = 0
@@ -747,7 +748,7 @@ func frameMsgID(key requests.Key) string {
 const recoverScanBytes = 16 << 20
 
 // recoverRun answers Lookup for a key this attachment holds no record of,
-// which after an endpoint restart is every key that was in flight (611.25).
+// which after an endpoint restart is every key that was in flight.
 // It scans the transcript for the entry that delivered the key's frame
 // (origin.msg_id == frameMsgID(key)). Found: the run is rebuilt as
 // submitted, with its delivery offset and timestamp, the poller cursor is
@@ -773,7 +774,7 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 	scan, seen := a.recoverFrom[key]
 	a.mu.Unlock()
 	// The saved position is only valid for the same transcript file, not
-	// truncated below it (codex #859 P2): a changed session path, a replaced
+	// truncated below it: a changed session path, a replaced
 	// file, or a shorter file restarts the scan from the recovery window.
 	if !seen || scan.path != path || scan.file == nil || !os.SameFile(scan.file, fi) || fi.Size() < scan.off {
 		scan = recoverScan{path: path, file: fi}
@@ -818,8 +819,8 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 // for the entry that delivered msgID. It returns that entry's byte offset
 // and timestamp when found, and in every case the position it reached and
 // whether it stopped inside an over-long line. It always returns once a
-// read makes no progress, including at an unfinished line at EOF (codex
-// #859 P1: skipping at EOF looped forever).
+// read makes no progress, including at an unfinished line at EOF (skipping at
+// EOF would loop forever).
 func scanForDelivery(path string, off int64, skipping bool, msgID string) (found bool, at, ts, next int64, nextSkipping bool) {
 	for {
 		rd, err := readTranscriptFrom(path, off, skipping)

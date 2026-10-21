@@ -181,12 +181,12 @@ type peerOrigin struct {
 
 // parseTranscriptLine decodes one JSONL line. Correlation happens on
 // decoded fields, never on raw bytes: valid JSONL escapes the envelope's
-// newlines and quotes (codex #855 r1 item 2). The harness records the
-// frame's msg_id as origin.msg_id in both delivery shapes, observed live on
-// v2.1.278: an idle target writes a "user" entry with a top-level origin
-// (611.2 probe transcript); a busy target absorbs the frame mid-turn as an
-// "attachment" of type "queued_command" with attachment.origin (live smoke
-// 2026-09-22). ok is false for undecodable or untyped lines.
+// newlines and quotes. The harness records the frame's msg_id as
+// origin.msg_id in both delivery shapes, observed live on
+// v2.1.278: an idle target writes a "user" entry with a top-level origin;
+// a busy target absorbs the frame mid-turn as an "attachment" of type
+// "queued_command" with attachment.origin. ok is false for undecodable or
+// untyped lines.
 func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	var raw struct {
 		SessionID  string      `json:"sessionId"`
@@ -226,7 +226,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	if origin != nil && origin.Kind == "peer" {
 		e.MsgID = origin.MsgID
 		// A peer delivery is input, whatever its meta flag: v2.1.280 marks
-		// the delivered user entry isMeta:true (observed live 2026-09-22),
+		// the delivered user entry isMeta:true (observed live),
 		// which v2.1.278 did not, and the ladder skips meta entries.
 		e.Meta = false
 		// The activity view shows the prompt the sender wrote, not the

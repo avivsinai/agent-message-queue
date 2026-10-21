@@ -27,7 +27,7 @@ const (
 	CodeClockSkew      = "clock_skew"
 )
 
-// Time bounds of a consent (design §6).
+// Time bounds of a consent.
 const (
 	consentClockWindow   = 60 * time.Second
 	passkeyMaxLifetime   = 2 * time.Minute
@@ -203,8 +203,8 @@ func DecodeConsent(doc []byte) (*ConsentDocument, error) {
 	return &d, nil
 }
 
-// verifyWebAuthnGet checks a WebAuthn assertion (L3 §7.2, the design's
-// profile) whose challenge must be challenge, made on an origin originOK
+// verifyWebAuthnGet checks a WebAuthn assertion (WebAuthn Level 3 §7.2)
+// whose challenge must be challenge, made on an origin originOK
 // accepts. There is no counter check: synced passkeys report 0.
 func verifyWebAuthnGet(key ConsentKey, challenge []byte, originOK func(string) bool, authDataB64, clientDataB64, sigB64 string) error {
 	authData, err1 := b64.DecodeString(authDataB64)

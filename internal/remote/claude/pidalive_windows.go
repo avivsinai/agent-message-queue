@@ -12,7 +12,7 @@ import (
 // signalling it: OpenProcess + GetExitCodeProcess. STILL_ACTIVE means
 // alive. OpenProcess on a dead pid fails with ERROR_FILE_NOT_FOUND or —
 // on some Windows versions — ERROR_INVALID_PARAMETER; both mean the
-// process is gone (r2 P2-3). Any other open failure is an error.
+// process is gone. Any other open failure is an error.
 func pidAlive(pid int) (bool, error) {
 	if pid <= 0 {
 		return false, nil

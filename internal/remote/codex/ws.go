@@ -35,7 +35,7 @@ const (
 )
 
 // wsConn is one client WebSocket over an already-dialed connection.
-// wmu is a cap-1 channel semaphore (B14b/B6): acquisition is a select on
+// wmu is a cap-1 channel semaphore: acquisition is a select on
 // send vs ctx.Done(), so WAITING for the writer is context-bounded — the
 // old sync.Mutex acquisition was unbounded, and ctx only bounded the write
 // after it. Release is a receive. Zero extra goroutines, no lost unlocks.
@@ -50,7 +50,7 @@ type wsConn struct {
 	// would be consumed as that payload — silently corrupting every
 	// subsequent request on this connection. A partial frame is
 	// unrecoverable, so the connection is closed and every later write fails
-	// fast instead (agent-message-queue-611.22.38).
+	// fast instead.
 	poisoned  atomic.Bool
 	closeOnce sync.Once
 }
@@ -72,7 +72,7 @@ func newWSConn(conn net.Conn, br *bufio.Reader) *wsConn {
 
 // writePong sends a pong frame with the writer slot acquired under a
 // deadline: both the WAIT for the slot and the write are bounded, so the
-// read pump can never stall on a wedged socket (B14b recut secondary).
+// read pump can never stall on a wedged socket.
 func (w *wsConn) writePong(payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -87,9 +87,9 @@ func (w *wsConn) writePong(payload []byte) error {
 }
 
 // writeCloseReply answers a peer close frame with the writer slot acquired
-// under a deadline, same discipline as writePong (B14b recut): an unbounded
-// close reply on a wedged socket stalled the read pump — Done() never fired
-// and the attachment never reported offline (611.22.40). On timeout the
+// under a deadline, same discipline as writePong: an unbounded
+// close reply on a wedged socket would stall the read pump — Done() would
+// never fire and the attachment would never report offline. On timeout the
 // stream is poisoned and the pump still exits; a missed close reply is
 // harmless because the peer initiated the close.
 func (w *wsConn) writeCloseReply() error {
@@ -166,8 +166,8 @@ func (w *wsConn) handshake() error {
 }
 
 // writeTextBounded sends one masked text frame bounded by a 3s deadline in
-// both phases (slot wait + write), same discipline as writePong/writeCloseReply
-// (611.22.40). Used by Client.Respond — the last unbounded frame write.
+// both phases (slot wait + write), same discipline as
+// writePong/writeCloseReply. Used by Client.Respond.
 func (w *wsConn) writeTextBounded(payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -184,9 +184,7 @@ func (w *wsConn) writeTextBounded(payload []byte) error {
 // writeTextCtx sends one masked text frame bounded by ctx in BOTH phases:
 // acquiring the writer slot (select on ctx.Done) and the write itself
 // (deadline installed+cleared under the slot, so concurrent writers cannot
-// clobber each other's deadline). This is Pro B14 recut #5's
-// deadline-under-mutex discipline with context-bounded acquisition added
-// (B14b/B6).
+// clobber each other's deadline).
 func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
 	if err := w.lockWriteCtx(ctx); err != nil {
 		return err
@@ -248,7 +246,7 @@ func (w *wsConn) readText() ([]byte, error) {
 		case opPing:
 			// The pong reply runs INSIDE the read pump, so it is
 			// deadline-bounded: an unbounded write on a wedged socket would
-			// stall the pump (B14b recut secondary finding).
+			// stall the pump.
 			if err := w.writePong(payload); err != nil {
 				return nil, err
 			}

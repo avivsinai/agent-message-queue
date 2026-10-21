@@ -96,7 +96,7 @@ func agentDisplay(agent agentInfo, label, name string) string {
 
 // helperDrafts reports whether the helper will send Desktop a create draft
 // for b, by the helper's own rule: it is ready, and b's session is proven
-// live (review-s5 P1-1). Only a session with no agent is drafted.
+// live. Only a session with no agent is drafted.
 func helperDrafts(b binding.Binding, helper agentInfo) bool {
 	state, _ := b.Liveness()
 	return helper.Ready && state == binding.Live

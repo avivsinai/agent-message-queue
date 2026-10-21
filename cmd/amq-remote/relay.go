@@ -24,8 +24,8 @@ import (
 const relayStatusFile = "relay-status.json"
 
 // authKind is the enrolled credential kind presented on connection AUTH
-// (relay design §3: one tag, chosen deterministically; 1059 is the body's
-// enrolled message kind).
+// (one tag, chosen deterministically; 1059 is the body's enrolled message
+// kind).
 const authKind = 1059
 
 type relayShareStatus struct {
@@ -57,9 +57,9 @@ type relayStatusDoc struct {
 // mismatched credential stops authentication instead of riding an old
 // socket. serve never mints, renews or enrolls.
 //
-// The first body this serve loads is pinned for its lifetime
-// (codex slice 1 review r2 #1): a renewal for that body is adopted, but a
-// different body under the same owner is refused until the operator
+// The first body this serve loads is pinned for its lifetime:
+// a renewal for that body is adopted, but a different body under the same
+// owner is refused until the operator
 // restarts serve.
 func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
 	var mu sync.Mutex
@@ -96,7 +96,7 @@ func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
 }
 
 // relaySet runs one authenticated relay client per manifest share and
-// follows the manifest while serve runs (#1024): a share added starts on the
+// follows the manifest while serve runs: a share added starts on the
 // startup path, a share removed stops, and any other change waits for a
 // restart. A relay that is down or refusing leaves local IPC and AMQ
 // operation untouched.
@@ -180,7 +180,7 @@ func (rs *relaySet) tick() {
 	delete(rs.said, "manifest")
 	if first && reflect.DeepEqual(mf.Relay, rs.started) {
 		// The file serve started from is not a manifest change, so a
-		// share refused at startup is not retried (review #1048 r1).
+		// share refused at startup is not retried.
 		return
 	}
 	rs.reconcile(mf)
@@ -209,7 +209,7 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 		}
 	}
 	// Plan first, then act: removals free a target or a body before a
-	// retry or an add may take it (review #1048 r1).
+	// retry or an add may take it.
 	var removed, retried []*relayRun
 	for session, run := range rs.running {
 		sh, ok := want[session]
@@ -221,7 +221,7 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 			rs.sayOnce("share:"+session, fmt.Sprintf("relay share %s: its manifest entry changed; restart serve, or remove and re-add the share, to adopt it", session), string(entry))
 		case rs.edges.refused(session):
 			// A setup refusal is retried on a manifest change, never on
-			// every tick (#1024 ruling 3).
+			// every tick.
 			retried = append(retried, run)
 		}
 	}
@@ -254,8 +254,8 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 // addShare sets up a share added to the manifest: the startup surfaces and
 // pins, then its client. A share whose target or enrolled body a running
 // share already holds is refused whole: no surface, pin or client, so it
-// never takes over the running share's target, profile or presence
-// (#1024 ruling 1, review #1048 r1). It reports false then.
+// never takes over the running share's target, profile or presence.
+// It reports false then.
 func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) bool {
 	body := ""
 	if creds, err := sharestate.Load(rs.root, sh.Session); err == nil {
@@ -288,8 +288,7 @@ func (rs *relaySet) collision(sh manifest.Share, body, self string) string {
 }
 
 // stopShare closes a share's client, drops its surfaces and pins, and
-// gives an attached Claude target the owner-less native pin a restart would
-// (#1024 ruling 2a).
+// gives an attached Claude target the owner-less native pin a restart would.
 func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
 	run.cancel()
 	select {
@@ -303,7 +302,7 @@ func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
 	delete(rs.said, "share:"+run.share.Session)
 	gone := rs.edges.removeShare(run.share, run.body)
 	// The native pin is written before the share's pins go, so the session
-	// is never without a pin (#1024 ruling 2a).
+	// is never without a pin.
 	for _, ad := range adapters {
 		if ad.Target == run.share.Target {
 			rs.edges.pinNative(ad, rs.edges.identityLate(ad.Target), rs.stderr)

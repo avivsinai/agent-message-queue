@@ -13,7 +13,7 @@ import (
 // Handler is the endpoint's command entry point (core.Endpoint.Handle).
 type Handler func(cmd *protocol.Command, src core.Source) (any, error)
 
-// Bounds of the request dispatcher (design §6 transport rules, §14).
+// Bounds of the request dispatcher.
 const (
 	dispatchWorkers  = 4
 	dispatchQueued   = 64

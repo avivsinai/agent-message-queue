@@ -24,7 +24,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Server waits of the link's tool bodies (design §6): a call answers within
+// Server waits of the link's tool bodies: a call answers within
 // 25 s (pending past that), call_get waits up to 30 s.
 const (
 	linkCallWait = 30 * time.Second
@@ -150,7 +150,7 @@ func linkIPC(stateDir string, req ipc.LinkRequest) (json.RawMessage, error) {
 
 // callKey is the durable handle of one call: the idempotency key, and the
 // wire call id derived from it ("c_" + key), a client-scoped alias the server
-// echoes and answers call_get for (ruling v). A CLI that died before printing
+// echoes and answers call_get for. A CLI that died before printing
 // reads the same call again with `link call resume KEY`.
 func callKey(given string) (key, callID string) {
 	key = given

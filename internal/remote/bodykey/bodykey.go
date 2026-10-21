@@ -1,6 +1,6 @@
-// Package bodykey implements the body-key contract of the AMQ Remote design
-// (v3 amended, §7.5 "Key contract") and the NIP-OA Owner Attestation tag
-// (buzz docs/nips/NIP-OA.md) that the owner uses to attest a body key.
+// Package bodykey implements the AMQ Remote body-key contract and the NIP-OA
+// Owner Attestation tag (buzz docs/nips/NIP-OA.md) that the owner uses to
+// attest a body key.
 //
 // BodyKey is the remote-owned secp256k1 (BIP340) keypair minted per shared
 // session, stored at <root>/extensions/remote/keys/<session>/body.key
@@ -78,8 +78,8 @@ var ErrWrongFormat = errors.New("not a body key file")
 // present, must equal the derived x-only pubkey.
 // errSymlinkedKey refuses a symlinked key path: the key material must live
 // at the owned path inside the root, never behind a link that can point
-// outside it (verifier P1-1: Load/Stat follow symlinks and would adopt an
-// out-of-root key silently).
+// outside it (Load/Stat follow symlinks and would adopt an out-of-root key
+// silently).
 var errSymlinkedKey = errors.New("state leaf is a symlink; refusing")
 
 // lstatKeyLeaf Lstats the key path: it must be a regular file (or absent).
@@ -136,7 +136,7 @@ func parse(content string) (*BodyKey, error) {
 			}
 			// The file format is lowercase hex (writeSecretFile emits only
 			// lowercase); reject uppercase so the on-disk contract stays
-			// canonical (codex P2: one consistent parser contract).
+			// canonical.
 			if strings.ToLower(fields[1]) != fields[1] {
 				return nil, fmt.Errorf("%w: secret hex must be lowercase", ErrWrongFormat)
 			}
@@ -197,8 +197,8 @@ func Mint(dir string) (*BodyKey, error) {
 	raw := sk.Serialize()
 	copy(k.secret[:], raw)
 	pubPath := filepath.Join(dir, "body.pub")
-	// Verifier r6 P2-3: body.pub is lstat'd BEFORE the body.key write — a
-	// check placed after it leaves a half-minted key directory whose
+	// body.pub is lstat'd BEFORE the body.key write — a check placed after it
+	// leaves a half-minted key directory whose
 	// symlinked body.pub is never re-checked (the next run Loads body.key
 	// successfully and never reaches Mint again).
 	if err := lstatKeyLeaf(pubPath); err != nil {
@@ -207,7 +207,7 @@ func Mint(dir string) (*BodyKey, error) {
 	if werr := writeSecretFile(keyPath, k.secret[:]); werr != nil {
 		return nil, werr
 	}
-	// Same leaf-confinement rule as body.key (r5 review P1-2): a symlink at
+	// Same leaf-confinement rule as body.key: a symlink at
 	// body.pub would otherwise be followed and an out-of-root file truncated
 	// silently.
 	if err := os.WriteFile(pubPath, []byte(k.PublicKeyHex()+"\n"), 0o644); err != nil {
@@ -327,7 +327,7 @@ func parseSigHex(s string) ([]byte, error) {
 // parsePubKeyHex decodes a 64-char hex pubkey, rejecting non-canonical
 // encodings: wrong length, non-hex, or uppercase (the NIP fixes lowercase
 // hex; an uppercase owner string would pass a text inequality check while
-// decoding to the same key — the self-attestation bypass codex flagged).
+// decoding to the same key — the self-attestation bypass).
 func parsePubKeyHex(s string) ([]byte, error) {
 	if len(s) != hexPubkeyLen {
 		return nil, fmt.Errorf("pubkey must be %d hex chars", hexPubkeyLen)
@@ -398,11 +398,11 @@ func ParseAuthTag(tag []string) (*AuthTag, error) {
 }
 
 // ShareKinds lists the event kinds a shared-session body may publish; the
-// owner signs one NIP-OA condition string per kind (architect ruling
-// 2026-09-22: NIP-OA condition strings are conjunctive — every clause must
-// hold and `kind=<n>` holds iff event.kind = n — so a multi-kind string is
-// satisfiable by no event. One string per kind, all under the one body
-// keypair; each event carries the tag naming its own kind).
+// owner signs one NIP-OA condition string per kind (they are
+// conjunctive — every clause must hold and `kind=<n>` holds iff event.kind
+// = n — so a multi-kind string is satisfiable by no event. One string per
+// kind, all under the one body keypair; each event carries the tag naming
+// its own kind).
 var ShareKinds = []uint16{20003, 1059, 24200, 44200, 10100}
 
 // ShareConditions is the canonical per-kind conditions string for a share:
@@ -539,7 +539,7 @@ func (k *BodyKey) PreimageHex(conditions string) string {
 }
 
 // SetSigHex decodes a 128-char signature into the tag with the same
-// canonical rules as ParseAuthTag (lowercase hex — codex P2: one canonical
+// canonical rules as ParseAuthTag (lowercase hex: one canonical
 // parser for signature text, so anything persisted is accepted by the wire
 // parser).
 func (t *AuthTag) SetSigHex(s string) error {

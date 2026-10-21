@@ -58,9 +58,8 @@ const MaxEnvelopeBytes = protocol.MaxCommandBytes + 4*1024 // command + overhead
 // The Command is the exact bytes the caller built (already validated and
 // digested by the protocol layer); the drainer hands it to Endpoint.Handle
 // unchanged on replay. Destination carries the routing the caller resolved
-// (the endpoint IPC state dir today; a cross-host courier destination in a
-// later wave). Target/Epoch/Expiry are the caller's explicit or
-// previously-verified values: the spool never retargets a request to a
+// (the endpoint IPC state dir). Target/Epoch/Expiry are the caller's explicit
+// or previously-verified values: the spool never retargets a request to a
 // different session or substitutes a fresh epoch — an offline enqueue must
 // supply them, and a live enqueue copies them from the inspected session.
 type Envelope struct {
@@ -161,7 +160,7 @@ var (
 // Open prepares <stateDir>/sender and returns a spool. The directory is
 // created if missing; existing envelopes are recovered by List.
 //
-// Round-4: a stable spool-level lock file (<dir>/.lock) is created here. Every
+// A stable spool-level lock file (<dir>/.lock) is created here. Every
 // filesystem transaction (Create, RMW, reap) acquires a blocking exclusive
 // flock on it via withLock, serializing concurrent Open instances/processes.
 // On unsupported platforms (non-unix) Open refuses CodeUnsupported before
@@ -197,7 +196,7 @@ func Open(stateDir string, opts ...Option) (*Spool, error) {
 // Create persists one envelope atomically BEFORE returning. A duplicate
 // (same creator host + request id) reconciles: if the existing envelope has
 // the same digest, Create returns it as-is so the CLI proceeds exactly as
-// main does (exit 0, existing record). Only a DIFFERENT digest under the
+// for a new one (exit 0, existing record). Only a DIFFERENT digest under the
 // same id is a conflict (the caller changed the command bytes). The
 // envelope starts in StatePending.
 //
@@ -218,9 +217,10 @@ func (s *Spool) Create(env *Envelope) error {
 			return err
 		}
 		if exists {
-			// B1: a retry with the same identity and the same digest reconciles
-			// to the existing envelope — the caller proceeds as main does (exit
-			// 0). Only a different digest under the same id is a conflict.
+			// A retry with the same identity and the same digest reconciles
+			// to the existing envelope — the caller proceeds as for a new one
+			// (exit 0). Only a different digest under the same id is a
+			// conflict.
 			if existing.InputDigest == env.InputDigest {
 				*env = *existing
 				return nil
@@ -276,7 +276,7 @@ func (s *Spool) List() ([]*Envelope, error) {
 			}
 			// The drainer dispatches what List returns, so a file another
 			// writer changed must pass the same check as Create: only a
-			// submit is replayed (agent-message-queue-611.47).
+			// submit is replayed.
 			if validateEnvelope(env) != nil {
 				continue
 			}
@@ -327,7 +327,7 @@ func (s *Spool) markDispatchedLocked(k Key) error {
 	}
 	env.State = StateDispatched
 	env.DispatchedAt = protocol.FormatTime(s.now())
-	env.SettledAt = env.DispatchedAt // B5: every terminal state stamps settle time.
+	env.SettledAt = env.DispatchedAt // every terminal state stamps settle time.
 	env.LastError = ""
 	env.Attempt++
 	return s.write(env)
@@ -355,7 +355,7 @@ func (s *Spool) markFailedLocked(k Key, errMsg string) error {
 	env.State = StateFailed
 	env.LastError = errMsg
 	env.Attempt++
-	env.SettledAt = protocol.FormatTime(s.now()) // B5: every terminal state stamps settle time.
+	env.SettledAt = protocol.FormatTime(s.now()) // every terminal state stamps settle time.
 	return s.write(env)
 }
 
@@ -565,8 +565,7 @@ func validateEnvelope(env *Envelope) error {
 		return protocol.Refuse(protocol.CodeInvalid, "envelope request_id must match command request_id")
 	}
 	// The spool holds the local CLI's submits, so a file that names another
-	// host, such as a Buzz share's, is not one the CLI wrote
-	// (agent-message-queue-611.47).
+	// host, such as a Buzz share's, is not one the CLI wrote.
 	if env.CreatorHost != ipc.LocalHost {
 		return protocol.Refuse(protocol.CodeInvalid, "creator_host must be %s", ipc.LocalHost)
 	}
@@ -621,7 +620,7 @@ type SpoolReceipt struct {
 	MinEvidence string `json:"min_evidence,omitempty"` // floor, unevaluated until drain
 	Reason      string `json:"reason"`                 // "endpoint_unreachable" or "duplicate_conflict"
 	CreatedAt   string `json:"created_at"`             // persist time
-	LastError   string `json:"last_error,omitempty"`   // round-3 B6: refusal code for failed envelopes
+	LastError   string `json:"last_error,omitempty"`   // refusal code for failed envelopes
 }
 
 // Receipt builds a SpoolReceipt from an envelope. The state is always pending:

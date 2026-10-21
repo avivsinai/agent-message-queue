@@ -162,9 +162,8 @@ func (s *Server) noAgentText(b binding.Binding, helper bool) string {
 
 // agentMarker is a pinned agent's record under
 // <state>/agents/<pin>/<pubkey>.json. Each identity has its own file, so two
-// agents pinned to one session never reset each other's state (review of S3
-// P1-1). It is rewritten on each tick, so its update time shows the agent
-// runs.
+// agents pinned to one session never reset each other's state. It is
+// rewritten on each tick, so its update time shows the agent runs.
 type agentMarker struct {
 	Name        string `json:"name"`
 	PubKey      string `json:"pubkey"`
@@ -400,8 +399,8 @@ func (s *Server) helperTick(now time.Time) {
 	}
 	// Desktop shows one draft at a time and drops a draft that arrives
 	// while one is open, so the helper sends at most one draft per window
-	// across all sessions (review of S4 P1-1). The window ends early once
-	// the drafted session's agent runs: the owner closed that dialog.
+	// across all sessions. The window ends early once the drafted session's
+	// agent runs: the owner closed that dialog.
 	if last, err := time.Parse(time.RFC3339, m.LastDraft); err == nil && now.Sub(last) < helperRequestGap &&
 		(m.LastDraftFor == "" || len(s.agentMarkers(m.LastDraftFor)) == 0) {
 		return

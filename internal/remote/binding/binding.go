@@ -344,9 +344,9 @@ func confinedPath(create bool) (string, error) {
 		parts = strings.Split(rel, string(filepath.Separator))
 	}
 	if os.Getenv(EnvPath) != "" {
-		// An override must be canonical: no symlink anywhere on its chain
-		// (codex #885 r2 P2), below an ancestor this user owns. The missing
-		// levels are made by the loop below, one Mkdir + Lstat at a time:
+		// An override must be canonical: no symlink anywhere on its chain,
+		// below an ancestor this user owns. The missing levels are made by
+		// the loop below, one Mkdir + Lstat at a time:
 		// MkdirAll would follow a symlink swapped in after this check.
 		existing, err := canonicalAncestor(dir)
 		if err != nil {
@@ -409,8 +409,8 @@ func read(path string) (Binding, error) {
 }
 
 // Named bindings: one per shared session, so each session has its own Buzz
-// agent (bead agent-message-queue-611.39). They live in a bindings
-// directory beside the legacy single binding file, which still reads as the
+// agent. They live in a bindings directory beside the legacy single binding
+// file, which still reads as the
 // name "default". All writes share the binding lock.
 
 // LegacyName is the name the single legacy binding file reads as.
@@ -626,7 +626,7 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 			// taken, never overwritten.
 			o, taken := held[candidate]
 			// Any other Lstat error means the directory cannot be read, so
-			// no name is provably free: fail closed (review-s1 P1).
+			// no name is provably free: fail closed.
 			_, statErr := os.Lstat(filepath.Join(dir, candidate+".json"))
 			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 				return statErr
@@ -754,8 +754,7 @@ const tombstoneSuffix = ".ended.json"
 
 // IsTombstone reports whether a file name in the bindings directory is a
 // tombstone. A tombstone is never a binding, so it is no evidence that a
-// session is bound: every reader of the directory skips it (review-s2r2
-// P1-A1).
+// session is bound: every reader of the directory skips it.
 func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tombstoneSuffix) }
 
 // PruneEnded removes every binding whose session inspect proves ended and
@@ -773,8 +772,8 @@ func PruneEnded(inspect Inspector) ([]string, error) {
 // Retire removes every binding match accepts, as read under the binding lock,
 // and returns the names removed. A named binding is renamed to its tombstone,
 // which keeps its name held by its session identity, so a later session never
-// inherits the removed session's Buzz agent through a freed name (review-s2
-// P1-1). Tombstones are never removed. Their number is bounded by the
+// inherits the removed session's Buzz agent through a freed name.
+// Tombstones are never removed. Their number is bounded by the
 // distinct session identities, and an identity derived from a target (a link
 // share, or a native session whose working directory is unknown) names a
 // process, so each such session leaves one. The legacy single binding has no

@@ -44,7 +44,7 @@ const (
 	closeServerRestart websocket.StatusCode = 1012 // server restart: reconnect after 0-60 s
 )
 
-// Defaults from the design (§6, §14).
+// Defaults of the link carrier.
 const (
 	DefaultOfferTTL     = 30 * time.Second
 	DefaultPingTimeout  = 45 * time.Second
@@ -782,7 +782,7 @@ func (c *Carrier) revokeWorker(ctx context.Context) {
 // handleRequest answers a frame the server sends. key_revoked stops the key
 // at once and drops it on disk off the reader. A signed submit and a command
 // (get, cancel, session list or inspect) wait in one ordered queue per
-// request id on bounded workers (ruling r), so a cancel runs after the submit
+// request id on bounded workers, so a cancel runs after the submit
 // it follows. Only the reader's own refusals (undecodable, busy) are answered
 // inline.
 func (c *Carrier) handleRequest(sess *session, f Frame) {
@@ -981,8 +981,7 @@ func (c *Carrier) markRevoked(id string) {
 }
 
 // OriginName is the Origin key naming the link (its manifest name), so a
-// harness can show where a task came from (ruling x). It carries no
-// authority.
+// harness can show where a task came from. It carries no authority.
 const OriginName = "name"
 
 // source is the authenticated source of a signed submit: this link's sink,

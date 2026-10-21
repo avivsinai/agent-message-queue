@@ -40,7 +40,7 @@ type settingsDoc struct {
 func (s *Server) loadTurnTiming() turnTiming {
 	startup := turnTiming{s.cfg.TurnTimeout, s.cfg.PollInterval, s.cfg.HeartbeatInterval}
 	// The read holds no lock: s.mu guards every request, and a stalled home
-	// mount must not block them (review of #1023).
+	// mount must not block them.
 	t, found, err := readSettingsFile(startup)
 	s.mu.Lock()
 	defer s.mu.Unlock()
