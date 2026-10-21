@@ -428,6 +428,10 @@ func (h *Host) serveRequests(ctx context.Context, root *fsq.DeliveryRoot) error 
 		if ctx.Err() != nil {
 			return nil
 		}
+		// A request refused busy while an earlier one ran is decided.
+		if h.handled[ref] {
+			continue
+		}
 		req, ok, err := h.admit(root, ref)
 		if err != nil {
 			return err
@@ -524,9 +528,10 @@ func requestOutcome(res turnResult, exitStatus func() string) (bridgeEvent, erro
 
 // askOwner shows one tool approval of a remote request's turn on the remote
 // face and waits for the owner's answer until it expires. The host offers
-// the remote face only the reject option (presence local_only), and the
+// the remote face only the reject_once option (presence local_only), and the
 // host's own policy, which also rejects, answers at expiry. It returns false
-// when the turn is cancelled meanwhile: the approval then answers cancelled.
+// when the turn is cancelled or ends meanwhile: the approval then answers
+// cancelled.
 func (h *Host) askOwner(turn *turnCollect, req permissionRequest, reject int) bool {
 	bt := turn.bridge
 	h.eventMu.Lock()
@@ -577,6 +582,8 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest, reject int) bo
 	for {
 		select {
 		case <-turn.cancelled:
+			return false
+		case <-turn.done:
 			return false
 		case <-timer.C:
 			resolve("answered_elsewhere")

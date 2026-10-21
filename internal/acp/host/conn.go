@@ -60,8 +60,9 @@ type reply struct {
 // in both directions. One reader goroutine routes responses to their calls by
 // id and hands notifications to onNotify in arrival order, so every
 // session/update the agent writes before a response is delivered before that
-// response. The agent's requests are answered through onRequest, each on its
-// own goroutine.
+// response. The agent's requests are taken by onRequest on the reader, in
+// arrival order, and answered by the function it returns on a goroutine of
+// their own, so a request that waits (an approval) holds up nothing else.
 type conn struct {
 	writeMu sync.Mutex
 	out     *bufio.Writer
@@ -71,7 +72,7 @@ type conn struct {
 	nextID  int64
 	pending map[int64]chan reply
 
-	onRequest func(method string, params json.RawMessage) (any, *rpcError)
+	onRequest func(method string, params json.RawMessage) func() (any, *rpcError)
 	onNotify  func(method string, params json.RawMessage)
 
 	done   chan struct{}
@@ -79,7 +80,7 @@ type conn struct {
 	closed bool
 }
 
-func newConn(in io.Reader, out io.Writer, onRequest func(string, json.RawMessage) (any, *rpcError), onNotify func(string, json.RawMessage)) *conn {
+func newConn(in io.Reader, out io.Writer, onRequest func(string, json.RawMessage) func() (any, *rpcError), onNotify func(string, json.RawMessage)) *conn {
 	w := bufio.NewWriter(out)
 	c := &conn{
 		out:       w,
@@ -170,17 +171,15 @@ func (c *conn) read(in io.Reader) {
 		hasID := len(msg.ID) > 0 && string(msg.ID) != "null"
 		switch {
 		case msg.Method != "" && hasID:
-			// A request may wait (an approval waits for the owner), so it
-			// is answered off the reader: responses and notifications keep
-			// flowing while it waits.
-			go func(id json.RawMessage, method string, params json.RawMessage) {
-				result, rerr := c.onRequest(method, params)
+			answer := c.onRequest(msg.Method, msg.Params)
+			go func(id json.RawMessage) {
+				result, rerr := answer()
 				if rerr != nil {
 					_ = c.write(outgoing{ID: &id, Error: rerr})
 				} else {
 					_ = c.write(outgoing{ID: &id, Result: result})
 				}
-			}(msg.ID, msg.Method, msg.Params)
+			}(msg.ID)
 		case msg.Method != "":
 			c.onNotify(msg.Method, msg.Params)
 		case hasID:
