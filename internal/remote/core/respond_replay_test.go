@@ -9,9 +9,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// TestRespondTransportErrorIsReplayedNotAlreadyResolved reproduces the gate
-// finding on agent-message-queue-611.22.36 (union 42d923a4, Pro #20 reopened
-// at the endpoint): the answer intent was persisted before the native call,
+// TestRespondTransportErrorIsReplayedNotAlreadyResolved reproduces
+// agent-message-queue-611.22.36: the answer intent was persisted before the native call,
 // the call failed with a transport error, and every retry short-circuited on
 // the intent with already_resolved while the question stayed pending at the
 // runtime. The retry must reach the runtime exactly once.

@@ -111,7 +111,7 @@ func TestLateAnswerToCancelledPromptNeverCompletesTheNext(t *testing.T) {
 	}
 }
 
-// codex #860 P1 (reproduced by the reviewer at GOMAXPROCS=1): a cancel read
+// Regression: #860 (reproduced at GOMAXPROCS=1), a cancel read
 // right after its prompt found no turn, because the prompt reserved its turn
 // inside its own goroutine, and the prompt then timed out instead of
 // returning cancelled.
@@ -134,7 +134,7 @@ func TestCancelImmediatelyAfterPromptIsNotLost(t *testing.T) {
 	}
 }
 
-// codex #860 P2: a replayed steer event must not be reclassified from the
+// Regression: #860, a replayed steer event must not be reclassified from the
 // session's current state; it reports duplicate and delivers nothing new.
 func TestReplayedSteerReportsDuplicate(t *testing.T) {
 	cfg := testConfig(t)

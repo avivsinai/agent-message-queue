@@ -44,7 +44,7 @@ func init() {
 	})
 }
 
-// TestBuildPartialFailureReturnsRefusals (611.13 r1 recut) pins that one bad
+// TestBuildPartialFailureReturnsRefusals pins that one bad
 // adapter does not take down the set: a manifest with an adapter that builds,
 // one whose factory refuses, and one of an unknown kind yields one attachment
 // and two typed refusals, not a fatal error.

@@ -20,7 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// 611.16: an owner DM submits one request (admitted floor, busy=reject),
+// An owner DM submits one request (admitted floor, busy=reject),
 // its first revision becomes one kind 9 row and a later revision a kind
 // 40003 edit of that row; a redelivered event replays the same request;
 // Flush sends every owed output and leaves none.
@@ -84,7 +84,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	if tagValue(sent[1], "e") != sent[0].ID.Hex() || sent[1].CreatedAt <= sent[0].CreatedAt {
 		t.Fatalf("edit does not name its row or is not strictly later: %+v", sent[1])
 	}
-	// 611.52 (field, 0.86.1): the row named the opaque request ref; it
+	// The row named the opaque request ref; it
 	// names the target and the state.
 	if sent[0].Content != "cx: running" || sent[1].Content != "cx: completed\n\ndone" {
 		t.Fatalf("row texts = %q, %q", sent[0].Content, sent[1].Content)
@@ -119,7 +119,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	}
 }
 
-// 611.16 slice 5: the owner reacting ❌ on this edge's result row cancels
+// The owner reacting ❌ on this edge's result row cancels
 // exactly that row's request.
 func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	var owner, body [32]byte
@@ -162,7 +162,7 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	}
 }
 
-// codex #866 r1 #3: a share enrolled without buzz-dm ran the owner's
+// Regression: #866, a share enrolled without buzz-dm ran the owner's
 // prompt and only then failed to sign the answer. Nothing is admitted
 // unless every DM kind is granted.
 func TestCarrierAdmitsNothingWithoutDMGrants(t *testing.T) {
@@ -219,7 +219,7 @@ func hasTag(evt nostr.Event, want ...string) bool {
 	return false
 }
 
-// 611.16 slice 5: an owner message that mentions the body in an opted-in
+// An owner message that mentions the body in an opted-in
 // channel submits one request; the result row goes to the DM channel and
 // carries no reference into the mentioning channel.
 func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
@@ -260,7 +260,7 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 func fixedIdentity(id string) func(string) string { return func(string) string { return id } }
 
 // busyCarrier is a carrier whose target refuses every submit as busy, the
-// endpoint answer behind the rows of agent-message-queue-611.58.
+// endpoint answer behind a refused row.
 func busyCarrier(t *testing.T) (c *Carrier, owner [32]byte, stateDir string) {
 	t.Helper()
 	var body [32]byte
@@ -285,11 +285,11 @@ func busyCarrier(t *testing.T) (c *Carrier, owner [32]byte, stateDir string) {
 	return c, owner, stateDir
 }
 
-// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Buzz tags an
+// Regression: #971, Buzz tags an
 // owner's direct reply to a thread's first message with a reply e tag only.
 // The result row named the owner event but no root, and the relay refused
-// it: "invalid: root tag does not match thread ancestry". Pro review of #971
-// added the legacy positional forms, which named no root either.
+// it: "invalid: root tag does not match thread ancestry". The legacy
+// positional forms named no root either.
 func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
 	root, parent := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	for name, tags := range map[string]nostr.Tags{
@@ -317,7 +317,7 @@ func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
 	}
 }
 
-// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Flush stopped
+// Regression: #971, Flush stopped
 // at the first refused row, so every later row, a new approval message
 // included, never reached the owner. A refused row stays owed with the
 // relay's reason: other requests' rows still go out, its own edit waits
@@ -369,11 +369,11 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 	}
 }
 
-// Pro review of #971 round 2 (agent-message-queue-611.58): Flush ordered a
+// Regression: #971, Flush ordered a
 // request's outputs by key text, so a newer revision ("row/R/00000003")
 // sorted before a refused approval message ("row/R/approval/ffff…") and
 // went out first, also after the ledger was reopened. A request's outputs
-// go out in the order they were prepared. Round 3: outputs written before
+// go out in the order they were prepared. Outputs written before
 // sequence numbers (seq 0) have no provable order, so a refused one holds
 // its request's other old outputs.
 func TestRefusedApprovalHoldsItsRequestsNewerRows(t *testing.T) {
@@ -463,7 +463,7 @@ func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
 	}
 }
 
-// Bead agent-message-queue-611.59 (Pro review of #971 round 2): a root row
+// Regression: #971, a root row
 // the relay stored, but whose positive OK was lost, is refused as too old on
 // every retry and held its request's later outputs forever. Finding the
 // exact signed event on the relay accepts it; a failed lookup keeps it owed.

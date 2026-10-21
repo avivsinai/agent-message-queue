@@ -12,7 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// 611.42 pre-merge review: the app-server fans an approval out to every
+// Regression: agent-message-queue-611.42, the app-server fans an approval out to every
 // client and drops every answer after the first with only a log line. When
 // the Codex terminal answered first, a later Buzz answer still reported
 // success. serverRequest/resolved must clear the approval, so the late
@@ -65,7 +65,7 @@ func TestApprovalAnsweredElsewhereRefusesLateAnswer(t *testing.T) {
 	}
 }
 
-// PR #919 review: a file-change approval showed no paths or diff, yet one
+// Regression: #919, a file-change approval showed no paths or diff, yet one
 // ✅ approved it. Approve is offered only for a command the prompt shows
 // whole; reject stays available.
 func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
@@ -75,7 +75,7 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 	t.Cleanup(func() { _ = att.Close() })
-	// Pro review of #969: Codex 0.160 sends additionalPermissions, which the
+	// Codex 0.160 sends additionalPermissions, which the
 	// approve guard reads, only to a client with the experimental API.
 	if init := <-srv.calls; !strings.Contains(string(init.Params), `"experimentalApi":true`) {
 		t.Fatalf("initialize params = %s, want the experimental API with approvals on", init.Params)
@@ -119,10 +119,10 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	if in := pending(); in.ApproveOption != "accept" || in.RejectOption != "cancel" || !strings.HasSuffix(in.Prompt, "Reject also stops this turn.") {
 		t.Fatalf("codex 0.160 command = approve %q reject %q prompt %q, want accept, cancel and the stop note", in.ApproveOption, in.RejectOption, in.Prompt)
 	}
-	// 611.42.11: a command that holds a credential went to the DM whole,
+	// A command that holds a credential went to the DM whole,
 	// and a zero-width character the DM removes showed a command other than
 	// the one a ✅ approved. Neither shows whole, so neither offers approve.
-	// Pro review of #988: curl's -u user:password, separate and attached.
+	// curl's -u user:password, separate and attached.
 	// The commands are filled in at run time, so no curl line with a
 	// credential sits in the source for secret scanners.
 	fill := strings.NewReplacer("{tool}", "cu"+"rl", "{bearer}", "Bear"+"er abcdefgh12345678", "{cred}", "alice"+":"+"demo-"+"pass-123", "{pass}", "demo-"+"pass-123")
@@ -133,7 +133,7 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 		"{tool} -4u {cred} example.invalid", "{tool} -#U{cred} example.invalid",
 		"{tool} -u :{pass} example.invalid", "{tool} -u':{pass}' example.invalid",
 		"{tool} -u 'alice: {pass}' example.invalid",
-		// Pro review of #988 r5: a backslash-newline the shell joins.
+		// A backslash-newline the shell joins.
 		`{tool} -\\\nu {cred} example.invalid`, `{tool} -\\\nU {cred} example.invalid`,
 		`cu\\\nrl -u {cred} example.invalid`} {
 		cmd := fill.Replace(row)
@@ -144,8 +144,7 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 			t.Fatalf("command %q = approve %q reject %q prompt %q, want reject only and no secret", cmd, in.ApproveOption, in.RejectOption, in.Prompt)
 		}
 	}
-	// Pro review of #988 r2: a -u that carries no credential stays visible.
-	// Pro review of #988 r4: nor does a git remote URL or refspec after it.
+	// A -u that carries no credential stays visible, and so does a git remote URL or refspec after it.
 	for i, cmd := range []string{"git push -u origin main", "sort -u names.txt",
 		"git push -u git@github.com:acme/repo.git main", "git push origin -u main:main"} {
 		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(25+i)+`"}`)
@@ -157,7 +156,7 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	}
 }
 
-// agent-message-queue-611.42.8 (Pro review of #969): permission, user-input
+// Regression: agent-message-queue-611.42.8, permission, user-input
 // and MCP elicitation requests were dropped, so a DM turn waited for a
 // terminal answer the owner never saw. The DM shows what is asked, bounded,
 // with no one-tap answer, and the terminal's answer clears it.
@@ -196,11 +195,11 @@ func TestTerminalOnlyRequestsShowInTheDM(t *testing.T) {
 		{"22", "mcpServer/elicitation/request",
 			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Pick a space ` + long + `","requestedSchema":{"type":"object","properties":{}}}`,
 			"22", "MCP server docs asks: Pick a space x"},
-		// Pro review of #985: an asked text that echoes a credential.
+		// An asked text that echoes a credential.
 		{"23", "mcpServer/elicitation/request",
 			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Authorization: Bearer abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
 			"23", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
-		// Pro review of #985 r2: a zero-width space the DM removes hid the
+		// A zero-width space the DM removes hid the
 		// credential from the screen.
 		{"24", "mcpServer/elicitation/request",
 			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Bearer\u200b abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
@@ -221,7 +220,7 @@ func TestTerminalOnlyRequestsShowInTheDM(t *testing.T) {
 	}
 }
 
-// PR #919 review round 2: a second approval replaced a pending one, and the
+// Regression: #919, a second approval replaced a pending one, and the
 // first one's resolution then cleared the second at the endpoint, which
 // holds one pending interaction. Approvals are reported one at a time: the
 // second becomes pending only after the first resolves.
@@ -288,7 +287,7 @@ func TestOverlappingApprovalsShowOneAtATime(t *testing.T) {
 	}
 }
 
-// PR #919 review round 2: approval requests reach the adapter through a
+// Regression: #919, approval requests reach the adapter through a
 // worker queue, so another client's resolution can overtake its own
 // request. Such a request is already answered and is never shown.
 func TestApprovalResolvedBeforeDeliveryIsNotShown(t *testing.T) {

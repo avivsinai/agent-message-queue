@@ -12,7 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// Bead agent-message-queue-z12 (Pro review of #965 r1): a cockpit prompt that
+// Regression: #965, a cockpit prompt that
 // reached the recipient inbox was reported as an error when the event journal
 // write failed afterwards, so Buzz cancelled and re-prompted a delivered
 // message, and a replay could deliver a second copy. The journal is now a
@@ -61,7 +61,7 @@ func TestFailedJournalClaimRefusesBeforeDelivery(t *testing.T) {
 // failed) before the message reached the inbox. Because the claim records
 // only identity and no outcome, the replay checks the inbox, finds the
 // message absent, and delivers exactly one copy under the claimed id
-// instead of reporting a delivery that never happened (review of #976).
+// instead of reporting a delivery that never happened.
 func TestReplayDeliversWhenClaimExistsButInboxEmpty(t *testing.T) {
 	root := canonicalTempDir(t)
 	for _, handle := range []string{"buzz", "agent"} {
@@ -114,7 +114,7 @@ func TestReplayDeliversWhenClaimExistsButInboxEmpty(t *testing.T) {
 	}
 }
 
-// Review of #976 r2 P1: a claim that exists but was never fsynced (the
+// Regression: #976, a claim that exists but was never fsynced (the
 // winner's exclusive create succeeded, its journal-dir sync failed, and the
 // attempt refused) must not let a replay publish until durability holds:
 // the adopt path re-syncs the journal directory chain under the post lock,
@@ -177,7 +177,7 @@ func TestReplayWithFailingJournalSyncRefusesBeforePublishing(t *testing.T) {
 	}
 }
 
-// Review of #976 r2 P2: the inbox proof reads both inbox locations through
+// Regression: #976, the inbox proof reads both inbox locations through
 // the pinned root and requires a readable regular message whose header id
 // matches the claim. A directory or a dangling symlink at <id>.md is not a
 // delivery; the attempt refuses instead of reporting a proven duplicate.
@@ -228,7 +228,7 @@ func TestInboxProofRefusesNonMessageEntries(t *testing.T) {
 	}
 }
 
-// Review of #976 r3 P1 (fresh claim): a first delivery whose claim file and
+// Regression: #976, a first delivery whose claim file and
 // acp-events sync succeed but whose PARENT outbox sync fails must refuse
 // with an empty inbox — a freshly created acp-events directory needs its
 // parent synced, or a crash can keep the message and lose the journal
@@ -272,7 +272,7 @@ func TestFreshClaimRefusesWhenParentOutboxSyncFails(t *testing.T) {
 	}
 }
 
-// Review of #976 r3 P1 (adopted claim): a claim written by a creator killed
+// Regression: #976, a claim written by a creator killed
 // after its write but before its file sync has unsynced content; the adopt
 // barrier must fsync the claim FILE itself — not just directories — before
 // publishing an absent message. With the claim file's sync failing, the
@@ -332,7 +332,7 @@ func TestAdoptedUnsyncedClaimIsSyncedBeforePublishing(t *testing.T) {
 	}
 }
 
-// Review of #976 r3 P1 (inbox-first): a journal sync fault on replay of an
+// Regression: #976, a journal sync fault on replay of an
 // ALREADY DELIVERED event must not turn the committed delivery into an
 // error — the inbox proof runs before the durability barrier, and the
 // replay reports Duplicate/Committed with no inbox change.
@@ -371,7 +371,7 @@ func TestDeliveredThenSyncFaultReplayReportsDuplicate(t *testing.T) {
 	}
 }
 
-// Review of #976 P1 b: the inbox absence check and the write are one
+// Regression: #976, the inbox absence check and the write are one
 // critical section under the event's post lock. When the first copy was
 // drained to cur/ before the replay ran, the replay still finds it (in
 // cur) and reports a duplicate instead of writing a second copy into new/.
@@ -412,7 +412,7 @@ func TestReplayFindsACopyDrainedToCur(t *testing.T) {
 	}
 }
 
-// Review of #976 P2 d: schema-1 journals written by the current release
+// Regression: #976, schema-1 journals written by the current release
 // have no created field. A replay proves delivery from the inbox by the
 // message id, takes created from the delivered message's header, and
 // reports a duplicate — it must not refuse.

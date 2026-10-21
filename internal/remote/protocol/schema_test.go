@@ -88,7 +88,7 @@ func fillCommand(cmd map[string]any, defaults map[string]string) map[string]any 
 	return out
 }
 
-// TestCorpusCommandsValidateAgainstSchema is the B12 guard: every client
+// TestCorpusCommandsValidateAgainstSchema is the guard that every client
 // command in the shared corpus, once defaults are filled, validates against
 // schemas/remote-command-v1.schema.json. Before the oneOf-branch schema fix
 // this was 0/34 because each branch required `schema` but did not list it as a
@@ -113,7 +113,7 @@ func TestCorpusCommandsValidateAgainstSchema(t *testing.T) {
 // TestRequestSnapshotsValidateAgainstSchema covers the request-snapshot schema:
 // a full completed record, the compacted-completed tombstone (completed with
 // result_expired code and no result), and a plain running record all validate.
-// The compacted variant is the B12 addition: a tombstoned completed record
+// The compacted variant covers a tombstoned completed record
 // keeps state=completed + code=result_expired instead of carrying a result.
 func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 	sch := compileSchema(t, "remote-request-v1.schema.json")
@@ -184,7 +184,7 @@ func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 	}
 }
 
-// TestTruncateTextIsUTF8Safe pins the B08 truncation contract: the result is at
+// TestTruncateTextIsUTF8Safe pins the truncation contract: the result is at
 // most max bytes, no multi-byte rune is split, and truncation is reported only
 // when the input exceeded the bound.
 func TestTruncateTextIsUTF8Safe(t *testing.T) {
@@ -220,12 +220,12 @@ func TestTruncateTextIsUTF8Safe(t *testing.T) {
 	}
 }
 
-// TestSchemaRejectsWhitespaceOnlyText pins F4's schema half: the published
+// TestSchemaRejectsWhitespaceOnlyText pins the schema half of the whitespace rule: the published
 // command schema's text field carries "pattern": "\\S", which rejects
 // whitespace-only input (spaces, tabs, newlines). Go's Validate trims and
 // checks emptiness, but without this test, stripping the pattern from the
 // schema file silently regresses and the whole package stays green — the
-// actual F4 defect (whitespace validates clean against the schema) is
+// actual defect (whitespace validates clean against the schema) is
 // unguarded. This test compiles the REAL schema file and validates against
 // it, so removing the pattern fails here.
 func TestSchemaRejectsWhitespaceOnlyText(t *testing.T) {
@@ -245,7 +245,7 @@ func TestSchemaRejectsWhitespaceOnlyText(t *testing.T) {
 		}
 		doc["input"] = map[string]any{"text": bad}
 		if err := sch.Validate(doc); err == nil {
-			t.Fatalf("whitespace-only text %q was accepted by the schema (F4: pattern \\S missing or broken)", bad)
+			t.Fatalf("whitespace-only text %q was accepted by the schema (pattern \\S missing or broken)", bad)
 		}
 	}
 	// A real prompt with leading/trailing whitespace is accepted (the pattern

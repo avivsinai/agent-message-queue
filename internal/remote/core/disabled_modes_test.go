@@ -10,8 +10,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestDisabledQueueAndSteerModesAreRefused pins the D1 gate (bead 611.22.10 /
-// 611.22.23): busy=queue and deliver=steer are disabled in v1 until their
+// TestDisabledQueueAndSteerModesAreRefused pins the disabled-mode gate: busy=queue and deliver=steer are disabled in v1 until their
 // ownership+evidence models exist. A submit carrying either is refused
 // unsupported (exit 6 via ExitForCode) BEFORE any durable write — no record
 // is created — and the identical submit with reject/turn succeeds.
@@ -64,9 +63,8 @@ func TestDisabledQueueAndSteerModesAreRefused(t *testing.T) {
 	}
 }
 
-// TestSteerCapabilityMaskedInSessionProjection verifies Pro r2 #22
-// (agent-message-queue-611.22.36): the D1 gate refuses every deliver=steer
-// submit, but the attachment advertises Steer:true. session.inspect and
+// TestSteerCapabilityMaskedInSessionProjection verifies that the
+// disabled-mode gate refuses every deliver=steer submit, but the attachment advertises Steer:true. session.inspect and
 // session.list must mask Steer out of the advertised capabilities so a client
 // that picks operations from the advertised capabilities is not given a false
 // signal.
@@ -91,7 +89,7 @@ func TestSteerCapabilityMaskedInSessionProjection(t *testing.T) {
 		t.Fatalf("session.inspect returned %T, want protocol.Session", rep)
 	}
 	if insp.Capabilities.Steer {
-		t.Fatal("session.inspect advertises Steer:true (D1 gate refuses it — must be masked)")
+		t.Fatal("session.inspect advertises Steer:true (gate refuses it — must be masked)")
 	}
 
 	// session.list

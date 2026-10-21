@@ -14,7 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// 611.42: a pending approval shows as its own message under the request's
+// A pending approval shows as its own message under the request's
 // row; the owner's ✅ on that message answers exactly that interaction; the
 // resolved revision edits the message with the outcome.
 func TestApprovalMessageAnsweredByReaction(t *testing.T) {
@@ -97,12 +97,12 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 	}
 }
 
-// 611.42.7: the owner typed ✅ as a message; it became a new prompt and was
-// refused busy while the approval waited (live, 2026-10-06). A typed yes or
-// no answers the pending approval, as the reaction does: in the approval's
-// thread, or in the main DM once its message reached the relay. The other
-// rows are Pro's review of #970: an approval not yet delivered is never
-// answered, and a replayed answer keeps its first decision.
+// Regression: #970, the owner typed ✅ as a message; it became a new prompt
+// and was refused busy while the approval waited. A typed yes or no answers
+// the pending approval, as the reaction does: in the approval's thread, or in
+// the main DM once its message reached the relay. An approval not yet
+// delivered is never answered, and a replayed answer keeps its first
+// decision.
 func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
@@ -221,7 +221,7 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	}
 
 	// An e tag that names no approval, even malformed or with an unknown
-	// marker, never selects the pending approval (Pro review of #970, round 3).
+	// marker, never selects the pending approval.
 	for _, tag := range []nostr.Tag{{"e", dm.ID.Hex(), "", "mention"}, {"e", "not-an-id", "", "reply"}, {"e"}} {
 		answered = nil
 		if err := c.Ingest(typed("yes", tag)); err != nil {
@@ -242,7 +242,7 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 		t.Fatalf("reply to the old approval answered %+v, want item-7 only", answered)
 	}
 
-	// Advisor review of 611.42.10: a Claude approval posted reject only and
+	// Regression: agent-message-queue-611.42.10, a Claude approval posted reject only and
 	// then edited to offer ✅ kept no ApproveProof, so an unthreaded yes was
 	// sent and refused as unverified instead of saying how to allow.
 	in := &protocol.Interaction{InteractionID: "item-9", Kind: "approval", Prompt: "touch b\nin /repo", Options: []string{"deny"}, RemoteAnswer: true, RejectOption: "deny"}
@@ -270,7 +270,7 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	}
 }
 
-// PR #919 review: the ledger outlives a share binding, and an approval
+// Regression: #919, the ledger outlives a share binding, and an approval
 // posted under the old binding was answered by a reaction under the new
 // one. Only the binding that submitted the request answers its approvals.
 func TestApprovalNotAnsweredUnderAnotherBinding(t *testing.T) {
@@ -328,7 +328,7 @@ func TestApprovalNotAnsweredUnderAnotherBinding(t *testing.T) {
 	}
 }
 
-// Pro review of #926 r2, 2026-09-30, #2: the fence saw the approved session,
+// Regression: #926, the fence saw the approved session,
 // then the session switched before the epoch was read, and the submit went
 // to the unshared session. The identity is checked again with the epoch
 // fixed, and nothing is dispatched.
@@ -358,7 +358,7 @@ func TestSessionSwitchBeforeEpochDispatchesNothing(t *testing.T) {
 	}
 }
 
-// Pro review of #926 r2, 2026-09-30, #4 and #5: a posted approval kept
+// Regression: #926, a posted approval kept
 // "React ✅" after it stopped taking a remote answer, and a share at
 // submitted evidence said a request that had not reached the session had.
 func TestApprovalMessageEditedWhenNoLongerAnswerable(t *testing.T) {
@@ -437,7 +437,7 @@ func TestApprovalMessageEditedWhenNoLongerAnswerable(t *testing.T) {
 	}
 }
 
-// Pro review of #926 r3, 2026-09-30, #2: a crash between preparing an
+// Regression: #926, a crash between preparing an
 // approval edit and updating its mapping left them apart for good: the
 // next revision matched the old mapping, so no corrective edit followed the
 // queued one. The recorded edit is now finished before anything is compared.
@@ -506,7 +506,7 @@ func TestApprovalEditCrashLeavesMessageAndMappingInAgreement(t *testing.T) {
 	}
 }
 
-// Pro review of #929 r4, 2026-10-01, #4: a reaction replayed after its
+// Regression: #929, a reaction replayed after its
 // answer resolved delivery_unknown is told exactly that, never "already
 // answered".
 func TestApprovalReplayKeepsDeliveryUnknown(t *testing.T) {
@@ -575,7 +575,7 @@ func TestApprovalReplayKeepsDeliveryUnknown(t *testing.T) {
 	}
 }
 
-// 611.42 slice 1b: an approval of a turn the user started in the Codex TUI
+// An approval of a turn the user started in the Codex TUI
 // has no request row. It shows as its own DM message, the owner's ✅
 // answers it through the thread approval path from this share, and the
 // resolution edits it with the outcome.

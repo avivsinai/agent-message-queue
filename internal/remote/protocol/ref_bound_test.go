@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestRefBoundFitsMaxSizeKey pins BK6: a request reference built from the
+// TestRefBoundFitsMaxSizeKey pins that a request reference built from the
 // maximum opaque-segment lengths (creator_host and target_id each MaxOpaqueLen,
 // plus a fixed-length UUID) must match the ref regex and round-trip through
 // DecodeRef. The previous 200-char cap rejected these valid max-size refs

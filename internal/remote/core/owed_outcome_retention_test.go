@@ -38,7 +38,7 @@ func (s *silentResolver) resolve(interactionID string, res protocol.Resolution) 
 	s.res[interactionID] = res
 }
 
-// Bead agent-message-queue-611.45 (advisor review of #926): a completed
+// Regression: #926. A completed
 // record that owes an approval outcome the resolver never finds must not
 // stay in the store forever. Given a completed record that owes an outcome
 // the resolver never finds, when the retention horizon passes, the record
@@ -103,7 +103,7 @@ func TestOwedOutcomeRetention(t *testing.T) {
 	}
 
 	// A retired outcome is correctable only until the record compacts
-	// (agent-message-queue-9dx.6, ruling bb): the tombstone leaves the
+	// (agent-message-queue-9dx.6): the tombstone leaves the
 	// sweep, and recovery no longer asks the resolver about it every tick.
 	if recs := store.ListSweep(); len(recs) != 0 {
 		rec, _, _ = store.Get(key)
@@ -123,7 +123,7 @@ func TestOwedOutcomeRetention(t *testing.T) {
 }
 
 // The horizon retires even when the target is GONE or its attachment has no
-// InteractionResolver (611.45 r2 P2): a record that survives a restart after
+// InteractionResolver: a record that survives a restart after
 // its target disappeared must not stay pinned forever.
 func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
 	store, now := openStore(t)
@@ -165,8 +165,7 @@ func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
 // A resolution that arrives between recovery's unlocked resolver lookup and
 // its locked update is not retired behind its own resolution, and a
 // resolution that arrives after retirement still corrects the record: the
-// resolver-reported answered outcome replaces the uncertain one (611.45 r2
-// P1, resolver-only correction).
+// resolver-reported answered outcome replaces the uncertain one.
 func TestOwedOutcomeCorrectableAfterRetirement(t *testing.T) {
 	store, now := openStore(t)
 	clk := now()
@@ -213,7 +212,7 @@ func TestOwedOutcomeCorrectableAfterRetirement(t *testing.T) {
 }
 
 // A late native EventQuestionResolved after retirement corrects the record
-// even though recovery no longer owes the id (611.45 r2 P1, native-event
+// even though recovery no longer owes the id (native-event
 // correction): the answered outcome replaces the uncertain one.
 func TestRetiredOutcomeCorrectedByLateNativeResolution(t *testing.T) {
 	store, now := openStore(t)
@@ -299,7 +298,7 @@ func TestOwedOutcomeStillSettlesNormally(t *testing.T) {
 
 // barrierResolver blocks its first ResolvedInteraction until released, then
 // answers from its own map, so the test can reattach a replacement while
-// the unlocked lookup of a Reconcile is in flight (bead 611.45 r3: the
+// the unlocked lookup of a Reconcile is in flight (the
 // locked retirement must ask the CURRENT target, not the attachment
 // captured before the lock).
 type barrierResolver struct {

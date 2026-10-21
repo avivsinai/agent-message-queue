@@ -89,9 +89,9 @@ func TestRecordLifecycle(t *testing.T) {
 }
 
 // TestCompactOneKeepsOwedResults pins the compaction gate. A result the
-// runtime still holds unacknowledged (B9: the result alone owes the ack, even
+// runtime still holds unacknowledged (the result alone owes the ack, even
 // with the run released) or one the caller has not received
-// (agent-message-queue-611.22.36 packet 4b) survives compaction. Each row
+// survives compaction. Each row
 // fails exactly one gate clause; TestRecordLifecycle is the settled,
 // published record that compacts.
 func TestCompactOneKeepsOwedResults(t *testing.T) {
@@ -101,7 +101,7 @@ func TestCompactOneKeepsOwedResults(t *testing.T) {
 		acked     bool
 		published bool
 	}{
-		{"runtime ack owed (B9)", protocol.StateCancelled, false, true},
+		{"runtime ack owed", protocol.StateCancelled, false, true},
 		{"caller has not received it (4b)", protocol.StateCompleted, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,7 +171,7 @@ func TestStoreRefusesBadTransitions(t *testing.T) {
 	}
 }
 
-// TestListIsolatesPoisonRecords pins B15: a corrupt record on disk must not
+// TestListIsolatesPoisonRecords pins that a corrupt record on disk must not
 // abort List (and therefore Reconcile). The bad record is isolated, its
 // dedup identity is recovered from the path, and every healthy record after
 // it is still returned. A poison record also blocks a conflicting re-create
@@ -268,7 +268,7 @@ func TestNormalizeRecordClearsStaleInteraction(t *testing.T) {
 	}
 }
 
-// TestClosedStoreRejectsEveryMutation pins B13 store half: after Close, every
+// TestClosedStoreRejectsEveryMutation pins that after Close, every
 // mutation refuses with store_closed, so a stale reference cannot write after a
 // replacement endpoint has taken ownership. Create, Update, MarkPublished, and
 // CompactOne must all refuse. A fresh Open after Close
@@ -317,11 +317,11 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 	}
 }
 
-// TestBK4AggregateQuotaRefusesBeforeWrite is the 611.22.19 BK4 happy path for
-// the aggregate quota: a store at quota refuses a new record with storage_full
+// TestAggregateQuotaRefusesBeforeWrite is the happy path for
+// the aggregate quota (agent-message-queue-611.22.19): a store at quota refuses a new record with storage_full
 // BEFORE the write lands, leaves the existing record intact, and never evicts
 // a dedup tombstone to make space. Reserve fails closed the same way.
-func TestBK4AggregateQuotaRefusesBeforeWrite(t *testing.T) {
+func TestAggregateQuotaRefusesBeforeWrite(t *testing.T) {
 	// One small record fits; the quota is tight enough that a second cannot.
 	// 600 bytes accommodates one ~530-byte record but refuses a second.
 	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(600))
@@ -364,17 +364,16 @@ func TestBK4AggregateQuotaRefusesBeforeWrite(t *testing.T) {
 	}
 }
 
-// TestBK4B1RaceCompactVsAck exercises the race the round-1 review confirmed
-// (611.22.19 BK4 B1): CompactOne and MarkAcknowledged mutate s.used
+// TestCompactVsAckRaceKeepsQuotaCounter exercises a race
+// (agent-message-queue-611.22.19): CompactOne and MarkAcknowledged mutate s.used
 // concurrently. Before the fix, CompactOne ran with no store lock while
 // MarkAcknowledged held it; a lost += drifted the quota counter. This test
-// is semantic (round-4): it collides CompactOne and MarkAcknowledged on the
+// is semantic: it collides CompactOne and MarkAcknowledged on the
 // SAME key for 20 rounds (modeled on lost_update_regression_test.go:18) and
 // asserts used equals a fresh recomputation of the on-disk sum. It catches
-// the lost update WITHOUT -race: 5/5 red on the reverted lock in ~50ms per
-// run (round-5 cut from 200 rounds, which cost 10.7-21s), so it stays well
+// the lost update WITHOUT -race, in ~50ms per run, so it stays well
 // under the 5s bar while remaining deterministic.
-func TestBK4B1RaceCompactVsAck(t *testing.T) {
+func TestCompactVsAckRaceKeepsQuotaCounter(t *testing.T) {
 	const rounds = 20
 	for round := 0; round < rounds; round++ {
 		s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
@@ -435,13 +434,13 @@ func TestBK4B1RaceCompactVsAck(t *testing.T) {
 	}
 }
 
-// TestBK4B2TombstoneAtQuotaDoesNotBreakSweep reproduces the round-1 review
-// blocker B2 (611.22.19 BK4 round-2): a terminal record with no result GROWS
+// TestTombstoneAtQuotaDoesNotBreakSweep reproduces
+// agent-message-queue-611.22.19: a terminal record with no result GROWS
 // on compaction (tombstone flag + revision bump). Before the fix, CompactOne
 // at quota returned storage_full and Reconcile broke the whole sweep. Now
 // settlement writes are quota-exempt, so CompactOne succeeds at quota and the
 // sweep continues.
-func TestBK4B2TombstoneAtQuotaDoesNotBreakSweep(t *testing.T) {
+func TestTombstoneAtQuotaDoesNotBreakSweep(t *testing.T) {
 	// Tight quota: a minimal cancelled record (no Input, no Result) is ~505
 	// bytes on disk, and compaction GROWS it to ~522 (tombstone flag +
 	// revision bump + code). Quota 510 lets the record fit but would refuse
@@ -492,13 +491,13 @@ func TestBK4B2TombstoneAtQuotaDoesNotBreakSweep(t *testing.T) {
 	}
 }
 
-// TestBK4B3ReservationIsReal reproduces the round-1 review blocker B3
-// (611.22.19 BK4 round-2): Reserve was a point-in-time check, not a
+// TestReservationIsReal reproduces
+// agent-message-queue-611.22.19: Reserve was a point-in-time check, not a
 // reservation. quota = 3*MaxRecordBytes admitted six submits, then refused
 // three results — records stuck in running forever. Now Reserve increments a
 // reserved total; used+reserved <= quota is the invariant; a result write for
 // an admitted record is never quota-refused.
-func TestBK4B3ReservationIsReal(t *testing.T) {
+func TestReservationIsReal(t *testing.T) {
 	// quota = 4 * MaxRecordBytes: at most 3 worst-case records can be
 	// admitted simultaneously (3 reservations + their Create overhead fit,
 	// the 4th reservation does not). Before the fix, Reserve was a
@@ -560,13 +559,13 @@ func TestBK4B3ReservationIsReal(t *testing.T) {
 	}
 }
 
-// TestBK4B3RestartReseedReservation (round-2 B3 restart variant) proves Open
+// TestRestartReseedReservation proves Open
 // reseeds reserved for non-terminal records with no result. After a restart,
 // running records hold nothing in memory; without reseeding, fresh submits
 // are admitted into their room and their results are refused after the work
 // ran. The probe: create a running record, reopen the store at a quota just
 // above used, write its result — must succeed.
-func TestBK4B3RestartReseedReservation(t *testing.T) {
+func TestRestartReseedReservation(t *testing.T) {
 	dir := t.TempDir()
 	// First open: create a running record with no result.
 	quota := int64(2 * protocol.MaxRecordBytes)
@@ -604,7 +603,7 @@ func TestBK4B3RestartReseedReservation(t *testing.T) {
 
 	// The running record must have been reseeded.
 	if s2.reserved <= 0 {
-		t.Fatalf("B3 restart: reserved=%d after reopen, want >0 (reseeding failed)", s2.reserved)
+		t.Fatalf("restart: reserved=%d after reopen, want >0 (reseeding failed)", s2.reserved)
 	}
 
 	// Write the result: must succeed (the reservation covers it).
@@ -618,7 +617,7 @@ func TestBK4B3RestartReseedReservation(t *testing.T) {
 	got.ObservedAt = "2026-09-01T00:00:00Z"
 	got.AckDigest = protocol.EvidenceDigest(got.Result)
 	if err := s2.Update(got); err != nil {
-		t.Fatalf("B3 restart: result write for running record refused after reopen: %v (reservation must cover it)", err)
+		t.Fatalf("restart: result write for running record refused after reopen: %v (reservation must cover it)", err)
 	}
 }
 

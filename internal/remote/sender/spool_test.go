@@ -212,7 +212,7 @@ func TestSenderExpireWithoutDispatch(t *testing.T) {
 }
 
 // TestSenderDuplicateReconciles proves a retry with the same identity and
-// the same digest reconciles instead of duplicating (B1, 611.7 round-2):
+// the same digest reconciles instead of duplicating:
 // Create returns the existing envelope and the CLI proceeds as main does
 // (exit 0). Only a DIFFERENT digest under the same id is a conflict.
 func TestSenderDuplicateReconciles(t *testing.T) {
@@ -243,7 +243,7 @@ func TestSenderDuplicateReconciles(t *testing.T) {
 		Destination: "ipc:/tmp/state",
 	}
 	if err := spool.Create(dup); err != nil {
-		t.Fatalf("Create same-digest duplicate should reconcile (B1): %v", err)
+		t.Fatalf("Create same-digest duplicate should reconcile: %v", err)
 	}
 	if dup.State != StatePending {
 		t.Fatalf("reconciled env state=%s, want pending", dup.State)
@@ -311,13 +311,13 @@ func TestSenderReapSettled(t *testing.T) {
 	}
 }
 
-// TestSenderB2RefusalClassification (round-3) is the core B2 regression: the
+// TestSenderRefusalClassification is a regression: the
 // endpoint returns a refusal as a protocol.Reply VALUE with Outcome.Code and
 // a nil error. Before the fix, classifyReply asserted reply.(*protocol.Reply),
 // which never matched, so every refusal became MarkDispatched. A terminal
 // refusal (stale epoch, or a mode the endpoint does not support) must drain
 // to failed with its code, never retry.
-func TestSenderB2RefusalClassification(t *testing.T) {
+func TestSenderRefusalClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		epoch string
@@ -389,7 +389,7 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 		{
 			// A store read that fails without a typed refusal is the
 			// endpoint being unreachable for now, not a refusal of the
-			// request (Pro review of the carrier cull).
+			// request.
 			name: "endpoint unreachable",
 			code: protocol.CodeEndpointUnreachable,
 			makeBusy: func(r *drainRig, _ string) {

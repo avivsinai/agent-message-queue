@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// codex #869 r1: the doctor check read settings.json with an unbounded
+// Regression: #869, the doctor check read settings.json with an unbounded
 // open, so a FIFO there hung doctor, and a marked hook under
 // disableAllHooks read as installed.
 func TestStopHookStateIsBoundedAndHonorsDisable(t *testing.T) {

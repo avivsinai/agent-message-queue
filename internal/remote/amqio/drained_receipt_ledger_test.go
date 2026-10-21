@@ -8,8 +8,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// TestDrainedReceiptEmittedWhenLedgerAnswerExists reproduces the gate finding
-// on agent-message-queue-611.22.36 (union 42d923a4): the drained receipt write
+// TestDrainedReceiptEmittedWhenLedgerAnswerExists reproduces
+// agent-message-queue-611.22.36: the drained receipt write
 // fails once AFTER the command was claimed into cur and its reply ledgered.
 // Every later reconciliation pass took recoverOne's ledger-first early return
 // and never emitted the receipt, so `send --wait-for drained` never completed.

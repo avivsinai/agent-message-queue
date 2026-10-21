@@ -38,7 +38,7 @@ type fakeAppServer struct {
 }
 
 // waitMemoForID waits until the terminal memo records id (deterministic sync
-// point replacing sleep-based assertions; 7xl agent-message-queue-7xl).
+// point replacing sleep-based assertions).
 func waitMemoForID(t *testing.T, att *Attachment, id string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -58,7 +58,7 @@ func waitMemoForID(t *testing.T, att *Attachment, id string) {
 // notification (the gen bump is the fingerprint). It is a deterministic
 // sync point: srv.notify writes the frame, the read pump applies it
 // asynchronously, and the gen counter is the observable barrier. Replaces
-// poll-sleep loops; 7xl.
+// poll-sleep loops.
 func waitLostStateGen(t *testing.T, att *Attachment, want uint64) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -75,7 +75,7 @@ func waitLostStateGen(t *testing.T, att *Attachment, want uint64) {
 }
 
 // waitInteraction waits until the run for key carries a registered
-// interaction (deterministic sync point replacing sleep; 7xl).
+// interaction (deterministic sync point replacing sleep).
 func waitInteraction(t *testing.T, att *Attachment, key requests.Key) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -221,7 +221,7 @@ func (s *fakeAppServer) setResumeReviewer(v string) {
 }
 
 // setTurnStartDelay installs a hook that fires BEFORE the turn/start RPC
-// response is written. Used by B3 to simulate the race where the read pump
+// response is written. Used to simulate the race where the read pump
 // processes notifications before the Submit goroutine processes the RPC
 // response.
 func (s *fakeAppServer) setTurnStartDelay(fn func()) {
@@ -231,7 +231,7 @@ func (s *fakeAppServer) setTurnStartDelay(fn func()) {
 }
 
 // setTurnStartResponse overrides the default turn/start RPC response. The
-// format string must contain %s where the RPC id goes. Used by B1 to send a
+// format string must contain %s where the RPC id goes. Used to send a
 // malformed response that fails to decode.
 func (s *fakeAppServer) setTurnStartResponse(format string) {
 	s.turnStartResponseMu.Lock()
@@ -317,7 +317,7 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 	}
 }
 
-// TestTentativeRunIsNotOwned reproduces Pro finding B01: while a run is bound
+// TestTentativeRunIsNotOwned: while a run is bound
 // but not yet confirmed by its own userMessage item, no consumer may treat it
 // as owned. Lookup must report Tentative (not Admitted), CancelExact must
 // record intent without interrupting a turn we do not own, a foreign turn's
@@ -356,10 +356,9 @@ func TestTentativeRunIsNotOwned(t *testing.T) {
 	}
 	// A foreign turn completing must not complete our run.
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"uForeign","status":"completed"}}`)
-	// 7xl: was a 30ms sleep (negative assertion, proves nothing and fails
-	// under load). Deterministic sync point: wait until the pump has actually
-	// processed the foreign completion (memo records it unconditionally,
-	// agent-message-queue-611.22.36 10a), then assert our run was untouched.
+	// Deterministic sync point: wait until the pump has actually processed
+	// the foreign completion (the memo records it unconditionally), then
+	// assert our run was untouched.
 	waitMemoForID(t, att, "uForeign")
 	if lk, _ := att.Lookup(key, epoch); lk.State == protocol.StateCompleted {
 		t.Fatal("foreign turn/completed wrongly completed our run")
@@ -403,7 +402,7 @@ func TestTentativeRunIsNotOwned(t *testing.T) {
 	}
 }
 
-// TestTargetIDNoCollision reproduces Pro B03: two distinct thread ids that
+// TestTargetIDNoCollision: two distinct thread ids that
 // share a 12-hex prefix must not collapse to one target id.
 func TestTargetIDNoCollision(t *testing.T) {
 	a := TargetID("0123456789ab-cdef-0000-0000-000000000001")
@@ -444,7 +443,7 @@ func TestAcknowledgeResultReleasesRetainedEvidence(t *testing.T) {
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"OUT"}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
 
-	// 7xl: was a 10ms-sleep poll loop. Deterministic: wait for the terminal
+	// Deterministic: wait for the terminal
 	// observation to reach the memo, then a single Lookup must be terminal.
 	waitMemoForID(t, att, "u1")
 	ev, _ := att.Lookup(key, s.Epoch)
@@ -533,7 +532,7 @@ type fakeClock struct {
 func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
-// TestLargeResultReleasedByBoundedDigest reproduces Pro F2: the attachment
+// TestLargeResultReleasedByBoundedDigest: the attachment
 // digested the UNBOUNDED result while the endpoint digested the BOUNDED one,
 // so any result larger than MaxResultBytes was never released. The fix: the
 // attachment bounds the result at the source (r.result() returns the bounded
@@ -565,7 +564,7 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"`+bigText+`"}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
 
-	// 7xl: was a 10ms-sleep poll loop (same shape as above).
+	// Deterministic wait (same shape as above).
 	waitMemoForID(t, att, "u1")
 	ev, _ := att.Lookup(key, s.Epoch)
 	if ev.State != protocol.StateCompleted {
@@ -581,17 +580,17 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
 	lk, _ := att.Lookup(key, s.Epoch)
 	if lk.Class != core.EvidenceNone || lk.Result != nil {
-		t.Fatalf("bounded-digest ack did not release the large result — the attachment digested the unbounded form (Pro F2): class=%s", lk.Class)
+		t.Fatalf("bounded-digest ack did not release the large result — the attachment digested the unbounded form: class=%s", lk.Class)
 	}
 }
 
-// TestHistoryResolvedRunConverges reproduces B2 (F1 never converges): when
+// TestHistoryResolvedRunConverges: when
 // lookupHistory resolves a run as terminal, the in-memory run must become
 // terminal so AcknowledgeResult can release it. Without the fix, the run
 // stays StateRunning forever, AcknowledgeResult refuses every ack, and
 // Reconcile re-reads the whole transcript every tick.
 //
-// It also covers Submit's confirm-timeout arm (Pro F1; the client.Done() arm
+// It also covers Submit's confirm-timeout arm (the client.Done() arm
 // is TestUnconfirmedTurnStartIsUncertainNotRejected): an unconfirmed
 // turn/start past confirmTimeout is uncertain with its run id kept, and
 // Lookup then falls through to history. The fake clock makes the timeout
@@ -645,11 +644,11 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 		t.Fatalf("Lookup did not deliver the result: %+v", lk.Result)
 	}
 
-	// B2: the in-memory run must now be terminal (completed). Without the
+	// The in-memory run must now be terminal (completed). Without the
 	// fix, it stays StateRunning and AcknowledgeResult refuses every ack.
 	lk2, _ := att.Lookup(key, s.Epoch)
 	if !lk2.State.Terminal() {
-		t.Fatalf("in-memory run did not become terminal after history resolved it (B2): state=%s", lk2.State)
+		t.Fatalf("in-memory run did not become terminal after history resolved it: state=%s", lk2.State)
 	}
 
 	// AcknowledgeResult must now release the run (digest matches). Without
@@ -658,16 +657,15 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 	att.AcknowledgeResult(key, s.Epoch, digest)
 	lk3, _ := att.Lookup(key, s.Epoch)
 	if lk3.Class != core.EvidenceNone || lk3.Result != nil {
-		t.Fatalf("AcknowledgeResult did not release the history-resolved run (B2): class=%s result=%+v", lk3.Class, lk3.Result)
+		t.Fatalf("AcknowledgeResult did not release the history-resolved run: class=%s result=%+v", lk3.Class, lk3.Result)
 	}
 }
 
-// TestB1PreSendFailureIsRefusalNotUncertain reproduces B1 (a)
-// (agent-message-queue-611.22.35): a pre-send failure (connection already
+// Regression: agent-message-queue-611.22.35. A pre-send failure (connection already
 // closed before the write) is UNAMBIGUOUS — the prompt never left. The
 // adapter must dropRun + refuse (retry is safe, nothing ran). The run must
 // NOT be in a.runs.
-func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
+func TestPreSendFailureIsRefusalNotUncertain(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -700,29 +698,28 @@ func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 	case r := <-done:
 		// Pre-send: refusal code, no error (the endpoint commits rejected).
 		if r.err != nil {
-			t.Fatalf("pre-send failure returned error %v (must be refusal, not uncertain) (B1)", r.err)
+			t.Fatalf("pre-send failure returned error %v (must be refusal, not uncertain)", r.err)
 		}
 		if r.adm.Code == "" {
-			t.Fatal("pre-send failure returned no refusal code (B1 — the prompt never left, refusal is safe)")
+			t.Fatal("pre-send failure returned no refusal code (the prompt never left, refusal is safe)")
 		}
 		// The run must NOT be in the map (dropRun was called).
 		att.mu.Lock()
 		_, hasRun := att.runs[key]
 		att.mu.Unlock()
 		if hasRun {
-			t.Fatal("pre-send failure left the run in the map (B1 — dropRun must clean up)")
+			t.Fatal("pre-send failure left the run in the map (dropRun must clean up)")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("submit did not return after pre-send failure (B1)")
+		t.Fatal("submit did not return after pre-send failure")
 	}
 }
 
-// TestB1PostSendFailureIsUncertainNotRefused reproduces B1 (b)
-// (agent-message-queue-611.22.35): a post-send failure (the server
+// Regression: agent-message-queue-611.22.35. A post-send failure (the server
 // responded but the result failed to decode) is AMBIGUOUS — the turn may be
 // running. The adapter must keep the run and return a non-nil error (uncertain),
 // not a refusal code.
-func TestB1PostSendFailureIsUncertainNotRefused(t *testing.T) {
+func TestPostSendFailureIsUncertainNotRefused(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -754,30 +751,29 @@ func TestB1PostSendFailureIsUncertainNotRefused(t *testing.T) {
 	case r := <-done:
 		// Post-send: non-nil error (uncertain), no refusal code.
 		if r.err == nil {
-			t.Fatal("post-send failure returned no error (must be uncertain) (B1)")
+			t.Fatal("post-send failure returned no error (must be uncertain)")
 		}
 		if r.adm.Code != "" {
-			t.Fatalf("post-send failure returned refusal code %q (B1 — the turn may be running, must be uncertain)", r.adm.Code)
+			t.Fatalf("post-send failure returned refusal code %q (the turn may be running, must be uncertain)", r.adm.Code)
 		}
 		// The run must STILL be in the map (correlation preserved).
 		att.mu.Lock()
 		_, hasRun := att.runs[key]
 		att.mu.Unlock()
 		if !hasRun {
-			t.Fatal("post-send failure dropped the run (B1 — correlation must survive so Lookup can resolve it)")
+			t.Fatal("post-send failure dropped the run (correlation must survive so Lookup can resolve it)")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("submit did not return after post-send failure (B1)")
+		t.Fatal("submit did not return after post-send failure")
 	}
 }
 
-// TestB3FastCompletionDoesNotWedgeAdapter reproduces B3
-// (agent-message-queue-611.22.35): if the read pump processes the
+// Regression: agent-message-queue-611.22.35. If the read pump processes the
 // confirming notification, the completed result, and the final idle-status
 // before the submitting goroutine resumes from turn/start, the adapter must
 // NOT install activeTurn/status for an already-terminal run — that would
 // wedge it permanently busy with no later event to clear it.
-func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
+func TestFastCompletionDoesNotWedgeAdapter(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -817,10 +813,10 @@ func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
 	select {
 	case r := <-done:
 		if r.err != nil {
-			t.Fatalf("fast completion returned error: %v (B3)", r.err)
+			t.Fatalf("fast completion returned error: %v", r.err)
 		}
 		if r.adm.RunID == "" {
-			t.Fatal("fast completion returned no run id (B3)")
+			t.Fatal("fast completion returned no run id")
 		}
 		// The adapter must NOT be left busy — activeTurn should not be set
 		// for a terminal run.
@@ -828,15 +824,14 @@ func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
 		activeTurn := att.activeTurn
 		att.mu.Unlock()
 		if activeTurn != "" {
-			t.Fatalf("adapter left busy with activeTurn=%q after fast completion (B3 — would wedge forever)", activeTurn)
+			t.Fatalf("adapter left busy with activeTurn=%q after fast completion (would wedge forever)", activeTurn)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("submit did not return after fast completion (B3 — adapter wedged)")
+		t.Fatal("submit did not return after fast completion (adapter wedged)")
 	}
 }
 
-// TestB6HistoryRecoveredRunHasEpochForCancel verifies Pro r2 B6 / packet 9
-// (agent-message-queue-611.22.36): after a restart, a run recovered through
+// Regression: agent-message-queue-611.22.36. After a restart, a run recovered through
 // lookupHistory must carry the requested epoch so CancelExact issues the
 // interrupt instead of returning noop_already_terminal for a LIVE run.
 //
@@ -844,7 +839,7 @@ func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
 // a turn with our clientId in running state. Lookup installs the run. Then
 // CancelExact(key, epoch) must find the run, match the epoch, and issue
 // turn/interrupt — NOT return CancelNoopTerminal.
-func TestB6HistoryRecoveredRunHasEpochForCancel(t *testing.T) {
+func TestHistoryRecoveredRunHasEpochForCancel(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -881,7 +876,7 @@ func TestB6HistoryRecoveredRunHasEpochForCancel(t *testing.T) {
 		t.Fatal("Lookup did not install a run")
 	}
 	if r.epoch != epoch {
-		t.Fatalf("recovered run epoch = %q, want %q (B6 — history must stamp the requested epoch)", r.epoch, epoch)
+		t.Fatalf("recovered run epoch = %q, want %q (history must stamp the requested epoch)", r.epoch, epoch)
 	}
 
 	// CancelExact must issue the interrupt, not return noop_already_terminal.
@@ -890,7 +885,7 @@ func TestB6HistoryRecoveredRunHasEpochForCancel(t *testing.T) {
 		t.Fatalf("CancelExact: %v", err)
 	}
 	if ce.Disposition == protocol.CancelNoopTerminal {
-		t.Fatal("CancelExact returned noop_already_terminal for a LIVE run (B6 — epoch mismatch disarmed cancellation)")
+		t.Fatal("CancelExact returned noop_already_terminal for a LIVE run (epoch mismatch disarmed cancellation)")
 	}
 	if ce.Disposition != protocol.CancelRequested {
 		t.Fatalf("CancelExact disposition = %v, want CancelRequested (interrupt sent)", ce.Disposition)
@@ -910,15 +905,14 @@ func TestB6HistoryRecoveredRunHasEpochForCancel(t *testing.T) {
 	}
 done:
 	if !interruptSeen {
-		t.Fatal("turn/interrupt was never sent (B6 — CancelExact must issue the interrupt for a live recovered run)")
+		t.Fatal("turn/interrupt was never sent (CancelExact must issue the interrupt for a live recovered run)")
 	}
 }
 
-// TestB8aApprovalStateNotTornDownBeforeSend verifies Pro r2 #20 / packet 8a
-// (agent-message-queue-611.22.36): Respond must not clear approvalReqs or
+// Regression: agent-message-queue-611.22.36. Respond must not clear approvalReqs or
 // r.interaction before client.Respond succeeds. A transport failure must
 // leave the state intact so a retry can send.
-func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
+func TestApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1", WithApprovals(true))
 	if err != nil {
@@ -949,7 +943,7 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	// (has ID + method), not a notification.
 	srv.sendServerRequest(t, "1", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"tool1","command":{"prompt":"approve?"},"availableDecisions":["accept","decline"]}`)
 
-	// 7xl: was a 50ms sleep. Deterministic: wait until the req worker has
+	// Deterministic: wait until the req worker has
 	// processed the approval and registered the interaction.
 	waitInteraction(t, att, key)
 
@@ -981,24 +975,24 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	}
 	if r.interaction == nil {
 		att.mu.Unlock()
-		t.Fatal("interaction was cleared before send succeeded (B8a — state must be intact on failure so retry can send)")
+		t.Fatal("interaction was cleared before send succeeded (state must be intact on failure so retry can send)")
 	}
 	if _, hasReq := r.approvalReqs[interactionID]; !hasReq {
 		att.mu.Unlock()
-		t.Fatal("approvalReq was deleted before send succeeded (B8a — state must be intact on failure so retry can send)")
+		t.Fatal("approvalReq was deleted before send succeeded (state must be intact on failure so retry can send)")
 	}
 	att.mu.Unlock()
 }
 
-// TestB3TerminalMemoEvictionIsFIFO pins the eviction mechanism (packet 10
-// recut 10b, agent-message-queue-611.22.36): the original eviction walked
+// TestTerminalMemoEvictionIsFIFO pins the eviction mechanism
+// (agent-message-queue-611.22.36): the original eviction walked
 // the map with Go's randomized iteration and deleted the FIRST key it saw
 // while the comment claimed "oldest" — so it could evict the turn whose RPC
-// response is still in flight, reinstating the B3 wedge intermittently.
+// response is still in flight, reinstating the busy wedge intermittently.
 // The memo must evict strictly in insertion order (FIFO via
 // terminalTurnOrder): each new entry beyond maxLiveRuns evicts exactly the
 // oldest observation and nothing else.
-func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
+func TestTerminalMemoEvictionIsFIFO(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -1076,8 +1070,8 @@ func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
 	}
 }
 
-// TestB3RPCResponseGuardClosesWindowBeforeLookup pins the RPC-response arm
-// of the B3 fix (packet 10 recut 10c, agent-message-queue-611.22.36): the
+// TestRPCResponseGuardClosesWindowBeforeLookup pins the RPC-response arm
+// of the fast-completion fix (agent-message-queue-611.22.36): the
 // memo guard exists to close the race window BEFORE any Lookup is made, but
 // the aggregate end-to-end test only checked Inspect AFTER Lookup, so
 // reverting the memo guard alone (or the lookupHistory activeTurn clear
@@ -1085,12 +1079,12 @@ func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
 // asserts Inspect is not busy and activeTurn is empty with NO Lookup call
 // at all.
 //
-// The "error" row is 10a: the memo's status whitelist was narrower than the
+// The "error" row: the memo's status whitelist was narrower than the
 // terminality the status switch implements (completed/interrupted/
 // default->StateFailed), so a turn ending with an unrecognized status was
 // not memoized and the wedge returned. turn/completed is recorded
 // unconditionally — the notification itself means the turn is over.
-func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
+func TestRPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
 	for _, tc := range []struct {
 		status, requestID string
 	}{
@@ -1125,7 +1119,7 @@ func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
 			select {
 			case <-done:
 			case <-time.After(10 * time.Second):
-				t.Fatal("submit did not return after missed confirmation (B3)")
+				t.Fatal("submit did not return after missed confirmation")
 			}
 
 			// NO Lookup, NO thread/read handler installed: if this passes, the
@@ -1143,15 +1137,15 @@ func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
 	}
 }
 
-// TestB3LookupHistoryMemoStaysBounded pins the FIFO bound THROUGH the
-// lookupHistory write path (packet 10d, agent-message-queue-611.22.36):
+// TestLookupHistoryMemoStaysBounded pins the FIFO bound THROUGH the
+// lookupHistory write path (agent-message-queue-611.22.36):
 // lookupHistory recorded turns into the terminalTurns map directly,
 // bypassing the FIFO. Those entries never entered terminalTurnOrder, so the
 // eviction — which tests len(terminalTurnOrder), the SLICE — never noticed
 // the MAP exceeding the bound: every history-recovered terminal turn leaked
 // one memo entry for the life of the attachment. Both memo writers must go
 // through the one owner.
-func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
+func TestLookupHistoryMemoStaysBounded(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -1204,7 +1198,7 @@ func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
 		t.Fatalf("oldest history-recovered turn %s was never memoized (lookupHistory path not exercising the memo)", oldest)
 	}
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn-new","status":"completed"}}`)
-	// 7xl: was an inline 2ms-sleep poll; waitMemoForID is the same wait,
+	// waitMemoForID is the same wait,
 	// shared and deadline-bounded.
 	waitMemoForID(t, att, "turn-new")
 
@@ -1224,13 +1218,13 @@ func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
 	}
 }
 
-// TestBK4AckedRunsAreBounded is the 611.22.19 BK4 happy path for the codex
+// TestAckedRunsAreBounded is the happy path (agent-message-queue-611.22.19) for the codex
 // attachment's in-memory maps: terminal+acknowledged runs are pruned from
 // runs/byClientID/byTurn once the acked FIFO exceeds maxLiveRuns, so the
 // correlation maps cannot grow without bound. The durable store remains the
 // source of truth; a dropped acked run Lookup returns EvidenceNone exactly as
 // a compacted tombstone would.
-func TestBK4AckedRunsAreBounded(t *testing.T) {
+func TestAckedRunsAreBounded(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -1272,7 +1266,7 @@ func TestBK4AckedRunsAreBounded(t *testing.T) {
 	att.mu.Unlock()
 
 	// The FIFO cap drops the oldest acked run; the maps never exceed
-	// maxLiveRuns. Without the BK4 prune, all maxLiveRuns+1 entries would
+	// maxLiveRuns. Without the prune, all maxLiveRuns+1 entries would
 	// persist forever.
 	if got != maxLiveRuns {
 		t.Fatalf("runs map unbounded after ack: want %d, got %d", maxLiveRuns, got)
@@ -1296,7 +1290,7 @@ func TestBK4AckedRunsAreBounded(t *testing.T) {
 	}
 }
 
-// 611.56 (live 2026-10-06, codex-cli 0.160): a thread under the owner's
+// agent-message-queue-611.56 (codex-cli 0.160): a thread under the owner's
 // approvals_reviewer = guardian_subagent had its approvals answered by the
 // reviewer, and none reached the Buzz DM. Inspect names the reviewer from
 // thread/resume and follows thread/settings/updated.

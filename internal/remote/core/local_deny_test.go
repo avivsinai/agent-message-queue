@@ -33,7 +33,7 @@ func (c claudeApproval) Subscribe(fn func(core.NativeEvent)) func() {
 	})
 }
 
-// Bead agent-message-queue-611.42.2: the Buzz Desktop agent relays the
+// The Buzz Desktop agent relays the
 // owner's ❌ over the local socket. A local client may deny the Claude
 // approval of a request it submitted, and nothing else: allow, an approval
 // with no reject option, and a stale interaction stay refused.

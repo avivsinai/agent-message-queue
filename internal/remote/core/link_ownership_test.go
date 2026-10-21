@@ -16,7 +16,7 @@ import (
 
 // A linked server sees and touches only what it created and the targets
 // shared with it, and cannot fill the machine's store
-// (agent-message-queue-9dx.3, design 4.2 §7 changes 4 and 5).
+// (agent-message-queue-9dx.3).
 
 const (
 	hostA = "link-aaaaaaaaaaaaaaaa"

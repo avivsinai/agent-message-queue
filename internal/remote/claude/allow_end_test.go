@@ -13,7 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Pro review of #936, P2 (611.42.4): the hook read an allow after its
+// Regression: #936, the hook read an allow after its
 // deadline and printed it before its timeout check. The hook checks its
 // end immediately before and immediately after verifying an allow: an
 // allow that verifies is never printed after the deadline, after Claude
@@ -92,7 +92,7 @@ func TestApprovalHookNeverAllowsAfterItsEnd(t *testing.T) {
 	}
 }
 
-// 611.42.6 (independent review of #936 r3): the hook's own verification of
+// Regression: #936, the hook's own verification of
 // a ✅ had no bound but Claude's TERM, so an unreachable relay held the hook
 // and a ❌ that arrived meanwhile landed only after it. The verifier stands
 // in for the relay sign-in: it fails at its deadline, and with none it
@@ -152,7 +152,7 @@ func TestApprovalHookBoundsItsVerifyAndThenDenies(t *testing.T) {
 	}
 }
 
-// 611.42.6 (independent review of #936 r3): after the hook refused an
+// Regression: #936, after the hook refused an
 // allow, a ✅ and a ❌ arrive at once. Both found the refused allow on disk
 // and both replaced it, so the ✅ verified meanwhile overwrote the ❌ the
 // endpoint had recorded. The first write now stands and the other answer
@@ -221,7 +221,7 @@ func TestApprovalAllowAndDenyAfterARefusedAllowAgree(t *testing.T) {
 	f.hookExited()
 }
 
-// 611.42.6 (Pro review of #986 r1): a refused record for a proof the hook
+// Regression: #986, a refused record for a proof the hook
 // was still verifying made the endpoint drop the allow and take a ❌, and
 // the hook's verify of that genuine proof then succeeded and printed
 // allow. The hook now records its allow verdict first and then requires
@@ -279,7 +279,7 @@ func TestApprovalHookNeverAllowsAProofRefusedDuringItsVerify(t *testing.T) {
 	if got := f.out.String(); strings.Contains(got, `"behavior":"allow"`) || !strings.Contains(got, `"behavior":"deny"`) {
 		t.Fatalf("hook printed %q, want the ❌ the endpoint took as deny", got)
 	}
-	// Advisor review of #1000: the endpoint read the allow verdict beside
+	// Regression: #1000, the endpoint read the allow verdict beside
 	// the refusal as allowed, so the DM said nothing about the refusal.
 	if v, ok := hookVerdict(f.home, approvalSession, f.id, proof); !ok || v.Verdict != verdictRefused {
 		t.Fatalf("verdict = %+v, %v; want the proof refused", v, ok)
