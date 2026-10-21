@@ -535,45 +535,15 @@ func (s *Server) ownsClaimInAnySession(c eventClaim) bool {
 // bytes are complete and synced before the link makes them visible, so a
 // reader never sees a partial claim. It reports whether this call won.
 func createExclusive(path string, raw []byte) (bool, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
-	tmp, err := os.CreateTemp(dir, ".claim-*")
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return false, err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return false, err
-	}
-	if err := tmp.Close(); err != nil {
-		return false, err
-	}
-	if err := os.Link(tmp.Name(), path); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, fsq.SyncDir(dir)
+	return fsq.CreateNewFile(path, raw, 0o600)
 }
 
 // readSmallRegular reads a small regular file, refusing a symlink leaf.
 func readSmallRegular(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() || fi.Size() > 64*1024 {
-		return nil, fmt.Errorf("%s is not a small regular file; refusing", path)
-	}
-	return os.ReadFile(path)
+	return fsq.ReadRegularNoFollowBounded(path, 64*1024)
 }
 
 // follow waits on the endpoint until the request is terminal or uncertain,
