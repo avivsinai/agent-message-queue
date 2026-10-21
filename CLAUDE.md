@@ -48,7 +48,7 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 ## Build and Development Commands
 
 ```bash
-make build          # go build amq, amq-keepalive, amq-bridge, amq-acp, amq-remote
+make build          # go build amq, amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign
 make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
@@ -72,6 +72,7 @@ cmd/amq-keepalive/   macOS wake supervisor companion
 cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
 cmd/amq-acp/         Preview ACP v2 stdio companion (not Core)
 cmd/amq-remote/      Remote-session companion (not Core)
+cmd/amq-owner-sign/  Owner signer for a strict relay share; the key stays in its process
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -314,10 +315,17 @@ test must fail on the pre-fix code; check that privately before it ships.
   completion.
 - Do not commit placeholders, weaken a validator, regenerate goldens to hide a
   defect, or split code from the test that ships with it.
+- PR titles, PR bodies, and commit messages state the user-visible change and
+  the reason. A bead id or review finding may appear once, at the end, as a
+  reference. Do not add review-round labels or narrate rulings. Test names
+  describe behavior, not bead ids.
+- Production code comments state invariants, not provenance: no bead ids,
+  review rounds, or reviewer names. Test comments follow the Testing rule.
 
 ## Documentation Policy
 
-- Keep `README.md` as the canonical install and onboarding path.
+- Keep `README.md` as the canonical onboarding path and `INSTALL.md` as the
+  one home for install, companion, and platform facts.
 - Keep `COOP.md` as the full co-op and supervisor operations guide.
 - Keep `CLAUDE.md` as a concise project index and engineering contract.
 - Keep `docs/` evergreen: architecture, protocol contracts, and operational
