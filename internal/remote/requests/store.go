@@ -204,14 +204,6 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
 }
 
-// MaxStoreBytes returns the aggregate quota in bytes (0 = unbounded).
-// Tests use this to assert that openServeStore wired DefaultMaxStoreBytes.
-func (s *Store) MaxStoreBytes() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.maxStoreBytes
-}
-
 // WithMaxStoreBytes sets the aggregate quota across every record in this
 // store. Zero disables the aggregate quota. Production sets
 // protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on

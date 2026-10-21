@@ -276,14 +276,6 @@ func (e *Endpoint) SetPublish(p Publisher) {
 	e.publish = p
 }
 
-// Observe registers a callback for every record write and every storage
-// failure projection. Tests use it to collect state history.
-func (e *Endpoint) Observe(fn func(*requests.Record)) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.observers = append(e.observers, fn)
-}
-
 // Register attaches a runtime under its target id and subscribes to its
 // native events. Registering the same target again replaces the attachment.
 func (e *Endpoint) Register(att Attachment) {
@@ -396,36 +388,6 @@ func (e *Endpoint) beginReconcile() bool {
 	}
 	e.inFlight++
 	return true
-}
-
-// InFlight returns the current number of in-flight handlers. Test seam for
-// observing the drain state without a sleep.
-func (e *Endpoint) InFlight() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.inFlight
-}
-
-// IsDraining reports whether the endpoint has begun shutdown (state is
-// draining or closed). Test seam for synchronizing tests on the actual
-// lifecycle transition instead of an elapsed-time sleep.
-func (e *Endpoint) IsDraining() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.state != stateAccepting
-}
-
-// IsDrainingState reports whether the endpoint is in the DRAINING state
-// specifically (not closed). This distinguishes 'Close is waiting on
-// in-flight handlers' from 'Close already set stateClosed and is past the
-// drain wait', which IsDraining conflates. Test seam for the
-// close-wait ordering regression: a test that releases a held publish after
-// observing IsDraining()==true must fail if what it actually observed was
-// stateClosed (Close raced past the drain without waiting).
-func (e *Endpoint) IsDrainingState() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.state == stateDraining
 }
 
 // Handle runs one validated command from an authenticated source and returns

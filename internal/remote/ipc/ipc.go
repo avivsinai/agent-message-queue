@@ -223,20 +223,6 @@ func (s *Server) SetLinkHandler(h LinkHandler) { s.link = h }
 // SetRegistrar installs the live registration handler. Call it before Serve.
 func (s *Server) SetRegistrar(r Registrar) { s.registrar = r }
 
-// Close stops the listener and removes the socket file. Tests and callers
-// that drive startup without Serve(ctx) use it so the bound socket does not
-// outlive the endpoint's owner.
-func (s *Server) Close() error {
-	_ = s.listener.Close()
-	// Go unlinks the socket file as part of listener.Close() on
-	// Unix, so the explicit Remove usually loses with ENOENT. That is the
-	// expected end state, not an error.
-	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
 // Listen binds the socket with owner-only permissions. A stale socket file
 // from a dead endpoint is removed only after a connect attempt fails.
 func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {

@@ -271,31 +271,6 @@ func Write(b Binding) error {
 	})
 }
 
-// Remove deletes the binding when match accepts it, all under the same lock
-// as Write, so a concurrent attach is never undone by an older off.
-// A nil match removes any binding.
-func Remove(match func(Binding) bool) (bool, error) {
-	removed := false
-	err := transact(func(path string) error {
-		b, err := read(path)
-		if errors.Is(err, ErrNone) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if match != nil && !match(b) {
-			return nil
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		removed = true
-		return nil
-	})
-	return removed, err
-}
-
 // transact runs fn under the binding's interprocess lock, after confining
 // its directory.
 func transact(fn func(path string) error) error {
