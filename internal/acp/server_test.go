@@ -504,6 +504,7 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 // TestPromptRoundTripAndThreadState proves the exercisable core: the prompt
 // lands on the session's durable cockpit thread, the client sees the live
 // thought update, and a fresh reply completes the turn with its text.
+// Regression: #961.
 func TestPromptRoundTripAndThreadState(t *testing.T) {
 	cfg := testConfig(t)
 	// The turn must stay open until the test delivers the reply; the 40ms

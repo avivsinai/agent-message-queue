@@ -59,6 +59,7 @@ func steerEvent(s *Server, sid, text, event string) response {
 // A follow-up DM during an open mailbox turn
 // reaches the bound handle as an urgent steer from buzz on the turn's thread
 // that refs the prompt, and the turn still ends on the final reply.
+// Regression: bead agent-message-queue-cfy.
 func TestFollowUpDMSteersAnOpenMailboxTurn(t *testing.T) {
 	s, root := mailboxServer(t)
 	var prompt string

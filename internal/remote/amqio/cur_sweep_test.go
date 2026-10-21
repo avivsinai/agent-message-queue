@@ -101,6 +101,8 @@ func TestReplyRouteFailureIsNotSuppressed(t *testing.T) {
 //   - restored route: the reply lands exactly once;
 //   - one more tick: success cleared the entry, so recovery and the router
 //     do not run again.
+//
+// Regression: bead agent-message-queue-611.22.46.
 func TestLateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")

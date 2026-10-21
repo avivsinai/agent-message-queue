@@ -16,6 +16,7 @@ import (
 // literal for secret scanners; the detector still sees the full value.
 var demoBearer = "abcdef" + "0123456789"
 
+// Regression: #929.
 func TestApprovalPreviewDetectorTable(t *testing.T) {
 	ghToken := "ghp_" + strings.Repeat("A", 36)
 	bash := func(cmd string) string {

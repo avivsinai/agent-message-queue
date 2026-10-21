@@ -68,6 +68,7 @@ func TestDisabledQueueAndSteerModesAreRefused(t *testing.T) {
 // session.list must mask Steer out of the advertised capabilities so a client
 // that picks operations from the advertised capabilities is not given a false
 // signal.
+// Regression: bead agent-message-queue-611.22.36.
 func TestSteerCapabilityMaskedInSessionProjection(t *testing.T) {
 	store, now := openStore(t)
 	rt := fake.New("fake", "e_1")

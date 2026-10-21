@@ -24,6 +24,7 @@ import (
 // its first revision becomes one kind 9 row and a later revision a kind
 // 40003 edit of that row; a redelivered event replays the same request;
 // Flush sends every owed output and leaves none.
+// Regression: bead agent-message-queue-611.52.
 func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])

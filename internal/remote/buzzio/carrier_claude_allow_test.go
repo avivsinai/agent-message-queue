@@ -198,6 +198,7 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 // saw "reaction is not kind 7". Now yes typed in the approval message's
 // thread allows once, and an unthreaded yes in the main DM is not sent: the
 // DM says how to allow.
+// Regression: bead agent-message-queue-611.42.10.
 func TestClaudeTypedYesAllowsInTheApprovalThread(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	if err := e.c.Ingest(e.typed("yes")); err != nil {
@@ -226,6 +227,7 @@ func TestClaudeTypedYesAllowsInTheApprovalThread(t *testing.T) {
 
 // Claude's inspect named no pending approval, so a typed no in
 // the main DM became a prompt. It now rejects the call, as ❌ does.
+// Regression: bead agent-message-queue-611.42.10.
 func TestClaudeTypedNoInTheMainDMDenies(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	if err := e.c.Ingest(e.typed("no")); err != nil {

@@ -323,6 +323,7 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 // record intent without interrupting a turn we do not own, a foreign turn's
 // completion must not complete our run, and once our userMessage confirms the
 // run the pending cancel is delivered against OUR turn.
+// Regression: bead agent-message-queue-611.22.36.
 func TestTentativeRunIsNotOwned(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")

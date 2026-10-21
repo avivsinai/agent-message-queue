@@ -125,6 +125,7 @@ func TestOwedOutcomeRetention(t *testing.T) {
 // The horizon retires even when the target is GONE or its attachment has no
 // InteractionResolver: a record that survives a restart after
 // its target disappeared must not stay pinned forever.
+// Regression: bead agent-message-queue-611.45.
 func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
 	store, now := openStore(t)
 	clk := now()
@@ -166,6 +167,7 @@ func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
 // its locked update is not retired behind its own resolution, and a
 // resolution that arrives after retirement still corrects the record: the
 // resolver-reported answered outcome replaces the uncertain one.
+// Regression: bead agent-message-queue-611.45.
 func TestOwedOutcomeCorrectableAfterRetirement(t *testing.T) {
 	store, now := openStore(t)
 	clk := now()
@@ -214,6 +216,7 @@ func TestOwedOutcomeCorrectableAfterRetirement(t *testing.T) {
 // A late native EventQuestionResolved after retirement corrects the record
 // even though recovery no longer owes the id (native-event
 // correction): the answered outcome replaces the uncertain one.
+// Regression: bead agent-message-queue-611.45.
 func TestRetiredOutcomeCorrectedByLateNativeResolution(t *testing.T) {
 	store, now := openStore(t)
 	clk := now()

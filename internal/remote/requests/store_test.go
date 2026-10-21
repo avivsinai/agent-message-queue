@@ -90,10 +90,10 @@ func TestRecordLifecycle(t *testing.T) {
 
 // TestCompactOneKeepsOwedResults pins the compaction gate. A result the
 // runtime still holds unacknowledged (the result alone owes the ack, even
-// with the run released) or one the caller has not received
-// survives compaction. Each row
-// fails exactly one gate clause; TestRecordLifecycle is the settled,
-// published record that compacts.
+// with the run released) or one the caller has not received survives
+// compaction. Each row fails exactly one gate clause; TestRecordLifecycle is
+// the settled, published record that compacts.
+// Regression: bead agent-message-queue-611.22.36.
 func TestCompactOneKeepsOwedResults(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

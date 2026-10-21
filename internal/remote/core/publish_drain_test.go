@@ -313,6 +313,7 @@ func TestFailedPublishDoesNotCorruptBookkeeping(t *testing.T) {
 // Close observes inFlight==0, closes the store, and returns before the
 // publish completes; MarkPublished fails (store closed) and the assertion
 // fails.
+// Regression: bead agent-message-queue-611.22.48.
 func TestCloseDrainsAsyncNativePublication(t *testing.T) {
 	store, now := openStoreNoCleanup(t)
 

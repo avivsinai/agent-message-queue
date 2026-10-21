@@ -122,6 +122,7 @@ func TestNotLoadedClearsStaleActiveTurn(t *testing.T) {
 // gates on the raw status string exactly because threadStatus maps unknown
 // statuses to "unknown", and a future status meaning "still running" must
 // not make Submit issue turn/start into a live turn.
+// Regression: bead agent-message-queue-611.22.39.
 func TestUnrecognisedStatusKeepsActiveTurn(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	// Confirmed explicitly below; no wall-clock confirm budget.

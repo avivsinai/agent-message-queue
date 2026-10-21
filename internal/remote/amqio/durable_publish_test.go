@@ -32,6 +32,8 @@ import (
 //	    and a byte-identical collision is a no-op.
 //	(e) The publish id starts with a timestamp, so it sorts chronologically
 //	    against ordinary AMQ ids and drain --limit does not starve it.
+//
+// Regression: bead agent-message-queue-611.22.14.
 func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -187,6 +189,7 @@ func filesForLabel(root, handle, label string) []string {
 // CommittedDurabilityError the directory fsync is retried in place and the
 // reply reports success, because the rename already made it visible. A
 // persistent fsync failure still reports success and warns the operator.
+// Regression: bead agent-message-queue-611.22.35.
 func TestCommittedDeliveryIsRepairedInPlace(t *testing.T) {
 	const created = "2026-09-14T11:00:00.000000Z"
 	snap := protocol.Snapshot{State: protocol.StateCompleted, Epoch: "ep-b12", Revision: 42, RequestRef: "ref-b12", ObservedAt: created}
@@ -252,11 +255,12 @@ func TestCommittedDeliveryIsRepairedInPlace(t *testing.T) {
 	}
 }
 
-// TestRecoveryRepliesForTwoRevisionsBothLand covers recovery replies for different revisions
-// of the same command produce different filenames (content-hash suffix), so
-// both land in inbox/new without a collision. Previously the suffix was
+// TestRecoveryRepliesForTwoRevisionsBothLand checks that recovery replies for
+// different revisions of the same command get different filenames
+// (content-hash suffix), so both land in inbox/new without a collision. Previously the suffix was
 // "noref" (identical for all revisions) -> resolvePublishCollision rejected
 // the second as a non-byte-identical collision.
+// Regression: bead agent-message-queue-611.22.35.
 func TestRecoveryRepliesForTwoRevisionsBothLand(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {

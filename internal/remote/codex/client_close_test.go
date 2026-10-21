@@ -150,6 +150,7 @@ func TestCloseStopsReqWorker(t *testing.T) {
 // for the writer slot, not just the write. A wedged writer (server never
 // reads) holds the slot; a second Call with a short deadline must return
 // ctx.Err within its deadline instead of blocking behind the wedged writer.
+// Regression: bead agent-message-queue-7xl.
 func TestCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 	dir, err := os.MkdirTemp("", "amqcx")
 	if err != nil {

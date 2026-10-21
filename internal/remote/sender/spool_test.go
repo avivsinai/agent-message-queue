@@ -215,6 +215,7 @@ func TestSenderExpireWithoutDispatch(t *testing.T) {
 // the same digest reconciles instead of duplicating:
 // Create returns the existing envelope and the CLI proceeds as main does
 // (exit 0). Only a DIFFERENT digest under the same id is a conflict.
+// Regression: bead agent-message-queue-611.7.
 func TestSenderDuplicateReconciles(t *testing.T) {
 	now := time.Now()
 	spool := newTestSpool(t, func() time.Time { return now })

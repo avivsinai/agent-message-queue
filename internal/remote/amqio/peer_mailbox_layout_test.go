@@ -21,6 +21,7 @@ import (
 // does not exist made a black-hole mailbox in someone else's root. A missing
 // peer mailbox is transient (it may be provisioned a moment later): the
 // command stays in new, is not DLQ'd, and nothing is written into the peer.
+// Regression: bead agent-message-queue-611.22.43.
 func TestReplyToMissingPeerMailboxIsRefusedNotCreated(t *testing.T) {
 	cases := []struct {
 		name                      string

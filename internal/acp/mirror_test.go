@@ -82,6 +82,7 @@ func (c *codexFake) send(method, params string) {
 // session's streamed text and tool call reach the ACP session as
 // session/update notifications, and the final answer ends the turn without
 // repeating the streamed text.
+// Regression: bead agent-message-queue-611.40.
 func TestRemoteTurnMirrorsNativeActivity(t *testing.T) {
 	root, err := os.MkdirTemp("", "acpm")
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 // projection is class "" and refused too (a `&& s.Evidence != nil`
 // guard once inverted the check). An omitted floor keeps
 // legacy semantics. Corpus Q01 covers a floor the adapter meets.
+// Regression: bead agent-message-queue-611.22.19.
 func TestMinEvidenceFloor(t *testing.T) {
 	weak := &protocol.Evidence{Submit: protocol.EvidenceSubmitted, Completion: "run_terminal"}
 	for _, tc := range []struct {

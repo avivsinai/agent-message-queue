@@ -235,7 +235,7 @@ func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
 	}
 }
 
-// Regression: a redelivered event published a second
+// Regression: bead agent-message-queue-611.36, a redelivered event published a second
 // message. It must reuse the first delivery's message.
 func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -513,6 +513,7 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 
 // A cancel says the message stays and
 // may still run, and the message is not recalled.
+// Regression: bead agent-message-queue-611.36.
 func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
 	s, root := mailboxServer(t)
 	turn := newTurn()
@@ -625,7 +626,7 @@ func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 	}
 }
 
-// Regression: the answer ended
+// Regression: bead agent-message-queue-611.38, the answer ended
 // the ACP turn but never reached the Buzz DM, because buzz-acp does not post
 // ACP answer text. amq-acp posts it into the prompt's channel itself.
 func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
@@ -1197,7 +1198,7 @@ func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	}
 }
 
-// Regression: a session whose model names a
+// Regression: bead agent-message-queue-iqh, a session whose model names a
 // missing binding must not fall back to the only binding left.
 func TestMissingModelNeverReachesAnotherBinding(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))

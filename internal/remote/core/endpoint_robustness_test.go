@@ -80,6 +80,7 @@ func TestReconcilePoisonRecordResolvesNotAborts(t *testing.T) {
 // TestReconcileDoesNotHoldLockAcrossNativeCalls reproduces the defect where
 // Reconcile held the endpoint mutex across a native Lookup, stalling every
 // other operation. A concurrent Handle must complete while the Lookup blocks.
+// Regression: bead agent-message-queue-611.22.54.
 func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 	store, now := openStore(t)
 	rt := fake.New("fake", "e_1")

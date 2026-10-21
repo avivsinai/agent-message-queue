@@ -62,6 +62,7 @@ func TestFailedJournalClaimRefusesBeforeDelivery(t *testing.T) {
 // only identity and no outcome, the replay checks the inbox, finds the
 // message absent, and delivers exactly one copy under the claimed id
 // instead of reporting a delivery that never happened.
+// Regression: #976.
 func TestReplayDeliversWhenClaimExistsButInboxEmpty(t *testing.T) {
 	root := canonicalTempDir(t)
 	for _, handle := range []string{"buzz", "agent"} {
