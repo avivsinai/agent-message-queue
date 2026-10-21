@@ -917,10 +917,9 @@ func setupBaseConfig(root string, agents []string) (config.Config, []byte, []str
 }
 
 // marshalSetupBaseConfig serializes the setup config while preserving every
-// unmodelled key already present in the on-disk config.json (611.22.57, the
-// setup/apply half of review-821-r1 P1-b: `amq setup` wiped default_agent/
-// project/routing from a live root). original carries the raw existing
-// document (empty when the file does not exist yet).
+// unmodelled key already present in the on-disk config.json, so `amq setup`
+// never wipes default_agent/project/routing from a live root. original
+// carries the raw existing document (empty when the file does not exist yet).
 func marshalSetupBaseConfig(cfg config.Config, original []byte) ([]byte, error) {
 	data, err := config.MarshalPreservingUnknowns(original, cfg)
 	if err != nil {
