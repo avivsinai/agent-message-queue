@@ -39,7 +39,7 @@ const (
 	methodFileChangeApproval = "item/fileChange/requestApproval"
 	methodLegacyExecApproval = "execCommand/approval"
 	// Requests answered with a shape other than {"decision": option}. The
-	// DM shows them, but only the terminal answers them (611.42.8).
+	// DM shows them, but only the terminal answers them.
 	methodPermissionsApproval = "item/permissions/requestApproval"
 	methodToolUserInput       = "item/tool/requestUserInput"
 	methodMcpElicitation      = "mcpServer/elicitation/request"
@@ -70,7 +70,7 @@ type run struct {
 	// in arrival order, once the current one resolves.
 	queuedApprovals []*protocol.Interaction
 	// createdAt is when the run was bound, for the unconfirmed-shadow
-	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
+	// deadline: a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
 	// shadowing so lookupHistory can resolve the turn by clientId.
 	createdAt time.Time
@@ -87,7 +87,7 @@ type run struct {
 	// acked records that the endpoint acknowledged this run's terminal
 	// result. The retained payload is released and Lookup reports
 	// EvidenceNone for the key, so reconcile's ack replay converges instead
-	// of re-asking every tick (agent-message-queue-611.22.24).
+	// of re-asking every tick.
 	acked bool
 }
 
@@ -100,7 +100,7 @@ type Attachment struct {
 	observers map[uint64]func(Notification)
 	nextObs   uint64
 
-	client   atomic.Pointer[Client] // BK5: set before Attach returns, read by read-loop-spawned paths
+	client   atomic.Pointer[Client] // set before Attach returns, read by read-loop-spawned paths
 	threadID string
 	targetID string
 	epoch    string
@@ -114,8 +114,8 @@ type Attachment struct {
 	mu         sync.Mutex
 	status     string
 	activeTurn string
-	// reviewer is the thread's approvals reviewer when it is not the user
-	// (611.56), from thread/resume and then thread/settings/updated;
+	// reviewer is the thread's approvals reviewer when it is not the user,
+	// from thread/resume and then thread/settings/updated;
 	// reviewerSeen keeps an update newer than the resume snapshot.
 	reviewer     string
 	reviewerSeen bool
@@ -126,16 +126,15 @@ type Attachment struct {
 	// terminalTurns is a bounded memo of turn IDs observed as terminal via
 	// turn/completed, even when no byTurn entry exists (the confirming
 	// userMessage item was missed in the race window). The RPC-response
-	// guard consults this so a finished turn is never reinstalled as
+	// guard reads this so a finished turn is never reinstalled as
 	// active. Bounded via terminalTurnOrder (FIFO): when full, the OLDEST
-	// observation is evicted — it is a race-window artefact, not a log
-	// (B3, agent-message-queue-611.22.36).
+	// observation is evicted — it is a race-window artefact, not a log.
 	terminalTurns     map[string]bool
 	terminalTurnOrder []string // FIFO of the same turn IDs; drives eviction
 	// lostStateGen is bumped every time a notLoaded/systemError notification
-	// tells us the app-server lost track of any previously-observed turn
-	// (611.22.39-r2 F758-1). A turn/start RPC continuation captured the
-	// generation BEFORE its call; if the generation advanced by the time the
+	// tells us the app-server lost track of any previously-observed turn.
+	// A turn/start RPC continuation captured the generation BEFORE its call;
+	// if the generation advanced by the time the
 	// continuation restores activeTurn/status, the restore would resurrect a
 	// turn whose observing source is gone — the exact wedge the lost-state
 	// handler just cleared. Stale continuations drop the restore instead.
@@ -146,7 +145,7 @@ type Attachment struct {
 	// ackedOrder is a FIFO of keys whose runs are terminal and acknowledged:
 	// their retained payload is released and Lookup reports EvidenceNone, so
 	// the runs/byClientID/byTurn entries exist only for stale correlation. To
-	// bound memory (611.22.19 BK4), once the FIFO exceeds maxLiveRuns the
+	// bound memory, once the FIFO exceeds maxLiveRuns the
 	// oldest acked run is fully dropped from all three maps. A later
 	// Lookup/Cancel for it returns EvidenceNone/unknown exactly as a
 	// compacted tombstone would; the durable store remains the source of
@@ -154,13 +153,13 @@ type Attachment struct {
 	ackedOrder []requests.Key
 	// ackedKeyOrder drives eviction of ackedKeys, the longer-lived memo that
 	// lets a pruned run short-circuit Lookup. It outlives ackedOrder so a
-	// compacted tombstone still converges (611.22.19 BK4).
+	// compacted tombstone still converges.
 	ackedKeyOrder []requests.Key
 	// ackedKeys remembers which keys have been acknowledged, so a run pruned
 	// from the bounded runs map (above) still short-circuits Lookup to
 	// EvidenceNone instead of falling through to lookupHistory, whose copy
 	// would look like fresh evidence and restart the ack loop. Bounded by the
-	// same FIFO eviction as ackedOrder (611.22.19 BK4).
+	// same FIFO eviction as ackedOrder.
 	ackedKeys map[requests.Key]bool
 	// questionMu orders approval events: every path that changes the
 	// pending approval holds it from the change through the emission, so
@@ -174,9 +173,8 @@ type Attachment struct {
 	resolvedEarly      map[string]bool
 	resolvedEarlyOrder []string
 	// threadApprovals are the open decision approvals of turns no run of
-	// ours owns, such as a turn the user started in the TUI, by threadKey
-	// (611.42 slice 1b). At most maxThreadApprovals; past that the TUI
-	// answers alone.
+	// ours owns, such as a turn the user started in the TUI, by threadKey.
+	// At most maxThreadApprovals; past that the TUI answers alone.
 	threadApprovals map[string]*threadApproval
 }
 
@@ -276,7 +274,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		// Codex 0.160 strips additionalPermissions from approval requests
 		// sent to a client without the experimental API, and the approve
 		// guard reads that field: without it a command that also asks for
-		// more access would get a one-tap approve (Pro review of #969).
+		// more access would get a one-tap approve.
 		init["capabilities"] = map[string]bool{"experimentalApi": true}
 	}
 	if err := client.Call(ctx, "initialize", init, nil); err != nil {
@@ -304,8 +302,8 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// turn/started we have already seen and publish "idle" for a running
 	// thread. A turn we know about wins over the older snapshot.
 	//
-	// BK5 (agent-message-queue-611.22.20): the client handle is published
-	// through an atomic.Pointer, not a plain field — a read-loop-spawned
+	// The client handle is published through an atomic.Pointer, not a plain
+	// field — a read-loop-spawned
 	// goroutine (deliverPendingCancel) can be scheduled in the window
 	// between Dial returning and this store; the pointer publication is
 	// synchronized, and the spawned path nil-checks, so no read observes a
@@ -349,7 +347,7 @@ func (a *Attachment) NativeSessionID() string { return a.threadID }
 
 func TargetID(threadID string) string {
 	// The full de-hyphenated thread id, never truncated: two distinct thread
-	// ids must not collapse to one target (Pro B03). Codex thread ids are
+	// ids must not collapse to one target. Codex thread ids are
 	// UUIDv7 (32 hex), well within the 128-char target_id bound.
 	return "codex:" + strings.ReplaceAll(threadID, "-", "")
 }
@@ -377,11 +375,11 @@ func (a *Attachment) Inspect() protocol.Session {
 	if a.offline {
 		att, status = "offline", "offline"
 	}
-	// yl0 (agent-message-queue-yl0; Inspect half of 611.22.51): ranging over
-	// the runs map and keeping the last interaction picked whichever run the
-	// randomizer visited last, so the published PendingInteraction flapped
-	// between Inspect calls with no state change. The operator should answer
-	// the interaction that has been waiting the longest: pick the OLDEST
+	// Ranging over the runs map and keeping the last interaction would pick
+	// whichever run the randomizer visited last, so the published
+	// PendingInteraction would flap between Inspect calls with no state
+	// change. The operator should answer the interaction that has been
+	// waiting the longest: pick the OLDEST
 	// interaction by run createdAt, ties broken by interaction id for full
 	// determinism.
 	var pending, active *string
@@ -394,7 +392,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		if pending == nil || r.createdAt.Before(pendingAt) ||
 			(r.createdAt.Equal(pendingAt) && id < *pending) {
 			// The request that waits on it, so a surface can name the
-			// approval it shows (611.42.7).
+			// approval it shows.
 			ref := protocol.EncodeRef(r.key.CreatorHost, r.key.TargetID, r.key.RequestID)
 			pending, active = &id, &ref
 			pendingAt = r.createdAt
@@ -500,16 +498,16 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	// 611.22.39-r2 F758-1: capture the lost-state generation before the RPC.
-	// A notLoaded/systemError notification processed by the read pump while
+	// Capture the lost-state generation before the RPC. A
+	// notLoaded/systemError notification processed by the read pump while
 	// this call is in flight means the app-server lost track of the turn we
 	// are about to restore — the continuation must not resurrect it.
 	a.mu.Lock()
 	genBefore := a.lostStateGen
 	a.mu.Unlock()
 	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
-		// B1 (agent-message-queue-611.22.35): split pre-send vs post-send.
-		// ErrNotSent (marshal error, write error, connection closed before
+		// Split pre-send vs post-send. ErrNotSent (marshal error, write
+		// error, connection closed before
 		// write) and rpcError (server responded with an error) are both
 		// unambiguous: the prompt either never left or was positively
 		// refused. dropRun + refuse (retry is safe). Post-send failures
@@ -527,37 +525,24 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{RunID: a.runID(r)}, err
 	}
 	if res.Turn.ID == "" {
-		// B1: a successful RPC response with no turn id is ambiguous, not a
+		// A successful RPC response with no turn id is ambiguous, not a
 		// definitive refusal. The server may have accepted the prompt under a
 		// turn we have not observed yet. Preserve the correlation and return
 		// a non-nil error so the endpoint records uncertain.
 		return core.Admission{RunID: a.runID(r)}, fmt.Errorf("turn/start returned no turn id")
 	}
 	a.mu.Lock()
-	// B3: the read pump may have already processed the confirming
-	// notification, the completed result, and the final idle-status before
-	// this goroutine resumes. Do not restore an already-finished turn as the
-	// active turn — that would wedge the adapter permanently busy with no
-	// later event to clear it. If the run is already terminal, OR the turn
-	// was observed as terminal via the memo (confirming userMessage missed,
-	// turn/completed recorded it), skip the activeTurn/status restoration.
-	// 611.22.39-r2 F758-1: a notLoaded/systemError notification processed
-	// while the RPC was in flight invalidated the state this continuation is
-	// about to restore. The run is NOT terminal and the turn is NOT in the
-	// memo (the lost-state notification does not make either true), so the
-	// B3 guard above does not fire — the generation check is the only
-	// defense. Stale = drop the restore; keep the run correlation (the text
-	// may still be running server-side, so Lookup/history stay able to
-	// resolve it) and report uncertain, exactly like the post-send
-	// ambiguity path below.
-	// BEAD e5q: the terminal check runs BEFORE the generation check. A
-	// terminal state (r.state.Terminal() or a.terminalTurns hit) is a
-	// POSITIVE fact that restores nothing — it only reports what already
-	// happened — so a notLoaded/systemError in flight cannot invalidate it.
-	// Ordered the other way, a lost-state notification that arrives while
-	// the RPC is in flight downgrades a known-good completed outcome to
-	// uncertain, and the endpoint then re-records evidence for a run that
-	// was already proven finished.
+	// Before this goroutine resumes, the read pump may have finished the turn
+	// (confirming notification, result, idle status), or processed a
+	// notLoaded/systemError that invalidated the state this continuation
+	// would restore. Restoring activeTurn in either case would wedge the
+	// adapter busy with no later event to clear it. A terminal run, or a turn
+	// the terminalTurns memo recorded, is a POSITIVE fact that restores
+	// nothing, so it is checked FIRST and reports admitted: a lost-state
+	// notification cannot downgrade a known completed outcome to uncertain.
+	// Otherwise an advanced lostStateGen drops the restore, keeps the run
+	// correlation (the text may still be running, so Lookup and history can
+	// resolve it) and reports uncertain, like the post-send ambiguity path.
 	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
@@ -589,10 +574,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// reconcile never revisits — the caller retries with a fresh id and
 		// the prompt runs twice. Report an ERROR so the endpoint records
 		// UNCERTAIN, and KEEP the correlation (no dropRun) so Lookup and
-		// lookupHistory can still resolve it (agent-message-queue-611.22.31).
-		// B1 (F3): runIDLocked takes a.mu — confirmRun writes r.turnID from the
-		// read-loop goroutine. Every runID read now goes through the lock-taking
-		// accessor (a.runID) or runIDLocked under a.mu.
+		// lookupHistory can still resolve it. runIDLocked needs a.mu:
+		// confirmRun writes r.turnID from the read-loop goroutine, so every
+		// runID read goes through a.runID or runIDLocked under a.mu.
 		a.mu.Lock()
 		rid := r.runIDLocked()
 		a.mu.Unlock()
@@ -624,8 +608,7 @@ func (a *Attachment) memoTerminal(turnID string) {
 	// race-window artefact size. FIFO via terminalTurnOrder: Go map
 	// iteration order is randomized, so walking the map to "evict the
 	// oldest" evicts an arbitrary entry — possibly the turn whose RPC
-	// response is still in flight, reinstating the wedge this memo closes
-	// (10b, packet 10 recut).
+	// response is still in flight, reinstating the wedge this memo closes.
 	if len(a.terminalTurnOrder) > maxLiveRuns {
 		oldest := a.terminalTurnOrder[0]
 		a.terminalTurnOrder = a.terminalTurnOrder[1:]
@@ -704,7 +687,7 @@ func (r *run) runIDLocked() string {
 }
 
 // runID is the lock-taking accessor for external callers. It is the ONLY
-// way to read a run's runID outside a.mu. B1 (F3): every read of a run's
+// way to read a run's runID outside a.mu. Every read of a run's
 // mutable fields (turnID, confirmed, state, text, createdAt) goes through a
 // small accessor that takes a.mu; no caller touches r.<field> directly.
 func (a *Attachment) runID(r *run) string {
@@ -713,8 +696,8 @@ func (a *Attachment) runID(r *run) string {
 	return r.runIDLocked()
 }
 
-// clientIDFor returns the native correlation token for a request key. B2:
-// the endpoint's identity is (CreatorHost, TargetID, RequestID), so two
+// clientIDFor returns the native correlation token for a request key.
+// The endpoint's identity is (CreatorHost, TargetID, RequestID), so two
 // creator hosts can legitimately share a UUID. Indexing by bare RequestID
 // would attribute one caller's failed run to another's live request. The
 // composite token preserves the full namespace. This token is sent as
@@ -761,9 +744,9 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 			// Bound but native ownership not yet proven: tentative, never
 			// admitted, so reconcile leaves it running and never rejects it.
 			//
-			// Pro F1: a retained-but-unconfirmed run permanently shadows
-			// lookupHistory, so the record sticks at Uncertain forever and a
-			// real completed result is never delivered. After confirmTimeout,
+			// A retained-but-unconfirmed run that shadowed lookupHistory
+			// forever would leave the record at Uncertain and never deliver a
+			// real completed result. After confirmTimeout,
 			// if still unconfirmed, STOP shadowing — fall through to
 			// lookupHistory, which resolves the turn by clientId == key.RequestID
 			// and can deliver the completed result. The deadline is the same
@@ -779,7 +762,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		a.mu.Unlock()
 		return ev, nil
 	}
-	// 611.22.19 BK4: a run pruned from the bounded runs map after ack still
+	// A run pruned from the bounded runs map after ack still
 	// short-circuits to EvidenceNone here, so it never falls through to
 	// lookupHistory (whose copy would look like fresh evidence and restart
 	// the ack loop). The durable store is the source of truth for the
@@ -844,32 +827,32 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		default:
 			state = protocol.StateRunning
 		}
-		// B2: when history resolves a run as terminal, MAKE THE IN-MEMORY RUN
+		// When history resolves a run as terminal, MAKE THE IN-MEMORY RUN
 		// TERMINAL. Record the turn id so the correlation exists (byTurn), set
 		// the terminal state, and populate the result text so AcknowledgeResult
 		// can match the digest and release it. A run we have proven finished
 		// must not stay "running" in our own map forever, re-reading the whole
-		// transcript every tick (agent-message-queue-611.22.24).
+		// transcript every tick.
 		//
-		// B3: r.result() is the ONLY place a protocol.Result is constructed in
+		// r.result() is the ONLY place a protocol.Result is constructed in
 		// this package — lookupHistory does not build one directly, so the
 		// bounding point (MaxResultBytes, truncated) applies here too.
 		nativeRef := "codex thread " + a.threadID + " turn " + t.ID
 		if state.Terminal() {
 			a.mu.Lock()
-			// B3 (agent-message-queue-611.22.36): when history establishes a
-			// turn terminal, clear a.activeTurn ONLY IF it is that same turn
+			// When history establishes a turn terminal, clear a.activeTurn
+			// ONLY IF it is that same turn
 			// id. If a newer turn is active, leave it alone — clearing a newer
 			// turn is a worse bug.
 			if a.activeTurn == t.ID {
 				a.activeTurn = ""
 				a.status = "idle"
 			}
-			// 10d (packet 10 recut): record through memoTerminal like every
-			// other memo writer. A bare map write here bypassed the FIFO —
-			// these entries never entered terminalTurnOrder, so eviction
-			// (which measures the SLICE) never removed them and the map grew
-			// without bound, one entry per distinct history-recovered turn.
+			// Record through memoTerminal like every other memo writer. A
+			// bare map write would bypass the FIFO: the entry would never
+			// enter terminalTurnOrder, so eviction (which measures the SLICE)
+			// would never remove it and the map would grow without bound, one
+			// entry per distinct history-recovered turn.
 			a.memoTerminal(t.ID)
 			if r, ok := a.runs[key]; ok {
 				r.turnID = t.ID
@@ -882,7 +865,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 				r.confirmed = true
 				a.mu.Unlock()
 				result := r.result()
-				// 611.22.34 B2: this is HISTORY-proven terminal evidence — a
+				// This is HISTORY-proven terminal evidence — a
 				// restarted attachment retains nothing in memory, so this
 				// class tells the endpoint the outcome is the run's final
 				// one and the ack replay may converge on it.
@@ -892,7 +875,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		}
 		// No in-memory run (e.g. after restart) or non-terminal: build the
 		// result through the same helper so the bounding point is one.
-		// B6: INSTALL a confirmed run entry so CancelExact can act on it.
+		// INSTALL a confirmed run entry so CancelExact can act on it.
 		// Without this, a surviving run after restart cannot be cancelled —
 		// the adapter has no entry, so CancelExact records intent only.
 		// Install for BOTH terminal and live results: a terminal run still
@@ -912,11 +895,10 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 			if existing.turnID == "" {
 				existing.turnID = t.ID
 			}
-			// B6 (agent-message-queue-611.22.36): a run installed by the
-			// submit path always has an epoch, but a run recovered by an
-			// earlier lookupHistory (before this fix) or by a concurrent
-			// history call that lost the race may have an empty epoch.
-			// Fill it from the requested epoch — history has proven this
+			// A run installed by the submit path always has an epoch, but a
+			// run recovered by a concurrent history call that lost the race
+			// may have an empty epoch. Fill it from the requested epoch —
+			// history has proven this
 			// is the same native turn, so the entry answers for the epoch
 			// the endpoint holds.
 			if existing.epoch == "" {
@@ -935,7 +917,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		} else {
 			a.runs[key] = r
 			a.byClientID[clientIDFor(key)] = r
-			// B3: if this is a terminal turn recovered from history after
+			// If this is a terminal turn recovered from history after
 			// restart, clear a.activeTurn if it matches (the pump is dead).
 			if state.Terminal() && a.activeTurn == t.ID {
 				a.activeTurn = ""
@@ -949,7 +931,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		result := r.result()
 		ev := core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}
 		if r.state.Terminal() {
-			// 611.22.34 B2: same as above — history-proven terminal.
+			// Same as above — history-proven terminal.
 			ev.Class = core.EvidenceHistoryTerminated
 		}
 		return ev, nil
@@ -959,8 +941,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 	// against a live app-server, and a single omitted field would otherwise
 	// make the first reconcile after a restart REJECT every in-flight request
 	// while its turns keep running. Absence of correlation is unknown —
-	// uncertain, keep correlation — never EvidenceNone
-	// (agent-message-queue-611.22.31).
+	// uncertain, keep correlation — never EvidenceNone.
 	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 }
 
@@ -1058,10 +1039,10 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		}
 		return "", err
 	}
-	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
-	// after Respond succeeds. Previously the delete + nil happened before the
-	// send, so a transport failure left r.interaction == nil and a retry
-	// returned CodeAlreadyResolved while the native question was still open.
+	// Tear down the approval state ONLY after Respond succeeds. Tearing it
+	// down before the send would let a transport failure leave
+	// r.interaction == nil, and a retry would return CodeAlreadyResolved
+	// while the native question is still open.
 	a.mu.Lock()
 	_, open := r.approvalReqs[interactionID]
 	open = open || r.resolvedWhileSending
@@ -1334,7 +1315,7 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.acked = true
 	r.text.Reset()
 	r.errText = ""
-	// 611.22.19 BK4: bound the in-memory correlation maps. A terminal+acked
+	// Bound the in-memory correlation maps. A terminal+acked
 	// run is fully resolved; keep it only as long as the FIFO cap allows, then
 	// drop it from runs/byClientID/byTurn. The durable store retains the
 	// disposition; a later Lookup returns EvidenceNone (the run is acked) and
@@ -1394,7 +1375,7 @@ func (a *Attachment) emit(ev core.NativeEvent) {
 
 // ObserveNotifications adds fn as a read-only observer of the app-server
 // notifications this attachment receives, called on the read pump after
-// the adapter's own handling. It is the activity export seam (611.17): fn
+// the adapter's own handling. It is the activity export seam: fn
 // must not block (activity.Sink.Enqueue does not) and gains no control. The
 // returned func removes the observer.
 func (a *Attachment) ObserveNotifications(fn func(Notification)) (stop func()) {
@@ -1479,19 +1460,16 @@ func (a *Attachment) onNotification(n Notification) {
 			a.activeTurn = ""
 			a.status = "idle"
 		}
-		// B3 (agent-message-queue-611.22.36): record the terminal observation
-		// even when no byTurn entry exists (the confirming userMessage item
-		// was missed). The RPC-response guard consults this memo so a finished
-		// turn is never reinstalled as active.
-		// 10a (packet 10 recut): record UNCONDITIONALLY. The notification means
-		// the turn is over — every arm of the status switch below (including
-		// default -> StateFailed) produces a terminal state, so keeping a
-		// narrower status whitelist here re-derives terminality a second time
-		// and wedges again for any status it fails to enumerate.
-		// 10b (packet 10 recut): the bound is owned by memoTerminal (FIFO
-		// via terminalTurnOrder — Go map iteration order is randomized, so
-		// walking the map to "evict the oldest" evicts an arbitrary entry,
-		// possibly the turn whose RPC response is still in flight).
+		// Record the terminal observation even when no byTurn entry exists
+		// (the confirming userMessage item was missed), so the RPC-response
+		// guard never reinstalls a finished turn as active. Record it
+		// UNCONDITIONALLY: every arm of the status switch below (including
+		// default -> StateFailed) is terminal, and a narrower status list
+		// here would re-derive terminality and wedge for any status it
+		// misses. The bound is owned by memoTerminal (FIFO via
+		// terminalTurnOrder: Go map iteration order is random, so evicting by
+		// walking the map could drop the turn whose RPC response is still in
+		// flight).
 		a.memoTerminal(p.Turn.ID)
 		r, ok := a.byTurn[p.Turn.ID]
 		if !ok || r.state.Terminal() {
@@ -1532,18 +1510,18 @@ func (a *Attachment) onNotification(n Notification) {
 		}
 		a.mu.Lock()
 		a.status = threadStatus(p.Status.Type)
-		// 611.22.39: notLoaded/systemError mean the app-server lost track of
+		// notLoaded/systemError mean the app-server lost track of
 		// any turn we previously observed (process restart, transcript not
 		// loaded). No turn/completed will follow for that turn, and the
 		// terminal memo is written only by turn/completed and lookupHistory —
-		// so keeping the stale activeTurn wedged Submit busy for the life of
-		// the process. The observing status source is gone; drop it.
+		// so keeping the stale activeTurn would wedge Submit busy for the
+		// life of the process. The observing status source is gone; drop it.
 		// Gate on the RAW status type, NOT the mapped a.status: threadStatus
 		// maps every unrecognised status to "unknown", and a future Codex
 		// status meaning "still running" would then clear a LIVE turn's
-		// activeTurn and Submit would issue turn/start into it (verifier
-		// round-1 blocker). Only the enumerated lost-track statuses clear;
-		// unrecognised statuses are left untouched.
+		// activeTurn and Submit would issue turn/start into it. Only the
+		// enumerated lost-track statuses clear; unrecognised statuses are
+		// left untouched.
 		switch p.Status.Type {
 		case "notLoaded", "systemError":
 			a.activeTurn = ""
@@ -1600,8 +1578,8 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	switch req.Method {
 	case methodCommandApproval, methodFileChangeApproval, methodLegacyExecApproval:
 	case methodPermissionsApproval, methodToolUserInput, methodMcpElicitation:
-		// 611.42.8: these were dropped, so a turn from the DM waited for a
-		// terminal answer the owner never heard of.
+		// These are shown, never dropped: otherwise a turn from the DM would
+		// wait for a terminal answer the owner never heard of.
 		a.questionMu.Lock()
 		defer a.questionMu.Unlock()
 		if turnID, inter := a.terminalQuestion(req); inter != nil {
@@ -1622,8 +1600,8 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		Cwd        string `json:"cwd"`
 		Reason     string `json:"reason"`
 		// Codex 0.160 mixes plain decisions with object decisions such as
-		// {"acceptWithExecpolicyAmendment": ...}; a []string decode failed
-		// on the object and dropped the whole request (611.57).
+		// {"acceptWithExecpolicyAmendment": ...}; a []string decode would
+		// fail on the object and drop the whole request.
 		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 		// Fields a one-tap approve cannot show; any of them withholds it.
 		Kind                  string          `json:"kind"`
@@ -1637,8 +1615,8 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	// The id names this server request, not only its item: Codex sends a
 	// null approvalId for a shell approval and asks again under the same
 	// itemId (a retry without the sandbox, network access), so the item id
-	// alone gave the retry the closed approval's id and DM message (review
-	// of slice 1b). The app-server resends a pending request under its own
+	// alone would give the retry the closed approval's id and DM message.
+	// The app-server resends a pending request under its own
 	// request id, so the id is stable across a restart.
 	id := cmp.Or(p.ApprovalID, p.ItemID) + ":" + requestPart(req.ID)
 	// Only a plain decision can be sent back as {"decision": option}.
@@ -1659,7 +1637,7 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		reject = offered(options, "cancel")
 	}
 	// The DM shows the display form, so that form is screened too, and an
-	// approval that may hold a secret shows only that it waits (611.42.11).
+	// approval that may hold a secret shows only that it waits.
 	// Approve needs the shown text to be what runs.
 	raw := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
 	prompt := secretscan.DisplayForm(raw)
@@ -1828,8 +1806,8 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 		return "", nil
 	}
 	// The asked text is the harness's or an MCP server's own words and may
-	// echo a credential: then the DM shows only that something waits (Pro
-	// review of #985). The DM shows the display form, so both are screened.
+	// echo a credential: then the DM shows only that something waits. The
+	// DM shows the display form, so both are screened.
 	raw := prompt
 	prompt = secretscan.DisplayForm(raw)
 	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
@@ -1844,12 +1822,12 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 
 // result returns the BOUNDED terminal evidence. The bound is owned HERE,
 // at the source, so the endpoint's boundResult is a no-op and both sides
-// digest the same bytes (Pro F2: the attachment and the endpoint must
-// compute the ack digest over the same form — if the attachment digests the
+// digest the same bytes (the attachment and the endpoint must compute the
+// ack digest over the same form — if the attachment digests the
 // unbounded result and the endpoint digests the bounded one, any result
 // larger than MaxResultBytes is never released).
 //
-// B3: this is the ONLY place a protocol.Result is constructed in this
+// This is the ONLY place a protocol.Result is constructed in this
 // package. lookupHistory does not build one directly — it populates the
 // run's fields and calls result(), so the bounding point is one.
 func (r *run) result() *protocol.Result {

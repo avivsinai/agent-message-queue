@@ -65,7 +65,7 @@ type Client struct {
 	once    sync.Once
 	readErr error
 
-	// reqQ is the reply-required server-request queue (B14b/B8). Server
+	// reqQ is the reply-required server-request queue. Server
 	// requests (approvals, user input) must never be silently dropped: the
 	// app-server waits for a response. The queue is bounded by the liveness
 	// invariant — at most one in-flight approval per live run — and dispatch
@@ -80,17 +80,17 @@ type Client struct {
 	stopOnce    sync.Once
 
 	// Handlers are set once, before the read pump starts, and never written
-	// again: readLoop and reqWorker read them without synchronisation. They
-	// used to be exported fields assigned AFTER Dial returned, while both
-	// goroutines were already running — a data race, and a window in which
-	// an early frame found a nil handler and was dropped.
+	// again: readLoop and reqWorker read them without synchronisation.
+	// Assigning them after Dial returned, while both goroutines already run,
+	// would be a data race, and an early frame could find a nil handler and
+	// be dropped.
 	onNotification  func(Notification)
 	onServerRequest func(ServerRequest)
 
 	// closeDrainBudget bounds Close's wait for the req worker and any
-	// executing handler (B14b L1). Production uses closeDrainBudgetDefault
-	// (2s). Test hook (611.22.33 test-bar): the wedged-handler test
-	// otherwise burns the FULL budget — a real 4s of wall clock per run —
+	// executing handler. Production uses closeDrainBudgetDefault
+	// (2s). Test hook: the wedged-handler test otherwise burns the FULL
+	// budget — a real 4s of wall clock per run —
 	// to verify a bound whose value is irrelevant to the invariant (Close
 	// must return, not hang). The test sets this to milliseconds and still
 	// proves the same thing, deterministically and fast.
@@ -122,7 +122,7 @@ const reqQSlack = 8
 // tracks; approvals are per-run, so this bounds reply-required in-flight.
 const maxLiveRuns = 16
 
-// ackedKeyMemoCap bounds the ackedKeys memo (611.22.19 BK4): the set of keys
+// ackedKeyMemoCap bounds the ackedKeys memo: the set of keys
 // whose terminal results were acknowledged and whose run structs may already
 // have been pruned from the bounded runs map. It outlives maxLiveRuns so a
 // compacted tombstone still short-circuits Lookup to EvidenceNone across a
@@ -158,7 +158,7 @@ func newClient(ws *wsConn, h Handlers) *Client {
 }
 
 // dispatchServerRequest enqueues a reply-required server request without
-// ever blocking the read pump (B14b/B8). Overflow must not happen — the
+// ever blocking the read pump. Overflow must not happen — the
 // app-server has at most one in-flight approval per live run — but if it
 // ever does, the request is FAILED EXPLICITLY (Respond with an error) so
 // the app-server never waits for an answer that never comes.
@@ -171,7 +171,7 @@ func (c *Client) dispatchServerRequest(sr ServerRequest) {
 	// Overflow: explicit failure, never a silent drop, never a blocked pump.
 	// The failure write is deadline-bounded: it runs INSIDE the read pump,
 	// so an unbounded write on a wedged socket would stall the pump — the
-	// exact thing B8 exists to prevent, on B8's own overflow path.
+	// exact thing the queue exists to prevent, on its own overflow path.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = c.respondErrorCtx(ctx, sr.ID, "server request queue overflow: "+sr.Method)
@@ -268,8 +268,8 @@ func (c *Client) readLoop() {
 			}
 		case msg.Method != "":
 			if c.onNotification != nil {
-				// Synchronous, by design (B14b recut): onNative is a bounded
-				// state-apply (B14a moved the native ack outside e.mu), so it
+				// Synchronous, by design: onNative is a bounded state-apply
+				// (the native ack runs outside e.mu), so it
 				// cannot wedge the pump — only reply-required approval
 				// handlers can, and those run off-pump via reqQ.
 				c.onNotification(Notification{Method: msg.Method, Params: msg.Params})
@@ -302,10 +302,10 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
-	// Bound BOTH phases of the write by the context (B14b/B6): WAITING for
-	// the writer slot is acquired ctx-aware (the old wmu sync.Mutex waited
-	// unboundedly — ctx only bounded the write after acquisition), and the
-	// write itself carries the deadline under the slot.
+	// Bound BOTH phases of the write by the context: WAITING for the writer
+	// slot is ctx-aware (a plain mutex would wait unboundedly, with ctx
+	// bounding only the write after acquisition), and the write itself
+	// carries the deadline under the slot.
 	if err := c.ws.writeTextCtx(ctx, data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -343,28 +343,27 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	if err != nil {
 		return err
 	}
-	// 611.22.40: this was the one write left unbounded (writeText acquires
-	// the writer slot and writes with no ctx/deadline). A wedged peer could
-	// stall the approval worker forever. Bound it like every other frame:
-	// slot acquisition + write under a 3s deadline.
+	// writeText acquires the writer slot and writes with no ctx or deadline,
+	// so a wedged peer could stall the approval worker forever. Bound it like
+	// every other frame: slot acquisition + write under a 3s deadline.
 	return c.ws.writeTextBounded(data)
 }
 
-// Close tears the connection down and stops the callback workers (B14b/B9):
+// Close tears the connection down and stops the callback workers:
 // the events channel closes (worker exits after the in-flight event; Close
 // waits, bounded), then the conn closes — aborting any blocked read or
 // write immediately. The stop lifecycle is a separate sync.Once from the
-// start Once, so it actually runs: the previous single-once design leaked
-// the worker on every teardown. Safe to call twice.
+// start Once, so it actually runs: one shared Once would leak the worker on
+// every teardown. Safe to call twice.
 func (c *Client) Close() error {
-	// ORDER IS THE BLOCKER FIX: the socket closes FIRST and the read pump is
-	// DRAINED (readLoop closes c.closed on exit) BEFORE reqQ closes. The
-	// previous order (close queues -> drain -> ws.close) left the pump live
-	// during the whole drain window, so an inbound approval frame could send
-	// on a CLOSED reqQ and panic the process. After the pump is dead,
-	// dispatchServerRequest can no longer fire and closing reqQ is safe.
+	// ORDER MATTERS: the socket closes FIRST and the read pump is DRAINED
+	// (readLoop closes c.closed on exit) BEFORE reqQ closes. The other order
+	// (close queues -> drain -> ws.close) would leave the pump live during
+	// the whole drain window, so an inbound approval frame could send on a
+	// CLOSED reqQ and panic the process. After the pump is dead,
+	// dispatchServerRequest cannot fire and closing reqQ is safe.
 	//
-	// The whole teardown is BOUNDED (B14 recut L1): the post-stopOnce drain
+	// The whole teardown is BOUNDED: the post-stopOnce drain
 	// (reqWorker exit + executing handler) shares ONE total deadline. If a
 	// handler wedges anyway, Close proceeds past it — the conn is already
 	// closed, so a leaked bounded handler is harmless, and Close must never
