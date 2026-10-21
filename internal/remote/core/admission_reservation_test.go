@@ -1,0 +1,548 @@
+package core_test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+)
+
+// waitUntil polls until cond() is true or the deadline passes; a regression
+// must FAIL, never hang.
+func waitUntil(cond func() bool) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return cond()
+}
+
+func raceEndpoint(t *testing.T) (*core.Endpoint, *fake.Runtime, *requests.Store, func() time.Time) {
+	t.Helper()
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+	return ep, rt, store, now
+}
+
+// writePoisonRecord writes an undecodable file at the on-disk path a record
+// for (host, targetID, id) would occupy, so ListWithPoison isolates it and
+// recovers its identity from the path.
+func writePoisonRecord(t *testing.T, store *requests.Store, host, targetID, id string) string {
+	t.Helper()
+	p := filepath.Join(store.Dir(), "requests", host, targetID+"__"+id+".json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatalf("mkdir poison dir: %v", err)
+	}
+	if err := os.WriteFile(p, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write poison record: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(p) })
+	return p
+}
+
+// TestReservationRefusesSecondConcurrentDispatch reproduces
+// #739 (per-runtime reservation): while A is
+// in flight for a target, a second submit is refused busy by the ENDPOINT
+// with a TERMINAL rejected+tombstoned record (never a Tick-admissible
+// received placeholder), no second native dispatch, and an identical
+// resubmit after A resolves is admitted through the tombstone.
+func TestReservationRefusesSecondConcurrentDispatch(t *testing.T) {
+	ep, rt, store, _ := raceEndpoint(t)
+
+	idA := "11111111-1111-4111-8111-1111111111a1"
+	if _, err := ep.Handle(submitCmd(idA), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	before := rt.Snapshot().Dispatches
+
+	idB := "11111111-1111-4111-8111-1111111111b2"
+	repAny, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"})
+	if err != nil {
+		t.Fatalf("submit B returned an error instead of an outcome: %v", err)
+	}
+	rep, ok := repAny.(protocol.Reply)
+	if !ok {
+		t.Fatalf("submit B reply type = %T", repAny)
+	}
+	if rep.Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("submit B outcome code = %q, want busy", rep.Outcome.Code)
+	}
+	recB, found, gerr := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB})
+	if gerr != nil || !found {
+		t.Fatalf("busy refusal record: ok=%v err=%v", found, gerr)
+	}
+	if recB.State != protocol.StateRejected || recB.Code != protocol.CodeBusy || !recB.Tombstone {
+		t.Fatalf("busy-refused record = %s/%s tomb=%v, want rejected/busy/tombstoned", recB.State, recB.Code, recB.Tombstone)
+	}
+	if got := rt.Snapshot().Dispatches; got != before {
+		t.Fatalf("second dispatch happened: %d -> %d", before, got)
+	}
+
+	// Once A resolves, B's identical retry dispatches normally (the caller
+	// resubmits; the busy tombstone is re-admittable — auto-retry of a
+	// refused request would be queue semantics, D1-disabled in v1).
+	rt.Complete(idA, "done-A")
+	if !waitUntil(func() bool {
+		recA, ok, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idA})
+		return err == nil && ok && recA.State == protocol.StateCompleted
+	}) {
+		t.Fatalf("A never completed: %d", rt.Snapshot().Dispatches)
+	}
+	if _, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("identical resubmit B: %v", err)
+	}
+	recB2, found, gerr := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB})
+	if gerr != nil || !found {
+		t.Fatalf("retry record: ok=%v err=%v", found, gerr)
+	}
+	if recB2.State != protocol.StateRunning {
+		t.Fatalf("retried B state = %s, want running", recB2.State)
+	}
+}
+
+// TestBusyRetryTakesTheStoreReservation reproduces agent-message-queue-9dx.8:
+// the re-admission of a busy tombstone skipped Store.Reserve, so the store
+// counted no room for its result and admitted other work into that room.
+func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
+	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	ep.Register(fake.New("other", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+	local := core.Source{Host: "local"}
+
+	idA, idB := "11111111-1111-4111-8111-1111111111a7", "11111111-1111-4111-8111-1111111111b7"
+	if _, err := ep.Handle(submitCmd(idA), local); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	if _, err := ep.Handle(submitCmd(idB), local); err != nil {
+		t.Fatalf("submit B (busy): %v", err)
+	}
+	rt.Complete(idA, "done-A")
+	if !waitUntil(func() bool { return rt.UnacknowledgedResults() == 0 && len(rt.Snapshot().RunningKeys) == 0 }) {
+		t.Fatal("A's result was never acknowledged")
+	}
+	out, err := ep.Handle(submitCmd(idB), local)
+	if err != nil || out.(protocol.Reply).Snapshot.State != protocol.StateRunning {
+		t.Fatalf("identical resubmit B = %v, %v; want running", out, err)
+	}
+
+	// B now holds the room for its result: the store has none left for C.
+	c := submitCmd("11111111-1111-4111-8111-1111111111c7")
+	c.TargetID = "other"
+	out, err = ep.Handle(c, local)
+	if err != nil {
+		t.Fatalf("submit C: %v", err)
+	}
+	if got := out.(protocol.Reply).Outcome.Code; got != protocol.CodeStorageFull {
+		t.Fatalf("submit C outcome = %q, want storage_full: the re-admitted B took no reservation", got)
+	}
+}
+
+// TestReservationPoisonFailClosed reproduces the fail-closed poison
+// semantics of #739 (reservation): a
+// record for the TARGET whose file is unreadable makes the target's
+// reservation state undeterminable, so a new submit is refused — List()
+// alone would have dropped the poison diagnostics and reported idle, which
+// is exactly the double-dispatch this refuses. Poison for a DIFFERENT
+// target does not block.
+func TestReservationPoisonFailClosed(t *testing.T) {
+	ep, rt, store, _ := raceEndpoint(t)
+
+	// A poison record for the target, before any healthy submit: the submit
+	// must be refused (fail-closed), not dispatched as if the target were
+	// idle.
+	poisonPath := writePoisonRecord(t, store, "local", "fake", "11111111-1111-4111-8111-1111111111p1")
+	idB := "11111111-1111-4111-8111-1111111111b2"
+	if _, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"}); err == nil {
+		t.Fatal("submit succeeded despite an unreadable target record — reservation failed OPEN on poison")
+	}
+	if got := rt.Snapshot().Dispatches; got != 0 {
+		t.Fatalf("dispatch happened on poison path: %d", got)
+	}
+
+	// Removing the poison file restores dispatch.
+	if err := os.Remove(poisonPath); err != nil {
+		t.Fatalf("remove poison: %v", err)
+	}
+	idA := "11111111-1111-4111-8111-1111111111a1"
+	if _, err := ep.Handle(submitCmd(idA), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit A after poison removed: %v", err)
+	}
+
+	// A poison record for a DIFFERENT target must not block this target's
+	// second dispatch refusal path. Probed on a clean third target: poison
+	// on "other" is tolerated there (and, by symmetry, on "fake"); the
+	// poisoned target itself stays fail-closed.
+	writePoisonRecord(t, store, "local", "other", "11111111-1111-4111-8111-1111111111p2")
+	rtThird := fake.New("third", "e_1")
+	ep.Register(rtThird)
+	idC := "11111111-1111-4111-8111-1111111111c3"
+	cmd := submitCmd(idC)
+	cmd.TargetID = "third"
+	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit on a clean third target with unrelated poison: %v", err)
+	}
+}
+
+// TestReservationPoisonFailClosed (deterministic) covers the same
+// fail-closed semantics this chmod test did, without the root-skip and the
+// 0700-vs-0755 cleanup issue. Removed per the test-bar.
+
+// TestCancelRacesAdmission reproduces the cancel-races-admission
+// interleaving of #739: Submit is blocked inside the native admission gate; a
+// concurrent cancel records intent (no run exists) and the record stays
+// dispatching; Submit returns cancelled_before_admission; the shared
+// finishAdmissionLocked must create the missing Cancel metadata with a
+// CONFIRMED disposition — never a nil-deref, never cancelled with an empty
+// disposition. The cancel handler saw a non-terminal record at its own
+// decision point, so the fake emits the native cancelled event exactly as
+// the codex attachment does.
+func TestCancelRacesAdmission(t *testing.T) {
+	ep, rt, store, now := raceEndpoint(t)
+
+	rt.HoldAdmission()
+
+	// An early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
+	id := "11111111-1111-4111-8111-1111111111c4"
+	submitDone := make(chan error, 1)
+	go func() { _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); submitDone <- err }()
+	if !waitUntil(func() bool {
+		key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+		rec, found, err := store.Get(key)
+		return err == nil && found && rec.State == protocol.StateDispatching
+	}) {
+		t.Fatal("submit never reached dispatching")
+	}
+
+	// Cancel while the record is dispatching and Submit is blocked in the
+	// gate. The fake has no run for the key: it records cancelIntent and —
+	// because there is no run to abort — emits nothing yet; the intent is
+	// consumed by Submit when the gate releases, returning
+	// cancelled_before_admission. This is the exact codex shape.
+	ref := protocol.EncodeRef("local", "fake", id)
+	cancelAny, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
+		TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
+	}, core.Source{Host: "local"})
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	// The cancel reply's snapshot code equals its outcome code.
+	if cancelRep := cancelAny.(protocol.Reply); cancelRep.Snapshot.Code != cancelRep.Outcome.Code {
+		t.Fatalf("cancel reply snapshot.Code=%q != outcome.Code=%q", cancelRep.Snapshot.Code, cancelRep.Outcome.Code)
+	}
+
+	rt.ReleaseAdmission()
+	if err := <-submitDone; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, found, err := store.Get(key)
+	if err != nil || !found {
+		t.Fatalf("record after raced cancel: ok=%v err=%v", found, err)
+	}
+	if rec.State != protocol.StateCancelled {
+		t.Fatalf("state = %s, want cancelled", rec.State)
+	}
+	if rec.Cancel == nil {
+		t.Fatal("cancelled record has NO cancel metadata — nil-deref regression")
+	}
+	if rec.Cancel.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("disposition = %q, want cancelled (confirmed)", rec.Cancel.Disposition)
+	}
+	if got := rt.Snapshot().Dispatches; got != 1 {
+		t.Fatalf("dispatches = %d, want 1 (blocked submit, no double dispatch)", got)
+	}
+	if rt.Snapshot().Aborts != 0 {
+		t.Fatalf("aborts = %d, want 0 (admission never happened)", rt.Snapshot().Aborts)
+	}
+}
+
+// TestCancelEventDuringAdmission reproduces the other raced shape of
+// #739: the
+// native cancel handler DOES emit EventRunCancelled while Submit is blocked
+// (a queued run cancelled natively). onNative sets StateCancelled without
+// cancel metadata (none exists); Submit then returns with an admission the
+// record no longer reflects. finishAdmissionLocked's non-dispatching branch
+// must create the metadata, confirm the disposition, and return the durable
+// cancelled snapshot — never an empty success.
+func TestCancelEventDuringAdmission(t *testing.T) {
+	ep, rt, store, _ := raceEndpoint(t)
+
+	rt.HoldAdmission()
+
+	// An early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
+	id := "11111111-1111-4111-8111-1111111111c5"
+	var submitRep protocol.Reply
+	submitDone := make(chan error, 1)
+	go func() {
+		any, err := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+		if any != nil {
+			submitRep, _ = any.(protocol.Reply)
+		}
+		submitDone <- err
+	}()
+	if !waitUntil(func() bool {
+		key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+		rec, found, err := store.Get(key)
+		return err == nil && found && rec.State == protocol.StateDispatching
+	}) {
+		t.Fatal("submit never reached dispatching")
+	}
+
+	// The native side cancels the run mid-admission and emits the event,
+	// exactly as a queued-run deletion does in the codex attachment.
+	rt.CancelRun(id)
+
+	if !waitUntil(func() bool {
+		key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+		rec, found, err := store.Get(key)
+		return err == nil && found && rec.State == protocol.StateCancelled
+	}) {
+		t.Fatal("native cancel event never moved the record to cancelled")
+	}
+
+	rt.ReleaseAdmission()
+	if err := <-submitDone; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, found, err := store.Get(key)
+	if err != nil || !found {
+		t.Fatalf("record after native cancel: ok=%v err=%v", found, err)
+	}
+	if rec.State != protocol.StateCancelled {
+		t.Fatalf("state = %s, want cancelled", rec.State)
+	}
+	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("cancel metadata = %+v, want confirmed disposition", rec.Cancel)
+	}
+	if submitRep.Snapshot.RequestID == "" || submitRep.Snapshot.State != protocol.StateCancelled {
+		t.Fatalf("submit reply snapshot = %+v, want durable cancelled snapshot", submitRep.Snapshot)
+	}
+	if submitRep.Outcome.Code != protocol.CodeCancelledBeforeAdmission {
+		t.Fatalf("submit outcome code = %q, want cancelled_before_admission", submitRep.Outcome.Code)
+	}
+	if submitRep.Outcome.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("submit outcome disposition = %q, want cancelled", submitRep.Outcome.Disposition)
+	}
+}
+
+// TestAdmitDeferredRacedCancel drives the same
+// #739 shape through the
+// deferred admission path: a received record whose target registers later,
+// with a cancel landing between the Tick's dispatching commit and the
+// native admission returning.
+func TestAdmitDeferredRacedCancel(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	t.Cleanup(func() { _ = ep.Close() })
+
+	// Target registered but OFFLINE: the submit stays received (deferred) —
+	// a submit to a target that was never shared is refused unshared, not
+	// queued, so the offline shape is the only way to reach admitDeferred.
+	rt.SetOffline(true)
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111c6"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("deferred submit: %v", err)
+	}
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	if rec, found, err := store.Get(key); err != nil || !found || rec.State != protocol.StateReceived {
+		t.Fatalf("offline submit did not defer: state=%s found=%v err=%v", rec.State, found, err)
+	}
+
+	// Target comes online with admission held; Tick admits the deferred
+	// record into the held gate.
+	rt.SetOffline(false)
+	rt.HoldAdmission()
+
+	// An early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
+	ep.Register(rt)
+	tickDone := make(chan error, 1)
+	go func() { tickDone <- ep.Tick() }()
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(key)
+		return err == nil && found && rec.State == protocol.StateDispatching
+	}) {
+		t.Fatal("deferred record never reached dispatching")
+	}
+
+	// Cancel the queued run natively while admission is held.
+	rt.CancelRun(id)
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(key)
+		return err == nil && found && rec.State == protocol.StateCancelled
+	}) {
+		t.Fatal("native cancel event never moved the deferred record")
+	}
+
+	rt.ReleaseAdmission()
+	if err := <-tickDone; err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(key)
+		if err != nil || !found || rec.Cancel == nil {
+			return false
+		}
+		return rec.Cancel.Disposition == protocol.CancelConfirmed
+	}) {
+		rec, _, _ := store.Get(key)
+		t.Fatalf("deferred raced cancel never confirmed metadata: %+v", rec)
+	}
+	rec, _, err := store.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != protocol.StateCancelled {
+		t.Fatalf("state = %s, want cancelled", rec.State)
+	}
+	// The gated Submit must
+	// not admit a run the cancel already reported as cancelled.
+	if rt.HasRun(id) {
+		t.Fatal("a live native run leaked after a gated deferred cancel")
+	}
+}
+
+// TestAdmitDeferredStaysDeferredWhenReserved reproduces the reserved
+// branch of admitDeferred in #739: a received record
+// whose sibling is still in flight is NOT dispatched by Tick — it stays
+// received and retries on the next tick after the sibling resolves.
+func TestAdmitDeferredStaysDeferredWhenReserved(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	rt.SetOffline(true)
+	ep := core.New(core.Config{Store: store, Now: now})
+	t.Cleanup(func() { _ = ep.Close() })
+	ep.Register(rt)
+
+	// Sibling A goes in-flight (offline, so it stays received and deferred).
+	idA := "11111111-1111-4111-8111-1111111111da"
+	if _, err := ep.Handle(submitCmd(idA), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	keyA := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idA}
+
+	// B is also deferred while offline.
+	idB := "11111111-1111-4111-8111-1111111111db"
+	if _, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit B: %v", err)
+	}
+	keyB := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB}
+
+	// Bring the target online with admission held (A will dispatch and block
+	// in the gate; B must stay deferred because A is in flight).
+	rt.SetOffline(false)
+	rt.HoldAdmission()
+
+	// An early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
+	ep.Register(rt)
+	tickDone := make(chan error, 1)
+	go func() { tickDone <- ep.Tick() }()
+
+	// A reaches dispatching; B stays received.
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(keyA)
+		return err == nil && found && rec.State == protocol.StateDispatching
+	}) {
+		t.Fatal("deferred A never reached dispatching")
+	}
+	recB, found, err := store.Get(keyB)
+	if err != nil || !found || recB.State != protocol.StateReceived {
+		t.Fatalf("B dispatched while sibling in flight: state=%s found=%v err=%v", recB.State, found, err)
+	}
+
+	// Resolve A; the next Tick admits B.
+	rt.ReleaseAdmission()
+	if err := <-tickDone; err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	rt.Complete(idA, "done-A")
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(keyA)
+		return err == nil && found && rec.State == protocol.StateCompleted
+	}) {
+		t.Fatal("A never completed")
+	}
+	if err := ep.Tick(); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if !waitUntil(func() bool {
+		rec, found, err := store.Get(keyB)
+		return err == nil && found && (rec.State == protocol.StateDispatching || rec.State == protocol.StateRunning)
+	}) {
+		rec, _, _ := store.Get(keyB)
+		t.Fatalf("B never admitted after sibling resolved: state=%s", rec.State)
+	}
+}
+
+// TestSubmitRacedByReconcileKeepsEvidence reproduces CI run 36407766979
+// (TestCLISubmitPrintsAchievedEvidence flake): a reconcile tick moved the
+// admitted record to running while Submit was in flight, and the reply lost
+// Outcome.Evidence.
+func TestSubmitRacedByReconcileKeepsEvidence(t *testing.T) {
+	ep, rt, store, _ := raceEndpoint(t)
+	rt.HoldAfterAdmit()
+	t.Cleanup(rt.ReleaseAfterAdmit)
+	id := "11111111-1111-4111-8111-1111111111e1"
+	done := make(chan protocol.Reply, 1)
+	go func() {
+		out, _ := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+		rep, _ := out.(protocol.Reply)
+		done <- rep
+	}()
+	if !waitUntil(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("submit never admitted a run")
+	}
+	if err := ep.Tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	if rec, ok, _ := store.Get(k); !ok || rec.State != protocol.StateRunning {
+		t.Fatalf("precondition: state=%s, want running", recState(rec, ok))
+	}
+	rt.ReleaseAfterAdmit()
+	select {
+	case rep := <-done:
+		if rep.Outcome.Evidence != protocol.EvidenceAdmitted {
+			t.Fatalf("Outcome.Evidence=%q, want %q", rep.Outcome.Evidence, protocol.EvidenceAdmitted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after the gate opened")
+	}
+}

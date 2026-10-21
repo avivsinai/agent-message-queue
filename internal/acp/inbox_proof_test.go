@@ -11,7 +11,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// Bead agent-message-queue-u1e (Pro review of #976 r2, P2): the mailbox
+// Regression: #976, the mailbox
 // prompt and steer paths proved an earlier delivery with os.Lstat, so a
 // directory at inbox/new/<id>.md read as a delivered message. Neither path
 // reports a delivery the inbox does not hold.

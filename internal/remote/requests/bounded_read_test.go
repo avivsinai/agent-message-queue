@@ -9,7 +9,7 @@ import (
 )
 
 // TestRequestStoreReadRejectsFIFOAndOversized is the agent-message-queue-qgc
-// regression (codex owner review 2026-09-24, finding 3). List used to
+// regression. List used to
 // os.ReadFile every record before the MaxRecordBytes check, so a FIFO blocked
 // the endpoint and a huge file was allocated. Both are poison for that record
 // only; a sibling target is still returned, and neither is reported as absent.

@@ -1,0 +1,479 @@
+package codex
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+// clientTestDeadline bounds every blocking wait: a regression FAILS, never hangs CI.
+const clientTestDeadline = 5 * time.Second
+
+// newStandInClient dials a stand-in app-server over a unix socket and wires a
+// handler-invocation counter into both callback paths.
+func newStandInClient(t *testing.T, onNotif func(), onReq func(ServerRequest)) (*Client, net.Listener) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stand-in server accepts one connection and then just reads
+	// (discarding) — it never sends anything unless a test writes itself.
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		for {
+			if _, err := ws.readText(); err != nil {
+				return
+			}
+		}
+	}()
+	ws, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	h := &swappableHandlers{}
+	if onNotif != nil {
+		h.setNote(func(n Notification) { onNotif() })
+	}
+	if onReq != nil {
+		h.setReq(onReq)
+	}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
+	t.Cleanup(func() { _ = c.Close(); _ = l.Close() })
+	return c, l
+}
+
+// newClientWithServerHook builds a client whose stand-in server forwards the
+// FIRST frame the client sends back to the test via onFrame.
+func newClientWithServerHook(t *testing.T, onFrame func([]byte)) (*Client, net.Listener) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		first := true
+		for {
+			payload, err := ws.readText()
+			if err != nil {
+				return
+			}
+			var msg rpcMessage
+			if json.Unmarshal(payload, &msg) == nil && msg.ID != nil && msg.Method != "" {
+				// A Call ("ping"): answer it so pump-liveness assertions can
+				// prove the read pump still moves.
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+				continue
+			}
+			if first {
+				first = false
+				onFrame(payload)
+			}
+		}
+	}()
+	ws, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	h := &swappableHandlers{}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
+	t.Cleanup(func() { _ = c.Close() })
+	return c, l
+}
+
+// sendNotif / sendReq let tests inject reader-side frames as if the server
+// sent them — but the real readLoop is the only writer-safe reader of the
+// socket, so tests instead deliver via a direct server frame over the conn.
+// Simplest deterministic injection: call the dispatch paths the readLoop
+// would call, since the tests target those paths' lifecycle, not the parse.
+
+// TestCloseStopsReqWorker: reqWorker is the only worker.
+// Close runs the full teardown — the req worker exits (reqWorkerDone) after
+// the read pump is drained, and the queues close safely. A second Close
+// neither panics nor deadlocks (separate stop-Once, idempotent ws close).
+func TestCloseStopsReqWorker(t *testing.T) {
+	c, _ := newStandInClient(t, nil, nil)
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case <-c.reqWorkerDone:
+	case <-time.After(clientTestDeadline):
+		t.Fatal("reqWorker did not exit after Close")
+	}
+	done := make(chan struct{})
+	go func() { _ = c.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(clientTestDeadline):
+		t.Fatal("second Close deadlocked")
+	}
+}
+
+// TestCallWaitsBoundedBehindWedgedWriter: ctx must bound WAITING
+// for the writer slot, not just the write. A wedged writer (server never
+// reads) holds the slot; a second Call with a short deadline must return
+// ctx.Err within its deadline instead of blocking behind the wedged writer.
+// Regression: bead agent-message-queue-7xl.
+func TestCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	// The server accepts but NEVER reads: the client's first big write wedges.
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = acceptServerWS(conn)
+		// deliberately never read or write
+	}()
+	ws, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c := newClient(ws, Handlers{})
+	t.Cleanup(func() { _ = c.Close() })
+
+	// NO second writer: a "Writer A" goroutine alongside the test-held slot
+	// would block in lockWrite's unconditional channel send forever (socket
+	// close does not unblock a channel send) and leak.
+	// The test-owned slot already establishes the exact contention Call B
+	// contends on; a second writer adds nothing and leaks.
+	//
+	// Deterministic: we hold the writer slot
+	// OURSELVES before any other goroutine can take it — no timing
+	// assumption at all. Call B's ctx proving the bounded wait is what this
+	// test pins.
+	ws.wmu <- struct{}{} // hold the slot for the whole test
+
+	// Call B: small payload, 250ms deadline. The slot is held by the test
+	// (uncontested under the old mutex: B waited unboundedly).
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err = c.Call(ctx, "ping", map[string]any{}, nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("call B unexpectedly succeeded while writer wedged")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("call B blocked %v — ctx did not bound WAITING for the writer", elapsed)
+	}
+	// Under -race scheduling, B's ctx race may lose to the read pump's EOF
+	// (Close tears the conn down when the test ends); the INVARIANT is that
+	// B returned within its deadline with a bounded error, never blocked
+	// behind A. DeadlineExceeded is the expected case on a live connection.
+	c.mu.Lock()
+	readErr := c.readErr
+	c.mu.Unlock()
+	if !errors.Is(err, context.DeadlineExceeded) && (readErr == nil || !errors.Is(err, readErr)) {
+		t.Fatalf("call B err = %v, want context.DeadlineExceeded (or the connection-closed error under teardown)", err)
+	}
+}
+
+// TestReplyRequiredNotDroppedAndPumpStaysLive: notifications may
+// drop on a full backlog, but reply-required server requests must never be
+// silently dropped — delivered via their own queue, or explicitly failed on
+// the should-be-impossible overflow — and the read pump never blocks on
+// handler latency.
+func TestReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
+	var mu sync.Mutex
+	approved := make(chan string, 8)
+	blockApproval := make(chan struct{}) // wedges the first approval handler
+	c, _ := newStandInClient(t, nil, nil)
+	first := true
+	handlersOf(c).setReq(func(r ServerRequest) {
+		mu.Lock()
+		approved <- r.Method
+		mu.Unlock()
+		if first {
+			first = false
+			<-blockApproval // wedge AFTER recording: the pump must survive it
+		}
+	})
+
+	// A reply-required request with a wedged handler: it is still DELIVERED
+	// (queued) and the read pump must stay live — an RPC Call completes even
+	// though the approval handler is stuck (the pump never blocks on handler
+	// latency; notifications run synchronously but are bounded state-applies).
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "item/commandExecution/requestApproval"})
+	select {
+	case m := <-approved:
+		if m != "item/commandExecution/requestApproval" {
+			t.Fatalf("delivered method = %s", m)
+		}
+	case <-time.After(clientTestDeadline):
+		t.Fatal("reply-required server request dropped")
+	}
+	close(blockApproval)
+
+	// Overflow (should-be-impossible): fill reqQ past capacity with a wedged
+	// handler, the overflowed request must be EXPLICITLY FAILED, not dropped.
+	// c2's stand-in server echoes the first frame it reads, so respondError's
+	// explicit error is observable without touching the live client's socket
+	// (swapping it would race the readLoop).
+	release2 := make(chan struct{})
+	respCh := make(chan []byte, 1)
+	c2, _ := newClientWithServerHook(t, func(payload []byte) { respCh <- payload })
+	headPicked := make(chan struct{})
+	handlersOf(c2).setReq(func(r ServerRequest) {
+		// Signal that the req worker has consumed the head from reqQ, then
+		// wedge: the queue below can now fill deterministically.
+		close(headPicked)
+		<-release2
+	})
+	c2.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-head"`), Method: "m"})
+	<-headPicked // worker consumed the head; it is wedged in this handler
+	for i := 0; i < cap(c2.reqQ)+1; i++ {
+		c2.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-x"`), Method: "m"})
+	}
+	select {
+	case payload := <-respCh:
+		var msg rpcMessage
+		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil {
+			t.Fatalf("overflow response not an explicit error: %s (%v)", payload, err)
+		}
+		if msg.ID == nil || string(*msg.ID) != `"srv-x"` {
+			t.Fatalf("error response id = %s, want srv-x", string(*msg.ID))
+		}
+	case <-time.After(clientTestDeadline):
+		t.Fatal("overflowed reply-required request neither delivered nor explicitly failed")
+	}
+	// Pump liveness with c2's handler STILL wedged (release2 open): a real
+	// RPC must complete — the read pump never blocks on handler latency. c2's
+	// stand-in server replies to the Call, so success proves the pump moved.
+	ctx, cancel := context.WithTimeout(context.Background(), clientTestDeadline)
+	defer cancel()
+	var pong struct{}
+	if err := c2.Call(ctx, "ping", map[string]any{}, &pong); err != nil {
+		t.Fatalf("RPC blocked while server-request handler wedged (pump starved): %v", err)
+	}
+	close(release2)
+}
+
+// TestServerRequestHandlerPanicAnswersOnlyNonInteractive: a handler that
+// panics has not answered, so the app-server would wait forever for that
+// request id. The worker answers a non-interactive request with an error,
+// sends nothing for an approval (the terminal keeps it), and keeps serving.
+// Found in the repo quality audit (agent-message-queue-0ed.15).
+func TestServerRequestHandlerPanicAnswersOnlyNonInteractive(t *testing.T) {
+	respCh := make(chan []byte, 1)
+	c, _ := newClientWithServerHook(t, func(payload []byte) { respCh <- payload })
+	served := make(chan string, 1)
+	handlersOf(c).setReq(func(r ServerRequest) {
+		if string(r.ID) != `"srv-next"` {
+			panic("handler bug")
+		}
+		served <- string(r.ID)
+	})
+	// The worker is sequential and the stand-in server reports only the
+	// first frame, so an answer to the approval would arrive first.
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-approval"`), Method: methodCommandApproval})
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-other"`), Method: "example/nonInteractiveRequest"})
+	select {
+	case payload := <-respCh:
+		var msg rpcMessage
+		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil || msg.ID == nil || string(*msg.ID) != `"srv-other"` {
+			t.Fatalf("first answer = %s (%v), want only an error for srv-other", payload, err)
+		}
+	case <-time.After(clientTestDeadline):
+		t.Fatal("panicked non-interactive server request was never answered")
+	}
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-next"`), Method: methodCommandApproval})
+	select {
+	case id := <-served:
+		if id != `"srv-next"` {
+			t.Fatalf("served %s, want srv-next", id)
+		}
+	case <-time.After(clientTestDeadline):
+		t.Fatal("request worker stopped after a handler panic")
+	}
+}
+
+// TestCloseConcurrentWithInboundServerRequest pins the BLOCKER: Close
+// must tear the socket down and DRAIN the read pump BEFORE closing reqQ.
+// The old order (close reqQ -> drain -> ws.close) left the pump live during
+// the drain window: an inbound approval frame then sent on a CLOSED reqQ —
+// send on closed channel, no recover in readLoop, process crash.
+//
+// The barrier is the pump itself: notifications run synchronously on it, so
+// a handler that blocks parks the pump between frames. The server writes a
+// notification and an approval request in ONE write, so once the pump parks
+// on the notification the approval is already in the client's read buffer.
+// Close starts, the peer observes socket closure, and the pump is released
+// to decode the buffered approval. Correct order: reqQ is still open (Close
+// closes it only after the pump exits), so the send lands. Reverted order:
+// reqQ is already closed and the send panics the test process.
+func TestCloseConcurrentWithInboundServerRequest(t *testing.T) {
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	const approval = `{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`
+	peerSawClose := make(chan struct{})
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		var frames []byte
+		for _, p := range []string{
+			`{"jsonrpc":"2.0","method":"park","params":{}}`,
+			approval,
+		} {
+			frames = append(append(frames, 0x80|opText, byte(len(p))), p...) // unmasked, < 126 bytes
+		}
+		if _, err := conn.Write(frames); err != nil {
+			return
+		}
+		for {
+			if _, err := ws.readText(); err != nil {
+				close(peerSawClose)
+				return
+			}
+		}
+	}()
+
+	w, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePump := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releasePump)
+	c := newClient(w, Handlers{
+		OnNotification: func(n Notification) {
+			if n.Method == "park" {
+				close(parked)
+				<-release
+			}
+		},
+		OnServerRequest: func(ServerRequest) {},
+	})
+	select {
+	case <-parked:
+	case <-time.After(clientTestDeadline):
+		t.Fatal("pump never parked on the notification")
+	}
+	if got, want := w.br.Buffered(), 2+len(approval); got != want {
+		t.Fatalf("setup: %d bytes buffered behind the parked pump, want the whole approval frame (%d)", got, want)
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		_ = c.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-peerSawClose:
+	case <-time.After(clientTestDeadline):
+		t.Fatal("peer never observed socket closure (ws.close did not run first)")
+	}
+	releasePump()
+	select {
+	case <-closeDone:
+	case <-time.After(clientTestDeadline):
+		t.Fatal("Close deadlocked after the pump was released")
+	}
+	// No panic = pass. (A send on a closed reqQ panics the whole test process.)
+}
+
+// TestCloseBoundedUnderWedgedHandler: Close must NEVER
+// hang, even against a reqWorker handler that wedges forever. The whole
+// post-stopOnce drain shares one bounded budget — on timeout Close proceeds
+// (the conn is already closed; the leaked handler is harmless).
+func TestCloseBoundedUnderWedgedHandler(t *testing.T) {
+	c, _ := newStandInClient(t, nil, nil)
+	// Shrink the drain budget for this test. The old
+	// shape burned Close's FULL 2s production budget — a real 4s of wall
+	// clock per run — to prove a bound whose VALUE is irrelevant: the
+	// invariant is that Close returns instead of hanging on a wedged
+	// handler. With a 50ms budget the same wedged-handler scenario is
+	// exercised deterministically in milliseconds, and the asserts below
+	// scale with it.
+	const budget = 50 * time.Millisecond
+	c.closeDrainBudget.Store(budget)
+	handlerStarted := make(chan struct{})
+	neverRelease := make(chan struct{}) // wedged forever
+	handlersOf(c).setReq(func(r ServerRequest) {
+		close(handlerStarted)
+		<-neverRelease
+	})
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "m"})
+	<-handlerStarted // handler executing and wedged
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { _ = c.Close(); close(done) }()
+	// Upper bound: the budget plus generous scheduling headroom — Close
+	// must NEVER wait for the never-releasing handler itself.
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 10*budget {
+			t.Fatalf("Close took %v — exceeded its %v bound", elapsed, budget)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung on a wedged reqWorker handler — teardown is unbounded")
+	}
+	// The worker is still wedged (expected); do not release — the test ends
+	// and the process exits; the goroutine leak is confined to the test.
+}

@@ -34,7 +34,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// Bead 611.42.3, design section 7: a Claude tool approval raised during a
+// A Claude tool approval raised during a
 // Buzz request shows in the DM. Through the real carrier, endpoint and
 // Claude attachment on a temporary home, with the PermissionRequest hook
 // called as a function: ❌ prints deny, and the approval message is edited
@@ -71,7 +71,7 @@ func TestClaudeApprovalRejectedFromBuzz(t *testing.T) {
 	}
 }
 
-// Pro review of #929, 2026-09-30, #1: an answer file is not owner
+// Regression: #929, an answer file is not owner
 // authorization. Without an owner pin the DM offers ❌ only, and a forged
 // allow answer file never yields an allow: the hook prints nothing, and the
 // approval does not end as answered.

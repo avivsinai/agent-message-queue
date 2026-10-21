@@ -8,7 +8,7 @@ import (
 // TestBoundReasonRendersInertInDM pins bead agent-message-queue-lfd: adapter
 // refusal text cannot carry direction overrides, line breaks or zero-width
 // characters into the Buzz DM. Filtering alone cannot make text inert — the
-// DM renderer decodes entities and autolinks URLs (review of #972 r3) — so
+// DM renderer decodes entities and autolinks URLs (#972) — so
 // inertness of the rest is the rendering boundary's job (code spans in
 // internal/acp); these rows pin what BoundReason itself removes.
 func TestBoundReasonRendersInertInDM(t *testing.T) {

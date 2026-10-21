@@ -56,9 +56,10 @@ func steerEvent(s *Server, sid, text, event string) response {
 	return resp
 }
 
-// Bead agent-message-queue-cfy: a follow-up DM during an open mailbox turn
+// A follow-up DM during an open mailbox turn
 // reaches the bound handle as an urgent steer from buzz on the turn's thread
 // that refs the prompt, and the turn still ends on the final reply.
+// Regression: bead agent-message-queue-cfy.
 func TestFollowUpDMSteersAnOpenMailboxTurn(t *testing.T) {
 	s, root := mailboxServer(t)
 	var prompt string
@@ -83,7 +84,7 @@ func TestFollowUpDMSteersAnOpenMailboxTurn(t *testing.T) {
 	}
 }
 
-// Review of #965, finding 1: the steer journal was root-local, so a steer
+// Regression: #965, the steer journal was root-local, so a steer
 // event replayed after set_model chose another binding was delivered again
 // into that binding's turn.
 func TestReplayedSteerStaysWithItsFirstBinding(t *testing.T) {
@@ -123,7 +124,7 @@ func TestReplayedSteerStaysWithItsFirstBinding(t *testing.T) {
 	}
 }
 
-// Review of #965, finding 2: a steer was written after another process had
+// Regression: #965, a steer was written after another process had
 // recorded the event's final answer.
 func TestSteerAfterTheFinalAnswerIsRefused(t *testing.T) {
 	s, root := mailboxServer(t)
@@ -144,7 +145,7 @@ func TestSteerAfterTheFinalAnswerIsRefused(t *testing.T) {
 	}
 }
 
-// Review of #965, finding 3: a steer committed to the inbox was reported as
+// Regression: #965, a steer committed to the inbox was reported as
 // failed when the event journal write failed afterwards.
 func TestCommittedSteerIsADeliveryWithoutTheJournal(t *testing.T) {
 	s, root := mailboxServer(t)

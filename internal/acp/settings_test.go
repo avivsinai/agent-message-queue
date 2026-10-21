@@ -50,7 +50,7 @@ func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	}
 }
 
-// Review of #1023: {"turn_timout":"4s"} was accepted as an empty document, so
+// Regression: #1023, {"turn_timout":"4s"} was accepted as an empty document, so
 // a typo silently reset a working turn timeout to the startup value. An
 // unknown key is refused and the last good value stays.
 func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {

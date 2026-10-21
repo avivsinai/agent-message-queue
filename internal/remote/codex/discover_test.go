@@ -11,11 +11,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// 611.13: discovery lists each loaded thread of a running app-server daemon
+// Discovery lists each loaded thread of a running app-server daemon
 // with the manifest config needed to attach it.
 func TestDiscoverListsLoadedThreads(t *testing.T) {
 	sock := fakeLoadedDaemon(t, "")
-	// The socket arrives as the --codex-socket hint (codex 611.13 consult).
+	// The socket arrives as the --codex-socket hint.
 	cands, err := discoverer{}.Discover(context.Background(), registry.DiscoverRequest{Hints: map[string]string{HintSocket: sock}})
 	if err != nil {
 		t.Fatal(err)
