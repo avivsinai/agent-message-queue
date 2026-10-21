@@ -232,7 +232,7 @@ func TestBodyKeyFileLifecycle(t *testing.T) {
 func TestPerKindCredential(t *testing.T) {
 	owner := mustHexSecret(t, vecOwnerSecret)
 	dir := t.TempDir()
-	k, err := LoadOrMint(dir)
+	k, err := Mint(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

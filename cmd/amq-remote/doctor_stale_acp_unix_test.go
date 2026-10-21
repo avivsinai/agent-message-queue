@@ -59,13 +59,10 @@ func TestStaleProbeReturnsWithinTotalDeadline(t *testing.T) {
 	probeTimeout = 200 * time.Millisecond
 
 	start := time.Now()
-	probes, err := staleACPProbe()
+	probes := inspectStaleACP(t)
 	elapsed := time.Since(start)
 	// ps was cut off by the context, so the candidate list is empty and the
-	// probe returns a nil (not error) result well within the bound.
-	if err != nil {
-		t.Fatal(err)
-	}
+	// inspection returns well within the bound.
 	if len(probes) != 0 {
 		t.Fatalf("probes = %v, want none when ps is cut off", probes)
 	}

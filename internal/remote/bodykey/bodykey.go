@@ -256,16 +256,6 @@ func writeSecretFile(path string, secret []byte) error {
 	return f.Close()
 }
 
-// LoadOrMint returns the session's body key, minting it only if absent.
-func LoadOrMint(dir string) (*BodyKey, error) {
-	if k, err := Load(filepath.Join(dir, "body.key")); err == nil {
-		return k, nil
-	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ErrWrongFormat) {
-		return nil, err
-	}
-	return Mint(dir)
-}
-
 // AuthTag is a parsed NIP-OA `auth` tag: the four-element
 // ["auth", owner-pubkey, conditions, sig] array, with the conditions string
 // preserved verbatim (clause order is part of the signed preimage).

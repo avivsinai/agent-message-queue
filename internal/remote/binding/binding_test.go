@@ -16,7 +16,7 @@ func TestRemoveLeavesAnotherSessionsBinding(t *testing.T) {
 	if err := Write(b); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := Remove(a.Same); err != nil || removed {
+	if removed, err := Retire(a.Same); err != nil || len(removed) != 0 {
 		t.Fatalf("removed=%v err=%v; A's off removed B's binding", removed, err)
 	}
 	if got, err := Read(); err != nil || !got.Same(b) {
