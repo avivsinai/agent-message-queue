@@ -1,9 +1,10 @@
 # Wake operations
 
 This reference defines the operator-facing contracts for `wake check`,
-`repair`, `recover-owner`, `retire`, and doctor wake repairs. For durable file
-and crash invariants, see [Wake state invariants](wake-state-invariants.md) and
-the [wake lifecycle document](wake-lifecycle.md).
+`repair`, `recover-owner`, `retire`, self-upgrade, and doctor wake repairs. For
+durable file and crash invariants, see
+[Wake state invariants](wake-state-invariants.md) and the
+[wake lifecycle document](wake-lifecycle.md).
 
 ## Inspect before mutation
 
@@ -17,6 +18,24 @@ A non-TTY agent must preserve a live wake unless the check reports
 `agent_safe`. The check is advice, not mutation authority: every mutating
 command revalidates the current process, target, generation, root, and owner
 state before it changes anything.
+
+`wake check` and `doctor` JSON has two schemas. Schema 1 is the default and is
+byte-compatible for a missing lock; a live or stale lock adds
+`wake_generation` and `wake_target_digest` when they exist (omitted when
+empty). Schema 2 is explicit with `--json-schema=2` (which requires `--json`).
+It gives a closed action kind, actor, reason code, and an argv command object
+for a directly executable action or a safe operator diagnostic. Missing
+evidence is JSON `null`, including `wake.generation` and `wake.target_digest`;
+`image.status="unknown"` is a real classification, not an error. In doctor
+schema 2, each wake-lock entry carries the same decision under `wake_check`.
+
+The wake child appends full runtime diagnostics to the private
+`agents/<agent>/.wake.log`; the controlling terminal receives only
+terminal-safe attention output, so fatal-error text stays out of full-screen
+agent composers. A new wake truncates the log when it has reached 1 MiB, and
+the 30-second maintenance tick checks again, so a long-lived wake bounds its
+own log. The keepalive launcher's detached variant is in
+[the keepalive reference](amq-keepalive.md#detached-wake-diagnostics).
 
 ## Hold by priority
 
@@ -166,7 +185,7 @@ later `wake config` change is not undone by the original command line. When the
 file is absent, a resume seeds it once from the settings flags in its argv; a
 resume never exits because of the file. Repair, `coop exec`, and keepalive pass
 no settings flags and start fresh on the stored file. A start that loses the
-lock, and `--accept-existing-wake` that adopts a live wake, write nothing. A
+lock, and a start that adopts an existing live wake, write nothing. A
 fresh start with explicit flags refuses to start when the file is refused or
 cannot be written. A fresh start without settings flags runs with the defaults,
 logs the error, and records `refused`. A self-upgrade or restart candidate is
@@ -247,6 +266,49 @@ when the wake stays `unreported` for 5 s, and exit 0 at once when no wake runs. 
 state in `.wake.settings.applied`; the file is not a receipt of message
 consumption.
 
+## Self-upgrade
+
+A resume-eligible wake started by `coop exec` follows the stable AMQ launch
+path (for example the Homebrew `bin/amq` symlink). When an installer points
+that path at a strictly newer release image, the wake waits for a quiescent
+delivery boundary and replaces its running image in place: the PID, terminal
+ownership, and unread work stay. On Darwin, a running wake whose mapped
+executable still has the recorded device and inode counts as the same image
+after the package manager removes the old path. On Homebrew or Scoop installs,
+`amq upgrade` delegates to the package manager.
+
+- **Candidates.** The wake reads the candidate's version from the recorded
+  `-X main.version` linker assignment and never runs the candidate to discover
+  it. A build with any linker flag other than `-s`, `-w`, and
+  `-X main.version`, a versioned `go install`, a `-trimpath` build, or an image
+  whose build metadata cannot be read is deferred. An incumbent without a
+  parsable version does not self-upgrade. On Darwin, the staged image must pass
+  `/usr/bin/codesign --verify --strict`.
+- **Preflights.** After the image is bound and verified, the wake runs it
+  twice before the exec: `--version` must print the version read from the
+  metadata, and a launch-contract preflight must confirm the exact wake argv
+  and bootstrap. Each probe runs in its own process group with a timeout and
+  is killed with that group. A descendant that calls `setsid` or `setpgid`
+  leaves the group and escapes this cleanup.
+- **Not eligible.** Pinned binaries, ownerless and keepalive wakes, repair
+  flows, destructive interrupts, and `--inject-cmd` wakes never self-upgrade.
+- **Disable.** Start the wake with `--no-self-upgrade` or
+  `AMQ_WAKE_NO_SELF_UPGRADE=1`, or set the live `self_upgrade` setting to
+  `false` (see [Live settings](#live-settings)).
+- **Failure guard.** A failed candidate is tried at most once per wake
+  generation, with memory of the 8 most recent candidates. Before the exec,
+  the wake writes a private `.wake.selfupgrade.attempt` record; a later wake
+  that reaches maintenance refuses the same image while that attempt is fresh.
+  The guard cannot help when the new image dies before any wake reaches
+  maintenance. A wake built without the guard ignores the record, so a mixed
+  pair of old and new images has no crash-loop protection.
+- **No rollback.** AMQ does not write or keep the executable. Recover from a
+  bad image by reinstalling or selecting a known-good package version.
+
+Schema-2 `wake check` and `doctor` JSON report the latest decision under
+`self_upgrade`. The `amq-keepalive` supervisor has its own contract in
+[the keepalive reference](amq-keepalive.md#self-upgrade-and-rollback).
+
 ## Doctor
 
 `amq doctor --ops` reports queue depth, sibling-session backlog, DLQ age,
@@ -278,6 +340,17 @@ doctor otherwise exits 0.
 It proves prompt notification, not message consumption. `recent_activity`
 means only that `last_seen` is fresh. AMQ does not claim `consumer_live`
 without a separate monitor heartbeat or lock.
+
+## Injector identity
+
+AMQ identifies an external injector (`--inject-via`/`--wake-inject-via`) by its
+resolved executable path and its ordered fixed arguments
+(`--inject-arg`/`--wake-inject-arg`), which `.wake.target` stores as
+`inject_via` and `inject_args`. Put any provider target identity that
+distinguishes a pane, window, or session in those fixed arguments. Environment
+variables and external provider configuration are not part of the identity, so
+repair, recovery, and retirement cannot detect a target change made only
+through them: after repointing a provider that way, restart the wake.
 
 ## Repair
 

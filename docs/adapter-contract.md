@@ -122,18 +122,3 @@ The v1 adapter contract does **not** define:
 - automatic reply routing back into every upstream orchestrator
 
 If AMQ grows additional adapters later, changes should extend this document first and preserve the message-first product boundary.
-
-## Wake ring adapters
-
-`amq-bridge ring` is a content-free doorbell. The contract is
-`adapter <handle> <pending>`: exit 0 accepted, nonzero deferred. The
-adapters never receive message bytes.
-
-- `grokbot` POSTs `{"handle","pending"}` to the URL in a mode-0600 JSON
-  file `{"url","key"}`. The key is sent as `X-AMQ-Ring-Key`.
-- `slack` POSTs `{"text":"AMQ mail waiting."}` to the URL in a mode-0600
-  JSON file `{"url"}`. The body does not name the handle or the peer.
-
-The adapters decide nothing about timing: the caller, such as `amq wake`
-through `--inject-via`, owns when a ring fires. These adapters do not
-change TTY `--baseline-existing`.

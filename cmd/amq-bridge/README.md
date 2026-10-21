@@ -105,8 +105,7 @@ The command reads only that regular, non-symlink file. It loads the local
 `key_generation` field and must match the trusted record), verifies the v2
 Ed25519 signature
 and payload digest, requires the `dest_alias` host to match the local host-id,
-and then routes through the transfer ledger (docs/adr-bridge-protocol.md,
-Addendum 4) into the same `ApplyEnvelope` Maildir path the courier uses. It
+and then routes through [the transfer ledger](../../docs/adr-bridge-protocol.md#transfer-ledger) into the same `ApplyEnvelope` Maildir path the courier uses. It
 prints and durably records a `destination_maildir_committed` receipt under
 `<AMQ root>/bridge/receipts/`. Repeating the same file is an idempotent
 replay; the same transfer key with a different payload is a conflict
@@ -127,29 +126,15 @@ The peer-stdio courier is a config-pinned, duplex session between two hosts.
 The configured initiator dials; the peer responds. `amq` itself remains local
 and daemon-free.
 
-Envelope v2 is the emitted peer-exchange format. The exchange moves exact,
-hash-named object files, not re-serialized AMQ messages:
-
-```text
-tx/<peer>/{tmp,new,committed,rejected}
-status-tx/<peer>/{tmp,new,returned}
-rx/<peer>/{tmp,new,done,quarantine}
-status-rx/<peer>/{tmp,new,done,quarantine}
-```
-
-The receiver writes an envelope to `rx/<peer>/tmp`, fsyncs it, and
-no-replace renames it to `rx/<peer>/new/<object_sha256>.envelope`. That
-durable destination rename is `transport_accepted`; it does not apply the
-payload or retire the source `tx` object. The source retires `tx` only after a
-verified signed `destination_maildir_committed` or `destination_rejected`
-outcome. Outcomes use `status-tx/<peer>/new` and may move to
-`status-tx/<peer>/returned` after transfer. Peer exchange never creates or
-uses `sent/`; that directory remains HTTPS-only.
-
-`OFFER`/`WANT` inventory is limited to the `tx`, `status-tx`, `rx`, and
-`status-rx` trees. The courier never reads Maildir, `applied/`, or
-`apply-journal/`. `STORED` means that the kind-specific destination sink is
-durable; it is not apply, source archive, or consumer drain.
+Peer exchange carries v3 transfer records
+([format](../../docs/adr-bridge-protocol.md#transfer-record-v3)).
+`amq-bridge sync --stdio` runs the initiator side and
+`amq-bridge listen --stdio` the responder side. The initiator offers records
+from `bridge/tx/<peer>/`. The receiver stages each wanted record under
+`bridge/rx/<peer>/`, files it into its Maildir, and answers with a signed
+`STORED` receipt. The sender removes a record from `bridge/tx/<peer>/` only
+after it verifies that receipt. Peer exchange never uses `sent/`; that
+directory is HTTPS-only.
 
 For a config-only peer submit, enqueue one AMQ message on stdin:
 
@@ -157,12 +142,28 @@ For a config-only peer submit, enqueue one AMQ message on stdin:
 amq-bridge enqueue --config FILE --dest-alias host-b/agent
 ```
 
-The signer emits Envelope v2 from the config intent. It does not create a
-`.dest` sidecar or use the HTTPS spool. Prompt-driven callers must not pass
+When the destination host is a pinned v3 peer, `enqueue` signs a v3 record
+into `bridge/tx/<peer>/`. Otherwise it writes the message into the HTTPS spool
+`bridge/outbox/<handle>/new/`. Prompt-driven callers must not pass
 `--root`, `--rendezvous`, `--me`, `--spool`, or any extra argument. Use
 [`scripts/amq-bridge-bot-enqueue.sh`](../../scripts/amq-bridge-bot-enqueue.sh)
 for a fixed-argv wrapper; it reads `AMQ_BRIDGE_ENQUEUE_CONFIG` and refuses a
 missing, symlinked, or non-0600 config before reading stdin.
+
+## Wake ring
+
+`amq-bridge ring` is a content-free doorbell. The contract is
+`adapter <handle> <pending>`: exit 0 accepted, nonzero deferred. The
+adapters never receive message bytes.
+
+- `grokbot` POSTs `{"handle","pending"}` to the URL in a mode-0600 JSON
+  file `{"url","key"}`. The key is sent as `X-AMQ-Ring-Key`.
+- `slack` POSTs `{"text":"AMQ mail waiting."}` to the URL in a mode-0600
+  JSON file `{"url"}`. The body does not name the handle or the peer.
+
+The adapters decide nothing about timing: the caller, such as `amq wake`
+through `--inject-via`, owns when a ring fires. These adapters do not
+change TTY `--baseline-existing`.
 
 ## Optional HTTPS courier
 

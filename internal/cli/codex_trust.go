@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -158,11 +159,8 @@ func codexGitMetadataFile(path string) bool {
 }
 
 func codexReadGitMetadata(path string) string {
-	if !codexGitMetadataFile(path) {
-		return ""
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) > codexMaxGitMetadataBytes {
+	raw, err := fsq.ReadRegularNoFollowBounded(path, codexMaxGitMetadataBytes)
+	if err != nil {
 		return ""
 	}
 	return string(codexTrimASCII(raw))

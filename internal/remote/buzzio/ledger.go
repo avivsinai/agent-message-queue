@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -570,58 +569,19 @@ func createOnce(dir, name string, data []byte) ([]byte, bool, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, false, err
 	}
-	tmp := filepath.Join(dir, fmt.Sprintf(".%s.tmp-%d", name, time.Now().UnixNano()))
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	created, err := fsq.CreateNewFile(final, data, 0o600)
 	if err != nil {
-		return nil, false, err
-	}
-	_, werr := f.Write(data)
-	if werr == nil {
-		werr = f.Sync()
-	}
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		_ = os.Remove(tmp)
-		return nil, false, werr
-	}
-	lerr := os.Link(tmp, final)
-	_ = os.Remove(tmp)
-	if lerr != nil && !errors.Is(lerr, os.ErrExist) {
-		return nil, false, lerr
-	}
-	if err := fsq.SyncDir(dir); err != nil {
 		return nil, false, err
 	}
 	stored, err := readBounded(final)
 	if err != nil {
 		return nil, false, err
 	}
-	return stored, lerr == nil, nil
+	return stored, created, nil
 }
 
 func readBounded(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, maxRecordBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > maxRecordBytes {
-		return nil, fmt.Errorf("%s is over %d bytes", path, maxRecordBytes)
-	}
-	return raw, nil
+	return fsq.ReadRegularNoFollowBounded(path, maxRecordBytes)
 }
 
 // keyFile names a record by the hash of its key, so no key text chooses a
