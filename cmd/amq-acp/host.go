@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -28,11 +30,12 @@ const childExitWait = 5 * time.Second
 
 // runHost is amq-acp host: it spawns the ACP agent named after `--` and
 // serves the AM_ME inbox through it until the agent exits or the host is
-// stopped.
+// stopped. With --check it only probes the agent.
 func runHost(args []string) int {
 	flags := flag.NewFlagSet("amq-acp host", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	cwd := flags.String("cwd", "", "working directory for the agent (default: the current directory)")
+	check := flags.Bool("check", false, "run the ACP handshake only, print the agent's info and capabilities as JSON, and exit")
 	flags.Usage = func() { fmt.Fprint(os.Stderr, hostUsage) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -44,18 +47,6 @@ func runHost(args []string) int {
 	if len(argv) == 0 {
 		fmt.Fprint(os.Stderr, hostUsage)
 		return exitUsage
-	}
-
-	root := strings.TrimSpace(os.Getenv(acp.EnvRoot))
-	if root == "" || !filepath.IsAbs(root) {
-		fmt.Fprintf(os.Stderr, "amq-acp host: %s must be an absolute queue root\n", acp.EnvRoot)
-		return exitContextMismatch
-	}
-	root = filepath.Clean(root)
-	me := strings.TrimSpace(os.Getenv(acp.EnvMe))
-	if err := fsq.ValidateHandle(me); err != nil {
-		fmt.Fprintf(os.Stderr, "amq-acp host: %s: %v\n", acp.EnvMe, err)
-		return exitContextMismatch
 	}
 	dir := *cwd
 	if dir == "" {
@@ -71,63 +62,36 @@ func runHost(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitUsage
 	}
-
-	// The agent's exit is watched while the host still reads its stdout,
-	// so the turn the agent did not survive can name the exit status.
-	// StdoutPipe would close the read end on Wait and lose the agent's last
-	// lines; an os.Pipe read end stays the host's.
-	exitDone := make(chan struct{})
-	var exitErr error
-	agentExit := func() string {
-		select {
-		case <-exitDone:
-		case <-time.After(childExitWait):
-			return "still running"
-		}
-		if exitErr == nil {
-			return "exit status 0"
-		}
-		return exitErr.Error()
+	if *check {
+		return runCheck(argv, dir)
 	}
 
-	h, err := host.Open(host.Config{Root: root, Me: me, Cwd: dir, Version: version, Agent: filepath.Base(argv[0]), Log: os.Stderr, AgentExit: agentExit})
+	root := strings.TrimSpace(os.Getenv(acp.EnvRoot))
+	if root == "" || !filepath.IsAbs(root) {
+		fmt.Fprintf(os.Stderr, "amq-acp host: %s must be an absolute queue root\n", acp.EnvRoot)
+		return exitContextMismatch
+	}
+	root = filepath.Clean(root)
+	me := strings.TrimSpace(os.Getenv(acp.EnvMe))
+	if err := fsq.ValidateHandle(me); err != nil {
+		fmt.Fprintf(os.Stderr, "amq-acp host: %s: %v\n", acp.EnvMe, err)
+		return exitContextMismatch
+	}
+
+	// The host lock is taken before the agent starts; AgentExit is read
+	// only while Run serves, after the agent has started.
+	var agent *agentProcess
+	h, err := host.Open(host.Config{Root: root, Me: me, Cwd: dir, Version: version, Agent: filepath.Base(argv[0]), Log: os.Stderr, AgentExit: func() string { return agent.exitStatus() }})
 	if err != nil {
 		return hostExit(err)
 	}
 	defer h.Close()
 
-	child := exec.Command(argv[0], argv[1:]...)
-	child.Dir = dir
-	child.Env = childEnv(os.Environ())
-	child.Stderr = os.Stderr
-	setProcessGroup(child)
-	stdin, err := child.StdinPipe()
+	agent, err = startAgent(argv, dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitGeneral
 	}
-	stdout, agentStdout, err := os.Pipe()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
-		return exitGeneral
-	}
-	defer func() { _ = stdout.Close() }()
-	child.Stdout = agentStdout
-	err = child.Start()
-	_ = agentStdout.Close()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-acp host: start the agent:", err)
-		return exitGeneral
-	}
-	go func() {
-		exitErr = child.Wait()
-		close(exitDone)
-		// A process the agent left behind may hold its stdout open; the
-		// host still sees the exit once the agent's last lines had time to
-		// arrive.
-		time.AfterFunc(childExitWait, func() { _ = stdout.Close() })
-	}()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -136,25 +100,116 @@ func runHost(args []string) int {
 		<-ctx.Done()
 		stop()
 	}()
-	runErr := h.Run(ctx, stdout, stdin)
-
-	_ = stdin.Close()
-	select {
-	case <-exitDone:
-	case <-time.After(childExitWait):
-	}
-	// Kill what is left of the agent's process group on every path: the
-	// agent itself if it ignored its closed stdin, or anything it started
-	// and left behind after it exited.
-	killProcessGroup(child)
-	<-exitDone
-	if exitErr != nil {
-		fmt.Fprintln(os.Stderr, "amq-acp host: the agent exited:", exitErr)
-	}
+	runErr := h.Run(ctx, agent.stdout, agent.stdin)
+	agent.stop()
 	if runErr != nil {
 		return hostExit(runErr)
 	}
 	return 0
+}
+
+// runCheck probes the agent: initialize only, with no AMQ root, handle, or
+// session. It prints the agent's info and capabilities as JSON and exits 0,
+// or exits 6 with the reason the host could not serve it.
+func runCheck(argv []string, dir string) int {
+	agent, err := startAgent(argv, dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
+		return exitActionRequired
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	res, err := host.Check(ctx, agent.stdout, agent.stdin, version)
+	stop()
+	agent.stop()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host --check:", err)
+		return exitActionRequired
+	}
+	out, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host --check:", err)
+		return exitGeneral
+	}
+	fmt.Println(string(out))
+	return 0
+}
+
+// agentProcess is the spawned ACP agent. Its stdout is an os.Pipe read end
+// the host owns: StdoutPipe would close it on Wait and lose the agent's last
+// lines, while the exit is watched so the turn the agent did not survive can
+// name the exit status.
+type agentProcess struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *os.File
+	done   chan struct{}
+	err    error
+}
+
+// startAgent spawns argv without a shell, in dir, in its own process group,
+// with the filtered environment.
+func startAgent(argv []string, dir string) (*agentProcess, error) {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = childEnv(os.Environ())
+	cmd.Stderr = os.Stderr
+	setProcessGroup(cmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, agentStdout, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout = agentStdout
+	err = cmd.Start()
+	_ = agentStdout.Close()
+	if err != nil {
+		_ = stdout.Close()
+		return nil, fmt.Errorf("start the agent: %w", err)
+	}
+	a := &agentProcess{cmd: cmd, stdin: stdin, stdout: stdout, done: make(chan struct{})}
+	go func() {
+		a.err = cmd.Wait()
+		close(a.done)
+		// A process the agent left behind may hold its stdout open; the
+		// host still sees the exit once the agent's last lines had time to
+		// arrive.
+		time.AfterFunc(childExitWait, func() { _ = stdout.Close() })
+	}()
+	return a, nil
+}
+
+// exitStatus waits briefly for the agent's exit and describes it.
+func (a *agentProcess) exitStatus() string {
+	select {
+	case <-a.done:
+	case <-time.After(childExitWait):
+		return "still running"
+	}
+	if a.err == nil {
+		return "exit status 0"
+	}
+	return a.err.Error()
+}
+
+// stop closes the agent's stdin, waits up to childExitWait for it to exit,
+// then kills what is left of its process group on every path: the agent
+// itself if it ignored its closed stdin, or anything it started and left
+// behind after it exited.
+func (a *agentProcess) stop() {
+	_ = a.stdin.Close()
+	select {
+	case <-a.done:
+	case <-time.After(childExitWait):
+	}
+	killProcessGroup(a.cmd)
+	<-a.done
+	_ = a.stdout.Close()
+	if a.err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host: the agent exited:", a.err)
+	}
 }
 
 func hostExit(err error) int {
@@ -193,6 +248,7 @@ request, a todo, a brainstorm, or a message with no kind runs a turn.
 
 Usage:
   amq-acp host [--cwd <dir>] -- <agent command> [agent arguments]
+  amq-acp host --check [--cwd <dir>] -- <agent command> [agent arguments]
 
 Example:
   amq coop exec --no-wake --me grok amq-acp -- host -- grok agent --no-leader stdio
@@ -201,4 +257,10 @@ Example:
 
 The agent runs without a shell, in --cwd, with every AM_*, AMQ_* and BUZZ_*
 variable removed from its environment.
+
+A restarted host resumes the ACP session it recorded when the agent
+advertises loadSession; otherwise it opens a new session and says so.
+
+--check runs the handshake only (no AMQ root needed), prints the agent's
+info and capabilities as JSON, and exits 0, or 6 with the reason.
 `

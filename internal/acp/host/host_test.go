@@ -20,9 +20,12 @@ import (
 // fakeAgent is an ACP agent on two pipes. It answers initialize and
 // session/new, and answers each session/prompt with two agent_message_chunk
 // updates and end_turn. With askPermission it first asks the client to allow
-// a tool call and records the option the client selected.
+// a tool call and records the option the client selected. With loadSession it
+// advertises session loading and answers session/load after replaying an
+// earlier answer.
 type fakeAgent struct {
 	askPermission bool
+	loadSession   bool
 
 	mu       sync.Mutex
 	methods  []string
@@ -56,7 +59,17 @@ func (f *fakeAgent) serve(in io.Reader, out io.WriteCloser) {
 		f.mu.Unlock()
 		switch msg.Method {
 		case "initialize":
-			respond(msg.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "fake", "version": "1"}})
+			respond(msg.ID, map[string]any{
+				"protocolVersion":   1,
+				"agentInfo":         map[string]string{"name": "fake", "version": "1"},
+				"agentCapabilities": map[string]bool{"loadSession": f.loadSession},
+			})
+		case "session/load":
+			_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+				"sessionId": msg.Params.SessionID,
+				"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": "an earlier answer"}},
+			}})
+			respond(msg.ID, map[string]any{})
 		case "session/new":
 			respond(msg.ID, map[string]string{"sessionId": "s1"})
 		case "session/prompt":
@@ -290,5 +303,48 @@ func TestHostSkipsASenderItCannotReplyTo(t *testing.T) {
 	defer agent.mu.Unlock()
 	if len(agent.prompts) != 1 {
 		t.Fatalf("agent ran %d turns; want one, for the local question", len(agent.prompts))
+	}
+}
+
+func TestHostResumesItsSessionWithoutReplayingOldText(t *testing.T) {
+	root := newRoot(t)
+	dir := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := json.Marshal(sessionRecord{SessionID: "s1", Agent: "fake", Cwd: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	send(t, root, "codex", format.KindQuestion, "and now?")
+	agent := &fakeAgent{loadSession: true}
+	startHost(t, root, agent)
+
+	reply := waitReply(t, root)
+	if strings.TrimRight(reply.Body, "\n") != "four, as asked" {
+		t.Fatalf("reply body=%q; want only this turn's chunks, not the replayed history", reply.Body)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if !slices.Contains(agent.methods, "session/load") || slices.Contains(agent.methods, "session/new") {
+		t.Fatalf("agent methods=%v; want session/load and no session/new", agent.methods)
+	}
+}
+
+func TestCheckReportsTheAgentsCapabilities(t *testing.T) {
+	hostOut, agentIn := io.Pipe()
+	agentOut, hostIn := io.Pipe()
+	go (&fakeAgent{loadSession: true}).serve(hostOut, hostIn)
+	defer func() { _ = agentIn.Close() }()
+
+	res, err := Check(context.Background(), agentOut, agentIn, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ProtocolVersion != 1 || res.AgentInfo.Name != "fake" || !res.LoadSession {
+		t.Fatalf("check result=%+v; want protocol 1, agent fake, load_session true", res)
 	}
 }

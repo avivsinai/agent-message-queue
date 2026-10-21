@@ -19,7 +19,7 @@ const codexCaptureMinimumVersion = "0.147.0"
 // codexCaptureVerifiedVersion is the newest codex-cli release on which the
 // notify capture contract was verified. It is informational only and never
 // gates capture.
-const codexCaptureVerifiedVersion = "0.154.0"
+const codexCaptureVerifiedVersion = "0.163.0"
 
 // codexCaptureVersionSupported reports whether version is a strict decimal
 // MAJOR.MINOR.PATCH release at or above codexCaptureMinimumVersion. Any other
@@ -216,7 +216,7 @@ func codexEnvRules() map[string]valueRule { return commonCommittedEnvRules() }
 func codexArgRules() map[string]argumentRule {
 	return map[string]argumentRule{
 		"-c":                 {value: true, validate: validCodexConfigOverride},
-		"--ask-for-approval": {value: true, validate: oneOf("untrusted", "on-request")},
+		"--ask-for-approval": {value: true, validate: oneOf("on-request")},
 		"--model":            {value: true, validate: safeArgumentValue},
 		"--no-alt-screen":    {},
 		"--sandbox":          {value: true, validate: oneOf("read-only", "workspace-write")},

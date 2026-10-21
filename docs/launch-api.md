@@ -87,6 +87,8 @@ Provider argument grammar:
 - Codex admits ordered `-c model_reasoning_effort=<value>` pairs with the
   values `minimal`, `low`, `medium`, `high`, or `xhigh`. Duplicate keys and
   unknown keys or values are rejected.
+- Codex `--ask-for-approval` admits only `on-request`. codex-cli refuses
+  `untrusted` at start, and `never` is not admitted.
 - Every `env_overlay` key matches the POSIX environment grammar
   `[A-Za-z_][A-Za-z0-9_]*`. A key with shell syntax, such as `a;b c`, is
   refused.
@@ -253,14 +255,22 @@ The registered launcher backends are `commands`, `tmux`, `cmux`, and
 
 ## Prepare and Apply
 
-Prepare is read-only. For a capture-mode participant planned fresh, it runs the
-provider identity probe (`--version`, `--help`, `resume --help`) after the
-executable-containment check, and otherwise writes nothing. It returns the exact
-subject schema, subject, plan, and trust digests, a preview, current
-observations, and required actions. Apply accepts the original Prepare request,
-the returned subject schema and digest, and one explicit decision for each
-required action. It recomputes the subject under that schema and fails closed if
-state changed.
+Prepare is read-only. It returns the exact subject schema, subject, plan, and
+trust digests, a preview, current observations, and required actions. Apply
+accepts the original Prepare request, the returned subject schema and digest,
+and one explicit decision for each required action. It recomputes the subject
+under that schema and fails closed if state changed.
+
+For a capture-mode participant planned fresh, Prepare runs the provider
+identity probe after the executable-containment check, and otherwise writes
+nothing. Each provider probes with its own arguments: Codex runs `--version`,
+`--help`, and `resume --help`; Cursor runs `--version`, `--help`, and
+`create-chat --help`. Prepare refuses only that seat, with `planned_outcome`
+`unsupported`, when the provider is project-contained
+(`provider_project_contained`, and the probe never runs) or its version is
+outside the capture range (`capture_version_unsupported`: Codex below its
+floor, Cursor other than its exact version). The other seats still plan, and a
+`stale_conversation` action for the refused seat stays.
 
 `SubjectSchemaV2` is the schema for new Prepare calls. A caller copies the
 returned schema and never omits the field to select legacy behavior. An Apply
