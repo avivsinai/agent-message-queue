@@ -696,7 +696,7 @@ func TestRunWakeWithLoopBaselinesBeforeReadiness(t *testing.T) {
 		if watcherErr := watcher.Add(inboxNew); watcherErr != nil {
 			t.Fatalf("watch inbox: %v", watcherErr)
 		}
-		if prepErr := prepareWakeBaseline(&cfg, watcher, inboxNew); prepErr != nil {
+		if prepErr := prepareWakeBaselineEvents(&cfg, watcher.Events, watcher.Errors, inboxNew); prepErr != nil {
 			t.Fatalf("prepareWakeBaseline: %v", prepErr)
 		}
 		if _, ok := cfg.baselineExisting["stale.md"]; !ok {
@@ -2997,7 +2997,7 @@ func TestWaitForWakeReadyReturnsWhenReadyFileAppears(t *testing.T) {
 	if err := writeWakeReadyFile(root, "orchestrator", readyPath, inspection); err != nil {
 		t.Fatalf("writeWakeReadyFile: %v", err)
 	}
-	if err := waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second); err != nil {
+	if err := waitForWakeReadyWithOwner(waiter, readyPath, root, "orchestrator", nil, time.Second); err != nil {
 		t.Fatalf("waitForWakeReady: %v", err)
 	}
 }

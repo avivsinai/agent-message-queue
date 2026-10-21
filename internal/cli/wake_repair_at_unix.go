@@ -32,8 +32,6 @@ type wakeRepairFloorAuthority struct {
 
 const wakeRepairFloorQuarantinePrefix = ".wake.repair-floor.quarantine."
 
-var renameWakeRepairFloorNoReplaceAt = renameWakeRepairNoReplaceAt
-
 func newWakeRepairFloorAuthority(snapshot wakeRepairFloorSnapshot) (wakeRepairFloorAuthority, error) {
 	if snapshot.FileInfo == nil {
 		return wakeRepairFloorAuthority{}, fmt.Errorf("wake repair floor file identity is missing")
@@ -294,7 +292,7 @@ func quarantineWakeRepairFloorAt(dirfd int) (string, bool, error) {
 			os.Getpid(),
 			hex.EncodeToString(nonce[:]),
 		)
-		err := renameWakeRepairFloorNoReplaceAt(
+		err := renameWakeRepairNoReplaceAt(
 			dirfd,
 			wakeRepairFloorFileName,
 			dirfd,
@@ -322,7 +320,7 @@ func quarantineWakeRepairFloorAt(dirfd int) (string, bool, error) {
 }
 
 func restoreWakeRepairFloorQuarantineAt(dirfd int, quarantine string) error {
-	err := renameWakeRepairFloorNoReplaceAt(
+	err := renameWakeRepairNoReplaceAt(
 		dirfd,
 		quarantine,
 		dirfd,

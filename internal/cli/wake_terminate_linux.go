@@ -18,35 +18,6 @@ var (
 	errWakeTerminationAuthorizationLost = errors.New("wake termination authorization lost")
 )
 
-func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
-	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
-}
-
-func terminateAndRemoveOrphanedWakeLockWithRawConsent(
-	inspection wakeLockInspection,
-	allowRawOrphan bool,
-) (bool, error) {
-	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
-	if err != nil {
-		return false, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
-	}
-	if agentDir == nil {
-		return false, withWakeDiagnostic(
-			fmt.Errorf("wake agent directory disappeared before termination"),
-			inspection.Root,
-			inspection.Agent,
-		)
-	}
-	defer func() { _ = agentDir.Close() }()
-	removed, err := terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
-		agentDir,
-		inspection,
-		allowRawOrphan,
-		nil,
-	)
-	return removed, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
-}
-
 func terminateAndRemoveOrphanedWakeLockInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,

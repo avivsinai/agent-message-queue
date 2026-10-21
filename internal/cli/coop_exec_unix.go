@@ -24,11 +24,9 @@ const wakeProcessExitTimeout = 5 * time.Second
 
 func killWakeHelperProcessWithHandle(proc *os.Process) error { return killWakeProcess(proc) }
 
-var killWakeHelperProcess = killWakeHelperProcessWithHandle
-
 var coopExecProcess = syscall.Exec
 
-var openCoopWakeTTY = func() (*os.File, error) {
+func openCoopWakeTTY() (*os.File, error) {
 	return os.OpenFile("/dev/tty", os.O_WRONLY|unix.O_CLOEXEC, 0)
 }
 
@@ -855,10 +853,6 @@ func (guard *managedExecutionGuard) Close() error {
 	return guard.root.Close()
 }
 
-// coopProvisionAfterClassifyHook runs between layout classification and the
-// provisioning writes. Test-only seam for the alias-swap boundary proof.
-var coopProvisionAfterClassifyHook func()
-
 // provisionSelfMailboxInExistingRoot provisions one agent mailbox inside a
 // pre-existing root, refusing trees that are not queues. The pinned
 // capability opened for classification is retained through the writes, so the
@@ -877,9 +871,6 @@ func provisionSelfMailboxInExistingRoot(root, agentHandle string) error {
 	state, err := deliveryRoot.ClassifyLayout()
 	if err != nil {
 		return fmt.Errorf("refusing to provision in %q: %w", root, err)
-	}
-	if coopProvisionAfterClassifyHook != nil {
-		coopProvisionAfterClassifyHook()
 	}
 	switch state {
 	case fsq.LayoutForeign:
@@ -962,8 +953,6 @@ func captureRetainedCoopWakeHelperClaim(
 	return &retainedCoopWakeHelperClaim{inspection: *retained, agentDir: agentDir}, nil
 }
 
-var beforeValidatePreparedCoopWakeClaim = func(*wakeAgentDir) {}
-
 func validatePreparedCoopWakeClaim(
 	root string,
 	me string,
@@ -980,7 +969,6 @@ func validatePreparedCoopWakeClaim(
 		return wakeLockInspection{}, fmt.Errorf("prepared coop wake agent directory is missing")
 	}
 	defer func() { _ = agentDir.Close() }()
-	beforeValidatePreparedCoopWakeClaim(agentDir)
 
 	var current wakeLockInspection
 	err = withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
@@ -1147,10 +1135,6 @@ func (waiter *wakeProcessWaiter) waitForExit(timeout time.Duration) error {
 	}
 }
 
-func waitForWakeReadyWithWaiter(waiter *wakeProcessWaiter, readyPath, root, me string, timeout time.Duration) error {
-	return waitForWakeReadyWithOwner(waiter, readyPath, root, me, nil, timeout)
-}
-
 func waitForWakeReadyWithOwner(
 	waiter *wakeProcessWaiter,
 	readyPath string,
@@ -1199,14 +1183,14 @@ func terminateWakeHelperProcess(proc *os.Process, waiter *wakeProcessWaiter, roo
 	}
 	agentDir, err := openExistingCoopWakeAgentDir(root, me)
 	if err != nil {
-		_ = killWakeHelperProcess(proc)
+		_ = killWakeHelperProcessWithHandle(proc)
 		if waitErr := waiter.waitForExit(wakeProcessExitTimeout); waitErr != nil {
 			return errors.Join(err, waitErr)
 		}
 		return err
 	}
 	if agentDir == nil {
-		_ = killWakeHelperProcess(proc)
+		_ = killWakeHelperProcessWithHandle(proc)
 		if err := waiter.waitForExit(wakeProcessExitTimeout); err != nil {
 			return err
 		}
@@ -1221,7 +1205,7 @@ func terminateWakeHelperProcess(proc *os.Process, waiter *wakeProcessWaiter, roo
 		expected = inspectWakeLockAt(dirfd, agentDir, root, me)
 		return nil
 	}); err != nil {
-		_ = killWakeHelperProcess(proc)
+		_ = killWakeHelperProcessWithHandle(proc)
 		if waitErr := waiter.waitForExit(wakeProcessExitTimeout); waitErr != nil {
 			return errors.Join(err, waitErr)
 		}
@@ -1241,7 +1225,7 @@ func terminateWakeHelperProcessInDir(
 		return fmt.Errorf("retained wake helper cleanup capability is incomplete")
 	}
 	ownedGeneration := confirmedLiveWake(expected) && expected.PID == proc.Pid && expected.Lock.Generation != ""
-	_ = killWakeHelperProcess(proc)
+	_ = killWakeHelperProcessWithHandle(proc)
 	if err := waiter.waitForExit(wakeProcessExitTimeout); err != nil {
 		return err
 	}
@@ -1395,15 +1379,6 @@ func rollbackAuthoritativeWakeClaimInDir(
 		}
 		return removeAuthoritativeWakeClaimAt(scope, current, &target)
 	})
-}
-
-func cleanupTerminatedWakeLock(expected wakeLockInspection) error {
-	agentDir, err := openExistingCoopWakeAgentDir(expected.Root, expected.Agent)
-	if err != nil || agentDir == nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return cleanupTerminatedWakeLockInDir(agentDir, expected)
 }
 
 func cleanupTerminatedWakeLockInDir(agentDir *wakeAgentDir, expected wakeLockInspection) error {

@@ -23,12 +23,6 @@ type wakeOwnerPublicationError struct {
 var errWakeOwnerLockExists = errors.New("wake lock already exists")
 var publishAuthoritativeWakeLinkAt = wakeLinkAt
 var publishAuthoritativeWakeAfterTargetRename = func() {}
-var removeAuthoritativeWakeAfterLockRelease = func() {}
-var removeAuthoritativeWakeBeforeFinalAuthorityCheck = func() {}
-var beforeAuthoritativeWakeStateSnapshot = func() {}
-var beforeAuthoritativeWakeLockFinalRemoval = func() {}
-var afterWakeTargetSnapshotDataRead = func() {}
-var removeAuthoritativeWakeLockTempAfterCommitAt = wakeUnlinkAt
 var syncAuthoritativeWakeLockAfterCommitDirFD = func(fd int) error {
 	return syncWakeOwnerDirFD(fd)
 }
@@ -39,16 +33,6 @@ func (err *wakeOwnerPublicationError) Error() string {
 
 func (err *wakeOwnerPublicationError) Unwrap() error {
 	return err.Err
-}
-
-func publishAuthoritativeWakeClaimAt(
-	scope *wakeMutationScope,
-	root string,
-	me string,
-	target wakeTarget,
-	lock wakeLock,
-) error {
-	return publishAuthoritativeWakeClaimWithDebugAt(scope, root, me, target, lock, false)
 }
 
 func publishAuthoritativeWakeClaimWithDebugAt(
@@ -187,7 +171,7 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 			Err: fmt.Errorf("publish authoritative wake lock: %w", err),
 		}
 	}
-	if err := scope.unlinkAtWith(removeAuthoritativeWakeLockTempAfterCommitAt, lockTemp, 0); err != nil {
+	if err := scope.unlinkAtWith(wakeUnlinkAt, lockTemp, 0); err != nil {
 		return &wakeOwnerPublicationError{
 			Err:       fmt.Errorf("remove authoritative wake lock temp after commit: %w", err),
 			Committed: true,
@@ -427,7 +411,6 @@ func readWakeTargetSnapshotAt(
 	if err != nil {
 		return wakeTargetSnapshot{}, true, err
 	}
-	afterWakeTargetSnapshotDataRead()
 	pathFile, err := open()
 	if err != nil {
 		return wakeTargetSnapshot{}, true, newWakeSnapshotReadChangedError(
@@ -582,7 +565,6 @@ func removeAuthoritativeWakeClaimAt(
 			}
 		}
 	}
-	beforeAuthoritativeWakeStateSnapshot()
 	relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if relationErr != nil {
 		return newWakeStateBoundInconclusiveError(relationErr)
@@ -637,7 +619,6 @@ func removeAuthoritativeWakeClaimAt(
 		}
 	}
 
-	beforeAuthoritativeWakeLockFinalRemoval()
 	finalLock := readWakeLockMetadataAt(dirfd, agentDir, expected.Root, expected.Agent)
 	multipleLinks, linkErr := wakeLockHasMultipleLinks(finalLock.fileInfo)
 	if linkErr != nil {
@@ -696,7 +677,6 @@ func removeAuthoritativeWakeClaimAt(
 			diagnosticCleanupErr,
 		)
 	}
-	removeAuthoritativeWakeAfterLockRelease()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 		if relationErr != nil {
@@ -802,7 +782,6 @@ func removeAuthoritativeWakeClaimAt(
 			)
 		}
 	}
-	removeAuthoritativeWakeBeforeFinalAuthorityCheck()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 		if relationErr != nil {

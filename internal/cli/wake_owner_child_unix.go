@@ -51,8 +51,6 @@ func (capability *authoritativeWakeChildCapability) Close() error {
 	return closeFn()
 }
 
-var prepareAuthoritativeWakeChild = prepareAuthoritativeWakeChildPlatform
-
 func mergeWakeStopChannels(first, second <-chan struct{}) <-chan struct{} {
 	if first == nil {
 		return second
@@ -72,5 +70,5 @@ func mergeWakeStopChannels(first, second <-chan struct{}) <-chan struct{} {
 }
 
 func configureAuthoritativeWakeChild(cmd *exec.Cmd) (*authoritativeWakeChildCapability, error) {
-	return prepareAuthoritativeWakeChild(cmd)
+	return prepareAuthoritativeWakeChildPlatform(cmd)
 }

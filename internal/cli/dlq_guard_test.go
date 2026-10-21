@@ -138,7 +138,7 @@ func TestCollectDLQListItemsRefusesOpenedRootPathReplacement(t *testing.T) {
 		t.Fatalf("replace authorized root path: %v", err)
 	}
 
-	items, err := collectDLQListItems(authorized, "alice", []string{"new"})
+	items, err := collectDLQListItemsWithPrecedence(authorized, "alice", []string{"new"}, false)
 	if err == nil || !strings.Contains(err.Error(), "delivery root changed after authorization") {
 		t.Fatalf("collect after root replacement error = %v, want delivery-root refusal", err)
 	}

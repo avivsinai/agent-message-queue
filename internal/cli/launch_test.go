@@ -136,7 +136,7 @@ func launchCLIFixture(t *testing.T, sessions ...string) (string, string) {
 		_ = os.Chdir(oldCWD)
 		launchIsTerminal = func() bool { return false }
 		launchInput = func() *bufio.Reader { return bufio.NewReader(os.Stdin) }
-		launchStateDir = defaultLaunchStateDir
+		launchStateDir = launch.DefaultLaunchStateDir
 		launchAMQPath = func() string { path, _ := os.Executable(); return path }
 		launchAdapters = defaultLaunchAdapters
 		launchBackends = func() map[string]launch.Backend {

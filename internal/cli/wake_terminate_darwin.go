@@ -10,31 +10,6 @@ var (
 	afterDarwinWakeSignalValidation = func() {}
 )
 
-func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
-	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
-}
-
-func terminateAndRemoveOrphanedWakeLockWithRawConsent(
-	inspection wakeLockInspection,
-	allowRawOrphan bool,
-) (removed bool, retErr error) {
-	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
-	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
-	if err != nil {
-		return false, err
-	}
-	if agentDir == nil {
-		return false, fmt.Errorf("wake agent directory disappeared before termination")
-	}
-	defer func() { _ = agentDir.Close() }()
-	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
-		agentDir,
-		inspection,
-		allowRawOrphan,
-		nil,
-	)
-}
-
 func terminateAndRemoveOrphanedWakeLockInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
@@ -147,24 +122,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	return removed, err
 }
 
-func terminateWakeProcess(inspection wakeLockInspection) error {
-	if !sameConfirmedWakeLock(inspection) {
-		return withWakeDiagnostic(
-			fmt.Errorf("wake process identity changed before SIGTERM"),
-			inspection.Root,
-			inspection.Agent,
-		)
-	}
-	afterDarwinWakeSignalValidation()
-	// Darwin has no pidfd. kill(pid) after the last identity recheck can hit a
-	// recycled PID. Cooperative control is the only agent-safe stop; raw numeric
-	// signaling is operator_only.
-	return newWakeOperatorOnlyError(
-		"darwin raw numeric signaling is operator_only; stop the wake from its owning terminal or supervisor",
-		wakeCheckRemedy(inspection.Root, inspection.Agent),
-	)
-}
-
 func terminateWakeProcessInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
@@ -204,9 +161,4 @@ func sameConfirmedWakeLockInDir(
 		return nil
 	})
 	return confirmed, err
-}
-
-func sameConfirmedWakeLock(inspection wakeLockInspection) bool {
-	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
-	return sameWakeLockInspection(inspection, recheck) && recheck.IdentityConfirmed
 }

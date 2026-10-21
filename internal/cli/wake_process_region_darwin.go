@@ -104,8 +104,6 @@ type darwinMappedWakeImage struct {
 	Size     int64
 }
 
-var readDarwinProcessRegionPathInfo = readDarwinProcessRegionPathInfoDefault
-
 func inspectDarwinWakeMappedImage(pid int) (darwinMappedWakeImage, error) {
 	firstPath, err := readDarwinProcessExecutablePath(pid)
 	if err != nil {
@@ -195,7 +193,7 @@ func scanDarwinWakeMappedImage(pid int, executablePath string) (darwinMappedWake
 	return darwinMappedWakeImage{}, fmt.Errorf("wake process region scan exceeded %d regions", darwinMaxProcessRegions)
 }
 
-func readDarwinProcessRegionPathInfoDefault(
+func readDarwinProcessRegionPathInfo(
 	pid int,
 	address uint64,
 ) (darwinProcRegionWithPathInfo, bool, error) {

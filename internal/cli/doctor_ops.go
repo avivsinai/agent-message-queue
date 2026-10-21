@@ -173,16 +173,6 @@ type opsWakeMutation struct {
 	Removed bool
 }
 
-func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
-	return runOpsChecksWithSchema(
-		root,
-		rootSource,
-		fixWakeLocks,
-		wakeCheckSchemaV1,
-		explicitBaseRoot...,
-	)
-}
-
 func runOpsChecksWithSchema(
 	root string,
 	rootSource string,

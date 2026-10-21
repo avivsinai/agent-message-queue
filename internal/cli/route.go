@@ -222,8 +222,6 @@ type deliveryRouteOptions struct {
 	MirrorPeerSession bool
 }
 
-var findDeliveryRouteAmqrc = findAmqrcForRoot
-
 func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts deliveryRouteOptions) (deliveryRoutePlan, error) {
 	plan := deliveryRoutePlan{
 		DeliveryRoot:  sourceRoot,
@@ -232,7 +230,7 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 	}
 
 	if plan.TargetProject != "" {
-		routeConfig, err := findDeliveryRouteAmqrc(sourceRoot)
+		routeConfig, err := findAmqrcForRoot(sourceRoot)
 		if err != nil {
 			return plan, federationSourceProjectError(sourceRoot)
 		}

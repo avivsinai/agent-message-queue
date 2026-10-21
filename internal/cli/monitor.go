@@ -23,11 +23,6 @@ type monitorResult struct {
 	Drained    []monitorItem `json:"drained"`
 }
 
-var (
-	monitorIdleForTest        func()
-	monitorPollingIdleForTest func()
-)
-
 func runMonitor(args []string) error {
 	fs := flag.NewFlagSet("monitor", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -303,12 +298,6 @@ func monitorWithFsnotifyProbe(
 	if found {
 		return "existing", nil
 	}
-	if monitorIdleForTest != nil {
-		monitorIdleForTest()
-		if err := revalidateContext(); err != nil {
-			return "", err
-		}
-	}
 
 	contextTicker := time.NewTicker(500 * time.Millisecond)
 	defer contextTicker.Stop()
@@ -379,15 +368,6 @@ func monitorWithPollingProbe(
 	}
 	if found {
 		return "existing", nil
-	}
-	if monitorIdleForTest != nil {
-		monitorIdleForTest()
-		if err := revalidateContext(); err != nil {
-			return "", err
-		}
-	}
-	if monitorPollingIdleForTest != nil {
-		monitorPollingIdleForTest()
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)

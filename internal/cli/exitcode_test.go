@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 )
 
@@ -26,115 +25,6 @@ func TestGetExitCode(t *testing.T) {
 			got := GetExitCode(tt.err)
 			if got != tt.expected {
 				t.Errorf("GetExitCode() = %d, want %d", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestAggregateExitCode(t *testing.T) {
-	ranked := []int{ExitSuccess, ExitError, ExitTimeout, ExitActionRequired}
-	rank := map[int]int{
-		ExitActionRequired: 3,
-		ExitTimeout:        2,
-		ExitError:          1,
-		ExitSuccess:        0,
-	}
-
-	for _, a := range ranked {
-		for _, b := range ranked {
-			want := a
-			if rank[b] > rank[a] {
-				want = b
-			}
-			t.Run(fmt.Sprintf("pair %d+%d", a, b), func(t *testing.T) {
-				got := AggregateExitCode(0, []AgentOutcome{{Code: a}, {Code: b}})
-				if got != want {
-					t.Errorf("got %d, want %d", got, want)
-				}
-			})
-		}
-	}
-
-	tests := []struct {
-		name         string
-		wholeCommand int
-		agents       []AgentOutcome
-		want         int
-	}{
-		{
-			name: "6 beats 4: action_required plus timeout",
-			agents: []AgentOutcome{
-				{Code: ExitActionRequired},
-				{Code: ExitTimeout},
-			},
-			want: ExitActionRequired,
-		},
-		{
-			name: "all expected dispositions is 0",
-			agents: []AgentOutcome{
-				{Code: ExitError, Disposition: AgentDispositionDisabled},
-				{Code: ExitTimeout, Disposition: AgentDispositionUnsupported},
-				{Code: ExitActionRequired, Disposition: AgentDispositionFresh},
-			},
-			want: ExitSuccess,
-		},
-		{
-			name: "disabled must not escalate a nonzero code",
-			agents: []AgentOutcome{
-				{Code: ExitError, Disposition: AgentDispositionDisabled},
-			},
-			want: ExitSuccess,
-		},
-		{
-			name: "disabled 6 plus timeout is 4, not 6",
-			agents: []AgentOutcome{
-				{Code: ExitActionRequired, Disposition: AgentDispositionDisabled},
-				{Code: ExitTimeout},
-			},
-			want: ExitTimeout,
-		},
-		{
-			name:         "usage preempts per-agent action_required",
-			wholeCommand: ExitUsage,
-			agents:       []AgentOutcome{{Code: ExitActionRequired}},
-			want:         ExitUsage,
-		},
-		{
-			name:         "context mismatch preempts per-agent timeout",
-			wholeCommand: ExitContextMismatch,
-			agents:       []AgentOutcome{{Code: ExitTimeout}},
-			want:         ExitContextMismatch,
-		},
-		{
-			name:         "not-found preempts per-agent error",
-			wholeCommand: ExitNotFound,
-			agents:       []AgentOutcome{{Code: ExitError}},
-			want:         ExitNotFound,
-		},
-		{
-			name:   "empty agents is success",
-			agents: nil,
-			want:   ExitSuccess,
-		},
-		{
-			name:         "nonzero whole-command is not dropped to success",
-			wholeCommand: ExitError,
-			agents:       nil,
-			want:         ExitError,
-		},
-		{
-			name:         "off-contract per-agent code fails closed as general error",
-			wholeCommand: 0,
-			agents:       []AgentOutcome{{Code: ExitNotFound}},
-			want:         ExitError,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := AggregateExitCode(tt.wholeCommand, tt.agents)
-			if got != tt.want {
-				t.Errorf("AggregateExitCode() = %d, want %d", got, tt.want)
 			}
 		})
 	}

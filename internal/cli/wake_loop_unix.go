@@ -299,7 +299,7 @@ func (l *wakeLoop) prepareStartupBaseline() (bool, error) {
 	historyUncertain := false
 	for {
 		var prepareErr error
-		l.startupBaselineWatcher, prepareErr = newWakeBaselineEventWatcher(retained.path)
+		l.startupBaselineWatcher, prepareErr = newWakePathEventWatcher(retained.path)
 		if prepareErr == nil {
 			prepareErr = retained.ValidateCanonical()
 		}

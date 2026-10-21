@@ -329,10 +329,6 @@ func provisionNewNamedSession(base, session string, agents []string) (string, er
 	return provisionCoopSessionChild(base, session, agents, "", "", true)
 }
 
-// sessionCreateBeforeExclusive runs after the base is pinned and before the
-// exclusive mkdir so tests can inject a racing creator.
-var sessionCreateBeforeExclusive func(base, name string)
-
 func provisionCoopSessionChild(base, session string, agents []string, execAgent, execCommand string, exclusive bool) (string, error) {
 	if err := validateSessionName(session); err != nil {
 		return "", err
@@ -356,9 +352,6 @@ func provisionCoopSessionChild(base, session string, agents []string, execAgent,
 
 	var result string
 	provision := func() error {
-		if exclusive && sessionCreateBeforeExclusive != nil {
-			sessionCreateBeforeExclusive(base, session)
-		}
 		var sessionRoot *fsq.DeliveryRoot
 		if exclusive {
 			sessionRoot, err = baseRoot.CreateDirectChildExclusive(session, 0o700)

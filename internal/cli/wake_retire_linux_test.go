@@ -46,7 +46,7 @@ func TestRetireWakeUsesLinuxPidfdAndRemovesTarget(t *testing.T) {
 		},
 	)
 
-	result, err := retireWake(root, "codex", requested)
+	result, err := retireWakeIfGeneration(root, "codex", requested, "")
 	if err != nil || result.Status != "retired" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

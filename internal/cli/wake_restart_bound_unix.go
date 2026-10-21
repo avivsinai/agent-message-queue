@@ -33,13 +33,6 @@ func (image *wakeRestartBoundImage) close() error {
 	return cleanupErr
 }
 
-func bindWakeRestartCandidate(candidate wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {
-	if err := validateWakeImageEvidence(candidate); err != nil {
-		return nil, err
-	}
-	return bindWakeRestartCandidatePlatform(candidate)
-}
-
 func bindWakeRestartCandidateForRecord(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
 	if err := validateWakeRestartRecord(record); err != nil {
 		return nil, err

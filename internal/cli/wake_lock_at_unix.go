@@ -19,8 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var afterWakeLockAtRead = func() {}
-var syncWakeLockAfterCommitDirFD = func(fd int) error {
+func syncWakeLockAfterCommitDirFD(fd int) error {
 	return syncWakeOwnerDirFD(fd)
 }
 
@@ -48,7 +47,6 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	afterWakeLockAtRead()
 	pathFile, err := open()
 	if err != nil {
 		return nil, nil, err
@@ -557,8 +555,6 @@ func recordWakeGenerationFileFailureAt(
 	return snapshot
 }
 
-var afterWakeGenerationFileSnapshotDataRead = func(string) {}
-
 func sameWakeGenerationFileSnapshot(first, second os.FileInfo) bool {
 	return sameWakeFileIdentity(first, second) &&
 		first.Mode() == second.Mode() && first.Size() == second.Size()
@@ -609,7 +605,6 @@ func readWakeGenerationFileSnapshotAt(
 		return recordWakeGenerationFileFailureAt(dirfd, name, "read", err, snapshot), true, err
 	}
 	snapshot.Raw = bytes.Clone(data)
-	afterWakeGenerationFileSnapshotDataRead(name)
 	pathFile, err := open()
 	if err != nil {
 		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
@@ -648,21 +643,6 @@ func readWakeGenerationFileSnapshotAt(
 	}
 	snapshot.Marker = marker
 	return snapshot, true, nil
-}
-
-func readWakeGenerationFileAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
-	name string,
-	label string,
-) (wakeReady, bool, error) {
-	snapshot, exists, err := readWakeGenerationFileSnapshotAt(
-		dirfd,
-		agentDir,
-		name,
-		label,
-	)
-	return snapshot.Marker, exists, err
 }
 
 func removeWakeGenerationFileIfSnapshotMatchesAt(

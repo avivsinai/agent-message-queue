@@ -15,8 +15,6 @@ import (
 )
 
 var claimInboxNewToCur = fsq.MoveNewToCur
-var moveInboxCurToDLQ = fsq.MoveCurToDLQ
-var moveClaimedInboxCurToDLQ = fsq.MoveClaimedCurToDLQ
 
 const receiptSenderUnavailableDetail = "sender unavailable because message metadata could not be parsed"
 
@@ -117,7 +115,7 @@ func drainInboxItemsPinned(
 			var dlqPath string
 			var dlqErr error
 			if claimCommitted {
-				dlqPath, dlqErr = moveClaimedInboxCurToDLQ(
+				dlqPath, dlqErr = fsq.MoveClaimedCurToDLQ(
 					deliveryRoot,
 					me,
 					item.Filename,
@@ -127,7 +125,7 @@ func drainInboxItemsPinned(
 					claimErr,
 				)
 			} else {
-				dlqPath, dlqErr = moveInboxCurToDLQ(
+				dlqPath, dlqErr = fsq.MoveCurToDLQ(
 					deliveryRoot,
 					me,
 					item.Filename,

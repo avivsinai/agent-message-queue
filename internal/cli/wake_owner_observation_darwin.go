@@ -19,8 +19,6 @@ type darwinWakeOwnerObservationCapability struct {
 	cancelWriteFD int
 }
 
-var writeDarwinWakeOwnerObservationCancel = unix.Write
-
 func observeAuthoritativeWakeOwnerPlatform(owner wakeOwner) (wakeOwnerObservation, error) {
 	capability, err := openDarwinWakeOwnerObservationCapability(owner.PID)
 	if err != nil {
@@ -268,7 +266,7 @@ func (capability *darwinWakeOwnerObservationCapability) cancel() error {
 		return nil
 	}
 	for {
-		count, err := writeDarwinWakeOwnerObservationCancel(
+		count, err := unix.Write(
 			capability.cancelWriteFD,
 			[]byte{1},
 		)

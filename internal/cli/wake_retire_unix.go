@@ -11,16 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
-
-var afterWakeRetireLockRemoval = func() {}
-var afterWakeRetireArtifactSnapshot = func() {}
-var afterWakeRetireValidation = func() {}
-
-var wakeRetireUnlinkStateAt wakemutation.UnlinkAtFunc = wakeUnlinkAt
 
 type wakeRetireArtifactSnapshot struct {
 	Target             wakeTargetSnapshot
@@ -132,10 +125,6 @@ func takeoverWakeTarget(root, me string, requested wakeTarget) wakeTarget {
 	return requested
 }
 
-func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error) {
-	return retireWakeIfGeneration(root, me, requested, "")
-}
-
 func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration string) (wakeRetireResult, error) {
 	result := wakeRetireResult{
 		Status: "refused",
@@ -213,7 +202,6 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			return refuse(err.Error())
 		}
 
-		afterWakeRetireValidation()
 		var commit wakeLockRemovalOutcome
 		commit.Committed, commit.Err = terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			agentDir,
@@ -227,7 +215,6 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			}
 			return refuse("wake lock or process identity changed before retirement")
 		}
-		afterWakeRetireLockRemoval()
 		cleanup := preserveWakeRetireArtifacts(artifacts, nil)
 		if commit.Err == nil {
 			cleanup = wakeRetireCleanupOutcome{}
@@ -268,7 +255,6 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			if err != nil {
 				return err
 			}
-			afterWakeRetireValidation()
 			if err := requireExistingWakeTargetMatchesAt(dirfd, scopedAgentDir, current, requested); err != nil {
 				return err
 			}
@@ -280,7 +266,6 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			if !commit.Committed {
 				return commit.Err
 			}
-			afterWakeRetireLockRemoval()
 			if commit.Err != nil {
 				cleanup = preserveWakeRetireArtifacts(artifacts, nil)
 				return nil
@@ -409,7 +394,6 @@ func removeWakeRetireArtifactsAt(
 	); err != nil {
 		return preserveWakeRetireArtifacts(expected, err)
 	}
-	afterWakeRetireArtifactSnapshot()
 	if err := validateWakeRetireCleanupSnapshotAt(
 		dirfd, agentDir, retired, expected, "during retired artifact cleanup",
 	); err != nil {
@@ -550,7 +534,7 @@ func removeWakeRetireStateIfSnapshotMatchesAt(
 	if !sameWakeRetireStateSnapshot(expected, current) {
 		return false, errors.New("wake state changed before removal; preserving replacement")
 	}
-	if err := scope.unlinkAtWith(wakeRetireUnlinkStateAt, wakeStateFileName, 0); err != nil {
+	if err := scope.unlinkAtWith(wakeUnlinkAt, wakeStateFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}

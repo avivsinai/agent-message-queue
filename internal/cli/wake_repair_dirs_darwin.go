@@ -13,9 +13,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// waitRetainedWakeInboxEvent is a seam so tests can inject the interrupts the
-// Go runtime delivers in production.
-var waitRetainedWakeInboxEvent = func(kqueueFD int, events []unix.Kevent_t) (int, error) {
+// waitRetainedWakeInboxEvent blocks until the retained inbox kqueue reports
+// events.
+func waitRetainedWakeInboxEvent(kqueueFD int, events []unix.Kevent_t) (int, error) {
 	return unix.Kevent(kqueueFD, nil, events, nil)
 }
 

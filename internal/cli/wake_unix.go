@@ -35,11 +35,9 @@ var (
 	wakeTerminalAuthorityRetryDelay  = 250 * time.Millisecond
 	wakeInboxScanRetryBase           = 250 * time.Millisecond
 	wakeInboxScanRetryMax            = 30 * time.Second
-	getWakeCurrentTTY                = getCurrentTTY
 	getWakeProcessSID                = unix.Getsid
 	wakeTIOCSTIAvailable             = func() bool { return tiocsti.Available() }
 	wakeInputIsTTY                   = func() bool { return tiocsti.IsTTY() }
-	newWakeBaselineEventWatcher      = newWakePathEventWatcher
 )
 
 type fsnotifyWakeEventWatcher struct {
@@ -198,43 +196,9 @@ func childRepairSource(lineage *wakeRepairLineage) wakeRepairHandoffSource {
 }
 
 var startWakeFromTarget = startWakeFromTargetDefault
-var startWakeReloadTransportForWake = startWakeReloadTransportInDir
-var afterExistingWakeReadyPublication = func() {}
-var waitForWakeRepairChildExit = func(waiter *wakeProcessWaiter) error {
+
+func waitForWakeRepairChildExit(waiter *wakeProcessWaiter) error {
 	return waiter.waitForExit(wakeProcessExitTimeout)
-}
-
-// acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
-// Returns cleanup function and error. If another wake is running, returns error.
-func acquireWakeLock(root, me string, target *wakeTarget) (cleanup func(), err error) {
-	return acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{target: target})
-}
-
-func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions) (cleanup func(), err error) {
-	agentDir, innerCleanup, err := acquireWakeLockWithOptionsRetained(root, me, options)
-	if err != nil {
-		return nil, err
-	}
-	return func() {
-		innerCleanup()
-		_ = agentDir.Close()
-	}, nil
-}
-
-func acquireWakeLockWithOptionsRetained(
-	root, me string,
-	options wakeLockAcquireOptions,
-) (agentDir *wakeAgentDir, cleanup func(), err error) {
-	agentDir, err = openWakeAgentDir(root, me)
-	if err != nil {
-		return nil, nil, err
-	}
-	innerCleanup, err := acquireWakeLockWithOptionsInDir(agentDir, root, me, options)
-	if err != nil {
-		_ = agentDir.Close()
-		return nil, nil, err
-	}
-	return agentDir, innerCleanup, nil
 }
 
 func supersedeUnverifiedGenericWakeAt(
@@ -311,7 +275,7 @@ func acquireWakeLockWithOptionsInDir(
 					wakeRecoverOwnerCommand(root, me),
 				)
 			}
-			if wakeLockEligibleForQuarantine(inspection, wakeQuarantineNow()) {
+			if wakeLockEligibleForQuarantine(inspection, time.Now()) {
 				if _, err := quarantineMalformedWakeLockAt(dirfd, agentDir, inspection); err != nil {
 					return err
 				}
@@ -806,14 +770,6 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 	return lock, nil
 }
 
-func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
-	replace, err := wakeLockReplacementNeeded(inspection)
-	if err != nil || !replace {
-		return replace, err
-	}
-	return terminateAndRemoveOrphanedWakeLock(inspection)
-}
-
 func wakeLockReplacementNeeded(inspection wakeLockInspection) (bool, error) {
 	if err := validateWakeLockOwnerlessMutation(inspection); err != nil {
 		return false, err
@@ -882,7 +838,7 @@ func wakeLockSharesCurrentTerminalDifferentSession(inspection wakeLockInspection
 }
 
 func sameWakeTTYPathAsCurrent(inspection wakeLockInspection) bool {
-	currentTTY := getWakeCurrentTTY()
+	currentTTY := getCurrentTTY()
 	existingTTY := inspection.Lock.TTY
 	if strings.HasPrefix(existingTTY, "/dev/") {
 		if real, err := filepath.EvalSymlinks(existingTTY); err == nil {
@@ -1618,7 +1574,7 @@ func startWakeFromTargetDefault(
 	if err != nil {
 		return nil, err
 	}
-	capability, err := prepareWakeRepairChildCapability(cmd)
+	capability, err := prepareWakeRepairChildCapabilityPlatform(cmd)
 	if err != nil {
 		_ = handoff.Close()
 		return nil, err
@@ -1720,8 +1676,6 @@ func openCoopWakeOutput(root, me string) (*os.File, error) {
 // existing wake maintenance tick.
 const wakeOutputMaxBytes int64 = 1 << 20
 
-var truncateWakeOutput = unix.Ftruncate
-
 func maintainWakeOutputBounds(outputs ...*os.File) error {
 	var bounded []os.FileInfo
 	var errs []error
@@ -1748,7 +1702,7 @@ func maintainWakeOutputBounds(outputs ...*os.File) error {
 			continue
 		}
 		bounded = append(bounded, info)
-		if err := truncateWakeOutput(int(output.Fd()), 0); err != nil {
+		if err := unix.Ftruncate(int(output.Fd()), 0); err != nil {
 			errs = append(errs, fmt.Errorf("truncate wake output %s: %w", output.Name(), err))
 		}
 	}
@@ -1790,7 +1744,7 @@ func openWakeOutputInDir(
 			return fmt.Errorf("%s %s must be a regular file", label, filepath.Join(agentDir.path, name))
 		}
 		if stat.Size >= wakeOutputMaxBytes {
-			if err := truncateWakeOutput(fd, 0); err != nil {
+			if err := unix.Ftruncate(fd, 0); err != nil {
 				truncateErr = err
 			}
 		}
@@ -2686,7 +2640,6 @@ func (s *wakeStart) reuseExistingWake(
 	cleanupReady := func(cause error) error {
 		return errors.Join(cause, publication.removeIfUnchanged())
 	}
-	afterExistingWakeReadyPublication()
 	if s.requestedOwner != nil {
 		ready, readyErr := validateWakeReadyFileAgainstOwnerInDir(
 			s.activeAgentDir,
@@ -3143,7 +3096,7 @@ func (s *wakeStart) startReloadTransport() (func(), error) {
 		return nil, fmt.Errorf("requested wake owner observation ended before reload transport startup")
 	default:
 	}
-	stopReloadTransport, startErr := startWakeReloadTransportForWake(
+	stopReloadTransport, startErr := startWakeReloadTransportInDir(
 		s.activeAgentDir,
 		s.root,
 		s.me,
@@ -3214,7 +3167,7 @@ func ignoreWakeBrokenPipe() func() {
 	}
 }
 
-var snapshotWakeDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+func snapshotWakeDirEntryInfo(entry os.DirEntry) (os.FileInfo, error) {
 	return entry.Info()
 }
 
@@ -3271,13 +3224,9 @@ func invalidateWakeBaselineEvent(cfg *wakeConfig, event fsnotify.Event) {
 	delete(cfg.baselineExisting, name)
 }
 
-// prepareWakeBaseline classifies startup backlog after the watcher is armed.
-// Linux/inotify provides an ordered marker fence; Darwin/kqueue uses the marker
-// plus a quiescence window, with watcher errors handled fail-closed.
-func prepareWakeBaseline(cfg *wakeConfig, watcher *fsnotify.Watcher, inboxNew string) error {
-	return prepareWakeBaselineEvents(cfg, watcher.Events, watcher.Errors, inboxNew)
-}
-
+// prepareWakeBaselineEvents classifies startup backlog after the watcher is
+// armed. Linux/inotify provides an ordered marker fence; Darwin/kqueue uses the
+// marker plus a quiescence window, with watcher errors handled fail-closed.
 func prepareWakeBaselineEvents(
 	cfg *wakeConfig,
 	events <-chan fsnotify.Event,

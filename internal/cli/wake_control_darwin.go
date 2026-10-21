@@ -668,28 +668,6 @@ func handleDarwinWakeRestartControl(
 	_, _ = conn.Write([]byte("ACK\n"))
 }
 
-func startWakeControlListener(
-	root, me string,
-	lock wakeLock,
-) (func(), <-chan struct{}, func(), error) {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	cleanup, stop, markStopped, err := startWakeControlListenerInDirOwned(
-		agentDir,
-		root,
-		me,
-		lock,
-		true,
-		nil,
-	)
-	if err != nil {
-		_ = agentDir.Close()
-	}
-	return cleanup, stop, markStopped, err
-}
-
 func startWakeControlListenerInDirWithRestart(
 	agentDir *wakeAgentDir,
 	root, me string,
@@ -714,24 +692,6 @@ type darwinWakeControlTestHooks struct {
 	// a directory swap here to prove the revalidation REFUSES rather than
 	// binding a detached directory.
 	beforeBindRevalidate func(agentDir *wakeAgentDir)
-}
-
-func startWakeControlListenerInDirOwned(
-	agentDir *wakeAgentDir,
-	root, me string,
-	lock wakeLock,
-	closeAgentDir bool,
-	testHooks *darwinWakeControlTestHooks,
-) (func(), <-chan struct{}, func(), error) {
-	return startWakeControlListenerInDirOwnedWithRestart(
-		agentDir,
-		root,
-		me,
-		lock,
-		closeAgentDir,
-		testHooks,
-		nil,
-	)
 }
 
 func startWakeControlListenerInDirOwnedWithRestart(

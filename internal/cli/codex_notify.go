@@ -18,7 +18,6 @@ import (
 const codexNotifyForwardTimeout = 10 * time.Second
 
 var (
-	codexNotifyExecutable  = os.Executable
 	codexNotifyForward     = forwardOperatorCodexNotify
 	runOperatorCodexNotify = defaultRunOperatorCodexNotify
 )
@@ -46,7 +45,7 @@ func runCodexNotify(args []string) error {
 	if err := fsq.ValidateExistingMailboxLayout(root, handle); err != nil {
 		return fmt.Errorf("validate codex notify root: %w", err)
 	}
-	amqExecutable, err := codexNotifyExecutable()
+	amqExecutable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve codex notify executable: %w", err)
 	}

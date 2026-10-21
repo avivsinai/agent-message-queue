@@ -22,7 +22,6 @@ type amqrc struct {
 }
 
 var (
-	amqrcLstat          = os.Lstat
 	globalAmqrcReadFile = os.ReadFile
 	gitMarkerLstat      = os.Lstat
 )
@@ -326,18 +325,12 @@ const (
 	rootSourceAutoDetect rootSource = "auto_detect"
 )
 
-// resolveEnvConfig resolves root and me with proper precedence.
+// resolveEnvConfigWithSource resolves root and me, returning the winning source for root.
 // Precedence:
 //   - Root: flags > env > project .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
 //   - Inside a Git worktree or bare repository: repo-local .agent-mail; ~/.amqrc is ineligible
 //   - Outside Git: ~/.amqrc > auto-detect
 //   - Me:   flags > env (NOT from .amqrc)
-func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
-	root, _, me, err := resolveEnvConfigWithSource(rootFlag, meFlag)
-	return root, me, err
-}
-
-// resolveEnvConfigWithSource resolves root and me, returning the winning source for root.
 func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, string, error) {
 	var root, me string
 	var source rootSource
@@ -787,7 +780,7 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 		// Refuse configuration whose provenance cannot be established. In
 		// particular, symlinks and group/world-writable files are attacker
 		// controlled in common shared-directory setups.
-		if info, statErr := amqrcLstat(rcPath); statErr == nil {
+		if info, statErr := os.Lstat(rcPath); statErr == nil {
 			if err := validateAmqrcInfo(rcPath, info); err != nil {
 				return amqrcResult{}, err
 			}
@@ -1136,7 +1129,7 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 				break
 			}
 			rcPath := filepath.Join(dir, ".amqrc")
-			if info, statErr := amqrcLstat(rcPath); statErr == nil {
+			if info, statErr := os.Lstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {
 					return amqrcResult{}, err
 				}

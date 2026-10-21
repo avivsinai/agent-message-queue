@@ -24,11 +24,8 @@ var (
 	fetchLatestTagForUpgrade              = update.FetchLatestTag
 	detectHomebrewPrefixForUpgrade        = detectHomebrewPrefix
 	detectHomebrewInstallationsForUpgrade = detectHomebrewInstallations
-	lookPathForHomebrewUpgrade            = exec.LookPath
-	lookPathForDelegateForUpgrade         = exec.LookPath
 	runBrewPrefixForHomebrewUpgrade       = runBrewPrefix
 	homebrewBrewExistsForUpgrade          = homebrewBrewExists
-	homebrewCellarExistsForUpgrade        = homebrewCellarExists
 	classifyInstallForUpgrade             = update.ClassifyInstall
 	runDelegateForUpgrade                 = runDelegateCommand
 	companionBinariesForUpgrade           = update.CompanionBinaries
@@ -855,7 +852,7 @@ func scoopManagerExecutable() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
-	path, err := lookPathForDelegateForUpgrade("scoop")
+	path, err := exec.LookPath("scoop")
 	if err != nil {
 		return ""
 	}
@@ -964,7 +961,7 @@ func derivedHomebrewPrefixes(path, resolved string) []derivedHomebrewPrefix {
 	rawPath := filepath.Clean(path)
 	if filepath.Base(filepath.Dir(rawPath)) == "bin" {
 		prefix := filepath.Dir(filepath.Dir(rawPath))
-		if homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")) {
+		if homebrewCellarExists(filepath.Join(prefix, "Cellar")) {
 			add(prefix, false)
 		}
 	}
@@ -1009,7 +1006,7 @@ func detectHomebrewInstallations() []homebrewInstallation {
 		})
 	}
 
-	if brewPath, err := lookPathForHomebrewUpgrade("brew"); err == nil {
+	if brewPath, err := exec.LookPath("brew"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), homebrewDetectionTimeout)
 		output, runErr := runBrewPrefixForHomebrewUpgrade(ctx, brewPath)
 		cancel()
@@ -1022,12 +1019,12 @@ func detectHomebrewInstallations() []homebrewInstallation {
 	}
 	for _, prefix := range wellKnownHomebrewPrefixes {
 		brewPath := filepath.Join(prefix, "bin", "brew")
-		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")))
+		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(prefix, "Cellar")))
 	}
 	if home, err := homeDirForUpgrade(); err == nil {
 		prefix := filepath.Join(home, ".linuxbrew")
 		brewPath := filepath.Join(prefix, "bin", "brew")
-		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")))
+		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(prefix, "Cellar")))
 	}
 	return installations
 }
@@ -1167,7 +1164,7 @@ func detectHomebrewPrefix() string {
 		return prefix
 	}
 
-	if brewPath, err := lookPathForHomebrewUpgrade("brew"); err == nil {
+	if brewPath, err := exec.LookPath("brew"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), homebrewDetectionTimeout)
 		output, runErr := runBrewPrefixForHomebrewUpgrade(ctx, brewPath)
 		cancel()
@@ -1180,7 +1177,7 @@ func detectHomebrewPrefix() string {
 
 	for _, prefix := range wellKnownHomebrewPrefixes {
 		brewPath := filepath.Join(prefix, "bin", "brew")
-		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")) {
+		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(prefix, "Cellar")) {
 			return filepath.Clean(prefix)
 		}
 	}
@@ -1189,7 +1186,7 @@ func detectHomebrewPrefix() string {
 	if home, err := homeDirForUpgrade(); err == nil {
 		userLinuxbrew := filepath.Join(home, ".linuxbrew")
 		brewPath := filepath.Join(userLinuxbrew, "bin", "brew")
-		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(userLinuxbrew, "Cellar")) {
+		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(userLinuxbrew, "Cellar")) {
 			return userLinuxbrew
 		}
 	}

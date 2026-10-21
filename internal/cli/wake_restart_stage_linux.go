@@ -4,10 +4,6 @@ package cli
 
 import "fmt"
 
-func planWakeRestartStagePlatform(wakeImageEvidenceV1, string) (string, error) {
-	return "", nil
-}
-
 func planWakeRestartStageForRecordPlatform(wakeRestartRecord) (string, error) {
 	return "", nil
 }

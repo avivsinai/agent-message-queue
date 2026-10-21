@@ -22,9 +22,6 @@ var currentWakeBootID = func() string {
 	return readWakeBootIDPlatform()
 }
 
-// currentWakeHostname reports the kernel hostname. Overridable for tests.
-var currentWakeHostname = os.Hostname
-
 type wakeMachineComparison int
 
 const (
@@ -70,7 +67,7 @@ func classifyWakeLockMachine(lock wakeLock) (wakeMachineComparison, string) {
 	if lock.Hostname == "" {
 		return wakeMachineSame, ""
 	}
-	current, err := currentWakeHostname()
+	current, err := os.Hostname()
 	if err != nil || current == "" {
 		return wakeMachineUnknown, inspectionReason("hostname unavailable", err)
 	}

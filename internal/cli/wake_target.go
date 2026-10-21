@@ -193,28 +193,6 @@ func validateWakeTargetFile(path string, info os.FileInfo) error {
 	return validateWakeTargetParentDirs("wake target", resolvedPath)
 }
 
-func writeWakeTarget(root, me string, target wakeTarget) error {
-	agentBase := fsq.AgentBase(root, me)
-	if err := os.MkdirAll(agentBase, 0o700); err != nil {
-		return fmt.Errorf("create wake target directory: %w", err)
-	}
-	return withWakeLifecycleGuard(root, me, func() error {
-		return writeWakeTargetGuarded(root, me, target)
-	})
-}
-
-func writeWakeTargetGuarded(root, me string, target wakeTarget) error {
-	if err := validateWakeTarget(target, root, me); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(target, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal wake target: %w", err)
-	}
-	data = append(data, '\n')
-	return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
-}
-
 func validateWakeTarget(target wakeTarget, root, me string) error {
 	if target.Schema != wakeTargetSchema {
 		return fmt.Errorf("wake target schema %d unsupported", target.Schema)

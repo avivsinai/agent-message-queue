@@ -32,7 +32,7 @@ func TestWakeUpgradeRetireUnsupportedPidfdFailsClosed(t *testing.T) {
 		},
 	)
 
-	result, err := retireWake(root, "codex", requested)
+	result, err := retireWakeIfGeneration(root, "codex", requested, "")
 	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "pidfd_open") {
 		t.Fatalf("retire result = %#v err=%v, want unsupported-pidfd failure", result, err)
 	}

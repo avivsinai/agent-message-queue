@@ -18,11 +18,6 @@ import (
 )
 
 var linkDarwinWakeRestartStage = os.Link
-var copyDarwinWakeRestartStageFn = copyDarwinWakeRestartStage
-
-func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {
-	return bindWakeRestartCandidateAtPlatform(candidate, "")
-}
 
 func bindWakeRestartCandidateForRecordPlatform(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
 	return bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
@@ -106,7 +101,7 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	linked := true
 	if err := linkDarwinWakeRestartStage(candidate.ExecutionPath, stagePath); errors.Is(err, syscall.EXDEV) {
 		linked = false
-		if err := copyDarwinWakeRestartStageFn(source, stagePath); err != nil {
+		if err := copyDarwinWakeRestartStage(source, stagePath); err != nil {
 			return nil, fmt.Errorf("copy cross-device wake restart candidate into stage: %w", err)
 		}
 	} else if err != nil {
