@@ -136,7 +136,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		return UsageError("--ignore-session-pin cannot be used with --from-session")
 	}
 
-	// Cross-tree guard (issue #144): a direct, unqualified --root that crosses
+	// Cross-tree guard: a direct, unqualified --root that crosses
 	// into a different AMQ tree carries no sender-origin metadata, so the
 	// recipient cannot reply — and a naive reply would loop back into the
 	// replier's own tree. Refuse with guidance instead of minting an

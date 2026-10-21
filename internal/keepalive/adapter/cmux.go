@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const (
@@ -783,23 +785,15 @@ func (c Cmux) executable() (string, error) {
 		}
 		return path, nil
 	}
-	if bundled := strings.TrimSpace(c.getenv("CMUX_BUNDLED_CLI_PATH")); bundled != "" && c.isExecutable(bundled) {
-		return filepath.Clean(bundled), nil
+	path, err := c.locator().Resolve()
+	if err != nil {
+		return "", fmt.Errorf("cmux CLI not found; set AMQ_KEEPALIVE_CMUX or install the bundled CLI at %s", launch.CmuxBundleCLI)
 	}
-	if path, err := c.lookPath("cmux"); err == nil {
-		return filepath.Clean(path), nil
-	}
+	return path, nil
+}
 
-	candidates := []string{"/Applications/cmux.app/Contents/Resources/bin/cmux"}
-	if home, err := c.userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		candidates = append(candidates, filepath.Join(home, "Applications", "cmux.app", "Contents", "Resources", "bin", "cmux"))
-	}
-	for _, candidate := range candidates {
-		if c.isExecutable(candidate) {
-			return filepath.Clean(candidate), nil
-		}
-	}
-	return "", fmt.Errorf("cmux CLI not found; set AMQ_KEEPALIVE_CMUX or install the bundled CLI at %s", candidates[0])
+func (c Cmux) locator() launch.CmuxLocator {
+	return launch.CmuxLocator{Getenv: c.Getenv, LookPath: c.LookPath, UserHomeDir: c.UserHomeDir, IsExecutable: c.IsExecutable}
 }
 
 func (c Cmux) resolveCandidate(candidate string) (string, error) {
@@ -830,18 +824,8 @@ func (c Cmux) lookPath(file string) (string, error) {
 	return exec.LookPath(file)
 }
 
-func (c Cmux) userHomeDir() (string, error) {
-	if c.UserHomeDir != nil {
-		return c.UserHomeDir()
-	}
-	return os.UserHomeDir()
-}
-
 func (c Cmux) isExecutable(path string) bool {
-	if c.IsExecutable != nil {
-		return c.IsExecutable(path)
-	}
-	return isExecutableFile(path)
+	return c.locator().Executable(path)
 }
 
 func (c Cmux) sleep(ctx context.Context, delay time.Duration) error {
@@ -911,9 +895,4 @@ func normalizeCmuxSurfaceID(id string) (string, error) {
 		}
 	}
 	return id, nil
-}
-
-func isExecutableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }

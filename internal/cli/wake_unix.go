@@ -28,8 +28,8 @@ var (
 	wakeTerminateKillConfirm = 3 * time.Second
 	// wakeTerminateGracefulExitConfirm bounds how long a retire waits for the
 	// exact signaled process to finish a graceful exit whose lock teardown
-	// already outlived wakeTerminateGrace (issue #714). It is a shutdown
-	// bound, not a kill-reap bound, even though today both are 3 s.
+	// already outlived wakeTerminateGrace. It is a shutdown bound, not a
+	// kill-reap bound, even though both are 3 s.
 	wakeTerminateGracefulExitConfirm = 3 * time.Second
 	wakeBaselineTimeout              = 5 * time.Second
 	wakeBaselineSettle               = 50 * time.Millisecond
@@ -452,9 +452,10 @@ func acquireWakeLockWithOptionsInDir(
 					return err
 				}
 			} else {
-				// byc: revalidate canonical identity before the targetless blind-unlink.
-				// A directory swap leaves the retained dirfd pointing at the detached
-				// OLD directory; unlinking there misses the canonical namespace. Refuse.
+				// Revalidate canonical identity before the targetless
+				// blind-unlink. A directory swap leaves the retained dirfd
+				// pointing at the detached OLD directory; unlinking there
+				// misses the canonical namespace. Refuse.
 				if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 					return err
 				}
@@ -653,7 +654,7 @@ func cleanupGenericWakeRepairFloorAt(
 	if err != nil || !exists || floor.Generation != created.Lock.Generation {
 		return err
 	}
-	// byc: revalidate canonical identity before the blind floor removal. A
+	// Revalidate canonical identity before the blind floor removal. A
 	// directory swap leaves the retained dirfd pointing at the detached OLD
 	// directory; removing there misses the canonical namespace. Refuse.
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
@@ -3813,12 +3814,9 @@ func runWakeLoop(cfg wakeConfig) error {
 			return nil
 		}
 		err := notifyNewMessages(&cfg)
-		// codex #788: canonical mismatch is a DEDICATED type (distinct from
-		// wakeInboxScanError). Handle it BEFORE the ordinary scan-retry path so
-		// the watcher is invalidated and rebindWatcher re-arms from the
-		// canonical path on the next inbox-scan-retry tick — otherwise the
-		// loop keeps reading the same detached inbox (rebindWatcher returns
-		// immediately when watcher != nil).
+		// A canonical mismatch (wakeInboxCanonicalMismatchError) is handled
+		// BEFORE the ordinary scan-retry path: rebindWatcher returns at once
+		// while watcher != nil, so the watcher must be invalidated here.
 		var canonicalMismatch *wakeInboxCanonicalMismatchError
 		if errors.As(err, &canonicalMismatch) {
 			switch classifyCanonicalMismatch(err, cfg.retainedInboxRebindable) {
@@ -4300,8 +4298,9 @@ func wakeInjectionPreconditionCheck(
 	}
 
 	// A running TIOCSTI wake was not conclusively disabled at bind time.
-	// Re-read the same #302 advisory capability signal so a later transition
-	// to disabled is surfaced and safely demoted without issuing an ioctl.
+	// Re-read the same TIOCSTI advisory capability signal so a later
+	// transition to disabled is surfaced and safely demoted without issuing
+	// an ioctl.
 	if tiocstiLegacyDisabledHint() {
 		mode := effectiveInjectMode(cfg)
 		capabilityErr := fmt.Errorf(

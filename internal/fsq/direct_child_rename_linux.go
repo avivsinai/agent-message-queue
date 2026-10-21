@@ -3,9 +3,9 @@
 package fsq
 
 // renameDirectChildNoReplace publishes a staged directory through
-// renameatNoReplace. Where that falls back to check-then-rename (issue
-// #1034), a plain rename could replace an empty directory created inside
-// the window; the callers that create session names exclusively hold
+// renameatNoReplace. Where that falls back to check-then-rename, a plain
+// rename could replace an empty directory created inside the window; the
+// callers that create session names exclusively hold
 // launch.WithSessionCreationLock, which closes that window between them.
 func (r *DeliveryRoot) renameDirectChildNoReplace(oldName, newName string) error {
 	dir, err := r.root.Open(".")

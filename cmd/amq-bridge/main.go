@@ -312,8 +312,8 @@ func writeRunResult(result RunResult) error {
 			return err
 		}
 	}
-	// review-827-r2 P2-3: refused transfers and unresolved ledger state are
-	// operator-facing diagnostics; emit them after the receipts so a silent
+	// Refused transfers and unresolved ledger state are operator-facing
+	// diagnostics; emit them after the receipts so a silent
 	// PollResult.Refused or a stuck retryable transfer is visible on every
 	// run.
 	if len(result.Poll.Refused) > 0 {

@@ -52,7 +52,7 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 	}
 	// claimRename is the exclusive-claim point: exactly one concurrent caller
 	// wins; losers observe os.IsNotExist. Windows cannot use os.Root.Rename
-	// here — it renames by handle and lets every contender succeed (#485).
+	// here — it renames by handle and lets every contender succeed.
 	if err := claimRename(root, newPath, curPath); err != nil {
 		var residue *claimCommittedResidueError
 		if errors.As(err, &residue) {
