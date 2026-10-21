@@ -13,7 +13,7 @@ func codexNotifyTestPayload(conversationID, cwd string) []byte {
 }
 
 func validCodexCapture() CaptureRequest {
-	evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload(testConversationID, testCodexCwd), testLaunchNonce, "codex", codexCaptureVersion, testCodexCwd)
+	evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload(testConversationID, testCodexCwd), testLaunchNonce, "codex", codexCaptureMinimumVersion, testCodexCwd)
 	if err != nil {
 		panic(err)
 	}
