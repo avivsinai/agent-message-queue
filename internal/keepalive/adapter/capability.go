@@ -3,7 +3,7 @@ package adapter
 // Capability models the wake capability vector from
 // docs/adr-wake-capability-vector.md. Each seat advertises the strongest
 // delivery it can honestly claim; callers request a minimum. Weaker is
-// refused, never substituted (ADR §"refusal over substitution").
+// refused, never substituted.
 type Capability struct {
 	Activation    Activation
 	Delivery      Delivery
@@ -40,9 +40,10 @@ const (
 
 // Satisfies reports whether this seat is at least as strong as the caller's
 // minimum on every axis. Weaker is REFUSED, never substituted
-// (ADR §"refusal over substitution"). A caller that needs an unattended wake
-// (min.RequiresHuman == false) must refuse a requires-human seat; a caller
-// that accepts a human handoff (min.RequiresHuman == true) accepts either.
+// (docs/adr-wake-capability-vector.md). A caller that needs an unattended
+// wake (min.RequiresHuman == false) must refuse a requires-human seat; a
+// caller that accepts a human handoff (min.RequiresHuman == true) accepts
+// either.
 func (c Capability) Satisfies(min Capability) bool {
 	if c.Activation < min.Activation {
 		return false

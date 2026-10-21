@@ -196,7 +196,7 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	// Undrained mail in inbox/new is unread by definition, so re-announcing it is
 	// correct; the cost is at most one duplicate notice when a wake is replaced
 	// while mail is still undrained, which clears as soon as the agent drains.
-	// Set AMQ_KEEPALIVE_BASELINE_EXISTING=1 to restore the old suppressing
+	// Set AMQ_KEEPALIVE_BASELINE_EXISTING=1 to restore suppressing
 	// behavior without a rebuild.
 	if baselineExistingEnabled() {
 		args = append(args, "--baseline-existing")

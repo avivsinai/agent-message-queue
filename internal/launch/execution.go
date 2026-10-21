@@ -226,9 +226,9 @@ func (ticket ExecutionTicket) Validate() error {
 		}
 	} else if (ticket.Backend == "") != (ticket.Profile == "") {
 		return fmt.Errorf("execution backend identity is incomplete")
-	} else if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion && ticket.Backend == "" {
+	} else if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && codexCaptureVersionSupported(ticket.ProviderVersion) && ticket.Backend == "" {
 		return fmt.Errorf("codex notify capture requires execution backend identity")
-	} else if ticket.Backend != "" && (ticket.Mode != AdapterModeCapture || ticket.Provider != CodexProvider || ticket.ProviderVersion != codexCaptureVersion) {
+	} else if ticket.Backend != "" && (ticket.Mode != AdapterModeCapture || ticket.Provider != CodexProvider || !codexCaptureVersionSupported(ticket.ProviderVersion)) {
 		return fmt.Errorf("execution backend identity is unsupported without pre-spawn acquisition")
 	}
 	for name, value := range map[string]string{"project root": ticket.ProjectRoot, "project identity": ticket.ProjectIdentity, "session root": ticket.SessionRoot, "session identity": ticket.SessionIdentity, "cwd": ticket.Cwd, "cwd identity": ticket.CwdIdentity, "provider executable": ticket.ProviderExecutable, "provider executable identity": ticket.ProviderExecutableIdentity, "amq executable": ticket.AMQExecutable, "amq executable identity": ticket.AMQExecutableIdentity, "environment digest": ticket.EnvDigest} {
@@ -273,7 +273,7 @@ func (ticket ExecutionTicket) Validate() error {
 	if err := ValidateCallerContext(ticket.CallerContext); err != nil {
 		return err
 	}
-	if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion {
+	if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && codexCaptureVersionSupported(ticket.ProviderVersion) {
 		if err := validateCodexNotifyTargetArgv(ticket); err != nil {
 			return err
 		}
@@ -828,7 +828,7 @@ func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable stri
 		return result, err
 	}
 	if ticket.LaunchNonce != nonce || ticket.Handle != handle || ticket.Mode != AdapterModeCapture ||
-		ticket.Provider != CodexProvider || ticket.ProviderVersion != codexCaptureVersion || ticket.PreSpawnAcquire {
+		ticket.Provider != CodexProvider || !codexCaptureVersionSupported(ticket.ProviderVersion) || ticket.PreSpawnAcquire {
 		return result, fmt.Errorf("codex notify execution ticket binding mismatch")
 	}
 	if ticket.State != ExecutionSpawnAttempted && ticket.State != ExecutionAcknowledged {

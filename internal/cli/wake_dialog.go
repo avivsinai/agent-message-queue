@@ -2,7 +2,7 @@ package cli
 
 import "time"
 
-// Dialog guard (#1054): a Claude Code hook (amq wake dialog open|close)
+// Dialog guard: a Claude Code hook (amq wake dialog open|close)
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
 // wake only reads the marker. Doorbell text and its CR would answer the

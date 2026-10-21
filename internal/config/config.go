@@ -51,8 +51,8 @@ func writeConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
 				return fmt.Errorf("stat config: %w", err)
 			}
 		}
-		// Review-823-r1 P2-1: every config.json writer emits the SAME layout
-		// (sorted keys via MarshalPreservingUnknowns with an empty original),
+		// Every config.json writer emits the SAME layout (sorted keys via
+		// MarshalPreservingUnknowns with an empty original),
 		// so `amq init` then `amq setup` is not a phantom roster change from
 		// struct-order vs sorted-order bytes alone.
 		data, err := MarshalPreservingUnknowns(nil, cfg)
@@ -81,8 +81,8 @@ func LoadConfig(path string) (Config, error) {
 // exist. The write is atomic and guarded against concurrent registration:
 // the config is pinned (opened as a regular file, no symlink), verified
 // before the write, and written through the DeliveryRoot — the same seam
-// provisionExistingApplyRoster uses (611.22.19 round-2 B2). It is idempotent:
-// a repeated call with an already-present handle is a no-op.
+// provisionExistingApplyRoster uses. It is idempotent: a repeated call with
+// an already-present handle is a no-op.
 //
 // This is the registration seam a companion uses to make its mailbox handle
 // discoverable to other agents in the root: the handle must be in config.json
@@ -90,7 +90,7 @@ func LoadConfig(path string) (Config, error) {
 // effects; the caller (serve) registers the handle through this function.
 // rootDir is the AMQ root (the DeliveryRoot base), not the config path.
 func EnsureAgent(rootDir, handle string) (bool, error) {
-	// B1: validate the handle BEFORE any write so a bad --me does not poison
+	// Validate the handle BEFORE any write so a bad --me does not poison
 	// config.json. This is the same validation fsq applies when reading the
 	// config; applying it at the door prevents an invalid handle from landing
 	// and blocking coop init / setup / doctor.
@@ -116,7 +116,7 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	if err := fsq.ValidateHandle(handle); err != nil {
 		return false, fmt.Errorf("invalid handle %q: %w", handle, err)
 	}
-	// B2: guarded RMW via an exclusive advisory lock on meta/config.lock.
+	// Guarded RMW via an exclusive advisory lock on meta/config.lock.
 	// The lock is held for the entire read-modify-write, so two concurrent
 	// EnsureAgent calls cannot lose a registration. This is the same
 	// flock-based seam DLQ envelope locks use (WithDLQEnvelopeLock), exposed
@@ -139,10 +139,10 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 
 // ensureAgentLocked does the read-modify-write of config.json under the
 // config lock. It reads via the DeliveryRoot (regular-file, no-follow),
-// preserves Version/CreatedUTC AND every unmodelled key (611.22.55: the
+// preserves Version/CreatedUTC AND every unmodelled key (the
 // Config struct models version/created_utc/agents only; re-marshalling the
-// bare struct dropped any other key an operator hand-added or a newer
-// writer emitted - probe names default_agent, project, wake, extensions,
+// bare struct would drop any other key an operator hand-added or a newer
+// writer emitted — for example default_agent, project, wake, extensions,
 // routing). The read decodes the file into a raw key map, the known fields
 // are overlaid, agents is mutated, and the full map is re-marshalled
 // (keys sorted by encoding/json - deterministic). Unknown keys are
@@ -151,18 +151,17 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 // indentation; the compaction pass applies encoding/json's default HTML
 // escaping, so an unknown string value containing <, > or & changes bytes on
 // the first rewrite — JSON-semantically identical, stable thereafter).
-// Since 611.22.57 the same preservation is shared by ALL config.json
-// writers (EnsureAgent/setup/apply overlay and the initializing writers,
-// through MarshalPreservingUnknowns). Creates the
-// config when absent.
+// The same preservation is shared by ALL config.json writers
+// (EnsureAgent/setup/apply overlay and the initializing writers, through
+// MarshalPreservingUnknowns). Creates the config when absent.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("read config: %w", err)
 		}
-		// No config: create one with this handle. Review-823-r1 P2-1: the
-		// create arm emits the same sorted layout as every other writer
+		// No config: create one with this handle. The create arm emits the
+		// same sorted layout as every other writer
 		// (empty original = struct keys in sorted order), keeping setup's
 		// byte comparison free of phantom roster changes.
 		cfg := Config{Version: 1, CreatedUTC: nowUTC(), Agents: []string{handle}}
@@ -196,11 +195,10 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 }
 
 // MarshalPreservingUnknowns re-marshals cfg together with every key present
-// in the original raw document but not modelled by Config (611.22.55,
-// extended to all config.json writers in 611.22.57). Known keys always take
-// the struct's values; unknown keys are re-emitted as their original raw
-// JSON. Keys come out sorted (map marshalling). Review-823-r1 P2-1: EVERY
-// config.json writer now routes through this encoder — WriteConfig, the
+// in the original raw document but not modelled by Config. Known keys
+// always take the struct's values; unknown keys are re-emitted as their
+// original raw JSON. Keys come out sorted (map marshalling). EVERY
+// config.json writer routes through this encoder — WriteConfig, the
 // ensureAgentLocked create arm, initializeApplySession, setup, and the apply
 // roster write — so a fresh write and a re-read rewrite are byte-stable
 // across writers, and `amq init` followed by `amq setup` reports no phantom
@@ -210,8 +208,8 @@ func MarshalPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
 }
 
 // marshalConfigPreservingUnknowns re-marshals cfg together with every key
-// present in the original raw document but not modelled by Config
-// (611.22.55). Known keys always take the struct's values; unknown keys are
+// present in the original raw document but not modelled by Config.
+// Known keys always take the struct's values; unknown keys are
 // re-emitted as their original raw JSON. Keys come out sorted (map
 // marshalling), which is deterministic across writers.
 func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
@@ -223,8 +221,8 @@ func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error
 	}
 	// A literal JSON `null` unmarshals into a nil map with no error; treat
 	// it like an empty document instead of panicking on the overlay
-	// (review-821-r1 P1-a; a panic here would kill amq-remote serve, whose
-	// caller degrades registration errors to warnings by design).
+	// (a panic here would kill amq-remote serve, whose caller degrades
+	// registration errors to warnings by design).
 	if raw == nil {
 		raw = make(map[string]json.RawMessage)
 	}

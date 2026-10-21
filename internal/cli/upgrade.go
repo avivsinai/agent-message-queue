@@ -98,14 +98,14 @@ var wellKnownHomebrewPrefixes = []string{
 
 func runUpgrade(args []string, currentVersion string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	allFlag := fs.Bool("all", false, "Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp)")
+	allFlag := fs.Bool("all", false, "Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign)")
 	yesFlag := fs.Bool("y", false, "Run the package-manager delegate without an AMQ confirmation; the manager may still prompt")
 	usage := usageWithFlags(
 		fs,
 		"amq upgrade [--all] [-y]",
 		"Downloads and installs the latest amq release from GitHub.",
 		"When amq is installed via Homebrew or Scoop, amq upgrade delegates to the package manager instead of overwriting it; pass -y to run the delegate.",
-		"--all upgrades companion binaries in the raw or resolved executable directory of a direct-install amq, or in ~/.local/bin; a running amq-keepalive is never killed.",
+		"--all upgrades companion binaries in the raw or resolved executable directory of a direct-install amq, or in ~/.local/bin; a running amq-keepalive or amq-remote is never killed.",
 		"Retire live wakes started by the previous binary before its install directory is removed.",
 		"If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.",
 	)
@@ -511,6 +511,11 @@ func upgradeCompanionsWithScoopRoots(
 				}
 			}
 			if err := writeStdoutLine("amq-keepalive: a running supervisor picks up a strictly newer image on its next supervise pass (self-upgrade); if it was started with --no-self-upgrade, restart it through its service manager (on macOS use 'amq-keepalive install-launchd'; on Linux use 'systemctl --user restart amq-keepalive.service')."); err != nil {
+				return err
+			}
+		}
+		if name == "amq-remote" {
+			if err := writeStdoutLine("amq-remote: a running endpoint keeps the old image until you restart it."); err != nil {
 				return err
 			}
 		}
@@ -1044,7 +1049,7 @@ func reportUnavailableCompanionsOnWindows(all *bool, goos string) error {
 	if all == nil || !*all || goos != "windows" {
 		return nil
 	}
-	return writeStdoutLine("--all: only amq-keepalive is published for Windows; skipping amq-bridge and amq-acp")
+	return writeStdoutLine("--all: only amq-keepalive is published for Windows; skipping amq-bridge, amq-acp, amq-remote, and amq-owner-sign")
 }
 
 func companionBinariesAvailableOn(names []string, goos string) []string {

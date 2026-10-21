@@ -72,8 +72,9 @@ providers without executing a caller-supplied provider.
   changes when the allowed argument forms, configuration overrides, or carrier
   support change. The adapter table in `internal/launch/adapter.go` owns the
   values.
-- `verified_provider_version` is informational. It names the provider release
-  on which AMQ verified the grammar, not the installed version.
+- `verified_provider_version` is informational. It names the newest provider
+  release on which AMQ verified the grammar. It is neither an exact pin nor
+  the installed version.
 
 Provider argument grammar:
 
@@ -213,15 +214,18 @@ Each provider owns its conversation identity:
 
 - Claude Code and Grok Build mint session IDs from the launch nonce.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
-  hook, at the verified version `codexCaptureVersion`
-  (`internal/launch/adapter_codex.go`). AMQ adds one static hook override
-  bound to the session root, handle, launch nonce, and AMQ executable. The
-  private hook validates the exact ticket and payload, persists immutable
-  evidence, and only then publishes the conversation identity. It then
-  forwards the identical payload to the operator's configured Codex notify
-  command; a missing command is a no-op, and a forwarding failure cannot
-  undo or fail the evidence path. An unused Codex launch stays pending and
-  cannot be resumed.
+  hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
+  newer, verified through `codexCaptureVerifiedVersion`
+  (`internal/launch/adapter_codex.go`). An older or non-release version is
+  refused with `capture_version_unsupported`. Prepare reports that refusal on
+  the Codex participant, and Apply refuses only that seat with Code 6; the
+  refusal does not block other seats. AMQ adds one static hook override bound to
+  the session root, handle, launch nonce, and AMQ executable. The private hook
+  validates the exact ticket and payload, persists immutable evidence, and only
+  then publishes the conversation identity. It then forwards the identical
+  payload to the operator's configured Codex notify command; a missing command
+  is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
+  unused Codex launch stays pending and cannot be resumed.
 - Cursor CLI acquires its chat ID before process start through `create-chat`
   at the exact version `cursorCaptureVersion`
   (`internal/launch/adapter_cursor.go`). Its provider identity is
@@ -249,11 +253,14 @@ The registered launcher backends are `commands`, `tmux`, `cmux`, and
 
 ## Prepare and Apply
 
-Prepare is read-only. It returns the exact subject schema, subject, plan, and
-trust digests, a preview, current observations, and required actions. Apply
-accepts the original Prepare request, the returned subject schema and digest,
-and one explicit decision for each required action. It recomputes the subject
-under that schema and fails closed if state changed.
+Prepare is read-only. For a capture-mode participant planned fresh, it runs the
+provider identity probe (`--version`, `--help`, `resume --help`) after the
+executable-containment check, and otherwise writes nothing. It returns the exact
+subject schema, subject, plan, and trust digests, a preview, current
+observations, and required actions. Apply accepts the original Prepare request,
+the returned subject schema and digest, and one explicit decision for each
+required action. It recomputes the subject under that schema and fails closed if
+state changed.
 
 `SubjectSchemaV2` is the schema for new Prepare calls. A caller copies the
 returned schema and never omits the field to select legacy behavior. An Apply

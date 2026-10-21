@@ -21,8 +21,8 @@ import (
 var identityEnvKeys = []string{envRoot, envBaseRoot, envSession, envMe, envRootID, envBaseRootID}
 
 // adoptCodexThreadIdentity gives an amq command run inside a Codex thread the
-// identity amq coop exec recorded for that thread (agent-message-queue-611.61).
-// On Codex 0.160 tool commands run in the shared daemon's environment and see
+// identity amq coop exec recorded for that thread. On Codex 0.160 tool
+// commands run in the shared daemon's environment and see
 // none of the AM_* variables coop exec set, only CODEX_THREAD_ID. It acts only
 // when every identity variable is absent; the recorded identity is fully
 // validated before any of it becomes visible, and then the usual pin checks
@@ -166,8 +166,8 @@ func parseCodexResume(args []string) (r codexResume, ok bool) {
 			i++
 		case !codexFlagOptions[flag] && !codexEmbeddedFlags[flag] && !codexValueOptions[flag]:
 			// An option AMQ does not know may take a value, so the resume
-			// after it cannot be parsed (review of #1001: --remote unix://
-			// resume --last bound nothing).
+			// after it cannot be parsed (--remote unix:// resume --last would
+			// otherwise bind nothing).
 			at := slices.Index(args[i+1:], "resume")
 			if at < 0 {
 				return r, false
@@ -217,7 +217,7 @@ func parseCodexResume(args []string) (r codexResume, ok bool) {
 		}
 	}
 	// Codex refuses --last with two positionals, and a repeated flag, as an
-	// argument conflict (cli/src/main.rs SessionTuiCli; review of #1001).
+	// argument conflict (cli/src/main.rs SessionTuiCli).
 	r.unparsed = r.unparsed || len(r.pos) > 2 || r.last && len(r.pos) > 1
 	return r, true
 }
@@ -261,8 +261,8 @@ func codexResumeRefusal(format string, args ...any) error {
 
 // resolveCodexResumeLaunch turns `codex resume --last` and `codex resume
 // <name>` on the Codex daemon into `codex resume <thread-id>`, so the thread
-// coop exec binds is the thread the TUI opens (agent-message-queue-611.64).
-// AMQ selects once, with the TUI's own daemon requests, and the id travels in
+// coop exec binds is the thread the TUI opens. AMQ selects once, with the
+// TUI's own daemon requests, and the id travels in
 // argv; recordResumedCodexThread then records it. AMQ ports no Codex
 // heuristic: where Codex's cwd or provider choice could differ from AMQ's
 // (-C, a symlinked cwd, linked worktrees, a profile's provider) --last or a

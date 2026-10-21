@@ -882,7 +882,7 @@ func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) (crea
 		if createErr != nil {
 			// Fail closed on a lost creation race (os.ErrExist) too: a bare
 			// `break` here would skip the record write and still report a
-			// successful append (review r5 P2). Callers serialize with the
+			// successful append. Callers serialize with the
 			// per-transfer lock, so an ErrExist here is unexpected; surface it.
 			return false, createErr
 		}
@@ -1069,8 +1069,8 @@ func (r *DeliveryRoot) WithDLQEnvelopeLock(agent, filename string, fn func(*Deli
 // root's config lock file. The lock file is retained deliberately: its flock
 // is released by the kernel on close or process crash, so no stale sentinel
 // can block a later registration. This is the mutual-exclusion seam for
-// config.json mutations (611.22.19 round-2 B2): EnsureAgent uses it to make
-// its read-modify-write atomic against concurrent registrations.
+// config.json mutations: EnsureAgent uses it to make its read-modify-write
+// atomic against concurrent registrations.
 func (r *DeliveryRoot) WithConfigLock(fn func(*DeliveryRoot) error) error {
 	if fn == nil {
 		return fmt.Errorf("config lock callback is nil")

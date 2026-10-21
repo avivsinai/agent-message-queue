@@ -27,8 +27,8 @@ var (
 	wakeTerminateKillConfirm = 3 * time.Second
 	// wakeTerminateGracefulExitConfirm bounds how long a retire waits for the
 	// exact signaled process to finish a graceful exit whose lock teardown
-	// already outlived wakeTerminateGrace (issue #714). It is a shutdown
-	// bound, not a kill-reap bound, even though today both are 3 s.
+	// already outlived wakeTerminateGrace. It is a shutdown bound, not a
+	// kill-reap bound, even though both are 3 s.
 	wakeTerminateGracefulExitConfirm = 3 * time.Second
 	wakeBaselineTimeout              = 5 * time.Second
 	wakeBaselineSettle               = 50 * time.Millisecond
@@ -450,9 +450,10 @@ func createGenericWakeLockAt(
 			return wakeLockInspection{}, err
 		}
 	} else {
-		// byc: revalidate canonical identity before the targetless blind-unlink.
-		// A directory swap leaves the retained dirfd pointing at the detached
-		// OLD directory; unlinking there misses the canonical namespace. Refuse.
+		// Revalidate canonical identity before the targetless
+		// blind-unlink. A directory swap leaves the retained dirfd
+		// pointing at the detached OLD directory; unlinking there
+		// misses the canonical namespace. Refuse.
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 			return wakeLockInspection{}, err
 		}
@@ -686,7 +687,7 @@ func cleanupGenericWakeRepairFloorAt(
 	if err != nil || !exists || floor.Generation != created.Lock.Generation {
 		return err
 	}
-	// byc: revalidate canonical identity before the blind floor removal. A
+	// Revalidate canonical identity before the blind floor removal. A
 	// directory swap leaves the retained dirfd pointing at the detached OLD
 	// directory; removing there misses the canonical namespace. Refuse.
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
@@ -3632,8 +3633,9 @@ func wakeInjectionPreconditionCheck(
 	}
 
 	// A running TIOCSTI wake was not conclusively disabled at bind time.
-	// Re-read the same #302 advisory capability signal so a later transition
-	// to disabled is surfaced and safely demoted without issuing an ioctl.
+	// Re-read the same TIOCSTI advisory capability signal so a later
+	// transition to disabled is surfaced and safely demoted without issuing
+	// an ioctl.
 	if tiocstiLegacyDisabledHint() {
 		mode := effectiveInjectMode(cfg)
 		capabilityErr := fmt.Errorf(

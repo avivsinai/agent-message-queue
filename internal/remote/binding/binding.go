@@ -385,8 +385,8 @@ func confinedPath(create bool) (string, error) {
 	return path, nil
 }
 
-// read reads the leaf no-follow and bounded, checked to be the file the
-// lstat gate saw.
+// read reads the leaf no-follow and bounded; the opened file must be a
+// regular file.
 func read(path string) (Binding, error) {
 	if !noFollowSupported {
 		return Binding{}, errors.New("the binding needs a no-follow file open, which this platform lacks")

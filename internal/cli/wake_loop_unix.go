@@ -649,12 +649,9 @@ func (l *wakeLoop) attemptNotification() error {
 		return nil
 	}
 	err := notifyNewMessages(&l.cfg)
-	// codex #788: canonical mismatch is a DEDICATED type (distinct from
-	// wakeInboxScanError). Handle it BEFORE the ordinary scan-retry path so
-	// the watcher is invalidated and rebindWatcher re-arms from the
-	// canonical path on the next inbox-scan-retry tick — otherwise the
-	// loop keeps reading the same detached inbox (rebindWatcher returns
-	// immediately when watcher != nil).
+	// A canonical mismatch (wakeInboxCanonicalMismatchError) is handled
+	// BEFORE the ordinary scan-retry path: rebindWatcher returns at once
+	// while watcher != nil, so the watcher must be invalidated here.
 	var canonicalMismatch *wakeInboxCanonicalMismatchError
 	if errors.As(err, &canonicalMismatch) {
 		switch classifyCanonicalMismatch(err, l.cfg.retainedInboxRebindable) {
