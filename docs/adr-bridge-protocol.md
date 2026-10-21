@@ -34,19 +34,15 @@ signed outcomes can move in both directions, but the responder does not
 initiate this class. `amq` Core remains local and daemon-free; no socket is
 added to it.
 
-The initiator offers objects from `tx/<peer>/new` and
-`status-tx/<peer>/new`. A receiver writes exact object bytes to a private
-`tmp` file, fsyncs the file, and no-replace renames the file into
-`rx/<peer>/new/<object_sha256>.envelope` (or the corresponding
-`status-rx` path for an outcome). That durable rename is
-`transport_accepted`. It is transport acceptance only: apply-watch later
-verifies and applies the envelope, and the source does not retire its `tx`
-object at this stage.
+Peer exchange carries [transfer record v3](#transfer-record-v3).
+`amq-bridge sync --stdio` runs the initiator side and
+`amq-bridge listen --stdio` the responder side. The initiator offers records
+from its `bridge/tx/<peer>/` outbox; the receiver files each wanted record into
+the destination Maildir and answers with a signed `STORED` receipt.
 
 The manually operated **`amq-bridge apply-file`** path remains available for
-recovery and file-based exchange. It verifies a complete hash-named regular
-file published under `drop/new/` and uses the same local apply and receipt
-rules; it is not a remote drain or a Maildir synchronizer.
+recovery and file-based exchange. It verifies one complete envelope file
+under `bridge/drop/` and uses the same local apply and receipt rules; it is not a remote drain or a Maildir synchronizer.
 
 HTTPS store-and-forward remains implemented as an optional courier class for
 an operator-provided rendezvous. It is not the peer-stdio architecture. The
@@ -91,25 +87,21 @@ are untrusted context, never routing keys.
 
 ### Receipts
 
-Keep three layers distinct:
+Keep the layers distinct:
 
 | State | Meaning |
 | --- | --- |
-| `transport_accepted` | The destination durably renamed the exact envelope bytes into `rx/<peer>/new/<object_sha256>.envelope`. It does not retire the source `tx` object. |
-| `destination_maildir_committed` | `ApplyEnvelope` committed `xfer-<source_host>-<transfer_id>.md` into the destination Maildir. |
-| `destination_rejected` | Named for outcome-table completeness only: NOT emitted by this protocol version. A terminal destination refusal (e.g. `transfer_conflict`) is reported to the operator via `PollResult.Refused` on every poll; recovery is a rendezvous-operator action (see Addendum 4's conflicted-transfer retirement). |
+| `transport_accepted` | The HTTPS rendezvous accepted a pushed envelope. `PushOnce` then moves the spool item to `sent/`. It is not delivery evidence. |
+| `destination_maildir_committed` | `ApplyEnvelope` committed `xfer-<source_host>-<transfer_id>.md` into the destination Maildir. The HTTPS poller (`PollOnce`) writes this receipt under `bridge/receipts/` and then acknowledges the rendezvous item (`ackEnvelope`); `amq-bridge apply-file` writes the same receipt. |
+| `STORED` | A v3 receiver filed the record into its Maildir. The sender verifies the signed receipt and only then removes the record from `bridge/tx/<peer>/`. |
+| `destination_rejected` | Reserved and not emitted. A terminal destination refusal (for example `transfer_conflict`) is reported to the operator through `PollResult.Refused` on every poll; see [Transfer ledger](#transfer-ledger). |
 | consumer-local drain/start/complete | Optional; may stay on the consuming host. |
 
-The source retires `tx/<peer>/new` only after a verified signed
-`destination_maildir_committed` or `destination_rejected` outcome. A
-`transport_accepted` outcome is diagnostic and never archives the source
-object. Lost outcomes replay the same transfer and must not create a second
-message. A same-key, different-digest replay is `transfer_conflict` and binds
-the received envelope and payload digests in the rejection outcome.
-
-Outcome objects travel through `status-tx/<peer>/new` and may move to
-`status-tx/<peer>/returned` after a successful peer transfer. `sent/` is not
-used by peer exchange; it remains an HTTPS-only archive.
+No destination outcome retires an envelope v2 object on the source host:
+`sent/` holds what the rendezvous accepted, and a refused envelope stays in the
+rendezvous queue. Lost outcomes replay the same transfer and must not create a
+second message. A same-key, different-digest replay is `transfer_conflict` and
+binds the received envelope and payload digests in the rejection outcome.
 
 ### Authorization
 
@@ -148,51 +140,25 @@ replaced. Verify the generation named in each envelope.
 Do not use a per-generation `trusted/<source_host>/<generation>` directory
 layout for v2.
 
-### Peer exchange layout and stages
-
-The peer-exchange WAL is separate from the HTTPS spool:
-
-```text
-tx/<peer>/{tmp,new,committed,rejected}
-status-tx/<peer>/{tmp,new,returned}
-rx/<peer>/{tmp,new,done,quarantine}
-status-rx/<peer>/{tmp,new,done,quarantine}
-drop/{tmp,new}
-```
-
-The initiator and responder exchange only hash-named envelope and outcome
-objects. `OFFER`/`WANT` inventory is limited to those courier trees;
-the courier never reads Maildir, `applied/`, or `apply-journal/`. `STORED`
-means that the kind-specific `rx` or `status-rx` sink is durable. It does not
-mean apply, source archive, or consumer drain.
-
 ### Wire and implementation constraints
 
 The following constraints are normative:
 
-1. **Hash-named publish.** Create with `O_EXCL` in `tmp`, write, fsync, hash
-   with SHA-256, and no-replace rename to `<64hex>.<kind>`, then fsync the
-   directory. Maildir publication is `tmp` to no-replace
-   `new/xfer-<source>-<transfer>.md`. Hash before the final filename.
-2. **Bounds.** `max_payload_bytes=8MiB`, `max_object_bytes=12MiB`,
-   `max_offered_bytes_per_session=16MiB`, and `max_offer_count=64`.
-3. **Apply lock.** Acquire `flock` on
-   `apply-locks/<source>/<transfer>.lock` before ledger, ACL, or journal
-   work. `O_EXCL` is the compare-and-set for terminal `applied` only.
+1. **Maildir publication.** Apply writes to `tmp` and no-replace renames to
+   `new/xfer-<source>-<transfer>.md`.
+2. **Bounds.** Envelope v2 limits are `bridge.MaxPayloadBytes` and
+   `bridge.MaxObjectBytes`; v3 offer pages are limited by
+   `xferv3.MaxOfferRecords` and `xferv3.MaxOfferPageBytes`.
+3. **Apply lock.** Acquire the per-transfer lock (see
+   [Transfer ledger](#transfer-ledger)) before ledger, ACL, or journal work.
 4. **Conflict binding.** A `transfer_conflict` binds the currently received
-   envelope and payload digests. The source finds `tx` by
-   `envelope_sha256`. Receipts are
-   `bridge/receipts/<peer>/<envelope_sha256>.outcome`.
-5. **Unique exchange.** OFFER and WANT are unique. PUT equals OFFER. Send
-   one PUT per WANT and then `PUT_END`; missing PUT aborts.
-6. **Durable cursor.** Persist the offer cursor. Process outcomes first, and
-   advance the cursor on `STORED` or `not-WANT`.
-7. **Signer binding.** The local `source_host` signs. Bind From, Id, and
-   Thread (and To when present) from the AMQ payload. Resume the same digest;
-   a different digest is `submit/failed`.
-8. **Driver boundary.** There is no signed-bundle transport. A forced-command
-   driver, when used, is local-exec only. `drop/` uses hash-named publication
-   into `drop/new/`.
+   envelope and payload digests. Receipts are
+   `bridge/receipts/<transfer_id>__<stage>.json`.
+5. **Durable cursor.** A v3 peer persists its offer cursor per peer.
+6. **Signer binding.** The local `source_host` signs. From, Id, and Thread are
+   bound from the AMQ payload.
+7. **Driver boundary.** There is no signed-bundle transport. `amq-bridge
+   apply-file` reads one complete envelope file under `bridge/drop/`.
 
 ### Local client wrapper
 
@@ -204,128 +170,91 @@ An operator UI on one host is not the peer host and does not become an AMQ
 host principal merely because it is open. Multiple seats on one host remain
 one host principal unless a separate, verified identity boundary is provided.
 
-## Consequences
+### Transfer ledger
 
-- Courier code implements this envelope and initiator-driven peer-stdio exchange;
-  HTTPS poll/push remains optional. It does not add listeners to `amq`.
-- `amq-bridge apply-file` is the manual/recovery path: it uses the same
-  envelope and local apply rules without a public locker, but it is not the
-  live peer-exchange class.
-- The configured initiator is the only peer-exchange dialer, and destination apply remains the
-  commit. Operators may provision a public HTTPS rendezvous, but AMQ does not
-  ship a hosted relay as Core.
-- Each peer is a normal AMQ install. Pin `AM_ROOT` in operator config, never in
-  prompt text. Durable state belongs under a path that survives client close.
+Destination apply (courier `PollOnce` and `amq-bridge apply-file`) runs under
+a per-transfer lock at
+`bridge/transfer-ledger/<session>/locks/<source>-<transfer>.lock`, scoped by
+the destination-alias session both callers derive identically. It is a `flock`
+on Unix and `LockFileEx` over byte range [0,1) on Windows (blocking,
+exclusive, one shared helper).
 
-### Addendum 4 — transfer ledger
-
-Applies to the destination-apply path (courier `PollOnce` and
-`amq-bridge apply-file`). Where Addendum 3 names an apply-lock path, this
-addendum supersedes it: the per-transfer lock lives at
-`bridge/transfer-ledger/<session>/locks/<source>-<transfer>.lock` (a `flock`
-on Unix, `LockFileEx` over byte range [0,1) on Windows — blocking, exclusive,
-both twins from the same helper), scoped by the destination-alias session
-both callers derive identically.
-
-**Ledger.** For each `(source_host, transfer_id)` an append-only JSONL file
+For each `(source_host, transfer_id)` an append-only JSONL file
 `bridge/transfer-ledger/<session>/<source>-<transfer>.jsonl` (mode 0600)
-records states `prepared` → `committed` | `rejected`, plus `uncertain`. The
-first `prepared` record binds the transfer's payload digest immutably; a
-different digest under the same key is `transfer_conflict` observed in the
-outcome and never overwrites the binding or a committed winner. The intent
-(`prepared`) is durable — file and directory chain — before `ApplyEnvelope`
-runs. Per platform: on Unix, directory-chain durability is `fsync` on each
-synced directory. On Windows, directory durability is `FlushFileBuffers` on
-a root-relative directory handle (`NtCreateFile` with a `RootDirectory`
-object attribute) — NTFS only; filesystems that reject the flush with the
-not-supported class (`ERROR_INVALID_FUNCTION` / `ERROR_NOT_SUPPORTED` /
-`ERROR_CALL_NOT_IMPLEMENTED`) are tolerated and the durability degrades to
-the file-level fsync, matching the Unix treatment of `EINVAL` / `ENOTSUP`.
-The renames performed through the NT rename-information classes (which have
-no write-through flag) are made durable by the directory flush that
-follows. A crash before the `committed` append recovers from durable publication
+records the states `prepared` then `committed` or `rejected`, plus
+`uncertain`. The first `prepared` record binds the payload digest
+immutably. A different digest under the same key is `transfer_conflict`,
+observed in the outcome; it never overwrites the binding or a committed
+winner. The `prepared` intent is durable, file and directory chain, before
+`ApplyEnvelope` runs. Directory durability uses `fsync` on Unix and a
+directory flush on Windows; where a filesystem rejects the flush as
+unsupported, durability degrades to the file-level fsync.
+
+A crash before the `committed` append recovers from durable publication
 evidence: a digest-matching artifact retained in `inbox/new`, `inbox/cur`, or
 a DLQ envelope wrapping the original bytes promotes the record to `committed`
-(replayed) without re-applying.
+(replayed) without re-applying. Promotion carries the artifact's path as
+`committed_path`; a replayed receipt for a consumer-drained transfer reports
+the surface (new, cur, or DLQ) where the delivery was verified.
 
-**Proven non-delivery is retryable.** An in-process apply failure — in the same process that
-just wrote `prepared` — is recorded as a retryable `rejected` record (typed
-`retryable` flag) naming the failure (`apply failed (retryable): ...`).
-ApplyEnvelope is NOT all-or-nothing: a `*fsq.CommittedDurabilityError` means
-the rename into `inbox/new` SUCCEEDED but the destination directory sync
-failed — the publication is a FACT, yet its durability is UNPROVEN (a crash
-can lose the unsynced rename). The ledger records the distinct
-`published_durability_unknown` state with the error's `FinalPath`: never
-re-applied (that would duplicate once the consumer drains new → cur), and
-the destination receipt and ACK are WITHHELD until a later call verifies
-digest-matching evidence AND the durability of that evidence's actual
-carrier directory. Two further non-delivery classes are explicit:
-an `os.ErrExist` whose existing bytes cannot be read is post-publication
-ambiguity (`uncertain`, never retryable, never a definitive conflict), and a
-collision whose destination PROVABLY already holds matching bytes is a
-committed delivery even when the tmp cleanup fails (classified as
-`CommittedDurabilityError` at the fsq boundary). Every other in-process
-failure is, in this process's knowledge, a pre-publication proven
-non-delivery. A retry of a retryable
-record first consults durable publication evidence (new/cur/DLQ, same rule
-as crash recovery) and promotes on a match; only with no evidence does it
-re-arm a fresh durable `prepared` intent and re-apply — so a crash during the
-retry resolves exactly like the first attempt, and a retry whose intent
-append fails does not apply at all. A known non-delivery is never
+**Retryable non-delivery.** An in-process apply failure, in the process that
+wrote `prepared`, is a retryable `rejected` record naming the failure. A retry
+first consults publication evidence and promotes on a match; with no evidence
+it re-arms a fresh durable `prepared` intent and re-applies. A retry whose
+intent append fails does not apply.
+
+**Apply is not all-or-nothing.** A `*fsq.CommittedDurabilityError` means the
+rename into `inbox/new` succeeded but the destination directory sync failed.
+The publication is a fact and its durability is unproven. The ledger records
+`published_durability_unknown` with the error's `FinalPath`. That transfer is
+never re-applied, and the destination receipt and ACK are withheld until a
+later call verifies digest-matching evidence and the durability of the
+evidence's carrier directory.
+
+**Uncertain history.** An `os.ErrExist` whose existing bytes cannot be read is
+post-publication ambiguity: `uncertain`, never retryable, never a definitive
+conflict. A collision whose destination provably holds matching bytes is a
+committed delivery even when tmp cleanup fails (classified as
+`CommittedDurabilityError` at the fsq boundary). A known non-delivery is never
 reclassified as `uncertain`; only unknown history (no evidence, no in-process
-knowledge) is `uncertain`, and `uncertain` refuses both the destination
-receipt and the ACK.
+knowledge) is. `uncertain` refuses both the destination receipt and the ACK.
 
-**Terminal rejection is one answer.** `os.ErrExist` on a fresh key
-(same-name artifact with different bytes) records a terminal `rejected`
-(`transfer_conflict`) on the first refusal and reports the same terminal
-outcome on every later attempt.
+**Terminal rejection.** `os.ErrExist` on a fresh key (same-name artifact with
+different bytes) records a terminal `rejected` (`transfer_conflict`) and
+reports the same outcome on every later attempt.
 
-**Torn tail.** An unparseable
-tail line of the ledger file is a torn append over an intact prefix: the last
-valid record governs the disposition, and a torn tail after a terminal record
-cannot un-terminal it. A torn read with no valid record (or a conflicting
-digest over a non-terminal prefix) remains fail-closed `uncertain`. When
-crash recovery promotes a committed record over a torn tail, the promotion is
-framed durably: a bare newline first terminates the torn fragment, then the
-committed record lands on its own parseable line — appended JSON fused into
-an unterminated fragment would be discarded by the reader with the artifact
-it names.
+**Torn tail.** An unparseable tail line is a torn append over an intact
+prefix. The last valid record governs, and a torn tail after a terminal record
+cannot un-terminal it. A torn read with no valid record, or a conflicting
+digest over a non-terminal prefix, is fail-closed `uncertain`. When recovery
+promotes `committed` over a torn tail, a bare newline first terminates the
+fragment and the record lands on its own line.
 
-**Courier batching.** A
-refused transfer — `uncertain` history, terminal rejection, or conflict — is
-skipped, not batch-fatal: the poll loop continues, envelopes behind it still
-apply and ACK, and the refusal is reported in `PollResult.Refused`, which the
-CLI serializes to the operator on every run alongside the ledger's
-unresolved-transfer diagnostics.
+**Courier batching.** A refused transfer (`uncertain` history, terminal
+rejection, or conflict) is skipped, not batch-fatal. Envelopes behind it still
+apply and ACK. The refusal appears in `PollResult.Refused`, which the CLI
+serializes to the operator on every run with the ledger's unresolved-transfer
+diagnostics.
 
-**Conflicted-transfer retirement.** The `destination_rejected` row in the outcome table names
-a stage this protocol does NOT implement: no receiver code emits it and no
-source code consumes it, and a receiver-side redelivery loop cannot be
-closed from the wire alone. The refused envelope STAYS in the receiver's
-rendezvous queue and is re-reported on every poll (steady-state signal, not
-an error). Removing the local source-side spool copy does NOT retire the
-posted remote item — this protocol has no source-deletion notification. The
-recovery is a rendezvous-operator action (clearing the conflicting envelope
-from the rendezvous queue, or replacing it with a corrected payload), which
-this wave does not automate and does not provide a command for; that is the
-actual operator-managed recovery limit of this protocol version.
+**Conflicted-transfer retirement.** No receiver emits `destination_rejected`
+and no source consumes it. The refused envelope stays in the receiver's
+rendezvous queue and is re-reported on every poll. Removing the source-side
+spool copy does not retire the posted remote item, because the protocol has no
+source-deletion notification. Recovery is a rendezvous-operator action:
+clear the conflicting envelope or replace it with a corrected payload. AMQ
+provides no command for it.
 
-**Recovered receipts.** Evidence-promoted commits carry the retained
-artifact's path as `committed_path` (a replayed receipt for a consumer-drained
-transfer reports the drain surface — new/cur/DLQ — where the delivery was
-verified).
+### Transfer record v3
 
-### Addendum 5 — Transfer record v3
-
-Envelope v2, `apply-file`, the HTTPS spool, and the v2 transfer ledger stay.
-A v3 transfer is a sibling type in `internal/bridge/xferv3`. Package `bridge`
-does not import it. Core `amq` stays socket-free.
+A v3 transfer is a sibling type in `internal/bridge/xferv3`; package `bridge`
+does not import it, and Core `amq` stays socket-free. Envelope v2,
+`apply-file`, the HTTPS spool, and the v2 transfer ledger stay.
 
 The v3 record, id, signature, receipt, offer page, seed-to-X25519 derivation,
 and Noise IK handshake are the layouts in
 `internal/bridge/xferv3/testdata/vectors.json`. That file is the byte
-authority. `make check-xferv3` fails if any vector drifts.
+authority. `TestVectors` in `internal/bridge/xferv3` fails if any vector
+drifts; it runs with the package tests in CI.
 
 The record is eight length-prefixed fields in this order: `amq-xfer-v3`,
 source host, handle, dest alias (`host/agent`), source message id, thread id,
@@ -342,17 +271,17 @@ bundle is the record, the signature, and the payload.
 
 v3 host and handle names are 1 to 63 bytes from `[a-z0-9._-]`, and are never
 `.` or `..`. v2 `ParseAlias` and `validateBridgeIdentifier` stay on the
-stricter grammar and still refuse a dot.
+stricter grammar and refuse a dot.
 
 The X25519 static is HKDF-SHA256 of the 32-byte Ed25519 seed, salt `amq-v3`,
 info `amq-v3-x25519-static`. It is never stored. The Noise session is
 `Noise_IK_25519_ChaChaPoly_BLAKE2s` with prologue `amq-v3`, using
-`github.com/flynn/noise` v1.1.0.
+`github.com/flynn/noise` at the version pinned in `go.mod`.
 
-The v3 outbox is `bridge/tx/<peer>/<id>`. The v1
-`tx/<peer>/{tmp,new,committed,rejected}` tree is not that layout. The v2
-ledger stays beside any later v3 ledger. Already-filed v2 ids are not
-re-hashed. Drain every v2 outbox before a host offers v3 records.
+The v3 outbox is `bridge/tx/<peer>/<id>`. The sender removes a record only
+after it verifies the receiver's signed `STORED` receipt for that id. The v2
+ledger stays beside the v3 ledger. An operator drains every v2 outbox before a
+host offers v3 records; nothing enforces this.
 
 v3 ledger states `intent` and `published` live in
 `bridge/ledger/v3/<id[:2]>/<id>` as checksummed `O_APPEND` records. Filing
@@ -360,5 +289,18 @@ stages under `bridge/rx/<peer>/<id>`, writes `intent`, renames into
 `inbox/new/<id>.md`, then writes `published`. A pre-admission `NO <reason>`
 writes no record. A torn tail is truncated when the staged copy is still
 present; if it is gone the next fact is `published`. Directory and file
-sync use `fsync` on Linux and `F_FULLFSYNC` on Darwin and fail closed.
-The v2 ledger stays read-only beside this one.
+sync use `fsync` on Linux and `F_FULLFSYNC` on Darwin and fail closed. The v2
+ledger is read-only beside this one.
+
+## Consequences
+
+- Courier code implements this envelope and initiator-driven peer-stdio exchange;
+  HTTPS poll/push remains optional. It does not add listeners to `amq`.
+- `amq-bridge apply-file` is the manual/recovery path: it uses the same
+  envelope and local apply rules without a public locker, but it is not the
+  live peer-exchange class.
+- The configured initiator is the only peer-exchange dialer, and destination apply remains the
+  commit. Operators may provision a public HTTPS rendezvous, but AMQ does not
+  ship a hosted relay as Core.
+- Each peer is a normal AMQ install. Pin `AM_ROOT` in operator config, never in
+  prompt text. Durable state belongs under a path that survives client close.

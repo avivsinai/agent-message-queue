@@ -25,9 +25,8 @@ generated and consumed by AMQ and must never be set manually.
 into the retained agent directory. Readers verify both its content and file
 identity. Removal is conditional on the exact inspected claim still matching;
 a replacement lock is not selected for cleanup. For managed retirement, exact
-lock removal is the commit point: pre-commit failure is `refused`; post-commit
-target/state residue cannot undo retirement and is reported as
-`retired_with_residue` rather than a refusal.
+lock removal is the commit point; its results are in
+[wake operations](wake-operations.md#retirement).
 
 **Independence invariant:** ownership changes only when the lock publication or
 exact-claim removal commits. Treating a target update, preparation marker, ready
@@ -80,26 +79,17 @@ a journal write failure never blocks wake delivery. Readers fold only
 contiguous, valid lifecycle sequences. An out-of-order or contradictory
 sequence is `invalid`, never accepted evidence.
 
-**Transport taxonomy:** an external injector may claim provider dispatch only
-with stderr marker `AMQ_INJECT_PROGRESS=accepted` and exit zero. A deferred
-marker is a pre-dispatch busy result and produces no attention or acceptance
-claim. An uncertain marker wins over every other marker and enters recovery.
-Timeout is failed even when stderr contains deferred. A bare legacy exit zero
-is byte-write/uncertain evidence, not provider acceptance. Raw TIOCSTI remains
-`written` byte evidence only. `amq doctor --ops` projects the same folded state
-and warns for deferred/retried attempts.
+**Transport taxonomy:** the injector marker protocol (`accepted`, `deferred`,
+`uncertain`, timeout) is defined in
+[the doorbell acknowledgement policy](wake-doorbell-acknowledgement.md#cli-contract).
+A bare legacy exit zero and raw TIOCSTI are `written` byte evidence only, never
+provider acceptance. `amq doctor --ops` projects the same folded state and
+warns for deferred/retried attempts.
 
 Source anchors: `internal/notificationattempt/ledger.go`, `wake.go`, and
 `doctor_ops.go`. Raw-mode injection carries byte-level evidence only
 ([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); provider
 acceptance requires the injector marker protocol.
-
-Retirement results are exactly `refused`, `retired`, and
-`retired_with_residue`. The last is exit-0 success with a warning: ownership is
-already retired, but target/state cleanup failed or was skipped. The next
-acquisition converges conclusively ownerless residue through the
-quarantine/supersession path. Owner-bearing residue follows owner recovery;
-malformed ownership remains inspection-only.
 
 ## `.wake.<lock|target>.quarantined.<timestamp>`: preserved blocked input
 
@@ -122,14 +112,16 @@ remove the clean form only after proving its exact owner dead; malformed
 ownership remains inspection-only.
 
 **Independence invariant:** quarantine is preservation, not cleanup or
-ownership. Exact names are reported by `doctor --ops` independently of lock
-discovery only after a complete root-wide scan. Any root or agent-directory
-open/validation failure produces `wake_quarantine.error` and blocks explicit
-quarantine cleanup rather than exposing a partial result. Ordinary tmp cleanup
-never removes them. Explicit
-`--wake-quarantine-older-than` cleanup captures and revalidates exact identity
-and bytes under the same guard before `unlinkat` and directory sync; ambiguity
-or replacement preserves the artifact.
+ownership. `doctor --ops` scans the exact names independently of lock
+discovery and reports `wake_quarantine` with `count` and a nullable
+`newest_age_seconds` only after a complete root-wide scan. Any root or
+agent-directory open/validation failure produces `wake_quarantine.error` and
+blocks explicit quarantine cleanup rather than exposing a partial result.
+Ordinary tmp cleanup never removes them. Only
+`amq cleanup --wake-quarantine-older-than <duration>` does: its dry run does not
+mutate, and the real run captures and revalidates exact identity and bytes
+under the same guard before `unlinkat` and directory sync; ambiguity or
+replacement preserves the artifact.
 
 Source anchors: `wake_quarantine_unix.go`, `wake_unix.go`, and `cleanup.go`.
 
@@ -236,9 +228,9 @@ makes a stale record inert. `amq wake config --wait` reads it.
 The record also carries `machine_status` and `machine_digest`: the status of
 the machine layer (`applied` or `refused`, with the error) and the digest of
 the `~/.amq/wake.settings` bytes the wake observed (the `"absent"` token when
-the file is missing). They are additive under schema 1, so an older reader
-ignores them, and the `digest` field keeps its meaning. A sidecar without them
-comes from an older image.
+the file is missing). They are additive under schema 1: a reader that does
+not know them ignores them, and the `digest` field keeps its meaning. A record
+without them reports nothing about the machine layer.
 
 **Independence invariant:** the record reports what a generation applied; it
 does not decide what the settings are. Putting it in the settings file would let
@@ -299,39 +291,29 @@ absent even when the ordinary notifier remains valid.
 Source anchors: `wake_control_darwin.go`, `wake_reload_transport_linux.go`,
 `wake_resume_protocol.go`, and `wake_owner_storage_unix.go`.
 
-## Authoritative claim publication order
+## Claim publication order
 
-An authoritative inject-via claim has three durable publication steps:
+A new inject-via claim publishes `.wake.target`, then the `.wake.state`
+projection, then `.wake.lock`; the exact steps and the code that owns them are
+in [the wake lifecycle document](wake-lifecycle.md#publication-order). The
+target and state can therefore be installed when no lock has committed; neither
+claims ownership. Once the lock commits, a later temp-removal or
+directory-sync error is a committed-lock error. Recovery classifies the point reached rather
+than inferring one all-or-nothing state across the files.
 
-1. Write, validate, atomically rename, re-read, and directory-sync
-   `.wake.target`.
-2. Publish and re-read the canonical target-section `.wake.state` projection.
-   This is a durable shadow only; it does not claim ownership.
-3. Write the lock temporary file, publish `.wake.lock` without replacing an
-   existing claim, remove the temporary name, and directory-sync the lock
-   commit.
+## Crash matrix
 
-The target and state shadow can therefore be installed when no lock has
-committed. Failures before the lock link preserve both artifacts; a later
-targetless acquisition may quarantine only an exact conclusively ownerless
-target, then must inspect again before superseding the corresponding projection
-or publishing a lock. Clean owner-bearing residue requires dead-owner recovery;
-malformed ownership remains inspection-only.
-Once the lock link succeeds, errors removing the temporary name or syncing the
-directory are reported as committed-lock errors.
+Each row is an interleaving that a crash, a concurrent writer, or a replaced
+file can produce, and the observation the code guarantees for it.
 
-This order gives target intent and wake ownership separate observable commit
-points. Recovery must classify the point reached rather than infer a single
-all-or-nothing state across both files.
-
-## Crash-interleaving test matrix
-
-| Case | Injected interleaving | Required observation |
+| Case | Interleaving | Required observation |
 | --- | --- | --- |
-| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are preserved. A later targetless acquisition may move the exact target to quarantine only when conclusively ownerless, then fresh-inspect before superseding matching projection state or creating ownership. Clean owner-bearing residue requires dead-owner recovery. |
+| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No lock exists. The installed target and state are preserved and claim nothing. A later targetless acquisition handles them through [quarantine](#wakelocktargetquarantinedtimestamp-preserved-blocked-input) and a fresh inspection. |
 | Lock replacement during a reader | Replace `.wake.lock` between the reader's pathname snapshot, opened-file read, and final comparison while reading lock-, target-, prepared-, or ready-bound state. | The operation reports changed or inconclusive state and performs no mutation based on the old snapshot. The replacement remains present. |
-| Prepared marker generation | Exercise absent, stale-generation, current-generation/current-digest, and current-generation/wrong-digest markers. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
+| Prepared marker generation | The marker is absent, names a stale generation, matches the current generation and digest, or names the current generation with a wrong digest. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
 | Ready file replacement during cleanup | Publish a caller ready file, replace its pathname, then run failure cleanup for the original publication. | Cleanup removes only the original unchanged snapshot. The replacement is preserved and is not reported as the original receipt. |
 | Guard release before waits | Pause immediately before a child, pidfd, or control wait and attempt lifecycle-guard acquisition from another participant. | The second participant can acquire the guard. Completion paths may reacquire it for final publication or cleanup; the wait itself never owns it. |
 | Endpoint generation mismatch | Address or request a Darwin control endpoint with the wrong generation, or replace a Linux reload socket before authorization or retirement. | The request is refused without lifecycle mutation. Cleanup removes only the endpoint authorized by the released generation or exact socket identity and preserves a successor. |
-| Crash at every authoritative publication point | Stop after target temporary-file creation, target rename/sync, state temporary-file creation, state rename/sync/re-read, lock link, lock-temp removal, and final directory sync. | Pre-lock target/state shadows never claim ownership and are preserved; post-link states are classified as committed even if later cleanup or sync reports an error. Recovery preserves ambiguous installed artifacts and never removes a different generation by pathname alone. |
+| Crash at every publication point | Stop after target temporary-file creation, target rename/sync, state temporary-file creation, state rename/sync/re-read, lock link, lock-temp removal, and final directory sync. | Pre-lock target and state never claim ownership and are preserved; post-link states are committed even if later cleanup or sync reports an error. Recovery preserves ambiguous installed artifacts and never removes a different generation by pathname alone. |
+| Prepared marker before state refresh | Stop after `.wake.prepared` commits and before the `.wake.state` refresh. | An unbound claim falls back to the legacy marker. A bound claim is inconclusive and retry-only until an authorized mutating path refreshes the state; no reader rewrites it. |
+| Torn or mismatched state document | Read `.wake.state` while it is missing, torn, non-canonical, of a newer schema, or out of step with the legacy files. | An unbound claim falls back silently to the legacy files. A bound claim is inconclusive and retry-only, and no mutation is authorized from the observation. |
