@@ -38,6 +38,17 @@ func inspectProcessPlatform(pid int) processInfo {
 	return info
 }
 
+func parentProcessID(pid int) (int, error) {
+	kp, err := readDarwinKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return 0, err
+	}
+	if kp == nil || int(kp.Proc.P_pid) != pid {
+		return 0, fmt.Errorf("process %d is not running", pid)
+	}
+	return int(kp.Eproc.Ppid), nil
+}
+
 func darwinBootID() string {
 	if sessionUUID, err := readDarwinBootSessionUUID(); err == nil {
 		sessionUUID = strings.TrimSpace(sessionUUID)

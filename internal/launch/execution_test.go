@@ -348,7 +348,7 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	nonce := "96969696-9696-4969-8969-969696969696"
 	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
 	raw := codexNotifyTestPayload(testConversationID, ticket.Cwd)
-	result, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, raw)
+	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
 	if err != nil || result.ConversationID != testConversationID || result.EvidenceRef == "" || result.AlreadyReady {
 		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
 	}
@@ -361,7 +361,7 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	if _, _, err := ReadEvidence(fixture.root, result.EvidenceRef); err != nil {
 		t.Fatal(err)
 	}
-	second, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, raw)
+	second, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
 	if err != nil || !second.AlreadyReady || second.EvidenceRef != result.EvidenceRef {
 		t.Fatalf("idempotent notify = %#v, %v", second, err)
 	}
@@ -379,7 +379,7 @@ func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, non
 		Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureMinimumVersion,
 		Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), ProjectRoot: fixture.project, SessionRoot: fixture.session,
 		Cwd: fixture.cwd, ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
-		TargetArgv: []string{fixture.provider, "-c", notify}, State: ExecutionSpawnAttempted, Reason: "spawn_attempted",
+		TargetArgv: []string{fixture.provider, "-c", notify}, State: ExecutionPending,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -400,6 +400,12 @@ func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, non
 		t.Fatal(err)
 	}
 	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err = PrepareExecution(fixture.root, "codex", nonce, ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: fixture.provider, TargetArgv: ticket.TargetArgv,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	return ticket

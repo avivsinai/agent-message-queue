@@ -79,6 +79,11 @@ type ExecutionTicket struct {
 	Reason        string                   `json:"reason,omitempty"`
 	Execution     *PrepareExecutionOptions `json:"execution,omitempty"`
 	CallerContext map[string]string        `json:"caller_context,omitempty"`
+
+	// ProviderProcess is the process that execs a post-spawn capture provider,
+	// recorded at spawn_attempted. Only that process and its descendants may
+	// report the provider's identity for this ticket.
+	ProviderProcess *HolderIdentity `json:"provider_process,omitempty"`
 }
 
 type ExecutionTicketRequest struct {
@@ -506,6 +511,12 @@ func RemoveExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle, nonce s
 // CompareAndSwapExecutionTicket changes one ticket state while the caller's
 // live lease and handle lock exclude competing launch/reconcile operations.
 func CompareAndSwapExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle string, expected ExecutionState, next ExecutionState, reason string) (ExecutionTicket, error) {
+	return compareAndSwapExecutionTicket(root, lease, handle, expected, next, reason, nil)
+}
+
+// compareAndSwapExecutionTicket applies update to the ticket in the same write
+// as the state change.
+func compareAndSwapExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle string, expected ExecutionState, next ExecutionState, reason string, update func(*ExecutionTicket)) (ExecutionTicket, error) {
 	if err := lease.authorizeWrite(root); err != nil {
 		return ExecutionTicket{}, err
 	}
@@ -537,6 +548,9 @@ func CompareAndSwapExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle 
 		return ticket, fmt.Errorf("invalid execution state transition %q -> %q", expected, next)
 	}
 	ticket.State, ticket.Reason = next, reason
+	if update != nil {
+		update(&ticket)
+	}
 	if err := ticket.Validate(); err != nil {
 		return ticket, err
 	}
@@ -636,7 +650,14 @@ func prepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 		if ticket.PreSpawnAcquire {
 			return preparePreSpawnCapture(root, lease, ticket, acquirer, hook)
 		}
-		return CompareAndSwapExecutionTicket(root, lease, handle, ExecutionPending, ExecutionSpawnAttempted, "spawn_attempted")
+		// This process execs the provider in place, so it is the provider process.
+		provider, err := HolderOf(os.Getpid())
+		if err != nil {
+			return ticket, fmt.Errorf("identify provider process: %w", err)
+		}
+		return compareAndSwapExecutionTicket(root, lease, handle, ExecutionPending, ExecutionSpawnAttempted, "spawn_attempted", func(ticket *ExecutionTicket) {
+			ticket.ProviderProcess = &provider
+		})
 	case AdapterModeMint:
 		if ticket.State == ExecutionPending {
 			ticket, err = CompareAndSwapExecutionTicket(root, lease, handle, ExecutionPending, ExecutionSpawnAttempted, "spawn_attempted")
@@ -810,29 +831,19 @@ type CodexNotifyResult struct {
 // RecordCodexNotify binds one provider-owned turn-complete notification to
 // the exact managed launch, persists immutable evidence, and only then makes
 // the provider identity resumable.
-func RecordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable string, raw []byte) (CodexNotifyResult, error) {
-	return recordCodexNotify(root, handle, nonce, amqExecutable, raw, nil)
+func RecordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable string, raw []byte) (CodexNotifyResult, error) {
+	return recordCodexNotify(root, handle, amqExecutable, raw, nil)
 }
 
-func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
-	lease, err := acquireExecutionLease(root, nonce)
+func recordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
+	lease, ticket, err := acquireCaptureTicket(root, handle, CodexProvider)
 	if err != nil {
 		return result, err
 	}
 	defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
-	if err := lease.LockHandles(handle); err != nil {
-		return result, err
-	}
-	ticket, err := LoadExecutionTicket(root, handle)
-	if err != nil {
-		return result, err
-	}
-	if ticket.LaunchNonce != nonce || ticket.Handle != handle || ticket.Mode != AdapterModeCapture ||
-		ticket.Provider != CodexProvider || !codexCaptureVersionSupported(ticket.ProviderVersion) || ticket.PreSpawnAcquire {
+	nonce := ticket.LaunchNonce
+	if !codexCaptureVersionSupported(ticket.ProviderVersion) {
 		return result, fmt.Errorf("codex notify execution ticket binding mismatch")
-	}
-	if ticket.State != ExecutionSpawnAttempted && ticket.State != ExecutionAcknowledged {
-		return result, fmt.Errorf("codex notify execution ticket state is %q", ticket.State)
 	}
 	_, amqIdentity, err := canonicalFile(amqExecutable)
 	if err != nil || amqIdentity != ticket.AMQExecutableIdentity {
@@ -897,6 +908,49 @@ func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable stri
 		return result, err
 	}
 	return CodexNotifyResult{ConversationID: evidence.conversationID, EvidenceRef: refID}, nil
+}
+
+// acquireCaptureTicket binds a provider-owned capture receiver to its seat.
+// The seat ticket's own nonce selects the launch lease; under the lease and
+// handle lock the ticket must still be that generation, a post-spawn capture
+// of provider whose spawn was attempted, and its recorded provider process
+// must be this process or one of its ancestors. A provider that outlived a
+// relaunch is not the new ticket's provider process, so it cannot bind. The
+// caller releases the returned lease.
+func acquireCaptureTicket(root *fsq.DeliveryRoot, handle, provider string) (*Lease, ExecutionTicket, error) {
+	observed, err := LoadExecutionTicket(root, handle)
+	if err != nil {
+		return nil, observed, err
+	}
+	lease, err := acquireExecutionLease(root, observed.LaunchNonce)
+	if err != nil {
+		return nil, observed, err
+	}
+	ticket, err := bindCaptureTicket(root, lease, handle, provider, observed.LaunchNonce)
+	if err != nil {
+		return nil, ticket, errors.Join(err, lease.Release())
+	}
+	return lease, ticket, nil
+}
+
+func bindCaptureTicket(root *fsq.DeliveryRoot, lease *Lease, handle, provider, nonce string) (ExecutionTicket, error) {
+	if err := lease.LockHandles(handle); err != nil {
+		return ExecutionTicket{}, err
+	}
+	ticket, err := LoadExecutionTicket(root, handle)
+	if err != nil {
+		return ticket, err
+	}
+	if ticket.LaunchNonce != nonce || ticket.Mode != AdapterModeCapture || ticket.Provider != provider || ticket.PreSpawnAcquire {
+		return ticket, fmt.Errorf("%s capture execution ticket binding mismatch", provider)
+	}
+	if ticket.State != ExecutionSpawnAttempted && ticket.State != ExecutionAcknowledged {
+		return ticket, fmt.Errorf("%s capture execution ticket state is %q", provider, ticket.State)
+	}
+	if ticket.ProviderProcess == nil || !runsUnderProcess(*ticket.ProviderProcess) {
+		return ticket, fmt.Errorf("%s capture receiver does not run under the seat's provider process", provider)
+	}
+	return ticket, nil
 }
 
 func callPrepareExecutionHook(hook prepareExecutionHook, stage string) error {
@@ -997,7 +1051,9 @@ func RevertExecution(root *fsq.DeliveryRoot, handle, nonce string) (returnErr er
 			_, err = CompareAndSwapExecutionTicket(root, lease, handle, ticket.State, ExecutionIdentityAcquired, "spawn_failed")
 			return err
 		}
-		_, err = CompareAndSwapExecutionTicket(root, lease, handle, ExecutionSpawnAttempted, ExecutionPending, "spawn_failed")
+		_, err = compareAndSwapExecutionTicket(root, lease, handle, ExecutionSpawnAttempted, ExecutionPending, "spawn_failed", func(ticket *ExecutionTicket) {
+			ticket.ProviderProcess = nil
+		})
 		return err
 	}
 	return fmt.Errorf("execution mode %q cannot be reverted", ticket.Mode)

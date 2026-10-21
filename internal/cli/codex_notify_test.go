@@ -15,8 +15,13 @@ import (
 
 const codexNotifyTestID = "019c8a2f-2b13-7000-8000-000000000001"
 
+// TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure also reproduces
+// the observed defect where managed Codex capture was refused for a missing
+// launch nonce (design review 2026-10-21): AMQ strips the nonce from the
+// provider environment, so the receiver must bind through the seat ticket.
 func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
-	session, root, nonce, amq := seedCodexNotifyCLI(t, "0.147.0")
+	t.Setenv(launch.InternalLaunchNonceEnv, "")
+	session, root, amq := seedCodexNotifyCLI(t, "0.147.0")
 	payload := []byte(`{"type":"agent-turn-complete","thread-id":"` + codexNotifyTestID + `","turn-id":"turn-1","cwd":"` + filepath.Join(session, "work") + `","input-messages":["reply with ok"],"last-assistant-message":"ok"}`)
 	original := codexNotifyForward
 	t.Cleanup(func() { codexNotifyForward = original })
@@ -36,7 +41,6 @@ func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 		}
 		return wantForwardErr
 	}
-	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
 	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", string(payload)}, "test"); err != nil {
 		t.Fatalf("run notify with failed operator hook: %v", err)
 	}
@@ -51,9 +55,8 @@ func TestCodexNotifyHonorsVerifiedVersionFloor(t *testing.T) {
 	t.Cleanup(func() { codexNotifyForward = original })
 	codexNotifyForward = func(string, []byte) error { return nil }
 	const threadID = "01a15ab3-228d-7003-9961-befa20b739a6"
-	session, root, nonce, _ := seedCodexNotifyCLI(t, "0.154.0")
+	session, root, _ := seedCodexNotifyCLI(t, "0.154.0")
 	payload := `{"type":"agent-turn-complete","thread-id":"` + threadID + `","turn-id":"01a15ab3-22e7-7a40-91a6-116eb12eb612","cwd":"` + filepath.Join(session, "work") + `","client":"codex_exec","input-messages":["Reply with exactly the word OK and nothing else."],"last-assistant-message":"OK"}`
-	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
 	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", payload}, "test"); err != nil {
 		t.Fatalf("notify at 0.154.0: %v", err)
 	}
@@ -98,7 +101,7 @@ func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	}
 }
 
-func seedCodexNotifyCLI(t *testing.T, providerVersion string) (string, *fsq.DeliveryRoot, string, string) {
+func seedCodexNotifyCLI(t *testing.T, providerVersion string) (string, *fsq.DeliveryRoot, string) {
 	t.Helper()
 	project := t.TempDir()
 	session := filepath.Join(t.TempDir(), "collab")
@@ -144,7 +147,7 @@ func seedCodexNotifyCLI(t *testing.T, providerVersion string) (string, *fsq.Deli
 		Handle: "codex", LaunchNonce: nonce, Mode: launch.AdapterModeCapture, Provider: launch.CodexProvider,
 		ProviderVersion: providerVersion, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 		ProjectRoot: project, SessionRoot: session, Cwd: cwd, ProviderExecutable: provider, AMQExecutable: amq,
-		TargetArgv: []string{provider, "-c", "notify=" + string(encoded)}, State: launch.ExecutionSpawnAttempted, Reason: "spawn_attempted",
+		TargetArgv: []string{provider, "-c", "notify=" + string(encoded)}, State: launch.ExecutionPending,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +171,14 @@ func seedCodexNotifyCLI(t *testing.T, providerVersion string) (string, *fsq.Deli
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
 	}
-	return session, root, nonce, amq
+	// The test process stands in for __launch-exec: it acknowledges the spawn
+	// and so becomes the provider process the notify receiver runs under.
+	if _, err := launch.PrepareExecution(root, "codex", nonce, launch.ExecutionEnvelope{
+		Cwd: cwd, AMQExecutable: amq, ProviderExecutable: provider, TargetArgv: ticket.TargetArgv, Environment: os.Environ(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return session, root, amq
 }
 
 func tomlQuote(value string) string {

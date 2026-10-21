@@ -381,6 +381,28 @@ func InspectHolder(h HolderIdentity) (LeaseState, string) {
 	return classifyHolder(h, inspectProcess(h.PID))
 }
 
+// maxProcessAncestry bounds the parent walk; a provider wrapper chain is a
+// handful of processes deep.
+const maxProcessAncestry = 64
+
+// runsUnderProcess reports whether holder is this process or one of its
+// ancestors. The holder's start token must match, so a reused pid does not.
+func runsUnderProcess(holder HolderIdentity) bool {
+	pid := os.Getpid()
+	for depth := 0; pid > 1 && depth < maxProcessAncestry; depth++ {
+		if pid == holder.PID {
+			state, _ := InspectHolder(holder)
+			return state == LeaseValid
+		}
+		parent, err := parentProcessID(pid)
+		if err != nil {
+			return false
+		}
+		pid = parent
+	}
+	return false
+}
+
 func writeLeaseRecord(root *fsq.DeliveryRoot, record leaseRecord) error {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {

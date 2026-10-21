@@ -5,6 +5,7 @@ package launch
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,23 @@ func linuxProcIdentity(stat string) (startToken string, state string, err error)
 		return "", "", fmt.Errorf("proc stat has malformed state")
 	}
 	return fields[startTimeIndex], fields[0], nil
+}
+
+func parentProcessID(pid int) (int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	stat := string(data)
+	endComm := strings.LastIndex(stat, ")")
+	if endComm < 0 || endComm+2 >= len(stat) {
+		return 0, fmt.Errorf("malformed proc stat")
+	}
+	fields := strings.Fields(stat[endComm+2:])
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("proc stat missing ppid")
+	}
+	return strconv.Atoi(fields[1])
 }
 
 // pidNamespace is the inode of this process's pid namespace, or empty when

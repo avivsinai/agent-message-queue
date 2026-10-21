@@ -12,5 +12,9 @@ func inspectProcessPlatform(pid int) processInfo {
 	return info
 }
 
+func parentProcessID(int) (int, error) {
+	return 0, fmt.Errorf("process ancestry unavailable on this platform")
+}
+
 // pidNamespace is empty: this platform has no pid namespaces.
 func pidNamespace() string { return "" }
