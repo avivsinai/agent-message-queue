@@ -174,7 +174,7 @@ valid value for the runtime `terminal` enum.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | opt-in | false | unavailable |
 | pi | true | true | false | false | bridge revision 4 | false | unavailable |
-| ACP host | true | submitted | false | false | reject only | false | unavailable |
+| ACP host | true | true | false | false | reject only | false | unavailable |
 | Claude Code | true | submitted | false | false | opt-in, reject only | false | unavailable |
 
 The v1 endpoint masks `steer` to false, even where an attachment declares it
