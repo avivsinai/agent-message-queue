@@ -31,7 +31,7 @@ func TestPlacementOmittedMatchesV061TmuxWindows(t *testing.T) {
 		t.Fatalf("omitted live windows = %d, want v0.61 one window per agent", got)
 	}
 	for _, pane := range tmuxOwnedPaneIDs(created.Binding) {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 		agent, agentErr := backend.run(ctx, backend.args("display-message", "-p", "-t", pane, "#{@amq_pane_agent}")...)
 		nonce, nonceErr := backend.run(ctx, backend.args("display-message", "-p", "-t", pane, "#{@amq_launch_nonce}")...)
 		cancel()
@@ -93,7 +93,7 @@ func TestTmuxJoinCrashAfterEachWindowRetriesWithoutDuplicates(t *testing.T) {
 
 func TestTmuxPlacementCurrentWindowCloseLeavesLauncher(t *testing.T) {
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	launcher, err := backend.run(ctx, backend.args("new-session", "-d", "-s", "host", "-P", "-F", "#{pane_id}")...)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestTmuxPlacementCurrentWindowCloseLeavesLauncher(t *testing.T) {
 
 func TestTmuxPlacementNewWindowCloseLeavesHostSession(t *testing.T) {
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	if _, err := backend.run(ctx, backend.args("new-session", "-d", "-s", "host", "-P", "-F", "#{session_id}")...); err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestTmuxPlacementStaggerSleepsRealDelay(t *testing.T) {
 
 func TestTmuxPlacementNewWindowRejectsForeignPaneJoinedIn(t *testing.T) {
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	foreign, err := backend.run(ctx, backend.args("new-session", "-d", "-s", "host", "-P", "-F", "#{pane_id}")...)
 	if err != nil {
@@ -287,7 +287,7 @@ func bindingWithEpoch(binding BindingRecord, epoch string) BindingRecord {
 
 func TestTmuxPlacementCloseRefusesEpochMismatch(t *testing.T) {
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeTmuxSleepAMQ(t), Root: root})
 	if err != nil {
@@ -308,7 +308,7 @@ func TestTmuxPlacementCloseRefusesEpochMismatch(t *testing.T) {
 
 func countLiveTmuxWindows(t *testing.T, backend *TmuxBackend) int {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	out, err := backend.run(ctx, backend.args("list-windows", "-a", "-F", "#{window_id}")...)
 	if err != nil {
@@ -389,7 +389,7 @@ func TestTmuxPlacementCrashRestartRecoversExactTarget(t *testing.T) {
 			req.HostIdentity = backend.Detect().HostIdentity
 			placement := &Placement{Target: tc.target, Layout: PlacementLayoutColumns}
 			if tc.needsHost {
-				ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 				defer cancel()
 				pane, err := backend.run(ctx, backend.args("new-session", "-d", "-s", "host", "-P", "-F", "#{pane_id}")...)
 				if err != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -131,43 +130,13 @@ func (c CodexQueue) probe(ctx context.Context, target string) (uuid, codexPath s
 }
 
 func (c CodexQueue) pinExecutable(ctx context.Context) (string, error) {
-	lookPath := c.LookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
-	}
-	looked, err := lookPath(platformExecutableName("codex"))
-	if err != nil {
-		return "", fmt.Errorf("codex not found on PATH (%w); put a codex >= 0.149 first in PATH", err)
-	}
-	if !filepath.IsAbs(looked) {
-		abs, absErr := filepath.Abs(looked)
-		if absErr != nil {
-			return "", fmt.Errorf("resolve codex executable: %w; put a codex >= 0.149 first in PATH", absErr)
-		}
-		looked = abs
-	}
-	// Mirror launch.ProviderForExecutable: identity is the PATH basename
-	// before symlink evaluation so version-manager shims keep the name `codex`.
-	if launch.ProviderForExecutable(looked) != launch.CodexProvider {
-		return "", fmt.Errorf("codex at %s has basename %q, want %q; put a codex >= 0.149 first in PATH", looked, filepath.Base(looked), launch.CodexProvider)
-	}
-	resolved, err := filepath.EvalSymlinks(looked)
-	if err != nil {
-		return "", fmt.Errorf("resolve codex at %s: %w; put a codex >= 0.149 first in PATH", looked, err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("stat codex at %s: %w; put a codex >= 0.149 first in PATH", resolved, err)
-	}
-	if !isExecutableRegularFile(info) {
-		return "", fmt.Errorf("codex at %s is not an executable regular file; put a codex >= 0.149 first in PATH", resolved)
-	}
-	out, err := c.runner().Run(ctx, resolved, "queue", "--help")
-	help := string(out)
-	if err != nil || !strings.Contains(help, "--thread") || !strings.Contains(help, "--message") {
-		return "", fmt.Errorf("codex at %s lacks `queue`; put a codex >= 0.149 first in PATH", resolved)
-	}
-	return resolved, nil
+	return pinExecutable(ctx, c.LookPath, c.runner(), providerExecutable{
+		provider:  launch.CodexProvider,
+		helpArgs:  []string{"queue", "--help"},
+		helpFlags: []string{"--thread", "--message"},
+		lacks:     "`queue`",
+		hint:      "put a codex >= 0.149 first in PATH",
+	})
 }
 
 func (c CodexQueue) codexHome() (string, error) {
@@ -199,15 +168,7 @@ func (c CodexQueue) lockInspector() WriterLockInspector {
 }
 
 func parseCodexQueueThreadUUID(target string) (string, error) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(target), codexQueueTargetThreadPrefix)
-	if !ok {
-		return "", fmt.Errorf("unsupported Codex queue target %q; use %s<uuid>", target, codexQueueTargetThreadPrefix)
-	}
-	id = strings.TrimSpace(id)
-	if !lowercaseThreadUUIDRe.MatchString(id) {
-		return "", fmt.Errorf("invalid Codex queue thread uuid %q; want an exact lowercase 8-4-4-4-12 hex uuid", id)
-	}
-	return id, nil
+	return parseTargetUUID(target, codexQueueTargetThreadPrefix, "Codex queue", "thread", codexQueueTargetThreadPrefix+"<uuid>")
 }
 
 func countCodexRollouts(home, uuid string) (int, error) {
