@@ -26,6 +26,8 @@ import (
 type fakeAgent struct {
 	askPermission bool
 	loadSession   bool
+	// gate, when set, holds each prompt's answer until it is closed.
+	gate chan struct{}
 
 	mu       sync.Mutex
 	methods  []string
@@ -76,6 +78,9 @@ func (f *fakeAgent) serve(in io.Reader, out io.WriteCloser) {
 			f.mu.Lock()
 			f.prompts = append(f.prompts, msg.Params.Prompt[0].Text)
 			f.mu.Unlock()
+			if f.gate != nil {
+				<-f.gate
+			}
 			if f.askPermission {
 				_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission", "params": map[string]any{
 					"sessionId": "s1",
@@ -347,4 +352,240 @@ func TestCheckReportsTheAgentsCapabilities(t *testing.T) {
 	if res.ProtocolVersion != 1 || res.AgentInfo.Name != "fake" || !res.LoadSession {
 		t.Fatalf("check result=%+v; want protocol 1, agent fake, load_session true", res)
 	}
+}
+
+const (
+	testRef  = "amqr1_abcdefghijklmnopqrst"
+	otherRef = "amqr1_bcdefghijklmnopqrstu"
+)
+
+// publishRequest plays the amq-remote adapter: it reads the live session
+// generation and publishes one request for it.
+func publishRequest(t *testing.T, root, ref, text string) {
+	t.Helper()
+	publishRequests(t, root, map[string]string{ref: text})
+}
+
+// publishRequests publishes several requests at once: they appear together,
+// so the host sees all of them in one scan.
+func publishRequests(t *testing.T, root string, texts map[string]string) {
+	t.Helper()
+	dir := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
+	var live bridgeLiveness
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "bridge.liveness"))
+		if err == nil && json.Unmarshal(data, &live) == nil && live.Live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the host published no live bridge.liveness")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	staging := filepath.Join(dir, "requests.staging")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for ref, text := range texts {
+		req, err := json.Marshal(bridgeRequest{
+			Ref: ref, Text: text, DeliverAs: "followUp", EpochHint: live.SessionGeneration, BridgeRevision: 3,
+			NotAfter: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(staging, ref+".json")
+		if err := os.WriteFile(path, req, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// One publication time: the host then takes them in ref order.
+		if err := os.Chtimes(path, live.at(), live.at()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requests := filepath.Join(dir, "requests")
+	if _, err := os.Stat(requests); err != nil {
+		// The first publication moves the whole directory in at once.
+		if err := os.Rename(staging, requests); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	for ref := range texts {
+		if err := os.Rename(filepath.Join(staging, ref+".json"), filepath.Join(requests, ref+".json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(staging); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitEvent waits for an event line of the given type on one request.
+func waitEvent(t *testing.T, root, ref, event string) []bridgeEvent {
+	t.Helper()
+	path := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "events", ref+".jsonl")
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		data, _ := os.ReadFile(path)
+		var events []bridgeEvent
+		for _, line := range strings.Split(string(data), "\n") {
+			var ev bridgeEvent
+			if json.Unmarshal([]byte(line), &ev) == nil {
+				events = append(events, ev)
+			}
+		}
+		if slices.ContainsFunc(events, func(ev bridgeEvent) bool { return ev.Event == event }) {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s event; stream: %s", event, data)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHostRunsARemoteRequest(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{}
+	startHost(t, root, agent)
+	publishRequest(t, root, testRef, "summarize the diff")
+
+	events := waitEvent(t, root, testRef, "completed")
+	if _, err := os.Stat(filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "receipts", testRef+".json")); err != nil {
+		t.Fatalf("no receipt for the request: %v", err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, ev.Event)
+	}
+	if !slices.Equal(kinds, []string{"started", "completed"}) || events[1].Text != "four, as asked" {
+		t.Fatalf("events=%v text=%q; want started then completed with the answer", kinds, events[len(events)-1].Text)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if !slices.Equal(agent.prompts, []string{"summarize the diff"}) {
+		t.Fatalf("agent prompts=%q; want the request text verbatim", agent.prompts)
+	}
+}
+
+func TestHostTakesARejectFromTheRemoteFace(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{askPermission: true}
+	startHost(t, root, agent)
+	publishRequest(t, root, testRef, "clean the build")
+
+	events := waitEvent(t, root, testRef, "interaction")
+	ask := events[len(events)-1]
+	answer, err := json.Marshal(map[string]string{
+		"protocol": BridgeProtocol, "ref": testRef, "interaction_id": ask.InteractionID,
+		"manifest_hash": ask.ManifestHash, "option": ask.RejectOption,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "answers")
+	if err := os.MkdirAll(answers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(answers, answerName(testRef, ask.InteractionID)), answer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	events = waitEvent(t, root, testRef, "completed")
+	if !slices.ContainsFunc(events, func(ev bridgeEvent) bool {
+		return ev.Event == "interaction_resolved" && ev.Outcome == "answered" && ev.Option == ask.RejectOption
+	}) {
+		t.Fatalf("no interaction_resolved answered with the reject option; events=%+v", events)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.selected != "reject" {
+		t.Fatalf("host selected option %q; want the reject_once option", agent.selected)
+	}
+}
+
+// at is the liveness record's time, a fixed instant for a test publication.
+func (l bridgeLiveness) at() time.Time {
+	at, _ := time.Parse(time.RFC3339Nano, l.At)
+	return at
+}
+
+// writeAnswer plays the remote face: it answers one approval with option.
+func writeAnswer(t *testing.T, root, ref string, ask bridgeEvent, option string) {
+	t.Helper()
+	answer, err := json.Marshal(map[string]string{
+		"protocol": BridgeProtocol, "ref": ref, "interaction_id": ask.InteractionID,
+		"manifest_hash": ask.ManifestHash, "option": option,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "answers")
+	if err := os.MkdirAll(answers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(answers, answerName(ref, ask.InteractionID)), answer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertNeverRan fails when ref got a receipt or a started event.
+func assertNeverRan(t *testing.T, root, ref string) {
+	t.Helper()
+	dir := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
+	if _, err := os.Stat(filepath.Join(dir, "receipts", ref+".json")); err == nil {
+		t.Fatalf("request %s got a receipt; a request refused busy must never run", ref)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "events", ref+".jsonl"))
+	if strings.Contains(string(data), `"event":"started"`) {
+		t.Fatalf("request %s started; a request refused busy must never run: %s", ref, data)
+	}
+}
+
+// Review of #1128 round 1 (P1): a request refused busy while another
+// request's turn ran was admitted again once that turn ended, and ran.
+func TestHostNeverRunsARequestRefusedBusyDuringARemoteTurn(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{askPermission: true}
+	startHost(t, root, agent)
+	publishRequests(t, root, map[string]string{testRef: "do A", otherRef: "do B"})
+	events := waitEvent(t, root, testRef, "interaction")
+	waitEvent(t, root, otherRef, "refused")
+
+	writeAnswer(t, root, testRef, events[len(events)-1], events[len(events)-1].RejectOption)
+	waitEvent(t, root, testRef, "completed")
+	// The serve loop would take B right after A's turn, in the same pass.
+	time.Sleep(300 * time.Millisecond)
+	assertNeverRan(t, root, otherRef)
+}
+
+// Review of #1128 round 1 (P1): a request published during a peer turn
+// shorter than the scan interval ran after that turn instead of being
+// refused busy.
+func TestHostRefusesARequestPublishedDuringAPeerTurn(t *testing.T) {
+	root := newRoot(t)
+	gate := make(chan struct{})
+	agent := &fakeAgent{gate: gate}
+	send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+	startHost(t, root, agent)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		agent.mu.Lock()
+		n := len(agent.prompts)
+		agent.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the peer turn never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	publishRequest(t, root, testRef, "summarize")
+	close(gate)
+
+	waitEvent(t, root, testRef, "refused")
+	assertNeverRan(t, root, testRef)
 }

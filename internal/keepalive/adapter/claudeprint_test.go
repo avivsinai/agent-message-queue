@@ -145,11 +145,8 @@ func writeInitThenAck(t *testing.T, path, payload string, beforeInit ...string) 
 }
 
 func TestDefaultRegistryRegistersClaudePrint(t *testing.T) {
-	if _, err := DefaultRegistry().Get("claude-print"); err != nil {
+	if _, err := DefaultRegistry(nil).Get("claude-print"); err != nil {
 		t.Fatalf("DefaultRegistry().Get(%q) failed: %v", "claude-print", err)
-	}
-	if _, err := DefaultRegistryWithLogf(func(string, ...any) {}).Get("claude-print"); err != nil {
-		t.Fatalf("DefaultRegistryWithLogf().Get(%q) failed: %v", "claude-print", err)
 	}
 	cap := (ClaudePrint{}).Capability()
 	if cap.Activation != ActivationNone || cap.Delivery != DeliverySubmitted || cap.Session != SessionExistingExact || cap.RequiresHuman {

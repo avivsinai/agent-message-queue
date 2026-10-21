@@ -541,14 +541,23 @@ func (b bridgeDir) listEventRefs() []string {
 // guessing.
 const ProtocolV1 = "amq:pi-bridge:v1"
 
+// ProtocolACPHost is the protocol string of kind "acp": the extension side
+// is an amq-acp host serving an ACP agent.
+const ProtocolACPHost = "amq:acp-host:v1"
+
 // wireNames is the set of names one bridge generation puts on disk and on
-// the wire: the extension directory, the protocol string, and the run-id
-// prefix the endpoint persists as the native run.
+// the wire: the extension directory, the protocol string, the run-id prefix
+// the endpoint persists as the native run, and the harness name the owner
+// sees.
 type wireNames struct {
 	dir       string
 	protocol  string
 	runPrefix string
+	harness   string
 }
 
 // piWire is the wire of kind "pi".
-var piWire = wireNames{dir: "pi-bridge", protocol: ProtocolV1, runPrefix: "pi:"}
+var piWire = wireNames{dir: "pi-bridge", protocol: ProtocolV1, runPrefix: "pi:", harness: "pi"}
+
+// acpWire is the wire of kind "acp".
+var acpWire = wireNames{dir: "acp-host", protocol: ProtocolACPHost, runPrefix: "acp:", harness: "acp"}

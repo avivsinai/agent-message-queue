@@ -95,6 +95,13 @@ type Host struct {
 
 	mu   sync.Mutex
 	turn *turnCollect
+
+	// generation names the opened ACP session on the bridge seam; handled
+	// holds the bridge requests already decided. Both belong to the loop.
+	generation string
+	handled    map[string]bool
+	// eventMu serializes appends to the bridge event streams.
+	eventMu sync.Mutex
 }
 
 // turnCollect gathers one turn's answer. The connection's reader fills it;
@@ -104,6 +111,13 @@ type turnCollect struct {
 	sessionID string
 	text      strings.Builder
 	refused   int
+	// cancelled is closed when the host cancels the turn, so an approval
+	// waiting for the owner answers cancelled; done is closed when the turn
+	// ends, so no approval outlives it.
+	cancelled chan struct{}
+	done      chan struct{}
+	// bridge is the remote request this turn serves; nil for a mailbox turn.
+	bridge *bridgeTurn
 }
 
 // Open authenticates the root, takes the host lock for the handle, and
@@ -174,13 +188,23 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		opened = "resumed"
 	}
 	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (ACP session %s, %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.sessionID, opened, AutonomyNotice)
+	stopBridge, err := h.startBridge()
+	if err != nil {
+		return err
+	}
+	defer stopBridge()
 	if err := h.withRoot(func(root *fsq.DeliveryRoot) error { return h.recover(ctx, root) }); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(scanInterval)
 	defer ticker.Stop()
 	for {
-		if err := h.withRoot(func(root *fsq.DeliveryRoot) error { return h.scan(ctx, root) }); err != nil {
+		if err := h.withRoot(func(root *fsq.DeliveryRoot) error {
+			if err := h.scan(ctx, root); err != nil {
+				return err
+			}
+			return h.serveRequests(ctx, root)
+		}); err != nil {
 			return err
 		}
 		select {
@@ -370,8 +394,10 @@ type CheckResult struct {
 // Check probes an agent on in and out: initialize only, no session and no
 // AMQ root. A refusal says why the host could not serve this agent.
 func Check(ctx context.Context, in io.Reader, out io.Writer, version string) (CheckResult, error) {
-	c := newConn(in, out, func(method string, _ json.RawMessage) (any, *rpcError) {
-		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+	c := newConn(in, out, func(method string, _ json.RawMessage) func() (any, *rpcError) {
+		return func() (any, *rpcError) {
+			return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+		}
 	}, func(string, json.RawMessage) {})
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
@@ -395,33 +421,66 @@ func authRequired(err error) bool {
 	return strings.Contains(text, "auth_required") || strings.Contains(text, "authentication required")
 }
 
-// onRequest answers the agent's requests. Only session/request_permission is
-// served, and it is always refused; the host advertises no fs or terminal
-// methods, so every other method is not found.
-func (h *Host) onRequest(method string, params json.RawMessage) (any, *rpcError) {
+// permissionRequest is the part of session/request_permission the host reads.
+type permissionRequest struct {
+	ToolCall json.RawMessage `json:"toolCall"`
+	Options  []struct {
+		OptionID string `json:"optionId"`
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+	} `json:"options"`
+}
+
+// onRequest takes the agent's requests on the connection's reader, so a
+// request belongs to the turn in flight when it arrived; the function it
+// returns gives the answer. Only session/request_permission is served, and
+// it is always refused: the host's policy selects the first reject_once
+// option, else the first reject_always, else cancelled. The host advertises
+// no fs or terminal methods, so every other method is not found. During a
+// remote request's turn the owner sees an approval that offers reject_once
+// and may give it from the remote face first; the agent gets that same
+// reject either way.
+func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rpcError) {
 	if method != "session/request_permission" {
-		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
-	}
-	h.mu.Lock()
-	if h.turn != nil {
-		h.turn.refused++
-	}
-	h.mu.Unlock()
-	var req struct {
-		Options []struct {
-			OptionID string `json:"optionId"`
-			Kind     string `json:"kind"`
-		} `json:"options"`
-	}
-	_ = json.Unmarshal(params, &req)
-	for _, kind := range []string{"reject_once", "reject_always"} {
-		for _, option := range req.Options {
-			if option.Kind == kind && option.OptionID != "" {
-				return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": option.OptionID}}, nil
-			}
+		return func() (any, *rpcError) {
+			return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
 		}
 	}
-	return map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}, nil
+	h.mu.Lock()
+	turn := h.turn
+	if turn != nil {
+		turn.refused++
+	}
+	h.mu.Unlock()
+	var req permissionRequest
+	_ = json.Unmarshal(params, &req)
+	first := func(kind string) int {
+		for i, option := range req.Options {
+			if option.Kind == kind && option.OptionID != "" {
+				return i
+			}
+		}
+		return -1
+	}
+	once := first("reject_once")
+	policy := once
+	if policy < 0 {
+		policy = first("reject_always")
+	}
+	cancelled := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
+	selected := func(i int) map[string]any {
+		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": req.Options[i].OptionID}}
+	}
+	return func() (any, *rpcError) {
+		if policy < 0 {
+			return cancelled, nil
+		}
+		// The remote face offers only reject_once, never a wider scope.
+		if turn != nil && turn.bridge != nil && once >= 0 && !h.askOwner(turn, req, once) {
+			return cancelled, nil
+		}
+		return selected(policy), nil
+	}
 }
 
 // onNotify collects the text of agent_message_chunk updates for the turn in
@@ -666,11 +725,47 @@ func (h *Host) takeMessage(root *fsq.DeliveryRoot, rec *turnRecord) (format.Mess
 // the record could not be written; fatal means the reply is recorded but the
 // host must stop after delivering it (the agent exited or ignored a cancel).
 func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRecord, msg format.Message) (fatal, err error) {
+	meta := map[string]any{"amq": map[string]string{"message_id": rec.MessageID, "thread": rec.Thread, "from": rec.From}}
+	res, err := h.prompt(ctx, root, framePrompt(msg), meta, nil, func(id int64) error {
+		rec.State, rec.RequestID, rec.SessionID = stateDispatching, id, h.sessionID
+		return saveTurn(root, h.cfg.Me, *rec)
+	})
+	if err != nil {
+		// No prompt byte was sent: the record stays claimed.
+		rec.State = stateClaimed
+		return nil, err
+	}
+	rec.State = stateAnswered
+	rec.StopReason, rec.ReplyBody, fatal = replyFor(res.answer, res.cancelled, res.raw, res.err, h.cfg.AgentExit)
+	if res.refused > 0 {
+		rec.ReplyBody += fmt.Sprintf("\n\nThe host rejected %d tool call(s) the agent asked to run.", res.refused)
+	}
+	if err := saveTurn(root, h.cfg.Me, *rec); err != nil {
+		return nil, err
+	}
+	return fatal, nil
+}
+
+// turnResult is how one prompt turn ended.
+type turnResult struct {
+	raw       json.RawMessage
+	err       error
+	cancelled string
+	answer    string
+	refused   int
+}
+
+// prompt sends one session/prompt with text and waits for it to end, cancel
+// it on timeout or when ctx ends. sent runs after the request id is known and
+// before any prompt byte; an error from sent, or a call that fails before
+// it, is returned as err and nothing reached the agent. bridge is the remote
+// request the turn serves, nil for a mailbox turn.
+func (h *Host) prompt(ctx context.Context, root *fsq.DeliveryRoot, text string, meta map[string]any, bridge *bridgeTurn, sent func(id int64) error) (turnResult, error) {
 	h.reloadSettings(root)
 	h.setPresence(root, "busy")
 	defer h.setPresence(root, "idle")
 
-	collect := &turnCollect{sessionID: h.sessionID}
+	collect := &turnCollect{sessionID: h.sessionID, cancelled: make(chan struct{}), done: make(chan struct{}), bridge: bridge}
 	h.mu.Lock()
 	h.turn = collect
 	h.mu.Unlock()
@@ -678,12 +773,15 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 		h.mu.Lock()
 		h.turn = nil
 		h.mu.Unlock()
+		close(collect.done)
 	}()
 
 	params := map[string]any{
 		"sessionId": h.sessionID,
-		"prompt":    []map[string]string{{"type": "text", "text": framePrompt(msg)}},
-		"_meta":     map[string]any{"amq": map[string]string{"message_id": rec.MessageID, "thread": rec.Thread, "from": rec.From}},
+		"prompt":    []map[string]string{{"type": "text", "text": text}},
+	}
+	if meta != nil {
+		params["_meta"] = meta
 	}
 	type outcome struct {
 		raw json.RawMessage
@@ -692,41 +790,49 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 	dispatched := make(chan error, 1)
 	done := make(chan outcome, 1)
 	go func() {
-		journaled := false
+		ran := false
 		raw, err := h.conn.call(context.Background(), "session/prompt", params, func(id int64) error {
-			rec.State, rec.RequestID, rec.SessionID = stateDispatching, id, h.sessionID
-			err := saveTurn(root, h.cfg.Me, *rec)
-			journaled = true
+			ran = true
+			err := sent(id)
 			dispatched <- err
 			return err
 		})
-		if !journaled {
-			// The call ended before its request id was journaled.
+		if !ran {
+			// The call ended before the hook ran.
 			dispatched <- err
 		}
 		done <- outcome{raw, err}
 	}()
 	if err := <-dispatched; err != nil {
-		if rec.State != stateDispatching {
-			return nil, err
-		}
-		// The dispatching record failed to save: no prompt byte was sent.
-		rec.State = stateClaimed
-		return nil, err
+		return turnResult{}, err
 	}
 
 	timer := time.NewTimer(h.timeout)
 	defer timer.Stop()
+	busy := time.NewTicker(scanInterval)
+	defer busy.Stop()
 	var result outcome
 	cancelled := ""
-	select {
-	case result = <-done:
-	case <-ctx.Done():
-		cancelled = "the host was stopped"
-	case <-timer.C:
-		cancelled = "the turn timed out after " + h.timeout.String()
+wait:
+	for {
+		select {
+		case result = <-done:
+			break wait
+		case <-ctx.Done():
+			cancelled = "the host was stopped"
+			break wait
+		case <-timer.C:
+			cancelled = "the turn timed out after " + h.timeout.String()
+			break wait
+		case <-busy.C:
+			// A remote request that arrives during a turn is refused busy
+			// at once, never queued behind it.
+			h.refuseBusy(root)
+		}
 	}
 	if cancelled != "" {
+		// A pending approval answers cancelled before the cancel goes out.
+		close(collect.cancelled)
 		_ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID})
 		grace := time.NewTimer(cancelGrace)
 		defer grace.Stop()
@@ -737,18 +843,12 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 		}
 	}
 
+	// A request published while this turn ran is refused busy now, before
+	// the host is idle again: it never runs after the turn.
+	h.refuseBusy(root)
 	h.mu.Lock()
-	answer, refused := collect.text.String(), collect.refused
-	h.mu.Unlock()
-	rec.State = stateAnswered
-	rec.StopReason, rec.ReplyBody, fatal = replyFor(answer, cancelled, result.raw, result.err, h.cfg.AgentExit)
-	if refused > 0 {
-		rec.ReplyBody += fmt.Sprintf("\n\nThe host rejected %d tool call(s) the agent asked to run.", refused)
-	}
-	if err := saveTurn(root, h.cfg.Me, *rec); err != nil {
-		return nil, err
-	}
-	return fatal, nil
+	defer h.mu.Unlock()
+	return turnResult{raw: result.raw, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused}, nil
 }
 
 // replyFor maps a turn's outcome to the stop label, the reply body, and

@@ -448,15 +448,17 @@ func removeAuthoritativeWakeClaimAt(
 	target *wakeTarget,
 ) (retErr error) {
 	defer func() { retErr = withWakeDiagnostic(retErr, expected.Root, expected.Agent) }()
-	dirfd, agentDir, err := scope.location()
+	r := &authoritativeWakeRelease{}
+	var err error
+	r.dirfd, r.agentDir, err = scope.location()
 	if err != nil {
 		return err
 	}
-	current := readWakeLockMetadataAt(dirfd, agentDir, expected.Root, expected.Agent)
-	if !sameWakeLockGeneration(expected, current) {
+	r.current = readWakeLockMetadataAt(r.dirfd, r.agentDir, expected.Root, expected.Agent)
+	if !sameWakeLockGeneration(expected, r.current) {
 		return fmt.Errorf("authoritative wake claim changed before release")
 	}
-	relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	relation, relationErr := retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 	if relationErr != nil {
 		return newWakeStateBoundInconclusiveError(relationErr)
 	}
@@ -472,30 +474,28 @@ func removeAuthoritativeWakeClaimAt(
 		)
 	}
 	detached := relation == wakeAgentDirDetached
-	var detachedValidationErr error
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+	if err := validateWakeStateAgentDirAt(r.dirfd, r.agentDir); err != nil {
 		if !detached {
 			return err
 		}
-		detachedValidationErr = err
+		r.detachedValidationErr = err
 	}
-	if err := validateBoundWakeMutationAt(scope, current); err != nil {
-		if detachedValidationErr == nil {
+	if err := validateBoundWakeMutationAt(scope, r.current); err != nil {
+		if r.detachedValidationErr == nil {
 			return err
 		}
-		detachedValidationErr = errors.Join(detachedValidationErr, err)
+		r.detachedValidationErr = errors.Join(r.detachedValidationErr, err)
 	}
-	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
+	if classifyPersistedWakeClaim(r.current) != wakeClaimAuthoritative {
 		return fmt.Errorf("authoritative wake lock became invalid before release")
 	}
-	var releaseTargetSnapshot *wakeTargetSnapshot
 	if target != nil {
 		currentTarget, err := readAuthoritativeWakeTargetSnapshotAt(
-			dirfd,
-			agentDir,
+			r.dirfd,
+			r.agentDir,
 			expected.Root,
 			expected.Agent,
-			current.Lock,
+			r.current.Lock,
 		)
 		if err != nil {
 			return fmt.Errorf("authoritative wake claim became invalid before release: %w", err)
@@ -508,50 +508,48 @@ func removeAuthoritativeWakeClaimAt(
 		if err != nil {
 			return err
 		}
-		if expectedDigest != current.Lock.TargetDigest ||
-			currentDigest != current.Lock.TargetDigest {
+		if expectedDigest != r.current.Lock.TargetDigest ||
+			currentDigest != r.current.Lock.TargetDigest {
 			return fmt.Errorf("authoritative wake target changed before release")
 		}
-		releaseTargetSnapshot = &currentTarget
+		r.releaseTargetSnapshot = &currentTarget
 	}
 
-	var releasePreparedSnapshot *wakeGenerationFileSnapshot
-	var preparedSnapshotErr error
 	preparedSnapshot, preparedExists, err := readWakeGenerationFileSnapshotAt(
-		dirfd,
-		agentDir,
+		r.dirfd,
+		r.agentDir,
 		wakePreparedFileName,
 		"wake prepared marker",
 	)
 	if err != nil {
-		preparedSnapshotErr = fmt.Errorf("snapshot released wake prepared marker: %w", err)
-		if releaseTargetSnapshot == nil {
-			return preparedSnapshotErr
+		r.preparedSnapshotErr = fmt.Errorf("snapshot released wake prepared marker: %w", err)
+		if r.releaseTargetSnapshot == nil {
+			return r.preparedSnapshotErr
 		}
 	} else if preparedExists &&
 		preparedSnapshot.Marker.Schema == wakeReadySchema &&
-		preparedSnapshot.Marker.Generation == current.Lock.Generation &&
-		preparedSnapshot.Marker.TargetDigest == current.Lock.TargetDigest {
-		if releaseTargetSnapshot == nil {
-			if detachedValidationErr == nil {
+		preparedSnapshot.Marker.Generation == r.current.Lock.Generation &&
+		preparedSnapshot.Marker.TargetDigest == r.current.Lock.TargetDigest {
+		if r.releaseTargetSnapshot == nil {
+			if r.detachedValidationErr == nil {
 				return fmt.Errorf(
 					"validate released wake prepared marker: authoritative wake target snapshot is unavailable",
 				)
 			}
 		} else {
-			releasePreparedSnapshot = &preparedSnapshot
+			r.releasePreparedSnapshot = &preparedSnapshot
 		}
 	}
-	if detachedValidationErr == nil {
-		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-			relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	if r.detachedValidationErr == nil {
+		if err := validateWakeStateAgentDirAt(r.dirfd, r.agentDir); err != nil {
+			relation, relationErr = retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 			if relationErr != nil {
 				return newWakeStateBoundInconclusiveError(relationErr)
 			}
 			switch relation {
 			case wakeAgentDirDetached:
 				detached = true
-				detachedValidationErr = err
+				r.detachedValidationErr = err
 			case wakeAgentDirCanonical:
 				return err
 			case wakeAgentDirInconclusive:
@@ -565,7 +563,7 @@ func removeAuthoritativeWakeClaimAt(
 			}
 		}
 	}
-	relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	relation, relationErr = retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 	if relationErr != nil {
 		return newWakeStateBoundInconclusiveError(relationErr)
 	}
@@ -573,7 +571,7 @@ func removeAuthoritativeWakeClaimAt(
 	case wakeAgentDirCanonical:
 	case wakeAgentDirDetached:
 		if !detached {
-			detachedValidationErr = wakeDetachedCleanupValidationError()
+			r.detachedValidationErr = wakeDetachedCleanupValidationError()
 		}
 	case wakeAgentDirInconclusive:
 		return newWakeStateBoundInconclusiveError(
@@ -584,24 +582,22 @@ func removeAuthoritativeWakeClaimAt(
 			fmt.Errorf("unknown wake agent directory relation %d", relation),
 		)
 	}
-	var releaseStateSnapshot wakeStateFileSnapshot
-	var releaseStateExists bool
-	if detachedValidationErr == nil {
+	if r.detachedValidationErr == nil {
 		var stateSnapshotErr error
-		releaseStateSnapshot, releaseStateExists, stateSnapshotErr = readWakeStateRawSnapshotAt(dirfd, agentDir)
+		r.releaseStateSnapshot, r.releaseStateExists, stateSnapshotErr = readWakeStateRawSnapshotAt(r.dirfd, r.agentDir)
 		if stateSnapshotErr != nil {
-			relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
+			relation, relationErr = retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 			if relationErr != nil {
 				return newWakeStateBoundInconclusiveError(relationErr)
 			}
 			switch relation {
 			case wakeAgentDirDetached:
-				detachedValidationErr = errors.Join(detachedValidationErr, stateSnapshotErr)
+				r.detachedValidationErr = errors.Join(r.detachedValidationErr, stateSnapshotErr)
 			case wakeAgentDirCanonical:
 				continueAfterWakeStateProjectionError(newWakeStateProjectionError(
 					fmt.Errorf("snapshot wake state before release: %w", stateSnapshotErr),
 				))
-				releaseStateExists = false
+				r.releaseStateExists = false
 			case wakeAgentDirInconclusive:
 				return newWakeStateBoundInconclusiveError(
 					fmt.Errorf("wake agent directory relation is inconclusive during authoritative state snapshot"),
@@ -613,23 +609,29 @@ func removeAuthoritativeWakeClaimAt(
 			}
 		}
 	}
-	if detachedValidationErr == nil {
-		if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, current); err != nil {
+	if r.detachedValidationErr == nil {
+		if err := reclaimWakeRestartStateForLockRemovalAt(r.dirfd, r.agentDir, r.current); err != nil {
 			return fmt.Errorf("reconcile wake restart ownership before authoritative lock release: %w", err)
 		}
 	}
+	return r.finish(scope, expected)
+}
 
-	finalLock := readWakeLockMetadataAt(dirfd, agentDir, expected.Root, expected.Agent)
+// finish removes the authoritative wake lock and, once no replacement lock
+// exists, the retained target, state, prepared marker and control socket of
+// the released generation. It reports how far the release got.
+func (r *authoritativeWakeRelease) finish(scope *wakeMutationScope, expected wakeLockInspection) error {
+	finalLock := readWakeLockMetadataAt(r.dirfd, r.agentDir, expected.Root, expected.Agent)
 	multipleLinks, linkErr := wakeLockHasMultipleLinks(finalLock.fileInfo)
 	if linkErr != nil {
 		err := fmt.Errorf("cannot determine authoritative wake lock hard-link count; preserving it: %w", linkErr)
-		return errors.Join(detachedValidationErr, err)
+		return errors.Join(r.detachedValidationErr, err)
 	}
 	if multipleLinks {
 		err := fmt.Errorf("authoritative wake lock has multiple hard links; preserving it to avoid mutating an alias")
-		return errors.Join(detachedValidationErr, err)
+		return errors.Join(r.detachedValidationErr, err)
 	}
-	if !sameWakeLockGeneration(current, finalLock) {
+	if !sameWakeLockGeneration(r.current, finalLock) {
 		return fmt.Errorf("authoritative wake claim changed immediately before release")
 	}
 
@@ -639,46 +641,46 @@ func removeAuthoritativeWakeClaimAt(
 	// during a two-step removal, creating a real competing-authority hazard.
 	if err := scope.unlinkWakeLockForCleanup(); err != nil {
 		if err == unix.ENOENT {
-			return preparedSnapshotErr
+			return r.preparedSnapshotErr
 		}
 		return errors.Join(
-			preparedSnapshotErr,
+			r.preparedSnapshotErr,
 			fmt.Errorf("unlink authoritative wake lock: %w", err),
 		)
 	}
 	var lockSyncErr error
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+	if err := syncWakeOwnerDirFD(r.dirfd); err != nil {
 		lockSyncErr = fmt.Errorf("sync authoritative wake lock release: %w", err)
 	}
-	if detachedValidationErr != nil {
+	if r.detachedValidationErr != nil {
 		return errors.Join(
-			preparedSnapshotErr,
+			r.preparedSnapshotErr,
 			lockSyncErr,
-			newWakeDetachedCleanupOnlyError(detachedValidationErr),
+			newWakeDetachedCleanupOnlyError(r.detachedValidationErr),
 		)
 	}
 	if lockSyncErr != nil {
 		return errors.Join(
-			preparedSnapshotErr,
+			r.preparedSnapshotErr,
 			lockSyncErr,
-			validateWakeStateAgentDirAt(dirfd, agentDir),
+			validateWakeStateAgentDirAt(r.dirfd, r.agentDir),
 		)
 	}
-	cleanupErr := preparedSnapshotErr
+	cleanupErr := r.preparedSnapshotErr
 	cleaned := false
-	if err := removeWakeSelfUpgradeArtifactsAt(dirfd); err != nil {
+	if err := removeWakeSelfUpgradeArtifactsAt(r.dirfd); err != nil {
 		diagnosticCleanupErr := newWakeLockResidueError(
 			wakeLockResidueSelfUpgradeDiagnostic,
 			fmt.Errorf("remove wake self-upgrade metadata after authoritative lock release: %w", err),
 		)
 		_ = writeStderr(
 			"warning: removed authoritative wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
-			current.Agent,
+			r.current.Agent,
 			diagnosticCleanupErr,
 		)
 	}
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	if err := validateWakeStateAgentDirAt(r.dirfd, r.agentDir); err != nil {
+		relation, relationErr := retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 		if relationErr != nil {
 			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
 		}
@@ -709,7 +711,7 @@ func removeAuthoritativeWakeClaimAt(
 
 	// A replacement is never selected or cleaned. Cooperative writers cannot
 	// install one while this guard is held; this check also catches bypassers.
-	replacement, err := unix.Openat(dirfd, wakeLockFileName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	replacement, err := unix.Openat(r.dirfd, wakeLockFileName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err == nil {
 		_ = unix.Close(replacement)
 		return cleanupErr
@@ -721,12 +723,12 @@ func removeAuthoritativeWakeClaimAt(
 		)
 	}
 
-	if releaseTargetSnapshot != nil {
+	if r.releaseTargetSnapshot != nil {
 		removed, err := removeWakeTargetIfSnapshotMatchesAt(
 			scope,
 			expected.Root,
 			expected.Agent,
-			*releaseTargetSnapshot,
+			*r.releaseTargetSnapshot,
 		)
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
@@ -736,8 +738,8 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	stateRemoved, stateErr := removeWakeStateIfTargetAbsentAt(
 		scope,
-		releaseStateSnapshot,
-		releaseStateExists,
+		r.releaseStateSnapshot,
+		r.releaseStateExists,
 	)
 	if stateErr != nil {
 		if !continueAfterWakeStateProjectionError(stateErr) {
@@ -746,19 +748,19 @@ func removeAuthoritativeWakeClaimAt(
 	} else if stateRemoved {
 		cleaned = true
 	}
-	if releasePreparedSnapshot != nil {
+	if r.releasePreparedSnapshot != nil {
 		_, err := removeWakeGenerationFileIfSnapshotMatchesAt(
 			scope,
 			wakePreparedFileName,
 			"wake prepared marker",
-			*releasePreparedSnapshot,
+			*r.releasePreparedSnapshot,
 		)
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if expected.Lock.ControlSocket != "" {
-		name, nameErr := darwinControlSocketBasenameForCleanup(agentDir, expected.Lock.ControlSocket)
+		name, nameErr := darwinControlSocketBasenameForCleanup(r.agentDir, expected.Lock.ControlSocket)
 		if nameErr != nil {
 			cleanupErr = errors.Join(cleanupErr, nameErr)
 		} else if name != "" {
@@ -775,15 +777,15 @@ func removeAuthoritativeWakeClaimAt(
 		}
 	}
 	if cleaned {
-		if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		if err := syncWakeOwnerDirFD(r.dirfd); err != nil {
 			cleanupErr = errors.Join(
 				cleanupErr,
 				fmt.Errorf("sync authoritative wake claim cleanup: %w", err),
 			)
 		}
 	}
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	if err := validateWakeStateAgentDirAt(r.dirfd, r.agentDir); err != nil {
+		relation, relationErr := retainedWakeAgentDirRelationAt(r.agentDir, r.dirfd)
 		if relationErr != nil {
 			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
 		}
@@ -809,6 +811,20 @@ func removeAuthoritativeWakeClaimAt(
 		}
 	}
 	return cleanupErr
+}
+
+// authoritativeWakeRelease is what removeAuthoritativeWakeClaimAt validated and
+// snapshotted before it removes the lock.
+type authoritativeWakeRelease struct {
+	dirfd                   int
+	agentDir                *wakeAgentDir
+	current                 wakeLockInspection
+	detachedValidationErr   error
+	releaseTargetSnapshot   *wakeTargetSnapshot
+	releasePreparedSnapshot *wakeGenerationFileSnapshot
+	preparedSnapshotErr     error
+	releaseStateSnapshot    wakeStateFileSnapshot
+	releaseStateExists      bool
 }
 
 func removeWakeTargetIfSnapshotMatchesAt(

@@ -773,143 +773,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 			handlers.Add(1)
 			go func(conn *net.UnixConn) {
 				defer handlers.Done()
-				defer func() { _ = conn.Close() }()
-				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-				uid, err := darwinPeerEUID(conn)
-				if err != nil || uid != uint32(os.Geteuid()) {
-					return
-				}
-				line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
-				if err != nil || len(line) > 4096 {
-					return
-				}
-				if lock.WakeMode == wakeOwnerWakeMode ||
-					(lock.ResumeSchema == wakeResumeSchemaV2 && lock.ControlSocket != "") {
-					var request wakeControlOwnerRequest
-					if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
-						return
-					}
-					peerPID, err := darwinPeerPID(conn)
-					if err != nil {
-						return
-					}
-					switch request.Operation {
-					case "":
-						if lock.WakeMode != wakeOwnerWakeMode {
-							return
-						}
-						handleDarwinOwnerControl(
-							conn,
-							agentDir,
-							root,
-							me,
-							lock,
-							request,
-							peerPID,
-							uid,
-							stopRequest,
-							loopStopped,
-							testHooks,
-						)
-					case wakeControlRestartOperation:
-						handleDarwinWakeRestartControl(
-							conn,
-							agentDir,
-							root,
-							me,
-							lock,
-							request,
-							peerPID,
-							uid,
-							restartSignals,
-						)
-					default:
-						return
-					}
-					return
-				}
-				fields := strings.Fields(line)
-				if len(fields) < 1 || len(fields) > 2 || fields[0] != lock.Generation {
-					return
-				}
-				requestedTargetDigest := ""
-				if len(fields) == 2 {
-					requestedTargetDigest = fields[1]
-				}
-				accepted := false
-				err = withWakeMutationScopeInDir(
-					agentDir,
-					wakeGuardExistingNoWait,
-					func(scope *wakeMutationScope) error {
-						dirfd, _, err := scope.location()
-						if err != nil {
-							return err
-						}
-						current := inspectWakeLockAt(dirfd, agentDir, root, me)
-						if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
-							return nil
-						}
-						if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
-							return err
-						}
-						if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
-							return err
-						}
-						if err := scope.queueStopRequest(stopRequest); err != nil {
-							return err
-						}
-						accepted = true
-						return nil
-					},
-				)
-				if err != nil || !accepted {
-					return
-				}
-				// Authentication is bounded, but completion is bounded by the
-				// configured inject-via execution timeout. Keep the generation
-				// published until the loop has actually quiesced so a concurrent
-				// acquire cannot start a second injector.
-				_ = conn.SetDeadline(time.Time{})
-				<-loopStopped
-				if testHooks != nil && testHooks.afterLoopStopped != nil {
-					testHooks.afterLoopStopped()
-				}
-				var removal wakeLockRemovalOutcome
-				err = withWakeMutationScopeInDir(
-					agentDir,
-					wakeGuardExistingNoWait,
-					func(scope *wakeMutationScope) error {
-						dirfd, _, err := scope.location()
-						if err != nil {
-							return err
-						}
-						current := inspectWakeLockAt(dirfd, agentDir, root, me)
-						if !current.Exists || current.Lock.Generation != lock.Generation ||
-							current.Lock.ControlSocket != path {
-							return nil
-						}
-						if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
-							return err
-						}
-						if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
-							return err
-						}
-						removal = removeWakeLockIfUnchangedGuardedAtOutcome(
-							scope,
-							current,
-							wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
-						)
-						return nil
-					},
-				)
-				if err != nil || !removal.Committed {
-					return
-				}
-				if removal.Err != nil {
-					_, _ = conn.Write([]byte(wakeControlResidueACK(removal.Err)))
-					return
-				}
-				_, _ = conn.Write([]byte("ACK\n"))
+				handleDarwinWakeControlConn(conn, agentDir, root, me, lock, path, stopRequest, loopStopped, restartSignals, testHooks)
 			}(conn)
 		}
 	}()
@@ -945,6 +809,159 @@ func startWakeControlListenerInDirOwnedWithRestart(
 		exposedStop = nil
 	}
 	return cleanup, exposedStop, markLoopStopped, nil
+}
+
+// handleDarwinWakeControlConn serves one control connection of the wake that
+// owns lock: an owner or restart request on an owner-bound lock, otherwise an
+// authenticated stop that removes the unchanged lock once the loop stops.
+func handleDarwinWakeControlConn(
+	conn *net.UnixConn,
+	agentDir *wakeAgentDir,
+	root, me string,
+	lock wakeLock,
+	path string,
+	stopRequest chan struct{},
+	loopStopped chan struct{},
+	restartSignals chan<- os.Signal,
+	testHooks *darwinWakeControlTestHooks,
+) {
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	uid, err := darwinPeerEUID(conn)
+	if err != nil || uid != uint32(os.Geteuid()) {
+		return
+	}
+	line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
+	if err != nil || len(line) > 4096 {
+		return
+	}
+	if lock.WakeMode == wakeOwnerWakeMode ||
+		(lock.ResumeSchema == wakeResumeSchemaV2 && lock.ControlSocket != "") {
+		var request wakeControlOwnerRequest
+		if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
+			return
+		}
+		peerPID, err := darwinPeerPID(conn)
+		if err != nil {
+			return
+		}
+		switch request.Operation {
+		case "":
+			if lock.WakeMode != wakeOwnerWakeMode {
+				return
+			}
+			handleDarwinOwnerControl(
+				conn,
+				agentDir,
+				root,
+				me,
+				lock,
+				request,
+				peerPID,
+				uid,
+				stopRequest,
+				loopStopped,
+				testHooks,
+			)
+		case wakeControlRestartOperation:
+			handleDarwinWakeRestartControl(
+				conn,
+				agentDir,
+				root,
+				me,
+				lock,
+				request,
+				peerPID,
+				uid,
+				restartSignals,
+			)
+		default:
+			return
+		}
+		return
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 1 || len(fields) > 2 || fields[0] != lock.Generation {
+		return
+	}
+	requestedTargetDigest := ""
+	if len(fields) == 2 {
+		requestedTargetDigest = fields[1]
+	}
+	accepted := false
+	err = withWakeMutationScopeInDir(
+		agentDir,
+		wakeGuardExistingNoWait,
+		func(scope *wakeMutationScope) error {
+			dirfd, _, err := scope.location()
+			if err != nil {
+				return err
+			}
+			current := inspectWakeLockAt(dirfd, agentDir, root, me)
+			if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
+				return nil
+			}
+			if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
+				return err
+			}
+			if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
+				return err
+			}
+			if err := scope.queueStopRequest(stopRequest); err != nil {
+				return err
+			}
+			accepted = true
+			return nil
+		},
+	)
+	if err != nil || !accepted {
+		return
+	}
+	// Authentication is bounded, but completion is bounded by the
+	// configured inject-via execution timeout. Keep the generation
+	// published until the loop has actually quiesced so a concurrent
+	// acquire cannot start a second injector.
+	_ = conn.SetDeadline(time.Time{})
+	<-loopStopped
+	if testHooks != nil && testHooks.afterLoopStopped != nil {
+		testHooks.afterLoopStopped()
+	}
+	var removal wakeLockRemovalOutcome
+	err = withWakeMutationScopeInDir(
+		agentDir,
+		wakeGuardExistingNoWait,
+		func(scope *wakeMutationScope) error {
+			dirfd, _, err := scope.location()
+			if err != nil {
+				return err
+			}
+			current := inspectWakeLockAt(dirfd, agentDir, root, me)
+			if !current.Exists || current.Lock.Generation != lock.Generation ||
+				current.Lock.ControlSocket != path {
+				return nil
+			}
+			if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
+				return err
+			}
+			if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
+				return err
+			}
+			removal = removeWakeLockIfUnchangedGuardedAtOutcome(
+				scope,
+				current,
+				wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup, durable: true},
+			)
+			return nil
+		},
+	)
+	if err != nil || !removal.Committed {
+		return
+	}
+	if removal.Err != nil {
+		_, _ = conn.Write([]byte(wakeControlResidueACK(removal.Err)))
+		return
+	}
+	_, _ = conn.Write([]byte("ACK\n"))
 }
 
 func cooperativeStopInjectViaInDir(

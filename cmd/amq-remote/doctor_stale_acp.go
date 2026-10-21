@@ -129,18 +129,6 @@ func staleACPInspect(ctx context.Context) staleInspection {
 	return insp
 }
 
-// staleACPProbe is the deadline wrapper the direct callers use: it bounds
-// one inspection pass with the probe's total deadline.
-func staleACPProbe() ([]staleProbe, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-	insp := staleACPInspect(ctx)
-	if insp.IdentErr != nil && insp.ListErr == nil && len(insp.Probes) == 0 {
-		return nil, insp.IdentErr
-	}
-	return insp.Probes, nil
-}
-
 // staleACPNotes turns probe outcomes into advice notes: one per stale
 // process (naming it and the installed path, with the Stop-and-Start
 // remedy) and, when anything is unknown, one note per distinct reason

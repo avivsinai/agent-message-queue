@@ -347,11 +347,16 @@ func applyMixedLiveMissing(t *testing.T, onLive string) ApplyResult {
 }
 
 func TestApplyFinalPrepareFailureReturnsCommittedBinding(t *testing.T) {
-	request, dependencies, _ := committedRunnableApplyFixture(t)
-	beforeApplyFinalPrepareForTest = func() {
-		request.Prepare.Participants[0].Executable = "\x00"
+	request, dependencies, backend := committedRunnableApplyFixture(t)
+	adapterFor := dependencies.AdapterFor
+	// After the backend commits, the only adapter lookup left is the final
+	// Prepare; a missing adapter fails it.
+	dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+		if backend.creates > 0 {
+			return nil
+		}
+		return adapterFor(provider, executable)
 	}
-	t.Cleanup(func() { beforeApplyFinalPrepareForTest = nil })
 
 	result, err := Apply(context.Background(), request, dependencies)
 	if err != nil {

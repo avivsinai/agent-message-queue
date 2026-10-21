@@ -66,12 +66,12 @@ func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 	// The fault fires only on the post-rename "new" dir sync (not the
 	// pre-rename tmp sync), so the rename commits and the error is a
 	// CommittedDurabilityError.
-	carrier.SetSyncDirFaultForTest(func(dir string) error {
+	carrier.syncDirFaultForTest = func(dir string) error {
 		if faultActive && strings.HasSuffix(dir, "new") {
 			return errors.New("simulated fsync failure")
 		}
 		return nil
-	})
+	}
 	rt := fake.New("fake", "e_1")
 	ep.Register(rt)
 	t.Cleanup(func() { _ = ep.Close() })

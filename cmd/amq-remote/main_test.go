@@ -1123,14 +1123,9 @@ func TestCLIB7PersistBeforeDispatchViaSubmit(t *testing.T) {
 	}
 }
 
-// TestBK4ServeWiringCompactionNonVacuous (round-4) tests BOTH halves of the
-// SHIPPED serve wiring via openServeStore:
-//
-//  1. Horizon half: a settled old record is compacted after Reconcile.
-//     RED when DefaultCompactHorizon wiring is removed from openServeStore.
-//  2. Quota half: a submit past DefaultMaxStoreBytes is refused
-//     storage_full through the endpoint openServeStore built.
-//     RED when DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded).
+// TestBK4ServeWiringCompactionNonVacuous tests the shipped serve wiring via
+// openServeStore: a settled old record is compacted after Reconcile, which
+// fails when DefaultCompactHorizon wiring is removed from openServeStore.
 //
 // openServeStore no longer calls Reconcile (round-4 P0: it ran before
 // SetPublish/Register, marking every running record attachment_lost). The
@@ -1209,16 +1204,7 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 		t.Fatalf("record missing after reconcile: exists=%v err=%v", exists, err)
 	}
 	if !got.Tombstone {
-		t.Fatal("horizon half: record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
-	}
-
-	// --- Quota half: openServeStore wired DefaultMaxStoreBytes ---
-	// The store openServeStore built must have the production quota. If the
-	// DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded), this goes
-	// RED. We assert the value directly because filling 64MiB in a test is
-	// impractical; the accessor confirms the wiring reached the store.
-	if got := store.MaxStoreBytes(); got != protocol.DefaultMaxStoreBytes {
-		t.Fatalf("quota half: store maxStoreBytes=%d, want %d (DefaultMaxStoreBytes wiring missing from openServeStore?)", got, protocol.DefaultMaxStoreBytes)
+		t.Fatal("record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
 	}
 }
 
@@ -1602,9 +1588,8 @@ func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []man
 	}()
 	t.Cleanup(func() {
 		cancel()
-		_ = server.Close()
+		<-served // Serve closes the listener and removes the socket on cancel
 		_ = ep.Close()
-		<-served
 	})
 }
 

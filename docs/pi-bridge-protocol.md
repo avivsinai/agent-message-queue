@@ -518,6 +518,48 @@ never redispatches. A lookup of an unseen ref reads the same files.
 `run_terminal`. The adapter never advertises `admitted` for the session:
 admission is proven per ref by its receipt, not by a session capability.
 
+## The acp-host wire
+
+`amq-acp host` implements the extension side of this protocol for one ACP
+agent, so `amq-remote` attaches to it as target kind `acp`. Everything above
+applies with these differences:
+
+- The directory is `<AM_ROOT>/agents/<handle>/extensions/acp-host/`, which
+  the host shares with its own state (`host.lock`, `session.json`,
+  `turns/`). The protocol string is `amq:acp-host:v1`.
+- Liveness carries `surface: "acp"`, `bridge_revision` 4, `session_id` (the
+  ACP `sessionId`, when it matches the session identity grammar), and
+  `agent` (the agent's name and version from `initialize`). The host mints a
+  new `session_generation` each time it starts and opens or loads its ACP
+  session.
+- The host is idle when no turn is in flight and its AMQ inbox holds no
+  message. Only then does it run a request; otherwise it refuses `busy`. A
+  request published while any turn is in flight is refused `busy` within a
+  second, and at the latest when that turn ends, and never runs. Peer
+  messages keep their order in the inbox; a request is never queued.
+- The receipt and the `started` event are written immediately before the
+  `session/prompt` bytes, so `started` needs no text matching. The request
+  `text` is the prompt, verbatim. `completed` carries the turn's
+  `agent_message_chunk` text after stop reason `end_turn`; stop reason
+  `cancelled` is `cancelled`; every other stop reason, a JSON-RPC error, and
+  an agent that exits are `failed`.
+- On start the host appends `uncertain` to every receipt without a terminal
+  event.
+- Each `session/request_permission` during a request's turn is an
+  `interaction` line with `interaction_id` `tool-<n>`, `options` the names
+  of the offered ACP options, `approve_option` the first `allow_once`,
+  `reject_option` the first `reject_once`,
+  `manifest_hash` the SHA-256 of the ACP tool call as received, `expires_at`
+  five minutes out, and `presence: local_only`. The host's policy is its
+  local face: it rejects. The first of a matching answer file and the expiry
+  decides, and the agent receives the reject option either way; a remote
+  answer gives the owner the reject at once. An answer file that does not
+  match is refused as `answered_elsewhere`. A cancelled turn answers a
+  pending approval `cancelled` and writes no resolution; the terminal event
+  closes it. An approval with no `reject_once` option raises no line: the
+  host's policy answers at once with the first `reject_always`, else
+  `cancelled`. A message turn rejects at once and raises no line.
+
 ## Capabilities
 
 v1 supports inspect and submit with `deliver_as: followUp` only, and tool
