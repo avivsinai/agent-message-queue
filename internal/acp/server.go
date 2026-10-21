@@ -919,10 +919,9 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 // item does not fail the poll.
 func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, bool, error) {
 	// Only a reply that refs this turn's prompt answers it. Time and thread
-	// alone let a late answer to a cancelled prompt complete the next one
-	// amq reply sets refs to the answered message plus its refs, so a reply
-	// to an in-turn steer, which refs the prompt,
-	// also qualifies.
+	// alone would let a late answer to a cancelled prompt complete the next
+	// one. amq reply sets refs to the answered message plus its refs, so a
+	// reply to an in-turn steer, which refs the prompt, also qualifies.
 	hits, err := scan.replies(s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err

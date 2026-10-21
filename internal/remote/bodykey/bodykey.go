@@ -1,6 +1,6 @@
-// Package bodykey implements the body-key contract of the AMQ Remote design
-// (v3 amended, §7.5 "Key contract") and the NIP-OA Owner Attestation tag
-// (buzz docs/nips/NIP-OA.md) that the owner uses to attest a body key.
+// Package bodykey implements the AMQ Remote body-key contract and the NIP-OA
+// Owner Attestation tag (buzz docs/nips/NIP-OA.md) that the owner uses to
+// attest a body key.
 //
 // BodyKey is the remote-owned secp256k1 (BIP340) keypair minted per shared
 // session, stored at <root>/extensions/remote/keys/<session>/body.key

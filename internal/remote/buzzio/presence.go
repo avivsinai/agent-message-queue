@@ -9,8 +9,8 @@ import (
 	"fiatjaf.com/nostr"
 )
 
-// Kinds the presence surface publishes (relay design §6). Both are
-// agent-authored and replaceable; Buzz Desktop reads the latest of each.
+// Kinds the presence surface publishes. Both are agent-authored and
+// replaceable; Buzz Desktop reads the latest of each.
 const (
 	KindProfile      = 0
 	KindAgentProfile = 10100

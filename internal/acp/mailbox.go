@@ -711,7 +711,7 @@ type replyHit struct {
 // inboxScan lists one inbox box and keeps each file's header by name. A
 // delivered maildir file never changes, so each name's header is read once:
 // a poll costs one directory listing plus the headers of names it has not
-// seen, not a read of every file (review F2). A header that cannot be parsed
+// seen, not a read of every file. A header that cannot be parsed
 // is remembered as nil and the file is left for drain and the DLQ.
 type inboxScan struct {
 	dir     string

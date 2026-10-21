@@ -41,10 +41,10 @@ type shareTagFile struct {
 }
 
 // shareKeyDir returns <root>/extensions/remote/keys/<session> — the
-// remote-owned key location the design pins (§7.5: the bridge reads the
-// path via config flag, never writes it). The session id must be a single
-// safe path component; traversal or escaping is refused (codex P1: an
-// unchecked session wrote body.key outside --root).
+// remote-owned key location (the bridge reads the path via config flag,
+// never writes it). The session id must be a single safe path component;
+// traversal or escaping is refused, so body.key is never written outside
+// --root.
 func shareKeyDir(root, session string) (string, error) {
 	if session == "" || session == "." || session == ".." ||
 		strings.ContainsAny(session, "/\\") || strings.ContainsRune(session, 0) {
@@ -68,7 +68,7 @@ func shareKeyDir(root, session string) (string, error) {
 }
 
 // validateKeyDirSymlinks walks the FULL owned path from root down to dir
-// (including extensions/remote/keys itself and its parents — codex P1:
+// (including extensions/remote/keys itself and its parents, because
 // checking only below the keys root misses a symlink AT keys that redirects
 // mint outside the root) and refuses any symlink or non-directory
 // component. Absent components are fine — Mint creates real directories.
@@ -183,11 +183,10 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	// --dry-run NEVER mutates state: if a key exists report it, otherwise
-	// report what mint WOULD do, without writing (codex P2: dry-run minted
-	// body.key before returning).
+	// report what mint WOULD do, without writing body.key.
 	keyPath := filepath.Join(keyDir, "body.key")
 	k, loadErr := bodykey.Load(keyPath)
-	// Round-9: ONE loader reads all five state leaves once. Confinement,
+	// ONE loader reads all five state leaves once. Confinement,
 	// dry-run validation, mint/renew/enroll and doctor all branch on the
 	// typed outcomes; nothing below re-reads the state files.
 	st, err := loadShareState(keyDir)
@@ -300,7 +299,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// Mint or renew: persist one pending window per kind so doctor can warn
 	// before expiry, and print the preimages for the owner to sign. The
 	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
-	// previews exactly what a real run mints (codex re-review P2).
+	// previews exactly what a real run mints.
 	window, err := renewalWindow(st, *days, daysSet, enable)
 	if err != nil {
 		return protocol.ExitActionRequired, err
@@ -386,8 +385,8 @@ func renewalWindow(st *shareState, days int, daysExplicit bool, enable []uint16)
 	if st.Enrolled.Gen != nil {
 		maxEnrolled = maxEnrolledBound(st.Enrolled.Gen.Tags)
 	}
-	// Ruling (claude 08:27Z #1): an EXPLICIT --days is never silently
-	// overridden by the bump. If the requested window would not clear the
+	// An EXPLICIT --days is never silently overridden by the bump. If the
+	// requested window would not clear the
 	// bounds the renewal must exceed, REFUSE with the minimum that would
 	// work — shortening the horizon has no silent path. The default (no
 	// --days) keeps the bump so plain renewals never fail.
@@ -415,8 +414,8 @@ func renewalWindow(st *shareState, days int, daysExplicit bool, enable []uint16)
 }
 
 // shareSurfaces maps an --enable surface to the extra kinds it needs owner
-// grants for (relay design §4: the DM edge publishes kind 9 rows and kind
-// 40003 edits; the owned-agent profile is kind 0).
+// grants for (the DM edge publishes kind 9 rows and kind 40003 edits; the
+// owned-agent profile is kind 0).
 var shareSurfaces = map[string][]uint16{
 	"buzz-dm":      {9, 40003},
 	"buzz-profile": {0},
@@ -487,8 +486,8 @@ func (e *stateLeafError) Error() string {
 
 // enrollTag validates one owner-signed tag against this session's body key
 // and the pending window for its kind, then persists it. An invalid tag
-// leaves any existing good enrollment untouched (codex P1: validation must
-// run on the real enrollment path, never silently skipped).
+// leaves any existing good enrollment untouched: validation runs on the real
+// enrollment path and is never skipped.
 func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareState) (int, error) {
 	// State-leaf confinement already ran in share() via refuseIfConfined.
 	raw, err := os.ReadFile(tagPath)
@@ -1096,8 +1095,8 @@ func stagedCorruptRefusal(session string, l leafRead) error {
 // generation. Generation identity comes from the tags' own signed
 // conditions: renewing mints a new created_at< bound, so a tag belongs to
 // the current generation iff its conditions match the pending window for
-// its kind (codex P1: counting five tags old-plus-new wrongly completed a
-// renewal after its first enrollment).
+// its kind. Counting five tags old-plus-new would complete a renewal after
+// its first enrollment.
 type enrolledGeneration struct {
 	Tags []shareTagFile `json:"tags"`
 }
@@ -1116,15 +1115,15 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 }
 
 func writeShareTag(session, keyDir string, tf *shareTagFile) error {
-	// Staged publication (codex re-review P1): signed tags accumulate in
-	// share.staged.json; the ACTIVE generation in share.json is untouched
+	// Staged publication: signed tags accumulate in share.staged.json; the
+	// ACTIVE generation in share.json is untouched
 	// until the pending generation is complete for every kind. Only then
 	// is the new generation published atomically (tmp+rename) and the
 	// pending window consumed. An interrupted enrollment therefore leaves
 	// the previous generation fully intact, and no write ever truncates a
 	// published file in place.
 	//
-	// Round-9: the loader is the only reader. The state may have changed
+	// The loader is the only reader. The state may have changed
 	// since the caller loaded (enrollment is offline-paced), so this path
 	// loads its own snapshot and refuses on confinement or unreadable
 	// leaves — corrupt/unreadable enrolled state is never overwritten.
@@ -1522,8 +1521,7 @@ func pendingTagForKind(pending []shareTagFile, kind uint16) *shareTagFile {
 
 // enrolledExpiry derives the expiry of one enrolled tag from its OWN signed
 // conditions (the created_at< bound is part of the signature) — one
-// authority, no second writable not_after field to drift (codex P1
-// finding 5).
+// authority, no second writable not_after field to drift.
 func enrolledExpiry(tf shareTagFile) (time.Time, error) {
 	conds, err := bodykey.ParseConditions(tf.Conditions)
 	if err != nil {
@@ -1615,8 +1613,8 @@ func printShareDryRun(w io.Writer, session string, k *bodykey.BodyKey, days int,
 // doctorShareInspection is the doctor surface for body identity: it reports
 // mint/enrolled/expiry state per session key dir and warns 7 days before
 // the signed window expires. Expiry comes from the signed conditions, so a
-// zero/unset field cannot make a fresh enrollment read as expired (codex
-// P1 finding 5). An enrolled-but-incomplete generation is reported as such.
+// zero/unset field cannot make a fresh enrollment read as expired. An
+// enrolled-but-incomplete generation is reported as such.
 func doctorShareInspection(root string) map[string]any {
 	keysRoot := filepath.Join(root, stateDirName, "keys")
 	entries, err := os.ReadDir(keysRoot)
@@ -1631,7 +1629,7 @@ func doctorShareInspection(root string) map[string]any {
 		}
 		keyDir := filepath.Join(keysRoot, e.Name())
 		info := map[string]any{}
-		// Round-9: ONE loader snapshot per session; every row derives from
+		// ONE loader snapshot per session; every row derives from
 		// its typed outcomes.
 		st, lerr := loadShareState(keyDir)
 		if lerr != nil {
@@ -1704,7 +1702,7 @@ func doctorShareInspection(root string) map[string]any {
 		gen := st.Enrolled.Gen
 		// Outstanding pending preimages are visible in BOTH branches: a
 		// half-finished renewal keeps every old tag, so the enrolled tag
-		// count alone cannot distinguish it from a healthy enrollment
+		// count alone cannot distinguish it from a healthy enrollment.
 		// While unsigned preimages remain, the remedy is always plain
 		// `share`, never `--renew` — renewing rotates the
 		// window and strands preimages the owner may already be signing.

@@ -44,7 +44,7 @@ const (
 	closeServerRestart websocket.StatusCode = 1012 // server restart: reconnect after 0-60 s
 )
 
-// Defaults from the design (§6, §14).
+// Defaults of the link carrier.
 const (
 	DefaultOfferTTL     = 30 * time.Second
 	DefaultPingTimeout  = 45 * time.Second

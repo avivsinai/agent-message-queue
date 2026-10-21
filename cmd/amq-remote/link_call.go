@@ -24,7 +24,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Server waits of the link's tool bodies (design §6): a call answers within
+// Server waits of the link's tool bodies: a call answers within
 // 25 s (pending past that), call_get waits up to 30 s.
 const (
 	linkCallWait = 30 * time.Second

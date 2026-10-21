@@ -1,8 +1,8 @@
-// Package buzzio is the Buzz DM edge of the remote endpoint (relay
-// design §4). This file is its durable ledger: ingress claims written
-// before any command reaches the endpoint, prepared signed output written
-// before any transmission, and the request-to-row receipt mapping. Every
-// record is created once and then read back verbatim, so a restart,
+// Package buzzio is the Buzz DM edge of the remote endpoint
+// (docs/amq-remote-relay.md). This file is its durable ledger: ingress claims
+// written before any command reaches the endpoint, prepared signed output
+// written before any transmission, and the request-to-row receipt mapping.
+// Every record is created once and then read back verbatim, so a restart,
 // redelivery or duplicate subscription replays the same decision and the
 // same signed bytes instead of making new ones.
 package buzzio

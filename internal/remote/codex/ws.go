@@ -88,8 +88,8 @@ func (w *wsConn) writePong(payload []byte) error {
 
 // writeCloseReply answers a peer close frame with the writer slot acquired
 // under a deadline, same discipline as writePong: an unbounded
-// close reply on a wedged socket stalled the read pump — Done() never fired
-// and the attachment never reported offline. On timeout the
+// close reply on a wedged socket would stall the read pump — Done() would
+// never fire and the attachment would never report offline. On timeout the
 // stream is poisoned and the pump still exits; a missed close reply is
 // harmless because the peer initiated the close.
 func (w *wsConn) writeCloseReply() error {
@@ -167,8 +167,7 @@ func (w *wsConn) handshake() error {
 
 // writeTextBounded sends one masked text frame bounded by a 3s deadline in
 // both phases (slot wait + write), same discipline as
-// writePong/writeCloseReply. Used by Client.Respond — the last unbounded
-// frame write.
+// writePong/writeCloseReply. Used by Client.Respond.
 func (w *wsConn) writeTextBounded(payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

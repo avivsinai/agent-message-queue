@@ -120,8 +120,8 @@ func classifyReply(reply any, herr error) protocol.Code {
 		return ""
 	}
 	// The endpoint returns a protocol.Reply VALUE (not a pointer);
-	// extract its Outcome.Code. A pointer assertion never matches
-	// (a pointer assertion would make every refusal MarkDispatched).
+	// extract its Outcome.Code. A pointer assertion never matches, so every
+	// refusal would be marked dispatched.
 	if rep, ok := reply.(protocol.Reply); ok {
 		return rep.Outcome.Code
 	}

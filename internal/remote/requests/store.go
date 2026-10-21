@@ -90,10 +90,10 @@ type Record struct {
 	// RetiredOutcomes is the interaction ids whose owed outcome the
 	// retention horizon retired: no resolver produced it, so
 	// the record shows the explicit uncertain delivery_unknown resolution
-	// and compaction no longer waits. A retired outcome stays correctable
-	// until the record compacts: an exact native resolution replaces the
-	// uncertain one, and recovery keeps asking the resolver for retired ids.
-	// Compaction clears it.
+	// and compaction does not wait for it. A retired outcome stays
+	// correctable until the record compacts: an exact native resolution
+	// replaces the uncertain one, and recovery keeps asking the resolver for
+	// retired ids. Compaction clears it.
 	RetiredOutcomes []string `json:"retired_outcomes,omitempty"`
 
 	// AckDigest is the evidence digest of the last acknowledgement sent to the
@@ -172,7 +172,7 @@ type Store struct {
 	// identity for an active epoch.
 	maxStoreBytes int64
 	used          int64
-	// reserved  is the sum of MaxRecordBytes reservations held for
+	// reserved is the sum of MaxRecordBytes reservations held for
 	// admitted-but-not-yet-terminal records. A real
 	// reservation, not a point-in-time check: Reserve increments it and
 	// tracks the per-key amount; Create/Update convert or release it when the
@@ -509,7 +509,7 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 		return err
 	}
 	// The whole read-mutate-write runs under s.mu. The publish
-	// arm runs under e.mu today, but the ack markers now run from async
+	// arm runs under e.mu, but the ack markers run from async
 	// goroutines — a raw Get->mutate->write here could revert a just-written
 	// Acknowledged flag. The field-level merge (fresh Get inside the lock,
 	// set only PublishedRevision, write) is what makes the update safe; a
@@ -805,7 +805,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision || len(rec.OwedOutcomes) > 0 {
 		return false, nil
 	}
-	// A retired outcome no longer gates compaction: the record already shows
+	// A retired outcome does not gate compaction: the record already shows
 	// the explicit uncertain resolution, and a late
 	// exact native resolution still corrects it while the record lives.
 	observed, err := protocol.ParseTime(rec.ObservedAt)

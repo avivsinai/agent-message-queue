@@ -595,9 +595,9 @@ func readRecordLimit[T any](r io.Reader, limit int) (*T, int, error) {
 }
 
 // writeResponseDeadline bounds one response write. A client that sends its
-// request and then stops reading (a stopped shell, a wedged reader) used to
-// block the handler goroutine forever on a full socket buffer, leaking the
-// goroutine and its fd for the life of the process.
+// request and then stops reading (a stopped shell, a wedged reader) would
+// otherwise block the handler goroutine forever on a full socket buffer,
+// leaking the goroutine and its fd for the life of the process.
 const writeResponseDeadline = 10 * time.Second
 
 func writeRecord(w io.Writer, v any) { _ = sendRecord(w, v) }

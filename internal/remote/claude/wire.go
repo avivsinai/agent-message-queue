@@ -158,9 +158,9 @@ func BuildFrame(from, body string) (*Frame, error) {
 // compact separators, each \n-terminated — the pinned line-delimited JSON.
 func EncodeFrames(token string, f *Frame) ([]byte, error) {
 	var out []byte
-	// The auth line is mandatory: an empty token is a fail-open shape
-	// (architect PR2 note) — frames with no auth line must never be
-	// emitted, so an empty token is refused, not skipped.
+	// The auth line is mandatory: an empty token is a fail-open shape —
+	// frames with no auth line must never be emitted, so an empty token is
+	// refused, not skipped.
 	if !peerTokenRe.MatchString(token) {
 		return nil, fmt.Errorf("peer token does not match the pinned [0-9a-f]{32} shape")
 	}

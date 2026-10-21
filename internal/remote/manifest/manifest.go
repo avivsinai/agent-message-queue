@@ -2,19 +2,19 @@
 // of truth for which adapters a serve instance runs. The manifest lives at
 // <AM_ROOT>/extensions/remote/manifest.json (per docs/adr-layer-extensions.md
 // the extensions/<layer> directory is owned by the layer; the companion owns
-// extensions/remote). The --manifest flag of serve and approve selects
-// another path.
+// extensions/remote). The --manifest flag of serve and of claude
+// install-approval-hook selects another path.
 //
 // Serve loads one snapshot at start, and that snapshot alone drives target
 // attachment, the Buzz DM carriers and the relay configuration. Serve does
-// not re-read the adapter list: attach adds a target to a running serve by
-// writing the manifest and registering the adapter live, and a target absent
-// from the manifest at the next start is not registered, so its live records
-// reconcile as attachment_lost. While serve runs, the relay reloads its
-// shares when the manifest bytes change (a changed relay url, relay_self or
-// share entry still needs a restart), and the link set syncs its links when
-// the manifest mtime changes. Every other command reads the manifest once per
-// invocation.
+// not register targets from a re-read: attach adds a target to a running
+// serve by writing the manifest and registering the adapter live, and a
+// target absent from the manifest at the next start is not registered, so its
+// live records reconcile as attachment_lost. While serve runs, the relay
+// reloads its shares when the manifest bytes change (a changed relay url,
+// relay_self or share entry still needs a restart), and the link set syncs
+// its links when the manifest mtime changes. Every other command reads the
+// manifest once per invocation.
 //
 // Flags (--fake, --codex-socket) APPEND to the manifest set. A target id
 // present in both is a usage error (exit 2). The manifest never stores an

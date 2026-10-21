@@ -24,8 +24,8 @@ import (
 const relayStatusFile = "relay-status.json"
 
 // authKind is the enrolled credential kind presented on connection AUTH
-// (relay design §3: one tag, chosen deterministically; 1059 is the body's
-// enrolled message kind).
+// (one tag, chosen deterministically; 1059 is the body's enrolled message
+// kind).
 const authKind = 1059
 
 type relayShareStatus struct {

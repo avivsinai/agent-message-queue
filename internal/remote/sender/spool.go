@@ -58,9 +58,8 @@ const MaxEnvelopeBytes = protocol.MaxCommandBytes + 4*1024 // command + overhead
 // The Command is the exact bytes the caller built (already validated and
 // digested by the protocol layer); the drainer hands it to Endpoint.Handle
 // unchanged on replay. Destination carries the routing the caller resolved
-// (the endpoint IPC state dir today; a cross-host courier destination in a
-// later wave). Target/Epoch/Expiry are the caller's explicit or
-// previously-verified values: the spool never retargets a request to a
+// (the endpoint IPC state dir). Target/Epoch/Expiry are the caller's explicit
+// or previously-verified values: the spool never retargets a request to a
 // different session or substitutes a fresh epoch — an offline enqueue must
 // supply them, and a live enqueue copies them from the inspected session.
 type Envelope struct {
@@ -161,7 +160,7 @@ var (
 // Open prepares <stateDir>/sender and returns a spool. The directory is
 // created if missing; existing envelopes are recovered by List.
 //
-// Round-4: a stable spool-level lock file (<dir>/.lock) is created here. Every
+// A stable spool-level lock file (<dir>/.lock) is created here. Every
 // filesystem transaction (Create, RMW, reap) acquires a blocking exclusive
 // flock on it via withLock, serializing concurrent Open instances/processes.
 // On unsupported platforms (non-unix) Open refuses CodeUnsupported before

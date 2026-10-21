@@ -36,7 +36,7 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 		}
 		home = h
 	}
-	// Bounded enumeration read the directory in batches and
+	// Bounded enumeration: read the directory in batches and
 	// stop after maxDiscoverEntries names, reporting the scan incomplete
 	// instead of silently hiding live sessions behind stale rows.
 	dir, err := openSessionsDir(claudeSessionsDir(home))

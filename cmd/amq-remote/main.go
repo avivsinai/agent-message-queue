@@ -296,7 +296,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "mcp":
 		code, err = mcpServe(rest, stdin, stdout, stderr, probe)
 	case "claude":
-		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
+		// Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —
 		// because Claude Code treats exit 2 as a blocking error and a
 		// broken bridge must never hold the target session hostage.
@@ -443,8 +443,8 @@ func printSession(w io.Writer, s protocol.Session) {
 // serveFlags holds pointers to the flags serve defines beyond the common
 // root/json pair. defineServeFlags is the single registration site: serve()
 // reads them to run, and up()'s FlagSet registers the same set so serve's
-// options can be forwarded by value (codex P1: two registration sites
-// panicked with "flag redefined" on every up invocation).
+// options can be forwarded by value: two registration sites would panic with
+// "flag redefined" on every up invocation.
 type serveFlags struct {
 	me           *string
 	useFake      *bool
@@ -959,7 +959,7 @@ func status(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	// Round-4 B6 gap 3: if the positional is a bare request ID (not a ref),
+	// If the positional is a bare request ID (not a ref),
 	// resolve the sender spool FIRST. A running endpoint refuses a bare id
 	// as invalid, so the spool surface that reports drain failures is
 	// unreachable at exactly the moment the failure exists. When the spool
@@ -1240,7 +1240,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			report["records"] = counts
 		}
 	}
-	// Print adapter refusals persisted by serve (gap 2: doctor-visible).
+	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
 	switch {
 	case loadErr == nil && len(refusals) > 0:
@@ -1418,8 +1418,8 @@ const maxRefusedNotes = 5
 
 // noteRefusedRows names the share's owed outputs the relay refused on
 // their last attempt, with the relay's reason. They stay owed and are
-// retried, and other requests' outputs still go out
-// so they are advice, not a failure.
+// retried, and other requests' outputs still go out, so they are advice, not
+// a failure.
 func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateDir, session string) {
 	refused, err := buzzio.RefusedOutputs(filepath.Join(stateDir, "shares", session))
 	if err != nil {
@@ -1750,9 +1750,9 @@ func isNotFound(err error) bool {
 }
 
 // isInvalid reports whether the endpoint refused the request as invalid
-// (e.g. a bare request ID passed where a ref is required). Round-4 B6 gap 3:
-// status falls back to the spool on invalid too, so a bare request ID is
-// resolved from the sender spool even while the companion is up.
+// (e.g. a bare request ID passed where a ref is required). Status falls back
+// to the spool on invalid too, so a bare request ID is resolved from the
+// sender spool even while the companion is up.
 func isInvalid(err error) bool {
 	var r *protocol.Refusal
 	return errors.As(err, &r) && r.Code == protocol.CodeInvalid
@@ -1821,7 +1821,7 @@ func exitForState(s protocol.State) int {
 
 // printCandidates prints one discovered candidate per line: kind, target,
 // display name, then a manifest entry to paste, and the native session id
-// a share entry pins when the discoverer read it. Discovery never attaches
+// a share entry pins when the discoverer read it. Discovery never attaches:
 // registration stays an explicit manifest edit, the owner's
 // consent to share the session.
 func printCandidates(w io.Writer, cands []registry.Candidate) {

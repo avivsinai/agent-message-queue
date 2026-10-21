@@ -287,7 +287,7 @@ func bridgePath(root, handle string, w wireNames) string {
 
 // refSanitize makes a request ref safe as a filename. protocol.EncodeRef
 // output is the prefix "amqr1_" plus base32 lowercase — already filename-
-// safe — so this is the identity today; it exists as the single named seam
+// safe — so this is the identity; it exists as the single named seam
 // if the ref grammar ever grows unsafe characters (protocol: identity and layout).
 func refSanitize(ref string) string {
 	return ref

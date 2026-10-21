@@ -117,19 +117,18 @@ func executablePath() string {
 // stop on clean exit 0. newSpawner builds the spawner from the --self path;
 // run passes newExecSpawner.
 //
-// Lifetime ownership (codex P1): the registry's per-write flock protects one
-// WRITE, not the process lifetime — two sequential Upserts from two ups both
-// succeed and the second exit's Forget empties the registry under the live
-// first endpoint. up therefore acquires a process-lifetime flock on
+// Lifetime ownership: the registry's per-write flock protects one
+// WRITE, not the process lifetime — two sequential Upserts from two ups would
+// both succeed and the second exit's Forget would empty the registry under
+// the live first endpoint. up therefore acquires a process-lifetime flock on
 // <registry>.up-<entryid>.lock BEFORE spawning. The kernel releases it when
 // the up process dies; a second up on the same root fails the non-blocking
 // flock and refuses. Only the owner removes the registration (its deferred
 // Forget runs under the lifetime lock it still holds).
 func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) spawner) (int, error) {
-	// ONE FlagSet declares up's flags plus serve's forwardable set. The
-	// previous recut re-registered root/json/me after newUpFlagSet had
-	// already added them, panicking "flag redefined: root" on every real
-	// invocation (codex P1, reproduced with the built binary).
+	// ONE FlagSet declares up's flags plus serve's forwardable set:
+	// registering root/json/me again after newUpFlagSet added them would
+	// panic "flag redefined: root" on every real invocation.
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	c := addCommon(fs)
@@ -192,9 +191,9 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	entryID := registry.EntryID(c.root, *me, "remote", c.root)
 
 	// Process-lifetime ownership before anything is spawned or written.
-	// The secure parent directory is prepared first: creating the lock
-	// fails ENOENT when the keepalive home does not exist yet, and that FS
-	// error would be mislabeled "another owner".
+	// The secure parent directory is prepared first: otherwise creating the
+	// lock would fail ENOENT when the keepalive home does not exist yet, and
+	// that FS error would be mislabeled "another owner".
 	if err := prepareSecureDir(filepath.Dir(regPath)); err != nil {
 		return 0, fmt.Errorf("prepare registry directory: %w", err)
 	}
@@ -327,8 +326,8 @@ func lifetimeOwnerPid(regPath, entryID string) int {
 // the same root/agent refused even though both would Upsert fine.
 func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 	lockPath := lockFilePath(regPath, entryID)
-	// Create the parent directory first (codex P2): a first use with a
-	// not-yet-existing registry directory hit ENOENT on open and was
+	// Create the parent directory first: otherwise a first use with a
+	// not-yet-existing registry directory would hit ENOENT on open and be
 	// reported as "another up already supervises" — a filesystem error
 	// mislabeled as lock contention.
 	if dir := filepath.Dir(lockPath); dir != "" && dir != "." {
@@ -450,8 +449,8 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 	}
 	// restart is the BACKOFF index: it resets on healthy uptime so the next
 	// crash waits the base step again. budget is the LIFETIME respawn count
-	// --max-restarts bounds: one counter, two obligations made the cap
-	// forgettable after any healthy-lived child.
+	// that --max-restarts bounds. Two counters, because one counter serving
+	// both would forget the cap after any healthy-lived child.
 	restart := 0
 	budget := 0
 	for {
@@ -534,7 +533,7 @@ func backoff(failureCount int, base, maxDelay time.Duration) time.Duration {
 // --me plus every serve flag the user set, preserving parsed values —
 // including explicit false. Go's flag package accepts --flag=false, so serve
 // parses the forwarded form fine; dropping the value would silently flip an
-// explicit --fake=false or --codex-approve=false back to opt-in (codex P1).
+// explicit --fake=false or --codex-approve=false back to opt-in.
 func buildServeArgs(fs *flag.FlagSet, root, me string) []string {
 	args := []string{"serve", "--root", root, "--me", me}
 	fs.Visit(func(f *flag.Flag) {

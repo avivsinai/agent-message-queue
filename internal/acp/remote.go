@@ -454,10 +454,10 @@ func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remo
 
 // eventDir is the directory of one event's state. Each Buzz agent keeps its
 // own, remote-events/<agent pubkey>/, because one Buzz event can reach
-// several agents, and each handles it for its own session. State
-// written before lives in remote-events itself; an event whose claim is
-// there and is this agent's stays there. A process with no Buzz identity
-// uses remote-events itself.
+// several agents, and each handles it for its own session. State from older
+// builds, which had no per-agent directory, lives in remote-events itself; an
+// event whose claim is there and is this agent's stays there. A process with
+// no Buzz identity uses remote-events itself.
 func (s *Server) eventDir(eventID string) string {
 	if buzzSelf == "" {
 		return s.eventsDir()

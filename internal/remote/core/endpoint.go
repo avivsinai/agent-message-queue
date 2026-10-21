@@ -404,9 +404,9 @@ func (e *Endpoint) releaseInFlight() {
 // sweep as in-flight in ONE critical section, mirroring Handle's entry gate.
 // Without this, a Tick racing Close could start new native work
 // (admitDeferred -> att.Submit, reconcileCancelRetry -> att.CancelExact,
-// ack replay -> att.AcknowledgeResult) after the endpoint began draining:
-// Close waited only on Handle's inFlight, so shutdown began work it would not
-// finish. Now Tick refuses to start once draining has begun, and when it does
+// ack replay -> att.AcknowledgeResult) after the endpoint began draining, and
+// Close, waiting only on Handle's inFlight, would return with that work
+// unfinished. Tick refuses to start once draining has begun, and when it does
 // start it is counted in inFlight so Close's drain wait bounds it. The caller
 // MUST defer releaseInFlight when ok is true.
 func (e *Endpoint) beginReconcile() bool {
@@ -496,12 +496,11 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 
 func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	// busy=queue and deliver=steer are disabled in v1 — their
-	// ownership+evidence models do not exist yet (steer would overwrite
+	// ownership+evidence models do not exist (steer would overwrite
 	// the running run's byTurn mapping; queue would admit without a NotAfter
 	// check at native admission or a per-runtime reservation). The gate sits
 	// BEFORE any durable write, so a disabled-mode submit consumes nothing
-	// and a plain retry with reject/turn succeeds. Full model deferred to a
-	// follow-up.
+	// and a plain retry with reject/turn succeeds.
 	if cmd.Input != nil && (cmd.Input.Busy == protocol.BusyQueue || cmd.Input.Deliver == protocol.DeliverSteer) {
 		mode, value := "busy", string(cmd.Input.Busy)
 		if cmd.Input.Deliver == protocol.DeliverSteer {
@@ -1666,7 +1665,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// that must be acknowledged so the native slot releases. The result is
 	// recorded via causeNone (State unchanged) and AckDigest is memoed.
 	//
-	// Ruling 4: guard on RunID, not on state. The ONLY event we drop is a
+	// Guard on RunID, not on state. The ONLY event we drop is a
 	// duplicate of a result we already recorded (same RunID, Result present).
 	// Everything else flows — including a completion for a cancelled record.
 	switch ev.Type {
@@ -1914,8 +1913,8 @@ type nativeEvidence struct {
 //     inconclusive — cancel_requested). cancelled_before_admission sets
 //     confirmed. cancel_requested sets the disposition without going terminal.
 //  4. rec.Result: set from ev.result when evidence carries one; a terminal
-//     result arriving on an already-terminal record (onNative no longer
-//     discards) updates Result WITHOUT changing State (the cancel stands, the
+//     result arriving on an already-terminal record (onNative does not
+//     discard it) updates Result WITHOUT changing State (the cancel stands, the
 //     result is acknowledged).
 //  5. rec.NativeRun: set from ev.runID whenever evidence carries one. Cleared
 //     only on a fresh causeDispatching with no run, or causeBusyTombstone.
@@ -2365,7 +2364,7 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		rec.NativeRun = nil
 		rec.Interaction = nil
 	}
-	// Ruling 1 Cancel rule: Cancel is written iff ev.cancel != nil or the
+	// Cancel rule: Cancel is written iff ev.cancel != nil or the
 	// cause is a cancelled_* cause (handled in-case above). Non-cancel causes
 	// that CARRY ev.cancel (e.g. causeAdmitted racing a cancel command) apply
 	// it here — without overriding the in-case disposition for cancelled_*
@@ -2466,7 +2465,7 @@ func (e *Endpoint) shouldCompact() bool {
 // does Revision++, ObservedAt, store.Update, notify, and memo AckDigest — so
 // no caller can forget notify or the ack memo. Returns the ackDigest + the
 // storage error (if any). The caller holds e.mu and owns unlocking + publish.
-// Ruling 3: applyTransition+commitLocked is the ONLY persist path.
+// applyTransition+commitLocked is the ONLY persist path.
 func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error) {
 	rec.Revision++
 	rec.ObservedAt = protocol.FormatTime(e.now())
@@ -2626,8 +2625,8 @@ func (e *Endpoint) Reconcile() error {
 // case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// The ack was already DELIVERED (durable confirmation) — no
-	// replay, no Lookup. This is the convergence fix: without this gate the
-	// restart case re-examines every terminal record every tick forever,
+	// replay, no Lookup. This gate is what makes replay converge: without it
+	// the restart case re-examines every terminal record every tick forever,
 	// because history results carry the NativeRef suffix ("codex thread
 	// turn ") the live path does not, so EvidenceDigest(ev.Result) never
 	// equals the memoed AckDigest. Gate ONLY records with a memoed digest:
@@ -2951,12 +2950,11 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
 	case ev.Admitted:
 		// The same-run early return goes FIRST. A healthy running record
-		// matches neither owesCancel nor owesAck and is a noop, as it was
-		// before this PR. Only a record that OWES A CANCEL may route to
-		// reconcileCancelRetry (Pro #1: the old needsRuntimeSettlement fired
-		// on healthy work because NativeRun != nil && AckDigest == "" is
-		// true for a simply-running record, and CancelExact killed every
-		// prompt within one tick).
+		// matches neither owesCancel nor owesAck and is a noop. Only a record
+		// that OWES A CANCEL may route to reconcileCancelRetry: NativeRun !=
+		// nil && AckDigest == "" is also true for a simply-running record,
+		// and routing on that would let CancelExact kill every prompt within
+		// one tick.
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
 			if owesCancel(rec) {
 				e.mu.Unlock()
@@ -2999,11 +2997,11 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 // window. The native Submit happens without the endpoint lock.
 func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	key := keyOfRecord(rec)
-	// W8 (D1 gate): busy=queue and deliver=steer are disabled in v1. The
-	// gate lives in submit() for fresh commands; admitDeferred is the other
-	// entrance to native Submit, so a record stored before D1 with
-	// deliver=steer would be admitted here after an upgrade without this
-	// check. Same gate, same code, same reason.
+	// busy=queue and deliver=steer are disabled in v1. The gate lives in
+	// submit() for fresh commands; admitDeferred is the other entrance to
+	// native Submit, so a record stored by an older build with deliver=steer
+	// would be admitted here after an upgrade without this check. Same gate,
+	// same code, same reason.
 	if rec.Input != nil && (rec.Input.Busy == protocol.BusyQueue || rec.Input.Deliver == protocol.DeliverSteer) {
 		mode, value := "busy", string(rec.Input.Busy)
 		if rec.Input.Deliver == protocol.DeliverSteer {
@@ -3142,7 +3140,7 @@ func admissionCause(adm Admission, nerr error) (cause, nativeEvidence) {
 // semantics. The caller holds e.mu and owns unlocking: finishAdmissionLocked
 // unlocks exactly once on every return.
 //
-// B3 (cancel-during-admission): a cancel that raced the gated admission
+// Cancel during admission: a cancel that raced the gated admission
 // emits EventRunCancelled while Submit is still blocked, so the record is
 // already StateCancelled WITHOUT cancel metadata when Submit returns — the
 // native cancel handler saw terminal and did not create it. The raced
@@ -3242,7 +3240,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev, Message: rec.RefusalReason}}, nil
 	}
 	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
-	// so snapshot.Code == outcome.Code always (Pro #4).
+	// so snapshot.Code == outcome.Code always.
 	snap := rec.Snapshot
 	out := protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Message: rec.RefusalReason}
 	if rec.Cancel != nil {
@@ -3293,7 +3291,7 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 		}
 		e.mu.Lock()
 		// Copy into the caller's *Record instead of rebinding the local param
-		// — otherwise the caller reads a stale object (Pro #2/Pro #4 bug).
+		// — otherwise the caller reads a stale object.
 		fresh, ok, _ := e.store.Get(key)
 		if !ok {
 			return "", protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
@@ -3310,7 +3308,7 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 	}
 	// CancelExact confirmed: the run was stopped. But disk may have moved under
 	// the unlock — a late completion may have committed `completed` while we
-	// were unlocked. Pro #3: do NOT rewrite the promise unconditionally. If the
+	// were unlocked. Do NOT rewrite the promise unconditionally. If the
 	// record is already terminal and NOT cancelled, settle the runtime
 	// obligation only (the cancel disposition is resolved) and return.
 	if rec.State.Terminal() && rec.State != protocol.StateCancelled {
@@ -3328,10 +3326,10 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 	return e.commitLocked(rec, t)
 }
 
-// abortAdmittedRacedRun handles the P1 shape: Submit admitted a run, but a
-// native cancel moved the record to cancelled before Submit returned. The
+// abortAdmittedRacedRun handles a raced admission: Submit admitted a run, but
+// a native cancel moved the record to cancelled before Submit returned. The
 // run is live and unwanted — abort it via CancelExact. The abort's OUTCOME
-// matters (Pro #1): confirmed -> cancelled_by_request; inconclusive ->
+// matters: confirmed -> cancelled_by_request; inconclusive ->
 // non-terminal cancel_requested for reconcile retry; noop_terminal -> the
 // run already finished, Lookup the evidence and record it.
 // The caller holds e.mu; this helper unlocks exactly once.
@@ -3459,7 +3457,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	key := keyOfRecord(rec)
 	// Fresh state under the lock: the caller's record may be stale, and a
 	// concurrent reconcile may already have published and marked this
-	// revision. Publishing from a stale record is the double delivery.
+	// revision. Publishing from a stale record would deliver it twice.
 	cur, ok, err := e.store.Get(key)
 	if err != nil || !ok {
 		return

@@ -1080,7 +1080,7 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 		Status:             status,
 		PendingInteraction: pending,
 		// Capability projection: Steer is FALSE (v1 is followUp-only; the
-		// endpoint's D1 gate refuses deliver=steer pre-adapter and the
+		// endpoint's v1 gate refuses deliver=steer pre-adapter and the
 		// adapter refuses it again pre-side-effect), cancel/question are
 		// false (no native seam; keystrokes are forbidden), approve needs
 		// bridge revision 4, terminal is unavailable.
@@ -1133,7 +1133,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		epochHint = gen
 	}
 	// The hint is captured in the SAME critical section as the gate
-	// above: re-reading it after the lock-free liveness check let a
+	// above: re-reading it after the lock-free liveness check would let a
 	// concurrent re-pin/refuse publish a generation the gate
 	// never validated — or swap it for the live generation on a
 	// refused(generation), addressing a session the gate never checked.
@@ -1167,7 +1167,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", r.ref)
 	}
 	if req.Input.Deliver == protocol.DeliverSteer {
-		// v1 is followUp-only. The endpoint's D1 gate already refuses
+		// v1 is followUp-only. The endpoint's v1 gate already refuses
 		// deliver=steer; this is the belt-and-braces adapter-side refusal,
 		// before any file write.
 		a.mu.Unlock()

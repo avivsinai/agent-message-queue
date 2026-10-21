@@ -429,7 +429,7 @@ func (r *Runtime) CancelExactCount() int {
 
 // HoldAfterAdmit blocks Submit AFTER a run is admitted (and the run is
 // recorded) until ReleaseAfterAdmit. Used to race a cancel against a
-// positively-admitted run (the P1 shape).
+// positively-admitted run.
 func (r *Runtime) HoldAfterAdmit() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -498,7 +498,7 @@ func (r *Runtime) ReleaseAdmission() {
 }
 
 // FailNextAdmissionAfterReturn makes the next Submit refuse with a native
-// error after the helper call returned, the Q11 shape.
+// error after the helper call returned.
 func (r *Runtime) FailNextAdmissionAfterReturn() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -506,7 +506,7 @@ func (r *Runtime) FailNextAdmissionAfterReturn() {
 }
 
 // Complete finishes the run bound to requestID with text. It is a no-op when
-// no such run is admitted, so Q19 can call it at every boundary.
+// no such run is admitted, so a test can call it at every boundary.
 func (r *Runtime) Complete(requestID, text string) bool {
 	r.mu.Lock()
 	var target *run
@@ -589,7 +589,7 @@ func (r *Runtime) CompleteCancelled(requestID, text string) bool {
 
 // CancelRun cancels the running run for requestID natively and emits
 // EventRunCancelled, as a queued-run deletion or interrupt does in a real
-// attachment. B14c tests use it to drive a cancel event arriving while the
+// attachment. Tests use it to drive a cancel event arriving while the
 // endpoint's Submit is still inside the admission gate. It reports whether
 // a running run was found.
 func (r *Runtime) CancelRun(requestID string) bool {
@@ -812,7 +812,7 @@ func (r *Runtime) AckCalls() int {
 
 // UnacknowledgedResults counts retained terminal results the endpoint has not
 // acknowledged. While this is nonzero the runtime refuses additional remote
-// work — the B06 busy wedge.
+// work (the busy wedge).
 func (r *Runtime) UnacknowledgedResults() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

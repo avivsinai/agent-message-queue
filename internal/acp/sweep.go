@@ -138,8 +138,8 @@ func (s *Server) requestSweep() {
 }
 
 // sweepLateReplies posts the final reply of each recent mailbox event whose
-// turn ended without one, for example on a timeout or a client that left
-// (review F1). An event waits while its turn can still be open (younger
+// turn ended without one, for example on a timeout or a client that left.
+// An event waits while its turn can still be open (younger
 // than the turn timeout) or while it has no DM channel, and leaves the
 // sweep once it has an outcome or passes the horizon. The post and a cancel
 // both decide the event's outcome through one exclusive record, so exactly

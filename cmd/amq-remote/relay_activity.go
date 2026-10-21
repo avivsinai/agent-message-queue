@@ -86,7 +86,7 @@ func observerOf(att any) observeFunc {
 // activityShare is one share's activity export: Codex notifications for the
 // approved native thread become NIP-44 kind 24200
 // frames to the owner. Export runs only while the target's attached native
-// session is the pinned one (relay design §2); it carries no control.
+// session is the pinned one; it carries no control.
 type activityShare struct {
 	share    manifest.Share
 	body     nostr.SecretKey

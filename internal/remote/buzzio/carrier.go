@@ -20,8 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Kinds the edge publishes (relay design §4; enrolled via share --enable
-// buzz-dm).
+// Kinds the edge publishes (enrolled via share --enable buzz-dm).
 const (
 	KindDM   = 9
 	KindEdit = 40003
@@ -202,8 +201,8 @@ const cancelReaction = "❌"
 // IngestReaction handles one verified kind 7 event from the owner. On an
 // approval message this edge posted, ✅ approves and ❌ rejects exactly that
 // interaction (answerApproval). On one of this edge's result rows, ❌
-// cancels exactly that row's request (relay design §4); the row is
-// resolved through the persisted receipt mapping, not the reaction's own
+// cancels exactly that row's request; the row is resolved through the
+// persisted receipt mapping, not the reaction's own
 // tags, and a reaction carries no h tag it has to match. Anything else is
 // ignored; removing a reaction never undoes a cancel or an answer.
 func (c *Carrier) IngestReaction(evt nostr.Event) error {
@@ -1028,7 +1027,7 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		messageID, appr, option = first.Message, stored, first.Option
 	}
 	// An approve carries its proof: a harness that allows a call only with
-	// the owner's signature  verifies it itself.
+	// the owner's signature (Claude, for one) verifies it itself.
 	var evidence json.RawMessage
 	if gesture == approveReaction {
 		var err error
@@ -1416,12 +1415,11 @@ func outputGroup(key string) string {
 	return key
 }
 
-// rowTags and editTags are the only place row tags are built (relay design
-// §3): a row lives in the owner DM channel (h), addresses the owner (p) and
-// replies to the owner's input event (e ...
-// reply) when it has one, naming the input's thread root (e ... root) when
-// the input was itself a reply; an edit names its original row (e) in the
-// same channel.
+// rowTags and editTags are the only place row tags are built: a row lives in
+// the owner DM channel (h), addresses the owner (p) and replies to the
+// owner's input event (e ... reply) when it has one, naming the input's
+// thread root (e ... root) when the input was itself a reply; an edit names
+// its original row (e) in the same channel.
 func (c *Carrier) rowTags(inputID, root string) nostr.Tags {
 	tags := nostr.Tags{{"h", c.binding.Channel}, {"p", c.binding.Owner}}
 	if validHexID(root) && root != inputID {

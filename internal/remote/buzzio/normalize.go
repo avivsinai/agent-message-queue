@@ -21,8 +21,8 @@ const (
 )
 
 // MutationWindow is how long after its signed created_at an owner command
-// that changes work may still be dispatched (relay design §4, ratified: two
-// minutes from the authenticated message, never from receipt or wake).
+// that changes work may still be dispatched: two minutes from the
+// authenticated message, never from receipt or wake.
 const MutationWindow = 2 * time.Minute
 
 // maxFutureSkew bounds how far in the future a command may be dated.

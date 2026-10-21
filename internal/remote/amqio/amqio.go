@@ -142,8 +142,7 @@ var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
 // ready right now: peer root or mailbox not available). The carrier leaves
 // the message in new for the next tick. The router (cli.ResolveReplyRoute)
 // wraps its retryable failures in this type; the carrier only reads the
-// declaration via errors.As and stops inferring anything from which function
-// failed.
+// declaration via errors.As and infers nothing from which function failed.
 type TransientRouteError struct{ err error }
 
 // NewTransientRouteError wraps err as a transient route error. Used by the
@@ -157,13 +156,7 @@ func NewTransientRouteError(err error) error {
 func (e *TransientRouteError) Error() string { return e.err.Error() }
 func (e *TransientRouteError) Unwrap() error { return e.err }
 
-// isPoisonRoute reports whether a route error is about the MESSAGE (poison,
-// DLQ) rather than the WORLD RIGHT NOW (transient, stays in new).
-// The router declares transient failures by wrapping them in
-// TransientRouteError; everything else is poison. The carrier does NOT infer
-// from which function failed: the real router's errors are the only path to
-// peer-root-absent in production. crossRoot reports whether a reply leaves
-// the endpoint's own root: the
+// crossRoot reports whether a reply leaves the endpoint's own root: the
 // caller named another project, or another session of this project
 // (reply_to carries a session component, handle@session). The CLI sets a
 // bare-handle reply_to only together with reply_project, so a bare handle
@@ -173,6 +166,13 @@ func crossRoot(origin map[string]string) bool {
 	return strings.TrimSpace(origin["reply_project"]) != "" || strings.Contains(strings.TrimSpace(origin["reply_to"]), "@")
 }
 
+// isPoisonRoute reports whether a route error is about the MESSAGE (poison,
+// DLQ) rather than the WORLD RIGHT NOW (transient, stays in new).
+// The router declares transient failures by wrapping them in
+// TransientRouteError; everything else is poison. The carrier does NOT infer
+// transience from which function failed: that inference misses the real
+// router's errors, which are the only path to peer-root-absent in
+// production.
 func isPoisonRoute(err error) bool {
 	var tre *TransientRouteError
 	return !errors.As(err, &tre)
@@ -1131,11 +1131,12 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 			// The id must be deterministic per (request_ref,
 			// revision) AND sort chronologically against ordinary AMQ message
 			// ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
-			// AFTER every dated message, starving drain --limit 20. Fix:
-			// stable timestamp first (from snap.ObservedAt, not time.Now —
-			// ObservedAt is identical on every retry of that revision, keeping
-			// the write idempotent), then the deterministic part, then a short
-			// digest of the request_ref so the filename stays short.
+			// AFTER every dated message and would starve drain --limit 20,
+			// so the id is: stable timestamp first (from snap.ObservedAt, not
+			// time.Now — ObservedAt is identical on every retry of that
+			// revision, keeping the write idempotent), then the deterministic
+			// part, then a short digest of the request_ref so the filename
+			// stays short.
 			observed, perr := protocol.ParseTime(snap.ObservedAt)
 			if perr != nil {
 				observed = now

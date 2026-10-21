@@ -35,8 +35,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// SentinelUnpinned matches the other seam-backed adapters: until PR2 binds
-// a run, no epoch is ever pinned by this adapter.
+// SentinelUnpinned is the epoch Inspect reports, matching the other
+// seam-backed adapters: this adapter never pins an epoch of its own.
 const SentinelUnpinned = "unpinned"
 
 // config is the adapter-specific config block for a claude manifest entry.
@@ -221,7 +221,7 @@ type Attachment struct {
 	cfg    config
 	home   string
 
-	// PR2 evidence path (submit.go): retained runs, cancel intent, the
+	// Evidence path (submit.go): retained runs, cancel intent, the
 	// native-event sink, and the confirmation poller's cancel. ctx is the
 	// attachment lifetime; the poller is never on the request path.
 	mu            sync.Mutex
