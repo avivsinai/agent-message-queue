@@ -4,15 +4,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/presence"
-	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func runReply(args []string) error {
@@ -72,11 +69,8 @@ func runReply(args []string) error {
 	// Validate co-op fields
 	priority := strings.TrimSpace(*priorityFlag)
 	kind := strings.TrimSpace(*kindFlag)
-	if !format.IsValidPriority(priority) {
-		return UsageError("--priority must be one of: urgent, normal, low")
-	}
-	if !format.IsValidKind(kind) {
-		return UsageError("--kind must be one of: %s", format.ValidKindsList())
+	if err := validatePriorityKind(priority, kind); err != nil {
+		return err
 	}
 
 	waitFor := strings.TrimSpace(*waitForFlag)
@@ -88,13 +82,9 @@ func runReply(args []string) error {
 
 	labels := splitList(*labelsFlag)
 
-	var context map[string]any
-	if *contextFlag != "" {
-		var err error
-		context, err = parseContext(*contextFlag)
-		if err != nil {
-			return err
-		}
+	context, err := parseContext(*contextFlag)
+	if err != nil {
+		return err
 	}
 
 	// Pin the source tree before reading the original. Its contents determine
@@ -218,17 +208,7 @@ func runReply(args []string) error {
 	var sourceConfigFS *fsq.DeliveryRoot
 	var sourceConfigPresent bool
 	if targetProject != "" {
-		sourceConfigBase, expectedSourceBaseRootID := localMailboxConfigAuthority(
-			root,
-			pin,
-			*ignoreSessionPinFlag,
-		)
-		sourceConfigSelection, err := openMailboxConfigSelection(
-			sourceFS,
-			root,
-			sourceConfigBase,
-			expectedSourceBaseRootID,
-		)
+		sourceConfigSelection, err := openSourceConfigSelection(sourceFS, root, pin, *ignoreSessionPinFlag)
 		if err != nil {
 			return err
 		}
@@ -332,196 +312,52 @@ func runReply(args []string) error {
 			kind = originalMsg.Header.Kind
 		}
 	}
-	if kind != "" && priority == "" {
-		priority = format.DefaultPriority(kind)
-	}
 
-	now := time.Now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		return err
+	sourceSession := ""
+	if targetProject != "" || targetSession != "" {
+		sourceSession = resolveSessionName(root)
 	}
-	replyTo := replyToForSource(me, root, targetProject, targetSession)
-
-	msg := format.Message{
-		Header: format.Header{
-			Schema:   format.CurrentSchema,
-			ID:       id,
-			From:     me,
-			To:       []string{recipient},
-			Thread:   originalMsg.Header.Thread,
-			Subject:  subject,
-			Created:  now.UTC().Format(time.RFC3339Nano),
-			Refs:     append(originalMsg.Header.Refs, originalMsg.Header.ID),
-			Priority: priority,
-			Kind:     kind,
-			Labels:   labels,
-			Context:  context,
-			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
-			ReplyTo: replyTo,
-			ReplyProject: func() string {
-				if targetProject != "" {
-					return sourceProject
-				}
-				return ""
-			}(),
-			FromProject: func() string {
-				if targetProject != "" {
-					return sourceProject
-				}
-				return ""
-			}(),
-		},
-		Body: body,
-	}
-
-	data, err := msg.Marshal()
-	if err != nil {
-		return err
-	}
-	if localMailboxAuthorization != nil {
-		if err := prepareLocalSendMailboxes(
-			deliveryFS,
-			localMailboxAuthorization,
-			deliveryRoot,
-			[]string{recipient},
-		); err != nil {
-			return err
-		}
-		if err := localMailboxAuthorization.Verify(); err != nil {
-			return fmt.Errorf("destination mailbox authorization changed before delivery: %w", err)
-		}
-	}
-
-	filename := id + ".md"
-	if targetProject != "" {
-		currentSourceAgents, currentSourceAgentsErr := revalidateSourceAgentsForSend(
-			sourceConfigFS,
-			sourceConfigPresent,
-			common.Strict,
-		)
-		if err := validateKnownHandlesFromAgents(
-			currentSourceAgents,
-			currentSourceAgentsErr,
-			common.Strict,
-			me,
-		); err != nil {
-			return err
-		}
-		currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(
-			peerConfigFS,
-			peerConfigPresent,
-			common.Strict,
-		)
-		if err := validateKnownHandlesFromAgents(
-			currentPeerAgents,
-			currentPeerAgentsErr,
-			common.Strict,
-			recipient,
-		); err != nil {
-			return err
-		}
-		if err := sourceFS.VerifyBase(); err != nil {
-			return err
-		}
-		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
-		if _, err := fsq.DeliverToExistingInbox(deliveryFS, recipient, filename, data); err != nil {
-			return reportDeliveryError(id, err)
-		}
-	} else {
-		if targetSession != "" {
-			if err := sourceFS.VerifyBase(); err != nil {
-				return err
-			}
-		}
-		if _, err := fsq.DeliverToInboxes(deliveryFS, []string{recipient}, filename, data); err != nil {
-			return reportDeliveryError(id, err)
-		}
-	}
-
-	// Best-effort presence touch.
-	_ = presence.TouchDeliveryRoot(sourceFS, me)
-
-	outboxDir := filepath.Join("agents", me, "outbox", "sent")
-	outboxErr := error(nil)
-	if _, err := sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
-		outboxErr = err
-	}
-
-	// Wait for receipt if requested (mirrors amq send --wait-for).
-	var waitResult *waitForResult
-	var waitErr error
-	if waitFor != "" {
-		r, err := receipt.WaitForDeliveryRoot(deliveryFS, id, recipient, waitFor, *waitTimeoutFlag, 1*time.Second)
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
-			waitErr = TimeoutError("reply --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
-		} else if err != nil {
-			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
-			waitErr = fmt.Errorf("reply --wait-for: %w", err)
-		} else {
-			waitResult = &waitForResult{Event: "matched", Stage: waitFor, Receipt: &r}
-		}
-	}
-
-	// Fix 5: Report target session in reply output (consistent with send).
 	session := sessionName(root)
 	targetDisplay := session
 	if targetSession != "" {
 		targetDisplay = targetSession
 	}
-	if common.JSON {
-		out := map[string]any{
-			"id":           id,
-			"thread":       msg.Header.Thread,
-			"to":           []string{recipient},
-			"subject":      subject,
-			"session":      targetDisplay,
-			"root":         deliveryRoot,
+	return deliverOutgoing(outgoingMessage{
+		command:              "reply",
+		verb:                 "Replied",
+		me:                   me,
+		recipients:           []string{recipient},
+		thread:               originalMsg.Header.Thread,
+		subject:              subject,
+		refs:                 append(originalMsg.Header.Refs, originalMsg.Header.ID),
+		priority:             priority,
+		kind:                 kind,
+		labels:               labels,
+		context:              context,
+		body:                 body,
+		sourceSession:        sourceSession,
+		sourceProject:        sourceProject,
+		targetProject:        targetProject,
+		targetSession:        targetSession,
+		sourceFS:             sourceFS,
+		deliveryFS:           deliveryFS,
+		deliveryRoot:         deliveryRoot,
+		strict:               common.Strict,
+		localAuthorization:   localMailboxAuthorization,
+		sourceConfigFS:       sourceConfigFS,
+		sourceConfigPresent:  sourceConfigPresent,
+		peerConfigFS:         peerConfigFS,
+		peerConfigPresent:    peerConfigPresent,
+		waitFor:              waitFor,
+		waitTimeout:          *waitTimeoutFlag,
+		json:                 common.JSON,
+		displaySession:       targetDisplay,
+		sourceSessionDisplay: session,
+		jsonExtra: map[string]any{
 			"in_reply_to":  originalMsg.Header.ID,
 			"original_box": originalBox,
-			"outbox":       outboxResult(outboxErr),
-		}
-		if targetProject != "" {
-			out["cross_project"] = true
-			out["source_project"] = sourceProject
-			out["target_project"] = targetProject
-		}
-		if targetSession != "" {
-			out["cross_session"] = true
-			out["source_session"] = session
-			out["target_session"] = targetSession
-		}
-		if waitResult != nil {
-			out["wait"] = waitResult
-		}
-		if err := writeJSON(os.Stdout, out); err != nil {
-			return err
-		}
-		return waitErr
-	}
-
-	if outboxErr != nil {
-		_ = reportOutboxError(outboxErr)
-	}
-	if waitResult != nil {
-		switch waitResult.Event {
-		case "matched":
-			if err := writeStdout("Replied %s to %s; %s by %s at %s\n", id, recipient, waitFor, recipient, waitResult.Receipt.EmittedAt); err != nil {
-				return err
-			}
-		case "timeout":
-			if err := writeStdout("Replied %s to %s; timed out waiting %s for %s receipt\n", id, recipient, *waitTimeoutFlag, waitFor); err != nil {
-				return err
-			}
-		default:
-			if err := writeStdout("Replied %s to %s; wait error: %s\n", id, recipient, waitResult.Detail); err != nil {
-				return err
-			}
-		}
-		return waitErr
-	}
-	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, targetDisplay, deliveryRoot)
+		},
+	})
 }
 
 // parseReplyToRoute accepts exactly one reply routing shape: handle@session,
@@ -556,17 +392,4 @@ func parseReplyToRoute(raw string, allowBase bool) (handle, session string, err 
 		return "", "", fmt.Errorf("invalid session in reply_to %q: %w", raw, err)
 	}
 	return handle, session, nil
-}
-
-func replyToForSource(me, sourceRoot, targetProject, targetSession string) string {
-	if targetProject == "" && targetSession == "" {
-		return ""
-	}
-	if sourceSession := resolveSessionName(sourceRoot); sourceSession != "" {
-		return me + "@" + sourceSession
-	}
-	if targetProject != "" {
-		return me
-	}
-	return ""
 }
