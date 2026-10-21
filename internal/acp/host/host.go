@@ -85,6 +85,8 @@ type Host struct {
 
 	conn      *conn
 	sessionID string
+	// resumed is true when the session was loaded from session.json.
+	resumed   bool
 	agentName string
 	timeout   time.Duration
 	// unreadable remembers inbox files the host leaves in place, so each
@@ -167,7 +169,11 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	if err := h.handshake(ctx); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (ACP session %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.sessionID, AutonomyNotice)
+	opened := "new"
+	if h.resumed {
+		opened = "resumed"
+	}
+	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (ACP session %s, %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.sessionID, opened, AutonomyNotice)
 	if err := h.withRoot(func(root *fsq.DeliveryRoot) error { return h.recover(ctx, root) }); err != nil {
 		return err
 	}
@@ -198,41 +204,110 @@ func (h *Host) withRoot(fn func(*fsq.DeliveryRoot) error) error {
 	return fn(root)
 }
 
-// handshake runs initialize and session/new within one budget, so an agent
-// that never answers does not hold the host lock forever.
+// handshake runs initialize and opens the session within one budget, so an
+// agent that never answers does not hold the host lock forever.
 func (h *Host) handshake(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	raw, err := h.conn.call(ctx, "initialize", map[string]any{
+	init, err := initialize(ctx, h.conn, h.cfg.Version)
+	if err != nil {
+		return err
+	}
+	h.agentName = strings.TrimSpace(init.AgentInfo.Name + " " + init.AgentInfo.Version)
+	return h.openSession(ctx, init.loadSession())
+}
+
+// agentInit is the part of the agent's initialize answer the host reads.
+type agentInit struct {
+	ProtocolVersion json.RawMessage `json:"protocolVersion"`
+	AgentInfo       struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"agentInfo"`
+	AgentCapabilities json.RawMessage `json:"agentCapabilities,omitempty"`
+}
+
+// loadSession reports agentCapabilities.loadSession; absent means false.
+func (a agentInit) loadSession() bool {
+	var caps struct {
+		LoadSession bool `json:"loadSession"`
+	}
+	_ = json.Unmarshal(a.AgentCapabilities, &caps)
+	return caps.LoadSession
+}
+
+// initialize sends the ACP initialize request and refuses a protocol
+// version the host does not speak.
+func initialize(ctx context.Context, c *conn, version string) (agentInit, error) {
+	raw, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": protocolVersion,
 		"clientCapabilities": map[string]any{
 			"fs":       map[string]bool{"readTextFile": false, "writeTextFile": false},
 			"terminal": false,
 		},
-		"clientInfo": map[string]string{"name": "amq-acp", "version": h.cfg.Version},
+		"clientInfo": map[string]string{"name": "amq-acp", "version": version},
 	}, nil)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return actionRequired("the agent did not answer initialize within %s", handshakeTimeout)
+			return agentInit{}, actionRequired("the agent did not answer initialize within %s", handshakeTimeout)
 		}
-		return fmt.Errorf("initialize the agent: %w", err)
+		return agentInit{}, fmt.Errorf("initialize the agent: %w", err)
 	}
-	var init struct {
-		ProtocolVersion json.RawMessage `json:"protocolVersion"`
-		AgentInfo       struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-		} `json:"agentInfo"`
-	}
+	var init agentInit
 	if err := json.Unmarshal(raw, &init); err != nil {
-		return fmt.Errorf("initialize the agent: %w", err)
+		return agentInit{}, fmt.Errorf("initialize the agent: %w", err)
 	}
 	if string(init.ProtocolVersion) != strconv.Itoa(protocolVersion) {
-		return actionRequired("the agent answered ACP protocol version %s; amq-acp host speaks version %d", init.ProtocolVersion, protocolVersion)
+		return agentInit{}, actionRequired("the agent answered ACP protocol version %s; amq-acp host speaks version %d", init.ProtocolVersion, protocolVersion)
 	}
-	h.agentName = strings.TrimSpace(init.AgentInfo.Name + " " + init.AgentInfo.Version)
+	return init, nil
+}
 
-	raw, err = h.conn.call(ctx, "session/new", map[string]any{"cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
+// sessionRecord is session.json: the ACP session this host created, with
+// the agent and working directory it was created for.
+type sessionRecord struct {
+	SessionID string `json:"session_id"`
+	Agent     string `json:"agent"`
+	Cwd       string `json:"cwd"`
+	Created   string `json:"created"`
+}
+
+// openSession resumes the session this host recorded when the agent can load
+// it, for the same agent and working directory; otherwise it opens a new one
+// and records it. The host loads only a session id it recorded itself.
+func (h *Host) openSession(ctx context.Context, canLoad bool) error {
+	saved, err := h.readSessionRecord()
+	if err != nil {
+		_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %v; starting a new ACP session\n", err)
+	}
+	if saved != nil {
+		switch {
+		case saved.Agent == "" || saved.Cwd == "":
+			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s names no agent or directory; starting a new ACP session\n", saved.SessionID)
+		case saved.Agent != h.cfg.Agent || saved.Cwd != h.cfg.Cwd:
+			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s belongs to %s in %s; starting a new ACP session\n", saved.SessionID, saved.Agent, saved.Cwd)
+		case !canLoad:
+			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: the agent cannot load sessions; starting a new ACP session in place of %s\n", saved.SessionID)
+		default:
+			// The agent replays the session's history as session/update
+			// notifications before it answers. No turn is in flight, so
+			// onNotify collects none of it.
+			_, err := h.conn.call(ctx, "session/load", map[string]any{"sessionId": saved.SessionID, "cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
+			if err == nil {
+				h.sessionID, h.resumed = saved.SessionID, true
+				return nil
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return actionRequired("the agent did not answer session/load within %s", handshakeTimeout)
+			}
+			if authRequired(err) {
+				return actionRequired("the agent needs a login: authenticate the harness once with its own CLI, then start the host again (%v)", err)
+			}
+			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: the agent could not load session %s (%v); starting a new ACP session\n", saved.SessionID, err)
+		}
+	}
+
+	raw, err := h.conn.call(ctx, "session/new", map[string]any{"cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return actionRequired("the agent did not answer session/new within %s", handshakeTimeout)
@@ -250,13 +325,63 @@ func (h *Host) handshake(ctx context.Context) error {
 	}
 	h.sessionID = session.SessionID
 	return h.withRoot(func(root *fsq.DeliveryRoot) error {
-		data, err := json.Marshal(map[string]string{"session_id": h.sessionID, "created": time.Now().UTC().Format(time.RFC3339Nano)})
+		data, err := json.Marshal(sessionRecord{SessionID: h.sessionID, Agent: h.cfg.Agent, Cwd: h.cfg.Cwd, Created: time.Now().UTC().Format(time.RFC3339Nano)})
 		if err != nil {
 			return err
 		}
 		_, err = root.WriteFileAtomic(filepath.Join("agents", h.cfg.Me, "extensions", extensionLayer), "session.json", append(data, '\n'), 0o600)
 		return err
 	})
+}
+
+// readSessionRecord reads session.json; a missing file is (nil, nil).
+func (h *Host) readSessionRecord() (*sessionRecord, error) {
+	var saved *sessionRecord
+	err := h.withRoot(func(root *fsq.DeliveryRoot) error {
+		data, err := root.ReadFile(filepath.Join("agents", h.cfg.Me, "extensions", extensionLayer, "session.json"))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var rec sessionRecord
+		if err := json.Unmarshal(data, &rec); err != nil || rec.SessionID == "" {
+			return fmt.Errorf("session.json is unreadable")
+		}
+		saved = &rec
+		return nil
+	})
+	return saved, err
+}
+
+// CheckResult is what amq-acp host --check prints: the agent's answer to
+// initialize.
+type CheckResult struct {
+	ProtocolVersion int `json:"protocol_version"`
+	AgentInfo       struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"agent_info"`
+	LoadSession       bool            `json:"load_session"`
+	AgentCapabilities json.RawMessage `json:"agent_capabilities,omitempty"`
+}
+
+// Check probes an agent on in and out: initialize only, no session and no
+// AMQ root. A refusal says why the host could not serve this agent.
+func Check(ctx context.Context, in io.Reader, out io.Writer, version string) (CheckResult, error) {
+	c := newConn(in, out, func(method string, _ json.RawMessage) (any, *rpcError) {
+		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
+	}, func(string, json.RawMessage) {})
+	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	init, err := initialize(ctx, c, version)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	res := CheckResult{ProtocolVersion: protocolVersion, LoadSession: init.loadSession(), AgentCapabilities: init.AgentCapabilities}
+	res.AgentInfo.Name, res.AgentInfo.Version = init.AgentInfo.Name, init.AgentInfo.Version
+	return res, nil
 }
 
 // authRequired recognizes the ACP auth_required error by name; its numeric

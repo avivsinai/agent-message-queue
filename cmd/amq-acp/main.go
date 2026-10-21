@@ -101,7 +101,7 @@ Usage:
                  delete the harness file this command wrote
   amq-acp setup [--out <file>]
                  write the AMQ Remote harness and the Desktop import file
-  amq-acp host [--cwd <dir>] -- <agent command>
+  amq-acp host [--check] [--cwd <dir>] -- <agent command>
                  run an ACP agent as the AM_ME participant: each inbox
                  message is one turn, answered on its thread
 
