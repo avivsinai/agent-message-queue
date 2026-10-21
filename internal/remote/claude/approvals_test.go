@@ -117,7 +117,7 @@ func (f *approvalFixture) raise(command string) {
 
 // raiseWith is raise with the hook's poll paced by ticks, nil for its own
 // ticker.
-func (f *approvalFixture) raiseWith(command string, ticks <-chan time.Time) {
+func (f *approvalFixture) raiseWith(command string, ticks chan time.Time) {
 	f.t.Helper()
 	in, _ := json.Marshal(map[string]any{
 		"session_id": approvalSession, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
@@ -145,6 +145,14 @@ func (f *approvalFixture) raiseWith(command string, ticks <-chan time.Time) {
 		}
 		if time.Now().After(deadline) {
 			f.t.Fatal("the hook raised no request")
+		}
+	}
+	if ticks != nil {
+		// The request is visible at its link, before the hook's directory
+		// sync returns; a tick taken means the hook reached its poll loop.
+		select {
+		case ticks <- time.Now():
+		case <-f.exited:
 		}
 	}
 	f.att.pollConfirmations()
@@ -525,18 +533,23 @@ func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
 // with pid hookPID leaves them before its delivery record.
 func (f *approvalFixture) writeClaim(hookPID int) {
 	f.t.Helper()
-	f.writeRequest(hookPID)
+	f.id, _ = newInteractionID()
+	// The claim goes first: the attachment can settle a dead hook's request
+	// as soon as its link makes it visible, before its create returns.
 	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
 		f.t.Fatal(err)
 	}
+	f.writeRequest(hookPID)
 }
 
 // writeRequest lays down a request a hook with pid hookPID raised.
 func (f *approvalFixture) writeRequest(hookPID int) {
 	f.t.Helper()
 	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
-	id, _ := newInteractionID()
-	f.id = id
+	if f.id == "" {
+		f.id, _ = newInteractionID()
+	}
+	id := f.id
 	dir, err := ensureApproveSubdir(f.home, approvalSession, "requests")
 	if err != nil {
 		f.t.Fatal(err)

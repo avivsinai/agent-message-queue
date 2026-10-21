@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // ActivityNote is one session activity record the bridge wrote to
@@ -149,21 +151,9 @@ func (a *Attachment) openActivity(session string) (*os.File, os.FileInfo, error)
 		return nil, nil, errNotActivityFile
 	}
 	path := filepath.Join(dir, session+".jsonl")
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !before.Mode().IsRegular() {
+	f, info, err := fsq.OpenRegularNoFollowBounded(path, 0)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, errNotActivityFile
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	after, err := f.Stat()
-	if err != nil || !os.SameFile(before, after) {
-		_ = f.Close()
-		return nil, nil, errNotActivityFile
-	}
-	return f, after, nil
+	return f, info, err
 }

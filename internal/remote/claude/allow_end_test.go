@@ -257,8 +257,13 @@ func TestApprovalHookNeverAllowsAProofRefusedDuringItsVerify(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, f.id+".json"), ans, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ticks <- time.Now()
-	<-entered
+	// The hook's first pass may read the answer before it takes a tick: its
+	// request is visible at the link, before its directory sync returns.
+	select {
+	case ticks <- time.Now():
+		<-entered
+	case <-entered:
+	}
 	if err := markRejected(f.home, approvalSession, f.id, proof, "forged"); err != nil {
 		t.Fatal(err)
 	}

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -354,53 +355,18 @@ func (b bridgeDir) publishRequest(req deliverRequest) error {
 // overwrite; claim-then-fill would expose an empty file), and a concurrent
 // publisher of the same ref loses cleanly (protocol: requests).
 func writeAtomicNew(path string, payload []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("pi: prepare dir: %v", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".publish-*")
-	if err != nil {
-		return fmt.Errorf("pi: temp write: %v", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(payload); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("pi: temp write: %v", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("pi: temp sync: %v", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("pi: temp close: %v", err)
-	}
-	// Atomic create-new publication: link fails with EEXIST when another
-	// writer already published this ref — the duplicate refusal.
-	if err := os.Link(tmpName, path); err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("%w: %s", ErrAlreadyDelivered, strings.TrimSuffix(filepath.Base(path), ".json"))
-		}
+	created, err := fsq.CreateNewFile(path, payload, 0o600)
+	switch {
+	case created:
+		return nil // the link published it; a failed directory sync cannot take it back
+	case err != nil:
 		return fmt.Errorf("pi: publish %s: %v", path, err)
+	default:
+		return fmt.Errorf("%w: %s", ErrAlreadyDelivered, strings.TrimSuffix(filepath.Base(path), ".json"))
 	}
-	// link(2) leaves the source name in place — unlink it now (the target
-	// holds the published inode); the deferred remove is a no-op backstop.
-	if rerr := os.Remove(tmpName); rerr != nil {
-		tmpName = "" // target owns the inode; a lingering temp name is harmless
-		return fmt.Errorf("pi: unlink temp after publish %s: %v", path, rerr)
-	}
-	tmpName = "" // published and temp unlinked — the deferred remove is a no-op
-	if d, err := os.Open(dir); err != nil {
-		return fmt.Errorf("pi: fsync dir: %v", err)
-	} else {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
 }
 
 // readReceipt reads receipts/<ref>.json (protocol: receipts). Returns (nil, nil) when the
