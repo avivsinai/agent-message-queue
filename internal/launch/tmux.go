@@ -24,7 +24,6 @@ const (
 	tmuxProfileVersionRange      = ">=3.2 <4.0"
 	tmuxNonceEnvironment         = "AMQ_LAUNCH_NONCE"
 	tmuxPaneNonceOption          = "@amq_launch_nonce"
-	tmuxCommandTimeout           = 5 * time.Second
 	tmuxEpochPrefix              = "tmux:v1:epoch:"
 	ownedPaneIdentityUnavailable = "owned_pane_identity_unavailable"
 	tmuxServerEpochMismatch      = "tmux_server_epoch_mismatch"
@@ -58,19 +57,7 @@ func NewTmuxBackend(binary string) *TmuxBackend {
 	}
 	b := &TmuxBackend{
 		binary: binary, hostname: os.Hostname, getenv: os.Getenv, uid: currentUserID,
-		sleep: func(ctx context.Context, delay time.Duration) error {
-			if delay <= 0 {
-				return nil
-			}
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-timer.C:
-				return nil
-			}
-		},
+		sleep: sleepContext,
 	}
 	b.run = b.runCommand
 	b.focus = b.focusResource
@@ -92,7 +79,7 @@ func (b *TmuxBackend) Detect() DetectResult {
 	if err != nil {
 		return result
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	out, err := b.run(ctx, "-V")
 	if err != nil || !supportedTmuxVersion(out) {
@@ -117,7 +104,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if req.Placement != nil && !preview.Supported {
 		return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
 	}
-	if err := b.validateCreate(req); err != nil {
+	if err := validateCreate(req); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
 	amqPath := req.AMQPath
@@ -158,7 +145,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	present, err := b.hasSession(ctx, name)
 	if err != nil {
@@ -169,7 +156,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	}
 
 	first := req.Plan.Agents[0]
-	firstLine := b.agentCommand(req, first)
+	firstLine := agentCommand(req, first)
 	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, firstLine)...)
 	if err != nil {
@@ -188,7 +175,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	}
 	for _, agent := range req.Plan.Agents[1:] {
 		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
-			"-t", "="+name, "-n", agent.Handle, b.agentCommand(req, agent))...)
+			"-t", "="+name, "-n", agent.Handle, agentCommand(req, agent))...)
 		if createErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux window for %s: %w", agent.Handle, createErr)
 		}
@@ -217,17 +204,11 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 }
 
 func (b *TmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-	defer cancel()
-	state, err := b.inspect(ctx, req.Binding)
-	if err != nil {
-		return InspectResult{Status: InspectUnknown, Evidence: err.Error(), ActionRequired: true}, nil
-	}
-	return state, nil
+	return inspectBinding(req.Binding, b.inspect)
 }
 
 func (b *TmuxBackend) Close(req CloseRequest) (CloseResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	if err := req.Binding.Validate(); err != nil {
 		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
@@ -283,7 +264,7 @@ func (b *TmuxBackend) Close(req CloseRequest) (CloseResult, error) {
 }
 
 func (b *TmuxBackend) Focus(req FocusRequest) (FocusResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	inspection, err := b.inspect(ctx, req.Binding)
 	if err != nil || inspection.Status != InspectPresent {
@@ -324,7 +305,7 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, backendCommandTimeout)
 	defer cancel()
 	if req.Root == nil {
 		return ReclaimResult{}, fmt.Errorf("missing pinned session root")
@@ -393,39 +374,12 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	return ReclaimResult{Status: ReclaimAdoptable, Evidence: "tmux session and nonce match the complete journal plan", Resources: resources, Binding: binding}, nil
 }
 
-func (b *TmuxBackend) validateCreate(req CreateRequest) error {
-	if strings.TrimSpace(req.ProjectRoot) == "" || strings.TrimSpace(req.Session) == "" || req.Root == nil {
-		return fmt.Errorf("project root, session, and pinned root are required")
-	}
-	if err := req.Plan.Validate(); err != nil {
-		return err
-	}
-	if _, err := canonicalIdentity(req.ProjectRoot); err != nil {
-		return fmt.Errorf("resolve project root: %w", err)
-	}
-	handles := make([]string, len(req.Plan.Agents))
-	nonce := req.Plan.Agents[0].LaunchNonce
-	if !validUUID(nonce) {
-		return fmt.Errorf("launch nonce must be a UUID")
-	}
-	for i, agent := range req.Plan.Agents {
-		handles[i] = agent.Handle
-		if agent.LaunchNonce != nonce {
-			return fmt.Errorf("agent %q has a different launch nonce", agent.Handle)
-		}
-	}
-	if err := fsq.ValidateExistingMailboxLayout(req.Root, handles...); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (b *TmuxBackend) joinExistingSession(req CreateRequest, detect DetectResult) (CreateResult, error) {
 	sessionID, name, err := parseTmuxSessionResource(*req.JoinBinding)
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	if err := b.validateJoinSession(ctx, *req.JoinBinding, sessionID, name); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
@@ -460,7 +414,7 @@ func (b *TmuxBackend) joinExistingSession(req CreateRequest, detect DetectResult
 			return CreateResult{}, &DefinitePreCreateError{Err: err}
 		}
 		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
-			"-t", sessionID, "-n", agent.Handle, b.agentCommand(req, agent))...)
+			"-t", sessionID, "-n", agent.Handle, agentCommand(req, agent))...)
 		if createErr != nil {
 			return CreateResult{}, fmt.Errorf("join tmux window for %s: %w", agent.Handle, createErr)
 		}
@@ -637,15 +591,8 @@ func (b *TmuxBackend) inspect(ctx context.Context, binding BindingRecord) (Inspe
 }
 
 func (b *TmuxBackend) validateBindingContext(binding BindingRecord) error {
-	host, err := b.hostname()
-	if err != nil {
-		return fmt.Errorf("resolve tmux host identity: %w", err)
-	}
-	if binding.Backend != LauncherTMux || binding.Profile != TmuxProfile().Identity() ||
-		binding.HostIdentity != host || binding.InstanceIdentity != "tmux-socket:"+b.socketPath() {
-		return fmt.Errorf("tmux binding belongs to a different backend context")
-	}
-	return nil
+	return checkBindingContext(binding, LauncherTMux, TmuxProfile(), b.hostname,
+		func() string { return "tmux-socket:" + b.socketPath() }, "")
 }
 
 func (b *TmuxBackend) liveResources(ctx context.Context, name string) ([]ResourceIdentity, error) {
@@ -751,19 +698,6 @@ func (b *TmuxBackend) windowsWithNonce(ctx context.Context, nonce string) ([]str
 		}
 	}
 	return ids, nil
-}
-
-func (b *TmuxBackend) agentCommand(req CreateRequest, agent AgentPlan) string {
-	amq := req.AMQPath
-	if strings.TrimSpace(amq) == "" {
-		amq = "amq"
-	}
-	env := cloneEnv(agent.EnvOverlay)
-	if env == nil {
-		env = make(map[string]string, 1)
-	}
-	env[InternalLaunchNonceEnv] = agent.LaunchNonce
-	return commandLine(agent.Cwd, env, coopExecArgv(amq, req.Root.Base(), agent.Handle, agent.Argv, agent.Execution))
 }
 
 func (b *TmuxBackend) args(args ...string) []string {
@@ -1255,7 +1189,7 @@ func (b *TmuxBackend) runNewSessionWithTransientRetry(ctx context.Context, args 
 
 func tmuxCreateTimeout(req CreateRequest) time.Duration {
 	includeFirst := req.Placement != nil && req.Placement.Target == PlacementTargetCurrentWindow
-	return tmuxCommandTimeout + placementStaggerBudget(req.Placement, len(req.Plan.Agents), includeFirst)
+	return backendCommandTimeout + placementStaggerBudget(req.Placement, len(req.Plan.Agents), includeFirst)
 }
 
 func (b *TmuxBackend) reclaimOwnedLayout(ctx context.Context, req ReclaimRequest, target string) (ReclaimResult, error) {
@@ -1417,7 +1351,7 @@ func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult
 	}
 	first := req.Plan.Agents[0]
 	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
-		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, b.agentCommand(req, first))...)
+		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, agentCommand(req, first))...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
 	}
@@ -1434,7 +1368,7 @@ func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult
 		if err := b.stagger(ctx, req, i+1); err != nil {
 			return CreateResult{}, err
 		}
-		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", agentCommand(req, agent))...)
 		if splitErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
 		}
@@ -1466,7 +1400,7 @@ func (b *TmuxBackend) createNewWindowLayout(req CreateRequest, detect DetectResu
 	}
 	first := req.Plan.Agents[0]
 	out, err := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
-		"-t", sessionID, "-n", first.Handle, b.agentCommand(req, first))...)
+		"-t", sessionID, "-n", first.Handle, agentCommand(req, first))...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux window: %w", err)
 	}
@@ -1486,7 +1420,7 @@ func (b *TmuxBackend) createNewWindowLayout(req CreateRequest, detect DetectResu
 		if err := b.stagger(ctx, req, i+1); err != nil {
 			return CreateResult{}, err
 		}
-		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", agentCommand(req, agent))...)
 		if splitErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
 		}
@@ -1520,7 +1454,7 @@ func (b *TmuxBackend) createCurrentWindowLayout(req CreateRequest, detect Detect
 		if err := b.stagger(ctx, req, i); err != nil {
 			return CreateResult{}, err
 		}
-		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", agentCommand(req, agent))...)
 		if splitErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
 		}
@@ -1544,7 +1478,7 @@ func (b *TmuxBackend) createCurrentWindowLayout(req CreateRequest, detect Detect
 }
 
 func (b *TmuxBackend) createdBinding(detect DetectResult, nonce string, resources []ResourceIdentity, preview PlacementPreview) (CreateResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	resources, err := b.withServerEpoch(ctx, resources)
 	if err != nil {

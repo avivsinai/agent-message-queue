@@ -262,8 +262,8 @@ func DeleteTrusted(root, host string) error {
 // re-provisions an older key is almost certainly undoing a rotation by
 // mistake — and it never leaves a partial file: the new body is written to
 // a temp file in the trusted directory and renamed over the target
-// (review-845-r1 P1-1: writePrivateFile's O_EXCL made rotation a raw
-// "file exists" error with the only remedy a hand-delete).
+// (writePrivateFile's O_EXCL would make rotation a raw "file exists"
+// error with the only remedy a hand-delete).
 func ReplaceTrusted(root, host string, pub ed25519.PublicKey, generation string) error {
 	return writeTrusted(root, host, pub, generation, true)
 }
@@ -332,8 +332,8 @@ func writeTrusted(root, host string, pub ed25519.PublicKey, generation string, r
 }
 
 // compareGenerations orders generation labels for the --replace downgrade
-// guard (review-845-r2 P1: a byte-string compare inverts across the digit
-// boundary — 9 -> 10 refused, 10 -> 9 allowed). Generations are unsigned
+// guard (a byte-string compare inverts across the digit boundary — 9 -> 10
+// refused, 10 -> 9 allowed). Generations are unsigned
 // decimal integers as minted by identity init, so all-digit labels compare
 // numerically; any other label class (or a mixed pair) has no defined
 // order and is reported as unordered rather than guessed at. Returns
@@ -473,24 +473,24 @@ func writePrivateFile(path string, data []byte) error {
 }
 
 // ParsePublicIdentity decodes a bridge identity's public half from the two
-// shapes an operator actually has in hand (bead agent-message-queue-ug3):
-// the one line `amq-bridge identity public` prints ("host=<h>
+// shapes an operator actually has in hand: the one line `amq-bridge identity
+// public` prints ("host=<h>
 // generation=<g> public=<hex>") or the two-line key-file record the loader
 // itself accepts ("generation <g>" + "public <hex>"). The returned host is
 // empty for the two-line shape, which carries none. The hex public key
 // must decode to an Ed25519 public key. Both shapes are normalised before
 // WriteTrusted re-validates host, generation and key size and emits the
 // canonical two-line body, so whatever is accepted here round-trips
-// through LoadTrusted (review-845-r1 P2-2: the safety property is that
-// normalisation, not literal parser sharing).
+// through LoadTrusted (the safety property is that normalisation, not
+// literal parser sharing).
 func ParsePublicIdentity(data []byte) (host, generation string, pub ed25519.PublicKey, err error) {
 	fields, perr := parseKeyFields("identity record", data, "public")
 	if perr == nil {
 		pub, err = decodePublicIdentity(fields)
 		return "", fields["generation"], pub, err
 	}
-	// Shape disambiguation first (review-845-r1 P2-3): the two-line shape
-	// contains no '='-keyed fields, so if the input is not one-line-shaped
+	// Shape disambiguation first: the two-line shape contains no '='-keyed
+	// fields, so if the input is not one-line-shaped
 	// the honest error is the parser's, never a synthesized "line 1 is
 	// invalid". Empty input is the no-input case.
 	first := ""
@@ -505,7 +505,7 @@ func ParsePublicIdentity(data []byte) (host, generation string, pub ed25519.Publ
 	}
 	// One-line shape: host=<h> generation=<g> public=<hex>. Unknown fields
 	// are refused with the same strictness parseKeyFields applies to the
-	// two-line shape (P2-2) — a future protocol field must be an explicit
+	// two-line shape — a future protocol field must be an explicit
 	// refusal, never a silent drop.
 	one := map[string]string{}
 	for i, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
