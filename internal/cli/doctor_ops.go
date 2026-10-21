@@ -44,9 +44,9 @@ type opsCompanion struct {
 	LastSeen string `json:"last_seen,omitempty"`
 	// Lock is the lifetime-lock probe result for the entry: "held" (a live
 	// companion), "not-held" (no process holds it - the row is stale), or
-	// "unknown" (the probe failed; see ProbeError). 611.13.2 review P1-1:
-	// the registry state alone says "active" for a kill -9ed companion;
-	// only the lock tells the truth. One mechanism, both doctor faces.
+	// "unknown" (the probe failed; see ProbeError). The registry state alone
+	// says "active" for a kill -9ed companion; only the lock tells the truth.
+	// One mechanism, both doctor faces.
 	Lock string `json:"lock,omitempty"`
 	// ProbeError carries the probe failure when Lock is "unknown".
 	ProbeError string `json:"probe_error,omitempty"`
@@ -539,7 +539,7 @@ func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 		}}
 	}
 	// LoadSnapshot is genuinely read-only: a passive diagnostic must not
-	// create the registry directory or lock (codex P2). A missing file is an
+	// create the registry directory or lock. A missing file is an
 	// empty registry; other read errors are surfaced as a hint instead of
 	// being silently treated as "no companions".
 	file, err := registry.New(regPath).LoadSnapshot()
@@ -547,7 +547,7 @@ func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		// A read error must not masquerade as "no companions" (codex P2):
+		// A read error must not masquerade as "no companions":
 		// surface it as a warn hint; companion visibility is diagnostic,
 		// never a doctor failure.
 		return nil, []opsHint{{
@@ -572,8 +572,8 @@ func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 			Target:  entry.Target,
 			State:   string(entry.State),
 		}
-		// P1-1 (611.13.2 review): probe the entry's process-lifetime lock.
-		// A registry row is only as alive as the lock its supervisor holds;
+		// Probe the entry's process-lifetime lock. A registry row is only as
+		// alive as the lock its supervisor holds;
 		// a kill -9ed up leaves an "active" row behind. A not-held lock
 		// downgrades the projected state to stale - the same classification
 		// amq-keepalive doctor --ops prints, so the two faces of doctor

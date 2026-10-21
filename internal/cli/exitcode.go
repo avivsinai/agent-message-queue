@@ -136,7 +136,7 @@ type AgentOutcome struct {
 	Disposition AgentDisposition
 }
 
-// AggregateExitCode implements the §11 launch/resume exit contract.
+// AggregateExitCode implements the launch/resume exit contract.
 // A nonzero wholeCommand is a pre-launch failure and is returned as-is.
 // Once per-agent work begins (wholeCommand == 0), the aggregate is the
 // highest-precedence per-agent outcome: 6 > 4 > 1 > 0.

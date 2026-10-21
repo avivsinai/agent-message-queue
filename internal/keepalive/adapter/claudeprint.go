@@ -21,7 +21,7 @@ import (
 const (
 	claudePrintName                = "claude-print"
 	claudePrintTargetSessionPrefix = "claude-print:session:"
-	// Live-verified 2026-08-26 on Claude Code 2.1.246: dontAsk denies Bash even
+	// Verified live on Claude Code 2.1.246: dontAsk denies Bash even
 	// with --allowedTools Bash. auto + scoped allow lets the doorbell run
 	// `amq drain` without --dangerously-skip-permissions.
 	claudePrintPermissionMode = "auto"
@@ -48,7 +48,7 @@ type ClaudePrint struct {
 	// flock LOCK_EX|LOCK_NB.
 	Lock func(path string) (unlock func(), err error)
 	// ConfigDir is CLAUDE_CONFIG_DIR (default ~/.claude). Ambient, not part of
-	// injector identity (docs/wake-lifecycle.md §9.4).
+	// injector identity (docs/wake-operations.md#injector-identity).
 	ConfigDir string
 	StateDir  string
 	AckWait   time.Duration
@@ -512,11 +512,11 @@ func scanJSONLCwd(r io.Reader, dropPartialFirstLine bool) (string, error) {
 
 func claudePrintAckSeen(logPath, payload string) (bool, error) {
 	// Submitted = the post-init isReplay echo of THIS child's stdin line.
-	// Live 2026-08-26 Claude 2.1.246: resume a session whose jsonl already
-	// contained text T, then stdin the same T with --replay-user-messages.
-	// stdout had exactly one isReplay user event (the stdin line), not a
-	// replay of the historical turn. Post-init payload match is enough;
-	// we do not snapshot jsonl uuids.
+	// Verified live on Claude Code 2.1.246: resume a session whose jsonl
+	// already contained text T, then stdin the same T with
+	// --replay-user-messages. stdout had exactly one isReplay user event (the
+	// stdin line), not a replay of the historical turn. Post-init payload
+	// match is enough; we do not snapshot jsonl uuids.
 	f, err := os.Open(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {

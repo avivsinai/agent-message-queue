@@ -55,7 +55,7 @@ func validateWakeRestartStageRequestPlatform(record wakeRestartRecord) error {
 }
 
 // planWakeRestartStageUnderAMQHomePlatform plans the stage path a later
-// release writes under ~/.amq/state/wake-stages (#1046).
+// release writes under ~/.amq/state/wake-stages.
 func planWakeRestartStageUnderAMQHomePlatform(record wakeRestartRecord) (string, error) {
 	if err := validateWakeRestartStageRequestPlatform(record); err != nil {
 		return "", err
@@ -98,7 +98,7 @@ func darwinWakeRestartStageRoot() (string, error) {
 
 // darwinWakeRestartAMQHomeStageRoot is ~/.amq/state/wake-stages. This binary
 // validates and prunes stages there so that a restart staged by a later
-// release can finish here, but it writes no new stage there (#1046).
+// release can finish here, but it writes no new stage there.
 func darwinWakeRestartAMQHomeStageRoot() (string, error) {
 	home, err := amqhome.Dir()
 	if err != nil {

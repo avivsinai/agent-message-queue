@@ -13,7 +13,7 @@ import (
 )
 
 // platformWriterLockInspector uses F_GETLK without taking the lock. Live check
-// on macOS (2026-08-26): a Codex GUI-held flock on
+// on macOS: a Codex GUI-held flock on
 // ~/.codex/thread-writer-locks/<uuid>.lock is visible to F_GETLK as Type=F_WRLCK
 // with Pid=-1, and LOCK_EX|LOCK_NB on the same fd returns EAGAIN. An idle file
 // returns Type=F_UNLCK. Inspection errors fail closed; lsof is not a lock
