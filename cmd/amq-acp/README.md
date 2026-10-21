@@ -400,6 +400,16 @@ cannot load sessions, the record belongs to another agent or directory, or
 the load fails, the host opens a new session and says so on stderr. The
 startup line says whether the session is `new` or `resumed`.
 
+The owner can drive the same ACP session from Buzz through `amq-remote`: a
+manifest entry `{"kind":"acp","target":"grok","config":{"handle":"grok"}}`
+attaches to the host through files under the same directory (see
+[the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire)). A
+remote request runs only while no turn is in flight and the inbox is empty,
+and is otherwise refused `busy`. Its text goes to the agent verbatim, and the
+answer comes back as the request's result. A tool call during a remote
+request shows in Buzz as an approval the owner can reject; the host rejects
+it anyway after five minutes, and approve from Buzz is not offered.
+
 `amq-acp host --check -- <agent command>` probes a harness before you use
 it: it runs only `initialize`, with no AMQ root, handle, or session, prints
 the agent's protocol version, info, `load_session`, and capabilities as
