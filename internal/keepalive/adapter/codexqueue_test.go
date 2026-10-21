@@ -48,7 +48,7 @@ func testCodexQueue(home, bin string, runner CommandRunner, lock WriterLockInspe
 }
 
 func TestDefaultRegistryRegistersCodexQueue(t *testing.T) {
-	if _, err := DefaultRegistry().Get("codex-queue"); err != nil {
+	if _, err := DefaultRegistry(nil).Get("codex-queue"); err != nil {
 		t.Fatalf("DefaultRegistry().Get(%q) failed: %v", "codex-queue", err)
 	}
 	cap := (CodexQueue{}).Capability()

@@ -710,7 +710,7 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 			if _, err := Reconcile(req); !errors.Is(err, crash) {
 				t.Fatalf("crash error = %v", err)
 			}
-			inspection, err := InspectLease(req.Root)
+			inspection, err := inspectLease(req.Root)
 			if err != nil {
 				t.Fatal(err)
 			}

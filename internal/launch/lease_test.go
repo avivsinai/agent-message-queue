@@ -43,7 +43,7 @@ func TestAcquireLeaseExclusiveAndRelease(t *testing.T) {
 
 func TestStaleLeaseIsReplaceableAfterCrash(t *testing.T) {
 	dir, root := openTestRoot(t)
-	if err := os.MkdirAll(filepath.Dir(LeasePath(dir)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(leasePath(dir)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeHostileLease(t, dir, leaseRecord{
@@ -63,7 +63,7 @@ func TestStaleLeaseIsReplaceableAfterCrash(t *testing.T) {
 
 func TestUnverifiedHolderFailsClosed(t *testing.T) {
 	dir, root := openTestRoot(t)
-	if err := os.MkdirAll(filepath.Dir(LeasePath(dir)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(leasePath(dir)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeHostileLease(t, dir, leaseRecord{
@@ -84,7 +84,7 @@ func TestUnverifiedHolderFailsClosed(t *testing.T) {
 	if !errors.As(err, &unverified) {
 		t.Fatalf("acquire = %v, want LeaseUnverifiedError", err)
 	}
-	got, err := os.ReadFile(LeasePath(dir))
+	got, err := os.ReadFile(leasePath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestUnverifiedHolderFailsClosed(t *testing.T) {
 
 func TestLeaseSymlinkAndPermissiveModeRefused(t *testing.T) {
 	dir, root := openTestRoot(t)
-	path := LeasePath(dir)
+	path := leasePath(dir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func writeHostileLease(t *testing.T, dir string, record leaseRecord, mode os.Fil
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(LeasePath(dir), data, mode); err != nil {
+	if err := os.WriteFile(leasePath(dir), data, mode); err != nil {
 		t.Fatal(err)
 	}
 }

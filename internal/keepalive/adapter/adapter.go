@@ -109,30 +109,26 @@ func NewRegistry(adapters ...Adapter) Registry {
 	return out
 }
 
-func DefaultRegistry() Registry {
-	// claude-desktop and codex-app are registered and reachable behind the
-	// capability gate in app.registerWithOptions: a caller gets one only by
-	// explicitly accepting a requires-human seat (--accept-requires-human) with
-	// delivery/session minima at or below what the target declares. With the
-	// default zero-value minimum both are refused automatically, and a
-	// submitted/unattended caller is refused too. (The Codex app's dead
-	// execute-javascript path stays dead, but its live codex://
-	// deep-link prefill seat is shipped here.)
-	//
-	// codex-queue is the honest submitted GUI/TUI seat: it enqueues into a
-	// thread that already has an active writer. It satisfies a submitted +
-	// existing-exact unattended minimum without --accept-requires-human.
-	// claude-print is the honest submitted CLI seat into an exact existing
-	// Claude Code session. It satisfies a submitted + existing-exact
-	// unattended minimum without --accept-requires-human. CLAUDE_CONFIG_DIR
-	// is ambient (docs/wake-operations.md#injector-identity).
-	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{}, ClaudePrint{})
-}
-
-// DefaultRegistryWithLogf returns the production adapter set with non-fatal
-// adapter diagnostics wired to logf. Callers that do not own a diagnostic
-// stream can continue using DefaultRegistry.
-func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
+// DefaultRegistry returns the production adapter set with non-fatal adapter
+// diagnostics wired to logf; a nil logf drops them.
+//
+// claude-desktop and codex-app are registered and reachable behind the
+// capability gate in app.registerWithOptions: a caller gets one only by
+// explicitly accepting a requires-human seat (--accept-requires-human) with
+// delivery/session minima at or below what the target declares. With the
+// default zero-value minimum both are refused automatically, and a
+// submitted/unattended caller is refused too. (The Codex app's dead
+// execute-javascript path stays dead, but its live codex://
+// deep-link prefill seat is shipped here.)
+//
+// codex-queue is the honest submitted GUI/TUI seat: it enqueues into a
+// thread that already has an active writer. It satisfies a submitted +
+// existing-exact unattended minimum without --accept-requires-human.
+// claude-print is the honest submitted CLI seat into an exact existing
+// Claude Code session. It satisfies a submitted + existing-exact
+// unattended minimum without --accept-requires-human. CLAUDE_CONFIG_DIR
+// is ambient (docs/wake-operations.md#injector-identity).
+func DefaultRegistry(logf func(format string, args ...any)) Registry {
 	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{}, ClaudePrint{})
 }
 
