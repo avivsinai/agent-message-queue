@@ -44,9 +44,7 @@ reads `~/.amq/acp.settings` at the start of each turn.
   `amq-keepalive supervise`: `false` stops new replacements live, and `true`
   enables them again in a process that started enabled. `true` cannot enable
   a process started with `--no-self-upgrade`, because enabling needs the
-  baseline a process captures at start; restart it. The key exists in this
-  version and later. An older wake refuses a settings file that holds it and
-  keeps its last good settings; a refused machine file never blocks a start.
+  baseline a process captures at start; restart it.
 - Identity is the exception. A value bound into a lock, a target, or resume
   state is fixed for the life of the process: `--me`, `--root`, `--inject-*`,
   `--interrupt-cmd`, and `--retry-until`. Changing it live would let a running
@@ -80,31 +78,32 @@ read and write:
 
 ## Launch trust state
 
-On a new machine, launch trust state lives in `~/.amq/state`. The legacy
-platform state directory (`<legacy>` below) is `$XDG_STATE_HOME/amq`, else the
-user config directory on macOS and Windows, else `~/.local/state/amq`. Older
-`amq` binaries keep trust there.
+Launch trust state lives in `~/.amq/state/launch`. The legacy platform state
+directory (`<legacy>` below) is `$XDG_STATE_HOME/amq`, else the user config
+directory on macOS and Windows, else `~/.local/state/amq`.
 
-- When `<legacy>/launch` exists, launch trust stays in the legacy directory.
-  Older and newer `amq` binaries then read and write the same trust records.
+- When `<legacy>/launch` exists, launch trust stays in the legacy directory,
+  so every `amq` binary reads and writes the same trust records.
 - `XDG_STATE_HOME` only locates the legacy directory. It does not move
   `~/.amq/state`.
 - `amq doctor --migrate-home` moves `<legacy>/launch` to
   `~/.amq/state/launch` in one rename, so launches keep their trust. Use
   `--dry-run` to see the move first. First upgrade or remove every `amq`
-  older than 0.97.0: an older binary writes `<legacy>/launch` again. The
-  command reads the version of each `amq` on `PATH` without running it, and
-  refuses (exit 6) when one is older or its version cannot be read. It also
+  below the migration version floor (`migrateHomeVersionFloor` in
+  `internal/cli/doctor_migrate_home.go`): a binary below it writes
+  `<legacy>/launch` again. The command reads the version of each `amq` on
+  `PATH` without running it, and refuses (exit 6) when one is below the floor
+  or its version cannot be read. It also
   refuses when `~/.amq/state/launch` already exists, or when the two
   directories are on different filesystems. A refusal changes nothing.
 - The command moves the `<legacy>` that its own `XDG_STATE_HOME` selects.
-  Programs that embed the `launchapi` package cannot be checked. An older
-  one asks for trust again and recreates `<legacy>/launch`.
+  Programs that embed the `launchapi` package cannot be checked. One built
+  below the floor asks for trust again and recreates `<legacy>/launch`.
 - Do not delete `<legacy>/launch` by hand. If `~/.amq/state/launch` also
   exists, its older trust records become active again without a new confirm.
-- When both exist, `<legacy>/launch` was written after a newer `amq` wrote
-  `~/.amq/state/launch`, so `~/.amq/state/launch` is inert. Find the older
-  binary or program that wrote `<legacy>/launch`, remove
+- When both exist, `<legacy>/launch` is authoritative and
+  `~/.amq/state/launch` is inert. Find the binary or program below the floor
+  that wrote `<legacy>/launch`, remove
   `~/.amq/state/launch` (the only effect is a new trust prompt for the
   projects it holds), and run `amq doctor --migrate-home` again. Never
   remove `<legacy>/launch`.
@@ -116,14 +115,15 @@ user config directory on macOS and Windows, else `~/.local/state/amq`. Older
 
 ## Keepalive home
 
-On a new install, `amq-keepalive` keeps its registry, hook script, hook log,
-and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
+`amq-keepalive` keeps its registry, hook script, hook log, and adapter state
+in `~/.amq/keepalive`.
 
-- When `~/.amq-keepalive` exists, keepalive continues to use it. Older and
-  newer binaries then share one registry.
+- When the legacy `~/.amq-keepalive` exists, keepalive uses it, so every
+  binary shares one registry.
 - When both `~/.amq-keepalive` and `~/.amq/keepalive` exist, every command
-  that uses the default path refuses until you remove one. Normally an older
-  binary recreated `~/.amq-keepalive`, and the error tells you to remove it.
+  that uses the default path refuses until you remove one. Usually a binary
+  below the version floor recreated `~/.amq-keepalive`, and the error tells
+  you to remove it.
   A supervisor started with `--registry` continues to use that path.
 - A symlink or a non-directory at either path is refused.
 - `amq doctor --migrate-home` moves `~/.amq-keepalive` to `~/.amq/keepalive`
@@ -152,8 +152,8 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
   process runs, whatever its version: a running one may hold the legacy path
   and create it again. It also refuses while the supervisor job or the
   amq-remote login service is loaded, or while an `up` or inject lock is held.
-  It refuses when an `amq`, `amq-keepalive` or `amq-remote` older than 0.97.0
-  can run: on `PATH`, in the plist (with the plist's `PATH`), in a hook, as a
+  It refuses when an `amq`, `amq-keepalive` or `amq-remote` below the
+  version floor can run: on `PATH`, in the plist (with the plist's `PATH`), in a hook, as a
   wake's injector, or as the amq-remote login service. It refuses when
   another launchd or systemd user unit names `~/.amq-keepalive`, and when the
   supervisor plist is a symlink or differs from what
@@ -169,9 +169,9 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
 
 ## Locations outside `~/.amq`
 
-These locations predate the rule and stay where they are:
+These locations stay outside the per-user home:
 
-- Darwin wake restart stages are written to `<legacy>/wake-stages`, also on a
-  new machine; a wake also accepts, validates, and prunes a stage under
+- Darwin wake restart stages are written to `<legacy>/wake-stages`, on every
+  machine; a wake also accepts, validates, and prunes a stage under
   `~/.amq/state/wake-stages`
   ([issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).
