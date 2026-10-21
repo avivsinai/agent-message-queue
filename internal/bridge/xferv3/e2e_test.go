@@ -3,6 +3,8 @@ package xferv3
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -31,7 +33,7 @@ func TestP2PTwoPeersExchangeOverPipe(t *testing.T) {
 		_ = left.Close()
 		_ = right.Close()
 	})
-	if err := SyncPipe(left, right, mac.state, box.state); err != nil {
+	if err := syncPipe(left, right, mac.state, box.state); err != nil {
 		t.Fatalf("sync pipe: %v", err)
 	}
 
@@ -67,7 +69,7 @@ func TestP2POneSidedResponderHasMail(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() {
-		done <- SyncPipe(left, right, mac.state, box.state)
+		done <- syncPipe(left, right, mac.state, box.state)
 	}()
 	select {
 	case err := <-done:
@@ -105,7 +107,7 @@ func TestRoundClosesWhenFileFailsAfterAdmission(t *testing.T) {
 		_ = left.Close()
 		_ = right.Close()
 	})
-	if err := SyncPipe(left, right, mac.state, box.state); err == nil {
+	if err := syncPipe(left, right, mac.state, box.state); err == nil {
 		t.Fatal("session completed after a post-admission File error")
 	}
 	if got := readInbox(t, box.root, "grok"); len(got) != 0 {
@@ -232,4 +234,30 @@ func readInbox(t *testing.T, root, agent string) [][]byte {
 		out = append(out, raw)
 	}
 	return out
+}
+
+// syncPipe runs one full round between two hosts over an in-memory pipe:
+// left dials as the initiator, right accepts.
+func syncPipe(left, right io.ReadWriter, a, b HostState) error {
+	errc := make(chan error, 2)
+	go func() {
+		sess, err := Dial(left, a.Static, b.Static.Public(), rand.Reader)
+		if err != nil {
+			errc <- err
+			return
+		}
+		errc <- Round(sess, a, true)
+	}()
+	go func() {
+		sess, err := Accept(right, b.Static, a.Static.Public(), rand.Reader)
+		if err != nil {
+			errc <- err
+			return
+		}
+		errc <- Round(sess, b, false)
+	}()
+	if err := <-errc; err != nil {
+		return err
+	}
+	return <-errc
 }

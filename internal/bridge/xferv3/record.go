@@ -55,13 +55,12 @@ func (r Record) ID() ID {
 	return ID{sum: sha256.Sum256(raw)}
 }
 
-func (r Record) PayloadSize() uint64  { return r.size }
-func (r Record) PayloadSum() [32]byte { return r.sum }
-func (r Record) Source() Host         { return r.source }
-func (r Record) Handle() Handle       { return r.handle }
-func (r Record) Dest() Dest           { return r.dest }
-func (r Record) Message() MessageID   { return r.msg }
-func (r Record) Thread() ThreadID     { return r.thread }
+func (r Record) PayloadSize() uint64 { return r.size }
+func (r Record) Source() Host        { return r.source }
+func (r Record) Handle() Handle      { return r.handle }
+func (r Record) Dest() Dest          { return r.dest }
+func (r Record) Message() MessageID  { return r.msg }
+func (r Record) Thread() ThreadID    { return r.thread }
 
 func (id ID) String() string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(id.sum[:]))

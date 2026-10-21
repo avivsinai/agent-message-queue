@@ -69,10 +69,13 @@ jobs:
         # TestR2NativeEnqueueAndConsumer is a data-race regression: it can
         # only fail under -race.
         run: go test -race -count=1 ./internal/remote/activity/
-      - name: Hook script tests (serial)
-        # Real SessionStart bash script; wall-clock sensitive, so it runs
-        # alone with -p 1 instead of inside the parallel suite above.
-        run: AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
+      - name: Hook script and wake process tests (serial)
+        # Real SessionStart bash script and fake amq wake child processes;
+        # wall-clock sensitive, so they run alone with -p 1 instead of inside
+        # the parallel suite above.
+        run: |
+          AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
+          AMQ_WAKE_PROCESS_TESTS=1 go test -p 1 -count=1 -run '^(TestStartWakeWaitsForReadyFileAndPassesTarget|TestStartWakeDoesNotInheritCoopOwnerToken|TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages|TestStartWakeFailsWhenProcessExitsBeforeReady|TestStartWakePreservesAlreadyTextWithoutRelabelingFailure|TestStartWakeCancelAfterReadyDoesNotKillEstablishedWake|TestStartWakeTimesOutWhenReadyFileNeverAppears|TestStartWakeDrainSurvivesLauncherProcessExit|TestRetireWakeEmitsExactArgvAndParsesRetired)$' ./internal/keepalive/amq/
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -135,7 +138,10 @@ jobs:
           go-version-file: go.mod
       - name: Test
         run: go test ./...
-      - name: Hook script tests (serial)
-        # Real SessionStart bash script; wall-clock sensitive, so it runs
-        # alone with -p 1 instead of inside the parallel suite above.
-        run: AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
+      - name: Hook script and wake process tests (serial)
+        # Real SessionStart bash script and fake amq wake child processes;
+        # wall-clock sensitive, so they run alone with -p 1 instead of inside
+        # the parallel suite above.
+        run: |
+          AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
+          AMQ_WAKE_PROCESS_TESTS=1 go test -p 1 -count=1 -run '^(TestStartWakeWaitsForReadyFileAndPassesTarget|TestStartWakeDoesNotInheritCoopOwnerToken|TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages|TestStartWakeFailsWhenProcessExitsBeforeReady|TestStartWakePreservesAlreadyTextWithoutRelabelingFailure|TestStartWakeCancelAfterReadyDoesNotKillEstablishedWake|TestStartWakeTimesOutWhenReadyFileNeverAppears|TestStartWakeDrainSurvivesLauncherProcessExit|TestRetireWakeEmitsExactArgvAndParsesRetired)$' ./internal/keepalive/amq/

@@ -2,10 +2,8 @@ package xferv3
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,28 +381,4 @@ func noReason(err error) string {
 		}
 	}
 	return ReasonBusy
-}
-
-func SyncPipe(left, right io.ReadWriter, a, b HostState) error {
-	errc := make(chan error, 2)
-	go func() {
-		sess, err := Dial(left, a.Static, b.Static.Public(), rand.Reader)
-		if err != nil {
-			errc <- err
-			return
-		}
-		errc <- Round(sess, a, true)
-	}()
-	go func() {
-		sess, err := Accept(right, b.Static, a.Static.Public(), rand.Reader)
-		if err != nil {
-			errc <- err
-			return
-		}
-		errc <- Round(sess, b, false)
-	}()
-	if err := <-errc; err != nil {
-		return err
-	}
-	return <-errc
 }

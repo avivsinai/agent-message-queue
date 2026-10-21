@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -20,7 +19,11 @@ import (
 // One stable lock file per spool dir avoids unbounded per-key lock-file
 // growth. Every Open instance/process that touches the same spool dir
 // acquires this same lock for each transaction, so concurrent writers are
-// serialized at the OS level even across processes.
+// serialized at the OS level even across processes. Within one process the
+// flock alone is enough too: flock locks belong to the open file description,
+// and every acquisition opens the file anew, so two goroutines exclude each
+// other exactly as two processes do. Spools in different dirs never wait on
+// each other.
 //
 // This follows internal/remote/requests/lock_unix.go's OS primitive, but is
 // a BLOCKING exclusive lock (the request store's owner lock is nonblocking
@@ -30,15 +33,11 @@ type spoolLock struct {
 	f *os.File
 }
 
-var spoolLockMu sync.Mutex // serializes lock-file path creation within a process
-
 // acquireSpoolLock opens (creating if missing) the stable lock file and
 // acquires a blocking exclusive flock. The lock is released by release().
 // On unsupported platforms (lock_other.go) the caller refuses CodeUnsupported
 // before reaching here.
 func acquireSpoolLock(path string) (*spoolLock, error) {
-	spoolLockMu.Lock()
-	defer spoolLockMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("open spool lock: %w", err)

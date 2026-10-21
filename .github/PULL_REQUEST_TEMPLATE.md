@@ -1,6 +1,7 @@
 ## Summary
 
-Brief description of changes.
+State the user-visible change and the reason. A bead id or review finding
+may appear once, at the end, as a reference; no review-round labels.
 
 ## Changes
 

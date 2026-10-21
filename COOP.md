@@ -73,7 +73,7 @@ pin. See [session routing and safety](docs/session-routing.md).
 ### Low-level provisioning
 
 `amq coop init` provisions a queue for scripts and direct flows. Direct
-`coop exec` remains available for deliberate launches and legacy automation; it
+`coop exec` remains available for deliberate launches and scripts; it
 is not a second project-onboarding flow. Without an eligible root, it can create
 `.amqrc` and `.agent-mail` in the worktree; `--no-init` turns that into an error.
 
@@ -155,18 +155,9 @@ amq watch --timeout 60s
 
 ## Remote endpoint
 
-A remote endpoint is optional. It does not replace co-op messaging.
-
-1. Install `amq-remote` with the Homebrew `amq` formula or its release asset. See [INSTALL.md](INSTALL.md).
-2. Declare harness targets in `<AM_ROOT>/extensions/remote/manifest.json`. Kinds are `claude`, `codex`, `pi`, and `fake`.
-3. Run `amq-remote up --root <absolute-root>`. That supervises `serve`. One `up` owns a root; a second `up` for the same root refuses.
-4. Use `submit`, `status`, `wait`, and `cancel` against that endpoint. `doctor` reports whether the endpoint is reachable.
-5. `share --session <id>` mints the session body key the owner signs. It does not start the endpoint.
-6. To reach a target from Buzz, add a `relay` object (manifest `schema_version` 2) with one share per target. Pin its `native_session_id`: DM commands require it, and presence honors it. Buzz DM content is readable by the relay operator.
-7. To let a server you linked reach a target, run `amq-remote link add NAME URL --code CODE`, then `amq-remote attach --self --link NAME` in that session. The manifest gains a `links` entry (`schema_version` 2) with one share per binding (`consent` `passkey` or `local`, `tools` a profile name). The device key is `~/.amq/remote/root/extensions/remote/link/NAME/device.key` (0600), in the machine root unless `link add --root` names another.
-8. `doctor` lists each broken boundary under `failing`, with a remedy, and exits 6 while any remains.
-
-Flags and exit codes: [amq-remote](cmd/amq-remote/README.md). The design is [the remote-control ADR](docs/adr-remote-control.md). Pinned harness seams are [the compatibility manifest](docs/remote-compat.md).
+A remote endpoint is optional and does not replace co-op messaging. The
+[amq-remote companion](cmd/amq-remote/README.md) attaches to a running harness
+session; its manifest, commands, flags, and exit codes are in that README.
 
 ## Wake command (optional)
 
@@ -255,9 +246,7 @@ go build ./cmd/amq-keepalive
 ./amq-keepalive doctor
 ```
 
-Native Windows supports core queue commands and direct keepalive injection, not
-`coop exec`, `wake`, or terminal supervision. Use WSL for the complete workflow.
-Linux raw TTY injection can be disabled by kernel hardening; see the
+Platform limits for `coop exec`, `wake`, and terminal supervision are in the
 [platform capability matrix](INSTALL.md#platform-capability-matrix).
 
 ## Message format and spec workflow
