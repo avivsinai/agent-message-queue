@@ -168,13 +168,5 @@ func (c CodexApp) runner() CommandRunner {
 // an exact lowercase 8-4-4-4-12 hex uuid, so no path-segment, query, or extra
 // component can be smuggled into the URL built from the target.
 func parseCodexAppThreadUUID(target string) (string, error) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(target), codexAppTargetThreadPrefix)
-	if !ok {
-		return "", fmt.Errorf("unsupported Codex app target %q; use %q or %s<uuid>", target, codexAppTargetNew, codexAppTargetThreadPrefix)
-	}
-	id = strings.TrimSpace(id)
-	if !lowercaseThreadUUIDRe.MatchString(id) {
-		return "", fmt.Errorf("invalid Codex app thread uuid %q; want an exact lowercase 8-4-4-4-12 hex uuid", id)
-	}
-	return id, nil
+	return parseTargetUUID(target, codexAppTargetThreadPrefix, "Codex app", "thread", fmt.Sprintf("%q or %s<uuid>", codexAppTargetNew, codexAppTargetThreadPrefix))
 }

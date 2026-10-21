@@ -352,7 +352,7 @@ func TestGhosttyCreateSendsExactLineAfterHealthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := backend.agentCommand(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: wantAMQ, Root: root}, plan.Agents[0])
+	want := agentCommand(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: wantAMQ, Root: root}, plan.Agents[0])
 	found := false
 	for _, argv := range calls {
 		if len(argv) >= 3 && argv[0] == "input-text" && argv[2] == want {

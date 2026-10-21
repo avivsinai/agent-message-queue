@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -248,41 +247,13 @@ func (c ClaudePrint) probe(ctx context.Context, target string) (uuid, claudePath
 }
 
 func (c ClaudePrint) pinExecutable(ctx context.Context) (string, error) {
-	lookPath := c.LookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
-	}
-	looked, err := lookPath(platformExecutableName("claude"))
-	if err != nil {
-		return "", fmt.Errorf("claude not found on PATH (%w); put claude on PATH", err)
-	}
-	if !filepath.IsAbs(looked) {
-		abs, absErr := filepath.Abs(looked)
-		if absErr != nil {
-			return "", fmt.Errorf("resolve claude executable: %w; put claude on PATH", absErr)
-		}
-		looked = abs
-	}
-	if launch.ProviderForExecutable(looked) != launch.ClaudeProvider {
-		return "", fmt.Errorf("claude at %s has basename %q, want %q; put claude on PATH", looked, filepath.Base(looked), launch.ClaudeProvider)
-	}
-	resolved, err := filepath.EvalSymlinks(looked)
-	if err != nil {
-		return "", fmt.Errorf("resolve claude at %s: %w; put claude on PATH", looked, err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("stat claude at %s: %w; put claude on PATH", resolved, err)
-	}
-	if !isExecutableRegularFile(info) {
-		return "", fmt.Errorf("claude at %s is not an executable regular file; put claude on PATH", resolved)
-	}
-	out, err := c.runner().Run(ctx, resolved, "--help")
-	help := string(out)
-	if err != nil || !strings.Contains(help, "--resume") || !strings.Contains(help, "--output-format") || !strings.Contains(help, "--replay-user-messages") {
-		return "", fmt.Errorf("claude at %s lacks print/resume stream-json; put claude on PATH", resolved)
-	}
-	return resolved, nil
+	return pinExecutable(ctx, c.LookPath, c.runner(), providerExecutable{
+		provider:  launch.ClaudeProvider,
+		helpArgs:  []string{"--help"},
+		helpFlags: []string{"--resume", "--output-format", "--replay-user-messages"},
+		lacks:     "print/resume stream-json",
+		hint:      "put claude on PATH",
+	})
 }
 
 func (c ClaudePrint) configDir() (string, error) {
@@ -629,15 +600,7 @@ func lastLogLines(path string, n int) string {
 }
 
 func parseClaudePrintSessionUUID(target string) (string, error) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(target), claudePrintTargetSessionPrefix)
-	if !ok {
-		return "", fmt.Errorf("unsupported Claude print target %q; use %s<uuid>", target, claudePrintTargetSessionPrefix)
-	}
-	id = strings.TrimSpace(id)
-	if !lowercaseThreadUUIDRe.MatchString(id) {
-		return "", fmt.Errorf("invalid Claude print session uuid %q; want an exact lowercase 8-4-4-4-12 hex uuid", id)
-	}
-	return id, nil
+	return parseTargetUUID(target, claudePrintTargetSessionPrefix, "Claude print", "session", claudePrintTargetSessionPrefix+"<uuid>")
 }
 
 type processSpec struct {
