@@ -225,7 +225,7 @@ func TestBodyKeyFileLifecycle(t *testing.T) {
 	}
 }
 
-// TestPerKindCredential pins the architect ruling (2026-09-22): one NIP-OA
+// TestPerKindCredential pins that there is one NIP-OA
 // condition string per kind; Satisfies is fully conjunctive; a multi-kind
 // string is satisfiable by no event and is rejected as a credential; a
 // kind-less string is rejected.
@@ -275,7 +275,7 @@ func TestPerKindCredential(t *testing.T) {
 	}
 }
 
-// TestMintRefusesSymlinkedBodyPub pins verifier r5 P1-2: a symlink planted
+// TestMintRefusesSymlinkedBodyPub pins that a symlink planted
 // at body.pub is refused before the write; the out-of-root target is never
 // truncated. Mint guards body.key with lstatKeyLeaf; body.pub is a state
 // leaf under the same confinement rule.
@@ -290,9 +290,9 @@ func TestMintRefusesSymlinkedBodyPub(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Mint(dir); err == nil {
-		t.Fatal("Mint accepted a symlinked body.pub (r5 P1-2: would truncate the target)")
+		t.Fatal("Mint accepted a symlinked body.pub (would truncate the target)")
 	}
-	// Verifier r6 P1 (second half): the refusal must come BEFORE the
+	// The refusal must come BEFORE the
 	// body.key write — no half-minted key directory whose symlinked pub
 	// leaf is never re-checked on a later run.
 	if _, err := os.Lstat(filepath.Join(dir, "body.key")); !errors.Is(err, os.ErrNotExist) {

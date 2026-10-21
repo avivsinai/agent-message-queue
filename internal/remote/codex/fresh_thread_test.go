@@ -10,10 +10,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// Bead agent-message-queue-611.54 (live, codex-cli 0.160.0): a loaded Codex
+// Regression: agent-message-queue-611.54 (codex-cli 0.160.0): a loaded Codex
 // thread with no turn yet failed attach with only "no rollout found"; the
-// owner saw no target and no reason. The refusal now names the action. Review
-// of #983 (Pro, P2): only that -32600 refusal is rewritten.
+// owner saw no target and no reason. The refusal now names the action; only that
+// -32600 refusal is rewritten.
 func TestAttachToAThreadWithNoTurnSaysWhatToDo(t *testing.T) {
 	for _, tc := range []struct {
 		code   int

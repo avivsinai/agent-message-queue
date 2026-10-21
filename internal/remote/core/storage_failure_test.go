@@ -12,11 +12,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestAsyncStorageFailureIsVisibleToTheOwner reproduces agent-message-queue
-// -611.50: when the durable write of a completion failed, the endpoint built
+// TestAsyncStorageFailureIsVisibleToTheOwner reproduces agent-message-queue-611.50:
+// when the durable write of a completion failed, the endpoint built
 // an uncertain projection that only test observers saw, so request.get and
-// Wait kept showing running until Reconcile. The other rows are the review
-// findings on the first fix: the projection must end with the Reconcile pass
+// Wait kept showing running until Reconcile. The other rows cover the projection:
+// it must end with the Reconcile pass
 // even when that pass writes nothing, and a durable terminal state wins.
 func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -42,7 +42,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 	}
 
 	t.Run("completion write fails", func(t *testing.T) {
-		ep, rt, store, _ := b14cEndpoint(t)
+		ep, rt, store, _ := raceEndpoint(t)
 		const id = "11111111-1111-4111-8111-111111111150"
 		if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
 			t.Fatalf("submit: %v", err)
@@ -56,7 +56,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 			t.Fatalf("store get: %v", err)
 		}
 		// A carrier tracks revisions, so the projection must not carry the
-		// revision whose write failed (Pro review of #941, P1).
+		// revision whose write failed (#941).
 		if s := get(t, ep, id); s.State != protocol.StateUncertain || s.Code != protocol.CodeStorageFull || s.Revision != durable.Revision {
 			t.Fatalf("get = %s/%s rev %d, want uncertain/storage_full at the stored rev %d", s.State, s.Code, s.Revision, durable.Revision)
 		}
@@ -75,7 +75,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 	})
 
 	t.Run("reconcile that writes nothing ends it", func(t *testing.T) {
-		ep, rt, store, _ := b14cEndpoint(t)
+		ep, rt, store, _ := raceEndpoint(t)
 		const id = "11111111-1111-4111-8111-111111111151"
 		if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
 			t.Fatalf("submit: %v", err)
@@ -95,7 +95,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 	})
 
 	t.Run("stays visible while reconcile waits on the harness", func(t *testing.T) {
-		ep, rt, store, _ := b14cEndpoint(t)
+		ep, rt, store, _ := raceEndpoint(t)
 		const id = "11111111-1111-4111-8111-111111111153"
 		if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
 			t.Fatalf("submit: %v", err)
@@ -122,7 +122,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 	})
 
 	t.Run("durable terminal state wins", func(t *testing.T) {
-		ep, rt, store, _ := b14cEndpoint(t)
+		ep, rt, store, _ := raceEndpoint(t)
 		const id = "11111111-1111-4111-8111-111111111152"
 		rt.HoldAdmission()
 		t.Cleanup(rt.ReleaseAdmission)
@@ -139,11 +139,11 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 			}
 			return rec.State
 		}
-		if !b14cWait(func() bool { return state() == protocol.StateDispatching }) {
+		if !waitUntil(func() bool { return state() == protocol.StateDispatching }) {
 			t.Fatal("submit never reached dispatching")
 		}
 		rt.CancelRun(id)
-		if !b14cWait(func() bool { return state() == protocol.StateCancelled }) {
+		if !waitUntil(func() bool { return state() == protocol.StateCancelled }) {
 			t.Fatal("native cancel never reached the record")
 		}
 		readOnly(t, store)

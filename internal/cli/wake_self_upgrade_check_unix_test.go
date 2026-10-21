@@ -76,7 +76,7 @@ func writeWakeCheckSelfUpgradeDiagnostic(
 
 func writeWakeCheckSelfUpgradeRaw(t *testing.T, fixture wakeRestartFixture, raw []byte) {
 	t.Helper()
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, wakeGuardWait, func(dirfd int) error {
 		return writeWakeRepairMetadataAt(
 			dirfd,
 			fixture.agentDir,
@@ -96,7 +96,7 @@ func writeWakeCheckSelfUpgradeRestartRecord(
 	record wakeRestartRecord,
 ) {
 	t.Helper()
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)

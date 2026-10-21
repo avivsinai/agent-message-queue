@@ -13,7 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// Design S3: a pinned agent archives itself when its binding is removed
+// A pinned agent archives itself when its binding is removed
 // (/amq-remote off) and unarchives itself when the same session binds again.
 func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -58,7 +58,7 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	}
 }
 
-// Review of S3 P1-1: two agents pinned to one session shared one marker, so
+// Regression: two agents pinned to one session shared one marker, so
 // each reset the other's state. Archive repeated on every tick, and
 // unarchive never ran when the binding came back.
 func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
@@ -106,7 +106,7 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 }
 
 // Desktop's Create agent runs one agent as N identical workers (parallelism
-// 10, harness log 2026-10-19), all with one Buzz identity. Each worker read
+// 10), all with one Buzz identity. Each worker read
 // the shared marker and archived the agent once more; only the lifecycle
 // leader may act, and another worker takes over when the leader stops.
 func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
@@ -154,7 +154,7 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 	}
 }
 
-// Design S4: the helper creates its control channel once, adds the owner,
+// The helper creates its control channel once, adds the owner,
 // and asks Desktop for one agent per bound session. Once that agent runs,
 // the helper asks nothing more.
 func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
@@ -198,7 +198,7 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	}
 }
 
-// Seen live on 2026-10-19: the relay refused Desktop's add of a new session
+// Regression: the relay refused Desktop's add of a new session
 // agent to the control channel ("only owners/admins may add private-channel
 // members"), because the helper had added the owner as a plain member. A
 // helper whose marker predates the fix makes the owner an admin of its
@@ -247,7 +247,7 @@ func recordHelperCalls(calls *[]string, control string) func(time.Duration, ...s
 	}
 }
 
-// Review of S4 P1-1: Desktop shows one draft at a time and drops a draft
+// Regression: Desktop shows one draft at a time and drops a draft
 // that arrives while one is open. The helper drafted every new session in
 // one tick, so only the first opened and the others spent their tries.
 func TestHelperDraftsOneSessionPerWindow(t *testing.T) {

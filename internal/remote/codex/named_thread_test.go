@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// 4ip (field, codex-cli 0.160, 2026-10-05): a Codex TUI on the shared
+// Regression: agent-message-queue-4ip, a Codex TUI on the shared
 // app-server daemon never got the session name. coop exec now creates the
 // thread on the daemon, names it, persists it, and resumes it.
 func TestStartNamedThreadCreatesNamesAndPersistsTheThread(t *testing.T) {
@@ -26,7 +26,7 @@ func TestStartNamedThreadCreatesNamesAndPersistsTheThread(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-611.63 (live, codex-cli 0.160.1): naming that
+// Regression: agent-message-queue-611.63, naming that
 // failed after thread/start left a named thread nobody resumes. The thread
 // is archived when a later step fails.
 func TestStartNamedThreadArchivesAThreadItCouldNotFinish(t *testing.T) {

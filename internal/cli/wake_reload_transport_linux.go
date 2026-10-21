@@ -122,7 +122,7 @@ func startLinuxWakeReloadTransport(
 	}
 
 	var current wakeLockInspection
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		current = inspectWakeLockAt(dirfd, agentDir, root, agent)
 		return validateLinuxWakeReloadCurrentLock(expected, current, root, agent, owner)
 	}); err != nil {
@@ -572,7 +572,9 @@ func (transport *linuxWakeReloadTransport) authorize(request wakeReloadTransport
 	if linuxWakeReloadBeforeGuard != nil {
 		linuxWakeReloadBeforeGuard()
 	}
-	authErr := withWakeLifecycleGuardNoWaitInDir(transport.agentDir, func(dirfd int) error {
+	// Reload authentication runs in a handler that Close must be able to drain
+	// promptly. It refuses a held guard instead of waiting for another owner.
+	authErr := withWakeLifecycleGuardInDir(transport.agentDir, wakeGuardOptions{noWait: true}, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, transport.agentDir, transport.root, transport.agent)
 		return validateLinuxWakeReloadCurrentLock(
 			transport.expected,

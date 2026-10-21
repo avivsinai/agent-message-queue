@@ -98,7 +98,7 @@ func withWakeMutationScopeForRetainedCleanup(
 	fn func(wakeRetainedCleanupScope) error,
 ) error {
 	if !allowMissing {
-		return withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
+		return withWakeMutationScopeInDir(agentDir, wakeGuardExistingNoWait, func(scope *wakeMutationScope) error {
 			return fn(scope)
 		})
 	}
@@ -126,7 +126,7 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 	fn func(*wakeMutationScope) error,
 ) error {
 	if !allowMissing {
-		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+		return withWakeMutationScopeInDir(agentDir, wakeGuardExistingNoWait, fn)
 	}
 	missing, err := wakeLifecycleGuardMissingAt(agentDir)
 	if err != nil {
@@ -134,9 +134,9 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 	}
 	wakeMutationAfterLifecycleGuardProbe(agentDir, missing)
 	if missing {
-		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
+		return withWakeMutationScopeInDir(agentDir, wakeGuardNoWait, fn)
 	}
-	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+	return withWakeMutationScopeInDir(agentDir, wakeGuardExistingNoWait, fn)
 }
 
 // sendPidfdSignal is for non-termination effects. It requires the retained

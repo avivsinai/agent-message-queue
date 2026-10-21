@@ -12,7 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestCrashAfterTerminalCommitReplaysAck reproduces Pro B06: the endpoint
+// TestCrashAfterTerminalCommitReplaysAck reproduces a defect: the endpoint
 // crashes after the terminal result is durably committed but before (or
 // during) the native AcknowledgeResult call. On restart, startup
 // reconciliation must replay the native acknowledgement for the terminal
@@ -121,7 +121,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 		t.Fatalf("ack digest = %q, want evidence digest %q", rec.AckDigest, want)
 	}
 	if !rec.Acknowledged {
-		t.Fatal("record not marked Acknowledged after the replay (611.22.34)")
+		t.Fatal("record not marked Acknowledged after the replay")
 	}
 }
 
@@ -133,7 +133,7 @@ func recState(rec *requests.Record, ok bool) any {
 }
 
 // TestReconcileConvergesAfterSuccessfulAck reproduces the follow-up defect
-// found reviewing PR #730: replayTerminalAck had no convergence guard, so once
+// found reviewing #730: replayTerminalAck had no convergence guard, so once
 // a terminal result was acknowledged normally, every later Reconcile/Tick
 // re-fired the native AcknowledgeResult for it — unbounded, for the life of the
 // daemon. A converged endpoint acks a terminal result exactly once: the
@@ -173,7 +173,7 @@ func TestReconcileConvergesAfterSuccessfulAck(t *testing.T) {
 }
 
 // countingAttachment wraps an Attachment and counts Lookup + AcknowledgeResult
-// calls, so the 611.22.34 regression can prove the replay path short-circuits
+// calls, so the regression can prove the replay path short-circuits
 // already-acked records.
 type countingAttachment struct {
 	core.Attachment
@@ -199,7 +199,7 @@ func (c *countingAttachment) AcknowledgeResult(key requests.Key, epoch, digest s
 	c.Attachment.AcknowledgeResult(key, epoch, digest)
 }
 
-// TestCrashAfterAckDeliveredConvergesWithoutRelookup pins the 611.22.34 fix:
+// TestCrashAfterAckDeliveredConvergesWithoutRelookup pins #767:
 // crash at PointAfterAck — the native ack DELIVERED but the durable flag was
 // not written. After restart, Reconcile must converge: the record is marked
 // Acknowledged and NO further attachment Lookup or AcknowledgeResult happens
@@ -250,7 +250,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	}
 	// PointAfterAck crash: the native ack already DELIVERED, so the runtime
 	// retains nothing — but the durable flag was never written. Exactly the
-	// window 611.22.34 exists for.
+	// window #767 exists for.
 	if rt.UnacknowledgedResults() != 0 {
 		t.Fatal("precondition: after the PointAfterAck crash the runtime should retain nothing (the ack landed)")
 	}
@@ -279,7 +279,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !rec.Acknowledged {
-		t.Fatal("record not marked Acknowledged after the replay reconciliation (611.22.34)")
+		t.Fatal("record not marked Acknowledged after the replay reconciliation")
 	}
 
 	// Convergence: two more Reconciles must perform ZERO Lookups and ZERO
@@ -296,20 +296,20 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	counting.mu.Lock()
 	defer counting.mu.Unlock()
 	if counting.lookups != lookupsAfterFirst {
-		t.Fatalf("already-acked record was re-Lookuped %d extra time(s) across 2 reconciles — replay does not converge (agent-message-queue-611.22.34)", counting.lookups-lookupsAfterFirst)
+		t.Fatalf("already-acked record was re-Lookuped %d extra time(s) across 2 reconciles — replay does not converge (#767)", counting.lookups-lookupsAfterFirst)
 	}
 	if counting.acks != acksAfterFirst {
-		t.Fatalf("already-acked record was re-acked %d extra time(s) across 2 reconciles (agent-message-queue-611.22.34)", counting.acks-acksAfterFirst)
+		t.Fatalf("already-acked record was re-acked %d extra time(s) across 2 reconciles", counting.acks-acksAfterFirst)
 	}
 }
 
 // historyShapeAttachment returns the LITERAL codex lookupHistory shape for a
-// terminal history turn (attachment.go:745, post-611.22.34-B2 with Class set):
+// terminal history turn (attachment.go:745, with Class set):
 // Known, Admitted, Class=HistoryTerminated, RunID "turn:<id>", terminal state,
 // result carrying the NativeRef suffix the live event did not have. This is
 // what a RESTARTED codex attachment returns for a pre-upgrade record — NOT
 // the fake.Runtime EvidenceNone-after-release shortcut, which outran
-// production and hid this path (verifier round 1, B2).
+// production and hid this path.
 type historyShapeAttachment struct {
 	core.Attachment
 	lookups int
@@ -341,15 +341,15 @@ func (h *historyShapeAttachment) AcknowledgeResult(key requests.Key, epoch, dige
 	h.Attachment.AcknowledgeResult(key, epoch, digest)
 }
 
-// TestPreUpgradeRecordConvergesOnHistoryShape pins the B2 recut: a terminal
+// TestPreUpgradeRecordConvergesOnHistoryShape pins #767: a terminal
 // record already on disk from a SHIPPED build (Acknowledged=false, AckDigest
 // memoed from the live NativeRef-free result) meets a RESTARTED attachment
 // whose Lookup returns history evidence. The replay must converge: the
 // NativeRef-asymmetric digest must not block the ack, the record must be
 // marked Acknowledged, and subsequent reconciles must not re-Lookup it.
-// Before the recut this looped forever: Class unset -> the in-memory
+// Before the fix this looped forever: Class unset -> the in-memory
 // EvidenceNone shortcut unreachable -> digest compare failed on the NativeRef
-// suffix -> 3 reconciles, 3 lookups, never acknowledged (verifier probe).
+// suffix -> 3 reconciles, 3 lookups, never acknowledged.
 func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
@@ -371,8 +371,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	// The live turn/completed result carries the NativeRef too: codex sets
 	// r.nativeRef before result() copies it (codex/attachment.go turn/completed
 	// arm). Seeding it NativeRef-free was the fake's shape, not codex's, and
-	// hid the digest asymmetry (agent-message-queue-611.22.34, post-merge
-	// verification of #767).
+	// hid the digest asymmetry.
 	liveResult := &protocol.Result{Text: "the result", NativeRef: "codex thread thr_1 turn turnHistory1"}
 	run := "turn:turnHistory1"
 	seed := &requests.Record{
@@ -431,7 +430,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
 	if !rec.Acknowledged {
-		t.Fatalf("NO CONVERGENCE: pre-upgrade record still Acknowledged=false after 3 reconciles; the restarted attachment was Lookuped %d time(s) (one full thread/read each) and will be re-Lookuped every tick forever (agent-message-queue-611.22.34 B2)", stub.lookups)
+		t.Fatalf("NO CONVERGENCE: pre-upgrade record still Acknowledged=false after 3 reconciles; the restarted attachment was Lookuped %d time(s) (one full thread/read each) and will be re-Lookuped every tick forever (#767)", stub.lookups)
 	}
 	if stub.lookups != 1 {
 		t.Fatalf("history lookup ran %d time(s), want 1 (converge after the first proof)", stub.lookups)

@@ -9,7 +9,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// agent-message-queue-611.46 (design review of 611.42 slice 1b): respond
+// agent-message-queue-611.46: respond
 // ignored the command source, so a local sender, the asking agent included,
 // could answer an approval over the AMQ mailbox or the IPC socket. Only the
 // owner's Buzz share that submitted the request may answer.

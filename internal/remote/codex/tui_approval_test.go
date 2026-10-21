@@ -10,7 +10,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// 611.42 slice 1b: an approval of a turn the user started in the Codex TUI
+// An approval of a turn the user started in the Codex TUI
 // (no run of ours, so not in byTurn) was dropped. It now becomes a thread
 // approval shown on the owner share, and the owner's approve reaches the
 // app-server as the decision.
@@ -78,7 +78,7 @@ func TestTUITurnApprovalAnsweredFromOwnerShare(t *testing.T) {
 	}
 }
 
-// Review of slice 1b (P1): Codex sends a null approvalId for a shell
+// Regression: Codex sends a null approvalId for a shell
 // approval and asks again under the same itemId, for example to retry
 // without the sandbox. The retry got the closed approval's id, so a ✅ on
 // the old message answered the retry the owner never saw. Each server

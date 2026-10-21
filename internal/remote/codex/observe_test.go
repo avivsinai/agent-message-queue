@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// 611.17: an activity observer sees the notifications the attachment
+// An activity observer sees the notifications the attachment
 // handles, after the adapter's own handling, until it is removed.
 func TestObserveNotificationsSeesHandledNotifications(t *testing.T) {
 	a := &Attachment{threadID: "t1", targetID: "codex:t1"}
