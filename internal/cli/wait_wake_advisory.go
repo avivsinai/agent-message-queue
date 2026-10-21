@@ -4,7 +4,7 @@ package cli
 // arrival wait (watch, monitor) starts while a live injecting wake already
 // notifies this agent's terminal. Two arrival mechanisms for one agent are
 // redundant at best; at worst the harness blocks on the wait and the wake's
-// doorbell queues behind it (issue #717). A notify-only wake (mode none) is
+// doorbell queues behind it. A notify-only wake (mode none) is
 // the supervisor recipe, where monitor is the sole consumer, so it stays
 // silent. Advisory only: the wait proceeds either way.
 func noteLiveWakeBeforeBlockingWait(command, root, me string) {

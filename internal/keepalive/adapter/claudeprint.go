@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,7 +21,7 @@ import (
 const (
 	claudePrintName                = "claude-print"
 	claudePrintTargetSessionPrefix = "claude-print:session:"
-	// Live-verified 2026-08-26 on Claude Code 2.1.246: dontAsk denies Bash even
+	// Verified live on Claude Code 2.1.246: dontAsk denies Bash even
 	// with --allowedTools Bash. auto + scoped allow lets the doorbell run
 	// `amq drain` without --dangerously-skip-permissions.
 	claudePrintPermissionMode = "auto"
@@ -49,7 +48,7 @@ type ClaudePrint struct {
 	// flock LOCK_EX|LOCK_NB.
 	Lock func(path string) (unlock func(), err error)
 	// ConfigDir is CLAUDE_CONFIG_DIR (default ~/.claude). Ambient, not part of
-	// injector identity (docs/wake-lifecycle.md §9.4).
+	// injector identity (docs/wake-operations.md#injector-identity).
 	ConfigDir string
 	StateDir  string
 	AckWait   time.Duration
@@ -248,41 +247,13 @@ func (c ClaudePrint) probe(ctx context.Context, target string) (uuid, claudePath
 }
 
 func (c ClaudePrint) pinExecutable(ctx context.Context) (string, error) {
-	lookPath := c.LookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
-	}
-	looked, err := lookPath(platformExecutableName("claude"))
-	if err != nil {
-		return "", fmt.Errorf("claude not found on PATH (%w); put claude on PATH", err)
-	}
-	if !filepath.IsAbs(looked) {
-		abs, absErr := filepath.Abs(looked)
-		if absErr != nil {
-			return "", fmt.Errorf("resolve claude executable: %w; put claude on PATH", absErr)
-		}
-		looked = abs
-	}
-	if launch.ProviderForExecutable(looked) != launch.ClaudeProvider {
-		return "", fmt.Errorf("claude at %s has basename %q, want %q; put claude on PATH", looked, filepath.Base(looked), launch.ClaudeProvider)
-	}
-	resolved, err := filepath.EvalSymlinks(looked)
-	if err != nil {
-		return "", fmt.Errorf("resolve claude at %s: %w; put claude on PATH", looked, err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("stat claude at %s: %w; put claude on PATH", resolved, err)
-	}
-	if !isExecutableRegularFile(info) {
-		return "", fmt.Errorf("claude at %s is not an executable regular file; put claude on PATH", resolved)
-	}
-	out, err := c.runner().Run(ctx, resolved, "--help")
-	help := string(out)
-	if err != nil || !strings.Contains(help, "--resume") || !strings.Contains(help, "--output-format") || !strings.Contains(help, "--replay-user-messages") {
-		return "", fmt.Errorf("claude at %s lacks print/resume stream-json; put claude on PATH", resolved)
-	}
-	return resolved, nil
+	return pinExecutable(ctx, c.LookPath, c.runner(), providerExecutable{
+		provider:  launch.ClaudeProvider,
+		helpArgs:  []string{"--help"},
+		helpFlags: []string{"--resume", "--output-format", "--replay-user-messages"},
+		lacks:     "print/resume stream-json",
+		hint:      "put claude on PATH",
+	})
 }
 
 func (c ClaudePrint) configDir() (string, error) {
@@ -541,11 +512,11 @@ func scanJSONLCwd(r io.Reader, dropPartialFirstLine bool) (string, error) {
 
 func claudePrintAckSeen(logPath, payload string) (bool, error) {
 	// Submitted = the post-init isReplay echo of THIS child's stdin line.
-	// Live 2026-08-26 Claude 2.1.246: resume a session whose jsonl already
-	// contained text T, then stdin the same T with --replay-user-messages.
-	// stdout had exactly one isReplay user event (the stdin line), not a
-	// replay of the historical turn. Post-init payload match is enough;
-	// we do not snapshot jsonl uuids.
+	// Verified live on Claude Code 2.1.246: resume a session whose jsonl
+	// already contained text T, then stdin the same T with
+	// --replay-user-messages. stdout had exactly one isReplay user event (the
+	// stdin line), not a replay of the historical turn. Post-init payload
+	// match is enough; we do not snapshot jsonl uuids.
 	f, err := os.Open(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -629,15 +600,7 @@ func lastLogLines(path string, n int) string {
 }
 
 func parseClaudePrintSessionUUID(target string) (string, error) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(target), claudePrintTargetSessionPrefix)
-	if !ok {
-		return "", fmt.Errorf("unsupported Claude print target %q; use %s<uuid>", target, claudePrintTargetSessionPrefix)
-	}
-	id = strings.TrimSpace(id)
-	if !lowercaseThreadUUIDRe.MatchString(id) {
-		return "", fmt.Errorf("invalid Claude print session uuid %q; want an exact lowercase 8-4-4-4-12 hex uuid", id)
-	}
-	return id, nil
+	return parseTargetUUID(target, claudePrintTargetSessionPrefix, "Claude print", "session", claudePrintTargetSessionPrefix+"<uuid>")
 }
 
 type processSpec struct {

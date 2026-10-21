@@ -646,7 +646,7 @@ func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies P
 
 	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{}}
 	for _, participant := range request.Participants {
-		prepared, observation, agentPlan, actions, participantErr := prepareOneParticipant(participant, state, dependencies, mailboxStates[participant.Handle], subjectSchema)
+		prepared, observation, agentPlan, actions, participantErr := prepareOneParticipant(ctx, participant, state, dependencies, mailboxStates[participant.Handle], subjectSchema)
 		if participantErr != nil {
 			return PrepareResult{}, participantErr
 		}
@@ -1081,7 +1081,7 @@ func inspectPrepareRoster(root *fsq.DeliveryRoot, authorization *fsq.MailboxConf
 	return roster, states, nil
 }
 
-func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetState, dependencies PrepareDependencies, mailbox string, subjectSchema int) (PreparedParticipant, PrepareObservation, *AgentPlan, []PrepareRequiredAction, error) {
+func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, state *prepareTargetState, dependencies PrepareDependencies, mailbox string, subjectSchema int) (PreparedParticipant, PrepareObservation, *AgentPlan, []PrepareRequiredAction, error) {
 	preparedExecution := participant.Execution
 	if subjectSchema == SubjectSchemaV1 {
 		preparedExecution.Named = false
@@ -1201,6 +1201,15 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 				return prepared, observation, nil, actions, nil
 			}
 		}
+		reason, capabilityErr := prepareFreshCaptureRefusal(ctx, adapter, participant, state.target.ProjectRoot)
+		if capabilityErr != nil {
+			return prepared, observation, nil, actions, capabilityErr
+		}
+		if reason != "" {
+			prepared.PlannedOutcome = "unsupported"
+			observation.ReasonCode = reason
+			return prepared, observation, nil, nil, nil
+		}
 		base.ResumePolicy = participant.ResumePolicy
 		plan, err = adapter.PlanFresh(base)
 		prepared.PlannedOutcome = "fresh"
@@ -1237,6 +1246,34 @@ func prepareInitialInputUnsupported(participant PrepareParticipant) string {
 		return "initial_input_unsupported"
 	}
 	return ""
+}
+
+// prepareFreshCaptureRefusal probes a capture-mode adapter before Prepare
+// plans a fresh launch and returns the reason Apply would refuse it with. It
+// derives that reason exactly as Reconcile does so Prepare and Apply agree.
+// Executable containment holds before the probe executes the provider, and
+// mint-mode adapters are not probed.
+func prepareFreshCaptureRefusal(ctx context.Context, adapter HarnessAdapter, participant PrepareParticipant, projectRoot string) (string, error) {
+	if adapter.Mode() != AdapterModeCapture {
+		return "", nil
+	}
+	if err := validateExecutableContainment(participant.Executable, projectRoot, participant.Provider); err != nil {
+		return "", err
+	}
+	capabilities := adapter.Capabilities(ctx)
+	if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
+		return "", fmt.Errorf("adapter capabilities for %s: %w", participant.Handle, err)
+	}
+	if capabilities.Available && capabilities.Fresh && capabilities.Capture {
+		return "", nil
+	}
+	if capabilities.Reason != "" {
+		return capabilities.Reason, nil
+	}
+	if !capabilities.Available || !capabilities.Fresh {
+		return "fresh_capability_unsupported", nil
+	}
+	return "capture_capability_unsupported", nil
 }
 
 func firstInitialInputUnsupported(observations []PrepareObservation) string {

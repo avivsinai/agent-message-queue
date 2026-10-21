@@ -376,7 +376,7 @@ func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, non
 		t.Fatal(err)
 	}
 	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
-		Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureVersion,
+		Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureMinimumVersion,
 		Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), ProjectRoot: fixture.project, SessionRoot: fixture.session,
 		Cwd: fixture.cwd, ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
 		TargetArgv: []string{fixture.provider, "-c", notify}, State: ExecutionSpawnAttempted, Reason: "spawn_attempted",
@@ -395,7 +395,7 @@ func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, non
 		t.Fatal(err)
 	}
 	if err := WriteConversation(fixture.root, lease, ConversationRecord{
-		Version: ConversationVersion, Handle: "codex", State: CapturePending, ProviderVersion: codexCaptureVersion, LaunchNonce: nonce,
+		Version: ConversationVersion, Handle: "codex", State: CapturePending, ProviderVersion: codexCaptureMinimumVersion, LaunchNonce: nonce,
 	}); err != nil {
 		t.Fatal(err)
 	}

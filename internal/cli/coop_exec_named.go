@@ -136,7 +136,7 @@ func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 
 // codexDaemonNamingTimeout bounds the daemon calls made before exec. They
 // take about 2 s, and up to 30 s while the daemon starts other sessions
-// (measured on codex-cli 0.160.1, agent-message-queue-611.63).
+// (measured on codex-cli 0.160.1).
 const codexDaemonNamingTimeout = 60 * time.Second
 
 // codexDaemonNamingNotice is how long naming runs before coop exec says why
@@ -366,8 +366,8 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
 		// The TUI may still run on the daemon, whose tool commands carry
-		// no AM_* (agent-message-queue-611.61); amq there then has no
-		// handle and refuses until one is given.
+		// no AM_*; amq there then has no handle and refuses until one is
+		// given.
 		_ = writeStderr("warning: amq commands inside this Codex session have no AMQ identity; pass --me %s, or export AM_ROOT and AM_ME in that command\n", strings.TrimPrefix(name, path.Dir(name)+"/"))
 		return agentArgs, true
 	}
@@ -408,7 +408,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	}
 	// Tool commands of a daemon thread run in the daemon's environment, not
 	// the TUI's, so a thread is created only when its AMQ identity can be
-	// recorded (agent-message-queue-611.61).
+	// recorded.
 	if record == nil {
 		return report("AMQ cannot record this session's identity for Codex tool commands")
 	}
