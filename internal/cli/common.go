@@ -356,11 +356,11 @@ func baseTreeRelation(a, b string) TreeRelation {
 // there is no such evidence (bare-root scripts, CI, and tests passing --root to
 // a temp dir), so those keep working untouched.
 //
-// This backs the cross-tree send guard (issue #144): a direct --root that
+// This backs the cross-tree send guard: a direct --root that
 // crosses into another tree carries no sender-origin metadata, so the recipient
 // cannot reply. Replyable cross-tree messaging must use --project/--session.
 //
-// Note: cwd-based project .amqrc is deliberately NOT consulted here. It would
+// Note: cwd-based project .amqrc is deliberately NOT read here. It would
 // flag any `amq send --root X` run from inside a project directory, breaking
 // hermetic scripts/harnesses for marginal coverage — the env signals already
 // cover the coop-session case that motivated the guard. A direct --root send

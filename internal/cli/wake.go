@@ -84,11 +84,10 @@ type wakeConfig struct {
 	retainedAgent                 wakeRetainedAgent
 	retainedInbox                 wakeInboxReader
 	// retainedInboxRebindable marks whether cfg.retainedInbox is the
-	// ordinary-recoverable inbox (the loop can rearm it via rebindWatcher
-	// after a remove/recreate) or a caller-provided retained inbox that
-	// cannot be rebound. notifyNewMessages uses this to route canonical
-	// authority loss: rebindable -> ordinary scan retry (rebindWatcher
-	// rearms); !rebindable -> fatal ownership-loss exit (codex #788).
+	// ordinary-recoverable inbox (rebindWatcher can rearm it after a
+	// remove/recreate) or a caller-provided retained inbox that cannot be
+	// rebound. See wakeInboxCanonicalMismatchError for how it routes a
+	// canonical mismatch.
 	retainedInboxRebindable       bool
 	touchPresence                 func() error
 	maintenanceTicks              <-chan time.Time
@@ -217,14 +216,21 @@ func newWakeOwnershipLoss(reason string) error {
 	return &wakeOwnershipLossError{reason: reason}
 }
 
-// wakeInboxCanonicalMismatchError signals the retained wake inbox no longer
-// matches the canonical namespace (a directory swap detached it). It is
-// DISTINCT from wakeInboxScanError: the caller (runWakeLoop) checks
-// errors.As(scanErr) FIRST and routes wakeInboxScanError to ordinary scan
-// retry (looping on the same detached inbox). wakeInboxCanonicalMismatchError
-// must NOT match *wakeInboxScanError so the caller falls through to
-// classifyWakeFailure, which returns wakeFailureFatal — terminal exit /
-// re-admission, not ordinary retry (codex #788).
+// wakeInboxCanonicalMismatchError signals that the retained wake inbox no
+// longer matches the canonical namespace (a directory swap detached it). It
+// carries the one rule for canonical authority loss:
+//   - It is DISTINCT from wakeInboxScanError. The loop routes
+//     wakeInboxScanError to ordinary scan retry without invalidating the
+//     watcher, so a mismatch reported as a scan error would loop on the same
+//     detached inbox. Ordinary transient read failures (EIO/ESTALE) stay
+//     wakeInboxScanError.
+//   - The loop handles it before the scan-retry path, and
+//     classifyCanonicalMismatch routes it by rebindability. A rebindable
+//     inbox drops the watcher and the retained inbox, so rebindWatcher
+//     re-arms from the canonical path on the next scan-retry tick: a
+//     legitimate remove/recreate is a rearm. A caller-provided retained inbox
+//     cannot be rebound, so the mismatch is fatal (classifyWakeFailure ->
+//     wakeFailureFatal), as in rebindWatcher's retained-authority handling.
 type wakeInboxCanonicalMismatchError struct {
 	detachedPath string
 	cause        error
@@ -257,10 +263,8 @@ const (
 )
 
 // classifyCanonicalMismatch decides how the caller routes a canonical inbox
-// mismatch (codex #788). err must be (or wrap) *wakeInboxCanonicalMismatchError;
-// if not, returns canonicalMismatchNone. rebindable reflects whether the
-// retained inbox can be re-armed by rebindWatcher (ordinary-recoverable) or is
-// a caller-provided retained inbox that cannot be rebound.
+// mismatch (see wakeInboxCanonicalMismatchError). err must be (or wrap)
+// *wakeInboxCanonicalMismatchError; if not, it returns canonicalMismatchNone.
 //
 // This is the testable core of the routing decision extracted from
 // attemptNotification (a closure); the full loop applies the watcher
@@ -551,27 +555,12 @@ func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
 func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
 
-	// byc: before any authoritative read from the retained inbox, revalidate
-	// it is still the canonical namespace. A directory swap after admission
-	// leaves the retained FD pointing at the detached OLD directory; reading
-	// it would silently miss messages that land in the canonical inbox.
-	//
-	// codex #788: return a DEDICATED wakeInboxCanonicalMismatchError (distinct
-	// from wakeInboxScanError) for canonical authority loss, for BOTH the
-	// rebindable (ordinary-recoverable) and !rebindable (caller-provided
-	// retained) cases. The error type signals WHAT happened; the CALLER
-	// (attemptNotification) decides what to do based on rebindability:
-	//   - Rebindable: nil the watcher + ordinaryInboxDir + cfg.retainedInbox so
-	//     rebindWatcher re-arms on the next inbox-scan-retry tick from the
-	//     canonical path, then schedule ordinary scan retry. Do NOT fatal-exit
-	//     — a legitimate remove/recreate is a rearm.
-	//   - !Rebindable: classifyWakeFailure -> wakeFailureFatal (terminal exit),
-	//     mirroring rebindWatcher's handling of retained authority loss.
-	// The dedicated type (not wakeInboxScanError) is essential: the caller's
-	// errors.As(scanErr) check would otherwise route it to ordinary scan retry
-	// WITHOUT invalidating the watcher — looping on the same detached inbox.
-	// Ordinary transient read failures (EIO/ESTALE on ReadDir below) remain
-	// wakeInboxScanError and retry WITHOUT watcher invalidation.
+	// Before any authoritative read from the retained inbox, revalidate that
+	// it is still the canonical namespace: after a directory swap the
+	// retained FD points at the detached OLD directory, and reading it would
+	// silently miss messages that land in the canonical inbox. A mismatch
+	// returns wakeInboxCanonicalMismatchError for every inbox; the caller
+	// routes it by rebindability.
 	if cfg.retainedInbox != nil {
 		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
 			if err := validator.ValidateCanonical(); err != nil {
@@ -991,7 +980,7 @@ func ensureNotificationAttempt(
 	if err != nil {
 		// Begin may return the built identity with the error (append failure).
 		// Pass it through so the caller can record "recording failed"
-		// (requirement 3), but do NOT cache an unpersisted lifecycle.
+		// but do NOT cache an unpersisted lifecycle.
 		return lifecycle, err
 	}
 	cfg.notificationAttempt = lifecycle
@@ -1128,7 +1117,7 @@ func deliverNewMessageNotification(
 		}
 	}
 	if cfg.injectMode != wakeInjectModeNone {
-		// #1054: hold before the attempt starts, so a hold is neither a
+		// Hold before the attempt starts, so a hold is neither a
 		// ledger record nor an input attempt.
 		state, readErr := cfg.dialogState()
 		if state != wakeDialogClosed {
@@ -1715,7 +1704,8 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				// exit-zero command is a successful transport result. The
 				// lifecycle ledger records it as written/uncertain, while the
 				// wake loop keeps its existing retry-until policy.
-				// t64: clear fallback-only degradation after successful injection resumes.
+				// Clear fallback-only degradation after successful injection
+				// resumes.
 				clearDegradedWakeNotifierStatus(cfg)
 				return nil
 			case wakeInjectorOutcomeUncertain:
@@ -1741,7 +1731,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		cfg.lastInjectorOutcome = wakeInjectorOutcomeAccepted
-		// t64: clear fallback-only degradation after successful injection resumes.
+		// Clear fallback-only degradation after successful injection resumes.
 		clearDegradedWakeNotifierStatus(cfg)
 		return nil
 	}
@@ -1871,7 +1861,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
-	// t64: clear fallback-only degradation after successful native injection.
+	// Clear fallback-only degradation after successful native injection.
 	clearDegradedWakeNotifierStatus(cfg)
 	return nil
 }
@@ -1924,7 +1914,7 @@ func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
 		return err
 	}
 	cfg.lastAttemptAttention = true
-	// t64: persist degraded status so `amq doctor --ops` can distinguish a
+	// Persist degraded status so `amq doctor --ops` can distinguish a
 	// fully-injecting wake from one that fell back to attention-only. Without
 	// this, doctor reports healthy while the operator only gets a stderr BEL.
 	// But don't overwrite a more specific failure status (e.g.
@@ -1993,7 +1983,7 @@ func (err *wakeTerminalAuthorityError) Unwrap() error {
 }
 
 func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
-	// #1054: a dialog that opened after the doorbell was planned parks the
+	// A dialog that opened after the doorbell was planned parks the
 	// next byte, even mid-doorbell.
 	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
 		return false, nil

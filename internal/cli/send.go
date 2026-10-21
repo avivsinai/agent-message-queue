@@ -137,7 +137,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		return UsageError("--ignore-session-pin cannot be used with --from-session")
 	}
 
-	// Cross-tree guard (issue #144): a direct, unqualified --root that crosses
+	// Cross-tree guard: a direct, unqualified --root that crosses
 	// into a different AMQ tree carries no sender-origin metadata, so the
 	// recipient cannot reply — and a naive reply would loop back into the
 	// replier's own tree. Refuse with guidance instead of minting an
@@ -484,8 +484,8 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 
 	// Build reply_to only for sends that actually cross a session or project
 	// boundary. Ordinary same-session sends reply locally and need no hint —
-	// stamping handle@session for them is what made a direct cross-root send
-	// look replyable while looping into the replier's own tree (issue #144).
+	// stamping handle@session for them would make a direct cross-root send
+	// look replyable while looping into the replier's own tree.
 	replyTo := ""
 	switch {
 	case senderInSession && (targetProject != "" || targetSession != ""):

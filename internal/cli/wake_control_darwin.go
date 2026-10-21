@@ -708,7 +708,7 @@ func startWakeControlListenerInDirWithRestart(
 type darwinWakeControlTestHooks struct {
 	afterLoopStopped func()
 	// beforeBindRevalidate runs inside the lifecycle guard immediately before
-	// the canonical revalidation that precedes bind. Test seam for 65s: inject
+	// the canonical revalidation that precedes bind. Test seam: inject
 	// a directory swap here to prove the revalidation REFUSES rather than
 	// binding a detached directory.
 	beforeBindRevalidate func(agentDir *wakeAgentDir)
@@ -763,7 +763,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 		if err := removeStaleDarwinControlSocketsAt(dirfd); err != nil {
 			return err
 		}
-		// 65s: bind and secure UNDER the lifecycle guard so a directory swap
+		// Bind and secure UNDER the lifecycle guard so a directory swap
 		// cannot detach the listener between validation and bind. Revalidate
 		// the canonical identity immediately before bind and REFUSE rather
 		// than binding a detached directory. validateWakeStateAgentDirAt opens

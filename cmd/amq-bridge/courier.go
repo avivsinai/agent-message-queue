@@ -124,19 +124,18 @@ type PollResult struct {
 	// rendezvous redelivers) or a terminal conflict (committed winner
 	// immutable, this copy refused without receipt or ACK).
 	// One refused transfer must not wedge the batch: envelopes behind it
-	// still apply and ACK (review-827-r1 P1b).
+	// still apply and ACK.
 	//
-	// Retirement of a CONFLICTED transfer (review-827-r2 P1, corrected per
-	// codex r2-r2 finding 4): there is no destination_rejected wire contract
-	// in this protocol — the ADR table row names an outcome stage the
-	// receiver never emits, and a redelivery loop cannot be closed from the
-	// wire. The refused envelope stays in the receiver's rendezvous queue
-	// and is re-reported on every poll; removing the LOCAL spool copy does
-	// NOT retire the posted remote item (this code has no source-deletion
-	// notification). Recovery is a rendezvous-operator action — clearing the
-	// conflicting envelope from the RENDEZVOUS queue (or replacing it with a
-	// corrected payload) — which this wave does not automate; the refusal
-	// is the steady-state signal until then.
+	// Retirement of a CONFLICTED transfer: there is no destination_rejected
+	// wire contract in this protocol — the ADR table row names an outcome
+	// stage the receiver never emits, and a redelivery loop cannot be closed
+	// from the wire. The refused envelope stays in the receiver's rendezvous
+	// queue and is re-reported on every poll; removing the LOCAL spool copy
+	// does NOT retire the posted remote item (this code has no
+	// source-deletion notification). Recovery is a rendezvous-operator action
+	// — clearing the conflicting envelope from the RENDEZVOUS queue (or
+	// replacing it with a corrected payload) — which the courier does not
+	// automate; the refusal is the steady-state signal until then.
 	Refused []RefusedTransfer `json:"refused,omitempty"`
 }
 
@@ -153,8 +152,8 @@ type RunResult struct {
 	Push PushResult `json:"push"`
 	Poll PollResult `json:"poll"`
 	// Diagnostics carries operator-facing unresolved state alongside the
-	// machine receipts (review-827-r2 P2-3): stuck retryable transfers,
-	// prepared/uncertain ledger histories, and torn ledger states from
+	// machine receipts: stuck retryable transfers, prepared/uncertain ledger
+	// histories, and torn ledger states from
 	// UnresolvedTransfers. writeRunResult serializes it after the
 	// receipts; without it the ledger diagnostic surface had no production
 	// caller.
@@ -514,10 +513,9 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 		if err != nil {
 			return result, fmt.Errorf("apply transfer %s: %w", env.TransferID, err)
 		}
-		// Refused transfers are SKIPPED, not batch-fatal (review-827-r1
-		// P1b): the loop continues so envelopes behind a bad transfer still
-		// apply and ACK, and the refusal is reported in PollResult.Refused
-		// (surfaced via status/doctor in the courier wave).
+		// Refused transfers are SKIPPED, not batch-fatal: the loop continues
+		// so envelopes behind a bad transfer still apply and ACK, and the
+		// refusal is reported in PollResult.Refused.
 		if applyOutcome.State == bridge.LedgerUncertain {
 			// Unknown history: fail closed. Do not ACK (the rendezvous will
 			// redeliver; the receiver's ledger still refuses while history
@@ -530,8 +528,8 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 			continue
 		}
 		if applyOutcome.State == bridge.LedgerPublishedDurabilityUnknown {
-			// Codex r2-r2 finding 1: the artifact IS published, but its
-			// durability is unverified. No success receipt, no ACK (the
+			// The artifact IS published, but its durability is unverified. No
+			// success receipt, no ACK (the
 			// rendezvous redelivers; the next apply re-verifies the
 			// destination sync and promotes without re-applying).
 			result.Refused = append(result.Refused, RefusedTransfer{
@@ -545,11 +543,11 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 			// Terminal non-commit (rejected: conflict, or a proven non-delivery
 			// retryable whose re-arm failed). A rejected outcome is terminal
 			// for THIS copy: no receipt, no ACK for the envelope itself.
-			// There is no destination_rejected wire contract (review-827-r2
-			// P1): a conflict is retired operator-side (see PollResult.Refused),
-			// and a stuck retryable rejection is surfaced via
-			// RunResult.Diagnostics until its condition clears. Skipping keeps
-			// the batch moving either way.
+			// There is no destination_rejected wire contract: a conflict is
+			// retired operator-side (see PollResult.Refused), and a stuck
+			// retryable rejection is surfaced via RunResult.Diagnostics until
+			// its condition clears. Skipping keeps the batch moving either
+			// way.
 			result.Refused = append(result.Refused, RefusedTransfer{
 				TransferID: env.TransferID,
 				Reason:     applyOutcome.Reason,
@@ -598,7 +596,7 @@ func (c *Courier) RunOnce(ctx context.Context, mode Mode) (RunResult, error) {
 			return result, err
 		}
 	}
-	// review-827-r2 P2-3: surface the ledger's unresolved transfers
+	// Surface the ledger's unresolved transfers
 	// (prepared/uncertain/torn/stuck-retryable) to the operator alongside
 	// the receipts. Best-effort: a diagnostic read failure must not fail a
 	// run whose transfers all resolved.

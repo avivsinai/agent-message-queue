@@ -828,7 +828,7 @@ func selfUpgradeHealthyPass(results []supervisor.Result) bool {
 		// Companion-supervised remote entries are EXCLUDED from results by
 		// superviseOnce below — they are out of scope for wake health, and a
 		// fabricated placeholder would let one silent entry swing settlement
-		// in either direction (codex P2). Everything left in results is an
+		// in either direction. Everything left in results is an
 		// entry keepalive owns: only a confirmed ensured pass settles the
 		// self-upgrade.
 		if result.Action != supervisor.ActionEnsured {
@@ -862,7 +862,7 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 			// on exit. Reconciling them here would probe an adapter this
 			// process has no wake adapter for and mark a healthy, live
 			// companion as backoff. They are excluded from results entirely,
-			// not deferred placeholders (codex P2): selfUpgradeHealthyPass
+			// not deferred placeholders: selfUpgradeHealthyPass
 			// settles only on ensured results, so a fabricated deferred entry
 			// blocked upgrade settlement on every pass whenever a remote
 			// companion was registered. Doctor --ops reads them directly.
@@ -1277,7 +1277,7 @@ func doctorSelfUpgradeSetting(path string) doctorSetting {
 
 // companionOpsReport classifies companion-supervised rows (adapter
 // "remote", registered by amq-remote up) by probing each row's
-// process-lifetime lock (611.13.2 D). A row whose lock is held is live;
+// process-lifetime lock. A row whose lock is held is live;
 // a row whose lock is not held is STALE — its up died hard (kill -9)
 // without Forget — and doctor must never present it as active. A probe
 // error is surfaced as "unknown" and counts as a warning in the exit

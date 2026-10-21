@@ -29,7 +29,7 @@ const (
 // send is always required (verified live on app 26.818.61809). This adapter
 // only launches the deep-link; it does not and cannot submit.
 //
-// Dispatch-vs-delivery caveat (live finding, issue #640): `open` exits 0 once
+// Dispatch-vs-delivery caveat (live finding): `open` exits 0 once
 // the OS dispatches the URL to the registered handler — that proves DISPATCH
 // only, not delivery. The app can refuse the deep-link with no adapter-visible
 // signal: e.g. a thread with an ACTIVE WRITER shows an "Error creating chat —

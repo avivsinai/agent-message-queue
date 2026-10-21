@@ -51,7 +51,7 @@ const (
 	wakeSettingsSourceFile    = "file"
 )
 
-// wakeSettings is the policy a running wake consults per use. It is a plain
+// wakeSettings is the policy a running wake reads per use. It is a plain
 // comparable value, read and replaced only on the wake loop goroutine.
 // Identity and transport inputs (handle, root, injector, retry policy) are
 // not settings: they are bound into the lock and fixed for the process life.

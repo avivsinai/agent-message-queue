@@ -19,8 +19,7 @@ import (
 // broader. In Windows errno terms that is ERROR_INVALID_FUNCTION (the
 // EINVAL twin) and ERROR_NOT_SUPPORTED / ERROR_CALL_NOT_IMPLEMENTED (the
 // ENOTSUP twins). ERROR_ACCESS_DENIED is deliberately NOT tolerated: on
-// NTFS it is a real failure and must surface (architect ruling on bead
-// u35, v3 2026-09-22).
+// NTFS it is a real failure and must surface.
 func isDirSyncUnsupported(err error) bool {
 	if err == nil {
 		return false
@@ -103,8 +102,8 @@ func flushDirHandle(handle windows.Handle, name string) error {
 // is the mechanism that makes the NT rename-information-class renames
 // (maildir claim, no-replace publication, renameDirectChildNoReplace,
 // DeliveryRoot.WriteFileAtomic) durable — those classes have no
-// write-through flag — and it establishes the directory chain in ADR
-// Addendum 4 (bead u35, ruling v3 2026-09-22).
+// write-through flag — and it establishes the directory chain the ADR
+// requires.
 func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	clean := filepath.ToSlash(filepath.Clean(dir))
 	if clean == "." || clean == "/" || clean == "" {
@@ -137,9 +136,9 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	if ntErr != nil {
 		// No missing-directory no-op: the Unix twin propagates the open
 		// error, and a flush that reports durable for a chain that does
-		// not exist would falsify ADR Addendum 4 on exactly the path it
-		// protects (ruling 10:05Z). Map NTSTATUS through windowsClaimError
-		// for a readable errno in the message.
+		// not exist would falsify the directory-chain durability guarantee on
+		// exactly the path it protects. Map NTSTATUS through
+		// windowsClaimError for a readable errno in the message.
 		return fmt.Errorf("open dir %s relative to root for sync: %w (%v)", dir, ntErr, windowsClaimError(ntErr))
 	}
 	return flushDirHandle(handle, dir)
