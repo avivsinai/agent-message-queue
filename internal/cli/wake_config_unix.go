@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -567,10 +565,9 @@ func resetWakeSettingsFileInDir(agentDir *wakeAgentDir, values wakeSettings, key
 	if err != nil {
 		return nil, err
 	}
-	err = withWakeLifecycleGuardModeAndTimeoutInDir(
+	err = withWakeLifecycleGuardInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		wakeSettingsGuardTimeout,
+		wakeGuardOptions{noWait: true, retryTimeout: wakeSettingsGuardTimeout},
 		func(dirfd int) error { return writeWakeSettingsFileAt(dirfd, agentDir, stored) },
 	)
 	if err != nil {

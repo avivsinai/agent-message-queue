@@ -109,7 +109,7 @@ func newAuthoritativeWakePreparedCleanupFixture(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return publishAuthoritativeWakeClaimAt(scope, root, me, target, lock)
 	}); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func newAuthoritativeWakePreparedCleanupFixture(
 }
 
 func (fixture *authoritativeWakePreparedCleanupFixture) release() error {
-	return withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	return withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
 			scope,
 			fixture.inspection,

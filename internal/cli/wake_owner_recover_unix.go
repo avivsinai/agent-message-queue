@@ -132,7 +132,7 @@ func recoverOwnerWakeWithStopPreparer(
 	for {
 		var stopCapability *authoritativeWakeStopCapability
 		var stopAuthorization wakeOwnerReleaseAuthorization
-		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) (retErr error) {
+		err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) (retErr error) {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err

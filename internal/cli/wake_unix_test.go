@@ -2737,7 +2737,7 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeInDir(agentDir, wakeGuardExisting, func(scope *wakeMutationScope) error {
 		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	if err == nil {

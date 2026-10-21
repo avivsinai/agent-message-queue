@@ -108,7 +108,7 @@ func newWakeRestartFixture(t *testing.T) wakeRestartFixture {
 		Owner:      owner,
 		Candidate:  candidate,
 	}
-	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func prepareWakeRestartRecordForBoundResumeTest(
 	fixture.record.StagePath = stagePath
 	boundCopy := *bound
 	fixture.record.BoundImage = &boundCopy
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)

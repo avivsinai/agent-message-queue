@@ -76,12 +76,13 @@ func authoritativeWakeRecoveryTargetAt(
 	if err := validateBoundWakeMutationAt(scope, inspection); err != nil {
 		return nil, err
 	}
-	target, exists, err := readWakeTargetRawAt(
+	snapshot, exists, err := readWakeTargetSnapshotAt(
 		dirfd,
 		agentDir,
 		inspection.Root,
 		inspection.Agent,
 	)
+	target := snapshot.Target
 	if err != nil {
 		// The authoritative lock retains owner evidence. An unreadable or
 		// corrupt target is preserved as an orphan rather than becoming a
@@ -194,7 +195,7 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 		var created wakeLockInspection
 		var stopCapability *authoritativeWakeStopCapability
 		retry := false
-		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err

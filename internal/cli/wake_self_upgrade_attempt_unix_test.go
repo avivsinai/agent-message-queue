@@ -23,7 +23,7 @@ func TestWakeSelfUpgradeAttemptSurvivesStaleLockReclaimAndRefusesOldWake(t *test
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
 	record.Candidate = candidate
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestWakeSelfUpgradeAttemptPersistsBeforeRestartExec(t *testing.T) {
 	removeWakeRestartRecordForTest(t, fixture)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)

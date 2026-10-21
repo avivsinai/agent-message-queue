@@ -293,7 +293,7 @@ func acquireWakeLockWithOptionsInDir(
 		var replace wakeLockInspection
 		var created wakeLockInspection
 		quarantined := false
-		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		err := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err
@@ -414,7 +414,7 @@ func acquireWakeLockWithOptionsInDir(
 		}
 
 		cleanup = func() {
-			if cleanupErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			if cleanupErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 				return cleanupGenericWakeGenerationAt(
 					scope,
 					root,
@@ -596,7 +596,12 @@ func cleanupGenericWakeGenerationAt(
 		me,
 		current,
 	)
-	committed, lockRemovalErr := removeWakeLockIfUnchangedGuardedAtStatus(scope, current)
+	removal := removeWakeLockIfUnchangedGuardedAtOutcome(
+		scope,
+		current,
+		wakeLockRemoval{unlink: scope.unlinkWakeLockForCleanup},
+	)
+	committed, lockRemovalErr := removal.Committed, removal.Err
 	blockingRemovalErr, diagnosticRemovalErr := splitWakeSelfUpgradeDiagnosticResidue(lockRemovalErr)
 	if blockingRemovalErr != nil {
 		return errors.Join(
@@ -1131,7 +1136,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 
 	prep := wakeRepairPreparation{result: &result}
 	defer func() { _ = prep.inboxDir.Close() }()
-	prepareErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	prepareErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1288,9 +1293,10 @@ func (p *wakeRepairPreparation) prepareAt(
 	}
 
 	var exists bool
-	p.target, exists, err = readWakeTargetFromStateForInspectionAt(
+	selection, err := readWakeStateSelectionForInspectionAt(
 		dirfd, agentDir, root, me, inspection,
 	)
+	p.target, exists = selection.Target, selection.TargetPresent
 	if err != nil {
 		result.Status = "refused"
 		result.Reason = err.Error()
@@ -1416,7 +1422,7 @@ func validatePreparedRepairWakeWinnerInDir(
 		child.Source.RootIdentity() != lineage.source.RootIdentity {
 		return winner, fmt.Errorf("started wake repair child source lineage mismatch")
 	}
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		if err := revalidateWakeRepairRootIdentity(root, lineage.source.RootIdentity); err != nil {
 			return err
 		}
@@ -1533,7 +1539,7 @@ func cleanupFailedWakeRepairChild(
 	if child.Process == nil || child.Process.Pid <= 0 {
 		return cleanupErr
 	}
-	metadataErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	metadataErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -2485,7 +2491,7 @@ func (s *wakeStart) bindRepairLineage(source wakeRepairHandoffSource) error {
 	value := *s.target
 	var persisted wakeTarget
 	var floor wakeRepairFloor
-	err := withWakeLifecycleGuardInDir(s.repairAgentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(s.repairAgentDir, wakeGuardWait, func(dirfd int) error {
 		if err := revalidateWakeRepairRootIdentity(root, source.RootIdentity()); err != nil {
 			return err
 		}
@@ -2989,7 +2995,7 @@ func (s *wakeStart) prepareRepairChild(watcher wakeAdmissionWatcher) error {
 		return err
 	}
 	var prepared wakeRepairHandoffPrepared
-	err := withWakeLifecycleGuardInDir(repairAgentDir, func(dirfd int) error {
+	err := withWakeLifecycleGuardInDir(repairAgentDir, wakeGuardWait, func(dirfd int) error {
 		if err := revalidateWakeRepairRootIdentity(
 			root,
 			repairLineage.source.RootIdentity,
@@ -3093,7 +3099,7 @@ func (s *wakeStart) publishRepairFloor(
 		if err != nil {
 			return err
 		}
-		return withWakeLifecycleGuardInDir(repairAgentDir, func(dirfd int) error {
+		return withWakeLifecycleGuardInDir(repairAgentDir, wakeGuardWait, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, repairAgentDir, root, me)
 			if !sameWakeLockGeneration(currentWake, current) {
 				return fmt.Errorf("wake repair lock changed before inherited floor publication")

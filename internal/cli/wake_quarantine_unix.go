@@ -189,7 +189,7 @@ func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupC
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		beforeWakeQuarantineCleanupRevalidation(candidate)
 		current, exists, err := readWakeQuarantineSnapshotAt(
 			dirfd,

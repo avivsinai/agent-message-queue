@@ -17,7 +17,7 @@ func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	writeWakeRestartLoopCandidateCopy(t, &fixture)
 	fixture.record.Source = wakeRestartSourceForeign
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture
 	}
 	fixture.candidate = candidate
 	fixture.record.Candidate = candidate
-	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
