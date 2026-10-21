@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -373,10 +372,13 @@ func (probe countingCommandProbe) Output(ctx context.Context, executable string,
 }
 
 // TestPrepareChecksCaptureContainmentBeforeProbe protects the PR #1108 review
-// finding: Prepare must refuse a project-contained capture provider before its
-// capability probe executes it.
+// findings: Prepare refuses a project-contained capture provider before its
+// capability probe executes it, and refuses only that seat, as Reconcile does.
 func TestPrepareChecksCaptureContainmentBeforeProbe(t *testing.T) {
 	fixture := newInternalPrepareFixture(t)
+	if err := fsq.EnsureAgentDirs(fixture.sessionRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(fixture.projectRoot, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -385,23 +387,34 @@ func TestPrepareChecksCaptureContainmentBeforeProbe(t *testing.T) {
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fixture.request.Participants[0].Provider = CodexProvider
-	fixture.request.Participants[0].Executable = executable
+	fixture.request.Participants = append(fixture.request.Participants, PrepareParticipant{
+		Handle: "codex", Runnable: true, Provider: CodexProvider, Executable: executable,
+		Cwd: fixture.cwd, ResumePolicy: ResumeEnabled,
+		Execution: PrepareExecutionOptions{WakeMode: "enabled"},
+	})
 	runs := 0
 	dependencies := fixture.dependencies(&prepareTestBackend{})
-	dependencies.AdapterFor = func(_, executable string) HarnessAdapter {
+	dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+		if provider != CodexProvider {
+			return prepareTestAdapter{provider: provider}
+		}
 		adapter := NewCodexAdapter(executable)
 		adapter.probe = countingCommandProbe{runs: &runs, fakeCommandProbe: fakeCommandProbe{path: executable, outputs: map[string]string{
-			"--version": "codex-cli 0.154.0\n", "--help": "commands: resume",
+			"--version": "codex-cli 0.163.0\n", "--help": "commands: resume",
 			"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
 		}}}
 		return adapter
 	}
-	_, err := Prepare(context.Background(), fixture.request, dependencies)
-	if err == nil || !strings.Contains(err.Error(), ProviderProjectContainedCode) {
-		t.Fatalf("Prepare error = %v, want %s", err, ProviderProjectContainedCode)
+	result, err := Prepare(context.Background(), fixture.request, dependencies)
+	if err != nil {
+		t.Fatalf("Prepare failed the whole launch: %v", err)
 	}
 	if runs != 0 {
 		t.Fatalf("Prepare executed the contained provider %d times", runs)
+	}
+	claude, codex := result.Participants[0], result.Participants[1]
+	if claude.PlannedOutcome != "fresh" || codex.PlannedOutcome != "unsupported" || codex.Command != nil ||
+		result.Observations[1].ReasonCode != ProviderProjectContainedCode {
+		t.Fatalf("seats = claude %q, codex %q reason %q", claude.PlannedOutcome, codex.PlannedOutcome, result.Observations[1].ReasonCode)
 	}
 }
