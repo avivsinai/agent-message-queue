@@ -483,7 +483,7 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 		return "", "", fmt.Errorf("malformed reply metadata: %w", err)
 	}
 	if project == "" {
-		// B7: empty reply_project does NOT mean the caller is in our own root.
+		// Empty reply_project does NOT mean the caller is in our own root.
 		// The caller may be in a DIFFERENT SESSION of the same project. If
 		// reply_to carries a session component (handle@session), route to
 		// that session's root under our base root.
@@ -509,7 +509,7 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 		// cmd/amq-remote/main.go turns ErrPeerRootUnreachable into
 		// amqio.TransientRouteError. A peer session that does not exist YET is
 		// as retryable as a peer base root that does not exist yet; the planner
-		// marks only the latter (agent-message-queue-611.22.36 packet 7).
+		// marks only the latter.
 		return "", "", retryableRouteError(err)
 	}
 	return plan.DeliveryRoot, recipient, nil

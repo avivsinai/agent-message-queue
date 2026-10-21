@@ -42,7 +42,7 @@ const (
 // release but not packaged by the Homebrew formula or Scoop manifest: only
 // amq itself goes through a package manager. They are direct-installed at a
 // stable path (~/.local/bin or next to amq) and upgraded in place.
-var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp"}
+var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp", "amq-remote", "amq-owner-sign"}
 
 // InstallKind classifies how a resolved executable path was installed.
 type InstallKind int
@@ -328,7 +328,7 @@ func AssetName(tag, goos, goarch string) (string, error) {
 }
 
 // AssetNameFor returns the release archive asset name for a given binary
-// (amq, amq-keepalive, amq-bridge, amq-acp). The archive name template is
+// (amq, amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign). The archive name template is
 // <binary>_<version>_<os>_<arch>.<ext>, matching .goreleaser.yaml's
 // name_template per build. amq and amq-keepalive publish Windows zip assets;
 // the other companions are darwin/linux tar.gz. This function does not
@@ -362,7 +362,7 @@ func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
 
 func validateBinaryName(binaryName string) error {
 	switch binaryName {
-	case BinaryName, "amq-keepalive", "amq-bridge", "amq-acp":
+	case BinaryName, "amq-keepalive", "amq-bridge", "amq-acp", "amq-remote", "amq-owner-sign":
 		return nil
 	default:
 		return fmt.Errorf("invalid binary name: %q", binaryName)

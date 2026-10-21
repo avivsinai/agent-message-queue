@@ -102,9 +102,10 @@ func (result CaptureResult) CanPersist() bool {
 	return result.State == CaptureReady && !result.Degraded && result.Identity.Provider != "" && result.Identity.ID != ""
 }
 
-// ParseCodexNotifyEvidence verifies the pinned Codex legacy notify wire shape
-// and binds it to the exact managed launch generation. It does not scan the
-// Codex session store or accept newest-file evidence.
+// ParseCodexNotifyEvidence verifies the Codex legacy notify wire shape for a
+// supported provider version and binds it to the exact managed launch
+// generation. It does not scan the Codex session store or accept newest-file
+// evidence.
 func ParseCodexNotifyEvidence(raw []byte, launchNonce, handle, expectedVersion, expectedCwd string) (CaptureEvidence, error) {
 	if len(raw) == 0 || len(raw) > CodexNotifyPayloadLimit {
 		return CaptureEvidence{}, fmt.Errorf("codex notify payload size is invalid")
@@ -115,7 +116,7 @@ func ParseCodexNotifyEvidence(raw []byte, launchNonce, handle, expectedVersion, 
 	if err := fsq.ValidateHandle(handle); err != nil {
 		return CaptureEvidence{}, fmt.Errorf("invalid capture handle: %w", err)
 	}
-	if expectedVersion != codexCaptureVersion {
+	if !codexCaptureVersionSupported(expectedVersion) {
 		return CaptureEvidence{}, fmt.Errorf("codex capture version %q is unsupported", expectedVersion)
 	}
 	var event codexNotifyEvent
@@ -159,7 +160,7 @@ func decodeCodexNotifyPayload(raw []byte) (codexNotifyPayload, error) {
 		return payload, fmt.Errorf("decode codex notify evidence: %w", err)
 	}
 	if payload.Source != CodexNotifyV1 || payload.Provider != CodexProvider ||
-		payload.ProviderVersion != codexCaptureVersion || !validUUID(payload.LaunchNonce) {
+		!codexCaptureVersionSupported(payload.ProviderVersion) || !validUUID(payload.LaunchNonce) {
 		return payload, fmt.Errorf("codex notify evidence metadata is invalid")
 	}
 	if err := fsq.ValidateHandle(payload.Handle); err != nil {

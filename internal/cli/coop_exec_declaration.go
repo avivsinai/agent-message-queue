@@ -9,9 +9,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
-// coopExecCreationDeprecated is the stable, greppable stderr line for the
-// #480 v1.1 §9 deprecation wave. Behavior is unchanged this release; the next
-// major release makes the same paths exit 3 with zero writes.
+// coopExecCreationDeprecated is the stable, greppable stderr line that marks
+// creating a missing session or root from coop exec as deprecated.
 const coopExecCreationDeprecated = "warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3."
 
 func warnCoopExecCreationDeprecated(warned *bool) {

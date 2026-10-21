@@ -23,7 +23,7 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	observed := time.Date(2026, 8, 17, 1, 2, 3, 0, time.UTC)
-	capture, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", fixture.cwd), nonce, "claude", codexCaptureVersion, fixture.cwd)
+	capture, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", fixture.cwd), nonce, "claude", codexCaptureMinimumVersion, fixture.cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 	}
 	manualConversation := ConversationRecord{
 		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: CodexProvider, ID: "019c8a2f-2b13-7000-8000-000000000001"}, ProviderVersion: codexCaptureVersion, LaunchNonce: nonce,
+		Identity: ConversationIdentity{Provider: CodexProvider, ID: "019c8a2f-2b13-7000-8000-000000000001"}, ProviderVersion: codexCaptureMinimumVersion, LaunchNonce: nonce,
 		ExecutionEvidence: &ConversationExecutionEvidence{
 			Backend: LauncherTMux, Profile: TmuxProfile().Identity(), Outcome: OutcomeCreated,
 			LaunchNonce: nonce, ConversationID: "019c8a2f-2b13-7000-8000-000000000001",

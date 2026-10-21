@@ -895,8 +895,8 @@ func detectAgentMailDir() string {
 // directory or anything above it. Test seams re-point HOME at per-test
 // sibling temp dirs, which moves the home stop off the walk's ancestor chain
 // and lets a walk climb out of the isolated test home into the operator's
-// real ~/.amqrc / ~/.agent-mail (issue #988, rev-853 P0). TestMain sets it
-// to the isolated test home; production binaries never set it, so live
+// real ~/.amqrc / ~/.agent-mail. TestMain sets it to the isolated test home;
+// production binaries never set it, so live
 // resolution behavior is unchanged.
 var walkCeilingForTests string
 

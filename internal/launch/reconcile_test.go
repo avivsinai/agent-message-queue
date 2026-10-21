@@ -69,7 +69,7 @@ func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 	}
 	providerVersion := "test"
 	if a.name == CodexProvider {
-		providerVersion = codexCaptureVersion
+		providerVersion = codexCaptureMinimumVersion
 	} else if a.preSpawnAcquire {
 		providerVersion = cursorCaptureVersion
 	}
@@ -247,7 +247,7 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	}
 	if b.capture {
 		if b.captured == nil {
-			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Plan.Agents[0].Cwd), req.Plan.Agents[0].LaunchNonce, req.Plan.Agents[0].Handle, codexCaptureVersion, req.Plan.Agents[0].Cwd)
+			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Plan.Agents[0].Cwd), req.Plan.Agents[0].LaunchNonce, req.Plan.Agents[0].Handle, codexCaptureMinimumVersion, req.Plan.Agents[0].Cwd)
 			if err != nil {
 				return CreateResult{}, err
 			}
@@ -305,7 +305,7 @@ func (b *reconcileBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	}
 	if b.capture {
 		if b.captured == nil {
-			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Journal.Plan.Agents[0].Cwd), req.Journal.LaunchNonce, req.Journal.Plan.Agents[0].Handle, codexCaptureVersion, req.Journal.Plan.Agents[0].Cwd)
+			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Journal.Plan.Agents[0].Cwd), req.Journal.LaunchNonce, req.Journal.Plan.Agents[0].Handle, codexCaptureMinimumVersion, req.Journal.Plan.Agents[0].Cwd)
 			if err != nil {
 				return ReclaimResult{}, err
 			}

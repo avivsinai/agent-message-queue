@@ -9,7 +9,7 @@ import (
 )
 
 // ProbeLifetimeLock reports whether the process-lifetime lock for entryID is
-// currently HELD by a live process (611.13.2 D). Three outcomes:
+// currently HELD by a live process. Three outcomes:
 //
 //   - held=true, nil: a live up owns the row - never reclaim, never stale.
 //   - held=false, nil: nobody holds the lock. The lock file may exist
@@ -42,7 +42,7 @@ func ProbeLockHeld(lockPath string) (bool, error) {
 	// Non-blocking SHARED probe: EWOULDBLOCK/EAGAIN = held by a live owner
 	// (an EX holder). Probers take SH too, so concurrent probes never
 	// collide — with LOCK_EX here, a second prober made a dead row read as
-	// live (review r3 P2-1, e.g. up's reclaim racing a doctor run).
+	// live (e.g. up's reclaim racing a doctor run).
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 	if err == nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)

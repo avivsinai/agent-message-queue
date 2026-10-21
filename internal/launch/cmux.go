@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,11 +19,6 @@ import (
 const (
 	cmuxProfileVersion      = 1
 	cmuxProfileVersionRange = ">=0.64.3 <1.0"
-	cmuxCommandTimeout      = 5 * time.Second
-	cmuxCreateTimeout       = 30 * time.Second
-	cmuxHealthTimeout       = 15 * time.Second
-	cmuxHealthPoll          = 100 * time.Millisecond
-	cmuxBundleCLI           = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 	cmuxWorkspacePrefix     = "cmux:v1:workspace:"
 	cmuxWindowPrefix        = "cmux:v1:window:"
 	cmuxSurfacePrefix       = "cmux:v1:surface:"
@@ -32,26 +28,15 @@ const (
 
 // CmuxBackend manages one cmux workspace per AMQ project/session generation.
 type CmuxBackend struct {
-	binary         string
-	run            func(context.Context, ...string) (string, error)
-	hostname       func() (string, error)
-	getenv         func(string) string
-	lookPath       func(string) (string, error)
-	userHomeDir    func() (string, error)
-	isExecutable   func(string) bool
-	sleep          func(context.Context, time.Duration) error
-	createTimeout  time.Duration
-	commandTimeout time.Duration
-	healthTimeout  time.Duration
-	healthPoll     time.Duration
+	backendTiming
+	binary   string
+	run      func(context.Context, ...string) (string, error)
+	hostname func() (string, error)
+	cli      CmuxLocator
 }
 
 func NewCmuxBackend(binary string) *CmuxBackend {
-	b := &CmuxBackend{
-		binary: strings.TrimSpace(binary), hostname: os.Hostname, getenv: os.Getenv,
-		lookPath: exec.LookPath, userHomeDir: os.UserHomeDir, isExecutable: cmuxExecutable,
-		healthTimeout: cmuxHealthTimeout, healthPoll: cmuxHealthPoll,
-	}
+	b := &CmuxBackend{binary: strings.TrimSpace(binary), hostname: os.Hostname}
 	b.run = b.runCommand
 	return b
 }
@@ -141,7 +126,7 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
-	if err := b.validateCreate(req); err != nil {
+	if err := validateCreate(req); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
 	amqPath := req.AMQPath
@@ -227,7 +212,7 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, err)
 	}
 	for i, agent := range req.Plan.Agents {
-		line := b.agentCommand(req, agent)
+		line := agentCommand(req, agent)
 		sendCtx, sendCancel := b.inspectCallContext()
 		_, err := b.run(sendCtx, "send", "--workspace", workspaceID, "--surface", surfaceIDs[i], "--", line)
 		sendCancel()
@@ -258,44 +243,8 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
 }
 
-func (b *CmuxBackend) createOpTimeout() time.Duration {
-	if b.createTimeout > 0 {
-		return b.createTimeout
-	}
-	return cmuxCreateTimeout
-}
-
-func (b *CmuxBackend) commandOpTimeout() time.Duration {
-	if b.commandTimeout > 0 {
-		return b.commandTimeout
-	}
-	return cmuxCommandTimeout
-}
-
-func (b *CmuxBackend) commandCallContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), b.commandOpTimeout())
-}
-
-func (b *CmuxBackend) createCallContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), b.createOpTimeout())
-}
-
-func (b *CmuxBackend) staggerPlacement(preview PlacementPreview, index int) error {
-	delay := placementStaggerDuration(&preview.Effective)
-	if delay <= 0 || index == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), delay+time.Second)
-	defer cancel()
-	return b.doSleep(ctx, delay)
-}
-
-func (b *CmuxBackend) inspectCallContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), cmuxCommandTimeout)
-}
-
 func (b *CmuxBackend) orphanCallContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), cmuxCreateTimeout)
+	return context.WithTimeout(context.Background(), backendCreateTimeout)
 }
 
 func (b *CmuxBackend) restoreSelectedWorkspace(previousSelected, skipID string) {
@@ -341,50 +290,32 @@ func (b *CmuxBackend) reconcileCreateFailure(knownWorkspaceID string, inputSent 
 }
 
 func (b *CmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cmuxCommandTimeout)
-	defer cancel()
-	state, err := b.inspect(ctx, req.Binding)
-	if err != nil {
-		return InspectResult{Status: InspectUnknown, Evidence: err.Error(), ActionRequired: true}, nil
-	}
-	return state, nil
+	return inspectBinding(req.Binding, b.inspect)
 }
 
 func (b *CmuxBackend) Close(req CloseRequest) (CloseResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cmuxCommandTimeout)
-	defer cancel()
-	inspection, err := b.inspect(ctx, req.Binding)
-	if err != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
-	}
-	if inspection.Status == InspectAbsent {
-		return CloseResult{Outcome: OutcomeClosed, Reason: "cmux workspace already absent"}, nil
-	}
-	surfaces := cmuxOwnedSurfaceIDs(req.Binding)
-	if len(surfaces) == 0 {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: "cmux binding has no surface identities"}, nil
-	}
-	workspaceID, _, err := parseCmuxWorkspaceResource(req.Binding)
-	if err != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
-	}
-	for _, surfaceID := range surfaces {
-		if _, closeErr := b.run(ctx, "close-surface", "--surface", surfaceID); closeErr != nil && !cmuxTargetMissing(closeErr) {
-			return CloseResult{}, fmt.Errorf("close cmux surface %s: %w", surfaceID, closeErr)
-		}
-	}
-	live, liveErr := b.ownedCmuxSurfacesStillLive(ctx, workspaceID, surfaces)
-	if liveErr != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: liveErr.Error()}, nil
-	}
-	if len(live) > 0 {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: "owned cmux surface still alive after close"}, nil
-	}
-	return CloseResult{Outcome: OutcomeClosed, Reason: "cmux surfaces closed"}, nil
+	return ownedTerminalClose{
+		backend: "cmux", container: "workspace", terminal: "surface",
+		inspect: func(ctx context.Context) (InspectResult, error) { return b.inspect(ctx, req.Binding) },
+		owned:   cmuxOwnedSurfaceIDs(req.Binding),
+		containerID: func() (string, error) {
+			workspaceID, _, err := parseCmuxWorkspaceResource(req.Binding)
+			return workspaceID, err
+		},
+		closeTerminal: func(ctx context.Context, surfaceID string) error {
+			_, err := b.run(ctx, "close-surface", "--surface", surfaceID)
+			return err
+		},
+		targetMissing: cmuxTargetMissing,
+		stillLive: func(ctx context.Context, workspaceID string, owned []string) (int, error) {
+			live, err := b.ownedCmuxSurfacesStillLive(ctx, workspaceID, owned)
+			return len(live), err
+		},
+	}.run()
 }
 
 func (b *CmuxBackend) Focus(req FocusRequest) (FocusResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCommandTimeout)
 	defer cancel()
 	inspection, err := b.inspect(ctx, req.Binding)
 	if err != nil || inspection.Status != InspectPresent {
@@ -413,7 +344,7 @@ func (b *CmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, cmuxCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, backendCommandTimeout)
 	defer cancel()
 	if req.Root == nil {
 		return ReclaimResult{}, fmt.Errorf("missing pinned session root")
@@ -479,33 +410,6 @@ func (b *CmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	return ReclaimResult{Status: ReclaimAdoptable, Evidence: "cmux workspace and nonce match the complete journal plan", Resources: resources, Binding: binding}, nil
 }
 
-func (b *CmuxBackend) validateCreate(req CreateRequest) error {
-	if strings.TrimSpace(req.ProjectRoot) == "" || strings.TrimSpace(req.Session) == "" || req.Root == nil {
-		return fmt.Errorf("project root, session, and pinned root are required")
-	}
-	if err := req.Plan.Validate(); err != nil {
-		return err
-	}
-	if _, err := canonicalIdentity(req.ProjectRoot); err != nil {
-		return fmt.Errorf("resolve project root: %w", err)
-	}
-	handles := make([]string, len(req.Plan.Agents))
-	nonce := req.Plan.Agents[0].LaunchNonce
-	if !validUUID(nonce) {
-		return fmt.Errorf("launch nonce must be a UUID")
-	}
-	for i, agent := range req.Plan.Agents {
-		handles[i] = agent.Handle
-		if agent.LaunchNonce != nonce {
-			return fmt.Errorf("agent %q has a different launch nonce", agent.Handle)
-		}
-	}
-	if err := fsq.ValidateExistingMailboxLayout(req.Root, handles...); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (b *CmuxBackend) inspect(ctx context.Context, binding BindingRecord) (InspectResult, error) {
 	if err := binding.Validate(); err != nil {
 		return InspectResult{}, err
@@ -557,37 +461,16 @@ func (b *CmuxBackend) inspect(ctx context.Context, binding BindingRecord) (Inspe
 }
 
 func (b *CmuxBackend) validateBindingContext(binding BindingRecord) error {
-	host, err := b.hostname()
-	if err != nil {
-		return fmt.Errorf("resolve cmux host identity: %w", err)
-	}
-	if binding.Backend != LauncherCMux || binding.Profile != CmuxProfile().Identity() ||
-		binding.HostIdentity != host {
-		return fmt.Errorf("cmux binding belongs to a different backend context")
-	}
-	detect := b.Detect()
-	if detect.InstanceIdentity == "" {
-		return fmt.Errorf("cmux socket is unreachable")
-	}
-	if binding.InstanceIdentity != detect.InstanceIdentity {
-		return fmt.Errorf("cmux binding belongs to a different backend context")
-	}
-	return nil
+	return checkBindingContext(binding, LauncherCMux, CmuxProfile(), b.hostname,
+		func() string { return b.Detect().InstanceIdentity }, "cmux socket is unreachable")
 }
 
 func (b *CmuxBackend) waitHealthy(parent context.Context, workspaceID string, want int) (bool, error) {
-	timeout := b.healthTimeout
-	if timeout <= 0 {
-		timeout = cmuxHealthTimeout
-	}
-	poll := b.healthPoll
-	if poll <= 0 {
-		poll = cmuxHealthPoll
-	}
+	timeout, poll := b.healthBudget()
 	deadline := time.Now().Add(timeout)
 	didSelect := false
 	for {
-		ctx, cancel := context.WithTimeout(parent, cmuxCommandTimeout)
+		ctx, cancel := context.WithTimeout(parent, backendCommandTimeout)
 		raw, err := b.runJSON(ctx, "surface-health", "--workspace", workspaceID)
 		if err == nil {
 			ready, needSelect, readyErr := cmuxSurfacesHealthy(raw, want)
@@ -697,19 +580,6 @@ func (b *CmuxBackend) listWorkspaceRecords(ctx context.Context) ([]cmuxListedWor
 	return parseCmuxWorkspaceList(raw)
 }
 
-func (b *CmuxBackend) agentCommand(req CreateRequest, agent AgentPlan) string {
-	amq := req.AMQPath
-	if strings.TrimSpace(amq) == "" {
-		amq = "amq"
-	}
-	env := cloneEnv(agent.EnvOverlay)
-	if env == nil {
-		env = make(map[string]string, 1)
-	}
-	env[InternalLaunchNonceEnv] = agent.LaunchNonce
-	return commandLine(agent.Cwd, env, coopExecArgv(amq, req.Root.Base(), agent.Handle, agent.Argv, agent.Execution))
-}
-
 func (b *CmuxBackend) runJSON(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--id-format", "uuids", "--json"}, args...)
 	return b.run(ctx, full...)
@@ -722,7 +592,7 @@ func (b *CmuxBackend) runCommand(ctx context.Context, args ...string) (string, e
 	}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cmuxCommandTimeout)
+		ctx, cancel = context.WithTimeout(ctx, backendCommandTimeout)
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
@@ -737,33 +607,7 @@ func (b *CmuxBackend) resolveExecutable() (string, error) {
 	if strings.TrimSpace(b.binary) != "" {
 		return filepath.Clean(b.binary), nil
 	}
-	if path, err := b.lookPath("cmux"); err == nil {
-		return filepath.Clean(path), nil
-	}
-	candidates := []string{cmuxBundleCLI}
-	if home, err := b.userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		candidates = append(candidates, filepath.Join(home, "Applications", "cmux.app", "Contents", "Resources", "bin", "cmux"))
-	}
-	for _, candidate := range candidates {
-		if b.isExecutable(candidate) {
-			return filepath.Clean(candidate), nil
-		}
-	}
-	return "", fmt.Errorf("cmux CLI not found")
-}
-
-func (b *CmuxBackend) doSleep(ctx context.Context, delay time.Duration) error {
-	if b.sleep != nil {
-		return b.sleep(ctx, delay)
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return b.cli.Resolve()
 }
 
 type cmuxCapabilities struct {
@@ -1230,11 +1074,6 @@ func cmuxInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
 	return issues
 }
 
-func cmuxExecutable(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
-}
-
 func redactCmuxArgs(args []string) []string {
 	out := append([]string(nil), args...)
 	for i, arg := range out {
@@ -1243,4 +1082,60 @@ func redactCmuxArgs(args []string) []string {
 		}
 	}
 	return out
+}
+
+// CmuxBundleCLI is where the cmux app installs its CLI.
+const CmuxBundleCLI = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+
+// CmuxLocator finds the cmux CLI for launch and keepalive. Nil fields use the
+// OS.
+type CmuxLocator struct {
+	Getenv       func(string) string
+	LookPath     func(string) (string, error)
+	UserHomeDir  func() (string, error)
+	IsExecutable func(string) bool
+}
+
+// Resolve returns the cmux CLI. CMUX_BUNDLED_CLI_PATH comes first: cmux sets
+// it in its own terminals to the CLI of the running app, which a PATH entry
+// of another version must not shadow. Then PATH, then the app bundle in
+// /Applications or ~/Applications.
+func (l CmuxLocator) Resolve() (string, error) {
+	getenv := l.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	lookPath := l.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	userHomeDir := l.UserHomeDir
+	if userHomeDir == nil {
+		userHomeDir = os.UserHomeDir
+	}
+	if bundled := strings.TrimSpace(getenv("CMUX_BUNDLED_CLI_PATH")); bundled != "" && l.Executable(bundled) {
+		return filepath.Clean(bundled), nil
+	}
+	if path, err := lookPath("cmux"); err == nil {
+		return filepath.Clean(path), nil
+	}
+	candidates := []string{CmuxBundleCLI}
+	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		candidates = append(candidates, filepath.Join(home, "Applications", "cmux.app", "Contents", "Resources", "bin", "cmux"))
+	}
+	for _, candidate := range candidates {
+		if l.Executable(candidate) {
+			return filepath.Clean(candidate), nil
+		}
+	}
+	return "", errors.New("cmux CLI not found")
+}
+
+// Executable reports whether path is a file with an execute bit.
+func (l CmuxLocator) Executable(path string) bool {
+	if l.IsExecutable != nil {
+		return l.IsExecutable(path)
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }

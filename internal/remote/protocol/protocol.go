@@ -610,8 +610,9 @@ const digestPrefix = "sha256:"
 // non-Go carrier MUST replicate json.Marshal's output, not build the bytes
 // by hand, because a hand-built template that omits the escaping computes a
 // different digest for any input containing <, >, or &. The precedent is
-// docs/wake-lifecycle.md:114-120, which binds the canonical form to
-// json.Marshal explicitly. Then sha256 hex with the "sha256:" prefix.
+// docs/wake-lifecycle.md#digests-and-canonical-bytes, which binds the
+// canonical form to json.Marshal explicitly. Then sha256 hex with the
+// "sha256:" prefix.
 //
 // Omitted optional fields inside input follow Go's struct tags (omitempty);
 // see resolveDigestDefaults for why Busy and Deliver are resolved to their

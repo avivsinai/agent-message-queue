@@ -120,16 +120,37 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 	if unsupported.Available || unsupported.Reason != "identity_contract_unsupported" {
 		t.Fatalf("unsupported Codex capabilities = %#v", unsupported)
 	}
-	codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
-		"--version": "codex-cli 0.148.0\n", "--help": "commands: resume",
-		"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
-	}}
-	untestedVersion := codex.Capabilities(context.Background())
-	if !untestedVersion.Available || !untestedVersion.Fresh || !untestedVersion.Resume || untestedVersion.Capture || untestedVersion.PreSpawnAcquire || untestedVersion.Reason != "capture_version_unsupported" {
-		t.Fatalf("untested Codex version capabilities = %#v", untestedVersion)
-	}
-	if err := ValidateAdapterCapabilities(codex, untestedVersion); err != nil {
-		t.Fatal(err)
+}
+
+// TestCodexCaptureVersionFloor protects the verified-floor contract: capture
+// accepts strict releases at or above 0.147.0, including newer unverified
+// releases, and refuses older ones by numeric (not string) comparison while
+// resume stays available.
+func TestCodexCaptureVersionFloor(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		capture bool
+	}{
+		{"0.147.0", true},
+		{"0.155.0", true},
+		{"0.99.0", false},
+	} {
+		codex := NewCodexAdapter("codex")
+		codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
+			"--version": "codex-cli " + tc.version + "\n", "--help": "commands: resume",
+			"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
+		}}
+		got := codex.Capabilities(context.Background())
+		wantReason := ""
+		if !tc.capture {
+			wantReason = "capture_version_unsupported"
+		}
+		if !got.Available || !got.Fresh || !got.Resume || got.Capture != tc.capture || got.Reason != wantReason || got.ProviderVersion != tc.version {
+			t.Fatalf("Codex %q capabilities = %#v", tc.version, got)
+		}
+		if err := ValidateAdapterCapabilities(codex, got); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
