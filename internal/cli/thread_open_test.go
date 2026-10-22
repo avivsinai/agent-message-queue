@@ -206,6 +206,23 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
+			// #1166 review of the skew fix: two skewed children of one
+			// unreferenced parent made a false cycle; the second child was
+			// marked unresolved and its decision never closed the todo.
+			name: "two skewed children of one unreferenced parent both act",
+			messages: []message{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
+				{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, refs: []string{"st"}, age: 3 * time.Hour},
+				{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}, age: 2 * time.Hour},
+			},
+			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
+				if un := result.Coverage.UnresolvedLineage; len(un) != 0 {
+					t.Fatalf("unresolved_lineage = %+v, want none", un)
+				}
+			},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
