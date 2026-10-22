@@ -226,7 +226,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		Kind:      KindAuth,
 		Tags:      nostr.Tags{{"relay", cfg.URL}, {"challenge", ch}, nostr.Tag(cfg.AuthTag)},
 	}
-	if err := evt.Sign(cfg.Secret); err != nil {
+	if err := Sign(&evt, cfg.Secret); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("sign AUTH: %w", err)
 	}

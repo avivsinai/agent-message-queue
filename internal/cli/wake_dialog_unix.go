@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -192,14 +194,48 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if err != nil {
 		return err
 	}
-	return writeWakeRepairMetadataAt(
-		dirfd,
-		agentDir,
-		wakeDialogFileName,
-		"wake dialog marker",
-		append(raw, '\n'),
-		maxWakeMetadataFileBytes,
-	)
+	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+}
+
+// replaceWakeDialogMarkerAt installs data as the marker by an exclusive
+// temp file and a rename, without fsync or read-back: the marker is
+// advisory, and a marker lost in a crash leaves the wake as it is without the
+// hook. The open runs as the dialog renders, so it must not wait on the disk.
+func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) error {
+	const label = "wake dialog marker"
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("generate %s temp name: %w", label, err)
+	}
+	temp := fmt.Sprintf(".%s.tmp.%d.%s", strings.TrimLeft(wakeDialogFileName, "."), os.Getpid(), hex.EncodeToString(nonce[:]))
+	fd, err := unix.Openat(dirfd, temp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s temp: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), temp)
+	tempPresent := true
+	defer func() {
+		_ = file.Close()
+		if tempPresent {
+			_ = wakeUnlinkAt(dirfd, temp, 0)
+		}
+	}()
+	if n, err := file.Write(data); err != nil {
+		return fmt.Errorf("write %s temp: %w", label, err)
+	} else if n != len(data) {
+		return fmt.Errorf("write %s temp: %w", label, io.ErrShortWrite)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s temp: %w", label, err)
+	}
+	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
+		return err
+	}
+	if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
+		return fmt.Errorf("install %s: %w", label, err)
+	}
+	tempPresent = false
+	return nil
 }
 
 // clearWakeDialogMarker removes the marker. With toolUseID (PostToolUse) it
@@ -228,34 +264,60 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) 
 	return nil
 }
 
-// wakeDialogHookCommand is the shell command one hook runs: the marker, the
-// single-quoted binary, and a trailing || true. Claude Code reads exit 2 as
-// a blocking error for PreToolUse, UserPromptSubmit and Stop, and an older
-// amq at this path would exit 2 on the unknown subcommand.
+// wakeDialogHookCommand is the shell command one hook runs: the marker, a
+// POSIX sh gate, the single-quoted binary, and a trailing || true. The gate
+// repeats what the receiver checks, so a gated call leaves state as the
+// receiver would and starts no amq: without AM_ME the receiver does nothing,
+// and a close has nothing to remove when the agent directory at AM_ROOT holds
+// no marker. The close skips only when the shell inspects exactly the
+// directory the receiver opens: AM_ROOT is absolute, has no "." or ".."
+// segment (sh resolves those through symlinks, filepath.Clean lexically),
+// and ends in a character that TrimSpace keeps; AM_ME holds only handle
+// characters. Any doubt (AM_ROOT unset, relative, padded, or naming no agent
+// directory) runs the receiver, which resolves the root itself. Claude Code
+// reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and Stop,
+// and an older amq at this path would exit 2 on the unknown subcommand.
 func wakeDialogHookCommand(bin, verb string) string {
-	return wakeDialogHookMarker +
+	gate := `[ -z "${AM_ME-}" ] || `
+	if verb == "close" {
+		gate += `{ case "${AM_ROOT-}" in */./*|*/../*|*/.|*/..) false ;; /*[[:alnum:]._/-]) ;; *) false ;; esac && ` +
+			`case "$AM_ME" in *[![:alnum:]_-]*) false ;; esac && ` +
+			`[ -d "$AM_ROOT/agents/$AM_ME" ] && ` +
+			`[ ! -e "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ] && ` +
+			`[ ! -L "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ]; } || `
+	}
+	return wakeDialogHookMarker + gate +
 		"'" + strings.ReplaceAll(bin, "'", `'\''`) + "'" +
 		" --no-update-check wake dialog " + verb + " || true"
 }
 
 // wakeDialogHookBinRe reads the binary back from wakeDialogHookCommand.
-var wakeDialogHookBinRe = regexp.MustCompile(`^` + regexp.QuoteMeta(wakeDialogHookMarker) + `'((?:[^']|'\\'')*)'`)
+var wakeDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:open|close) \|\| true$`)
+
+// wakeDialogHookVerb is the receiver verb the installer wires to event.
+func wakeDialogHookVerb(event string) string {
+	if event == "PreToolUse" || event == "PermissionRequest" {
+		return "open"
+	}
+	return "close"
+}
 
 func wakeDialogHooks(bin string) []claude.CommandHook {
 	hooks := make([]claude.CommandHook, 0, len(wakeDialogHookEvents))
 	for _, event := range wakeDialogHookEvents {
-		hook := claude.CommandHook{Event: event, Marker: wakeDialogHookMarker, Timeout: 5}
+		hook := claude.CommandHook{
+			Event:   event,
+			Marker:  wakeDialogHookMarker,
+			Command: wakeDialogHookCommand(bin, wakeDialogHookVerb(event)),
+			Timeout: 5,
+		}
 		switch event {
-		case "PreToolUse":
+		case "PreToolUse", "PostToolUse":
 			hook.Matcher = wakeDialogHookTools
-			hook.Command = wakeDialogHookCommand(bin, "open")
-		case "PermissionRequest":
-			hook.Command = wakeDialogHookCommand(bin, "open")
-		case "PostToolUse":
-			hook.Matcher = wakeDialogHookTools
-			hook.Command = wakeDialogHookCommand(bin, "close")
-		default:
-			hook.Command = wakeDialogHookCommand(bin, "close")
+		case "SessionEnd":
+			// SessionEnd hooks share a 1.5 s exit budget that a longer
+			// timeout raises for every hook.
+			hook.Timeout = 1
 		}
 		hooks = append(hooks, hook)
 	}
@@ -294,7 +356,7 @@ func runWakeInstallDialogHook(args []string) error {
 			if matcher == "" {
 				matcher = "(all)"
 			}
-			if err := writeStdout("%s\t%s\t%s\n", hook.Event, matcher, hook.Command); err != nil {
+			if err := writeStdout("%s\t%s\ttimeout=%ds\t%s\n", hook.Event, matcher, hook.Timeout, hook.Command); err != nil {
 				return err
 			}
 		}
@@ -347,7 +409,9 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 		return doctorCheck{}, false
 	}
 	check := doctorCheck{Name: "Claude dialog hook", Status: "warn"}
-	var commands, missing []string
+	type installed struct{ event, command string }
+	var commands []installed
+	var missing []string
 	for _, event := range wakeDialogHookEvents {
 		found, err := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
 		if err != nil {
@@ -357,7 +421,9 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 		if len(found) == 0 {
 			missing = append(missing, event)
 		}
-		commands = append(commands, found...)
+		for _, command := range found {
+			commands = append(commands, installed{event, command})
+		}
 	}
 	if len(commands) == 0 {
 		check.Message = "not installed: a wake doorbell can answer an open Claude Code dialog; remedy: amq wake install-dialog-hook"
@@ -367,14 +433,19 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
 		return check, true
 	}
-	for _, command := range commands {
-		match := wakeDialogHookBinRe.FindStringSubmatch(command)
+	for _, hook := range commands {
+		match := wakeDialogHookBinRe.FindStringSubmatch(hook.command)
 		if match == nil {
-			continue
+			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
+			return check, true
 		}
 		bin := strings.ReplaceAll(match[1], `'\''`, `'`)
 		if _, err := os.Stat(bin); err != nil {
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)
+			return check, true
+		}
+		if hook.command != wakeDialogHookCommand(bin, wakeDialogHookVerb(hook.event)) {
+			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
 			return check, true
 		}
 	}

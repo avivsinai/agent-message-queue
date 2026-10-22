@@ -102,7 +102,7 @@ func (s Signer) sign(evt *nostr.Event) error {
 		return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
 	}
 	evt.Tags = append(evt.Tags, nostr.Tag{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
-	return evt.Sign(s.secret)
+	return relay.Sign(evt, s.secret)
 }
 
 // source is this carrier's identity to the endpoint: a stable,

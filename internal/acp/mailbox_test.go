@@ -84,14 +84,16 @@ func replyAs(t *testing.T, root, thread, prompt, kind, body string) string {
 // handle and ends the turn on its final reply. A status reply is progress
 // and does not end the turn (codex 611.36 research, final-answer gap). The
 // turn claims its replies like drain (move to cur, drained receipt) and
-// leaves other messages in buzz/inbox/new.
+// leaves other messages in buzz/inbox/new. The prompt carries the
+// nostr:<eventID> label, so a layer can fetch the DM event (#1155).
 func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 	s, root := mailboxServer(t)
 	other := replyAs(t, root, cockpitThread("session/s"), "another-prompt", format.KindAnswer, "not for this turn")
+	eventID := strings.Repeat("1", 64)
 	var thoughts []string
 	var answer string
 	replied := false
-	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("1", 64), newTurn(), func(v any) error {
+	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(v any) error {
 		note := v.(sessionUpdateNotification)
 		if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
 			thoughts = append(thoughts, note.Params.Update.Content.Text)
@@ -99,6 +101,10 @@ func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 		if !replied {
 			if ids := inboxPrompts(t, root); len(ids) == 1 {
 				replied = true
+				prompt, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "agent"), ids[0]+".md"))
+				if err != nil || !slices.Equal(prompt.Header.Labels, []string{"acp", "buzz", "nostr:" + eventID}) {
+					t.Errorf("prompt labels=%q err=%v", prompt.Header.Labels, err)
+				}
 				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "working on it")
 				answer = replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi from the agent")
 			}
@@ -264,7 +270,7 @@ func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("3", 64), time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("3", 64), "", time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -298,7 +304,7 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", id, time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", id, "", time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -503,7 +509,7 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("6", 64), time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("6", 64), "", time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {

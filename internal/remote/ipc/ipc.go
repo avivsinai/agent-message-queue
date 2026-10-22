@@ -65,6 +65,11 @@ type Request struct {
 	// Activity streams the native activity of one running request. Local-only
 	// and read-only: see ActivityRequest.
 	Activity *ActivityRequest `json:"activity,omitempty"`
+	// Evidence is Command's opaque answer proof (protocol.Command.Evidence),
+	// carried for the Buzz Desktop agent, which relays the owner's signed ✅
+	// over this socket. Local-only, like NativeSession. It grants nothing by
+	// itself: the attachment's verifier decides what it proves.
+	Evidence json.RawMessage `json:"evidence,omitempty"`
 }
 
 // ActivityRequest asks for the native activity of one request while it runs:
@@ -359,6 +364,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		writeRecord(conn, Response{Reply: mustJSON(NativeReply{NativeSession: id})})
 	case req.Command != nil:
+		req.Command.Evidence = req.Evidence
 		// A pinned submit stays bound to the pinned session: core checks it
 		// again at every handoff, also after a restart.
 		reply, err := s.ep.Handle(req.Command, core.Source{Host: LocalHost, NativeSession: req.NativeSession})

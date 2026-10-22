@@ -109,11 +109,11 @@ amq wake install-dialog-hook
 
 The installer adds marked command hooks (`AMQ_DIALOG_HOOK=1`) to the user
 settings file `~/.claude/settings.json` and leaves other content as it is.
-Running it again changes nothing; `amq wake uninstall-dialog-hook` removes the
-entries. Running sessions pick up the change through the settings watcher; if
-`/hooks` does not list the entries, restart the session. `amq doctor` warns
-when `~/.claude` exists and the hook is missing or runs an amq binary that is
-gone.
+Running it again keeps current entries and replaces older forms;
+`amq wake uninstall-dialog-hook` removes the entries. Running sessions pick up
+the change through the settings watcher; if `/hooks` does not list the
+entries, restart the session. `amq doctor` warns when `~/.claude` exists and
+the hook is missing, runs an amq binary that is gone, or has an older form.
 
 - **Marker.** The hooks run `amq wake dialog open|close`, which writes or
   removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
@@ -121,11 +121,19 @@ gone.
   runs on `PostToolUse` for the same two tools (only for the tool call that
   opened the marker), and on `UserPromptSubmit`, `Stop`, `SessionStart`, and
   `SessionEnd`. The receiver exits 0 once its arguments parse and prints
-  nothing, so it never decides a tool call or a permission.
+  nothing, so it never decides a tool call or a permission. The marker is
+  advisory and is written without fsync; a marker lost in a crash leaves the
+  wake as it is without the hook. Every hook has a 5 second timeout, except
+  `SessionEnd` at 1 second, so the hook never extends Claude Code's exit.
 - **Identity.** The receiver finds the mailbox through `AM_ME` and `AM_ROOT`
   in the Claude Code environment, which `amq coop exec` and `amq launch` set.
   A Claude Code process started without them gets no marker, and its wake
-  behaves as it does without the hook.
+  behaves as it does without the hook. The hook command tests these in the
+  shell before it starts amq: without `AM_ME` it starts nothing. A close
+  skips amq only when `AM_ROOT` is absolute with no `.` or `..` segment and
+  no surrounding whitespace, `AM_ME` holds only handle characters, and
+  `<AM_ROOT>/agents/<AM_ME>` is a directory without a marker; otherwise it
+  runs amq. Every other Claude Code session pays one `sh` per hook.
 - **Hold.** Before each doorbell, reminder, or `--inject-cmd`/`--inject-via`
   delivery, the wake reads the marker. While it exists, the wake writes no
   terminal input, checks again every 2 seconds, and rings the full doorbell
