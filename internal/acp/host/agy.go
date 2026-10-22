@@ -90,6 +90,9 @@ type agyProc struct {
 	init    chan agyEvent
 	results chan agyResult
 	exited  chan struct{}
+	// denied is how many denied tool calls this process has reported:
+	// result.denied_actions counts every turn of the process so far.
+	denied int
 }
 
 func startAgyProc(spawn Spawner, extra []string) (*agyProc, error) {
@@ -259,12 +262,12 @@ func (s *agySession) send(text string, _ map[string]any, sent func(id int64) err
 		}
 		select {
 		case res := <-proc.results:
-			ended <- s.finish(turn, res)
+			ended <- s.finish(proc, turn, res)
 		case <-proc.exited:
 			// The reader queues a result before it sees the exit.
 			select {
 			case res := <-proc.results:
-				ended <- s.finish(turn, res)
+				ended <- s.finish(proc, turn, res)
 			default:
 				ended <- turnEnd{err: errClosed}
 			}
@@ -276,13 +279,19 @@ func (s *agySession) send(text string, _ map[string]any, sent func(id int64) err
 	return ended, nil
 }
 
-// finish maps a result to the turn's end, and puts the turn's answer and its
-// denied tool calls into the turn.
-func (s *agySession) finish(turn *turnCollect, res agyResult) turnEnd {
+// finish maps a result to the turn's end, and puts the turn's answer and the
+// tool calls denied in this turn into the turn. A new process starts its
+// count again at zero.
+func (s *agySession) finish(proc *agyProc, turn *turnCollect, res agyResult) turnEnd {
+	denied := len(res.DeniedActions) - proc.denied
+	if denied < 0 {
+		denied = 0
+	}
+	proc.denied = max(proc.denied, len(res.DeniedActions))
 	s.h.mu.Lock()
 	if turn != nil {
 		turn.text.WriteString(cutUTF8(res.Response, bodyLimit))
-		turn.refused += len(res.DeniedActions)
+		turn.refused += denied
 	}
 	s.h.mu.Unlock()
 	switch {
