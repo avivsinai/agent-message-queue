@@ -148,6 +148,22 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(agent, wakeDialogFileName)
+	// Regression (#1165 review): the receiver trims AM_ROOT and cleans it
+	// lexically, so a padded root or one with ".." through a symlink names
+	// the marker's directory for amq but an empty directory for sh.
+	if err := os.MkdirAll(fsq.AgentBase(root+" ", "codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fsq.AgentBase(filepath.Join(dir, "a", "root"), "codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "a", "b"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	dotted := filepath.Join(dir, "link") + "/../root"
 
 	for _, tc := range []struct {
 		name       string
@@ -159,6 +175,8 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 		{"participant without marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, false, true, false},
 		{"participant with marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, true, true, true},
 		{"participant without AM_ROOT", []string{"AM_ME=codex"}, false, true, true},
+		{"padded AM_ROOT, marker in the trimmed root", []string{"AM_ME=codex", "AM_ROOT=" + root + " "}, true, true, true},
+		{"AM_ROOT with .. through a symlink", []string{"AM_ME=codex", "AM_ROOT=" + dotted}, true, true, true},
 	} {
 		for _, hook := range wakeDialogHooks(fake) {
 			_ = os.Remove(ran)

@@ -118,9 +118,11 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   in the Claude Code environment, which `amq coop exec` and `amq launch` set.
   A Claude Code process started without them gets no marker, and its wake
   behaves as it does without the hook. The hook command tests these in the
-  shell before it starts amq: without `AM_ME` it starts nothing, and a close
-  starts amq only when `<AM_ROOT>/agents/<AM_ME>` is not a directory or holds
-  a marker. Every other Claude Code session pays one `sh` per hook.
+  shell before it starts amq: without `AM_ME` it starts nothing. A close
+  skips amq only when `AM_ROOT` is absolute with no `.` or `..` segment and
+  no surrounding whitespace, `AM_ME` holds only handle characters, and
+  `<AM_ROOT>/agents/<AM_ME>` is a directory without a marker; otherwise it
+  runs amq. Every other Claude Code session pays one `sh` per hook.
 - **Hold.** Before each doorbell, reminder, or `--inject-cmd`/`--inject-via`
   delivery, the wake reads the marker. While it exists, the wake writes no
   terminal input, checks again every 2 seconds, and rings the full doorbell

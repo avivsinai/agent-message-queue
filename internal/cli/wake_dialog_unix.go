@@ -269,14 +269,20 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) 
 // repeats what the receiver checks, so a gated call leaves state as the
 // receiver would and starts no amq: without AM_ME the receiver does nothing,
 // and a close has nothing to remove when the agent directory at AM_ROOT holds
-// no marker. Any doubt (AM_ROOT unset, padded, or naming no agent directory)
-// fails a test and runs the receiver, which resolves the root itself. Claude
-// Code reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and
-// Stop, and an older amq at this path would exit 2 on the unknown subcommand.
+// no marker. The close skips only when the shell inspects exactly the
+// directory the receiver opens: AM_ROOT is absolute, has no "." or ".."
+// segment (sh resolves those through symlinks, filepath.Clean lexically),
+// and ends in a character that TrimSpace keeps; AM_ME holds only handle
+// characters. Any doubt (AM_ROOT unset, relative, padded, or naming no agent
+// directory) runs the receiver, which resolves the root itself. Claude Code
+// reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and Stop,
+// and an older amq at this path would exit 2 on the unknown subcommand.
 func wakeDialogHookCommand(bin, verb string) string {
 	gate := `[ -z "${AM_ME-}" ] || `
 	if verb == "close" {
-		gate += `{ [ -d "${AM_ROOT-}/agents/$AM_ME" ] && ` +
+		gate += `{ case "${AM_ROOT-}" in */./*|*/../*|*/.|*/..) false ;; /*[[:alnum:]._/-]) ;; *) false ;; esac && ` +
+			`case "$AM_ME" in *[![:alnum:]_-]*) false ;; esac && ` +
+			`[ -d "$AM_ROOT/agents/$AM_ME" ] && ` +
 			`[ ! -e "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ] && ` +
 			`[ ! -L "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ]; } || `
 	}
