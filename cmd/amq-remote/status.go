@@ -21,22 +21,16 @@ func status(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	// If the positional is a bare request ID (not a ref),
-	// resolve the sender spool FIRST. A running endpoint refuses a bare id
-	// as invalid, so the spool surface that reports drain failures is
-	// unreachable at exactly the moment the failure exists. When the spool
-	// has the envelope, use its stored identity; if the spool's envelope is
-	// terminal (failed/expired), return it directly without hitting the
-	// endpoint. For a real ref, call the endpoint as before.
+	// A bare request ID (not a ref) resolves through the sender spool: a
+	// running endpoint refuses a bare id as invalid. The spool's stored
+	// identity names the endpoint record, and the endpoint is asked first
+	// whatever the spool state: the spool records delivery of intent, the
+	// endpoint records execution, so a record the endpoint holds wins over a
+	// failed or expired envelope. The spool receipt answers only when the
+	// endpoint has no record or cannot be reached.
 	refOrID := pos[0]
 	if !strings.HasPrefix(refOrID, protocol.RefPrefix) {
 		if spoolReceipt, ok := lookupSpoolStatus(stateDir, refOrID); ok {
-			if spoolReceipt.State == sender.StateFailed || spoolReceipt.State == sender.StateExpired {
-				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
-			}
-			// Pending/dispatched: use the spool's stored identity for the
-			// live endpoint call so the caller sees the endpoint's current
-			// state, not just the spool's snapshot.
 			refOrID = protocol.EncodeRef(spoolReceipt.CreatorHost, spoolReceipt.TargetID, spoolReceipt.RequestID)
 		}
 	}

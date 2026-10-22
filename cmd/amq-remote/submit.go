@@ -118,11 +118,14 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 	if err := spool.Create(env); err != nil {
 		return nil, 0, err
 	}
-	// Attempt live dispatch. If the endpoint is up, return its reply and mark
-	// the envelope dispatched. If it is unreachable, return a `submitted`
+	// Attempt live dispatch of the persisted command, never the one just
+	// built: a same-id retry reconciles to the existing envelope and keeps
+	// its admission window, so the endpoint answers from its record or
+	// refuses a closed window. If the endpoint is up, return its reply and
+	// mark the envelope dispatched. If it is unreachable, return a `submitted`
 	// receipt from the spool: the intent is durable and the drainer will
 	// dispatch it when the companion runs.
-	rep, derr := callReply(stateDir, cmd)
+	rep, derr := callReply(stateDir, env.Command)
 	if derr != nil {
 		// A duplicate (request_conflict) means a prior submit for this id
 		// already reached the endpoint; surface the stored reply instead of
@@ -135,8 +138,10 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		if isEndpointUnreachable(derr) {
 			// The intent is persisted; the caller is told `submitted`, not
 			// an error. The drainer replays after restart. The receipt is a
-			// sender-side SpoolReceipt, not a fabricated Snapshot.
-			return env.Receipt("endpoint_unreachable"), protocol.ExitSuccess, nil
+			// sender-side SpoolReceipt, not a fabricated Snapshot. A
+			// reconciled envelope that already settled keeps its exit.
+			receipt := env.Receipt("endpoint_unreachable")
+			return receipt, exitForSpoolReceipt(receipt), nil
 		}
 		return nil, 0, derr
 	}
@@ -152,6 +157,8 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		case protocol.CodeBusy, protocol.CodeDraining, protocol.CodeStorageFull:
 			// Transient: leave pending, drainer retries next tick.
 			_ = spool.MarkAttempt(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
+		case protocol.CodeExpired:
+			_ = spool.MarkExpired(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id})
 		default:
 			// Terminal refusal: mark failed with the code.
 			_ = spool.MarkFailed(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
