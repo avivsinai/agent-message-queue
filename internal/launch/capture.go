@@ -187,10 +187,10 @@ const codexRolloutMetaLimit = 1 << 20
 // thread of a Codex session in cwd. Codex also sends notify for side threads
 // (title generation writes no rollout) and subagent threads (their
 // session_meta source is an object), so arrival order never identifies the
-// seat's conversation. The check reads only the first line of the rollout
-// named by the exact thread id, in the day directories around the UUIDv7
-// creation time; it never selects a newest file. A missing rollout is not
-// proof and reports false.
+// seat's conversation. Older releases may omit thread_source. The check reads
+// only the first line of the rollout named by the exact thread id, in the day
+// directories around the UUIDv7 creation time; it never selects a newest
+// file. A missing rollout is not proof and reports false.
 func codexTopLevelThread(codexHome, threadID, cwd string) (bool, error) {
 	if !validUUIDv7(threadID) {
 		return false, nil
@@ -237,7 +237,7 @@ func codexTopLevelThread(codexHome, threadID, cwd string) (bool, error) {
 		return false, nil
 	}
 	return meta.Type == "session_meta" && meta.Payload.ID == threadID && meta.Payload.Cwd == cwd &&
-		string(meta.Payload.Source) == `"cli"` && meta.Payload.ThreadSource == "user", nil
+		string(meta.Payload.Source) == `"cli"` && (meta.Payload.ThreadSource == "" || meta.Payload.ThreadSource == "user"), nil
 }
 
 // ParseCursorCreateChatEvidence validates the exact stdout returned by the
