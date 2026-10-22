@@ -39,6 +39,23 @@ Disable wake when the environment has no usable terminal:
 amq coop exec --no-wake claude
 ```
 
+### Claude Code session-start preamble
+
+```sh
+amq coop install-hooks
+```
+
+This adds one SessionStart hook to `~/.claude/settings.json`. On startup,
+resume, `/clear`, and compaction it gives the agent a short preamble: its
+handle, session and peers, its unread count, and whether a wake rings the
+terminal (so it must not run `watch`, `monitor`, or a polling loop). The hook
+runs `amq` only in sessions with `AM_ME` set, which `amq coop exec` and
+`amq launch` do; a plain `claude` without `AM_ME` gets no preamble, and other
+Claude Code sessions start no `amq`. Running it again replaces the entry in
+place; `amq coop uninstall-hooks` removes it. Remove a project hook entry that
+runs `scripts/claude-session-start.sh`, or the preamble arrives twice; the
+install command and `amq doctor` list such entries.
+
 ### Multiple pairs (isolated sessions)
 
 Create each named session before launching it:

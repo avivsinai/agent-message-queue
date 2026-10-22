@@ -36,6 +36,12 @@ func runCoop(args []string) error {
 		return runCoopExec(args[1:])
 	case "named-inject":
 		return runCoopNamedInject(args[1:])
+	case "hook":
+		return runCoopHook(args[1:])
+	case "install-hooks":
+		return runCoopInstallHooks(args[1:])
+	case "uninstall-hooks":
+		return runCoopUninstallHooks(args[1:])
 	default:
 		return formatUnknownSubcommand("coop", args[0])
 	}
