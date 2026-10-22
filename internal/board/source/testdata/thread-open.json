@@ -1,0 +1,227 @@
+{
+  "schema": "amq/thread-open/v1",
+  "generated_at": "2026-10-22T12:00:00Z",
+  "base_root": "/fixture/.agent-mail",
+  "sessions": [
+    "s1",
+    "s2"
+  ],
+  "obligations": [
+    {
+      "key": "s2/2026-10-22T08-00-00.000Z_pid101_aa11bb22/user",
+      "thread": "p2p/alpha__user",
+      "opener": {
+        "id": "2026-10-22T08-00-00.000Z_pid101_aa11bb22",
+        "kind": "question",
+        "from": "alpha",
+        "to": [
+          "user"
+        ],
+        "reply_to": "alpha@s1",
+        "reply_project": "",
+        "from_project": "",
+        "subject": "Which port for the relay?",
+        "created": "2026-10-22T08:00:00.000Z",
+        "priority": "normal",
+        "labels": []
+      },
+      "owed_by": {
+        "project": "",
+        "session": "s2",
+        "handle": "user"
+      },
+      "owed_by_kind": "human",
+      "owed_to": {
+        "project": "",
+        "session": "s1",
+        "handle": "alpha"
+      },
+      "reply_destination": {
+        "handle": "alpha",
+        "session": "s1",
+        "project": "",
+        "source": "reply_to"
+      },
+      "state": "pending",
+      "completion": {
+        "kind": "answer",
+        "labels": []
+      },
+      "acknowledge": {
+        "kind": "status",
+        "labels": []
+      },
+      "age_seconds": 0
+    },
+    {
+      "key": "s1/2026-10-22T09-00-00.000Z_pid102_cc33dd44/user",
+      "thread": "p2p/beta__user",
+      "opener": {
+        "id": "2026-10-22T09-00-00.000Z_pid102_cc33dd44",
+        "kind": "todo",
+        "from": "beta",
+        "to": [
+          "user"
+        ],
+        "reply_to": "",
+        "reply_project": "",
+        "from_project": "",
+        "subject": "Approve the release",
+        "created": "2026-10-22T09:00:00.000Z",
+        "priority": "normal",
+        "labels": []
+      },
+      "owed_by": {
+        "project": "",
+        "session": "s1",
+        "handle": "user"
+      },
+      "owed_by_kind": "human",
+      "owed_to": {
+        "project": "",
+        "session": "s1",
+        "handle": "beta"
+      },
+      "reply_destination": {
+        "handle": "beta",
+        "session": "s1",
+        "project": "",
+        "source": "local"
+      },
+      "state": "pending",
+      "completion": {
+        "kind": "status",
+        "labels": [
+          "done"
+        ]
+      },
+      "acknowledge": {
+        "kind": "status",
+        "labels": []
+      },
+      "age_seconds": 0
+    },
+    {
+      "key": "s1/2026-10-22T10-00-00.000Z_pid103_ee55ff66/beta",
+      "thread": "p2p/alpha__beta",
+      "opener": {
+        "id": "2026-10-22T10-00-00.000Z_pid103_ee55ff66",
+        "kind": "review_request",
+        "from": "alpha",
+        "to": [
+          "beta"
+        ],
+        "reply_to": "",
+        "reply_project": "",
+        "from_project": "",
+        "subject": "Review demo-b3 parser",
+        "created": "2026-10-22T10:00:00.000Z",
+        "priority": "normal",
+        "labels": []
+      },
+      "owed_by": {
+        "project": "",
+        "session": "s1",
+        "handle": "beta"
+      },
+      "owed_by_kind": "agent",
+      "owed_to": {
+        "project": "",
+        "session": "s1",
+        "handle": "alpha"
+      },
+      "reply_destination": {
+        "handle": "alpha",
+        "session": "s1",
+        "project": "",
+        "source": "local"
+      },
+      "state": "pending",
+      "completion": {
+        "kind": "review_response",
+        "labels": []
+      },
+      "acknowledge": {
+        "kind": "status",
+        "labels": []
+      },
+      "age_seconds": 0
+    },
+    {
+      "key": "s1/2026-10-22T10-30-00.000Z_pid104_a1b2c3d4/beta",
+      "thread": "p2p/alpha__beta",
+      "opener": {
+        "id": "2026-10-22T10-30-00.000Z_pid104_a1b2c3d4",
+        "kind": "review_request",
+        "from": "alpha",
+        "to": [
+          "beta"
+        ],
+        "reply_to": "",
+        "reply_project": "",
+        "from_project": "",
+        "subject": "Review the docs",
+        "created": "2026-10-22T10:30:00.000Z",
+        "priority": "normal",
+        "labels": []
+      },
+      "owed_by": {
+        "project": "",
+        "session": "s1",
+        "handle": "beta"
+      },
+      "owed_by_kind": "agent",
+      "owed_to": {
+        "project": "",
+        "session": "s1",
+        "handle": "alpha"
+      },
+      "reply_destination": {
+        "handle": "alpha",
+        "session": "s1",
+        "project": "",
+        "source": "local"
+      },
+      "state": "pending",
+      "completion": {
+        "kind": "review_response",
+        "labels": []
+      },
+      "acknowledge": {
+        "kind": "status",
+        "labels": []
+      },
+      "age_seconds": 0
+    }
+  ],
+  "coverage": {
+    "max_age_seconds": 1209600,
+    "assessed_since": "2026-10-08T12:00:00Z",
+    "pruned_files": [
+      {
+        "session": "s1",
+        "count": 40
+      }
+    ],
+    "expired": [],
+    "skipped": [],
+    "unresolved_lineage": [],
+    "ambiguous": [
+      {
+        "id": "2026-10-22T11-00-00.000Z_pid105_0f0f0f0f",
+        "session": "s1",
+        "from": "alpha",
+        "reason": "2 candidates",
+        "candidates": [
+          "s1/2026-10-22T10-00-00.000Z_pid103_ee55ff66/beta",
+          "s1/2026-10-22T10-30-00.000Z_pid104_a1b2c3d4/beta"
+        ]
+      }
+    ],
+    "outbound_routed": [],
+    "truncated_by_limit": {
+      "limit": 0,
+      "omitted": 0
+    }
+  }
+}

@@ -63,7 +63,7 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 ## Build and Development Commands
 
 ```bash
-make build          # go build amq, amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign
+make build          # go build amq, amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign, amq-board
 make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
@@ -88,6 +88,7 @@ cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
 cmd/amq-acp/         Preview ACP v2 stdio companion (not Core)
 cmd/amq-remote/      Remote-session companion (not Core)
 cmd/amq-owner-sign/  Owner signer for a strict relay share; the key stays in its process
+cmd/amq-board/       Read-only fleet board companion (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -103,6 +104,7 @@ internal/sessionguard Shared fail-closed session decision table
 internal/swarm/      Claude Code Agent Teams interoperability
 internal/thread/     Cross-mailbox thread collection
 internal/presence/   Agent presence metadata
+internal/board/      Fleet board items, links, column table, and sources
 ```
 
 Mailbox layout:
