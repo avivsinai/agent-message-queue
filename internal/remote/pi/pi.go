@@ -1571,7 +1571,7 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	if !ok || (r.epoch != "" && r.epoch != epoch) || !r.state.Terminal() || r.acked {
 		return
 	}
-	if digest == "" || digest != protocol.EvidenceDigestStable(r.result()) {
+	if digest == "" || digest != protocol.EvidenceDigest(r.result()) {
 		return
 	}
 	r.acked = true
