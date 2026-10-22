@@ -296,8 +296,10 @@ func hostExit(err error) int {
 }
 
 // childEnv is the host's environment without any AM_*, AMQ_* or BUZZ_*
-// variable, so the agent can never act as the host's handle or see a Buzz
-// identity. The host keeps its own environment.
+// variable, so the agent does not inherit the host's queue context or a
+// Buzz identity. It runs as the same user, so it can still name the root and
+// the host's handle explicitly: this is not an isolation boundary. The host
+// keeps its own environment.
 func childEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, entry := range environ {

@@ -384,8 +384,11 @@ arguments grant autonomy, for example Grok's `--always-approve`. The host
 advertises no file or terminal methods and never calls `authenticate`; an
 agent that needs a login is a refusal with exit code 6, and you log in once
 with the harness's own CLI. An agent that does not answer `initialize` and
-`session/new` within 60 seconds is also exit 6. The agent's environment has every `AM_*`, `AMQ_*`
-and `BUZZ_*` variable removed, so it cannot act as the host's handle.
+`session/new` within 60 seconds is also exit 6. The agent's environment has
+every `AM_*`, `AMQ_*` and `BUZZ_*` variable removed, so the agent does not
+inherit the host's queue context or a Buzz identity. It runs as the same
+user, so it can still name the root and the host's handle explicitly. This
+is not an isolation boundary.
 
 State lives in `<root>/agents/<me>/extensions/acp-host/`: `host.lock` (one
 host per handle; a second one exits 6), `session.json`, and one journal
