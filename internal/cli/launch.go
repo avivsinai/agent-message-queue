@@ -239,6 +239,10 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 func defaultLaunchAdapters(cfg launch.ProjectConfig) map[string]launch.HarnessAdapter {
 	adapters := make(map[string]launch.HarnessAdapter, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
+		if agent.Adapter == launch.ACPProvider {
+			adapters[agent.Adapter] = launch.NewACPAdapter(launchAMQPath())
+			continue
+		}
 		switch launch.ProviderForExecutable(agent.Adapter) {
 		case launch.ClaudeProvider:
 			adapters[agent.Adapter] = launch.NewClaudeAdapter(agent.Command[0])
