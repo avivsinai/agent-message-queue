@@ -233,27 +233,50 @@ func send(t *testing.T, root, from, kind, body string) format.Message {
 	return msg
 }
 
+// waitFor polls cond until it holds. Only the test binary's -timeout bounds
+// the wait, so a slow runner never fails it; a wait that never ends fails
+// with what it waited for shortly before that timeout.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	for !cond() {
+		if bounded && time.Until(deadline) < 5*time.Second {
+			t.Fatalf("still waiting for %s when the test binary's timeout came near", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitClosed waits for ch to close, bounded like waitFor.
+func waitClosed(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	waitFor(t, what, func() bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 // waitReply waits for the one message in codex's inbox.
 func waitReply(t *testing.T, root string) format.Message {
 	t.Helper()
 	dir := filepath.Join(root, "agents", "codex", "inbox", "new")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		entries, _ := os.ReadDir(dir)
-		if len(entries) > 0 {
-			if len(entries) != 1 {
-				t.Fatalf("codex inbox holds %d messages; want one reply", len(entries))
-			}
-			msg, err := format.ReadMessageFile(filepath.Join(dir, entries[0].Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return msg
-		}
-		time.Sleep(10 * time.Millisecond)
+	var entries []os.DirEntry
+	waitFor(t, "a reply to codex", func() bool {
+		entries, _ = os.ReadDir(dir)
+		return len(entries) > 0
+	})
+	if len(entries) != 1 {
+		t.Fatalf("codex inbox holds %d messages; want one reply", len(entries))
 	}
-	t.Fatal("no reply reached codex")
-	return format.Message{}
+	msg, err := format.ReadMessageFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
 }
 
 func TestHostAnswersAMessageOnItsThread(t *testing.T) {
@@ -306,17 +329,10 @@ func TestHostDrainsAStatusWithoutReply(t *testing.T) {
 	startHost(t, root, agent)
 
 	record := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns", status.Header.ID+".json")
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, "the status message's skipped record", func() bool {
 		data, _ := os.ReadFile(record)
-		if strings.Contains(string(data), `"state":"skipped"`) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("status message was not skipped; record: %s", data)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return strings.Contains(string(data), `"state":"skipped"`)
+	})
 	if _, err := os.Stat(filepath.Join(root, "agents", "grok", "receipts", status.Header.ID+"__grok__drained.json")); err != nil {
 		t.Fatalf("no drained receipt for the status: %v", err)
 	}
@@ -417,17 +433,10 @@ func publishRequests(t *testing.T, root string, texts map[string]string) {
 	t.Helper()
 	dir := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
 	var live bridgeLiveness
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, "a live bridge.liveness", func() bool {
 		data, err := os.ReadFile(filepath.Join(dir, "bridge.liveness"))
-		if err == nil && json.Unmarshal(data, &live) == nil && live.Live {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the host published no live bridge.liveness")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return err == nil && json.Unmarshal(data, &live) == nil && live.Live
+	})
 	staging := filepath.Join(dir, "requests.staging")
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		t.Fatal(err)
@@ -471,24 +480,19 @@ func publishRequests(t *testing.T, root string, texts map[string]string) {
 func waitEvent(t *testing.T, root, ref, event string) []bridgeEvent {
 	t.Helper()
 	path := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "events", ref+".jsonl")
-	deadline := time.Now().Add(4 * time.Second)
-	for {
+	var events []bridgeEvent
+	waitFor(t, "a "+event+" event on "+ref, func() bool {
 		data, _ := os.ReadFile(path)
-		var events []bridgeEvent
+		events = events[:0]
 		for _, line := range strings.Split(string(data), "\n") {
 			var ev bridgeEvent
 			if json.Unmarshal([]byte(line), &ev) == nil {
 				events = append(events, ev)
 			}
 		}
-		if slices.ContainsFunc(events, func(ev bridgeEvent) bool { return ev.Event == event }) {
-			return events
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no %s event; stream: %s", event, data)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return slices.ContainsFunc(events, func(ev bridgeEvent) bool { return ev.Event == event })
+	})
+	return events
 }
 
 func TestHostRunsARemoteRequest(t *testing.T) {
@@ -642,19 +646,11 @@ func TestHostRefusesARequestPublishedDuringAPeerTurn(t *testing.T) {
 	agent := &fakeAgent{gate: gate}
 	send(t, root, "codex", format.KindQuestion, "what is 2+2?")
 	startHost(t, root, agent)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, "the peer turn to start", func() bool {
 		agent.mu.Lock()
-		n := len(agent.prompts)
-		agent.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the peer turn never started")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		defer agent.mu.Unlock()
+		return len(agent.prompts) == 1
+	})
 	publishRequest(t, root, testRef, "summarize")
 	close(gate)
 
@@ -691,11 +687,7 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cancels, testRef+".json"), cancel, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-agent.cancelSent:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the host never wrote session/cancel")
-	}
+	waitClosed(t, "the host to write session/cancel", agent.cancelSent)
 
 	// The prompt ends on its own while the cancel write is still blocked:
 	// the turn must not end, so no later turn can start under the cancel.
@@ -924,7 +916,7 @@ func newScriptedAgy(conversation string) *scriptedAgy {
 
 // startAgyHost runs an agy host for grok. stop cancels it and returns once
 // it has stopped; the test's cleanup stops it too and releases the lock.
-func startAgyHost(t *testing.T, root string, spawn Spawner) (stop func(timeout time.Duration) bool) {
+func startAgyHost(t *testing.T, root string, spawn Spawner) (stop func()) {
 	t.Helper()
 	h, err := Open(Config{Root: root, Me: "grok", Cwd: root, Version: "test", Agent: "agy"})
 	if err != nil {
@@ -936,19 +928,13 @@ func startAgyHost(t *testing.T, root string, spawn Spawner) (stop func(timeout t
 		_ = h.RunAgy(ctx, spawn)
 		close(done)
 	}()
-	stop = func(timeout time.Duration) bool {
+	stop = func() {
 		cancel()
-		select {
-		case <-done:
-			return true
-		case <-time.After(timeout):
-			return false
-		}
+		waitClosed(t, "the agy host to stop", done)
 	}
 	t.Cleanup(func() {
-		if stop(10 * time.Second) {
-			h.Close()
-		}
+		stop()
+		h.Close()
 	})
 	return stop
 }
@@ -974,18 +960,12 @@ func TestAgyHostStopsWhileAgyIsNotReadingStdin(t *testing.T) {
 	})
 	stop := startAgyHost(t, root, spawn)
 	record := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns")
-	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if entries, _ := os.ReadDir(record); len(entries) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the host never claimed the message")
-		}
-	}
-	time.Sleep(200 * time.Millisecond)
-	if !stop(3 * time.Second) {
-		t.Fatal("the host did not stop while agy was not reading its stdin")
-	}
+	waitFor(t, "the host to claim the message", func() bool {
+		entries, _ := os.ReadDir(record)
+		return len(entries) > 0
+	})
+	time.Sleep(200 * time.Millisecond) // lets the stdin write block
+	stop()
 }
 
 // Review of #1143 (P2): a cancelled agy that had not exited yet was reused
@@ -1042,7 +1022,7 @@ func TestAgyHostRespawnsAfterACancelledTurn(t *testing.T) {
 	})
 	startAgyHost(t, root, spawn)
 
-	body := waitReplies(t, root, 2, 4*time.Second)
+	body := waitReplies(t, root, 2)
 	if strings.TrimRight(body, "\n") != "second answer" {
 		t.Fatalf("second reply=%q; want the respawned agy's answer", body)
 	}

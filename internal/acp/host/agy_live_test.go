@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -59,21 +60,19 @@ func spawnRealAgy(t *testing.T, dir string) Spawner {
 
 // waitReplies waits until codex's inbox holds n messages and returns the
 // newest one's body.
-func waitReplies(t *testing.T, root string, n int, timeout time.Duration) string {
+func waitReplies(t *testing.T, root string, n int) string {
 	t.Helper()
 	dir := filepath.Join(root, "agents", "codex", "inbox", "new")
-	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-		entries, _ := os.ReadDir(dir)
-		if len(entries) >= n {
-			msg, err := format.ReadMessageFile(filepath.Join(dir, entries[len(entries)-1].Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return msg.Body
-		}
+	var entries []os.DirEntry
+	waitFor(t, fmt.Sprintf("%d replies to codex", n), func() bool {
+		entries, _ = os.ReadDir(dir)
+		return len(entries) >= n
+	})
+	msg, err := format.ReadMessageFile(filepath.Join(dir, entries[len(entries)-1].Name()))
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("codex has fewer than %d replies after %s", n, timeout)
-	return ""
+	return msg.Body
 }
 
 // runAgyHostFor serves the inbox through real agy until n replies exist.
@@ -99,7 +98,7 @@ func runAgyHostFor(t *testing.T, root, dir string, n int) string {
 		}
 	}
 	defer stop()
-	body := waitReplies(t, root, n, 3*time.Minute)
+	body := waitReplies(t, root, n)
 	stop()
 	if runErr != nil {
 		t.Fatalf("agy host: %v", runErr)
