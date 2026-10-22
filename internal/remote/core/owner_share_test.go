@@ -10,8 +10,9 @@ import (
 )
 
 // ownerShare is the source of the owner's Buzz share: only it may answer an
-// interaction of a request it submitted (agent-message-queue-611.46).
-var ownerShare = core.Source{Host: "local", Origin: map[string]string{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}}
+// interaction of a request it submitted (agent-message-queue-611.46). Its
+// approved native session is the fake target's own identity.
+var ownerShare = core.Source{Host: "local", NativeSession: "fake", Origin: map[string]string{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}}
 
 // TestCancelBeforeSubmitOnBuzzHostIgnoresCase reproduces #934: a local sender re-encoded a Buzz
 // request's creator host as BUZZ- and left a tombstone that, on a

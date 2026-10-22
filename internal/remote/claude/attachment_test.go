@@ -16,9 +16,10 @@ import (
 // coreBoundRequest builds one bound request for the refusal tests.
 func coreBoundRequest() core.BoundRequest {
 	return core.BoundRequest{
-		Key:   requests.Key{CreatorHost: "local", TargetID: "claude:9", RequestID: "11111111-1111-4111-8111-111111111111"},
-		Epoch: SentinelUnpinned,
-		Input: protocol.SubmitInput{Text: "hello"},
+		Key:      requests.Key{CreatorHost: "local", TargetID: "claude:9", RequestID: "11111111-1111-4111-8111-111111111111"},
+		Epoch:    SentinelUnpinned,
+		Input:    protocol.SubmitInput{Text: "hello"},
+		NotAfter: "2099-01-01T00:00:00Z",
 	}
 }
 

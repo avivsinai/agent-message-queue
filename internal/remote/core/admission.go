@@ -68,9 +68,10 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		}
 		// Fall through to the normal admission path with the existing
 		// record: the deferred/Tick machinery owns it from here. A link
-		// record never gets here (retryable is false for it), so this third
-		// entrance to native Submit needs no signed-handoff check.
-		return e.resubmitTombstoneLocked(cmd, key, rec)
+		// record never gets here (retryable is false for it); a Buzz one
+		// does, so this third entrance to native Submit checks the native
+		// session too.
+		return e.resubmitTombstoneLocked(cmd, src, key, rec)
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -85,10 +86,10 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			NotAfter:    cmd.NotAfter,
 			ObservedAt:  protocol.FormatTime(e.now()),
 		},
-		Input:               cmd.Input,
-		Origin:              maps.Clone(src.Origin),
-		SignedNativeSession: src.NativeSession,
-		ConsentCredential:   src.Credential,
+		Input:             cmd.Input,
+		Origin:            maps.Clone(src.Origin),
+		NativeSession:     src.NativeSession,
+		ConsentCredential: src.Credential,
 	}
 	// Decide admissibility + reservation BEFORE Create: a request we are
 	// about to refuse is never written (no durable placeholder to leak on a
@@ -141,10 +142,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
-	// A link request runs only on the native session it was signed for, with
-	// a consent key still accepted. This check and the dispatching commit
-	// below share one critical section; the handoff is the cutoff.
-	if code := e.signedHandoffLocked(rec, t); code != "" {
+	// A session-bound request runs only on the native session it is bound
+	// to, and a link request only with a consent key still accepted. This
+	// check and the dispatching commit below share one critical section; the
+	// handoff is the cutoff.
+	if code := e.handoffLocked(rec, t); code != "" {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
 	}
@@ -189,9 +191,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 }
 
 // resubmitTombstoneLocked admits an identical resubmit of the busy-rejected
-// tombstone rec. The caller holds e.mu; it unlocks exactly once on every
-// return.
-func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
+// tombstone rec by src. The caller holds e.mu; it unlocks exactly once on
+// every return.
+func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
 	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		e.mu.Unlock()
@@ -200,6 +202,14 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, key requests.K
 	if t == nil {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	}
+	// The resubmit is bound to the session its source proves now, which the
+	// dispatching write below stores. Only the creator host reaches this
+	// record, so the source is the same carrier that stored the tombstone.
+	rec.NativeSession = src.NativeSession
+	if code := e.handoffLocked(rec, t); code != "" {
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
 	}
 	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
 	if rerr != nil {
@@ -252,12 +262,12 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, key requests.K
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	input, origin := *cmd.Input, maps.Clone(rec.Origin)
+	input, origin, native := *cmd.Input, maps.Clone(rec.Origin), rec.NativeSession
 	e.mu.Unlock()
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
 	}
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native})
 	if err := e.crashAt(PointAfterNative); err != nil {
 		return protocol.Reply{}, err
 	}
@@ -329,13 +339,13 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	origin := maps.Clone(rec.Origin)
+	origin, native := maps.Clone(rec.Origin), rec.NativeSession
 	e.mu.Unlock()
 
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
 	}
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter, Origin: origin})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native})
 	if err := e.crashAt(PointAfterNative); err != nil {
 		return protocol.Reply{}, err
 	}
@@ -427,25 +437,34 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 	return s
 }
 
-// signedHandoffLocked decides, right before the handoff, whether a signed
-// request may still run: its consent key is still accepted and the target is
-// attached to the exact native session it was signed for. An unknown (empty)
-// native session refuses too. A request that was not signed passes.
-func (e *Endpoint) signedHandoffLocked(rec *requests.Record, t *target) protocol.Code {
-	if rec.SignedNativeSession == "" && rec.Origin["carrier"] != CarrierLink {
-		return ""
-	}
-	if e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential) {
+// handoffLocked decides, right before the handoff, whether a request may
+// still run. A link request needs its consent key still accepted. A
+// session-bound request runs only while the target is attached to the exact
+// native session the record names; an unknown (empty) session on either side
+// refuses, so a record stored before Buzz requests carried a session never
+// runs. A request no session binds passes.
+func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) protocol.Code {
+	if rec.Origin["carrier"] == CarrierLink && (e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential)) {
 		return protocol.CodeConsentInvalid
+	}
+	if rec.NativeSession == "" && !sessionBound(rec.Origin) {
+		return ""
 	}
 	native := ""
 	if n, ok := t.att.(NativeIdentifier); ok {
 		native = n.NativeSessionID()
 	}
-	if native == "" || native != rec.SignedNativeSession {
+	if native == "" || native != rec.NativeSession {
 		return protocol.CodeSessionChanged
 	}
 	return ""
+}
+
+// sessionBound reports whether requests that arrived with origin may run in
+// one native session only: a link's signed session or a Buzz share's
+// approved one.
+func sessionBound(origin map[string]string) bool {
+	return origin["carrier"] == CarrierLink || origin["carrier"] == "buzz"
 }
 
 // linkFullLocked reports whether the link with creator host host already
@@ -597,15 +616,16 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	// A deferred link request is checked again here, in the same critical
-	// section as its dispatching commit: a session or key that changed while
-	// it waited stops it before the harness sees it.
-	if rec.SignedNativeSession != "" && e.consent == nil {
+	// A deferred or recovered request is checked again here, in the same
+	// critical section as its dispatching commit: a session or key that
+	// changed while it waited, or across a restart, stops it before the
+	// harness sees it.
+	if rec.Origin["carrier"] == CarrierLink && e.consent == nil {
 		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		return nil // the consent check is not installed yet; retry on the next tick
 	}
-	if code := e.signedHandoffLocked(rec, t); code != "" {
+	if code := e.handoffLocked(rec, t); code != "" {
 		e.store.ReleaseReservation(key)
 		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
 		_, err = e.commitLocked(rec, nil)
@@ -622,10 +642,10 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	if rec.Input != nil {
 		input = *rec.Input
 	}
-	origin := maps.Clone(rec.Origin)
+	origin, native := maps.Clone(rec.Origin), rec.NativeSession
 	e.mu.Unlock()
 
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter, Origin: origin})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter, Origin: origin, NativeSession: native})
 
 	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()

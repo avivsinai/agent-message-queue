@@ -97,7 +97,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	// The claude adapter pins no epoch of its own (SentinelUnpinned): any
 	// epoch the endpoint holds is current, and ownership is proven by
-	// transcript observation, not epoch pinning.
+	// transcript observation, not epoch pinning. A request bound to one
+	// session carries it in req.NativeSession, checked below.
 	if a.cancelIntent[req.Key] {
 		delete(a.cancelIntent, req.Key)
 		a.mu.Unlock()
@@ -109,12 +110,25 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	a.mu.Unlock()
 
+	// The receiver has no deadline of its own, so not_after holds only if
+	// this adapter checks it: before the pre-send work, and again right
+	// before the write. Core always sends a parseable window.
+	notAfter, err := protocol.ParseTime(req.NotAfter)
+	if err != nil || !a.now().Before(notAfter) {
+		return expired(), nil
+	}
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
 	if reg == nil || reg.MessagingSocketPath == "" {
 		return refusal(ErrNoInbound), nil
+	}
+	// The pid can run another session than the one the request is bound to
+	// (/clear, /resume). The socket path below comes from this same read, so
+	// a bound request is written only to the socket of its own session.
+	if req.NativeSession != "" && reg.SessionID != req.NativeSession {
+		return core.Admission{Code: protocol.CodeSessionChanged, Message: "claude submit: the session this request is bound to is no longer the one running in this process; nothing was sent"}, nil
 	}
 	token, err := readPeerToken(a.home, a.cfg.Pid, reg.MessagingSocketPath)
 	if err != nil {
@@ -145,7 +159,10 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	fromOff := transcriptSize(transcriptPath(a.home, reg.Cwd, reg.SessionID))
-	if err := a.sendFrame(reg.MessagingSocketPath, wire); err != nil {
+	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter); err != nil {
+		if !a.now().Before(notAfter) {
+			return expired(), nil
+		}
 		return refusal(err), nil
 	}
 
@@ -164,12 +181,12 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	return core.Admission{Admitted: true, RunID: frame.MsgID}, nil
 }
 
-// sendFrame dials the target's UDS and writes the framed bytes. The
-// receiver answers nothing (capture §4); the write itself is the only
-// transport signal, and any error before the full write is a definitive
-// not-sent.
-func (a *Attachment) sendFrame(sockPath string, wire []byte) error {
-	ctx, cancel := context.WithTimeout(a.ctx, submitTimeout)
+// sendFrame dials the target's UDS and writes the framed bytes, all before
+// notAfter. The receiver answers nothing (capture §4); the write itself is
+// the only transport signal, and any error before the full write is a
+// definitive not-sent.
+func (a *Attachment) sendFrame(sockPath string, wire []byte, notAfter time.Time) error {
+	ctx, cancel := context.WithTimeout(a.ctx, min(submitTimeout, notAfter.Sub(a.now())))
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", sockPath)
@@ -178,6 +195,10 @@ func (a *Attachment) sendFrame(sockPath string, wire []byte) error {
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetWriteDeadline(deadline)
+	}
+	if !a.now().Before(notAfter) {
+		_ = conn.Close()
+		return fmt.Errorf("%w: not_after passed before the write", ErrNotSent)
 	}
 	n, err := conn.Write(wire)
 	if err != nil || n != len(wire) {
@@ -195,6 +216,12 @@ func (a *Attachment) sendFrame(sockPath string, wire []byte) error {
 
 func refusal(err error) core.Admission {
 	return core.Admission{Code: protocol.CodeUnsupported, Message: err.Error()}
+}
+
+// expired is the refusal of a request whose window closed before its frame
+// was written.
+func expired() core.Admission {
+	return core.Admission{Code: protocol.CodeExpired, Message: "claude submit: not_after passed; nothing was sent"}
 }
 
 // sanitizeAddr reduces the target id to the envelope's safe attribute

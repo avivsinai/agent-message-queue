@@ -107,7 +107,9 @@ func (s Signer) sign(evt *nostr.Event) error {
 
 // source is this carrier's identity to the endpoint: a stable,
 // protocol-valid host derived from relay, body and owner. It carries no
-// authority beyond naming the creator of requests submitted here.
+// authority beyond naming the creator of requests submitted here, and the
+// approved native session they may run in: the one the fence proves
+// attached before every submit, which core checks again at the handoff.
 func (c *Carrier) source(eventID, root string) core.Source {
 	sum := sha256.Sum256([]byte("amq-remote/buzz/host\x00" + c.binding.RelayHost + "\x00" + c.binding.Body + "\x00" + c.binding.Owner))
 	src := core.Source{
@@ -118,6 +120,7 @@ func (c *Carrier) source(eventID, root string) core.Source {
 			"channel": c.binding.Channel,
 			"event":   eventID,
 		},
+		NativeSession: c.binding.NativeSession,
 	}
 	if root != "" {
 		src.Origin["root"] = root // the input's thread root, derived from the signed event

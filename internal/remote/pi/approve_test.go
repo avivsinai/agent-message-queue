@@ -546,4 +546,4 @@ func TestApprovalOwedOutcomeSettledByLateResolution(t *testing.T) {
 
 // piOwnerShare is the owner's Buzz share, the only source that may answer an
 // interaction (agent-message-queue-611.46).
-var piOwnerShare = core.Source{Host: "host1", Origin: map[string]string{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}}
+var piOwnerShare = core.Source{Host: "host1", NativeSession: "sess-1", Origin: map[string]string{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}}
