@@ -87,6 +87,38 @@ message. A same-user process that can replace the installed `amq-remote`
 binary, or edit the Claude settings with the owner's consent, defeats this
 protection.
 
+## Buzz Desktop
+
+A Claude session that a Buzz Desktop agent (`amq-acp`) drives with
+`--native` has no relay share, and the hook holds no Buzz key. The pin then
+names the owner, the agent's public key and the agent's DM channel with the
+owner: `... claude permission-hook --wait 600 --surface 'desktop' --owner
+'<64 hex>' --body '<agent pubkey>' --channel '<DM channel>'`, written by
+`install-approval-hook --desktop`, which the owner runs in the terminal with
+the values the agent's approval message shows. The agent key never leaves
+`amq-acp`. The hook prints allow only when all of these hold:
+
+- the call is a Bash call shown whole, as above;
+- the answer carries the owner's kind 7 reaction ✅ whose id and signature
+  verify under the pinned owner, dated in the approval's window, whose last
+  `e` tag is the approval message;
+- the approval message is kind 9, signed by the pinned agent key in the
+  pinned DM channel, and its content is exactly the Desktop approval text
+  for the hook's own rendering of the call (with `Interaction: <id>` and
+  `Action: <sha256 of the call>`);
+- the answer carries the agent's grant: a BIP-340 signature by the pinned
+  agent key over the message id, the reaction id and the time the agent
+  checked, dated no earlier than the reaction and before the deadline. The
+  agent signs it only after its own read of the relay finds no edit that
+  changes the call, no deletion of the message, and no owner ❌ on it.
+
+Here the agent, not the hook, reads the relay; a holder of the agent key can
+sign a grant. The endpoint accepts this answer from the local socket only
+for the Claude approval of a request submitted on that socket, and runs the
+same verification before it passes the answer to the hook.
+
+## How the call is shown
+
 The message shows the call whole, or not at all: a call that may contain
 a secret anywhere shows "Command hidden: it may contain a secret. Check the
 terminal.", and a call too long to show whole shows "Command too long:

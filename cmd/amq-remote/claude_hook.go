@@ -73,6 +73,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		fs.StringVar(&pin.Body, "body", "", "pinned body pubkey (64 lowercase hex) of the share")
 		fs.StringVar(&pin.Channel, "channel", "", "pinned DM channel id of the share")
 		fs.StringVar(&pin.Target, "target", "", "pinned target id of the share")
+		fs.StringVar(&pin.Surface, "surface", "", "desktop for a Buzz Desktop agent's DM pin (owner, agent pubkey as body, channel)")
 		if fs.Parse(args[1:]) != nil {
 			return 0
 		}
