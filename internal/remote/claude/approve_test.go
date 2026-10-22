@@ -2,9 +2,14 @@ package claude
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // TestApprovalPreviewDetectorTable is the one table for the DM preview's
@@ -141,7 +146,8 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"hooks":[{"type":"command","command":"AMQ_APPROVAL_HOOK=1 '/opt/amq-remote' claude permission-hook --wait 600","timeout":630}]}`
+	cmd, _ := json.Marshal("AMQ_APPROVAL_HOOK=1 set -- '" + home + `/.claude/sessions/amq-approve'/*/pin-*; [ ! -e "$1" ] || exec '/opt/amq-remote' claude permission-hook --wait 600`)
+	want := `{"hooks":[{"type":"command","command":` + string(cmd) + `,"timeout":630}]}`
 	if len(got.Hooks["PermissionRequest"]) != 1 || string(got.Hooks["PermissionRequest"][0]) != want || len(got.Hooks["Stop"]) != 1 {
 		t.Fatalf("settings = %s, want the Stop hook and %s", raw, want)
 	}
@@ -153,7 +159,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, pin); err != nil {
 		t.Fatal(err)
 	}
-	cmds, err := installedCommands(home, permissionSpec)
+	cmds, err := installedCommands(settingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner '"+pin.Owner+"'") || PermissionHookPin(home) != pin {
 		t.Fatalf("commands = %q (%v), pin = %+v; want one hook pinning %+v", cmds, err, PermissionHookPin(home), pin)
 	}
@@ -165,5 +171,78 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	}
 	if state, _ := StopHookState(home); state != StopHookPresent {
 		t.Fatalf("after uninstall the Stop hook state = %q, want it kept", state)
+	}
+}
+
+// Regression: hook-audit S2 review finding (Codex), the cleanup race. The
+// last unpin found no live pin and holds the lifecycle lock for its
+// cleanup. A new owner's pin waits for the lock, and the cleanup removes
+// only dead records: a request whose hook is alive and open survives, and
+// the new pin and the run marker written after it survive later cleanups.
+func TestApprovalCleanupKeepsLiveRecordsAndANewOwnersPin(t *testing.T) {
+	home := t.TempDir()
+	write := func(sub, name string, v any) string {
+		t.Helper()
+		dir, err := ensureApproveSubdir(home, approvalSession, sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := createNewJSON(dir, name, v); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(dir, name)
+	}
+	request := func(hookPID int, deadline time.Time) (string, string) {
+		id, _ := newInteractionID()
+		r := approvalRequest{Protocol: approvalProtocol, InteractionID: id, SessionID: approvalSession, PromptID: "p-1",
+			HookPID: hookPID, Deadline: protocol.FormatTime(deadline)}
+		return write("requests", id+".json", r), write("answers", id+".json", approvalAnswer{InteractionID: id, Option: optionDeny})
+	}
+	liveReq, liveAns := request(os.Getpid(), time.Now().Add(time.Minute))
+	deadReq, deadAns := request(0, time.Now().Add(time.Minute))
+	deadPin := write("", "pin-dead", approvalPin{PID: 0})
+	deadRun := write("runs", "p-0", runMarker{MsgID: "m-0", Owner: "old", PID: 1 << 30}) // no such process
+
+	release, err := lockLifecycle(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinLive(home, approvalSession) {
+		t.Fatal("setup: a live pin")
+	}
+	pinned := make(chan string, 1)
+	go func() {
+		token, err := PinApprovals(home, approvalSession, "share-2", "", os.Getpid())
+		if err != nil {
+			t.Error(err)
+		}
+		pinned <- token
+	}()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-pinned:
+		t.Fatal("a pin was written while the last unpin held the lifecycle lock")
+	default:
+	}
+	for _, path := range deadRecords(home, approvalSession, time.Now(), true) {
+		removeRegular(path)
+	}
+	release()
+	token := <-pinned
+	if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: "m-1", Owner: "new", PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	// The new owner's own unpin of another pin leaves its live pin, so it
+	// cleans nothing; the bind sweep removes only dead pins and inflight.
+	sweepApprovals(home)
+	for _, path := range []string{deadReq, deadAns, deadPin, deadRun} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("dead record %s survived the cleanup (%v)", path, err)
+		}
+	}
+	for _, path := range []string{liveReq, liveAns, filepath.Join(approveDir(home, approvalSession), "pin-"+token), runMarkerPath(home, approvalSession, "p-1")} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("live record %s was removed: %v", path, err)
+		}
 	}
 }

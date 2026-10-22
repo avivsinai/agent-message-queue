@@ -60,10 +60,14 @@ type permissionHook struct {
 	wait time.Duration
 	// poll is how often the hook reads answers/ and resolved/.
 	poll time.Duration
-	// markerGrace is how long a pinned session waits for runs/<prompt_id>:
-	// the attachment writes it when its poller sees the delivery line, which
-	// can trail the first tool call by a tick.
+	// markerGrace is how long a pinned session waits for runs/<prompt_id>
+	// while a run is in flight to it: the attachment writes the marker when
+	// its poller sees the delivery line, which can trail the first tool call
+	// by a tick. A prompt with no run in flight does not wait.
 	markerGrace time.Duration
+	// afterMarkerMiss runs between a missed marker read and the inflight
+	// read; tests set it to move a run out of inflight at that moment.
+	afterMarkerMiss func()
 	// ticks paces the poll when set; nil uses a ticker of poll.
 	ticks <-chan time.Time
 	// stderr receives the one note about an answer the hook ignored.
@@ -241,14 +245,26 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 }
 
 // awaitRunMarker reports whether runs/<prompt_id> exists, waiting at most
-// markerGrace for it.
+// markerGrace for it while a live inflight record says an AMQ run is on its
+// way to the session. With none, it reads the marker once more and
+// returns: the attachment writes a run's marker before it removes the
+// run's inflight record, so a run that left inflight before the inflight
+// read has its marker visible to the second read. A prompt typed in the
+// terminal has neither and returns at once.
 func (h permissionHook) awaitRunMarker(sessionID, promptID string, done <-chan struct{}) bool {
 	until := h.now().Add(h.markerGrace)
 	for {
 		if runMarked(h.home, sessionID, promptID) {
 			return true
 		}
-		if !h.now().Before(until) {
+		if h.afterMarkerMiss != nil {
+			h.afterMarkerMiss()
+		}
+		now := h.now()
+		if !inflightLive(h.home, sessionID, now) {
+			return runMarked(h.home, sessionID, promptID)
+		}
+		if !now.Before(until) {
 			return false
 		}
 		select {
