@@ -8,6 +8,25 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.104.0](https://github.com/avivsinai/agent-message-queue/compare/v0.103.0...v0.104.0) (2026-10-22)
+
+
+### Features
+
+* **acp:** cancel a running ACP turn from Buzz ([#1135](https://github.com/avivsinai/agent-message-queue/issues/1135)) ([bb95b5f](https://github.com/avivsinai/agent-message-queue/commit/bb95b5f2f802b76230cac1bcaf701f3924fd08c3))
+* **acp:** drive an ACP harness from Buzz through amq-remote ([#1128](https://github.com/avivsinai/agent-message-queue/issues/1128)) ([68dfd5e](https://github.com/avivsinai/agent-message-queue/commit/68dfd5ef2b8a26af7329a1075b9637c0ec47b454))
+* **acp:** resume the host session and probe a harness with --check ([#1117](https://github.com/avivsinai/agent-message-queue/issues/1117)) ([531bbc4](https://github.com/avivsinai/agent-message-queue/commit/531bbc45fcfb177693f967d653fb1d4690b92f43))
+* **cli:** check the agy skill and add an agy shell alias ([#1138](https://github.com/avivsinai/agent-message-queue/issues/1138)) ([27820a7](https://github.com/avivsinai/agent-message-queue/commit/27820a79f41476ea7c62900e87f48619cde7deaa))
+
+
+### Bug Fixes
+
+* **fsq:** read a regular file renamed over the path after its lstat ([#1124](https://github.com/avivsinai/agent-message-queue/issues/1124)) ([7a4cf23](https://github.com/avivsinai/agent-message-queue/commit/7a4cf23090d0f4cd76f4f6d50594f3f4de20970c))
+* **launch:** accept codex-cli at or above the verified capture floor ([#1108](https://github.com/avivsinai/agent-message-queue/issues/1108)) ([04faebf](https://github.com/avivsinai/agent-message-queue/commit/04faebf3ac4ae43412fdb3f996f92ea2f789edce))
+* **launch:** Codex approval values that Codex accepts, per-seat containment refusal ([#1125](https://github.com/avivsinai/agent-message-queue/issues/1125)) ([3575701](https://github.com/avivsinai/agent-message-queue/commit/3575701fe6ac7893cb746338ef4c29d5495e2c28))
+* **launch:** record Codex capture evidence from the seat ticket ([#1137](https://github.com/avivsinai/agent-message-queue/issues/1137)) ([c0c6e7f](https://github.com/avivsinai/agent-message-queue/commit/c0c6e7fd54fbc25ca2c9d138efbdde5abaa4704f))
+* **upgrade:** upgrade amq-remote and amq-owner-sign with --all ([#1115](https://github.com/avivsinai/agent-message-queue/issues/1115)) ([f3684b4](https://github.com/avivsinai/agent-message-queue/commit/f3684b4338bd5160e7b99553a4cb43c9405910ed))
+
 ## [0.103.0](https://github.com/avivsinai/agent-message-queue/compare/v0.102.0...v0.103.0) (2026-10-21)
 
 
