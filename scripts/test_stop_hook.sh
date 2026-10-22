@@ -118,10 +118,11 @@ import json, sys
 d=json.load(open(sys.argv[1])); assert sys.argv[2] not in d["blocked_ids"]
 PY
 # Under a live wake the hook blocks only for mail created at or before the
-# wake's lock start, the --baseline-existing cohort the wake never rings for
+# wake's baseline_at, the --baseline-existing cohort the wake never rings for
 # (observed 2026-10-22: every turn end under wake=live(raw) showed a Stop hook
 # error for mail the doorbell was about to deliver; PR #1152 review: coop exec
-# baselines startup mail, which then never rings).
+# baselines startup mail, which then never rings, and mail landing after the
+# lock start but before the snapshot is baselined too).
 mkdir -p "$TMP/live-wake-bin"
 cat >"$TMP/live-wake-bin/amq" <<EOF
 #!/usr/bin/env bash
@@ -145,10 +146,12 @@ assert json.loads(sys.argv[1] or "{}").get("decision")=="block", sys.argv[2]
 PY
 }
 send after >/dev/null
-after_out="$(run_hook_with_wake '{"live_wake":true,"started_at":"2000-01-01T00:00:00Z"}')"
+after_out="$(run_hook_with_wake '{"live_wake":true,"baseline_at":"2000-01-01T00:00:00Z"}')"
 assert_eq "" "$after_out" "mail after wake start"
 send baseline >/dev/null
-assert_block "$(run_hook_with_wake '{"live_wake":true,"started_at":"2999-01-01T00:00:00Z"}')" "baseline mail"
+assert_block "$(run_hook_with_wake '{"live_wake":true,"baseline_at":"2999-01-01T00:00:00Z"}')" "baseline mail"
+send unprepared >/dev/null
+assert_block "$(run_hook_with_wake '{"live_wake":true,"started_at":"2000-01-01T00:00:00Z"}')" "live wake before its baseline"
 send unwoken >/dev/null
 assert_block "$(run_hook_with_wake '{"live_wake":false,"started_at":"2000-01-01T00:00:00Z"}')" "no live wake"
 echo "stop hook tests ok"

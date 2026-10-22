@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
@@ -25,6 +26,7 @@ type wakeCheckWire struct {
 	StartReason              string `json:"start_reason"`
 	LiveWake                 bool   `json:"live_wake"`
 	StartedAt                string `json:"started_at"`
+	BaselineAt               string `json:"baseline_at"`
 	WakeStatus               string `json:"wake_status"`
 	WakePID                  int    `json:"wake_pid"`
 	WakeMode                 string `json:"wake_mode"`
@@ -109,6 +111,14 @@ func TestWakeCheckReportsLiveStaleRawImageAndRequiresOwningTerminal(t *testing.T
 			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
 		}
 	})
+	preparedAt := time.Date(2026, 7, 31, 1, 0, 2, 0, time.UTC)
+	if err := os.WriteFile(wakePreparedPath(root, "codex"),
+		[]byte(`{"schema":1,"generation":"live-raw-generation"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(wakePreparedPath(root, "codex"), preparedAt, preparedAt); err != nil {
+		t.Fatal(err)
+	}
 	stubWakeCheckRuntime(t, false, "0.49.14")
 	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
 		return wakeBinaryStaleness{
@@ -133,10 +143,12 @@ func TestWakeCheckReportsLiveStaleRawImageAndRequiresOwningTerminal(t *testing.T
 		got.WakePID != pid || got.WakeMode != wakeInjectModeRaw || got.OwnerBound {
 		t.Fatalf("live wake = %#v", got)
 	}
-	// The Stop hook blocks only for mail created at or before the lock start,
-	// the --baseline-existing cohort the wake never rings for (PR #1152).
-	if got.StartedAt != "2026-07-31T01:00:00Z" {
-		t.Fatalf("started_at = %q, want the lock start", got.StartedAt)
+	// The Stop hook blocks only for mail created at or before the prepared
+	// marker, which the wake writes after its --baseline-existing snapshot;
+	// the lock start precedes that snapshot (PR #1152).
+	if got.StartedAt != "2026-07-31T01:00:00Z" || got.BaselineAt != preparedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("started_at = %q baseline_at = %q, want the lock start and the prepared marker time",
+			got.StartedAt, got.BaselineAt)
 	}
 	if got.RunningImagePath != runningPath || got.RunningVersion != runningVersion ||
 		got.CurrentVersion != "0.49.14" || got.ImageStatus != "different" {

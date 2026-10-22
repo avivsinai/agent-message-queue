@@ -21,21 +21,23 @@ state before it changes anything.
 
 `wake check` and `doctor` JSON has two schemas. Schema 1 is the default and is
 byte-compatible for a missing lock; a live or stale lock adds
-`wake_generation`, `wake_target_digest`, and `started_at` (the lock's start
-time) when they exist (omitted when empty). Schema 2 is explicit with
-`--json-schema=2` (which requires `--json`). It gives a closed action kind,
-actor, reason code, and an argv command object for a directly executable
-action or a safe operator diagnostic. Missing
-evidence is JSON `null`, including `wake.generation` and `wake.target_digest`;
+`wake_generation`, `wake_target_digest`, `started_at` (the lock's start time),
+and `baseline_at` (when this generation published its prepared marker, after
+its startup baseline snapshot) when they exist (omitted when empty). Schema 2
+is explicit with `--json-schema=2` (which requires `--json`). It gives a closed
+action kind, actor, reason code, and an argv command object for a directly
+executable action or a safe operator diagnostic. Missing evidence is JSON
+`null`, including `wake.generation` and `wake.target_digest`;
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
 The co-op Stop hook (`scripts/amq-stop-hook.sh`) blocks a stop only for mail
 no wake will ring for. With no live wake, every pending message counts. Under a
-live wake, only mail created at or before `started_at` counts, because a wake
-started with `--baseline-existing` never rings for that cohort; a probe that
-fails or takes more than 2 seconds counts every message. A live wake that is
-demoted or parked signals through its own pane attention and `doctor --ops`
+live wake, only mail created at or before `baseline_at` counts, because a wake
+started with `--baseline-existing` never rings for that cohort. Every message
+counts when a live wake has no `baseline_at` yet (its baseline is not done) or
+when the probe fails or takes more than 2 seconds. A live wake that is demoted
+or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
 
 The wake child appends full runtime diagnostics to the private

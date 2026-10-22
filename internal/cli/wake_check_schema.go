@@ -115,6 +115,7 @@ type wakeCheckWakeDecision struct {
 	Generation   *string
 	TargetDigest *string
 	StartedAt    *string
+	BaselineAt   *string
 }
 
 type wakeCheckImageDecision struct {
