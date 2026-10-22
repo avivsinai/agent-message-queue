@@ -702,6 +702,11 @@ func skipReason(msg format.Message) string {
 // takeMessage moves the claimed message to cur, writes the drained receipt,
 // and reads it back. ok is false when the message is in neither new nor cur.
 func (h *Host) takeMessage(root *fsq.DeliveryRoot, rec *turnRecord) (format.Message, bool, error) {
+	// Every claimed record, fresh or found on restart, is durable before
+	// its message moves.
+	if err := syncJournal(root, h.cfg.Me); err != nil {
+		return format.Message{}, false, err
+	}
 	if err := fsq.MoveNewToCur(root, h.cfg.Me, rec.File); err != nil {
 		var committed *fsq.CommittedDurabilityError
 		if !errors.As(err, &committed) && !os.IsNotExist(err) {
