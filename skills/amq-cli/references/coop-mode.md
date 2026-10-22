@@ -88,10 +88,6 @@ phase boundaries, and finish with changes and verification.
   output notice, and rejects `--inject-via`, `--inject-arg`, and `--inject-cmd`.
   A directly started wake uses its configured stderr. `coop exec` sends wake
   diagnostics to the private `agents/<agent>/.wake.log`, not the TUI composer.
-- `amq coop exec agy` defaults its wake to `--wake-inject-mode none`, because
-  agy runs no hooks and the doorbell's Enter approves an open agy permission
-  prompt. Under agy, run `amq drain --include-body` when asked and between
-  tasks. An explicit `--wake-inject-mode` or `--wake-inject-via` overrides it.
 - A new wake started with `--baseline-existing` (which `coop exec` adds) leaves
   messages already in `inbox/new` unread and notifies only for later arrivals.
   `wake repair` keeps the dead generation's suppression floor instead, so mail
