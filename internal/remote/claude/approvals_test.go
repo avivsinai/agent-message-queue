@@ -736,7 +736,8 @@ func TestApprovalHookDoesNotWaitForATerminalPrompt(t *testing.T) {
 // Regression: hook-audit S2 review finding (Codex), the reader order. The
 // attachment writes the run marker and then removes the run's inflight
 // record, both between the hook's missed marker read and its inflight
-// read. The hook reads the marker again and raises the request.
+// read. The hook reads the marker again and raises the request. The hand-off
+// runs at the hook's clock read, which comes between those two file reads.
 func TestApprovalHookRaisesForARunThatLeftInflightBetweenReads(t *testing.T) {
 	home := t.TempDir()
 	if _, err := PinApprovals(home, approvalSession, "share-1", "", os.Getpid()); err != nil {
@@ -748,15 +749,18 @@ func TestApprovalHookRaisesForARunThatLeftInflightBetweenReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	frozen := time.Now()
-	var once sync.Once
-	h := permissionHook{home: home, now: func() time.Time { return frozen }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
-		afterMarkerMiss: func() {
-			once.Do(func() {
+	reads := 0
+	h := permissionHook{home: home, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
+		now: func() time.Time {
+			// Read 1 starts the grace; read 2 follows the first missed
+			// marker read and precedes the inflight read.
+			if reads++; reads == 2 {
 				if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: msgID, Owner: owner, PID: os.Getpid()}); err != nil {
 					t.Error(err)
 				}
 				removeInflight(home, approvalSession, owner, msgID)
-			})
+			}
+			return frozen
 		}}
 	startHook(t, h, make(chan struct{}), io.Discard)
 	awaitRequest(t, home)
@@ -784,13 +788,15 @@ func TestApprovalHookWaitsForAnInflightRunsMarker(t *testing.T) {
 	if !inflightLive(ft.home, approvalSession, time.Now()) {
 		t.Fatal("the submitted run has no live inflight record")
 	}
+	// The hook's second clock read follows its first missed marker read.
 	missed := make(chan struct{}, 1)
-	h := permissionHook{home: ft.home, now: time.Now, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
-		afterMarkerMiss: func() {
-			select {
-			case missed <- struct{}{}:
-			default:
+	var reads atomic.Int32
+	h := permissionHook{home: ft.home, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
+		now: func() time.Time {
+			if reads.Add(1) == 2 {
+				missed <- struct{}{}
 			}
+			return time.Now()
 		}}
 	exited := startHook(t, h, make(chan struct{}), io.Discard)
 	select {
