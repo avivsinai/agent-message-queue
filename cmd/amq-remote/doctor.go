@@ -170,7 +170,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			if pin := claude.PermissionHookPin(home); pin.DesktopComplete() {
 				report["claude_approval_pin"] = map[string]string{"surface": pin.Surface, "owner": pin.Owner, "agent": pin.Body, "channel": pin.Channel}
 			} else if !pin.Complete() {
-				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz; for Buzz Desktop, run the install-approval-hook --desktop command the agent's approval message shows"
+				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz; for Buzz Desktop, run `amq-remote claude install-approval-hook --desktop --owner <pubkey> --body <agent pubkey> --channel <DM channel id>`"
 			} else {
 				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
 			}

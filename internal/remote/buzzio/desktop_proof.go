@@ -115,7 +115,8 @@ func verifyDesktopGrant(g DesktopGrant, body, messageID, reactionID string) bool
 //     DesktopApprovalText(want.Prompt);
 //   - the grant verifies under want.Body over that message and reaction;
 //   - the reaction and the grant are dated within [want.NotBefore,
-//     want.NotAfter], and the grant no earlier than the reaction.
+//     want.NotAfter]. The reaction's date is the owner's clock and the
+//     grant's is this machine's, so neither is ordered against the other.
 //
 // The message's history is not in the evidence: the grant says the agent
 // read it clean. Nothing in the evidence changes what must be proven.
@@ -157,7 +158,7 @@ func VerifyDesktopEvidence(raw json.RawMessage, want DesktopCheck) error {
 	switch {
 	case reacted.Before(want.NotBefore) || reacted.After(want.NotAfter):
 		return errors.New("reaction is outside the approval's window")
-	case checked.Before(reacted) || checked.After(want.NotAfter):
+	case checked.Before(want.NotBefore) || checked.After(want.NotAfter):
 		return errors.New("the agent's grant is outside the approval's window")
 	}
 	return nil

@@ -95,7 +95,8 @@ names the owner, the agent's public key and the agent's DM channel with the
 owner: `... claude permission-hook --wait 600 --surface 'desktop' --owner
 '<64 hex>' --body '<agent pubkey>' --channel '<DM channel>'`, written by
 `install-approval-hook --desktop`, which the owner runs in the terminal with
-the values the agent's approval message shows. The agent key never leaves
+the agent's public key and its DM channel id. A hook holds one pin: a
+Desktop pin or a relay-share pin, never both. The agent key never leaves
 `amq-acp`. The hook prints allow only when all of these hold:
 
 - the call is a Bash call shown whole, as above;
@@ -108,7 +109,7 @@ the values the agent's approval message shows. The agent key never leaves
   `Action: <sha256 of the call>`);
 - the answer carries the agent's grant: a BIP-340 signature by the pinned
   agent key over the message id, the reaction id and the time the agent
-  checked, dated no earlier than the reaction and before the deadline. The
+  checked, dated in the approval's window. The
   agent signs it only after its own read of the relay finds no edit that
   changes the call, no deletion of the message, and no owner ❌ on it.
 

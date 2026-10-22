@@ -146,7 +146,7 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 	root := fs.String("root", os.Getenv("AM_ROOT"), "AMQ root whose manifest names the share to pin and whose enrolled body key the hook signs in with (default AM_ROOT)")
 	session := fs.String("session", "", "the share session to pin (default: the one relay share of the owner with a DM channel)")
 	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <root>/"+stateDirName+"/manifest.json)")
-	desktop := fs.Bool("desktop", false, "pin the Buzz Desktop agent's DM instead of a relay share: needs --owner, --body and --channel, which the agent's approval message in the DM shows")
+	desktop := fs.Bool("desktop", false, "pin the Buzz Desktop agent's DM instead of a relay share: needs --owner, --body and --channel")
 	body := fs.String("body", "", "with --desktop: the Desktop agent's public key (64 hex or npub)")
 	channel := fs.String("channel", "", "with --desktop: the agent's DM channel id with the owner")
 	if fs.Parse(args) != nil {
@@ -185,9 +185,8 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 }
 
 // installDesktopApprovalHook writes the PermissionRequest hook with a Desktop
-// pin. The owner runs it in the terminal and confirms the values it prints
-// against the agent's approval message in the DM: nothing is read from a
-// file Claude can write.
+// pin. The owner runs it in the terminal and confirms the values it prints:
+// nothing is read from a file Claude can write.
 func installDesktopApprovalHook(home, owner, body, channel string, stdout, stderr io.Writer) int {
 	var err error
 	pin := claude.HookPin{Surface: claude.SurfaceDesktop, Channel: strings.TrimSpace(channel)}
@@ -210,7 +209,7 @@ func installDesktopApprovalHook(home, owner, body, channel string, stdout, stder
 		return 1
 	}
 	say(stdout, "approval hook installed for Buzz Desktop: the owner %s can allow a Claude tool call with ✅ on an approval that the agent %s posts in the DM %s, or block it with ❌\n", pin.Owner, pin.Body, pin.Channel)
-	say(stdout, "check that these three values match the agent's approval message in Buzz Desktop; an approval from any other agent or channel can only deny\n")
+	say(stdout, "check these three values against Buzz Desktop; an approval from any other agent or channel can only deny\n")
 	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
 	return 0
 }
