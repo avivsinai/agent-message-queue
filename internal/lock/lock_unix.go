@@ -1,91 +1,39 @@
-//go:build darwin || linux
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
 
 package lock
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// ErrStopped is returned by WithExclusiveFileLockUntil when stopped reported
-// true before the lock was acquired; fn did not run.
-var ErrStopped = errors.New("stopped before the lock was acquired")
-
-// lockRetry is the pause between non-blocking lock attempts.
-const lockRetry = 20 * time.Millisecond
-
-// WithExclusiveFileLockUntil is WithExclusiveFileLock that gives up, without
-// running fn, once stopped reports true. A caller whose work can be cancelled
-// or can run out of time never waits on the lock past that point.
-func WithExclusiveFileLockUntil(lockPath string, stopped func() bool, fn func() error) error {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	for {
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) {
-			return fmt.Errorf("acquire lock: %w", err)
-		}
-		if stopped() {
-			return ErrStopped
-		}
-		time.Sleep(lockRetry)
-	}
-	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
-	return fn()
-}
-
-// TryExclusive takes an exclusive advisory lock on lockPath without waiting.
-// ok is false, with no error, when another holder has it. On success the
-// lock stays held until release is called or the process exits.
-func TryExclusive(lockPath string) (release func(), ok bool, err error) {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, false, fmt.Errorf("open lock file: %w", err)
-	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = f.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("acquire lock: %w", err)
-	}
-	return func() {
-		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
-		_ = f.Close()
-	}, true, nil
-}
-
-// AdvisoryLockAvailable reports whether WithExclusiveFileLock holds a real
-// interprocess lock. On other platforms the helper runs fn with no lock.
+// AdvisoryLockAvailable reports whether this platform has a real
+// interprocess file lock.
 func AdvisoryLockAvailable() bool { return true }
 
-// WithExclusiveFileLock runs fn while holding an exclusive advisory lock on
-// lockPath. The lock is released when fn returns.
-//
-// The lock is taken on lockPath (not the target file being updated) so callers
-// can safely use atomic rename for the real data file without invalidating the
-// lock (flock is per-inode).
-func WithExclusiveFileLock(lockPath string, fn func() error) error {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
+// Lock takes an exclusive flock on f, waiting until it is free. The lock
+// belongs to the open file description: another open of the same file,
+// in this process or another, excludes it.
+func Lock(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_EX)
+}
 
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		return fmt.Errorf("acquire lock: %w", err)
+// TryLock takes the lock of Lock without waiting. ok is false, with no error,
+// when another holder has it.
+func TryLock(f *os.File) (ok bool, err error) {
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
+		return true, nil
 	}
-	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return false, nil
+	}
+	return false, err
+}
 
-	return fn()
+// Unlock releases a lock taken by Lock or TryLock. Closing f releases it too.
+func Unlock(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }

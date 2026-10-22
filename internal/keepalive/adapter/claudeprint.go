@@ -16,6 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const (
@@ -336,6 +337,20 @@ func (c ClaudePrint) lockInject(uuid string) (func(), error) {
 }
 
 var errInjectBusy = errors.New("inject lock busy")
+
+func tryFlockExclusive(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	release, ok, err := lock.TryExclusive(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errInjectBusy
+	}
+	return release, nil
+}
 
 func abortAfterKill(proc startedProcess, logPath, payload, why string) error {
 	_ = proc.KillGroup()

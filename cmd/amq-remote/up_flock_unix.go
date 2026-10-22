@@ -3,20 +3,20 @@
 package main
 
 import (
-	"errors"
 	"os"
-	"syscall"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // flockLifetime takes an exclusive non-blocking advisory lock held for the
-// process lifetime. EWOULDBLOCK/EAGAIN mean another up owns the slot.
+// process lifetime. A busy lock means another up owns the slot.
 func flockLifetime(f *os.File) error {
-	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err == nil {
-		return nil
+	ok, err := lock.TryLock(f)
+	if err != nil {
+		return err
 	}
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if !ok {
 		return errLifetimeHeld
 	}
-	return err
+	return nil
 }

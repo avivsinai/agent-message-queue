@@ -25,6 +25,9 @@ func ProbeLifetimeLock(regPath, entryID string) (bool, error) {
 	return ProbeLockHeld(LifetimeLockPath(regPath, entryID))
 }
 
+// ProbeLockHeld uses its own flock call, not internal/lock, because it probes
+// with a shared lock.
+//
 // ProbeLockHeld reports whether a live process holds an exclusive flock on
 // the lock file at path, with the outcomes of ProbeLifetimeLock. A missing
 // file is not held.

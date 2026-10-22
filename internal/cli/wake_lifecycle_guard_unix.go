@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"golang.org/x/sys/unix"
 )
 
@@ -144,13 +145,6 @@ var (
 	}
 )
 
-func (opts wakeGuardOptions) lockMode() int {
-	if opts.noWait {
-		return unix.LOCK_EX | unix.LOCK_NB
-	}
-	return unix.LOCK_EX
-}
-
 // withWakeLifecycleGuardInDir runs fn under the lifecycle guard and releases
 // the guard when fn returns.
 func withWakeLifecycleGuardInDir(
@@ -185,7 +179,7 @@ func (lease *wakeLifecycleGuardLease) release() error {
 	}
 	var unlockErr error
 	if lease.locked {
-		unlockErr = unix.Flock(int(lease.file.Fd()), unix.LOCK_UN)
+		unlockErr = lock.Unlock(lease.file)
 	}
 	closeErr := lease.file.Close()
 	return errors.Join(unlockErr, closeErr)
@@ -205,7 +199,7 @@ func withWakeLifecycleGuardLeaseInDir(
 			path,
 			agentDir,
 			opts.existing,
-			opts.lockMode(),
+			opts.noWait,
 			opts.retryTimeout,
 		)
 		if err != nil {
@@ -220,7 +214,7 @@ func openAndAcquireWakeLifecycleGuardLeaseAt(
 	path string,
 	agentDir *wakeAgentDir,
 	existing bool,
-	lockMode int,
+	noWait bool,
 	retryTimeout time.Duration,
 ) (*wakeLifecycleGuardLease, error) {
 	var (
@@ -236,7 +230,7 @@ func openAndAcquireWakeLifecycleGuardLeaseAt(
 		return nil, err
 	}
 	lease := &wakeLifecycleGuardLease{file: file, path: path}
-	if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode, retryTimeout); err != nil {
+	if err := acquireWakeLifecycleGuard(file, path, agentDir, noWait, retryTimeout); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -338,23 +332,23 @@ func acquireWakeLifecycleGuard(
 	file *os.File,
 	path string,
 	agentDir *wakeAgentDir,
-	lockMode int,
+	noWait bool,
 	retryTimeout time.Duration,
 ) error {
-	if lockMode&unix.LOCK_NB == 0 {
-		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
+	if !noWait {
+		if err := lock.Lock(file); err != nil {
 			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
 		}
 		return nil
 	}
 	deadline := time.Now().Add(retryTimeout)
 	for {
-		err := unix.Flock(int(file.Fd()), lockMode)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) {
+		ok, err := lock.TryLock(file)
+		if err != nil {
 			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		}
+		if ok {
+			return nil
 		}
 		if !time.Now().Before(deadline) {
 			root := filepath.Dir(filepath.Dir(agentDir.path))

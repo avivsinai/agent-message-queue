@@ -3,30 +3,23 @@
 package registry
 
 import (
-	"errors"
 	"os"
-	"syscall"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // flockExclusive takes an exclusive advisory lock on the open lock file,
 // blocking until it is available.
-func flockExclusive(lock *os.File) error {
-	return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+func flockExclusive(f *os.File) error {
+	return lock.Lock(f)
 }
 
 // flockTryExclusive attempts the same lock without blocking. A busy lock is a
 // normal false result so context-aware callers can poll and honor cancellation.
-func flockTryExclusive(lock *os.File) (bool, error) {
-	err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-		return false, nil
-	}
-	return false, err
+func flockTryExclusive(f *os.File) (bool, error) {
+	return lock.TryLock(f)
 }
 
-func flockRelease(lock *os.File) {
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+func flockRelease(f *os.File) {
+	_ = lock.Unlock(f)
 }

@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || windows
 
 package lock
 
@@ -27,6 +27,14 @@ func TestWithExclusiveFileLockSerializesAndReleases(t *testing.T) {
 		t.Fatalf("first callback did not enter: %v", err)
 	case <-time.After(time.Second):
 		t.Fatal("first callback did not enter within timeout")
+	}
+
+	release, ok, err := TryExclusive(lockPath)
+	if err != nil || ok {
+		if ok {
+			release()
+		}
+		t.Fatalf("TryExclusive while held = (%v, %v), want busy", ok, err)
 	}
 
 	secondEntered := make(chan struct{})
