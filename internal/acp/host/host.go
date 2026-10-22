@@ -1044,5 +1044,5 @@ func (h *Host) setPresence(root *fsq.DeliveryRoot, status string) {
 	if h.agentName != "" {
 		note += " " + h.agentName
 	}
-	_ = presence.WriteDeliveryRoot(root, presence.New(h.cfg.Me, status, note, time.Now()))
+	_, _ = presence.SetStatusDeliveryRoot(root, h.cfg.Me, status, note)
 }

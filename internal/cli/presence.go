@@ -4,7 +4,6 @@ import (
 	"flag"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -64,8 +63,8 @@ func runPresenceSet(args []string) error {
 	if status == "" {
 		return UsageError("--status is required")
 	}
-	p := presence.New(common.Me, status, strings.TrimSpace(*noteFlag), time.Now())
-	if err := presence.Write(root, p); err != nil {
+	p, err := presence.SetStatus(root, common.Me, status, strings.TrimSpace(*noteFlag))
+	if err != nil {
 		return err
 	}
 	if common.JSON {
