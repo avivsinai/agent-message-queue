@@ -26,6 +26,7 @@ and never from its own environment.
   receipts/<ref>.json    extension -> adapter: admission proof
   events/<ref>.jsonl     extension -> adapter: lifecycle and terminal evidence
   answers/<hash>.json    adapter -> extension: one tool-approval answer (revision 4)
+  cancels/<ref>.json     adapter -> extension: cancel of one request (revision 5)
   activity/<session_id>.jsonl  extension -> adapter: whole-session activity
   bridge.liveness        extension -> adapter: heartbeat
 ```
@@ -40,7 +41,7 @@ adapter's temporary files.
 
 ## Ownership
 
-The adapter writes only `requests/` and `answers/`. The extension writes only
+The adapter writes only `requests/`, `answers/`, and `cancels/`. The extension writes only
 `receipts/`, `events/`, and `bridge.liveness`. Neither side deletes or rewrites a file the
 other side owns. The extension never deletes or rewrites a request; the adapter
 never deletes a request it published. Cleanup of old files is an explicit
@@ -147,6 +148,7 @@ One JSON object per line, appended and fsynced line by line:
 | `generation` | `stale_epoch` |
 | `busy` | `busy` |
 | `revision` | `unsupported` |
+| `cancelled` | `cancelled_before_admission` (revision 5) |
 | anything else (for example `invalid`, `unsupported`) | `native_error` |
 
 The first terminal event (`completed`, `failed`, `cancelled`, `refused`,
@@ -397,6 +399,33 @@ An allow grants that one tool call, never a wider scope. The extension applies
 the first decision from any face and reports the result with
 `interaction_resolved`. It never deletes or rewrites an answer file.
 
+## Bridge revision 5: exact cancel
+
+Revision 5 is revision 4 plus one seam: the adapter cancels one request it
+published, and the extension stops it only if it is that request.
+
+```json
+{"protocol":"amq:pi-bridge:v1","ref":"amqr1_...","at":"2026-01-01T00:01:00Z"}
+```
+
+The adapter writes `cancels/<ref>.json` create-new, with the same steps as a
+request, only while a live bridge advertises revision 5 or later, and never
+rewrites it. A cancel already on disk is delivered. The adapter advertises
+`cancel_request` only while the live record's `bridge_revision` is 5 or
+higher.
+
+The extension applies a cancel file with this `protocol` and `ref`:
+
+- for a request with no receipt and no terminal event: a `refused` event with
+  reason `cancelled` and no receipt, so the request never runs;
+- for the request in flight: the native cancel of that request, after the
+  extension has checked, in the same step, that the ref is the request it is
+  running. The outcome is the request's usual terminal event, `cancelled`
+  when the cancel took effect;
+- for a request that already has a terminal event: nothing.
+
+A cancel never reaches any other request or a local turn.
+
 ## Session generation and epoch
 
 A session generation is an opaque token (`^[A-Za-z0-9_.:-]{1,128}$`) that
@@ -527,7 +556,7 @@ applies with these differences:
 - The directory is `<AM_ROOT>/agents/<handle>/extensions/acp-host/`, which
   the host shares with its own state (`host.lock`, `session.json`,
   `turns/`). The protocol string is `amq:acp-host:v1`.
-- Liveness carries `surface: "acp"`, `bridge_revision` 4, `session_id` (the
+- Liveness carries `surface: "acp"`, `bridge_revision` 5, `session_id` (the
   ACP `sessionId`, when it matches the session identity grammar), and
   `agent` (the agent's name and version from `initialize`). The host mints a
   new `session_generation` each time it starts and opens or loads its ACP
@@ -559,10 +588,17 @@ applies with these differences:
   closes it. An approval with no `reject_once` option raises no line: the
   host's policy answers at once with the first `reject_always`, else
   `cancelled`. A message turn rejects at once and raises no line.
+- A cancel file for the request in flight sends ACP `session/cancel`. The
+  host checks the cancel file within a second, in the loop that runs that
+  turn, so the cancel is for that turn only. It answers a pending approval
+  `cancelled` and waits 30 seconds for the prompt response, and starts no
+  other turn meanwhile. The `session/cancel` write runs on its own, so an
+  agent that stopped reading its stdin does not hold the turn past those 30
+  seconds; the host then records `failed` and exits.
 
 ## Capabilities
 
-v1 supports inspect and submit with `deliver_as: followUp` only, and tool
-approval through `answers/` from bridge revision 4. Steering, exact
-cancellation, question answers, and terminal access are not part of the
-protocol; the adapter refuses a steer submit before it writes anything.
+v1 supports inspect and submit with `deliver_as: followUp` only, tool
+approval through `answers/` from bridge revision 4, and exact cancel through
+`cancels/` from bridge revision 5. Steering, question answers, and terminal
+access are not part of the protocol; the adapter refuses a steer submit before it writes anything.

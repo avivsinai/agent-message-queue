@@ -10,6 +10,7 @@ package host
 //	  receipts/<ref>.json    host -> adapter: admission proof
 //	  events/<ref>.jsonl     host -> adapter: lifecycle, approvals, outcome
 //	  answers/<hash>.json    adapter -> host: one approval answer
+//	  cancels/<ref>.json     adapter -> host: cancel of one request
 //	  bridge.liveness        host -> adapter: heartbeat
 //
 // The host writes only receipts/, events/ and bridge.liveness. A request
@@ -42,8 +43,9 @@ const BridgeProtocol = "amq:acp-host:v1"
 
 const (
 	// bridgeRevision is the rule set the host implements: revision 3 plus
-	// tool approvals through answers/ (revision 4).
-	bridgeRevision = 4
+	// tool approvals through answers/ (revision 4) and exact cancel through
+	// cancels/ (revision 5).
+	bridgeRevision = 5
 	// minRequestRevision is the lowest revision a request may require.
 	minRequestRevision = 3
 	livenessInterval   = 2 * time.Second
@@ -108,6 +110,11 @@ type bridgeLiveness struct {
 	BridgeRevision    int    `json:"bridge_revision"`
 	SessionID         string `json:"session_id,omitempty"`
 	Agent             string `json:"agent,omitempty"`
+}
+
+type bridgeCancel struct {
+	Protocol string `json:"protocol"`
+	Ref      string `json:"ref"`
 }
 
 type bridgeAnswer struct {
@@ -346,6 +353,9 @@ func (h *Host) admit(root *fsq.DeliveryRoot, ref string) (bridgeRequest, bool, e
 		h.handled[ref] = true
 		return bridgeRequest{}, false, h.appendEvent(root, ref, nil, bridgeEvent{Event: "refused", Reason: reason, Error: detail})
 	}
+	if h.cancelRequested(root, ref) {
+		return refuse("cancelled", "the owner cancelled the request before it ran")
+	}
 	data, err := root.ReadFile(bridgePath(h.cfg.Me, "requests", ref+".json"))
 	if err != nil {
 		return bridgeRequest{}, false, nil
@@ -372,6 +382,16 @@ func (h *Host) admit(root *fsq.DeliveryRoot, ref string) (bridgeRequest, bool, e
 		return refuse("generation", "the request addresses another session generation")
 	}
 	return req, true, nil
+}
+
+// cancelRequested reports whether the adapter published a cancel for ref.
+func (h *Host) cancelRequested(root *fsq.DeliveryRoot, ref string) bool {
+	data, err := root.ReadFile(bridgePath(h.cfg.Me, "cancels", ref+".json"))
+	if err != nil {
+		return false
+	}
+	var c bridgeCancel
+	return json.Unmarshal(data, &c) == nil && c.Protocol == BridgeProtocol && c.Ref == ref
 }
 
 // inboxBusy reports whether a peer message waits in the inbox. A file the
@@ -468,6 +488,9 @@ func (h *Host) runRequest(ctx context.Context, root *fsq.DeliveryRoot, req bridg
 		return err
 	}
 	ev, fatal := requestOutcome(res, h.cfg.AgentExit)
+	if fatal == nil {
+		fatal = res.stuck
+	}
 	if err := h.appendEvent(root, req.Ref, bt, ev); err != nil {
 		return err
 	}
