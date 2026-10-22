@@ -443,6 +443,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Unlock()
 
 	input := []map[string]any{{"type": "text", "text": req.Input.Text}}
+	// Core checked not_after before it dispatched, but its store write and
+	// the wait for the writer slot come after that check. Every prompt send
+	// below rechecks not_after at the writer, so a prompt never leaves late.
+	var sendBy time.Time
+	if exp, err := protocol.ParseTime(req.NotAfter); err == nil {
+		sendBy = exp
+	}
 
 	switch {
 	case req.Input.Deliver == protocol.DeliverSteer:
@@ -452,7 +459,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if !busy {
 			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
 		}
-		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
+		if err := a.call(sendBy, "turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
 			return refusal(err), nil
 		}
 		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
@@ -465,7 +472,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	case busy && req.Input.Busy == protocol.BusyQueue:
 		// Codex's own FIFO queue primitive; acceptance is Codex-native.
-		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
+		if err := a.call(sendBy, "thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
 		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
@@ -499,7 +506,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	genBefore := a.lostStateGen
 	a.mu.Unlock()
-	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
+	if err := a.call(sendBy, "turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
 		// Split pre-send vs post-send. ErrNotSent (marshal error, write
 		// error, connection closed before
 		// write) and rpcError (server responded with an error) are both
@@ -530,18 +537,30 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// (confirming notification, result, idle status), or processed a
 	// notLoaded/systemError that invalidated the state this continuation
 	// would restore. Restoring activeTurn in either case would wedge the
-	// adapter busy with no later event to clear it. A terminal run, or a turn
-	// the terminalTurns memo recorded, is a POSITIVE fact that restores
-	// nothing, so it is checked FIRST and reports admitted: a lost-state
-	// notification cannot downgrade a known completed outcome to uncertain.
-	// Otherwise an advanced lostStateGen drops the restore, keeps the run
-	// correlation (the text may still be running, so Lookup and history can
-	// resolve it) and reports uncertain, like the post-send ambiguity path.
-	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
+	// adapter busy with no later event to clear it. A finished run of ours is
+	// a POSITIVE fact that restores nothing, so it is checked FIRST and
+	// reports admitted: a lost-state notification cannot downgrade a known
+	// outcome to uncertain. Only our own evidence makes the run ours: a
+	// terminal state (reachable only through byTurn, which only confirmation
+	// binds) or a memo hit on a run our userMessage item or history confirmed.
+	if r.state.Terminal() || (r.confirmed && a.terminalTurns[res.Turn.ID]) {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: rid}, nil
 	}
+	// The returned turn already finished without our userMessage item. The
+	// busy-join returns a running foreign turn and drops our text, so this
+	// proves nothing about our request. Restore nothing (the turn is over),
+	// keep the run correlation so history can still resolve it, and report
+	// uncertain.
+	if a.terminalTurns[res.Turn.ID] {
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, fmt.Errorf("turn %s finished before our own userMessage item confirmed the text; the request may not have run", res.Turn.ID)
+	}
+	// An advanced lostStateGen drops the restore, keeps the run correlation
+	// (the text may still be running, so Lookup and history can resolve it)
+	// and reports uncertain, like the post-send ambiguity path.
 	if genBefore != a.lostStateGen {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
@@ -584,10 +603,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 }
 
 // call runs one app-server request with a bounded timeout and no lock held.
-func (a *Attachment) call(method string, params, result any) error {
+// A request still unwritten at a non-zero sendBy is not sent.
+func (a *Attachment) call(sendBy time.Time, method string, params, result any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return a.client.Load().Call(ctx, method, params, result)
+	return a.client.Load().callBefore(ctx, sendBy, method, params, result)
 }
 
 // memoTerminal records turnID as an observed-terminal turn and keeps the
@@ -670,6 +690,20 @@ func (a *Attachment) deliverPendingCancel(turnID string) {
 	_ = client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil)
 }
 
+// historyEvidenceLocked is the evidence for a run that thread history proved
+// ours. The caller holds a.mu for the whole snapshot: the read pump writes
+// the run's text and state under a.mu, so no field is read after unlock and
+// the evidence never mixes two moments. A terminal run is history-proven
+// final: a restarted attachment retains nothing in memory, so this class
+// tells the endpoint the ack replay may converge on it.
+func (r *run) historyEvidenceLocked() core.Evidence {
+	ev := core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: r.result()}
+	if r.state.Terminal() {
+		ev.Class = core.EvidenceHistoryTerminated
+	}
+	return ev
+}
+
 // runIDLocked returns the run's correlation id. The caller MUST hold a.mu:
 // r.turnID is written by confirmRun from the read-loop goroutine. Every
 // external caller goes through a.runID, which takes the lock.
@@ -702,6 +736,9 @@ func clientIDFor(key requests.Key) string {
 }
 
 func refusal(err error) core.Admission {
+	if errors.Is(err, errSendDeadline) {
+		return core.Admission{Code: protocol.CodeExpired, Message: "not_after passed before the prompt was sent"}
+	}
 	var rpc *rpcError
 	if errors.As(err, &rpc) {
 		return core.Admission{Code: protocol.CodeNativeError, Message: rpc.Message}
@@ -857,13 +894,9 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 				r.text.Reset()
 				r.text.WriteString(text.String())
 				r.confirmed = true
+				ev := r.historyEvidenceLocked()
 				a.mu.Unlock()
-				result := r.result()
-				// This is HISTORY-proven terminal evidence — a
-				// restarted attachment retains nothing in memory, so this
-				// class tells the endpoint the outcome is the run's final
-				// one and the ack replay may converge on it.
-				return core.Evidence{Known: true, Admitted: true, Class: core.EvidenceHistoryTerminated, RunID: "turn:" + t.ID, State: state, Result: result}, nil
+				return ev, nil
 			}
 			a.mu.Unlock()
 		}
@@ -919,13 +952,8 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		if t.ID != "" && r.turnID != "" {
 			a.byTurn[r.turnID] = r
 		}
+		ev := r.historyEvidenceLocked()
 		a.mu.Unlock()
-		result := r.result()
-		ev := core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}
-		if r.state.Terminal() {
-			// Same as above — history-proven terminal.
-			ev.Class = core.EvidenceHistoryTerminated
-		}
 		return ev, nil
 	}
 	// No turn carried our clientId. That is NOT positive proof the request was

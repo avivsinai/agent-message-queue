@@ -26,10 +26,12 @@ type Source struct {
 	// (local socket, mailbox, Buzz). A link source always carries a non-nil
 	// list, possibly empty: session list and inspect show only these targets.
 	Shared []string
-	// NativeSession and Credential come only from a link's verified signed
-	// submit: the native session the user signed for and the consent key
-	// that signed. Core stores both on the record and checks them again right
-	// before the handoff to the harness.
+	// NativeSession is the native session this source's requests may run in:
+	// the session a link's verified signed submit names, or the session the
+	// Buzz share approved and its carrier just proved attached. Credential
+	// comes only from a link's signed submit: the consent key that signed.
+	// Core stores both on the record and checks them again right before the
+	// handoff to the harness.
 	NativeSession string
 	Credential    string
 }

@@ -24,6 +24,12 @@ type silentResolver struct {
 	asks int
 }
 
+// NativeSessionID keeps the wrapped fake's native identity, which the owner
+// share's requests are bound to.
+func (s *silentResolver) NativeSessionID() string {
+	return s.Attachment.(core.NativeIdentifier).NativeSessionID()
+}
+
 func (s *silentResolver) ResolvedInteraction(_ requests.Key, _, interactionID string) (protocol.Resolution, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -310,6 +316,11 @@ type barrierResolver struct {
 	res     map[string]protocol.Resolution
 	entered chan struct{}
 	release chan struct{}
+}
+
+// NativeSessionID keeps the wrapped fake's native identity.
+func (b *barrierResolver) NativeSessionID() string {
+	return b.Attachment.(core.NativeIdentifier).NativeSessionID()
 }
 
 func (b *barrierResolver) ResolvedInteraction(_ requests.Key, _, interactionID string) (protocol.Resolution, bool) {

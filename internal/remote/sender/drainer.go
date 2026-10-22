@@ -11,15 +11,18 @@
 // unreachable, draining, storage_full) leaves the envelope pending and the
 // drainer retries on the next tick.
 //
-// An envelope whose NotAfter has passed is expired WITHOUT dispatch — the
-// caller is told the request expired before the endpoint could admit it,
-// never that it was dispatched late.
+// The endpoint alone decides whether an envelope's window has closed. The
+// drainer never expires an envelope on its own clock: a crash after the
+// endpoint accepted the command but before the envelope was settled leaves a
+// pending envelope whose request already ran, and only the endpoint knows
+// that. Replaying it returns the endpoint's existing record (settled as
+// dispatched); an envelope the endpoint never saw is refused as expired
+// without dispatch (settled as expired).
 package sender
 
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -29,16 +32,12 @@ import (
 type Drainer struct {
 	spool *Spool
 	ep    *core.Endpoint
-	now   func() time.Time
 }
 
 // NewDrainer returns a drainer that replays pending envelopes in spool through
-// ep. now defaults to time.Now.
-func NewDrainer(spool *Spool, ep *core.Endpoint, now func() time.Time) *Drainer {
-	if now == nil {
-		now = time.Now
-	}
-	return &Drainer{spool: spool, ep: ep, now: now}
+// ep.
+func NewDrainer(spool *Spool, ep *core.Endpoint) *Drainer {
+	return &Drainer{spool: spool, ep: ep}
 }
 
 // Drain replays every pending envelope once. It is safe to call on each tick:
@@ -60,16 +59,6 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 			continue
 		}
 		k := env.key()
-		// Expire first: an envelope whose window closed while it waited is
-		// expired WITHOUT dispatch. The caller is told the request expired
-		// before admission, never that it was dispatched late.
-		if expired, err := d.spool.Expire(k, d.now()); err != nil {
-			errs = append(errs, err)
-			continue
-		} else if expired {
-			n++
-			continue
-		}
 		n++
 		// A spooled submit carries no origin: the spool is a local file, and
 		// an origin is a carrier's claim that only the carrier may make.
@@ -85,13 +74,18 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 			if err := d.spool.MarkDispatched(k); err != nil {
 				errs = append(errs, err)
 			}
+		case code == protocol.CodeExpired:
+			// The endpoint has no record and the window closed: nothing ran.
+			if err := d.spool.MarkExpired(k); err != nil {
+				errs = append(errs, err)
+			}
 		case isTransientCode(code):
 			// Busy / draining / unreachable / storage_full: retry next tick.
 			if err := d.spool.MarkAttempt(k, string(code)); err != nil {
 				errs = append(errs, err)
 			}
 		default:
-			// Terminal refusal (expired, stale_epoch, unshared,
+			// Terminal refusal (stale_epoch, unshared,
 			// request_conflict, invalid, unsupported): no retry will succeed.
 			if err := d.spool.MarkFailed(k, string(code)); err != nil {
 				errs = append(errs, err)

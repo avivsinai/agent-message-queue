@@ -88,15 +88,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["endpoint"] = "reachable"
 		report["targets"] = len(sessions)
 	}
-	if store, err := requests.OpenReadOnly(stateDir); err == nil {
-		if recs, err := store.List(); err == nil {
-			counts := map[string]int{}
-			for _, r := range recs {
-				counts[string(r.State)]++
-			}
-			report["records"] = counts
-		}
-	}
+	doctorRequestStore(stateDir, report, fail)
 	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
 	switch {
@@ -207,6 +199,41 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	return finish()
 }
 
+// doctorRequestStore counts the request records and fails each one that
+// cannot be read. It reads the store as admission does: an unreadable
+// record makes its target's reservation state unknown, so admission
+// refuses every submit to that target until the record is repaired.
+func doctorRequestStore(stateDir string, report map[string]any, fail func(boundary, subject, detail, remedy string)) {
+	store, err := requests.OpenReadOnly(stateDir)
+	var refusal *protocol.Refusal
+	if errors.As(err, &refusal) && refusal.Code == protocol.CodeNotFound {
+		return // no request was ever stored
+	}
+	if err != nil {
+		fail("request_store", "", "cannot open the request store: "+err.Error(), "check the permissions of "+filepath.Join(stateDir, "v1"))
+		return
+	}
+	recs, poison, err := store.ListWithPoison()
+	if err != nil {
+		report["records_error"] = err.Error()
+		fail("request_store", "", "cannot list the request store: "+err.Error(), "check the permissions of "+filepath.Join(stateDir, "v1"))
+		return
+	}
+	counts := map[string]int{}
+	for _, r := range recs {
+		counts[string(r.State)]++
+	}
+	report["records"] = counts
+	for _, p := range poison {
+		subject, refused := p.Key.TargetID, "submits to "+p.Key.TargetID+" are refused"
+		if subject == "" {
+			subject, refused = p.Path, "submits to every target are refused"
+		}
+		fail("request_store", subject, fmt.Sprintf("request record %s is unreadable (%s); %s while it stays unreadable", p.Path, p.Error, refused),
+			"repair or restore the file by hand; a restart does not repair it. Do not delete it: it may be the only record that stops its request from running twice")
+	}
+}
+
 // doctorBodyKeys reports the session body keys and fails each share whose
 // key, attestation or grants cannot authenticate.
 func doctorBodyKeys(root string, report map[string]any, fail func(boundary, subject, detail, remedy string)) {
@@ -275,6 +302,7 @@ func doctorRelay(stateDir string, report map[string]any, fail, note func(boundar
 				fail("discovery", sh.Session, sh.Discovery, "the owner publishes the kind 30177 policy for this body from their Buzz client")
 			}
 			noteRefusedRows(note, stateDir, sh.Session)
+			failDamagedRows(fail, stateDir, sh.Session)
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
@@ -308,6 +336,20 @@ func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateD
 			see = "see the request's state with `amq-remote status " + ref + "` or in the terminal"
 		}
 		note("publication_refused", session, detail, "the output stays owed and is retried; "+see+". Do not send the message again from Buzz: that would run the request a second time")
+	}
+}
+
+// failDamagedRows fails each outbox record of the share that cannot be
+// read. The other outputs still go out, but the damaged one is never sent,
+// and whether it was already accepted cannot be read back.
+func failDamagedRows(fail func(boundary, subject, detail, remedy string), stateDir, session string) {
+	damaged, err := buzzio.DamagedOutputs(filepath.Join(stateDir, "shares", session))
+	if err != nil {
+		return // noteRefusedRows already reports an unreadable outbox
+	}
+	for _, d := range damaged {
+		fail("publication", session, fmt.Sprintf("outbox record %s is unreadable (%s); the output it holds is never sent", d.Path, d.Error),
+			"check the session's requests with `amq-remote requests`, then repair or restore the file by hand, or move it out of the outbox once its output is not owed; a restart does not repair it")
 	}
 }
 

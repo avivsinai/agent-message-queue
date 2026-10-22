@@ -6,8 +6,8 @@
 // BEFORE the caller returns a `submitted` receipt to its user. After a
 // restart, a drainer replays pending envelopes through the same
 // Endpoint.Handle path a live submit uses, retrying the same identity and
-// bytes. An envelope whose admission window has closed is expired without
-// dispatch.
+// bytes. The endpoint decides admission: an envelope whose window closed
+// before the endpoint saw it is refused and settled as expired.
 //
 // The spool's `submitted` state is the SENDER's record that it has accepted
 // the user's intent; it is distinct from the target-side `received`/
@@ -75,8 +75,8 @@ type Envelope struct {
 	TargetID string `json:"target_id"`
 	// Epoch is the registration epoch the caller verified for TargetID.
 	Epoch string `json:"epoch"`
-	// NotAfter is the RFC-3339 admission deadline. An envelope whose window
-	// closed while it waited in the spool is expired without dispatch.
+	// NotAfter is the RFC-3339 admission deadline. It is part of the
+	// persisted Command, so a replay or a same-id retry never gets a new one.
 	NotAfter string `json:"not_after"`
 	// InputDigest is protocol.CommandDigest of Command, persisted so a replay
 	// can prove it is retrying the exact same bytes (and so a concurrent
@@ -114,8 +114,8 @@ const (
 	// StateDispatched: the endpoint accepted the command and owns the record
 	// now; the spool entry is settled and will be reaped.
 	StateDispatched State = "dispatched"
-	// StateExpired: the admission window closed before the endpoint accepted
-	// the command; no dispatch happened. Action-required for the caller.
+	// StateExpired: the endpoint refused the command because its admission
+	// window closed before the endpoint saw it; no dispatch happened.
 	StateExpired State = "expired"
 	// StateFailed: the endpoint refused the command with a terminal (non-
 	// transient) refusal; no retry will succeed. The refusal is in LastError.
@@ -383,42 +383,31 @@ func (s *Spool) markAttemptLocked(k Key, errMsg string) error {
 	return s.write(env)
 }
 
-// Expire marks a pending envelope whose admission window has closed as
-// expired WITHOUT dispatching. Returns true if the envelope was expired by
-// this call (was pending and past its deadline).
-func (s *Spool) Expire(k Key, now time.Time) (bool, error) {
+// MarkExpired settles an envelope the endpoint refused as expired. The spool
+// never reads a clock for this: the endpoint is the one deadline predicate,
+// and it answers from its existing record when it already accepted the
+// command.
+func (s *Spool) MarkExpired(k Key) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var expired bool
-	err := s.withLock(func() error {
-		var e error
-		expired, e = s.expireLocked(k, now)
-		return e
-	})
-	return expired, err
+	return s.withLock(func() error { return s.markExpiredLocked(k) })
 }
 
-func (s *Spool) expireLocked(k Key, now time.Time) (bool, error) {
+func (s *Spool) markExpiredLocked(k Key) error {
 	env, exists, err := s.get(k)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if !exists {
-		return false, protocol.Refuse(protocol.CodeNotFound, "envelope does not exist")
+		return protocol.Refuse(protocol.CodeNotFound, "envelope does not exist")
 	}
 	if env.State.Terminal() {
-		return false, nil
-	}
-	deadline, err := protocol.ParseTime(env.NotAfter)
-	if err != nil {
-		return false, err
-	}
-	if !now.After(deadline) {
-		return false, nil
+		return nil
 	}
 	env.State = StateExpired
-	env.SettledAt = protocol.FormatTime(s.now())
-	return true, s.write(env)
+	env.Attempt++
+	env.SettledAt = protocol.FormatTime(s.now()) // every terminal state stamps settle time.
+	return s.write(env)
 }
 
 // Reap removes settled envelopes older than before. It bounds the spool's

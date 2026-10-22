@@ -228,12 +228,14 @@ func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int
 
 // nextSeq returns the next outbox sequence number. The outbox records are
 // its durable state: the first call after open continues after the highest
-// stored one.
+// readable one. A damaged record's number may be handed out again; that is
+// safe because a damaged record is never pending, so it is never ordered
+// against the new one, and a record's identity is its key, not its number.
 func (l *Ledger) nextSeq() (int64, error) {
 	l.seqMu.Lock()
 	defer l.seqMu.Unlock()
 	if l.lastSeq < 0 {
-		all, err := scanOutbox(filepath.Join(l.dir, "outbox"), func(Outbound) bool { return true })
+		all, _, err := scanOutbox(filepath.Join(l.dir, "outbox"), func(Outbound) bool { return true })
 		if err != nil {
 			return 0, err
 		}
@@ -333,40 +335,70 @@ func (l *Ledger) updateOwed(key string, set func(*Outbound)) error {
 }
 
 // Pending returns prepared outputs not yet accepted, in preparation order.
+// A damaged record is left out, so it never stops the other outputs.
 func (l *Ledger) Pending() ([]Outbound, error) {
-	return scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted })
+	out, _, err := scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted })
+	return out, err
 }
 
 // RefusedOutputs lists the owed outputs the relay refused on their last
 // attempt in the ledger under stateDir, in preparation order, without
 // creating anything; a ledger that does not exist has none.
 func RefusedOutputs(stateDir string) ([]Outbound, error) {
-	out, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused != nil })
+	out, _, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused != nil })
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	return out, err
 }
 
+// DamagedOutput is an outbox record that cannot be read or decoded. Its key
+// is lost with its contents (the file name is the key's hash), so whether
+// it was accepted or still owed is unknown.
+type DamagedOutput struct {
+	Path  string
+	Error string
+}
+
+// DamagedOutputs lists the damaged outbox records in the ledger under
+// stateDir, without creating anything; a ledger that does not exist has
+// none.
+func DamagedOutputs(stateDir string) ([]DamagedOutput, error) {
+	_, damaged, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(Outbound) bool { return false })
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return damaged, err
+}
+
 // scanOutbox returns the records in dir that keep selects, in preparation
 // order: records from before sequences first, in key order, then by Seq.
-func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, error) {
+// A record that cannot be read or decoded is skipped and returned in
+// damaged, never removed; only a directory that cannot be listed fails the
+// scan.
+func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, []DamagedOutput, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []Outbound
+	var damaged []DamagedOutput
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		raw, err := readBounded(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return nil, err
+		path := filepath.Join(dir, e.Name())
+		raw, err := readBounded(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
-		o, err := readOutbound(raw)
+		var o Outbound
+		if err == nil {
+			o, err = readOutbound(raw)
+		}
 		if err != nil {
-			return nil, err
+			damaged = append(damaged, DamagedOutput{Path: path, Error: err.Error()})
+			continue
 		}
 		if keep(o) {
 			out = append(out, o)
@@ -378,7 +410,7 @@ func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, error) {
 		}
 		return out[i].Key < out[j].Key
 	})
-	return out, nil
+	return out, damaged, nil
 }
 
 // Prepared returns the output prepared for key, if any.

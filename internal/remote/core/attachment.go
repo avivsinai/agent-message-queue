@@ -18,6 +18,10 @@ type BoundRequest struct {
 	// Origin is a copy of the record's origin (its carrier and routing), so
 	// an adapter can tell the harness where the task came from.
 	Origin map[string]string
+	// NativeSession, when set, is the only native session the request may
+	// run in. An adapter that reads the session it is about to write to
+	// refuses with session_changed when that session differs.
+	NativeSession string
 }
 
 // Admission is the attachment's answer to Submit. Admitted means the request

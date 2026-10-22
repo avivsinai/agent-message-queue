@@ -20,6 +20,10 @@ import (
 // keeps the run and returns an uncertain error.
 var ErrNotSent = errors.New("not sent")
 
+// errSendDeadline joins ErrNotSent when a call's send deadline, not its
+// transport timeout, ended it before the request was written.
+var errSendDeadline = errors.New("send deadline passed before the request was written")
+
 // rpcMessage is one JSON-RPC 2.0 message in either direction. The app-server
 // omits "jsonrpc" on some notifications, so it is optional on decode.
 type rpcMessage struct {
@@ -283,6 +287,15 @@ func (c *Client) Done() <-chan struct{} { return c.closed }
 
 // Call sends a request and waits for its response or ctx.
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
+	return c.callBefore(ctx, time.Time{}, method, params, result)
+}
+
+// callBefore is Call with a send deadline: a request still unwritten at
+// sendBy is never written and fails with ErrNotSent wrapping
+// errSendDeadline. The reply wait stays bounded by ctx alone, so a
+// request sent just before sendBy is not cut off while Codex answers. A zero
+// sendBy imposes no send deadline.
+func (c *Client) callBefore(ctx context.Context, sendBy time.Time, method string, params any, result any) error {
 	id := c.nextID.Add(1)
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -306,10 +319,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	// slot is ctx-aware (a plain mutex would wait unboundedly, with ctx
 	// bounding only the write after acquisition), and the write itself
 	// carries the deadline under the slot.
-	if err := c.ws.writeTextCtx(ctx, data); err != nil {
+	writeCtx := ctx
+	if !sendBy.IsZero() {
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithDeadline(ctx, sendBy)
+		defer cancel()
+	}
+	if err := c.ws.writeTextCtx(writeCtx, data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
+		if writeCtx.Err() != nil && ctx.Err() == nil {
+			err = errSendDeadline
+		}
 		return fmt.Errorf("%w: write: %w", ErrNotSent, err)
 	}
 	select {

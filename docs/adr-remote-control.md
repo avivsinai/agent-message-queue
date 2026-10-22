@@ -92,7 +92,11 @@ invariants.
 - **A submit window is explicit and enforced natively.** `not_after` defaults
   to two minutes and is checked at the native admission boundary, not only on
   arrival. A request whose window closed while it waited is `expired`, which
-  is action-required, never a silent dispatch.
+  is action-required, never a silent dispatch. When the harness receiver has
+  no deadline of its own, the adapter is the boundary. The Claude Code and
+  Codex adapters check `not_after` again right before they write and send
+  nothing past it, but once the bytes are written Codex itself may start the
+  turn after the deadline.
 - **Steering is influence, not ownership.** Remote steering is a separate
   operation that names the target request's ref and the turn it expects to
   be running. It never takes ownership of another caller's run and never

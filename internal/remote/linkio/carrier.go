@@ -931,9 +931,14 @@ func (c *Carrier) view() *ConsentView {
 }
 
 // ConsentLive reports whether this link still accepts a consent key. Core
-// asks it right before a handoff, under its own lock, so it reads only the
-// snapshot the last signed submit or key removal stored.
+// asks it right before a handoff, under its own lock, so it does no I/O: it
+// reads the revoked set, which only grows, and then the snapshot the last
+// signed submit or key removal stored. A revoked key is refused even when a
+// snapshot read before its revocation still lists it.
 func (c *Carrier) ConsentLive(credentialID string) bool {
+	if revoked := c.revoked.Load(); revoked != nil && (*revoked)[credentialID] {
+		return false
+	}
 	live := c.liveKeys.Load()
 	return live != nil && (*live)[credentialID]
 }
@@ -943,12 +948,15 @@ func (c *Carrier) ConsentLive(credentialID string) bool {
 func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
 
 // refreshKeys reads the consent keys this machine trusts and stores the
-// snapshot ConsentLive reads.
+// snapshot ConsentLive reads. The revoked set is loaded after the disk read,
+// so a revocation that lands while the disk is read still filters the keys
+// this submit verifies against.
 func (c *Carrier) refreshKeys() map[string]ConsentKey {
 	keys := map[string]ConsentKey{}
 	live := map[string]bool{}
+	onDisk := c.cfg.ConsentKeys()
 	revoked := c.revoked.Load()
-	for _, k := range c.cfg.ConsentKeys() {
+	for _, k := range onDisk {
 		if revoked != nil && (*revoked)[k.CredentialID] {
 			continue // removed by the server; the disk may not say so yet
 		}

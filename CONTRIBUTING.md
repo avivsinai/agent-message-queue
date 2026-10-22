@@ -58,13 +58,16 @@ AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run '^TestGhosttyLiveDi
 AMQ_CLAUDE_LIVE=1 go test ./internal/keepalive/adapter -run '^TestClaudePrintLiveResumeAck$' -count=1 -v
 AMQ_CODEX_LIVE=1 AMQ_CODEX_LIVE_THREAD="<scratch-thread-uuid>" go test ./internal/keepalive/adapter -run '^TestCodexQueueLiveEnqueue$' -count=1 -v
 AMQ_TMUX_LIVE=1 go test ./internal/launch -run '^TestTmuxBackendLifecycleAndRecovery$' -count=1 -v
+AMQ_AGY_LIVE=1 go test ./internal/acp/host -run '^TestAgyLiveRemembersAcrossHostRestart$' -count=1 -v
 AMQ_WAKE_SELF_UPGRADE_PTY_LIVE=1 go test ./internal/cli -run '^Test(Darwin|Linux)WakeSelfUpgradeRealPTYStableSymlink$' -count=1 -v
 ```
 
 Read the selected test before running it. The tmux proof starts a private
 tmux server on its own socket and removes it. The terminal probes create and close
 windows or workspaces; use a dedicated application instance with no concurrent
-users. The Claude check creates and resumes a scratch conversation. The Codex
+users. The Claude check creates and resumes a scratch conversation. The agy check
+runs the installed `agy` with its own login, in a temporary directory, for two
+turns across a host restart. The Codex
 check submits to the exact live thread you supply; replace the placeholder
 with a disposable thread UUID and keep its writer open. Never omit that UUID:
 the test otherwise selects an active thread. A skipped check is not a live result.

@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -176,5 +177,67 @@ func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("wait did not return after endpoint shutdown")
+	}
+}
+
+// sessionAttachment gives the fake runtime a native session that can differ
+// from its target id, as a Claude pid that moved to another session does.
+type sessionAttachment struct {
+	core.Attachment
+	native string
+}
+
+func (s sessionAttachment) NativeSessionID() string { return s.native }
+
+// A local submit pinned to session A, whose target is attached to session B
+// by the time the endpoint recovers it after a crash after the received
+// write, is refused before dispatch (agent-message-queue-611.70: the pin
+// was checked only at the socket, so recovery dispatched into B).
+func TestPinnedSubmitSessionChangedBeforeDispatchAfterRestart(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	store1, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep1 := core.New(core.Config{Store: store1, Crash: func(p string) error {
+		if p == core.PointAfterReceived {
+			return errors.New("power loss")
+		}
+		return nil
+	}})
+	ep1.Register(sessionAttachment{Attachment: fake.New("fake", "e_1"), native: "sess-A"})
+	server, err := Listen(stateDir, ep1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = server.Serve(ctx) }()
+	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-111111111270", TargetID: "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "for A"}}
+	if resp, err := Call(stateDir, Request{Command: cmd, NativeSession: "sess-A"}); err == nil && resp.AsError() == nil {
+		t.Fatal("submit did not stop at the crash point")
+	}
+	cancel()
+	_ = ep1.Close()
+	_ = store1.Close()
+
+	store2, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep2 := core.New(core.Config{Store: store2})
+	t.Cleanup(func() { _ = ep2.Close(); _ = store2.Close() })
+	ep2.Register(sessionAttachment{Attachment: fake.New("fake", "e_1"), native: "sess-B"})
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rec, _, err := store2.Get(requests.Key{CreatorHost: LocalHost, TargetID: "fake", RequestID: cmd.RequestID})
+	if err != nil || rec == nil || rec.State != protocol.StateRejected || rec.Code != protocol.CodeSessionChanged || rec.NativeDispatches != 0 {
+		t.Fatalf("recovered record = %+v, %v; want rejected session_changed before any dispatch", rec, err)
 	}
 }

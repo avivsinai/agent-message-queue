@@ -99,6 +99,12 @@ observed on Claude Code 2.1.278. The adapter is `internal/remote/claude`.
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | `claude agents --help` |
 | Observation | Transcript JSONL tail (`~/.claude/projects/<slug>/<uuid>.jsonl`) plus `~/.claude/sessions/<pid>.json` process metadata (`messagingSocketPath`, `peerProtocol`, `peerFeatures`) | delivered | Capture §1, §3.2; `transcriptPath` |
 
+A request bound to one session (a Buzz share or a link) is refused with
+`session_changed` when the registry names another session for the pid,
+checked at dispatch and again right before the socket write. A frame names no
+destination session and its token binds only the pid and the socket path, so
+a session switch after that last check, on the same socket, is not detected.
+
 ### 3.4 ACP host
 
 The adapter is kind `acp` in `internal/remote/pi`, over the bridge seam of

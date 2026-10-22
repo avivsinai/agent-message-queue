@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
@@ -105,4 +106,50 @@ func doctorHasBoundary(out any, boundary, subject string) bool {
 		}
 	}
 	return false
+}
+
+// agent-message-queue-611.71: one unreadable request record made admission
+// refuse every submit to its target ("reservation state undeterminable"),
+// while doctor read the store through List, dropped the poison, and exited 0.
+// A damaged Buzz outbox row is never sent, and doctor named nothing either;
+// `amq-remote requests` hid the damaged request record too.
+func TestDoctorNamesDamagedRecords(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "extensions", "remote")
+	hostDir := filepath.Join(stateDir, "v1", "requests", "host-1")
+	outbox := filepath.Join(stateDir, "shares", "work", "buzz", "outbox")
+	for _, dir := range []string{hostDir, outbox} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, "fake__deadbeef.json"), []byte(`{"state":"runn`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outbox, "0a.json"), []byte(`{"key":"row/old/1","acc`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := json.Marshal(relayStatusDoc{URL: "wss://relay.example", Shares: []relayShareStatus{{Session: "work", Target: "cx", State: "authenticated"}}})
+	if err := os.WriteFile(filepath.Join(stateDir, relayStatusFile), status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := map[string]bool{}
+	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
+		switch {
+		case f.Boundary == "request_store" && f.Subject == "fake" && strings.Contains(f.Detail, "fake__deadbeef.json") && f.Remedy != "":
+			named["request"] = true
+		case f.Boundary == "publication" && f.Subject == "work" && strings.Contains(f.Detail, "0a.json") && f.Remedy != "":
+			named["outbox"] = true
+		}
+	}
+	if code != protocol.ExitActionRequired || !named["request"] || !named["outbox"] {
+		t.Fatalf("damaged records not named: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	}
+	if code, listed, _ := cli(t, "", "requests", "--root", root, "--json"); code != 0 || !strings.Contains(listed, `"request_damaged"`) || !strings.Contains(listed, "fake__deadbeef.json") {
+		t.Fatalf("requests exit=%d out=%s, want the damaged record listed", code, listed)
+	}
 }

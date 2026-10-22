@@ -231,7 +231,7 @@ func (h *harness) command(raw map[string]any) (*protocol.Command, core.Source) {
 	// source that may answer an interaction or cancel the request
 	// (agent-message-queue-611.46, 611.48). Every other step is a local peer.
 	if h.carrier == "buzz" && host == h.c.Defaults.CreatorHost {
-		return decoded, core.Source{Host: host, Origin: ownerShare.Origin}
+		return decoded, core.Source{Host: host, Origin: ownerShare.Origin, NativeSession: decoded.TargetID}
 	}
 	return decoded, core.Source{Host: host}
 }

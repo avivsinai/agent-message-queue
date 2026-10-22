@@ -151,7 +151,15 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 		} else if observe := observerOf(att); observe == nil {
 			as.set("refused: this target's adapter has no activity seam")
 		} else {
-			as.export(ctx, conn, observe, identity, warn)
+			// An attachment replaced live (attach upgraded it) ends this
+			// export, so the next tick observes the new one.
+			current := func(target string) string {
+				if now, ok := attachment(target); !ok || now != att {
+					return ""
+				}
+				return identity(target)
+			}
+			as.export(ctx, conn, observe, current, warn)
 		}
 		select {
 		case <-ctx.Done():
