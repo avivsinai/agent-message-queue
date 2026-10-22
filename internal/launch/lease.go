@@ -389,10 +389,13 @@ const maxProcessAncestry = 64
 // ancestors. The holder's start token must match, so a reused pid does not.
 func runsUnderProcess(holder HolderIdentity) bool {
 	pid := os.Getpid()
-	for depth := 0; pid > 1 && depth < maxProcessAncestry; depth++ {
+	for depth := 0; pid > 0 && depth < maxProcessAncestry; depth++ {
 		if pid == holder.PID {
 			state, _ := InspectHolder(holder)
 			return state == LeaseValid
+		}
+		if pid == 1 {
+			return false
 		}
 		parent, err := parentProcessID(pid)
 		if err != nil {
