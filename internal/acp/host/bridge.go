@@ -515,17 +515,13 @@ func requestOutcome(res turnResult, exitStatus func() string) (bridgeEvent, erro
 			return bridgeEvent{Event: "failed", Error: "the turn failed: " + res.err.Error() + "; its effects are unknown"}, res.err
 		}
 	}
-	var out struct {
-		StopReason string `json:"stopReason"`
-	}
-	_ = json.Unmarshal(res.raw, &out)
-	switch out.StopReason {
+	switch res.stop {
 	case "end_turn":
 		return bridgeEvent{Event: "completed", Text: res.answer}, nil
 	case "cancelled":
 		return bridgeEvent{Event: "cancelled"}, nil
 	default:
-		return bridgeEvent{Event: "failed", Error: joinNote(res.answer, "The turn stopped: "+stopLabel(out.StopReason)+".")}, nil
+		return bridgeEvent{Event: "failed", Error: joinNote(res.answer, "The turn stopped: "+stopLabel(res.stop)+".")}, nil
 	}
 }
 

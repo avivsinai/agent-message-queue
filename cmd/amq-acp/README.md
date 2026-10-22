@@ -384,8 +384,11 @@ arguments grant autonomy, for example Grok's `--always-approve`. The host
 advertises no file or terminal methods and never calls `authenticate`; an
 agent that needs a login is a refusal with exit code 6, and you log in once
 with the harness's own CLI. An agent that does not answer `initialize` and
-`session/new` within 60 seconds is also exit 6. The agent's environment has every `AM_*`, `AMQ_*`
-and `BUZZ_*` variable removed, so it cannot act as the host's handle.
+`session/new` within 60 seconds is also exit 6. The agent's environment has
+every `AM_*`, `AMQ_*` and `BUZZ_*` variable removed, so the agent does not
+inherit the host's queue context or a Buzz identity. It runs as the same
+user, so it can still name the root and the host's handle explicitly. This
+is not an isolation boundary.
 
 State lives in `<root>/agents/<me>/extensions/acp-host/`: `host.lock` (one
 host per handle; a second one exits 6), `session.json`, and one journal
@@ -447,3 +450,41 @@ group. A host killed with SIGKILL cannot do that; the agent then sees its
 stdin close, and an agent that keeps running after stdin EOF is left behind. A message whose sender set cross-root reply routing (`reply_to` or
 `reply_project`) runs no turn and gets a reply naming that limitation. The
 host refuses to run on platforms without advisory file locks.
+
+### agy over stream-json
+
+`amq-acp host --protocol agy-stream -- agy [agy arguments]` makes agy, which
+has no ACP agent mode, an AMQ participant through its headless stream-json
+mode:
+
+```sh
+amq coop exec --no-wake --me agy amq-acp -- host --protocol agy-stream -- agy
+```
+
+The host starts agy itself with `--input-format stream-json --output-format
+stream-json -p=`, so it refuses those flags, and `--conversation`, `-c`,
+`--continue`, `--print`, `--prompt` and `-i`, in the agy arguments (exit 2).
+Each message is one `user` line; the reply is that turn's `result.response`.
+agy names its conversation in its `init` event before any turn, and
+`session.json` records it. A restarted host starts agy with `--conversation
+<id>`; when agy answers with another id (an unknown conversation runs under a
+new one), the host says so and records the new id.
+
+agy denies every tool call that needs a permission unless its own arguments
+or its `permissions.allow` settings grant it, for example
+`--dangerously-skip-permissions`; the host adds no permission flag. The reply
+counts the denied calls (`denied_actions`). agy asks for no approval
+headless, so a remote request never raises one.
+
+Limits:
+
+- agy has no cancel input. A timeout, an owner cancel, or a host stop
+  (Ctrl-C, SIGTERM, SIGHUP) sends agy SIGINT; agy ends the turn as
+  interrupted and exits, and the next turn starts agy again on the same
+  conversation.
+- agy exiting between turns is not an error: the next turn starts it again.
+  agy exiting during a turn ends the turn with its exit status, and the host
+  exits.
+- `--mode auto` is not available to every account; agy then continues in its
+  default mode.
+- `--check` starts agy, prints its `init` event as JSON, and stops it.
