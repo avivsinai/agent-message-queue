@@ -347,8 +347,10 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	fixture := newExecutionFixture(t)
 	nonce := "96969696-9696-4969-8969-969696969696"
 	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	codexHome := t.TempDir()
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
 	raw := codexNotifyTestPayload(testConversationID, ticket.Cwd)
-	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
+	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, raw)
 	if err != nil || result.ConversationID != testConversationID || result.EvidenceRef == "" || result.AlreadyReady {
 		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
 	}
@@ -361,7 +363,7 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	if _, _, err := ReadEvidence(fixture.root, result.EvidenceRef); err != nil {
 		t.Fatal(err)
 	}
-	second, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
+	second, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, raw)
 	if err != nil || !second.AlreadyReady || second.EvidenceRef != result.EvidenceRef {
 		t.Fatalf("idempotent notify = %#v, %v", second, err)
 	}

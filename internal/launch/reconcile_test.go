@@ -3,6 +3,7 @@ package launch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -172,8 +173,6 @@ type reconcileBackend struct {
 	focuses                   int
 	createGate                chan struct{}
 	createStart               chan struct{}
-	capture                   bool
-	captured                  *CaptureEvidence
 	invalidBind               bool
 	reclaims                  int
 	resourceUp                bool
@@ -245,16 +244,6 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	if b.invalidBind {
 		result.Binding.Resources.Version = 0
 	}
-	if b.capture {
-		if b.captured == nil {
-			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Plan.Agents[0].Cwd), req.Plan.Agents[0].LaunchNonce, req.Plan.Agents[0].Handle, codexCaptureMinimumVersion, req.Plan.Agents[0].Cwd)
-			if err != nil {
-				return CreateResult{}, err
-			}
-			b.captured = &evidence
-		}
-		result.CaptureEvidence = map[string][]CaptureEvidence{req.Plan.Agents[0].Handle: {*b.captured}}
-	}
 	if b.persistCandidate && req.PersistCandidate != nil {
 		if err := req.PersistCandidate(result.Binding); err != nil {
 			return CreateResult{}, err
@@ -302,16 +291,6 @@ func (b *reconcileBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if b.reclaimFlip && b.reclaims > 1 {
 		result.Binding.Resources.Resources[0].OpaqueID = "resource:replacement"
 		result.Resources = slices.Clone(result.Binding.Resources.Resources)
-	}
-	if b.capture {
-		if b.captured == nil {
-			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Journal.Plan.Agents[0].Cwd), req.Journal.LaunchNonce, req.Journal.Plan.Agents[0].Handle, codexCaptureMinimumVersion, req.Journal.Plan.Agents[0].Cwd)
-			if err != nil {
-				return ReclaimResult{}, err
-			}
-			b.captured = &evidence
-		}
-		result.CaptureEvidence = map[string][]CaptureEvidence{req.Journal.Plan.Agents[0].Handle: {*b.captured}}
 	}
 	return result, nil
 }
@@ -621,7 +600,8 @@ func TestReconcileMintStaysPendingUntilAcknowledgedThenResumesExactIdentity(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != CommandsBackendName {
+	// #1158: the record names the backend that created the pane.
+	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != managed.name {
 		t.Fatalf("acknowledged record=%#v", record)
 	}
 
@@ -799,26 +779,55 @@ func TestReconcileJournalRequiresClassifiedReclaimAndPreservesInventory(t *testi
 
 type noReclaimBackend struct{ Backend }
 
-func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, capture: true}
+// #1157: no backend reports Codex identity at create, so Apply must leave the
+// seat pending for its notify receiver instead of finalizing it stale. The
+// receiver then binds the seat's thread even though codex-tui 0.163.0 also
+// sends notify, before or after it, for a title-generation thread that writes
+// no rollout.
+func TestReconcileCodexSeatStaysPendingUntilNotifyBindsIt(t *testing.T) {
+	const titleThread = "018f1f2a-bc35-7000-8000-000000000002"
+	titleNotify := func(cwd string) []byte {
+		return []byte(fmt.Sprintf(`{"type":"agent-turn-complete","thread-id":%q,"turn-id":"turn-title","cwd":%q,"client":"codex-tui","input-messages":["Generate a concise, single-line task title of at most 36 characters.\n\nUser prompt:\nreply with ok"],"last-assistant-message":"{\"title\":\"Reply ok\"}"}`, titleThread, cwd))
+	}
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
 	req := reconcileFixture(t, backend)
 	req.Config.Agents[0].Adapter = "codex"
 	req.Config.Agents[0].Command = []string{"codex"}
 	req.Adapters = map[string]HarnessAdapter{"codex": reconcileAdapter{name: "codex", mode: AdapterModeCapture, available: true}}
 	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 0 {
+	if err != nil || result.AggregateCode != 0 || result.Agents[0].Code != 0 || result.Agents[0].ConversationDisposition != DispositionFresh {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || record.State != CapturePending || record.Reason != "" {
+		t.Fatalf("record after Apply = %#v, %v", record, err)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.Provider != CodexProvider || record.Identity.ID != "019c8a2f-2b13-7000-8000-000000000001" || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name || len(record.EvidenceRefs) != 1 {
-		t.Fatalf("record=%#v", record)
+	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
+	}); err != nil {
+		t.Fatal(err)
 	}
-	evidence, ref, err := ReadEvidence(req.Root, record.EvidenceRefs[0])
-	if err != nil || evidence.Kind != EvidenceProviderCapture || ref.ID != record.EvidenceRefs[0] {
-		t.Fatalf("capture evidence = %#v %#v, %v", evidence, ref, err)
+	codexHome := t.TempDir()
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
+	if title, err := RecordCodexNotify(req.Root, "claude", ticket.AMQExecutable, codexHome, titleNotify(ticket.Cwd)); err != nil || !title.NotTopLevel {
+		t.Fatalf("title notify before = %#v, %v", title, err)
+	}
+	notify, err := RecordCodexNotify(req.Root, "claude", ticket.AMQExecutable, codexHome, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || notify.ConversationID != testConversationID {
+		t.Fatalf("notify = %#v, %v", notify, err)
+	}
+	if title, err := RecordCodexNotify(req.Root, "claude", ticket.AMQExecutable, codexHome, titleNotify(ticket.Cwd)); err != nil || !title.NotTopLevel {
+		t.Fatalf("title notify after = %#v, %v", title, err)
+	}
+	record, err = LoadConversation(req.Root, "claude")
+	if err != nil || record.State != CaptureReady || record.Identity != (ConversationIdentity{Provider: CodexProvider, ID: testConversationID}) ||
+		record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name {
+		t.Fatalf("record after notify = %#v, %v", record, err)
 	}
 }
 
