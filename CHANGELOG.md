@@ -8,6 +8,28 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.105.0](https://github.com/avivsinai/agent-message-queue/compare/v0.104.0...v0.105.0) (2026-10-22)
+
+
+### Features
+
+* **acp:** drive agy as a headless AMQ worker over stream-json ([#1143](https://github.com/avivsinai/agent-message-queue/issues/1143)) ([6fb0a91](https://github.com/avivsinai/agent-message-queue/commit/6fb0a9127d36c655760780a3ea5bdc8f5947c17c))
+* **launch:** start an ACP host from amq launch ([#1142](https://github.com/avivsinai/agent-message-queue/issues/1142)) ([ad025a2](https://github.com/avivsinai/agent-message-queue/commit/ad025a2e2b7bddc1a9ced60914956df47f9b1b91))
+
+
+### Bug Fixes
+
+* **acp:** deliver to the pinned queue and thread, and never fake or drop an answer ([#1149](https://github.com/avivsinai/agent-message-queue/issues/1149)) ([8f442ef](https://github.com/avivsinai/agent-message-queue/commit/8f442ef07cba92589574a10ed73acedefb5182ce))
+* **acp:** make the first host turn's journal durable before dispatch ([#1151](https://github.com/avivsinai/agent-message-queue/issues/1151)) ([4757a13](https://github.com/avivsinai/agent-message-queue/commit/4757a135683b89bd05c05fe60adc33824168580b))
+* **coop:** do not type the wake doorbell into agy ([#1139](https://github.com/avivsinai/agent-message-queue/issues/1139)) ([2d91e0a](https://github.com/avivsinai/agent-message-queue/commit/2d91e0a339089a2fb5ffd0bcb88519854908e32e))
+* **lock:** hold the file lock on Windows and share one lock implementation ([#1140](https://github.com/avivsinai/agent-message-queue/issues/1140)) ([5d1a964](https://github.com/avivsinai/agent-message-queue/commit/5d1a96480a98d6f88ec9fb903e7bb4d518858619))
+* **remote:** admit a Codex request only on its own evidence and before its deadline ([#1146](https://github.com/avivsinai/agent-message-queue/issues/1146)) ([6413101](https://github.com/avivsinai/agent-message-queue/commit/64131012264109d95966f9f76ba64931f2a0bcc9))
+* **remote:** doctor reports damaged request records and one bad Buzz reply never blocks the rest ([#1148](https://github.com/avivsinai/agent-message-queue/issues/1148)) ([18b71a5](https://github.com/avivsinai/agent-message-queue/commit/18b71a5e43bec1d2239b31d29971dbe54b46ed51))
+* **remote:** keep link revocation, detach and live reload consistent ([#1145](https://github.com/avivsinai/agent-message-queue/issues/1145)) ([b62968f](https://github.com/avivsinai/agent-message-queue/commit/b62968f9b04810eacd8be481dc5c8d6c972b2c47))
+* **remote:** release pi and ACP-host results when core acknowledges them ([#1144](https://github.com/avivsinai/agent-message-queue/issues/1144)) ([609a755](https://github.com/avivsinai/agent-message-queue/commit/609a7558ba6a18cf985695048b7d1fb0f0d7a2be))
+* **remote:** run a Buzz request only in the native session it was sent to ([#1150](https://github.com/avivsinai/agent-message-queue/issues/1150)) ([574b594](https://github.com/avivsinai/agent-message-queue/commit/574b59426237060bcd66696b31595b9d59874677))
+* **remote:** sender status and retry follow core execution ([#1147](https://github.com/avivsinai/agent-message-queue/issues/1147)) ([7dbaab2](https://github.com/avivsinai/agent-message-queue/commit/7dbaab233e44249ff2c2f6ef2b25b343394b7bc3))
+
 ## [0.104.0](https://github.com/avivsinai/agent-message-queue/compare/v0.103.0...v0.104.0) (2026-10-22)
 
 
