@@ -961,7 +961,7 @@ func TestCLIB6RequestsListsFailedEnvelopes(t *testing.T) {
 		t.Fatalf("mark failed: %v", err)
 	}
 	// Expire the third envelope (its window already closed).
-	if _, err := spool.Expire(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}, now); err != nil {
+	if err := spool.MarkExpired(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 
@@ -1054,7 +1054,7 @@ func TestCLIB6StatusFailedEnvelopeExitsOne(t *testing.T) {
 	if err := spool.Create(expiredEnv); err != nil {
 		t.Fatalf("create expired: %v", err)
 	}
-	if _, err := spool.Expire(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}, now); err != nil {
+	if err := spool.MarkExpired(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 	code2, out2, _ := cli(t, "", "status", expiredCmd.RequestID, "--root", root, "--json")

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,6 +61,8 @@ type drainRig struct {
 	ep        *core.Endpoint
 	rt        *fake.Runtime
 	published []map[string]string
+	// skew moves the endpoint's clock ahead of real time, in nanoseconds.
+	skew atomic.Int64
 }
 
 func newDrainRig(t *testing.T, now time.Time) *drainRig {
@@ -83,7 +86,7 @@ func (r *drainRig) start() {
 		r.t.Fatalf("open store: %v", err)
 	}
 	r.store = store
-	r.ep = core.New(core.Config{Store: store, Publish: func(_ protocol.Snapshot, origin map[string]string) error {
+	r.ep = core.New(core.Config{Store: store, Now: func() time.Time { return time.Now().Add(time.Duration(r.skew.Load())) }, Publish: func(_ protocol.Snapshot, origin map[string]string) error {
 		r.published = append(r.published, origin)
 		return nil
 	}})
@@ -105,9 +108,9 @@ func (r *drainRig) enqueue(id, epoch, notAfter string) *protocol.Command {
 	return cmd
 }
 
-func (r *drainRig) drain(now time.Time) int {
+func (r *drainRig) drain() int {
 	r.t.Helper()
-	n, err := NewDrainer(r.spool, r.ep, func() time.Time { return now }).Drain(context.Background())
+	n, err := NewDrainer(r.spool, r.ep).Drain(context.Background())
 	if err != nil {
 		r.t.Fatalf("Drain: %v", err)
 	}
@@ -179,7 +182,7 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 
 	// The drainer dispatches through the (now-up) endpoint and settles it.
 	r.spool = reopened
-	if n := r.drain(now); n != 1 {
+	if n := r.drain(); n != 1 {
 		t.Fatalf("drained n=%d, want 1", n)
 	}
 	if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
@@ -191,16 +194,16 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 }
 
 // TestSenderExpireWithoutDispatch proves an envelope whose admission window
-// closed while it waited is expired WITHOUT dispatch: the caller is told the
-// request expired before the endpoint could admit it, never that it was
-// dispatched late.
+// closed before the endpoint saw it is expired WITHOUT dispatch: the caller
+// is told the request expired before the endpoint could admit it, never that
+// it was dispatched late.
 func TestSenderExpireWithoutDispatch(t *testing.T) {
 	now := time.Now()
 	r := newDrainRig(t, now)
-	cmd := r.enqueue(validUUID(1), "e_1", protocol.FormatTime(now.Add(time.Second)))
+	cmd := r.enqueue(validUUID(1), "e_1", protocol.FormatTime(now.Add(-time.Second)))
 
 	// The deadline passed while the envelope was waiting.
-	if n := r.drain(now.Add(2 * time.Minute)); n != 1 {
+	if n := r.drain(); n != 1 {
 		t.Fatalf("drained n=%d, want 1 (expired)", n)
 	}
 	if got := r.envelope(cmd.RequestID); got.State != StateExpired {
@@ -208,6 +211,30 @@ func TestSenderExpireWithoutDispatch(t *testing.T) {
 	}
 	if d := r.rt.Snapshot().Dispatches; d != 0 || r.hasRecord("local", cmd.RequestID) {
 		t.Fatalf("expired envelope reached the endpoint: dispatches=%d", d)
+	}
+}
+
+// TestSenderSettlesAcceptedEnvelopeAfterDeadline: the endpoint accepted the
+// command, the CLI died before it settled the envelope, and the first drain
+// runs after not_after. The drainer must settle the envelope from the
+// endpoint's record, not expire it on its own clock while the request runs.
+// Regression for agent-message-queue-611.69 (the drainer expired it).
+func TestSenderSettlesAcceptedEnvelopeAfterDeadline(t *testing.T) {
+	now := time.Now()
+	r := newDrainRig(t, now)
+	cmd := r.enqueue(validUUID(1), "e_1", protocol.FormatTime(now.Add(time.Minute)))
+	reply, err := r.ep.Handle(cmd, core.Source{Host: "local"})
+	if code := classifyReply(reply, err); code != "" {
+		t.Fatalf("live dispatch refused: code=%s err=%v", code, err)
+	}
+	r.skew.Store(int64(2 * time.Minute))
+
+	r.drain()
+	if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
+		t.Fatalf("state=%s, want dispatched: the endpoint owns the record", got.State)
+	}
+	if d := r.rt.Snapshot().Dispatches; d != 1 {
+		t.Fatalf("dispatches=%d, want 1 (replay must not run it again)", d)
 	}
 }
 
@@ -338,7 +365,7 @@ func TestSenderRefusalClassification(t *testing.T) {
 			if err := r.spool.Create(env); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
-			if n := r.drain(now); n != 1 {
+			if n := r.drain(); n != 1 {
 				t.Fatalf("drained n=%d, want 1", n)
 			}
 			got := r.envelope(cmd.RequestID)
@@ -414,7 +441,7 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 			tc.makeBusy(r, notAfter)
 
 			// Tick 1: refused, still pending.
-			if n := r.drain(now); n != 1 {
+			if n := r.drain(); n != 1 {
 				t.Fatalf("tick 1: drained n=%d, want 1", n)
 			}
 			got := r.envelope(cmd.RequestID)
@@ -427,7 +454,7 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 
 			// Tick 2: the target is free; the same envelope dispatches.
 			tc.makeUnbusy(r)
-			if n := r.drain(now); n != 1 {
+			if n := r.drain(); n != 1 {
 				t.Fatalf("tick 2: drained n=%d, want 1", n)
 			}
 			if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
@@ -572,7 +599,7 @@ func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
 
 	// Only the submit with a copied origin field is still a valid local
 	// submit; the respond and the foreign host are never handed over.
-	if n := r.drain(now); n != 1 {
+	if n := r.drain(); n != 1 {
 		t.Fatalf("drained n=%d, want 1 (only the valid local submit)", n)
 	}
 	if !r.rt.HasRun(validUUID(1)) || r.rt.HasRun(validUUID(2)) || r.hasRecord("buzz-0123456789abcdef", validUUID(2)) {

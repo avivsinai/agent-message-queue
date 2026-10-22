@@ -182,7 +182,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = ep.Close()
 		return 0, err
 	}
-	drainer := sender.NewDrainer(spool, ep, nil)
+	drainer := sender.NewDrainer(spool, ep)
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
 		_ = ep.Close()
