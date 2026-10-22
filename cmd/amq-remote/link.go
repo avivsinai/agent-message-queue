@@ -48,7 +48,8 @@ type linkSet struct {
 	running  map[string]*linkRun // by link name
 	byHost   map[string]*linkio.Carrier
 	retired  map[string]bool
-	mfStamp  time.Time
+	mf       manifestBytes
+	mfErr    string // the manifest read error last reported
 	statuses map[string]linkio.Status
 	pages    *pageServer // the endpoint's own local pages
 }
@@ -95,17 +96,21 @@ func (ls *linkSet) start(ctx context.Context, ep *core.Endpoint, mf manifest.Fil
 	ls.ep, ls.ctx = ep, ctx
 	ls.mu.Unlock()
 	ls.sync(mf)
-	if info, err := os.Stat(ls.manifestFile); err == nil {
-		ls.mfStamp = info.ModTime()
-	}
 }
 
 // tick runs on every sweep: it follows manifest changes (a link added,
-// removed or a binding shared), tells each server when its bindings
-// changed, and records each link's status for `link status`.
+// removed or a binding shared, or the manifest deleted), tells each server
+// when its bindings changed, and records each link's status for `link
+// status`. The first sweep reconciles against the file as it is then, so an
+// edit made during startup is not missed; a manifest that does not load
+// keeps every running link and is reported once.
 func (ls *linkSet) tick() {
-	if info, err := os.Stat(ls.manifestFile); err == nil && !info.ModTime().Equal(ls.mfStamp) {
-		ls.mfStamp = info.ModTime()
+	if changed, _, err := ls.mf.changed(ls.manifestFile); err != nil {
+		if err.Error() != ls.mfErr {
+			ls.mfErr = err.Error()
+			say(ls.stderr, "link: reload manifest: %v", err)
+		}
+	} else if ls.mfErr = ""; changed {
 		if mf, err := manifest.Load(ls.manifestFile); err == nil {
 			ls.sync(mf)
 		} else {
@@ -802,10 +807,6 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if err != nil || pin.API == "" {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("link %q has no server address; remove it and run link add again", name)
 	}
-	keys, err := linkio.LoadConsentKeys(stateDir, name)
-	if err != nil {
-		return nil, protocol.ExitError, err
-	}
 	_, ck, err := redeemOneKey(linkHTTPClient(), pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, stdin, stdout)
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
@@ -813,16 +814,20 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if ck.RPID != pin.RPID || ck.Origin != pin.Origin {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("the key is for %s, this link signs on %s; refused", ck.Origin, pin.Origin)
 	}
-	if slices.ContainsFunc(keys, func(k linkio.ConsentKey) bool { return k.CredentialID == ck.CredentialID }) {
+	// The key list is read and written under its lock only now, after the
+	// redeem call and the typed fingerprint, so a key the endpoint dropped
+	// meanwhile stays dropped.
+	n, err := linkio.AddConsentKey(stateDir, name, ck)
+	if errors.Is(err, linkio.ErrConsentKeyExists) {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("passkey %s is already accepted on link %q", ck.CredentialID, name)
 	}
-	if err := linkio.WriteConsentKeys(stateDir, name, append(keys, ck)); err != nil {
+	if err != nil {
 		return nil, protocol.ExitError, err
 	}
 	if c.json {
-		return map[string]any{"link": name, "added": ck.CredentialID, "keys": len(keys) + 1}, 0, nil
+		return map[string]any{"link": name, "added": ck.CredentialID, "keys": n}, 0, nil
 	}
-	say(stdout, "Matches. Link %s now accepts %d consent passkey(s).", name, len(keys)+1)
+	say(stdout, "Matches. Link %s now accepts %d consent passkey(s).", name, n)
 	return nil, 0, nil
 }
 

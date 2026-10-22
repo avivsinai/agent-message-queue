@@ -142,7 +142,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if isEndpointUnreachable(err) {
 		// No endpoint yet: record the target where startup reads it, then
 		// start a supervised endpoint and register again once it answers.
-		if err = persistAdapter(stateDir, manifest.Adapter{Kind: reg.Kind, Target: reg.Target, Config: reg.Config}); err == nil {
+		if _, err = persistAdapter(stateDir, manifest.Adapter{Kind: reg.Kind, Target: reg.Target, Config: reg.Config}); err == nil {
 			if err = startEndpoint(c.root, stateDir); err == nil {
 				session, err = awaitRegister(stateDir, reg)
 			}
@@ -854,27 +854,27 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			}
 		}
 	}
-	if *self && os.Getenv("AM_ME") != "" && c.root != "" {
-		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: strings.TrimSpace(os.Getenv("AM_ME"))}
+	if *self {
+		handle := strings.TrimSpace(os.Getenv("AM_ME"))
+		mailbox := handle != "" && c.root != ""
+		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: handle}
 		native := func(binding.Binding) bool { return false }
-		if stateDir, err := c.stateDir(); err == nil {
-			if target, id, err := selfIdentity(c.root, stateDir); err == nil {
-				nb := binding.Binding{Root: c.root, Target: target, NativeSession: id}
-				native = nb.Same
-			}
-		}
-		match = func(b binding.Binding) bool { return mine.Same(b) || native(b) }
-	} else if *self {
 		stateDir, err := c.stateDir()
-		if err != nil {
+		if err != nil && !mailbox {
 			return protocol.ExitUsage, err
 		}
-		target, native, err := selfIdentity(c.root, stateDir)
-		if err != nil {
-			return protocol.ExitActionRequired, err
+		if err == nil {
+			target, id, err := selfIdentity(c.root, stateDir)
+			switch {
+			case err == nil:
+				if native, err = selfNativeMatch(c.root, c.rootSet, target, id); err != nil {
+					return protocol.ExitActionRequired, err
+				}
+			case !mailbox:
+				return protocol.ExitActionRequired, err
+			}
 		}
-		mine := binding.Binding{Root: c.root, Target: target, NativeSession: native}
-		match = mine.Same
+		match = func(b binding.Binding) bool { return (mailbox && mine.Same(b)) || native(b) }
 	}
 	if *name != "" {
 		match = func(b binding.Binding) bool { return b.Name == *name }
@@ -1023,6 +1023,30 @@ func candidatePID(cand registry.Candidate) int {
 	return 0
 }
 
+// selfNativeMatch matches the native bindings of this session in whatever
+// root they were made: attach --link binds through the link's root, not the
+// session's own. Only an explicit --root narrows the match; bindings of this
+// session in more than one root are refused, naming the roots.
+func selfNativeMatch(root string, rootSet bool, target, native string) (func(binding.Binding) bool, error) {
+	match := func(b binding.Binding) bool {
+		return !b.Mailbox() && b.Target == target && b.NativeSession == native && (!rootSet || sameRoot(b.Root, root))
+	}
+	all, err := binding.List()
+	if err != nil {
+		return nil, err
+	}
+	var roots []string
+	for _, b := range all {
+		if match(b) && !slices.ContainsFunc(roots, func(r string) bool { return sameRoot(r, b.Root) }) {
+			roots = append(roots, b.Root)
+		}
+	}
+	if len(roots) > 1 {
+		return nil, protocol.Refuse(protocol.CodeInvalid, "this session is connected through several roots (%s); run detach --self --root <root> for each", strings.Join(roots, ", "))
+	}
+	return match, nil
+}
+
 // selfIdentity is the invoking session's target and native session. It is a
 // variable so detach tests can supply a fixed session instead of the
 // machine's ambient one.
@@ -1131,16 +1155,17 @@ func nativeSessionOf(stateDir, target string) (string, error) {
 }
 
 // persistAdapter adds a manifest entry for a so a restart attaches it again.
-// An existing entry for the target is kept as it is.
-func persistAdapter(stateDir string, a manifest.Adapter) error {
+// An existing entry for the target is kept as it is, except that a Claude
+// entry gains approve; upgraded reports that change.
+func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err error) {
 	if !lock.AdvisoryLockAvailable() {
-		return errors.New("refusing to update the manifest without an advisory file lock")
+		return false, errors.New("refusing to update the manifest without an advisory file lock")
 	}
 	path := manifest.DefaultPath(stateDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return false, err
 	}
-	return lock.WithExclusiveFileLock(path+".lock", func() error {
+	err = lock.WithExclusiveFileLock(path+".lock", func() error {
 		f, err := manifest.Load(path)
 		if err != nil {
 			return err
@@ -1170,7 +1195,11 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 			if err := manifest.Validate(f); err != nil {
 				return err
 			}
-			return manifest.Write(path, f)
+			if err := manifest.Write(path, f); err != nil {
+				return err
+			}
+			upgraded = true
+			return nil
 		}
 		f.Adapters = append(f.Adapters, a)
 		if err := manifest.Validate(f); err != nil {
@@ -1178,21 +1207,26 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 		}
 		return manifest.Write(path, f)
 	})
+	return upgraded, err
 }
 
 // liveRegistrar attaches one adapter to the running endpoint the way startup
 // attaches manifest entries, after persisting it for restarts.
-// A Claude target gets its native approval pin from pin when non-nil.
+// A Claude target gets its native approval pin from pin when non-nil. A
+// target attached already is built again when its entry gained approve, so
+// the running endpoint answers approvals as a restart would; the replaced
+// attachment ends when the endpoint unsubscribes it.
 func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
 	var mu sync.Mutex
 	return func(r ipc.RegisterRequest) (protocol.Session, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		a := manifest.Adapter{Kind: r.Kind, Target: r.Target, Config: r.Config, Epoch: r.Epoch}
-		if err := persistAdapter(stateDir, a); err != nil {
+		upgraded, err := persistAdapter(stateDir, a)
+		if err != nil {
 			return protocol.Session{}, err
 		}
-		if _, ok := ep.AttachmentOf(r.Target); !ok {
+		if _, ok := ep.AttachmentOf(r.Target); !ok || upgraded {
 			out := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{a}})
 			if len(out) != 1 || out[0].Refusal != nil {
 				reason := "no adapter built"
