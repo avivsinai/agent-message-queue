@@ -714,3 +714,78 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 		t.Fatalf("the next turn received the earlier cancel: %+v", next)
 	}
 }
+
+// fakeAgy is agy's stream-json mode on two pipes: init, then one result per
+// user line, answering with the line's content.
+type fakeAgy struct {
+	stdin  *io.PipeWriter
+	stdout *io.PipeReader
+}
+
+func (f *fakeAgy) Stdin() io.WriteCloser { return f.stdin }
+func (f *fakeAgy) Stdout() io.Reader     { return f.stdout }
+func (f *fakeAgy) Interrupt() error      { return nil }
+func (f *fakeAgy) Stop()                 { _ = f.stdin.Close() }
+
+func spawnFakeAgy(conversation string, spawned *[]string) Spawner {
+	return func(extra []string) (AgentProcess, error) {
+		*spawned = append(*spawned, strings.Join(extra, " "))
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		go func() {
+			defer func() { _ = outW.Close() }()
+			enc := json.NewEncoder(outW)
+			_ = enc.Encode(map[string]any{"event": "init", "conversation_id": conversation, "init": map[string]string{"permission_mode": "request-review"}})
+			scanner := bufio.NewScanner(inR)
+			for scanner.Scan() {
+				var line struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				}
+				_ = json.Unmarshal(scanner.Bytes(), &line)
+				_ = enc.Encode(map[string]any{"event": "step_update", "step_update": map[string]any{"conversation_id": conversation, "text_delta": "thinking"}})
+				_ = enc.Encode(map[string]any{"event": "result", "result": map[string]any{
+					"conversation_id": conversation, "status": "SUCCESS", "response": "agy saw: " + strings.SplitN(line.Message.Content, "\n\n", 2)[1],
+				}})
+			}
+		}()
+		return &fakeAgy{stdin: inW, stdout: outR}, nil
+	}
+}
+
+func TestAgyHostAnswersAMessageAndRecordsItsConversation(t *testing.T) {
+	root := newRoot(t)
+	question := send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+	h, err := Open(Config{Root: root, Me: "grok", Cwd: root, Version: "test", Agent: "agy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spawned []string
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.RunAgy(ctx, spawnFakeAgy("conv-1", &spawned)) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("agy host run: %v", err)
+		}
+		h.Close()
+	})
+
+	reply := waitReply(t, root)
+	if strings.TrimRight(reply.Body, "\n") != "agy saw: what is 2+2?" || !slices.Equal(reply.Header.Refs, []string{question.Header.ID}) {
+		t.Fatalf("reply body=%q refs=%v; want agy's result for the question", reply.Body, reply.Header.Refs)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec sessionRecord
+	if err := json.Unmarshal(data, &rec); err != nil || rec.SessionID != "conv-1" {
+		t.Fatalf("session.json=%s; want conversation conv-1", data)
+	}
+	if len(spawned) != 1 || spawned[0] != strings.Join(agyStreamArgs, " ") {
+		t.Fatalf("agy spawned with %q; want one start in stream-json mode", spawned)
+	}
+}

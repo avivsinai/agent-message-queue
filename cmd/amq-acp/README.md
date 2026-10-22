@@ -436,3 +436,40 @@ The host never restarts the agent. When the agent exits, the host exits with
 code 1; a turn in flight is answered with the agent's exit status. A message whose sender set cross-root reply routing (`reply_to` or
 `reply_project`) runs no turn and gets a reply naming that limitation. The
 host refuses to run on platforms without advisory file locks.
+
+### agy over stream-json
+
+`amq-acp host --protocol agy-stream -- agy [agy arguments]` makes agy, which
+has no ACP agent mode, an AMQ participant through its headless stream-json
+mode:
+
+```sh
+amq coop exec --no-wake --me agy amq-acp -- host --protocol agy-stream -- agy
+```
+
+The host starts agy itself with `--input-format stream-json --output-format
+stream-json -p=`, so it refuses those flags, and `--conversation`, `-c`,
+`--continue`, `--print`, `--prompt` and `-i`, in the agy arguments (exit 2).
+Each message is one `user` line; the reply is that turn's `result.response`.
+agy names its conversation in its `init` event before any turn, and
+`session.json` records it. A restarted host starts agy with `--conversation
+<id>`; when agy answers with another id (an unknown conversation runs under a
+new one), the host says so and records the new id.
+
+agy denies every tool call that needs a permission unless its own arguments
+or its `permissions.allow` settings grant it, for example
+`--dangerously-skip-permissions`; the host adds no permission flag. The reply
+counts the denied calls (`denied_actions`). agy asks for no approval
+headless, so a remote request never raises one.
+
+Limits:
+
+- agy has no cancel input. A timeout, Ctrl-C or an owner cancel sends agy
+  SIGINT; agy ends the turn as interrupted and exits, and the next turn
+  starts agy again on the same conversation.
+- agy exiting between turns is not an error: the next turn starts it again.
+  agy exiting during a turn ends the turn with its exit status, and the host
+  exits.
+- `--mode auto` is not available to every account; agy then continues in its
+  default mode.
+- `--check` starts agy, prints its `init` event as JSON, and stops it.

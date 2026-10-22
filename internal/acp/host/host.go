@@ -83,8 +83,12 @@ type Host struct {
 	identity fsq.DeliveryRootIdentity
 	release  func()
 
-	sess      agentSession
-	sessionID string
+	sess agentSession
+	// label names the session in log lines; notice is the startup line's
+	// statement of who decides tool calls; refusedNote (with %d) tells a
+	// peer how many tool calls of the turn were refused.
+	label, notice, refusedNote string
+	sessionID                  string
 	// resumed is true when the session was loaded from session.json.
 	resumed   bool
 	agentName string
@@ -164,7 +168,8 @@ func Open(cfg Config) (*Host, error) {
 		release()
 		return nil, err
 	}
-	return &Host{cfg: cfg, identity: identity, release: release, timeout: defaultTurnTimeout, unreadable: map[string]bool{}}, nil
+	return &Host{cfg: cfg, identity: identity, release: release, timeout: defaultTurnTimeout, unreadable: map[string]bool{}, label: "ACP session", notice: AutonomyNotice,
+		refusedNote: "The host rejected %d tool call(s) the agent asked to run."}, nil
 }
 
 // Close releases the host lock.
@@ -193,7 +198,7 @@ func (h *Host) run(ctx context.Context, sess agentSession) error {
 	if h.resumed {
 		opened = "resumed"
 	}
-	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (ACP session %s, %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.sessionID, opened, AutonomyNotice)
+	_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %s in %s answers AMQ messages through %s (%s %s, %s). %s\n", h.cfg.Me, h.cfg.Root, h.cfg.Agent, h.label, h.sessionID, opened, h.notice)
 	stopBridge, err := h.startBridge()
 	if err != nil {
 		return err
@@ -250,6 +255,11 @@ func (h *Host) handshake(ctx context.Context) error {
 	if resumed {
 		return nil
 	}
+	return h.recordSession()
+}
+
+// recordSession writes h.sessionID to session.json for this agent and cwd.
+func (h *Host) recordSession() error {
 	return h.withRoot(func(root *fsq.DeliveryRoot) error {
 		data, err := json.Marshal(sessionRecord{SessionID: h.sessionID, Agent: h.cfg.Agent, Cwd: h.cfg.Cwd, Created: time.Now().UTC().Format(time.RFC3339Nano)})
 		if err != nil {
@@ -719,7 +729,7 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 		fatal = res.stuck
 	}
 	if res.refused > 0 {
-		rec.ReplyBody += fmt.Sprintf("\n\nThe host rejected %d tool call(s) the agent asked to run.", res.refused)
+		rec.ReplyBody += "\n\n" + fmt.Sprintf(h.refusedNote, res.refused)
 	}
 	if err := saveTurn(root, h.cfg.Me, *rec); err != nil {
 		return nil, err

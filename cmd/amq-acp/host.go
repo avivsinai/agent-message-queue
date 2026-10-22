@@ -35,7 +35,8 @@ func runHost(args []string) int {
 	flags := flag.NewFlagSet("amq-acp host", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	cwd := flags.String("cwd", "", "working directory for the agent (default: the current directory)")
-	check := flags.Bool("check", false, "run the ACP handshake only, print the agent's info and capabilities as JSON, and exit")
+	check := flags.Bool("check", false, "run the handshake only, print what the agent reports as JSON, and exit")
+	protocol := flags.String("protocol", "acp", "agent protocol: acp (ACP over stdio) or agy-stream (agy's stream-json)")
 	flags.Usage = func() { fmt.Fprint(os.Stderr, hostUsage) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -62,6 +63,21 @@ func runHost(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitUsage
 	}
+	switch *protocol {
+	case "acp":
+	case host.ProtocolAgyStream:
+		if err := host.AgyArgvRefusal(argv[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "amq-acp host:", err)
+			return exitUsage
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "amq-acp host: unknown --protocol %q (want acp or %s)\n", *protocol, host.ProtocolAgyStream)
+		return exitUsage
+	}
+	agy := *protocol == host.ProtocolAgyStream
+	if *check && agy {
+		return runAgyCheck(argv, dir)
+	}
 	if *check {
 		return runCheck(argv, dir)
 	}
@@ -86,6 +102,9 @@ func runHost(args []string) int {
 		return hostExit(err)
 	}
 	defer h.Close()
+	if agy {
+		return runAgyHost(h, argv, dir, &agent)
+	}
 
 	agent, err = startAgent(argv, dir)
 	if err != nil {
@@ -121,6 +140,51 @@ func runCheck(argv []string, dir string) int {
 	res, err := host.Check(ctx, agent.stdout, agent.stdin, version)
 	stop()
 	agent.stop()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host --check:", err)
+		return exitActionRequired
+	}
+	out, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp host --check:", err)
+		return exitGeneral
+	}
+	fmt.Println(string(out))
+	return 0
+}
+
+// runAgyHost serves the inbox through agy, which the host starts and
+// respawns itself; agent always names the latest agy process.
+func runAgyHost(h *host.Host, argv []string, dir string, agent **agentProcess) int {
+	spawn := func(extra []string) (host.AgentProcess, error) {
+		a, err := startAgent(append(append([]string(nil), argv...), extra...), dir)
+		if err != nil {
+			return nil, err
+		}
+		*agent = a
+		return a, nil
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	if err := h.RunAgy(ctx, spawn); err != nil {
+		return hostExit(err)
+	}
+	return 0
+}
+
+// runAgyCheck starts agy in stream-json mode, prints its init event as JSON,
+// and stops it; exit 6 says why agy could not be served.
+func runAgyCheck(argv []string, dir string) int {
+	spawn := func(extra []string) (host.AgentProcess, error) {
+		return startAgent(append(append([]string(nil), argv...), extra...), dir)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	res, err := host.CheckAgy(ctx, spawn)
+	stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp host --check:", err)
 		return exitActionRequired
@@ -180,6 +244,11 @@ func startAgent(argv []string, dir string) (*agentProcess, error) {
 	}()
 	return a, nil
 }
+
+func (a *agentProcess) Stdin() io.WriteCloser { return a.stdin }
+func (a *agentProcess) Stdout() io.Reader     { return a.stdout }
+func (a *agentProcess) Interrupt() error      { return a.cmd.Process.Signal(os.Interrupt) }
+func (a *agentProcess) Stop()                 { a.stop() }
 
 // exitStatus waits briefly for the agent's exit and describes it.
 func (a *agentProcess) exitStatus() string {
@@ -249,6 +318,7 @@ request, a todo, a brainstorm, or a message with no kind runs a turn.
 Usage:
   amq-acp host [--cwd <dir>] -- <agent command> [agent arguments]
   amq-acp host --check [--cwd <dir>] -- <agent command> [agent arguments]
+  amq-acp host --protocol agy-stream [--check] [--cwd <dir>] -- agy [agy arguments]
 
 Example:
   amq coop exec --no-wake --me grok amq-acp -- host -- grok agent --no-leader stdio
@@ -263,4 +333,10 @@ advertises loadSession; otherwise it opens a new session and says so.
 
 --check runs the handshake only (no AMQ root needed), prints the agent's
 info and capabilities as JSON, and exits 0, or 6 with the reason.
+
+--protocol agy-stream drives agy headless over its stream-json mode. The host
+starts agy itself with --input-format stream-json --output-format
+stream-json -p= (and --conversation to resume), so it refuses those flags
+and -c, --continue, --print, --prompt and -i in the agy arguments.
+` + host.AgyAutonomyNotice + `
 `
