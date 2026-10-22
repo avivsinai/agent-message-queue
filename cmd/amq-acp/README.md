@@ -271,6 +271,18 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   reply's post fails before the Buzz CLI starts (for example, no CLI is
   found), the same sweep posts it once the CLI works; a post that started
   and then failed is uncertain and is not repeated.
+- When Buzz names the event, the prompt and each follow-up carry the label
+  `nostr:<eventID>`: the id of the owner's Buzz DM event that caused the
+  message, the same on every redelivery. The label is a pointer, not proof.
+  amq-acp never holds the signed event on this path, and any local process
+  can write an AMQ message with any label. A layer that must know the owner
+  wrote the DM, for example to accept a gate answer, fetches that event from
+  the relay and checks it itself, as the
+  [Claude Code approval hook](../../docs/amq-remote-approvals.md#when-the-hook-answers)
+  does: the pinned owner key and signature, the DM channel, the gate message
+  in its `e` tags or thread, the gate's nonce in the content, the time window,
+  the edit and deletion history, and single use. AMQ verifies nothing for
+  the layer.
 - Follow-up DMs: a second `session/prompt` while a turn is open is still
   refused, but `initialize` advertises `_meta.steering.supported: true` in
   binding mode, so Buzz sends a follow-up as `_session/steering`. Once the
