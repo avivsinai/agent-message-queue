@@ -198,11 +198,34 @@ func TestApprovalCleanupKeepsLiveRecordsAndANewOwnersPin(t *testing.T) {
 			HookPID: hookPID, Deadline: protocol.FormatTime(deadline)}
 		return write("requests", id+".json", r), write("answers", id+".json", approvalAnswer{InteractionID: id, Option: optionDeny})
 	}
+	gone := func(paths ...string) {
+		t.Helper()
+		for _, path := range paths {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("dead record %s survived the cleanup (%v)", path, err)
+			}
+		}
+	}
+	kept := func(paths ...string) {
+		t.Helper()
+		for _, path := range paths {
+			if _, err := os.Lstat(path); err != nil {
+				t.Errorf("live record %s was removed: %v", path, err)
+			}
+		}
+	}
 	liveReq, liveAns := request(os.Getpid(), time.Now().Add(time.Minute))
 	deadReq, deadAns := request(0, time.Now().Add(time.Minute))
-	deadPin := write("", "pin-dead", approvalPin{PID: 0})
 	deadRun := write("runs", "p-0", runMarker{MsgID: "m-0", Owner: "old", PID: 1 << 30}) // no such process
+	// The last unpin removes the dead records and keeps the live hook's.
+	write("", "pin-last", approvalPin{PID: os.Getpid()})
+	UnpinApprovals(home, approvalSession, "last")
+	gone(deadReq, deadAns, deadRun)
+	kept(liveReq, liveAns)
 
+	deadReq, deadAns = request(0, time.Now().Add(time.Minute))
+	deadPin := write("", "pin-dead", approvalPin{PID: 0})
+	deadRun = write("runs", "p-0", runMarker{MsgID: "m-0", Owner: "old", PID: 1 << 30})
 	release, err := lockLifecycle(home)
 	if err != nil {
 		t.Fatal(err)
@@ -232,17 +255,8 @@ func TestApprovalCleanupKeepsLiveRecordsAndANewOwnersPin(t *testing.T) {
 	if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: "m-1", Owner: "new", PID: os.Getpid()}); err != nil {
 		t.Fatal(err)
 	}
-	// The new owner's own unpin of another pin leaves its live pin, so it
-	// cleans nothing; the bind sweep removes only dead pins and inflight.
+	// The bind sweep removes only dead pins and inflight records.
 	sweepApprovals(home)
-	for _, path := range []string{deadReq, deadAns, deadPin, deadRun} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("dead record %s survived the cleanup (%v)", path, err)
-		}
-	}
-	for _, path := range []string{liveReq, liveAns, filepath.Join(approveDir(home, approvalSession), "pin-"+token), runMarkerPath(home, approvalSession, "p-1")} {
-		if _, err := os.Lstat(path); err != nil {
-			t.Errorf("live record %s was removed: %v", path, err)
-		}
-	}
+	gone(deadReq, deadAns, deadPin, deadRun)
+	kept(liveReq, liveAns, filepath.Join(approveDir(home, approvalSession), "pin-"+token), runMarkerPath(home, approvalSession, "p-1"))
 }
