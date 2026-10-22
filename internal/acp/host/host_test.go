@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -712,6 +713,104 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 	next := waitEvent(t, root, otherRef, "completed")
 	if slices.ContainsFunc(next, func(ev bridgeEvent) bool { return ev.Event == "cancelled" }) {
 		t.Fatalf("the next turn received the earlier cancel: %+v", next)
+	}
+}
+
+// A verifier review of the ACP host found that the first turn was claimed
+// and its message moved to cur before extensions/acp-host/ (which gained
+// turns/) was fsynced: a power loss could keep the moved message and lose
+// its journal. The directory chain of turns/ must be synced before the move.
+func TestHostSyncsTheJournalDirectoryChainBeforeTakingAMessage(t *testing.T) {
+	root := newRoot(t)
+	var mu sync.Mutex
+	var synced []string
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		mu.Lock()
+		synced = append(synced, filepath.ToSlash(dir))
+		mu.Unlock()
+		return nil
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+	send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+	startHost(t, root, &fakeAgent{})
+	waitReply(t, root)
+
+	mu.Lock()
+	defer mu.Unlock()
+	turns, cur := -1, -1
+	for i, dir := range synced {
+		if turns < 0 && strings.HasSuffix(dir, "extensions/acp-host/turns") {
+			turns = i
+		}
+		if turns >= 0 && cur < 0 && strings.HasSuffix(dir, "grok/inbox/cur") {
+			cur = i
+		}
+	}
+	if turns < 0 || cur < 0 {
+		t.Fatalf("syncs=%q; want the turns directory, then grok's inbox/cur", synced)
+	}
+	if !slices.ContainsFunc(synced[turns:cur], func(dir string) bool { return strings.HasSuffix(dir, "grok/extensions/acp-host") }) {
+		t.Fatalf("syncs between the claim and the move=%q; want extensions/acp-host synced before the message moves", synced[turns:cur])
+	}
+}
+
+// runHostOnce runs a host for grok until it stops on its own, and returns
+// why it stopped.
+func runHostOnce(t *testing.T, root string) error {
+	t.Helper()
+	h, err := Open(Config{Root: root, Me: "grok", Cwd: root, Version: "test", Agent: "fake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	hostOut, agentIn := io.Pipe()
+	agentOut, hostIn := io.Pipe()
+	go (&fakeAgent{}).serve(hostOut, hostIn)
+	defer func() { _ = agentIn.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.Run(ctx, agentOut, agentIn) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		return nil
+	}
+}
+
+// Review of #1151: a claim whose directory-chain sync failed left its record
+// on disk, and the next start advanced that record and moved the message to
+// cur without the barrier. Every claimed record must pass the barrier before
+// its message moves.
+func TestHostKeepsAMessageInNewUntilItsJournalIsDurable(t *testing.T) {
+	root := newRoot(t)
+	var mu sync.Mutex
+	last := ""
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		dir = filepath.ToSlash(dir)
+		prev := last
+		last = dir
+		// The chain above a turn record cannot be made durable.
+		if strings.HasSuffix(dir, "grok/extensions/acp-host") && strings.HasSuffix(prev, "acp-host/turns") {
+			return fmt.Errorf("injected: cannot sync %s", dir)
+		}
+		return nil
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+	question := send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+
+	for run := 1; run <= 2; run++ {
+		if err := runHostOnce(t, root); err == nil {
+			t.Fatalf("run %d: the host served a message whose journal is not durable", run)
+		}
+		if _, err := os.Stat(filepath.Join(root, "agents", "grok", "inbox", "new", question.Header.ID+".md")); err != nil {
+			t.Fatalf("run %d: the message left inbox/new before its journal was durable: %v", run, err)
+		}
 	}
 }
 
