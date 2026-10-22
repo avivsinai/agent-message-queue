@@ -295,6 +295,7 @@ func (c *coopExecRun) defineFlags(args []string) ([]string, func()) {
 		"  amq coop exec claude                              # Exec into Claude Code (declared session or collab)",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec grok                                # Grok CLI, caller flags forwarded as-is",
+		"  amq coop exec agy                                 # Antigravity CLI, caller flags forwarded as-is",
 		"  amq coop exec --session feature-x claude          # Isolated session",
 		"  amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)",
 		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",

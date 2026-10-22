@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -63,7 +64,7 @@ func runDoctor(args []string) error {
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
 		"  - Extension metadata manifests and diagnostics",
-		"  - Skill installation (Claude Code / Codex / Grok Build)",
+		"  - Skill installation (Claude Code / Codex / Grok Build / agy)",
 		"",
 		"With --ops, also checks runtime health:",
 		"  - Queue depth and oldest unread per agent",
@@ -194,10 +195,8 @@ func runDoctor(args []string) error {
 		result.Checks = append(result.Checks, checkExtensions(manifests, diagnostics))
 	}
 
-	// Check 7-9: Claude Code, Codex, and Grok Build skills
-	result.Checks = append(result.Checks, checkSkill("claude"))
-	result.Checks = append(result.Checks, checkSkill("codex"))
-	result.Checks = append(result.Checks, checkSkill("grok"))
+	// Check 7-10: Claude Code, Codex, Grok Build, and (when installed) agy skills
+	result.Checks = append(result.Checks, skillChecks()...)
 
 	// Hook config health: flag AMQ-owned SessionStart hooks whose script is gone.
 	result.Checks = append(result.Checks, checkHookConfigs())
@@ -917,11 +916,27 @@ func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRe
 	return check
 }
 
+// lookPathAgy reports whether the agy binary is on PATH. Tests replace it.
+var lookPathAgy = func() bool {
+	_, err := exec.LookPath("agy")
+	return err == nil
+}
+
+// skillChecks returns one row per agent. The agy row appears only when agy is
+// installed, so machines without it see no warning.
+func skillChecks() []doctorCheck {
+	checks := []doctorCheck{checkSkill("claude"), checkSkill("codex"), checkSkill("grok")}
+	if lookPathAgy() {
+		checks = append(checks, checkSkill("agy"))
+	}
+	return checks
+}
+
 func checkSkill(agent string) doctorCheck {
 	check := doctorCheck{Name: fmt.Sprintf("%s skill", agent)}
 
 	switch agent {
-	case "claude", "codex", "grok":
+	case "claude", "codex", "grok", "agy":
 	default:
 		check.Status = "warn"
 		check.Message = "unknown agent"
@@ -935,6 +950,16 @@ func checkSkill(agent string) doctorCheck {
 	// so every agent checks it in addition to its agent-specific dir. The legacy
 	// ~/.<agent>/skills paths remain for installs created before the shared dir.
 	agentDir := "." + agent
+	if agent == "agy" {
+		// agy reads project .agents/skills and ~/.gemini/config/skills only;
+		// it never reads ~/.agy or ~/.agents.
+		candidates := []string{
+			filepath.Join(".agents", "skills", "amq-cli"),
+			filepath.Join(home, ".gemini", "config", "skills", "amq-cli"),
+		}
+		return skillCandidatesResult(check, candidates,
+			"not installed (run: mkdir -p ~/.gemini/config/skills && cp -R <amq clone>/skills/amq-cli ~/.gemini/config/skills/)")
+	}
 	candidates := []string{
 		filepath.Join(agentDir, "skills", "amq-cli"),        // project-local, agent-specific
 		filepath.Join(".agents", "skills", "amq-cli"),       // project-local, shared
@@ -942,6 +967,13 @@ func checkSkill(agent string) doctorCheck {
 		filepath.Join(home, ".agents", "skills", "amq-cli"), // user-level, shared (npx skills add -g)
 	}
 
+	return skillCandidatesResult(check, candidates,
+		"not installed (run: npx skills add avivsinai/agent-message-queue -g -y)")
+}
+
+// skillCandidatesResult reports ok for the first candidate that holds a
+// SKILL.md, warns on a partial install, and otherwise warns with the remedy.
+func skillCandidatesResult(check doctorCheck, candidates []string, remedy string) doctorCheck {
 	// Check project-local candidates first, then user-level, in order.
 	for _, dir := range candidates {
 		if fileExists(filepath.Join(dir, "SKILL.md")) {
@@ -966,6 +998,6 @@ func checkSkill(agent string) doctorCheck {
 	}
 
 	check.Status = "warn"
-	check.Message = "not installed (run: npx skills add avivsinai/agent-message-queue -g -y)"
+	check.Message = remedy
 	return check
 }

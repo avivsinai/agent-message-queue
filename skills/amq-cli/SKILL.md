@@ -4,7 +4,7 @@ version: 0.103.0 # x-release-please-version
 description: Coordinate coding agents through AMQ. Use for agent messages, inboxes, receipts, sessions, wake delivery, cross-project routing, managed launches, or AMQ diagnostics. Use amq-spec for collaborative design; do not use this for general message queues or single-agent work.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
-  compatibility: claude-code, codex-cli, grok-cli
+  compatibility: claude-code, codex-cli, grok-cli, antigravity-cli
 ---
 
 # AMQ CLI

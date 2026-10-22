@@ -114,7 +114,7 @@ Commands:
   who          Show sessions and agents in current project
   route        Explain canonical routing
   doctor       Verify installation and configuration
-  shell-setup  Output shell aliases (amc/amx/amg)
+  shell-setup  Output shell aliases (amc/amx/amg/amy)
   completion   Generate shell completions (bash, zsh, fish)
 
 Global options:
@@ -1037,7 +1037,7 @@ Checks:
   - Mailbox directory permissions
   - Agent configuration (config.json)
   - Extension metadata manifests and diagnostics
-  - Skill installation (Claude Code / Codex / Grok Build)
+  - Skill installation (Claude Code / Codex / Grok Build / agy)
 
 With --ops, also checks runtime health:
   - Queue depth and oldest unread per agent
@@ -1099,23 +1099,27 @@ Usage:
 
 Outputs shell aliases for quick co-op session management.
 
-Defines three functions (names customizable via flags):
+Defines four functions (names customizable via flags):
   amc [session] [flags]  → amq coop exec [--session <s>] claude [flags]
   amx [session] [flags]  → amq coop exec [--session <s>] codex -- --dangerously-bypass-approvals-and-sandbox [flags]
   amg [session] [flags]  → amq coop exec [--session <s>] grok [flags]
+  amy [session] [flags]  → amq coop exec [--session <s>] agy [flags]
 
 Usage:
   eval "$(amq shell-setup)"           # Add to current shell (default names)
   amq shell-setup --shell fish         # Fish shell output
-  amq shell-setup --claude-alias cc --codex-alias cx --grok-alias gk  # Custom names
+  amq shell-setup --claude-alias cc --codex-alias cx --grok-alias gk --agy-alias ag  # Custom names
 
 Examples after setup:
   amc                    # Start Claude Code (default session)
   amc feature-x          # Isolated session for feature-x
   amx feature-x          # Codex in same isolated session
   amg feature-x          # Grok in same isolated session
+  amy feature-x          # agy in same isolated session
 
 Options:
+  -agy-alias string
+        Function name for Antigravity CLI (agy) shortcut (default "amy")
   -claude-alias string
         Function name for Claude Code shortcut (default "amc")
   -codex-alias string
@@ -1619,6 +1623,7 @@ Examples:
   amq coop exec claude                              # Exec into Claude Code (declared session or collab)
   amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags
   amq coop exec grok                                # Grok CLI, caller flags forwarded as-is
+  amq coop exec agy                                 # Antigravity CLI, caller flags forwarded as-is
   amq coop exec --session feature-x claude          # Isolated session
   amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)
   amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake
