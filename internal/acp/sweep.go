@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -326,9 +327,10 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 }
 
 // resendFinal posts an answer that is its event's outcome but was never
-// posted. The check and the post run under the event's post lock, so two
-// sweeps never post it twice; a post that fails before the CLI starts again
-// leaves it for the next sweep.
+// posted. Under the event's post lock it renames the unsent marker to
+// sending before the post, so a crash during the post leaves the answer
+// uncertain, never unsent. Only a post proved not started renames it back
+// for the next sweep.
 func (s *Server) resendFinal(c *lateClaim) {
 	text := ""
 	for _, dir := range []string{fsq.AgentInboxCur(c.b.Root, mailboxSender), fsq.AgentInboxNew(c.b.Root, mailboxSender)} {
@@ -341,9 +343,25 @@ func (s *Server) resendFinal(c *lateClaim) {
 		return
 	}
 	_ = s.withPostLock(c.eventID, func() error {
-		if out, ok := s.mailboxAnswered(c.eventID); ok && s.finalUnsent(c.eventID, out) {
-			s.publishFinal(c.eventID, c.channel, text)
+		if out, ok := s.mailboxAnswered(c.eventID); !ok || !s.finalUnsent(c.eventID, out) {
+			return nil
 		}
+		unsent, sending := s.finalStatePath(c.eventID, finalUnsent), s.finalStatePath(c.eventID, finalSending)
+		if err := os.Rename(unsent, sending); err != nil {
+			return err
+		}
+		if err := fsq.SyncDir(filepath.Dir(sending)); err != nil {
+			return err
+		}
+		result, err := s.post(c.channel, text)
+		var notSent *notSentError
+		if errors.As(err, &notSent) || errors.Is(err, errNoBuzzIdentity) {
+			if err := os.Rename(sending, unsent); err != nil {
+				return err
+			}
+			return fsq.SyncDir(filepath.Dir(unsent))
+		}
+		s.recordFinal(c.eventID, result, err)
 		return nil
 	})
 }

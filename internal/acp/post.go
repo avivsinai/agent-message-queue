@@ -211,13 +211,16 @@ func (s *Server) publish(channel, text string) string {
 	return result
 }
 
-// Outbound states of an event's final post, each a marker created beside
-// the final marker once the post returns. A final marker with none of them
-// is a post in flight, interrupted, or made by an older build: uncertain.
+// Outbound states of an event's final post, each a marker beside the final
+// marker. accepted, uncertain and unsent are created once a post returns; a
+// retry renames unsent to sending before it posts. A final marker with no
+// unsent marker is a post in flight, interrupted, or made by an older
+// build: uncertain, never posted again.
 const (
 	finalAccepted  = "accepted"
 	finalUncertain = "uncertain"
 	finalUnsent    = "unsent"
+	finalSending   = "sending"
 )
 
 // publishFinal is publish for an event's final text: it also records what
@@ -225,7 +228,15 @@ const (
 // unsent, and the late-reply sweep may make it again (resendFinal).
 func (s *Server) publishFinal(eventID, channel, text string) string {
 	result, err := s.post(channel, text)
-	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" || errors.Is(err, errNoBuzzIdentity) {
+	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
+		return result
+	}
+	return s.recordFinal(eventID, result, err)
+}
+
+// recordFinal records what a final post proves and returns its result.
+func (s *Server) recordFinal(eventID, result string, err error) string {
+	if errors.Is(err, errNoBuzzIdentity) {
 		return result
 	}
 	state := finalAccepted

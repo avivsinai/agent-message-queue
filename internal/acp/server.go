@@ -109,6 +109,10 @@ type turnState struct {
 	// prompt is the delivered prompt's message id; only a reply whose refs
 	// name it answers this turn.
 	prompt string
+	// to and thread are the delivered prompt's recipient and thread. A
+	// replayed event keeps its first delivery's, which can differ from the
+	// worker's recipient and the session's thread; steering follows them.
+	to, thread string
 	// done is closed when the turn is settled from outside the wait loop
 	// (cancel or stream close).
 	done chan struct{}
@@ -781,7 +785,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		delivery, err := DeliverCockpitPrompt(s.cfg, text, session.Thread, eventID)
 		s.mu.Lock()
 		if err == nil {
-			turn.prompt = delivery.MessageID
+			turn.prompt, turn.to, turn.thread = delivery.MessageID, delivery.To, delivery.Thread
 		}
 		close(turn.ready)
 		s.mu.Unlock()
@@ -1175,14 +1179,15 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		}
 		s.mu.Lock()
 	}
-	turnPrompt := ""
-	if t := session.turn; t != nil && t.outcome == "" {
-		turnPrompt = t.prompt
+	// Steering into a turn goes where that turn's prompt went.
+	turnPrompt, cfg, thread := "", s.cfg, session.Thread
+	if t := session.turn; t != nil && t.outcome == "" && t.prompt != "" {
+		turnPrompt, cfg.To, thread = t.prompt, t.to, t.thread
 	}
-	delivery, err := DeliverSteering(s.cfg, formatSteeringBody(text), session.Thread, turnPrompt, eventID)
+	delivery, err := DeliverSteering(cfg, formatSteeringBody(text), thread, turnPrompt, eventID)
 	s.mu.Unlock()
 	if err != nil {
-		return nil, newRPCError(codeInternalError, "deliver steering to %s: %v", s.cfg.To, err)
+		return nil, newRPCError(codeInternalError, "deliver steering to %s: %v", cfg.To, err)
 	}
 	// The outcome names the delivery mode only. An urgent AMQ write is not
 	// proof the peer steered or started anything; the evidence fields say

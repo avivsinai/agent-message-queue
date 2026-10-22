@@ -1392,11 +1392,15 @@ func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
 // Regression (agent-message-queue-37o.7, finding 16): the final marker was
 // reserved before the post, so a post that failed before it started (no
 // buzz CLI) consumed the answer: neither the sweep nor a redelivery ever
-// posted it. Once the CLI is fixed, the next sweep posts it, once.
+// posted it. Once the CLI is fixed, the next sweep posts it, once. The
+// #1149 review found the retry kept the event unsent while its post was in
+// flight, so a crash before the post's state was recorded let a later sweep
+// post the answer a second time.
 func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 	s, root := mailboxServer(t)
 	var posts []string
 	broken := true
+	event := strings.Repeat("6", 64)
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
 	postAnswer = func(_, content string, _ time.Duration) (string, error) {
@@ -1404,11 +1408,15 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 			_, err := buzzCLIFrom("/nonexistent", "relative")
 			return "", err
 		}
+		// A crash here leaves the disk as it is now; a restarted sweep
+		// must not see an unsent answer.
+		if c, _ := s.loadLateClaim(event, time.Now().Add(time.Hour)); c != nil && c.unsentReply != "" {
+			t.Errorf("while the retry posts, the answer still reads as unsent")
+		}
 		posts = append(posts, content)
 		return "id", nil
 	}
 	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	event := strings.Repeat("6", 64)
 	turn := newTurn()
 	turn.channel = buzzChannel(prompt)
 	replied := false
