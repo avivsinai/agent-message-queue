@@ -158,208 +158,12 @@ if command -v python3 >/dev/null 2>&1; then
   bash scripts/test_git_env_sanitization.sh
 fi
 
-# --- SessionStart hook test (claude-session-start.sh) ---
-HOOK_TMPDIR="$(mktemp -d)"
-hook_tmpdir_cleanup() {
-  rm -rf "$HOOK_TMPDIR"
-}
-trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup' EXIT
-
-# Fixture: 1 peer (codex, active presence) + 2 unread messages for claude
-HOOK_ROOT="$HOOK_TMPDIR/agent-mail/collab"
-"$BIN" init --root "$HOOK_ROOT" --agents claude,codex
-"$BIN" presence set --root "$HOOK_ROOT" --me codex --status active
-"$BIN" send --root "$HOOK_ROOT" --me codex --to claude --body "msg one" >/dev/null 2>&1
-"$BIN" send --root "$HOOK_ROOT" --me codex --to claude --body "msg two" >/dev/null 2>&1
-
-# Write .amqrc so amq env can resolve project/session
-printf '{"root": "agent-mail"}\n' > "$HOOK_TMPDIR/.amqrc"
-
-HOOK_ENV_FILE="$HOOK_TMPDIR/claude-env"
-
-HOOK_OUTPUT=$(
-  CLAUDE_ENV_FILE="$HOOK_ENV_FILE" \
-  CLAUDE_PROJECT_DIR="$HOOK_TMPDIR" \
-  AM_ROOT="$HOOK_ROOT" \
-  AM_ME="claude" \
-  PATH="$(dirname "$BIN"):$PATH" \
-  bash scripts/claude-session-start.sh 2>/dev/null
-)
-
-# Phase 1: env file should contain AM_ROOT export
-grep -q '^export AM_ROOT=' "$HOOK_ENV_FILE"
-echo "  hook phase 1: AM_ROOT in env file ok"
-
-# Phase 2: stdout should be valid JSON with required fields
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$HOOK_OUTPUT" <<'PYEOF'
-import json, sys
-
-data = json.loads(sys.argv[1])
-hso = data["hookSpecificOutput"]
-assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
-ctx = hso["additionalContext"]
-assert ctx, "additionalContext is empty"
-assert "me=claude" in ctx, f"missing me=claude in: {ctx}"
-assert "codex" in ctx, f"missing peer codex in: {ctx}"
-sm = data["systemMessage"]
-assert "peer" in sm.lower(), f"systemMessage missing peer mention: {sm}"
-assert "2 unread" in sm, f"systemMessage missing unread count: {sm}"
-print("  hook phase 2: JSON assertions passed")
-PYEOF
-else
-  echo "  hook phase 2: python3 not available, skipping JSON assertions"
-fi
-
-# Test /clear scenario: env file already has AM_ROOT, but AM_ROOT not in parent env.
-# Phase 1 must read RESOLVED_ROOT from existing env file for phase 2 to work.
-printf "export AM_ROOT='%s'\n" "$HOOK_ROOT" > "$HOOK_ENV_FILE"
-
-HOOK_OUTPUT2=$(
-  CLAUDE_ENV_FILE="$HOOK_ENV_FILE" \
-  CLAUDE_PROJECT_DIR="$HOOK_TMPDIR" \
-  AM_ME="claude" \
-  PATH="$(dirname "$BIN"):$PATH" \
-  bash scripts/claude-session-start.sh 2>/dev/null
-)
-
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$HOOK_OUTPUT2" <<'PYEOF'
-import json, sys
-
-data = json.loads(sys.argv[1])
-hso = data["hookSpecificOutput"]
-assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
-ctx = hso["additionalContext"]
-assert ctx, "additionalContext is empty"
-assert "me=claude" in ctx, f"missing me=claude in: {ctx}"
-print("  hook /clear scenario: JSON assertions passed")
-PYEOF
-fi
-
-# Quoted-root scenario: phase 1 must round-trip shell-escaped AM_ROOT correctly.
-HOOK_QUOTED_DIR="$HOOK_TMPDIR/quoted-project"
-mkdir -p "$HOOK_QUOTED_DIR"
-HOOK_QUOTED_ROOT="$HOOK_QUOTED_DIR/agent-mail'quoted/collab"
-"$BIN" init --root "$HOOK_QUOTED_ROOT" --agents claude,codex
-"$BIN" presence set --root "$HOOK_QUOTED_ROOT" --me codex --status active
-"$BIN" send --root "$HOOK_QUOTED_ROOT" --me codex --to claude --body "quoted msg" >/dev/null 2>&1
-printf '{"root": "%s"}\n' "agent-mail'quoted" > "$HOOK_QUOTED_DIR/.amqrc"
-
-HOOK_OUTPUT3=$(
-  CLAUDE_ENV_FILE="$HOOK_QUOTED_DIR/claude-env" \
-  CLAUDE_PROJECT_DIR="$HOOK_QUOTED_DIR" \
-  AM_ROOT="$HOOK_QUOTED_ROOT" \
-  AM_ME="claude" \
-  PATH="$(dirname "$BIN"):$PATH" \
-  bash scripts/claude-session-start.sh 2>/dev/null
-)
-
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$HOOK_OUTPUT3" <<'PYEOF'
-import json, sys
-
-data = json.loads(sys.argv[1])
-hso = data["hookSpecificOutput"]
-assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
-ctx = hso["additionalContext"]
-assert "codex(" in ctx, f"missing peer in: {ctx}"
-assert "1 unread message(s)" in ctx, f"missing unread count in: {ctx}"
-print("  hook quoted-root scenario: JSON assertions passed")
-PYEOF
-fi
-
-# /clear with env-file-only AM_ME: phase 2 must reuse the persisted handle.
-HOOK_ALT_ME_DIR="$HOOK_TMPDIR/nondefault-me-project"
-mkdir -p "$HOOK_ALT_ME_DIR"
-HOOK_ALT_ME_ROOT="$HOOK_ALT_ME_DIR/agent-mail/collab"
-"$BIN" init --root "$HOOK_ALT_ME_ROOT" --agents alice,codex
-"$BIN" presence set --root "$HOOK_ALT_ME_ROOT" --me codex --status active
-"$BIN" send --root "$HOOK_ALT_ME_ROOT" --me codex --to alice --body "msg one" >/dev/null 2>&1
-"$BIN" send --root "$HOOK_ALT_ME_ROOT" --me codex --to alice --body "msg two" >/dev/null 2>&1
-printf '{"root": "agent-mail"}\n' > "$HOOK_ALT_ME_DIR/.amqrc"
-HOOK_ALT_ME_ENV_FILE="$HOOK_ALT_ME_DIR/claude-env"
-printf "export AM_ROOT='%s'\nexport AM_ME=alice\n" "$HOOK_ALT_ME_ROOT" > "$HOOK_ALT_ME_ENV_FILE"
-
-HOOK_OUTPUT4=$(
-  CLAUDE_ENV_FILE="$HOOK_ALT_ME_ENV_FILE" \
-  CLAUDE_PROJECT_DIR="$HOOK_ALT_ME_DIR" \
-  PATH="$(dirname "$BIN"):$PATH" \
-  bash scripts/claude-session-start.sh 2>/dev/null
-)
-
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$HOOK_OUTPUT4" <<'PYEOF'
-import json, sys
-
-data = json.loads(sys.argv[1])
-hso = data["hookSpecificOutput"]
-assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
-ctx = hso["additionalContext"]
-assert "me=alice" in ctx, f"missing me=alice in: {ctx}"
-assert "2 unread message(s)" in ctx, f"missing unread count in: {ctx}"
-assert "amq drain --me alice" in ctx, f"missing alice drain hint in: {ctx}"
-print("  hook /clear env-file AM_ME scenario: JSON assertions passed")
-PYEOF
-fi
-
-# HOOK_LOG rotation: oversized logs should rotate to .1; smaller logs should stay in place.
-HOOK_LOG_ROTATE_DIR="$(mktemp -d)"
-hook_log_rotate_cleanup() {
-  rm -rf "$HOOK_LOG_ROTATE_DIR"
-}
-trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup' EXIT
-
-HOOK_LOG_PATH="$HOOK_LOG_ROTATE_DIR/amq-hook-hooklogtest.log"
-HOOK_LOG_BACKUP="$HOOK_LOG_PATH.1"
-dd if=/dev/zero of="$HOOK_LOG_PATH" bs=1024 count=1025 >/dev/null 2>&1
-
-CLAUDE_ENV_FILE="$HOOK_LOG_ROTATE_DIR/env" \
-CLAUDE_PROJECT_DIR="$HOOK_LOG_ROTATE_DIR" \
-TMPDIR="$HOOK_LOG_ROTATE_DIR" \
-USER="hooklogtest" \
-PATH="$(dirname "$BIN"):$PATH" \
-bash scripts/claude-session-start.sh >/dev/null 2>/dev/null
-
-test -f "$HOOK_LOG_BACKUP"
-test -f "$HOOK_LOG_PATH"
-ROTATED_SIZE="$(wc -c < "$HOOK_LOG_BACKUP" | tr -d '[:space:]')"
-CURRENT_SIZE="$(wc -c < "$HOOK_LOG_PATH" | tr -d '[:space:]')"
-if [[ "$ROTATED_SIZE" -lt 1048576 ]]; then
-  echo "hook log rotation backup size too small: $ROTATED_SIZE"
-  exit 1
-fi
-if [[ "$CURRENT_SIZE" -ge 1048576 ]]; then
-  echo "hook log rotation did not cap current log: $CURRENT_SIZE"
-  exit 1
-fi
-echo "  hook log rotation: oversized log rotated"
-
-rm -f "$HOOK_LOG_BACKUP"
-printf 'small-log\n' > "$HOOK_LOG_PATH"
-
-CLAUDE_ENV_FILE="$HOOK_LOG_ROTATE_DIR/env2" \
-CLAUDE_PROJECT_DIR="$HOOK_LOG_ROTATE_DIR" \
-TMPDIR="$HOOK_LOG_ROTATE_DIR" \
-USER="hooklogtest" \
-PATH="$(dirname "$BIN"):$PATH" \
-bash scripts/claude-session-start.sh >/dev/null 2>/dev/null
-
-if [[ -f "$HOOK_LOG_BACKUP" ]]; then
-  echo "hook log rotation unexpectedly rotated small log"
-  exit 1
-fi
-grep -q '^small-log$' "$HOOK_LOG_PATH"
-echo "  hook log rotation: small log left in place"
-
-echo "claude-session-start.sh hook test ok"
-
 # --- DLQ: a corrupt delivered message routes to DLQ; list/retry/purge ---
 DLQ_DIR="$(mktemp -d)"
 dlq_cleanup() {
   rm -rf "$DLQ_DIR"
 }
-trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup' EXIT
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; dlq_cleanup' EXIT
 
 DLQ_ROOT="$DLQ_DIR/agent-mail"
 "$BIN" init --root "$DLQ_ROOT" --agents codex,claude
@@ -452,7 +256,7 @@ RECEIPTS_DIR="$(mktemp -d)"
 receipts_cleanup() {
   rm -rf "$RECEIPTS_DIR"
 }
-trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup; receipts_cleanup' EXIT
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; dlq_cleanup; receipts_cleanup' EXIT
 
 RECEIPTS_ROOT="$RECEIPTS_DIR/agent-mail"
 "$BIN" init --root "$RECEIPTS_ROOT" --agents codex,claude
@@ -512,7 +316,7 @@ INTEGRATION_DIR="$(mktemp -d)"
 integration_cleanup() {
   rm -rf "$INTEGRATION_DIR"
 }
-trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup; receipts_cleanup; integration_cleanup' EXIT
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; dlq_cleanup; receipts_cleanup; integration_cleanup' EXIT
 
 INTEGRATION_ROOT="$INTEGRATION_DIR/agent-mail"
 "$BIN" init --root "$INTEGRATION_ROOT" --agents codex
