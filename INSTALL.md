@@ -270,7 +270,7 @@ Without npm, copy the canonical skill directory from a clone:
 
 ```sh
 git clone https://github.com/avivsinai/agent-message-queue.git amq-src
-for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli; do
+for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli ~/.gemini/config/skills/amq-cli; do
   if [ -e "$target" ] || [ -L "$target" ]; then
     echo "Skill target already exists: $target (remove it to replace it)" >&2
   else
@@ -278,6 +278,11 @@ for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli; do
   fi
 done
 ```
+
+agy (Antigravity CLI) reads `~/.gemini/config/skills` and the project
+`.agents/skills`; the `~/.gemini/config/skills/amq-cli` target above covers it.
+`npx skills add` does not: its Antigravity CLI target writes
+`~/.gemini/antigravity-cli/skills`, which agy does not read.
 
 Restart the agent after installing a skill.
 

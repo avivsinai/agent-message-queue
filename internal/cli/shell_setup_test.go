@@ -6,7 +6,7 @@ import (
 )
 
 func TestShellSnippetPosixDefaults(t *testing.T) {
-	snippet := posixSnippet(defaultClaudeAlias, defaultCodexAlias, defaultGrokAlias)
+	snippet := posixSnippet(defaultClaudeAlias, defaultCodexAlias, defaultGrokAlias, defaultAgyAlias)
 	if !strings.Contains(snippet, "function amc()") {
 		t.Error("posix snippet missing amc function")
 	}
@@ -16,13 +16,16 @@ func TestShellSnippetPosixDefaults(t *testing.T) {
 	if !strings.Contains(snippet, "function amg()") {
 		t.Error("posix snippet missing amg function")
 	}
+	if !strings.Contains(snippet, "function amy()") || !strings.Contains(snippet, `amq coop exec "${session_args[@]}" agy "$@"`) {
+		t.Error("posix snippet missing amy function for agy")
+	}
 	if !strings.Contains(snippet, "--session") {
 		t.Error("posix snippet missing --session flag")
 	}
 }
 
 func TestShellSnippetPosixGrokIsBarePassthrough(t *testing.T) {
-	snippet := posixSnippet(defaultClaudeAlias, defaultCodexAlias, defaultGrokAlias)
+	snippet := posixSnippet(defaultClaudeAlias, defaultCodexAlias, defaultGrokAlias, defaultAgyAlias)
 	if strings.Contains(snippet, "grok -- --dangerously-bypass-approvals-and-sandbox") {
 		t.Error("grok function should not bake in a permission-bypass flag")
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -23,6 +24,25 @@ func TestCheckSkillCodexFoundUnderSharedAgentsDir(t *testing.T) {
 	if got.Name != "codex skill" || got.Status != "ok" || got.Message != "installed" {
 		t.Fatalf("codex skill under ~/.agents/skills = %#v; want status=ok message=installed", got)
 	}
+}
+
+func TestSkillChecksAgyFoundUnderGeminiConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", home)
+	writeSkillFile(t, filepath.Join(home, ".gemini", "config", "skills", "amq-cli", "SKILL.md"))
+	lookPathAgy = func() bool { return true }
+	t.Cleanup(func() { lookPathAgy = func() bool { _, err := exec.LookPath("agy"); return err == nil } })
+
+	for _, c := range skillChecks() {
+		if c.Name == "agy skill" {
+			if c.Status != "ok" {
+				t.Fatalf("agy skill = %#v; want ok", c)
+			}
+			return
+		}
+	}
+	t.Fatal("no agy skill row")
 }
 
 func writeSkillFile(t *testing.T, path string) {

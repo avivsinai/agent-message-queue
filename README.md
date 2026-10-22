@@ -62,7 +62,8 @@ npx skills add avivsinai/agent-message-queue -g -y
 ```
 
 Restart the agents after installing. [Other skill installation methods](INSTALL.md)
-are available if you do not use npm.
+are available if you do not use npm. agy (Antigravity CLI) reads skills from
+`~/.gemini/config/skills`, so copy the skill there as INSTALL.md shows.
 
 ### 3. Set up the project
 

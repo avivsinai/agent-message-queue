@@ -12,6 +12,7 @@ const (
 	defaultClaudeAlias = "amc"
 	defaultCodexAlias  = "amx"
 	defaultGrokAlias   = "amg"
+	defaultAgyAlias    = "amy"
 )
 
 func runShellSetup(args []string) error {
@@ -20,25 +21,28 @@ func runShellSetup(args []string) error {
 	claudeAliasFlag := fs.String("claude-alias", defaultClaudeAlias, "Function name for Claude Code shortcut")
 	codexAliasFlag := fs.String("codex-alias", defaultCodexAlias, "Function name for Codex CLI shortcut")
 	grokAliasFlag := fs.String("grok-alias", defaultGrokAlias, "Function name for Grok CLI shortcut")
+	agyAliasFlag := fs.String("agy-alias", defaultAgyAlias, "Function name for Antigravity CLI (agy) shortcut")
 
 	usage := usageWithFlags(fs, "amq shell-setup [options]",
 		"Outputs shell aliases for quick co-op session management.",
 		"",
-		"Defines three functions (names customizable via flags):",
+		"Defines four functions (names customizable via flags):",
 		fmt.Sprintf("  %s [session] [flags]  → amq coop exec [--session <s>] claude [flags]", defaultClaudeAlias),
 		fmt.Sprintf("  %s [session] [flags]  → amq coop exec [--session <s>] codex -- --dangerously-bypass-approvals-and-sandbox [flags]", defaultCodexAlias),
 		fmt.Sprintf("  %s [session] [flags]  → amq coop exec [--session <s>] grok [flags]", defaultGrokAlias),
+		fmt.Sprintf("  %s [session] [flags]  → amq coop exec [--session <s>] agy [flags]", defaultAgyAlias),
 		"",
 		"Usage:",
 		"  eval \"$(amq shell-setup)\"           # Add to current shell (default names)",
 		"  amq shell-setup --shell fish         # Fish shell output",
-		"  amq shell-setup --claude-alias cc --codex-alias cx --grok-alias gk  # Custom names",
+		"  amq shell-setup --claude-alias cc --codex-alias cx --grok-alias gk --agy-alias ag  # Custom names",
 		"",
 		"Examples after setup:",
 		fmt.Sprintf("  %s                    # Start Claude Code (default session)", defaultClaudeAlias),
 		fmt.Sprintf("  %s feature-x          # Isolated session for feature-x", defaultClaudeAlias),
 		fmt.Sprintf("  %s feature-x          # Codex in same isolated session", defaultCodexAlias),
 		fmt.Sprintf("  %s feature-x          # Grok in same isolated session", defaultGrokAlias),
+		fmt.Sprintf("  %s feature-x          # agy in same isolated session", defaultAgyAlias),
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -55,6 +59,7 @@ func runShellSetup(args []string) error {
 	claudeAlias := *claudeAliasFlag
 	codexAlias := *codexAliasFlag
 	grokAlias := *grokAliasFlag
+	agyAlias := *agyAliasFlag
 
 	if err := validateAliasName(claudeAlias); err != nil {
 		return err
@@ -65,8 +70,11 @@ func runShellSetup(args []string) error {
 	if err := validateAliasName(grokAlias); err != nil {
 		return err
 	}
+	if err := validateAliasName(agyAlias); err != nil {
+		return err
+	}
 
-	snippet := shellSnippet(shell, claudeAlias, codexAlias, grokAlias)
+	snippet := shellSnippet(shell, claudeAlias, codexAlias, grokAlias, agyAlias)
 	return writeStdout("%s", snippet)
 }
 
@@ -83,16 +91,16 @@ func validateAliasName(name string) error {
 	return nil
 }
 
-func shellSnippet(shell, claudeAlias, codexAlias, grokAlias string) string {
+func shellSnippet(shell, claudeAlias, codexAlias, grokAlias, agyAlias string) string {
 	switch shell {
 	case "fish":
-		return fishSnippet(claudeAlias, codexAlias, grokAlias)
+		return fishSnippet(claudeAlias, codexAlias, grokAlias, agyAlias)
 	default:
-		return posixSnippet(claudeAlias, codexAlias, grokAlias)
+		return posixSnippet(claudeAlias, codexAlias, grokAlias, agyAlias)
 	}
 }
 
-func posixSnippet(claudeAlias, codexAlias, grokAlias string) string {
+func posixSnippet(claudeAlias, codexAlias, grokAlias, agyAlias string) string {
 	return fmt.Sprintf(`# AMQ co-op aliases (added by amq shell-setup)
 function %s() {
   local session_args=()
@@ -118,10 +126,18 @@ function %s() {
   fi
   amq coop exec "${session_args[@]}" grok "$@"
 }
-`, claudeAlias, codexAlias, grokAlias)
+function %s() {
+  local session_args=()
+  if [ -n "${1:-}" ] && [ "${1#-}" = "$1" ]; then
+    session_args=(--session "$1")
+    shift
+  fi
+  amq coop exec "${session_args[@]}" agy "$@"
+}
+`, claudeAlias, codexAlias, grokAlias, agyAlias)
 }
 
-func fishSnippet(claudeAlias, codexAlias, grokAlias string) string {
+func fishSnippet(claudeAlias, codexAlias, grokAlias, agyAlias string) string {
 	return fmt.Sprintf(`# AMQ co-op aliases (added by amq shell-setup)
 function %s
   set -l session_args
@@ -147,7 +163,15 @@ function %s
   end
   amq coop exec $session_args grok $argv
 end
-`, claudeAlias, codexAlias, grokAlias)
+function %s
+  set -l session_args
+  if test (count $argv) -gt 0; and not string match -q -- '-*' $argv[1]
+    set session_args --session $argv[1]
+    set -e argv[1]
+  end
+  amq coop exec $session_args agy $argv
+end
+`, claudeAlias, codexAlias, grokAlias, agyAlias)
 }
 
 func detectShell() string {
