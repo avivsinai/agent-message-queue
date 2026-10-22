@@ -88,7 +88,8 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 		{
 			// Design review of the thread open contract: the default thread
 			// name repeats in every session, so a reference-free decision in
-			// one session must not close work in another.
+			// one session must not close work in another. The S2 decision
+			// closes its one exact-participant candidate.
 			name: "reference-free decision closes only its own session",
 			messages: []message{
 				{name: "t1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
@@ -99,7 +100,9 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 		},
 		{
 			// Pro review finding 2 (trace T1): a second unreferenced todo in
-			// the same thread was suppressed as a nudge of the first.
+			// the same thread was suppressed as a nudge of the first. Seen on a
+			// copy of a live queue: unreferenced review requests folded into an
+			// older one and vanished when it was answered.
 			name: "two unreferenced todos are two obligations",
 			messages: []message{
 				{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
