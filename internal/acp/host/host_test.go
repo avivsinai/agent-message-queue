@@ -669,9 +669,13 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 	root := newRoot(t)
 	agent := &fakeAgent{stall: true, answer: make(chan struct{}), resume: make(chan struct{}), cancelSent: make(chan struct{})}
 	startHost(t, root, agent)
-	var resumed sync.Once
+	var answered, resumed sync.Once
+	answer := func() { answered.Do(func() { close(agent.answer) }) }
 	resume := func() { resumed.Do(func() { close(agent.resume) }) }
-	t.Cleanup(resume) // runs before the host stops
+	// Both run before the host stops, so a failed assertion never leaves
+	// the fake agent blocked.
+	t.Cleanup(resume)
+	t.Cleanup(answer)
 
 	publishRequest(t, root, testRef, "a long task")
 	waitEvent(t, root, testRef, "started")
@@ -694,7 +698,7 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 
 	// The prompt ends on its own while the cancel write is still blocked:
 	// the turn must not end, so no later turn can start under the cancel.
-	close(agent.answer)
+	answer()
 	events := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "events", testRef+".jsonl")
 	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		if data, _ := os.ReadFile(events); strings.Contains(string(data), `"event":"completed"`) {
