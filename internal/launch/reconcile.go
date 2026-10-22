@@ -541,7 +541,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	}
 	for i := range planned {
 		if planned[i].write {
-			if err := WriteConversation(request.Root, lease, planned[i].record); err != nil {
+			record, err := keepPromotedCapture(request.Root, planned[i].record)
+			if err != nil {
+				return result, err
+			}
+			if err := WriteConversation(request.Root, lease, record); err != nil {
 				return result, err
 			}
 		}
@@ -799,11 +803,6 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, create CreateResult, backendNa
 			agent.record.State, agent.record.Identity, agent.record.Reason = capture.State, capture.Identity, capture.Reason
 			if capture.State == CapturePending {
 				agent.record.ExecutionEvidence = nil
-				record, keepErr := keepPromotedCapture(root, agent.record)
-				if keepErr != nil {
-					return nil, keepErr
-				}
-				agent.record = record
 			} else if !capture.CanPersist() {
 				result.Agents[agent.index].Code = 6
 				result.Agents[agent.index].ConversationDisposition = DispositionDegraded
@@ -902,7 +901,7 @@ func removeExecutionTickets(root *fsq.DeliveryRoot, lease *Lease, planned []plan
 
 // keepPromotedCapture returns the stored record instead of a pending one when
 // the capture receiver already promoted the same launch generation, so a
-// recovery write never demotes a captured identity.
+// conversation write never demotes a captured identity.
 func keepPromotedCapture(root *fsq.DeliveryRoot, pending ConversationRecord) (ConversationRecord, error) {
 	if pending.State != CapturePending {
 		return pending, nil

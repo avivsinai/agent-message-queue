@@ -203,11 +203,18 @@ func codexTopLevelThread(codexHome, threadID, cwd string) (bool, error) {
 	var matches []string
 	for _, offset := range []int{-1, 0, 1} {
 		dir := filepath.Join(codexHome, "sessions", created.AddDate(0, 0, offset).Format("2006/01/02"))
-		found, err := filepath.Glob(filepath.Join(dir, "rollout-*-"+threadID+".jsonl"))
-		if err != nil {
-			return false, err
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
-		matches = append(matches, found...)
+		if err != nil {
+			return false, fmt.Errorf("read codex sessions: %w", err)
+		}
+		for _, entry := range entries {
+			if name := entry.Name(); strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, "-"+threadID+".jsonl") {
+				matches = append(matches, filepath.Join(dir, name))
+			}
+		}
 	}
 	if len(matches) != 1 {
 		return false, nil

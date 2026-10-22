@@ -369,6 +369,20 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	}
 }
 
+// #1174 review: a CODEX_HOME whose path holds glob syntax, such as
+// "[codex]", must still find the seat's rollout.
+func TestRecordCodexNotifyFindsRolloutUnderGlobSyntaxHome(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "98989898-9898-4989-8989-989898989898"
+	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	codexHome := filepath.Join(t.TempDir(), "[codex]")
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
+	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || result.NotTopLevel || result.ConversationID != testConversationID {
+		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
+	}
+}
+
 func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, nonce string) ExecutionTicket {
 	t.Helper()
 	notify, err := codexNotifyOverride(PlanRequest{
