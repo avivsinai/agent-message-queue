@@ -184,12 +184,17 @@ func (w *wsConn) writeTextBounded(payload []byte) error {
 // writeTextCtx sends one masked text frame bounded by ctx in BOTH phases:
 // acquiring the writer slot (select on ctx.Done) and the write itself
 // (deadline installed+cleared under the slot, so concurrent writers cannot
-// clobber each other's deadline).
+// clobber each other's deadline). A ctx that ended while the slot was being
+// acquired writes nothing: select picks at random between a free slot and a
+// done ctx, and a send deadline must hold at the moment the bytes go out.
 func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
 	if err := w.lockWriteCtx(ctx); err != nil {
 		return err
 	}
 	defer w.unlockWrite()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dl, ok := ctx.Deadline()
 	if ok {
 		_ = w.conn.SetWriteDeadline(dl)

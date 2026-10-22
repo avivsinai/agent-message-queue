@@ -118,10 +118,11 @@ func TestLostStateDuringTurnStartDoesNotRestore(t *testing.T) {
 
 // Regression: #767, in the turn/start
 // continuation, the terminal check must run BEFORE the lostStateGen guard.
-// A terminal state (r.state.Terminal() || a.terminalTurns hit) is a
-// POSITIVE fact that restores nothing — it only reports what already
-// happened — so a notLoaded/systemError processed while the RPC was in
-// flight cannot invalidate it. Ordered the other way (the pre-bead shape),
+// A confirmed terminal run is a POSITIVE fact that restores nothing — it
+// only reports what already happened — so a notLoaded/systemError processed
+// while the RPC was in flight cannot invalidate it. The run is confirmed by
+// its own userMessage item: a terminal-turn memo alone does not admit
+// (agent-message-queue-611.68). Ordered the other way (the pre-bead shape),
 // a lost-state notification in flight downgrades a known-good completed
 // outcome to uncertain: the continuation returns a bare error and the
 // endpoint re-records evidence for a run that was already proven finished.
@@ -164,13 +165,10 @@ func TestTerminalOutcomeSurvivesLostStateDuringTurnStart(t *testing.T) {
 	}()
 	<-srv.calls // turn/start arrives; hook now holds the response
 
-	// 1. Make the run terminal BEFORE the RPC response is released: the read
-	// pump records the terminal memo for turn "u1" (the turn/start response's
-	// turn id — same harness as the regression above). The run's own state
-	// is NOT terminal here: r.turnID is bound only when the continuation
-	// resumes, so the turn/completed handler cannot reach it via byTurn —
-	// exactly the missed-confirmation shape the terminalTurns memo exists
-	// for. The continuation's terminal check consults this memo.
+	// 1. Make the run confirmed and terminal BEFORE the RPC response is
+	// released: our userMessage item binds turn "u1" (the turn/start
+	// response's turn id) and its turn/completed reaches the run via byTurn.
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
 	waitMemoForID(t, att, "u1")
 
