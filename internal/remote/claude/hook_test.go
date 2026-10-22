@@ -115,9 +115,8 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 		t.Fatalf("Stop chain = %+v, want one group with one hook", groups)
 	}
 	cmd := groups[0].Hooks[0].Command
-	want := stopHookMarker + `'/opt/amq bin/amq-remote' claude stop-hook`
-	if cmd != want {
-		t.Fatalf("command = %q, want %q", cmd, want)
+	if !strings.HasPrefix(cmd, stopHookMarker) || !strings.HasSuffix(cmd, ` || exec '/opt/amq bin/amq-remote' claude stop-hook`) {
+		t.Fatalf("command = %q, want the marker first and the quoted binary exec'd last", cmd)
 	}
 	// A second install of the same hook is a no-op.
 	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
@@ -136,7 +135,7 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 		t.Fatal(err)
 	}
 	if groups := s.Hooks["Stop"]; len(groups) != 1 || len(groups[0].Hooks) != 1 ||
-		groups[0].Hooks[0].Command != stopHookCommand("/opt/homebrew/bin/amq-remote") {
+		groups[0].Hooks[0].Command != stopHookCommand(home, "/opt/homebrew/bin/amq-remote") {
 		t.Fatalf("reinstall from another binary = %+v, want one hook on the new binary", groups)
 	}
 }
@@ -198,7 +197,7 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 func TestUninstallFromMixedGroupKeepsForeignHook(t *testing.T) {
 	home, _ := installSettings(t, "")
 	raw, _ := os.ReadFile(settingsPath(home))
-	mixed := strings.Replace(string(raw), `,"timeout":10}]`, `,"timeout":10},{"type":"command","command":"echo operator"}]`, 1)
+	mixed := strings.Replace(string(raw), `,"timeout":5}]`, `,"timeout":5},{"type":"command","command":"echo operator"}]`, 1)
 	if mixed == string(raw) {
 		t.Fatalf("setup: could not add a foreign hook to:\n%s", raw)
 	}

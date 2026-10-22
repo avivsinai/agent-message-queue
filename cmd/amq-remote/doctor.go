@@ -125,6 +125,10 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			// is reported, not failed.
 			report["claude_stop_hook"] = "~/.claude/settings.json holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
+		if serr == nil && state != claude.StopHookMissing {
+			form, _ := claude.StopHookForm(home)
+			hookFormFinding(form, s.TargetID, "Stop", "install-stop-hook", fail, note)
+		}
 		break
 	}
 	// A Codex target with approve whose thread runs Codex's automatic
@@ -178,6 +182,16 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 				report["claude_approval_pin_warnings"] = warns
 			}
 		}
+		if serr == nil && state != claude.StopHookMissing {
+			form, _ := claude.PermissionHookForm(home)
+			hookFormFinding(form, s.TargetID, "PermissionRequest", "install-approval-hook", fail, note)
+			// Records of a crashed serve hold the hook's gate open, or make
+			// a prompt typed in the terminal wait, until a bind sweeps them.
+			if stale := claude.StaleApprovalRecords(home); len(stale) > 0 {
+				note("approval_records", s.TargetID, fmt.Sprintf("%d approval record(s) of a process that is gone: %s", len(stale), strings.Join(stale, ", ")),
+					"they are removed when an attachment with approve binds a session; restart `amq-remote serve` to remove them now")
+			}
+		}
 		break
 	}
 	// Body identity: per-session body keys, attestations, expiry
@@ -199,6 +213,20 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["notes"] = notes
 	}
 	return finish()
+}
+
+// hookFormFinding reports an installed Claude hook that is not the form its
+// installer writes now. An ungated hook still works and costs an amq-remote
+// start at every event in every session, so it is advice. A stale gate can
+// skip a state the receiver reads, so it fails.
+func hookFormFinding(form, target, event, installer string, fail, note func(boundary, subject, detail, remedy string)) {
+	remedy := "run `amq-remote claude " + installer + "`"
+	switch form {
+	case claude.HookFormUngated:
+		note("hook_form", target, "the "+event+" hook is an older form that starts amq-remote in every Claude session on this machine", remedy)
+	case claude.HookFormStale:
+		fail("native_capability", target, "the "+event+" hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", remedy)
+	}
 }
 
 // doctorRequestStore counts the request records and fails each one that

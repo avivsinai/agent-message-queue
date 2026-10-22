@@ -20,6 +20,8 @@ package claude
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,17 +150,22 @@ func Attach(cfg config) (*Attachment, error) {
 	if !protocol.ValidTargetID(target) {
 		return nil, fmt.Errorf("claude adapter: derived target id %q is not protocol-addressable (opaque grammar); set an explicit target in the manifest", target)
 	}
+	var owner [8]byte
+	if _, err := rand.Read(owner[:]); err != nil {
+		return nil, fmt.Errorf("claude adapter: %w", err)
+	}
 	att := &Attachment{
-		target:       target,
-		cfg:          cfg,
-		home:         home,
-		boundSession: reg.SessionID,
-		allowFactory: allowFactory,
-		runs:         map[requests.Key]*runRecord{},
-		cancelIntent: map[requests.Key]bool{},
-		recoverFrom:  map[requests.Key]recoverScan{},
-		released:     map[requests.Key]struct{}{},
-		ctx:          context.Background(),
+		target:        target,
+		cfg:           cfg,
+		home:          home,
+		boundSession:  reg.SessionID,
+		inflightOwner: hex.EncodeToString(owner[:]),
+		allowFactory:  allowFactory,
+		runs:          map[requests.Key]*runRecord{},
+		cancelIntent:  map[requests.Key]bool{},
+		recoverFrom:   map[requests.Key]recoverScan{},
+		released:      map[requests.Key]struct{}{},
+		ctx:           context.Background(),
 
 		releasedOutcomes: map[requests.Key]map[string]protocol.Resolution{},
 	}
@@ -167,6 +174,9 @@ func Attach(cfg config) (*Attachment, error) {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
 	att.boundToken = token
+	if cfg.approvals() {
+		sweepApprovals(home)
+	}
 	return att, nil
 }
 
@@ -240,6 +250,9 @@ type Attachment struct {
 	boundSession string
 	// boundToken is this attachment's sentinel file under amq-bound.
 	boundToken string
+	// inflightOwner names this attachment's inflight records; one process
+	// can replace its attachment, so the pid alone cannot.
+	inflightOwner string
 	// cur is the poller's transcript position; owner is the run that owns
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
@@ -396,10 +409,14 @@ func (a *Attachment) now() time.Time {
 // trackBoundSession publishes sessionID for the Stop-hook receiver when the
 // live registry session changes. File IO stays under a.mu: the files are
 // tiny and the unsubscribe path clears the same field under that lock.
+//
+// With DM approvals it then drops this attachment's inflight records of the
+// old session and sweeps dead records, outside a.mu: the sweep waits on a
+// lock other processes hold.
 func (a *Attachment) trackBoundSession(sessionID string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.closed || a.boundSession == sessionID {
+		a.mu.Unlock()
 		return
 	}
 	prev, prevToken := a.boundSession, a.boundToken
@@ -408,6 +425,11 @@ func (a *Attachment) trackBoundSession(sessionID string) {
 	a.boundToken = token
 	if prev != "" {
 		unbindStopSession(a.home, prev, prevToken)
+	}
+	a.mu.Unlock()
+	if a.cfg.approvals() {
+		removeOwnerInflight(a.home, prev, a.inflightOwner)
+		sweepApprovals(a.home)
 	}
 }
 
@@ -494,6 +516,7 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 		a.mu.Unlock()
 		if sid != "" {
 			unbindStopSession(a.home, sid, token)
+			removeOwnerInflight(a.home, sid, a.inflightOwner)
 		}
 		if stop != nil {
 			stop()

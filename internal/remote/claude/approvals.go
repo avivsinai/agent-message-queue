@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -812,24 +814,16 @@ func removeApprovalFiles(home, sessionID, promptID string, ids []string) {
 		if !interactionIDRe.MatchString(id) {
 			continue
 		}
-		for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
-			removeRegular(filepath.Join(dir, sub, id+".json"))
-		}
-		for _, sub := range []string{"rejected", "verdicts"} {
-			if entries, err := os.ReadDir(filepath.Join(dir, sub)); err == nil {
-				for _, e := range entries {
-					if strings.HasPrefix(e.Name(), id+"-") {
-						removeRegular(filepath.Join(dir, sub, e.Name()))
-					}
-				}
-			}
+		for _, path := range interactionFiles(dir, id) {
+			removeRegular(path)
 		}
 	}
 }
 
 // claimPromptLocked follows the prompt of a new turn and, when the turn is
-// an AMQ run's own delivery, records the run's prompt id and queues its
-// runs/<prompt_id> marker. Caller holds a.mu and has applied e.
+// an AMQ run's own delivery, records the run's prompt id; the poll queues
+// its runs/<prompt_id> marker (queueRunMarkersLocked). Caller holds a.mu
+// and has applied e.
 func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 	a.turnPrompt = e.PromptID
 	rec := a.runByMsgIDLocked(e.MsgID)
@@ -837,19 +831,143 @@ func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 		return
 	}
 	rec.promptID, rec.sessionID = e.PromptID, sessionID
+}
+
+// queueRunMarkersLocked queues the runs/<prompt_id> write of every claimed
+// run whose marker is not written yet. Only after the marker is written
+// does the op remove the run's inflight record: the hook rechecks the
+// marker after it finds no inflight record, so it never misses a run that
+// left inflight. A failed write is tried again next poll. Caller holds a.mu.
+func (a *Attachment) queueRunMarkersLocked() {
 	if !a.cfg.approvals() {
 		return
 	}
-	home, promptID, msgID := a.home, e.PromptID, rec.msgID
-	a.pendingOps = append(a.pendingOps, func() { _ = writeRunMarker(home, sessionID, promptID, msgID) })
+	for _, rec := range a.runs {
+		if rec.terminal || rec.promptID == "" || rec.marked.Load() {
+			continue
+		}
+		rec, home, owner := rec, a.home, a.inflightOwner
+		sid, promptID, inflightSID := rec.sessionID, rec.promptID, rec.inflightSID
+		m := runMarker{MsgID: rec.msgID, Owner: owner, PID: os.Getpid()}
+		a.pendingOps = append(a.pendingOps, func() {
+			if writeRunMarker(home, sid, promptID, m) != nil {
+				return
+			}
+			rec.marked.Store(true)
+			removeInflight(home, inflightSID, owner, m.MsgID)
+		})
+	}
 }
 
-// queueRunEndLocked queues the removal of an ended run's prompt marker, so
-// the hook decides nothing more for that prompt. Caller holds a.mu.
+// queueRunEndLocked queues the removal of an ended run's prompt marker and
+// then of its inflight record, claimed or not, so the hook decides nothing
+// more for that prompt. Caller holds a.mu.
 func (a *Attachment) queueRunEndLocked(rec *runRecord) {
 	sessionID, home, promptID := rec.sessionID, a.home, rec.promptID
-	if sessionID == "" || promptID == "" {
+	if sessionID != "" && promptID != "" {
+		a.pendingOps = append(a.pendingOps, func() { removeRunMarker(home, sessionID, promptID) })
+	}
+	if sid, owner, msgID := rec.inflightSID, a.inflightOwner, rec.msgID; sid != "" {
+		a.pendingOps = append(a.pendingOps, func() { removeInflight(home, sid, owner, msgID) })
+	}
+}
+
+// inflightClaimWindow bounds how long the hook treats a sent run as on its
+// way to its prompt: within it, a prompt with no run marker waits up to
+// markerGrace for one. It is advisory. No transport deadline bounds when
+// Claude takes the prompt, so a run claimed later than this gets no Buzz
+// approval for a tool call raised before its marker is written.
+const inflightClaimWindow = 2 * time.Minute
+
+// inflightRecord is inflight/<owner>-<msg_id>: an AMQ run whose frame is
+// being sent or was sent to the session and whose prompt is not claimed.
+type inflightRecord struct {
+	Owner     string `json:"owner"`
+	PID       int    `json:"pid"`
+	SessionID string `json:"sid"`
+	MsgID     string `json:"msg_id"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// inflightNameRe bounds an inflight record name: a hex owner token and a
+// frame msg_id.
+var inflightNameRe = regexp.MustCompile(`^[0-9a-f]{16}-[0-9a-f-]{36}$`)
+
+// writeInflight records r, under the lifecycle lock, before its frame is
+// sent. A record of the same run from an earlier attempt is replaced.
+func writeInflight(home string, r inflightRecord) error {
+	name := r.Owner + "-" + r.MsgID
+	if !inflightNameRe.MatchString(name) {
+		return fmt.Errorf("inflight record %q is not a file-safe name", name)
+	}
+	release, err := lockLifecycle(home)
+	if err != nil {
+		return err
+	}
+	defer release()
+	dir, err := ensureApproveSubdir(home, r.SessionID, "inflight")
+	if err != nil {
+		return err
+	}
+	if err := createNewJSON(dir, name, r); !errors.Is(err, errFileExists) {
+		return err
+	}
+	return replaceJSON(dir, name, r)
+}
+
+// removeInflight drops one run's inflight record.
+func removeInflight(home, sessionID, owner, msgID string) {
+	name := owner + "-" + msgID
+	if !sessionIDRe.MatchString(sessionID) || !inflightNameRe.MatchString(name) || !noFollowSupported {
 		return
 	}
-	a.pendingOps = append(a.pendingOps, func() { removeRunMarker(home, sessionID, promptID) })
+	removeRegular(filepath.Join(approveDir(home, sessionID), "inflight", name))
+}
+
+// removeOwnerInflight drops every inflight record of one attachment owner
+// in the session.
+func removeOwnerInflight(home, sessionID, owner string) {
+	if !sessionIDRe.MatchString(sessionID) || owner == "" || !noFollowSupported {
+		return
+	}
+	dir := filepath.Join(approveDir(home, sessionID), "inflight")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), owner+"-") {
+			removeRegular(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// readInflight reads the inflight record at path, named name, and reports
+// whether it is live: it parses, its name is its owner and msg_id, it has
+// not expired, and its process is alive or cannot be decided.
+func readInflight(path, name string, now time.Time) (inflightRecord, bool) {
+	var r inflightRecord
+	if readApprovalJSON(path, &r) != nil || name != r.Owner+"-"+r.MsgID {
+		return r, false
+	}
+	expires, err := protocol.ParseTime(r.ExpiresAt)
+	return r, err == nil && now.Before(expires) && !hookDead(r.PID)
+}
+
+// inflightLive reports whether the session has a live inflight record.
+func inflightLive(home, sessionID string, now time.Time) bool {
+	dir := filepath.Join(approveDir(home, sessionID), "inflight")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if _, live := readInflight(filepath.Join(dir, e.Name()), e.Name(), now); live {
+			return true
+		}
+	}
+	return false
 }
