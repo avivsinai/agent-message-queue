@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -260,6 +261,108 @@ func committedRunnableApplyFixture(t *testing.T) (ApplyRequest, ApplyDependencie
 		request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
 	}
 	return request, dependencies, backend
+}
+
+// #1157: no backend reports Codex identity at create, so Apply must leave the
+// seat pending for its notify receiver instead of finalizing it stale. The
+// receiver then binds the seat's thread although codex-tui 0.163.0 also sends
+// notify, before or after it, for a title-generation thread that writes no
+// rollout, and a later Apply resumes that thread.
+func TestApplyCodexSeatIsCapturedByNotifyAndResumes(t *testing.T) {
+	const titleThread = "018f1f2a-bc35-7000-8000-000000000002"
+	titleNotify := func(cwd string) []byte {
+		return []byte(fmt.Sprintf(`{"type":"agent-turn-complete","thread-id":%q,"turn-id":"turn-title","cwd":%q,"client":"codex-tui","input-messages":["Generate a concise, single-line task title of at most 36 characters.\n\nUser prompt:\nreply with ok"],"last-assistant-message":"{\"title\":\"Reply ok\"}"}`, titleThread, cwd))
+	}
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	for _, path := range []string{project, filepath.Join(root, "mail")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, executable := testExecutable(t, CodexProvider)
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	store, err := OpenTrustStore(filepath.Join(root, "state"), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := PrepareRequest{
+		Target:   PrepareTarget{ProjectRoot: project, SessionRoot: filepath.Join(root, "mail", "collab"), Session: "collab"},
+		Launcher: "test", IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'a'}, 64)),
+		Participants: []PrepareParticipant{{Handle: "codex", Provider: CodexProvider, Executable: executable, Runnable: true, Cwd: project, ResumePolicy: ResumeEnabled}},
+	}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{"test": backend}, Preferences: []string{"test"}, TrustStore: store,
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return reconcileAdapter{name: provider, mode: AdapterModeCapture, available: true}
+		},
+		HostIdentity: "host:test",
+	}}
+	apply := func() (ApplyResult, *fsq.DeliveryRoot, ExecutionTicket) {
+		t.Helper()
+		prepared, err := Prepare(context.Background(), prepare, dependencies.PrepareDependencies)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := ApplyRequest{Prepare: prepare, SubjectDigest: prepared.SubjectDigest}
+		for _, action := range prepared.RequiredActions {
+			request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+		}
+		result, err := Apply(context.Background(), request, dependencies)
+		if err != nil || result.Outcome != ApplyOutcomeApplied {
+			t.Fatalf("Apply = %#v, %v", result, err)
+		}
+		sessionRoot := prepare.Target.SessionRoot
+		identity, err := fsq.SnapshotDeliveryRoot(sessionRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deliveryRoot, err := fsq.OpenDeliveryRoot(sessionRoot, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = deliveryRoot.Close() })
+		ticket, err := LoadExecutionTicket(deliveryRoot, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The pane's coop exec acknowledges the spawn before Codex runs.
+		if _, err := PrepareExecution(deliveryRoot, "codex", ticket.LaunchNonce, ExecutionEnvelope{
+			Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+			ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return result, deliveryRoot, ticket
+	}
+
+	_, deliveryRoot, ticket := apply()
+	record, err := LoadConversation(deliveryRoot, "codex")
+	if err != nil || record.State != CapturePending || record.Reason != "" {
+		t.Fatalf("record after Apply = %#v, %v", record, err)
+	}
+	codexHome := t.TempDir()
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
+	for _, raw := range [][]byte{titleNotify(ticket.Cwd), codexNotifyTestPayload(testConversationID, ticket.Cwd), titleNotify(ticket.Cwd)} {
+		if _, err := RecordCodexNotify(deliveryRoot, "codex", ticket.AMQExecutable, codexHome, raw); err != nil {
+			t.Fatalf("notify %s: %v", raw, err)
+		}
+	}
+	record, err = LoadConversation(deliveryRoot, "codex")
+	if err != nil || record.State != CaptureReady || record.Identity != (ConversationIdentity{Provider: CodexProvider, ID: testConversationID}) ||
+		record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name {
+		t.Fatalf("record after notify = %#v, %v", record, err)
+	}
+
+	backend.resourceUp = false
+	_, deliveryRoot, ticket = apply()
+	if ticket.ConversationID != testConversationID {
+		t.Fatalf("relaunch ticket = %#v, want resume of %s", ticket, testConversationID)
+	}
+	again, err := RecordCodexNotify(deliveryRoot, "codex", ticket.AMQExecutable, codexHome, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || !again.AlreadyReady {
+		t.Fatalf("resumed notify = %#v, %v", again, err)
+	}
 }
 
 func TestOnLiveOmittedMatchesV061Apply(t *testing.T) {

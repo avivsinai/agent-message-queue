@@ -516,7 +516,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if journalActive && journal.Phase == JournalCreated {
 			candidate = journal.Binding
 		} else {
-			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, request.CallerContext, planned, &result, joinBinding)
+			candidate, err = finalizeCreatedState(request.Root, create, backendName, detect, nonce, request.CallerContext, planned, &result, joinBinding)
 			if err != nil {
 				return result, err
 			}
@@ -541,7 +541,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	}
 	for i := range planned {
 		if planned[i].write {
-			if err := WriteConversation(request.Root, lease, planned[i].record); err != nil {
+			record, err := keepPromotedCapture(request.Root, planned[i].record)
+			if err != nil {
+				return result, err
+			}
+			if err := WriteConversation(request.Root, lease, record); err != nil {
 				return result, err
 			}
 		}
@@ -712,10 +716,7 @@ func recoverJournal(request ReconcileRequest, journal LaunchJournal, binding Bin
 			result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_identity_mismatch"
 			return journal.Backend, backend, detect, CreateResult{}, false, nil
 		}
-		create := CreateResult{
-			Outcome: OutcomeCreated, Profile: journal.Profile, Binding: reclaim.Binding,
-			CaptureEvidence: reclaim.CaptureEvidence,
-		}
+		create := CreateResult{Outcome: OutcomeCreated, Profile: journal.Profile, Binding: reclaim.Binding}
 		return journal.Backend, backend, detect, create, true, nil
 	case ReclaimIncomplete:
 		result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_incomplete"
@@ -756,7 +757,7 @@ func revalidateAdoption(request ReconcileRequest, backend Backend, journal Launc
 	return nil
 }
 
-func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, callerContext map[string]string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
+func finalizeCreatedState(root *fsq.DeliveryRoot, create CreateResult, backendName string, detect DetectResult, nonce string, callerContext map[string]string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
 	created := create.Binding
 	created.CallerContext = cloneCallerContext(callerContext)
 	bindingNonce := nonce
@@ -794,20 +795,15 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 			}
 		}
 		if agent.plan.AdapterMode == AdapterModeCapture && agent.write && !agent.plan.PreSpawnAcquire {
-			captureEvidence := create.CaptureEvidence[agent.plan.Handle]
+			// No backend observes provider identity at create. The seat stays
+			// pending until its provider-owned capture receiver binds it.
 			capture := agent.adapter.CaptureIdentity(CaptureRequest{
 				LaunchNonce: agent.plan.LaunchNonce, ExpectedProviderVersion: agent.providerVersion,
-				Final: true, Evidence: captureEvidence,
 			})
 			agent.record.State, agent.record.Identity, agent.record.Reason = capture.State, capture.Identity, capture.Reason
-			if capture.CanPersist() {
-				refs, evidenceErr := persistProviderCaptureEvidenceWithContext(root, lease, agent.plan.Handle, callerContext, captureEvidence)
-				if evidenceErr != nil {
-					return nil, evidenceErr
-				}
-				agent.record.EvidenceRefs = refs
-			}
-			if !capture.CanPersist() {
+			if capture.State == CapturePending {
+				agent.record.ExecutionEvidence = nil
+			} else if !capture.CanPersist() {
 				result.Agents[agent.index].Code = 6
 				result.Agents[agent.index].ConversationDisposition = DispositionDegraded
 				if capture.State == CaptureUnsupported && !capture.Degraded {
@@ -857,7 +853,8 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			InitialInput: agent.plan.InitialInput, Execution: agent.plan.Execution,
 			CallerContext: cloneCallerContext(request.CallerContext), Wrapper: cloneWrapper(agent.plan.Wrapper),
 		}
-		if agent.plan.PreSpawnAcquire || (agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
+		if agent.plan.PreSpawnAcquire || agent.plan.AdapterMode == AdapterModeMint ||
+			(agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
 			ticketRequest.Backend, ticketRequest.Profile = backend, profile
 		}
 		ticket, err := NewExecutionTicket(ticketRequest)
@@ -902,8 +899,32 @@ func removeExecutionTickets(root *fsq.DeliveryRoot, lease *Lease, planned []plan
 	return result
 }
 
+// keepPromotedCapture returns the stored record instead of a pending one when
+// the capture receiver already promoted the same launch generation, so a
+// conversation write never demotes a captured identity.
+func keepPromotedCapture(root *fsq.DeliveryRoot, pending ConversationRecord) (ConversationRecord, error) {
+	if pending.State != CapturePending {
+		return pending, nil
+	}
+	stored, err := LoadConversation(root, pending.Handle)
+	if errors.Is(err, os.ErrNotExist) {
+		return pending, nil
+	}
+	if err != nil {
+		return pending, err
+	}
+	if stored.State == CaptureReady && stored.LaunchNonce == pending.LaunchNonce {
+		return stored, nil
+	}
+	return pending, nil
+}
+
 func commitRecoveredJournal(request ReconcileRequest, lease *Lease, journal LaunchJournal) error {
 	for _, record := range journal.Conversations {
+		record, err := keepPromotedCapture(request.Root, record)
+		if err != nil {
+			return err
+		}
 		if err := WriteConversation(request.Root, lease, record); err != nil {
 			return err
 		}

@@ -179,11 +179,10 @@ type CreateResult struct {
 	// Binding is a managed backend's candidate runtime record. The
 	// reconciliation engine is the only layer allowed to persist it under the
 	// session lease. plan_only backends leave it empty.
-	Binding         BindingRecord                `json:"binding,omitempty"`
-	CaptureEvidence map[string][]CaptureEvidence `json:"-"`
-	Commands        []EmittedCommand             `json:"commands,omitempty"`
-	Plan            []byte                       `json:"plan,omitempty"`
-	Reason          string                       `json:"reason,omitempty"`
+	Binding  BindingRecord    `json:"binding,omitempty"`
+	Commands []EmittedCommand `json:"commands,omitempty"`
+	Plan     []byte           `json:"plan,omitempty"`
+	Reason   string           `json:"reason,omitempty"`
 }
 
 type InspectRequest struct {
@@ -234,11 +233,10 @@ type ReclaimRequest struct {
 }
 
 type ReclaimResult struct {
-	Status          ReclaimStatus                `json:"status"`
-	Evidence        string                       `json:"evidence"`
-	Resources       []ResourceIdentity           `json:"resources"`
-	Binding         BindingRecord                `json:"binding,omitempty"`
-	CaptureEvidence map[string][]CaptureEvidence `json:"-"`
+	Status    ReclaimStatus      `json:"status"`
+	Evidence  string             `json:"evidence"`
+	Resources []ResourceIdentity `json:"resources"`
+	Binding   BindingRecord      `json:"binding,omitempty"`
 }
 
 // DefinitePreCreateError means Create proved that it made no backend resource.

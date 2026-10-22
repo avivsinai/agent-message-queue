@@ -2,14 +2,38 @@ package launch
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testCodexCwd = "/tmp/codex-project"
 
 func codexNotifyTestPayload(conversationID, cwd string) []byte {
 	return []byte(fmt.Sprintf(`{"type":"agent-turn-complete","thread-id":%q,"turn-id":"turn-1","cwd":%q,"input-messages":["reply with ok"],"last-assistant-message":"ok"}`, conversationID, cwd))
+}
+
+// writeCodexRollout writes the first rollout line that codex-cli 0.163.0
+// writes for a top-level TUI thread, in its local creation-date directory.
+func writeCodexRollout(t *testing.T, codexHome, threadID, cwd string) {
+	t.Helper()
+	millis, err := strconv.ParseInt(strings.ReplaceAll(threadID[:13], "-", ""), 16, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.UnixMilli(millis).Local()
+	dir := filepath.Join(codexHome, "sessions", created.Format("2006/01/02"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := fmt.Sprintf(`{"timestamp":"2026-10-22T16:00:45.166Z","ordinal":0,"type":"session_meta","payload":{"session_id":%q,"id":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.163.0","source":"cli","thread_source":"user","history_mode":"paginated"}}`+"\n", threadID, threadID, cwd)
+	name := "rollout-" + created.Format("2006-01-02T15-04-05") + "-" + threadID + ".jsonl"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func validCodexCapture() CaptureRequest {
