@@ -1719,9 +1719,10 @@ Claude Code hook receiver for the co-op hooks; amq coop install-hooks installs i
 
 session-start prints the co-op preamble as SessionStart additionalContext:
 the agent's handle, session and peers, its unread count, and whether a wake
-rings this terminal. It reads AM_ME and AM_ROOT from the environment;
-without AM_ME or AM_ROOT, or when the mailbox does not exist,
-it prints nothing. Always exits 0 once the arguments parse.
+rings this terminal. It reads AM_ME, AM_ROOT and the session pin from the
+environment and never reads .amqrc. Without AM_ME or an absolute AM_ROOT,
+with a session pin that does not match AM_ROOT, or when the mailbox does not
+exist, it prints nothing. Always exits 0 once the arguments parse.
 ```
 
 ## amq swarm list
