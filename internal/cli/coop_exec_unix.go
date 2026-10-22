@@ -74,6 +74,7 @@ type coopExecRun struct {
 	cmdName                      string
 	wakeInjectVia                string
 	wakeInjectMode               string
+	agyDoorbellOff               bool
 	executionOptions             *launch.PrepareExecutionOptions
 	agentHandle                  string
 	managedGuard                 *managedExecutionGuard
@@ -187,6 +188,9 @@ func runCoopExec(args []string) error {
 		return errors.Join(cleanupErr, c.wakeHelperClaimErr)
 	}
 	if !*c.noWakeFlag {
+		if c.agyDoorbellOff {
+			_ = writeStderr("note: the wake doorbell is off for agy because wake cannot see agy approval prompts; opt in with --wake-inject-mode paste\n")
+		}
 		amqExecutable, binErr := os.Executable()
 		if binErr != nil {
 			return fmt.Errorf("resolve current amq executable: %w", binErr)
@@ -351,6 +355,14 @@ func (c *coopExecRun) validateFlags() error {
 	c.wakeInjectMode, err = normalizeWakeInjectMode(*c.wakeInjectModeFlag)
 	if err != nil {
 		return UsageError("--wake-inject-mode: %v", err)
+	}
+	// agy runs no hooks, so no dialog guard can hold the doorbell while an
+	// approval prompt is open, and the doorbell's Enter would approve it.
+	// Only an explicit injector choice may type into agy.
+	if strings.ToLower(filepath.Base(c.cmdName)) == "agy" &&
+		!flagWasVisited(c.fs, "wake-inject-mode") && declaredWakeInjectVia == "" {
+		c.wakeInjectMode = wakeInjectModeNone
+		c.agyDoorbellOff = true
 	}
 	if *c.wakeInjectViaFlag != "" && c.wakeInjectVia == "" {
 		return UsageError("--wake-inject-via must not be blank")

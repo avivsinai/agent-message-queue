@@ -48,6 +48,23 @@ func TestCoopExecForwardsCommandArguments(t *testing.T) {
 	}
 }
 
+// Live probe 2026-10-22 (agy 1.4.5): the coop wake typed the doorbell plus
+// Enter into agy, and the Enter approved an open "Run this command?" prompt.
+func TestCoopExecAgyWakeDoesNotTypeByDefault(t *testing.T) {
+	c := &coopExecRun{}
+	amqArgs, usage := c.defineFlags([]string{"agy"})
+	if _, err := parseFlagsAllowPositionals(c.fs, amqArgs, usage); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.validateFlags(); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(buildCoopWakeArgs("agy", "/root", c.wakeInjectMode, c.wakeInjectVia, nil, ""), " ")
+	if !strings.Contains(args, "--inject-mode none") {
+		t.Fatalf("wake args = %q, want --inject-mode none", args)
+	}
+}
+
 func putBareCommandOnPATH(t *testing.T, name string) {
 	t.Helper()
 	dir := t.TempDir()
