@@ -4,28 +4,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/hookinstall"
 )
 
 // checkHookConfigs scans the default Claude and Codex hook config files for
-// AMQ-owned SessionStart hook commands whose installed script path no longer
-// exists (the WP-646 leak class: macOS reclaims /var/folders temp dirs and the
-// dead command then fails with exit 127 on every session start). It is
-// read-only; it never repairs. The remedy is the exact install command that
-// rewrites a live hook and prunes the stale ones via the installer's self-heal,
-// scoped to the agent(s) actually found stale.
+// AMQ-owned SessionStart hooks that need a rewrite: commands whose installed
+// script path no longer exists (the WP-646 leak class: macOS reclaims
+// /var/folders temp dirs and the dead command then fails with exit 127 on
+// every session start), and live hooks in an old form or installed twice. It
+// is read-only; it never repairs. The remedy is the exact install command,
+// which rewrites a live hook, prunes stale ones, and leaves one current entry,
+// scoped to the agent(s) actually found.
 func checkHookConfigs() doctorCheck {
 	check := doctorCheck{Name: "Hook configs"}
 	claudeConfig, claudeErr := hookinstall.DefaultClaudeConfig()
 	codexConfig, codexErr := hookinstall.DefaultCodexConfig()
 
-	type staleAgent struct {
-		agent string
-		hooks []hookinstall.StaleSessionStartHook
-	}
-	var perAgent []staleAgent
+	var stale []hookinstall.StaleSessionStartHook
+	var outdated []hookinstall.OutdatedSessionStartHook
+	var agents []string
 	var warnings []string
 
 	for _, c := range []struct {
@@ -44,6 +44,14 @@ func checkHookConfigs() doctorCheck {
 			continue
 		}
 		found, err := hookinstall.StaleSessionStartHooks(c.path, c.agent)
+		if err == nil {
+			var old []hookinstall.OutdatedSessionStartHook
+			old, err = hookinstall.OutdatedSessionStartHooks(c.path, c.agent)
+			outdated = append(outdated, old...)
+			if len(found) > 0 || len(old) > 0 {
+				agents = append(agents, c.agent)
+			}
+		}
 		if err != nil {
 			// A missing config file is not an error: AMQ hooks may not be
 			// installed. Any other error (corrupt JSON, permission denied) is
@@ -54,51 +62,51 @@ func checkHookConfigs() doctorCheck {
 			}
 			continue
 		}
-		if len(found) > 0 {
-			perAgent = append(perAgent, staleAgent{agent: c.agent, hooks: found})
-		}
+		stale = append(stale, found...)
 	}
 
-	totalStale := 0
-	for _, a := range perAgent {
-		totalStale += len(a.hooks)
-	}
-	if totalStale == 0 && len(warnings) == 0 {
+	if len(agents) == 0 && len(warnings) == 0 {
 		check.Status = "ok"
-		check.Message = "no stale AMQ SessionStart hooks"
+		check.Message = "no stale or outdated AMQ SessionStart hooks"
 		return check
 	}
-	if totalStale == 0 {
-		// Only warnings (e.g. a corrupt config file), no stale hooks.
-		check.Status = "warn"
+	check.Status = "warn"
+	if len(agents) == 0 {
+		// Only warnings (e.g. a corrupt config file), no hook findings.
 		check.Message = strings.Join(warnings, "; ")
 		return check
 	}
 
-	var paths []string
-	var agents []string
-	for _, a := range perAgent {
-		agents = append(agents, a.agent)
-		for _, h := range a.hooks {
+	var findings []string
+	if len(stale) > 0 {
+		var paths []string
+		for _, h := range stale {
 			paths = append(paths, h.ScriptPath)
 		}
+		findings = append(findings, fmt.Sprintf("%d stale AMQ SessionStart hook(s) point at missing scripts (%s)",
+			len(stale), strings.Join(uniqueNonEmpty(paths), ", ")))
+	}
+	if len(outdated) > 0 {
+		var items []string
+		for _, h := range outdated {
+			items = append(items, fmt.Sprintf("%s %s: %s", h.Agent, h.ScriptPath, h.Reason))
+		}
+		findings = append(findings, fmt.Sprintf("%d AMQ SessionStart hook(s) need a rewrite (%s)",
+			len(outdated), strings.Join(items, ", ")))
 	}
 	// The remedy uses the real install-hook subcommand spelling, scoped to the
-	// agent(s) actually found stale. Verified via `amq-keepalive install-hook
+	// agent(s) actually found. Verified via `amq-keepalive install-hook
 	// --help`: -agent accepts claude, codex, or both.
 	remedyAgent := strings.Join(agents, ",")
 	if len(agents) > 1 {
 		remedyAgent = hookinstall.AgentBoth
 	}
-	check.Status = "warn"
-	message := fmt.Sprintf(
-		"%d stale AMQ SessionStart hook(s) point at missing scripts (%s); remedy: amq-keepalive install-hook --agent %s",
-		totalStale,
-		strings.Join(uniqueNonEmpty(paths), ", "),
-		remedyAgent,
-	)
-	// Surface config warnings alongside stale findings rather than hiding the
-	// stale hooks when one agent's config is corrupt and another has dead hooks.
+	message := strings.Join(findings, "; ") + "; remedy: amq-keepalive install-hook --agent " + remedyAgent
+	if slices.Contains(agents, hookinstall.AgentCodex) {
+		message += " (" + hookinstall.CodexRetrustNote + ")"
+	}
+	// Surface config warnings alongside the findings rather than hiding them
+	// when one agent's config is corrupt and another needs a rewrite.
 	if len(warnings) > 0 {
 		message += "; " + strings.Join(warnings, "; ")
 	}
