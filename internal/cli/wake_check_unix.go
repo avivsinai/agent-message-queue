@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -22,6 +23,8 @@ type wakeCheckResult struct {
 	StartMode                string `json:"start_mode"`
 	StartReason              string `json:"start_reason,omitempty"`
 	LiveWake                 bool   `json:"live_wake"`
+	StartedAt                string `json:"started_at,omitempty"`
+	BaselineAt               string `json:"baseline_at,omitempty"`
 	WakeStatus               string `json:"wake_status"`
 	WakePID                  int    `json:"wake_pid,omitempty"`
 	WakeMode                 string `json:"wake_mode,omitempty"`
@@ -69,6 +72,9 @@ type wakeCheckObservation struct {
 	Floor       wakeCheckMetadataFingerprint
 	Repair      wakeRepairAssessment
 	SelfUpgrade wakeCheckSelfUpgradeObservation
+	// BaselineAt is the mtime of this generation's prepared marker. It is
+	// outside the stability comparison.
+	BaselineAt string
 }
 
 type wakeCheckSnapshot struct {
@@ -144,6 +150,7 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 		Decision: buildWakeCheckDecision(root, me, second.Inspection, opsLock, true),
 	}
 	snapshot.Decision.SelfUpgrade = wakeCheckSelfUpgradeDecisionFromObservation(second.SelfUpgrade)
+	snapshot.Decision.Wake.BaselineAt = wakeCheckOptionalString(second.BaselineAt)
 	// Image probing occurs while building the decision. Re-observe afterwards
 	// so a PID reuse or lock generation change cannot inherit that conclusion.
 	third, thirdErr := observeWakeCheck(root, me)
@@ -177,6 +184,7 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 			agentDir,
 			observation.Inspection,
 		)
+		observation.BaselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, observation.Inspection)
 		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
 			root,
@@ -238,6 +246,27 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 		return observation, err
 	}
 	return observation, nil
+}
+
+// observeWakeCheckBaselineAt reports when the wake published its prepared
+// marker. The wake publishes it after its startup baseline snapshot, so mail
+// created later is not in the --baseline-existing cohort. A missing,
+// unreadable, or other-generation marker reports nothing.
+func observeWakeCheckBaselineAt(dirfd int, agentDir *wakeAgentDir, inspection wakeLockInspection) string {
+	if !inspection.Exists || inspection.Lock.Generation == "" {
+		return ""
+	}
+	snapshot, exists, err := readWakeGenerationFileSnapshotAt(
+		dirfd,
+		agentDir,
+		wakePreparedFileName,
+		"wake prepared marker",
+	)
+	if err != nil || !exists || snapshot.FileInfo == nil ||
+		snapshot.Marker.Generation != inspection.Lock.Generation {
+		return ""
+	}
+	return snapshot.FileInfo.ModTime().UTC().Format(time.RFC3339Nano)
 }
 
 func recordWakeCheckSelectionTarget(observation *wakeCheckObservation, selection wakeStateReadSelection) error {
@@ -437,6 +466,7 @@ func buildWakeCheckDecision(
 			OwnerBound:   ownerBound,
 			Generation:   wakeCheckOptionalString(inspection.Lock.Generation),
 			TargetDigest: wakeCheckOptionalString(inspection.Lock.TargetDigest),
+			StartedAt:    wakeCheckOptionalString(inspection.Lock.Started),
 		},
 		Image: wakeCheckImageDecision{
 			Current: wakeCheckImageEvidenceDecision{
@@ -540,6 +570,8 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		StartMode:                decision.Start.Mode,
 		StartReason:              wakeCheckStringValue(decision.Start.Detail, ""),
 		LiveWake:                 decision.Wake.Live,
+		StartedAt:                wakeCheckStringValue(decision.Wake.StartedAt, ""),
+		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
 		WakeStatus:               decision.Wake.Status,
 		WakePID:                  wakeCheckIntValue(decision.Wake.PID),
 		WakeMode:                 wakeCheckStringValue(decision.Wake.Mode, ""),

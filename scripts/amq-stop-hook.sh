@@ -35,6 +35,21 @@ resolved="$(printf '%s' "$env_json" | python3 -c \
   exit 0
 IFS=$'\x1f' read -r ROOT SESSION ME <<<"$resolved"
 
+# A live wake rings for mail that arrives after its startup baseline. Mail
+# created at or before baseline_at may be the --baseline-existing cohort it
+# never rings for, so only that mail blocks. A wake without baseline_at, any
+# error, or a slow probe leaves wake_baseline empty and every message counts.
+wake_baseline="$(python3 -c '
+import json,subprocess,sys
+root,me,cwd=sys.argv[1:]
+try:
+  r=subprocess.run(["amq","wake","check","--root",root,"--me",me,"--json"],
+    cwd=cwd,capture_output=True,timeout=2)
+  d=json.loads(r.stdout) if r.returncode==0 else {}
+  s=d.get("baseline_at")
+  if d.get("live_wake") is True and isinstance(s,str): print(s)
+except Exception: pass' "$ROOT" "$ME" "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null)" || wake_baseline=""
+
 list_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
   amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null)" || {
   python3 -c 'import json,sys; print(json.dumps({"systemMessage":f"AMQ mailbox unreadable at {sys.argv[1]}; pending messages may exist."},separators=(",",":")))' "$ROOT"
@@ -42,10 +57,19 @@ list_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
 }
 state="$ROOT/agents/$ME/.stop-hook-state.json"
 decision="$(printf '%s' "$list_json" | python3 -c '
-import json,os,sys
-state,active,root,session=sys.argv[1:]
+import json,os,re,sys
+from datetime import datetime
+state,active,root,session,baseline=sys.argv[1:]
 session=session or "(none)"
-ids=sorted({x["id"] for x in json.load(sys.stdin) if x.get("id")})
+def second(t):
+  t=re.sub(r"\.\d+","",t.replace("Z","+00:00"))
+  return int(datetime.fromisoformat(t).timestamp())
+def unrung(x):
+  try: return second(x["created"])<=wake
+  except Exception: return True
+try: wake=second(baseline) if baseline else None
+except Exception: wake=None
+ids=sorted({x["id"] for x in json.load(sys.stdin) if x.get("id") and (wake is None or unrung(x))})
 old={"blocked_ids":[],"chain_blocks":0}
 try:
   with open(state,encoding="utf-8") as f: old=json.load(f)
@@ -77,7 +101,7 @@ finally:
   try: os.unlink(tmp)
   except FileNotFoundError: pass
 if out is not None: print(json.dumps(out,separators=(",",":")))
-' "$state" "$active" "$ROOT" "$SESSION" 2>/dev/null)" || exit 0
+' "$state" "$active" "$ROOT" "$SESSION" "$wake_baseline" 2>/dev/null)" || exit 0
 
 if [ -n "$decision" ]; then
   printf '%s\n' "$decision"
