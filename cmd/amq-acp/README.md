@@ -478,9 +478,10 @@ headless, so a remote request never raises one.
 
 Limits:
 
-- agy has no cancel input. A timeout, Ctrl-C or an owner cancel sends agy
-  SIGINT; agy ends the turn as interrupted and exits, and the next turn
-  starts agy again on the same conversation.
+- agy has no cancel input. A timeout, an owner cancel, or a host stop
+  (Ctrl-C, SIGTERM, SIGHUP) sends agy SIGINT; agy ends the turn as
+  interrupted and exits, and the next turn starts agy again on the same
+  conversation.
 - agy exiting between turns is not an error: the next turn starts it again.
   agy exiting during a turn ends the turn with its exit status, and the host
   exits.

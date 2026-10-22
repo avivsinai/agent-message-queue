@@ -169,7 +169,7 @@ func runAgyHost(h *host.Host, argv []string, dir string, agent **agentProcess) i
 		*agent = a
 		return a, nil
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), hostStopSignals...)
 	defer stop()
 	go func() {
 		<-ctx.Done()
@@ -187,7 +187,7 @@ func runAgyCheck(argv []string, dir string) int {
 	spawn := func(extra []string) (host.AgentProcess, error) {
 		return startAgent(append(append([]string(nil), argv...), extra...), dir)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), hostStopSignals...)
 	res, err := host.CheckAgy(ctx, spawn)
 	stop()
 	if err != nil {
