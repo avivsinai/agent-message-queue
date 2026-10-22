@@ -55,6 +55,9 @@ options not repeated here.
 - [amq wake uninstall-dialog-hook](#amq-wake-uninstall-dialog-hook)
 - [amq coop init](#amq-coop-init)
 - [amq coop exec](#amq-coop-exec)
+- [amq coop install-hooks](#amq-coop-install-hooks)
+- [amq coop uninstall-hooks](#amq-coop-uninstall-hooks)
+- [amq coop hook](#amq-coop-hook)
 - [amq swarm list](#amq-swarm-list)
 - [amq swarm join](#amq-swarm-join)
 - [amq swarm leave](#amq-swarm-leave)
@@ -105,7 +108,7 @@ Commands:
   wake         Background waker (TIOCSTI injection)
   upgrade      Upgrade amq to the latest release
   env          Output shell commands to set environment variables
-  coop         Co-op mode setup (init, exec)
+  coop         Co-op mode setup (init, exec, hooks)
   swarm        Claude Code Agent Teams integration (join, tasks, bridge)
   integration  Optional interoperability adapters
   receipts     Message delivery receipts
@@ -872,8 +875,11 @@ $ amq coop --help
 amq coop - Co-op mode for multi-agent collaboration
 
 Subcommands:
-  init  Initialize project for co-op mode
-  exec  Set up co-op mode and exec into an agent
+  init             Initialize project for co-op mode
+  exec             Set up co-op mode and exec into an agent
+  install-hooks    Install the co-op Claude Code hooks for AM_ME sessions
+  uninstall-hooks  Remove the co-op Claude Code hooks
+  hook             Claude Code hook receiver: print the co-op preamble
 
 Examples:
   amq coop exec claude
@@ -1666,6 +1672,56 @@ Options:
   -wake-inject-via string
         Start wake with this absolute --inject-via executable, enabling later amq wake repair
   -y    Skip confirmation prompts (including clearing a blocking wake)
+```
+
+## amq coop install-hooks
+
+```text
+$ amq coop install-hooks --help
+Usage:
+  amq coop install-hooks [--dry-run]
+
+Install the co-op hooks in ~/.claude/settings.json.
+
+SessionStart (startup, resume, clear, compact) gives the agent its co-op
+preamble: handle, session, peers, unread count, and whether a wake rings the
+terminal. The hooks run only in sessions with AM_ME set, which amq coop exec
+and amq launch set; other Claude Code sessions start no amq.
+
+Running again keeps the same entries and replaces entries of another amq
+binary. Other settings and hooks are not changed. It also lists old project
+hook entries that run the co-op scripts; remove them, or both run.
+
+Options:
+  -dry-run
+        Print the hooks without changing the settings file
+```
+
+## amq coop uninstall-hooks
+
+```text
+$ amq coop uninstall-hooks --help
+Usage:
+  amq coop uninstall-hooks
+
+Remove the co-op hooks (AMQ_COOP_HOOK entries) from ~/.claude/settings.json.
+Other settings and hooks are not changed.
+```
+
+## amq coop hook
+
+```text
+$ amq coop hook --help
+Usage:
+  amq coop hook session-start
+
+Claude Code hook receiver for the co-op hooks; amq coop install-hooks installs it.
+
+session-start prints the co-op preamble as SessionStart additionalContext:
+the agent's handle, session and peers, its unread count, and whether a wake
+rings this terminal. It reads AM_ME and AM_ROOT from the environment;
+without AM_ME or AM_ROOT, or when the mailbox does not exist,
+it prints nothing. Always exits 0 once the arguments parse.
 ```
 
 ## amq swarm list
