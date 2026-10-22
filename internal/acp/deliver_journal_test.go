@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -490,9 +491,14 @@ func TestDeliveryRefusesAReplacedPinnedRoot(t *testing.T) {
 		clearContextEnv(t)
 		base := canonicalTempDir(t)
 		root := filepath.Join(base, "s1")
-		if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
-			t.Fatal(err)
+		ensure := func() {
+			for _, h := range []string{"buzz", "agent"} {
+				if err := fsq.EnsureAgentDirs(root, h); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
+		ensure()
 		t.Setenv(EnvRoot, root)
 		t.Setenv(EnvBaseRoot, base)
 		t.Setenv(EnvSession, "s1")
@@ -507,14 +513,13 @@ func TestDeliveryRefusesAReplacedPinnedRoot(t *testing.T) {
 		if err := os.Rename(root, root+".A"); err != nil {
 			t.Fatal(err)
 		}
-		if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
-			t.Fatal(err)
+		ensure()
+		var refused *ContextError
+		if _, err := DeliverCockpitPrompt(cfg, "secret prompt", cockpitThread("s"), event); !errors.As(err, &refused) {
+			t.Fatalf("event %q: prompt into the replacement root: %v", event, err)
 		}
-		if _, err := DeliverCockpitPrompt(cfg, "secret prompt", cockpitThread("s"), event); err == nil {
-			t.Fatalf("event %q: delivered into the replacement root", event)
-		}
-		if _, err := DeliverSteering(cfg, "steer", cockpitThread("s"), "", event); err == nil {
-			t.Fatalf("event %q: steered into the replacement root", event)
+		if _, err := DeliverSteering(cfg, "steer", cockpitThread("s"), "", event); !errors.As(err, &refused) {
+			t.Fatalf("event %q: steer into the replacement root: %v", event, err)
 		}
 		if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "agent")); len(entries) != 0 {
 			t.Fatalf("event %q: replacement inbox holds %d messages", event, len(entries))
