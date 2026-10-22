@@ -245,11 +245,11 @@ func TestLookupUnknownForNeverSubmittedKey(t *testing.T) {
 	}
 }
 
-// A Buzz request recorded for session A must never run in session B, which
-// the same pid can run after /clear or /resume, also when the endpoint
-// crashed after the received write and recovers the request on restart
+// A Buzz request recorded for session A, whose pid runs session B by the
+// time the endpoint recovers it after a crash after the received write
+// (/clear or /resume), is refused before dispatch and B gets zero bytes
 // (agent-message-queue-611.70: session B received the prompt).
-func TestBuzzRequestNeverRunsInAnotherSessionAfterRestart(t *testing.T) {
+func TestSessionChangedBeforeDispatchSendsNothingAfterRestart(t *testing.T) {
 	pid := os.Getpid() // a live pid, so the target reads attached
 	ftA := newFakeTarget(t, pid, nil)
 	ftB := newFakeTarget(t, pid, nil) // only its socket is used
