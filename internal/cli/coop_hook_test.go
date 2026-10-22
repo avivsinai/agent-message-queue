@@ -195,3 +195,11 @@ func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
 		t.Fatalf("mail at the baseline: %v blocked %v, want a block for before only", out, next.BlockedIDs)
 	}
 }
+
+func TestCoopStopAllowsTheStopAfterFiveBlocksInAChain(t *testing.T) {
+	old := coopStopState{Schema: 1, BlockedIDs: []string{"a"}, ChainBlocks: coopStopBlockLimit}
+	next, out := decideCoopStop([]coopStopMessage{{ID: "a"}, {ID: "b"}}, nil, old, true, "root=r session=s")
+	if !strings.Contains(out["systemMessage"], "budget exhausted") || next.ChainBlocks != 0 {
+		t.Fatalf("sixth block: %v chain %d, want a notice and a reset chain", out, next.ChainBlocks)
+	}
+}
