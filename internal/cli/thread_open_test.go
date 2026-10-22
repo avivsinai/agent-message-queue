@@ -195,6 +195,17 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
+			// #1166 review: a clock-skewed decision visited its unreferenced
+			// parent before the earlier opener, so the status matched nothing
+			// and the todo stayed pending.
+			name: "unreferenced parent resolves against earlier openers despite skew",
+			messages: []message{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
+				{name: "dec", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}, age: 2 * time.Hour},
+			},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",

@@ -322,6 +322,7 @@ type obligationReducer struct {
 	cutoff      time.Time
 	records     map[string]*record
 	order       []*record
+	settled     int // order[:settled] has been started
 	obligations []*obligation
 	byThread    map[string][]*obligation
 	lookups     int
@@ -357,8 +358,25 @@ func (red *obligationReducer) add(entry *thread.Entry) *record {
 // run processes messages in created order, then id. The reference-free path
 // depends on that order; reference links do not.
 func (red *obligationReducer) run() {
-	for _, rec := range red.order {
+	for red.settled < len(red.order) {
+		rec := red.order[red.settled]
+		red.settled++
 		red.process(rec, 0)
+	}
+}
+
+// settleBefore processes every scanned message created before rec, so a
+// message without refs is matched against the obligations opened before it
+// even when a clock-skewed child visits it early.
+func (red *obligationReducer) settleBefore(rec *record) {
+	for red.settled < len(red.order) {
+		next := red.order[red.settled]
+		if !next.entry.RawTime.Before(rec.entry.RawTime) &&
+			(!next.entry.RawTime.Equal(rec.entry.RawTime) || next.entry.ID >= rec.entry.ID) {
+			return
+		}
+		red.settled++
+		red.process(next, 0)
 	}
 }
 
@@ -414,6 +432,7 @@ func (red *obligationReducer) process(rec *record, hops int) {
 		}
 		continuation = msg.Kind == defaultReplyKind(target.entry.Kind)
 	} else if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
+		red.settleBefore(rec)
 		acted = red.actWithoutRefs(rec)
 	}
 
