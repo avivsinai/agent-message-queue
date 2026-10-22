@@ -24,27 +24,36 @@ const coopHookPeerActive = 10 * time.Minute
 
 func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq coop hook session-start",
-		"Claude Code hook receiver for the co-op hooks; amq coop install-hooks installs it.",
+	usage := usageWithFlags(fs, "amq coop hook session-start|stop",
+		"Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.",
+		"They read AM_ME and AM_ROOT from the environment and always exit 0 once the",
+		"arguments parse.",
 		"",
 		"session-start prints the co-op preamble as SessionStart additionalContext:",
 		"the agent's handle, session and peers, its unread count, and whether a wake",
-		"rings this terminal. It reads AM_ME and AM_ROOT from the environment;",
-		"without AM_ME or AM_ROOT, or when the mailbox does not exist,",
-		"it prints nothing. Always exits 0 once the arguments parse.")
+		"rings this terminal. Without AM_ME or AM_ROOT, or when the mailbox does not",
+		"exist, it prints nothing.",
+		"",
+		"stop blocks the stop once for unread mail it has not reported yet. Under a",
+		"live wake it counts only mail created at or before the wake's startup",
+		"baseline, because the wake rings for later mail. It allows the stop after",
+		"5 blocks in one chain, and prints a systemMessage when the mailbox cannot be",
+		"read.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return UsageError("coop hook needs exactly one of: session-start")
+		return UsageError("coop hook needs exactly one of: session-start, stop")
 	}
 	switch fs.Arg(0) {
 	case "session-start":
 		return writeCoopSessionStart(os.Stdout, time.Now())
+	case "stop":
+		return writeCoopStop(os.Stdin, os.Stdout)
 	default:
-		return UsageError("coop hook needs exactly one of: session-start")
+		return UsageError("coop hook needs exactly one of: session-start, stop")
 	}
 }
 
