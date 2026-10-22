@@ -97,7 +97,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	// The claude adapter pins no epoch of its own (SentinelUnpinned): any
 	// epoch the endpoint holds is current, and ownership is proven by
-	// transcript observation, not epoch pinning.
+	// transcript observation, not epoch pinning. A request bound to one
+	// session carries it in req.NativeSession, checked below.
 	if a.cancelIntent[req.Key] {
 		delete(a.cancelIntent, req.Key)
 		a.mu.Unlock()
@@ -109,12 +110,25 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	a.mu.Unlock()
 
+	// The receiver has no deadline of its own, so not_after holds only if
+	// this adapter checks it: before the pre-send work, and again right
+	// before the write. Core always sends a parseable window.
+	notAfter, err := protocol.ParseTime(req.NotAfter)
+	if err != nil || !a.now().Before(notAfter) {
+		return expired(), nil
+	}
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
 	if reg == nil || reg.MessagingSocketPath == "" {
 		return refusal(ErrNoInbound), nil
+	}
+	// The pid can run another session than the one the request is bound to
+	// (/clear, /resume). The socket path below comes from this same read,
+	// and sendFrame reads the registry again right before the write.
+	if req.NativeSession != "" && reg.SessionID != req.NativeSession {
+		return sessionChanged(), nil
 	}
 	token, err := readPeerToken(a.home, a.cfg.Pid, reg.MessagingSocketPath)
 	if err != nil {
@@ -145,7 +159,15 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	fromOff := transcriptSize(transcriptPath(a.home, reg.Cwd, reg.SessionID))
-	if err := a.sendFrame(reg.MessagingSocketPath, wire); err != nil {
+	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter, req.NativeSession); err != nil {
+		switch {
+		case errors.Is(err, errPartialWrite):
+			return core.Admission{}, err // delivery unknown: never a refusal
+		case errors.Is(err, errSessionChanged):
+			return sessionChanged(), nil
+		case !a.now().Before(notAfter):
+			return expired(), nil
+		}
 		return refusal(err), nil
 	}
 
@@ -164,25 +186,47 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	return core.Admission{Admitted: true, RunID: frame.MsgID}, nil
 }
 
-// sendFrame dials the target's UDS and writes the framed bytes. The
-// receiver answers nothing (capture §4); the write itself is the only
-// transport signal, and any error before the full write is a definitive
-// not-sent.
-func (a *Attachment) sendFrame(sockPath string, wire []byte) error {
-	ctx, cancel := context.WithTimeout(a.ctx, submitTimeout)
+// sendFrame dials the target's UDS and writes the framed bytes, all before
+// notAfter. When session is set, the registry must still name it on this
+// socket right before the write. A frame names no destination session and
+// its token binds only the pid and the socket, so a switch after this check
+// on the same socket cannot be seen here. The receiver answers nothing
+// (capture §4); the write itself is the only transport signal. An error
+// before the first byte is a definitive not-sent; a partial write leaves
+// delivery unknown (errPartialWrite).
+func (a *Attachment) sendFrame(sockPath string, wire []byte, notAfter time.Time, session string) error {
+	// One absolute deadline bounds the dial and the write.
+	ctx, cancel := context.WithDeadline(a.ctx, time.Now().Add(min(submitTimeout, notAfter.Sub(a.now()))))
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", sockPath)
 	if err != nil {
 		return fmt.Errorf("%w: dial %s: %v", ErrNotSent, sockPath, err)
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetWriteDeadline(deadline)
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("%w: set write deadline on %s: %v", ErrNotSent, sockPath, err)
+	}
+	if session != "" {
+		reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+		if err != nil || reg == nil || reg.SessionID != session || reg.MessagingSocketPath != sockPath {
+			_ = conn.Close()
+			return errSessionChanged
+		}
+	}
+	if !a.now().Before(notAfter) {
+		_ = conn.Close()
+		return fmt.Errorf("%w: not_after passed before the write", ErrNotSent)
 	}
 	n, err := conn.Write(wire)
+	if n > 0 && n < len(wire) {
+		_ = conn.Close()
+		return fmt.Errorf("%w: %d/%d bytes to %s: %v", errPartialWrite, n, len(wire), sockPath, err)
+	}
 	if err != nil || n != len(wire) {
 		_ = conn.Close()
-		return fmt.Errorf("%w: short write to %s (%d/%d): %v", ErrNotSent, sockPath, n, len(wire), err)
+		return fmt.Errorf("%w: write to %s (%d/%d): %v", ErrNotSent, sockPath, n, len(wire), err)
 	}
 	// Half-close: the receiver never sends bytes back (capture §4), so a
 	// clean shutdown is the correct end of the exchange.
@@ -195,6 +239,26 @@ func (a *Attachment) sendFrame(sockPath string, wire []byte) error {
 
 func refusal(err error) core.Admission {
 	return core.Admission{Code: protocol.CodeUnsupported, Message: err.Error()}
+}
+
+// expired is the refusal of a request whose window closed before its frame
+// was written.
+func expired() core.Admission {
+	return core.Admission{Code: protocol.CodeExpired, Message: "claude submit: not_after passed; nothing was sent"}
+}
+
+// errSessionChanged: the registry no longer names the request's session on
+// the socket about to be written. Nothing was sent.
+var errSessionChanged = errors.New("claude submit: the session this request is bound to is no longer the one running in this process; nothing was sent")
+
+// errPartialWrite: part of the frame reached the socket, so whether the
+// receiver took it is unknown.
+var errPartialWrite = errors.New("claude submit: frame partly written")
+
+// sessionChanged is the refusal of a request bound to a session the process
+// no longer runs.
+func sessionChanged() core.Admission {
+	return core.Admission{Code: protocol.CodeSessionChanged, Message: errSessionChanged.Error()}
 }
 
 // sanitizeAddr reduces the target id to the envelope's safe attribute

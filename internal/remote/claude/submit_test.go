@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -241,5 +242,105 @@ func TestLookupUnknownForNeverSubmittedKey(t *testing.T) {
 	// (a lost submit and a never-submitted key are indistinguishable).
 	if ev.Class != core.EvidenceUnknown || !ev.Known {
 		t.Fatalf("lookup = %+v, want Known Unknown", ev)
+	}
+}
+
+// A Buzz request recorded for session A, whose pid runs session B by the
+// time the endpoint recovers it after a crash after the received write
+// (/clear or /resume), is refused before dispatch and B gets zero bytes
+// (agent-message-queue-611.70: session B received the prompt).
+func TestSessionChangedBeforeDispatchSendsNothingAfterRestart(t *testing.T) {
+	pid := os.Getpid() // a live pid, so the target reads attached
+	ftA := newFakeTarget(t, pid, nil)
+	ftB := newFakeTarget(t, pid, nil) // only its socket is used
+	stateDir := t.TempDir()
+
+	store1, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep1 := core.New(core.Config{Store: store1, Crash: func(p string) error {
+		if p == core.PointAfterReceived {
+			return errors.New("power loss")
+		}
+		return nil
+	}})
+	att1, err := Attach(config{Pid: pid, Home: ftA.home, Target: "cc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep1.Register(att1)
+	// What the Buzz carrier sends after its fence proved sess-abc attached.
+	src := core.Source{Host: "buzz-0123456789abcdef", NativeSession: "sess-abc",
+		Origin: map[string]string{"carrier": "buzz", "body": "b", "channel": "dm-1", "event": "e1"}}
+	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "33333333-3333-4333-8333-333333333333", TargetID: "cc-1", Epoch: SentinelUnpinned,
+		NotAfter: protocol.FormatTime(time.Now().Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "authorized for A", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn, MinEvidence: protocol.EvidenceSubmitted}}
+	if _, err := ep1.Handle(cmd, src); !errors.Is(err, core.ErrCrashed) {
+		t.Fatalf("submit = %v, want the crash after received", err)
+	}
+	_ = ep1.Close()
+	_ = store1.Close()
+
+	// The same pid now runs session B with its own socket.
+	reg, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "sess-B", "kind": "interactive", "cwd": "/tmp/proj", "messagingSocketPath": ftB.sockPath})
+	if err := os.WriteFile(filepath.Join(claudeSessionsDir(ftA.home), fmt.Sprintf("%d.json", pid)), reg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kf, err := peerKeyFile(ftA.home, pid, ftB.sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kf, []byte(`{"peerToken":"00000000000000000000000000000000"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store2, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep2 := core.New(core.Config{Store: store2})
+	t.Cleanup(func() { _ = ep2.Close(); _ = store2.Close() })
+	att2, err := Attach(config{Pid: pid, Home: ftA.home, Target: "cc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep2.Register(att2)
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	key := requests.Key{CreatorHost: src.Host, TargetID: "cc-1", RequestID: cmd.RequestID}
+	rec, _, err := store2.Get(key)
+	if err != nil || rec == nil || rec.State != protocol.StateRejected || rec.Code != protocol.CodeSessionChanged || rec.NativeDispatches != 0 {
+		t.Fatalf("recovered record = %+v, %v; want rejected session_changed before any dispatch", rec, err)
+	}
+	// The adapter refuses too, at the write: the fence-to-Submit race.
+	adm, err := att2.Submit(core.BoundRequest{Key: key, Epoch: SentinelUnpinned, Input: *cmd.Input, NotAfter: cmd.NotAfter, NativeSession: "sess-abc"})
+	if err != nil || adm.Code != protocol.CodeSessionChanged {
+		t.Fatalf("adapter Submit = %+v, %v; want session_changed", adm, err)
+	}
+	select {
+	case b := <-ftB.received:
+		t.Fatalf("session B received %d bytes of the prompt for session A", len(b))
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A request whose not_after passed is never written to Claude
+// (agent-message-queue-611.70: the adapter wrote it anyway).
+func TestSubmitWritesNothingAfterNotAfter(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	req := pr2BoundRequest("expired prompt")
+	req.NotAfter = "2000-01-01T00:00:00Z"
+	adm, err := att.Submit(req)
+	if err != nil || adm.Admitted || adm.Code != protocol.CodeExpired {
+		t.Fatalf("Submit = %+v, %v; want expired", adm, err)
+	}
+	select {
+	case b := <-ft.received:
+		t.Fatalf("adapter wrote %d bytes after not_after", len(b))
+	case <-time.After(200 * time.Millisecond):
 	}
 }
