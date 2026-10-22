@@ -161,7 +161,7 @@ func (cfg ProjectConfig) Validate() error {
 		if agent.Adapter == "" {
 			return fmt.Errorf("agent %q has no adapter", agent.Handle)
 		}
-		if len(agent.Command) == 0 || !adapterExecutableMatches(agent.Adapter, agent.Command[0]) {
+		if len(agent.Command) == 0 || (agent.Adapter != ACPProvider && !adapterExecutableMatches(agent.Adapter, agent.Command[0])) {
 			return fmt.Errorf("agent %q command must select its adapter-known executable", agent.Handle)
 		}
 		for _, arg := range agent.Command {
@@ -184,6 +184,9 @@ func (cfg ProjectConfig) Validate() error {
 		}
 		if agent.ResumePolicy != ResumeEnabled && agent.ResumePolicy != ResumeFresh && agent.ResumePolicy != ResumeDisabled {
 			return fmt.Errorf("agent %q has invalid resume policy %q", agent.Handle, agent.ResumePolicy)
+		}
+		if agent.Adapter == ACPProvider && agent.ResumePolicy == ResumeEnabled {
+			return fmt.Errorf("agent %q: the ACP host resumes its own session; use resume_policy %q", agent.Handle, ResumeFresh)
 		}
 	}
 	if cfg.Layout.Type != LayoutColumns {

@@ -119,11 +119,14 @@ type PlanRequest struct {
 	LaunchNonce      string
 	Named            bool
 	ResumePolicy     ResumePolicy
-	CommittedArgs    []string
-	BypassArgs       []string
-	EnvOverlay       map[string]string
-	InitialInput     *InitialInputRequest
-	Wrapper          *Wrapper
+	// Command is the committed command, executable first. An adapter that
+	// is not selected by its executable (acp) plans from it.
+	Command       []string
+	CommittedArgs []string
+	BypassArgs    []string
+	EnvOverlay    map[string]string
+	InitialInput  *InitialInputRequest
+	Wrapper       *Wrapper
 }
 
 type InitialInputRequest struct {
@@ -272,6 +275,9 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 	var argRules map[string]argumentRule
 	var bypassAllowed map[string]struct{}
 	switch provider {
+	case ACPProvider:
+		// The agent argv has no AMQ grammar; the trust digest binds it.
+		return append([]string(nil), args...), nil, nil
 	case ClaudeProvider:
 		argRules, bypassAllowed = claudeArgRules(), claudeBypassArgs()
 	case CodexProvider:
@@ -461,6 +467,14 @@ func cloneEnv(overlay map[string]string) map[string]string {
 }
 
 func validateKnownExecutable(executable, projectRoot, provider string) (string, error) {
+	return resolveExternalExecutable(executable, projectRoot, provider, true)
+}
+
+// resolveExternalExecutable resolves executable to an absolute path that is
+// an executable regular file outside the project. With matchProvider, its
+// basename must also select provider; label names it in errors.
+func resolveExternalExecutable(executable, projectRoot, label string, matchProvider bool) (string, error) {
+	provider := label
 	if !filepath.IsAbs(executable) {
 		lookedUp, err := exec.LookPath(executable)
 		if err != nil {
@@ -477,7 +491,7 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve %s executable: %w", provider, err)
 	}
-	if ProviderForExecutable(executable) != provider {
+	if matchProvider && ProviderForExecutable(executable) != provider {
 		return "", fmt.Errorf("adapter %s cannot execute %q", provider, resolvedExecutable)
 	}
 	if strings.TrimSpace(projectRoot) == "" {

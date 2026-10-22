@@ -150,6 +150,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := request.Config.Validate(); err != nil {
 		return result, err
 	}
+	request.ExecutionOptions = withAdapterExecution(request.Config, request.Adapters, request.ExecutionOptions)
 	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath, request.ProjectRoot)
 	if err != nil {
 		return result, err
@@ -1017,7 +1018,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		named := request.Config.EffectiveAgentNamed(cfg) && supportsManagedPlanNaming(adapter.Name())
 		base := PlanRequest{
 			Handle: cfg.Handle, Session: request.Session, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
-			AMQExecutable: request.AMQPath, Cwd: cwd,
+			AMQExecutable: request.AMQPath, Cwd: cwd, Command: append([]string(nil), cfg.Command...),
 			LaunchNonce: nonce, Named: named, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
 			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd, InitialInput: cfg.InitialInput, Wrapper: cloneWrapper(cfg.Wrapper),
 		}
@@ -1154,6 +1155,39 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		})
 	}
 	return planned, nil
+}
+
+// inboxConsumer is an adapter whose seat consumes its own inbox. Launch runs
+// it with wake disabled, with the adapter's audit reason.
+type inboxConsumer interface {
+	inboxReason() string
+}
+
+// withAdapterExecution returns options with wake disabled for every seat of
+// an inbox-consuming adapter. The plan, the journal check and the trust
+// digest then all see the same policy. options is not modified.
+func withAdapterExecution(cfg ProjectConfig, adapters map[string]HarnessAdapter, options map[string]PrepareExecutionOptions) map[string]PrepareExecutionOptions {
+	var out map[string]PrepareExecutionOptions
+	for _, agent := range cfg.Agents {
+		consumer, ok := adapters[agent.Adapter].(inboxConsumer)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]PrepareExecutionOptions, len(options)+1)
+			for handle, value := range options {
+				out[handle] = value
+			}
+		}
+		policy := out[agent.Handle]
+		policy.WakeMode, policy.AuditReason, policy.RequireWake = "disabled", consumer.inboxReason(), false
+		policy.InjectorMode, policy.InjectorVia, policy.InjectorArgs = "", "", nil
+		out[agent.Handle] = policy
+	}
+	if out == nil {
+		return options
+	}
+	return out
 }
 
 func ensurePlanTrust(request ReconcileRequest, plan Plan, digest string) (bool, error) {

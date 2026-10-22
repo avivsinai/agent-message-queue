@@ -413,6 +413,13 @@ Cancelling the request from Buzz (`/cancel <ref>`) or with
 `amq-remote cancel` sends ACP `session/cancel` for that turn only; a request
 that has not run never runs.
 
+`amq launch` starts a host from `.amq/launch.json` with adapter `acp` (see
+[the launch API](../../docs/launch-api.md#participants)). An entry such as
+`{"handle": "grok", "adapter": "acp", "resume_policy": "fresh", "command":
+["grok", "agent", "--no-leader", "stdio"]}` runs the command above, with
+wake disabled, under trust for the exact argv, environment and directory.
+`amq setup` does not add it; write it by hand after `--check`.
+
 `amq-acp host --check -- <agent command>` probes a harness before you use
 it: it runs only `initialize`, with no AMQ root, handle, or session, prints
 the agent's protocol version, info, `load_session`, and capabilities as
@@ -433,6 +440,10 @@ value. On timeout or Ctrl-C the host sends `session/cancel` and waits 30
 seconds for the turn to end.
 
 The host never restarts the agent. When the agent exits, the host exits with
-code 1; a turn in flight is answered with the agent's exit status. A message whose sender set cross-root reply routing (`reply_to` or
+code 1; a turn in flight is answered with the agent's exit status. Ctrl-C,
+SIGTERM, and SIGHUP (a closed terminal pane) stop the host the same way: it
+closes the agent's stdin, waits 5 seconds, then kills the agent's process
+group. A host killed with SIGKILL cannot do that; the agent then sees its
+stdin close, and an agent that keeps running after stdin EOF is left behind. A message whose sender set cross-root reply routing (`reply_to` or
 `reply_project`) runs no turn and gets a reply naming that limitation. The
 host refuses to run on platforms without advisory file locks.

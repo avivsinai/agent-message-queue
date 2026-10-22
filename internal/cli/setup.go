@@ -539,6 +539,8 @@ func validateSetupCommittedConfig(cfg launch.ProjectConfig, projectRoot string, 
 			byName["cursor-agent.exe"] = adapter
 		}
 	}
+	// An acp seat is written by hand, never detected; it still validates.
+	byName[launch.ACPProvider] = launch.NewACPAdapter(launchAMQPath())
 	for _, agent := range cfg.Agents {
 		adapter, ok := byName[agent.Adapter]
 		if !ok {
