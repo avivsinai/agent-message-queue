@@ -83,7 +83,7 @@ type Host struct {
 	identity fsq.DeliveryRootIdentity
 	release  func()
 
-	conn      *conn
+	sess      agentSession
 	sessionID string
 	// resumed is true when the session was loaded from session.json.
 	resumed   bool
@@ -179,7 +179,13 @@ func (h *Host) Close() {
 // exits. It returns nil only when ctx ended. An agent that exits is an
 // error; the host never restarts it.
 func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
-	h.conn = newConn(in, out, h.onRequest, h.onNotify)
+	return h.run(ctx, newACPSession(h, in, out))
+}
+
+// run serves the inbox through one agent session until ctx ends or the agent
+// is gone.
+func (h *Host) run(ctx context.Context, sess agentSession) error {
+	h.sess = sess
 	if err := h.handshake(ctx); err != nil {
 		return err
 	}
@@ -210,8 +216,8 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-h.conn.done:
-			return fmt.Errorf("the agent exited: %w", h.conn.closedErr())
+		case <-h.sess.done():
+			return fmt.Errorf("the agent exited: %w", h.sess.err())
 		case <-ticker.C:
 		}
 	}
@@ -228,17 +234,30 @@ func (h *Host) withRoot(fn func(*fsq.DeliveryRoot) error) error {
 	return fn(root)
 }
 
-// handshake runs initialize and opens the session within one budget, so an
-// agent that never answers does not hold the host lock forever.
+// handshake opens the agent's session within one budget, so an agent that
+// never answers does not hold the host lock forever. A new session is
+// recorded in session.json; the host resumes only a session it recorded
+// itself, for the same agent and working directory.
 func (h *Host) handshake(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	init, err := initialize(ctx, h.conn, h.cfg.Version)
+	id, resumed, err := h.sess.open(ctx, h.recordedSession())
 	if err != nil {
 		return err
 	}
-	h.agentName = strings.TrimSpace(init.AgentInfo.Name + " " + init.AgentInfo.Version)
-	return h.openSession(ctx, init.loadSession())
+	h.agentName = h.sess.agentName()
+	h.sessionID, h.resumed = id, resumed
+	if resumed {
+		return nil
+	}
+	return h.withRoot(func(root *fsq.DeliveryRoot) error {
+		data, err := json.Marshal(sessionRecord{SessionID: h.sessionID, Agent: h.cfg.Agent, Cwd: h.cfg.Cwd, Created: time.Now().UTC().Format(time.RFC3339Nano)})
+		if err != nil {
+			return err
+		}
+		_, err = root.WriteFileAtomic(filepath.Join("agents", h.cfg.Me, "extensions", extensionLayer), "session.json", append(data, '\n'), 0o600)
+		return err
+	})
 }
 
 // agentInit is the part of the agent's initialize answer the host reads.
@@ -296,66 +315,25 @@ type sessionRecord struct {
 	Created   string `json:"created"`
 }
 
-// openSession resumes the session this host recorded when the agent can load
-// it, for the same agent and working directory; otherwise it opens a new one
-// and records it. The host loads only a session id it recorded itself.
-func (h *Host) openSession(ctx context.Context, canLoad bool) error {
+// recordedSession is the session this host recorded for the same agent and
+// working directory, or nil; any other record is reported and ignored.
+func (h *Host) recordedSession() *sessionRecord {
 	saved, err := h.readSessionRecord()
 	if err != nil {
 		_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: %v; starting a new ACP session\n", err)
+		return nil
 	}
-	if saved != nil {
-		switch {
-		case saved.Agent == "" || saved.Cwd == "":
-			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s names no agent or directory; starting a new ACP session\n", saved.SessionID)
-		case saved.Agent != h.cfg.Agent || saved.Cwd != h.cfg.Cwd:
-			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s belongs to %s in %s; starting a new ACP session\n", saved.SessionID, saved.Agent, saved.Cwd)
-		case !canLoad:
-			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: the agent cannot load sessions; starting a new ACP session in place of %s\n", saved.SessionID)
-		default:
-			// The agent replays the session's history as session/update
-			// notifications before it answers. No turn is in flight, so
-			// onNotify collects none of it.
-			_, err := h.conn.call(ctx, "session/load", map[string]any{"sessionId": saved.SessionID, "cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
-			if err == nil {
-				h.sessionID, h.resumed = saved.SessionID, true
-				return nil
-			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return actionRequired("the agent did not answer session/load within %s", handshakeTimeout)
-			}
-			if authRequired(err) {
-				return actionRequired("the agent needs a login: authenticate the harness once with its own CLI, then start the host again (%v)", err)
-			}
-			_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: the agent could not load session %s (%v); starting a new ACP session\n", saved.SessionID, err)
-		}
+	switch {
+	case saved == nil:
+		return nil
+	case saved.Agent == "" || saved.Cwd == "":
+		_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s names no agent or directory; starting a new ACP session\n", saved.SessionID)
+		return nil
+	case saved.Agent != h.cfg.Agent || saved.Cwd != h.cfg.Cwd:
+		_, _ = fmt.Fprintf(h.cfg.Log, "amq-acp host: recorded session %s belongs to %s in %s; starting a new ACP session\n", saved.SessionID, saved.Agent, saved.Cwd)
+		return nil
 	}
-
-	raw, err := h.conn.call(ctx, "session/new", map[string]any{"cwd": h.cfg.Cwd, "mcpServers": []any{}}, nil)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return actionRequired("the agent did not answer session/new within %s", handshakeTimeout)
-		}
-		if authRequired(err) {
-			return actionRequired("the agent needs a login: authenticate the harness once with its own CLI, then start the host again (%v)", err)
-		}
-		return fmt.Errorf("open an ACP session: %w", err)
-	}
-	var session struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(raw, &session); err != nil || session.SessionID == "" {
-		return fmt.Errorf("open an ACP session: the agent returned no session id")
-	}
-	h.sessionID = session.SessionID
-	return h.withRoot(func(root *fsq.DeliveryRoot) error {
-		data, err := json.Marshal(sessionRecord{SessionID: h.sessionID, Agent: h.cfg.Agent, Cwd: h.cfg.Cwd, Created: time.Now().UTC().Format(time.RFC3339Nano)})
-		if err != nil {
-			return err
-		}
-		_, err = root.WriteFileAtomic(filepath.Join("agents", h.cfg.Me, "extensions", extensionLayer), "session.json", append(data, '\n'), 0o600)
-		return err
-	})
+	return saved
 }
 
 // readSessionRecord reads session.json; a missing file is (nil, nil).
@@ -736,7 +714,7 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 		return nil, err
 	}
 	rec.State = stateAnswered
-	rec.StopReason, rec.ReplyBody, fatal = replyFor(res.answer, res.cancelled, res.raw, res.err, h.cfg.AgentExit)
+	rec.StopReason, rec.ReplyBody, fatal = replyFor(res.answer, res.cancelled, res.stop, res.err, h.cfg.AgentExit)
 	if fatal == nil {
 		fatal = res.stuck
 	}
@@ -751,7 +729,7 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 
 // turnResult is how one prompt turn ended.
 type turnResult struct {
-	raw       json.RawMessage
+	stop      string
 	err       error
 	cancelled string
 	answer    string
@@ -782,34 +760,8 @@ func (h *Host) prompt(ctx context.Context, root *fsq.DeliveryRoot, text string, 
 		close(collect.done)
 	}()
 
-	params := map[string]any{
-		"sessionId": h.sessionID,
-		"prompt":    []map[string]string{{"type": "text", "text": text}},
-	}
-	if meta != nil {
-		params["_meta"] = meta
-	}
-	type outcome struct {
-		raw json.RawMessage
-		err error
-	}
-	dispatched := make(chan error, 1)
-	done := make(chan outcome, 1)
-	go func() {
-		ran := false
-		raw, err := h.conn.call(context.Background(), "session/prompt", params, func(id int64) error {
-			ran = true
-			err := sent(id)
-			dispatched <- err
-			return err
-		})
-		if !ran {
-			// The call ended before the hook ran.
-			dispatched <- err
-		}
-		done <- outcome{raw, err}
-	}()
-	if err := <-dispatched; err != nil {
+	ended, err := h.sess.send(text, meta, sent)
+	if err != nil {
 		return turnResult{}, err
 	}
 
@@ -817,12 +769,12 @@ func (h *Host) prompt(ctx context.Context, root *fsq.DeliveryRoot, text string, 
 	defer timer.Stop()
 	busy := time.NewTicker(scanInterval)
 	defer busy.Stop()
-	var result outcome
+	var result turnEnd
 	cancelled := ""
 wait:
 	for {
 		select {
-		case result = <-done:
+		case result = <-ended:
 			break wait
 		case <-ctx.Done():
 			cancelled = "the host was stopped"
@@ -845,24 +797,19 @@ wait:
 	var stuck error
 	if cancelled != "" {
 		// A pending approval answers cancelled before the cancel goes out.
-		// The write runs apart, so an agent that stopped reading its stdin
-		// cannot hold the turn past the grace. session/cancel is
-		// session-wide: the turn ends only once both the prompt response and
-		// the write are done, so the cancel can never reach a later turn. A
-		// write still pending at the grace stops the host instead.
+		// A cancel is session-wide: the turn ends only once both the turn's
+		// end and the cancel's delivery are done, so the cancel can never
+		// reach a later turn. A cancel still pending at the grace stops the
+		// host instead.
 		close(collect.cancelled)
-		wrote := make(chan struct{})
-		go func() {
-			_ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID})
-			close(wrote)
-		}()
+		wrote := h.sess.cancel()
 		grace := time.NewTimer(cancelGrace)
 		defer grace.Stop()
 		answered := false
 	drain:
 		for !answered || wrote != nil {
 			select {
-			case result = <-done:
+			case result = <-ended:
 				answered = true
 			case <-wrote:
 				wrote = nil
@@ -882,12 +829,12 @@ wait:
 	h.refuseBusy(root)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return turnResult{raw: result.raw, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused, stuck: stuck}, nil
+	return turnResult{stop: result.stop, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused, stuck: stuck}, nil
 }
 
 // replyFor maps a turn's outcome to the stop label, the reply body, and
 // whether the host must stop afterwards.
-func replyFor(answer, cancelled string, raw json.RawMessage, callErr error, exitStatus func() string) (string, string, error) {
+func replyFor(answer, cancelled, stopReason string, callErr error, exitStatus func() string) (string, string, error) {
 	answer = truncate(answer)
 	if callErr != nil {
 		var rerr *rpcError
@@ -904,12 +851,8 @@ func replyFor(answer, cancelled string, raw json.RawMessage, callErr error, exit
 			return "error", "The turn failed: " + callErr.Error() + "; its effects are unknown.", callErr
 		}
 	}
-	var res struct {
-		StopReason string `json:"stopReason"`
-	}
-	_ = json.Unmarshal(raw, &res)
-	stop := stopLabel(res.StopReason)
-	switch res.StopReason {
+	stop := stopLabel(stopReason)
+	switch stopReason {
 	case "end_turn":
 		if strings.TrimSpace(answer) == "" {
 			return stop, "The agent ended the turn without text.", nil
@@ -924,7 +867,7 @@ func replyFor(answer, cancelled string, raw json.RawMessage, callErr error, exit
 		}
 		return stop, joinNote(answer, "The turn was cancelled: "+who+"."), nil
 	default:
-		return stop, joinNote(answer, "The turn stopped: "+res.StopReason+"."), nil
+		return stop, joinNote(answer, "The turn stopped: "+stopReason+"."), nil
 	}
 }
 
