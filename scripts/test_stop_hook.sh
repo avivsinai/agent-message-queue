@@ -149,7 +149,7 @@ send after >/dev/null
 after_out="$(run_hook_with_wake '{"live_wake":true,"baseline_at":"2000-01-01T00:00:00Z"}')"
 assert_eq "" "$after_out" "mail after wake start"
 send baseline >/dev/null
-assert_block "$(run_hook_with_wake '{"live_wake":true,"baseline_at":"2999-01-01T00:00:00Z"}')" "baseline mail"
+assert_block "$(run_hook_with_wake '{"live_wake":true,"started_at":"2000-01-01T00:00:00Z","baseline_at":"2999-01-01T00:00:00Z"}')" "mail between lock start and baseline"
 send unprepared >/dev/null
 assert_block "$(run_hook_with_wake '{"live_wake":true,"started_at":"2000-01-01T00:00:00Z"}')" "live wake before its baseline"
 send unwoken >/dev/null
