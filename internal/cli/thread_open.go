@@ -357,14 +357,47 @@ func (red *obligationReducer) add(entry *thread.Entry) *record {
 	return rec
 }
 
-// run processes messages in created order, then id, so a message without
-// refs is matched against the obligations opened before it. A message with
-// refs waits until its direct target is processed and then runs at once,
-// so a reference links regardless of created order. A message still waiting
-// at the end is on a reference cycle and is reported as unresolved.
+// run reduces in two passes, so the result depends on neither file order
+// nor the created time of any message with refs.
+//
+// First every missing direct target is read by name, so the set of
+// messages is fixed before reduction starts.
+//
+// Pass 1 visits the messages without refs in created order, then id. An
+// opener opens its obligations; any other message is matched against the
+// obligations opened by earlier pass 1 openers and not closed by an earlier
+// pass 1 message. Replies are not consulted.
+//
+// Pass 2 visits the messages with refs. Each waits until its direct target
+// has settled and then acts on the target's lineage. Close and acknowledge
+// are sticky and a message's lineage depends only on its settled target,
+// never on its siblings, so the visiting order does not matter. A message
+// still waiting at the end is on a reference cycle and is unresolved.
 func (red *obligationReducer) run() {
-	for _, rec := range red.order {
-		red.visit(rec)
+	all := slices.Clone(red.order)
+	for i := 0; i < len(all); i++ {
+		if refs := all[i].entry.Refs; len(refs) > 0 {
+			if found := red.lookup(refs[len(refs)-1], all[i]); found != nil {
+				all = append(all, found)
+			}
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		a, b := all[i].entry, all[j].entry
+		if !a.RawTime.Equal(b.RawTime) {
+			return a.RawTime.Before(b.RawTime)
+		}
+		return a.ID < b.ID
+	})
+	for _, rec := range all {
+		if len(rec.entry.Refs) == 0 {
+			red.visit(rec)
+		}
+	}
+	for _, rec := range all {
+		if len(rec.entry.Refs) > 0 {
+			red.visit(rec)
+		}
 	}
 	ids := make([]string, 0, len(red.waiting))
 	for id := range red.waiting {
@@ -404,7 +437,7 @@ func (red *obligationReducer) visit(rec *record) {
 	// The last ref names the direct parent; earlier refs are inherited
 	// context and give no authority.
 	targetID := msg.Refs[len(msg.Refs)-1]
-	target := red.resolve(targetID, rec)
+	target := red.records[targetID]
 	switch {
 	case target == nil:
 		red.markUnresolved(rec, targetID)
@@ -412,10 +445,6 @@ func (red *obligationReducer) visit(rec *record) {
 	case !target.done:
 		rec.waiting = true
 		red.waiting[target.entry.ID] = append(red.waiting[target.entry.ID], rec)
-		if target.hops > 0 {
-			// A target read by name is not in the created order.
-			red.visit(target)
-		}
 		return
 	case target.missingRef != "":
 		red.markUnresolved(rec, target.missingRef)
@@ -479,12 +508,12 @@ func (red *obligationReducer) markUnresolved(rec *record, missing string) {
 	red.release(rec)
 }
 
-// resolve finds the record of id, reading its header by name when the scan
-// did not collect it. A chain of records read by name is at most
-// threadOpenMaxHops long.
-func (red *obligationReducer) resolve(id string, from *record) *record {
-	if rec, ok := red.records[id]; ok {
-		return rec
+// lookup reads the header of a direct target the scan did not collect, by
+// name, and returns the new record; nil when it is collected already or not
+// found. A chain of records read by name is at most threadOpenMaxHops long.
+func (red *obligationReducer) lookup(id string, from *record) *record {
+	if _, ok := red.records[id]; ok {
+		return nil
 	}
 	if from.hops >= threadOpenMaxHops || red.lookups >= threadOpenMaxLookups {
 		return nil

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,34 +19,24 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
-	// from and to are handle@session. The sender's outbox copy lands in its
-	// session and the recipient's inbox copy in the recipient's session,
-	// unless noInbox marks a send routed outside the scan.
-	type message struct {
-		name, from, to, kind, thread string
-		refs, labels                 []string // refs name earlier messages; an unknown name is a missing id
-		replyTo, replyProject        string
-		noInbox                      bool
-		age                          time.Duration // default: ordered within the last hour
-	}
 	type check func(t *testing.T, result threadOpenResult, names map[string]string)
 	cases := []struct {
 		name     string
-		messages []message
+		messages []threadOpenMessage
 		args     []string
 		want     []string // "<owner session>/<opener name>/<owner> <state> <owed_by_kind>"
 		check    check
 	}{
 		{
 			name: "review answered by a review_response is closed",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "rr", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest},
 				{name: "resp", from: "beta@s1", to: "alpha@s1", kind: format.KindReviewResponse, refs: []string{"rr"}},
 			},
 		},
 		{
 			name: "status from the owner acknowledges a question",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "q", from: "alpha@s1", to: "beta@s1", kind: format.KindQuestion},
 				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, refs: []string{"q"}},
 			},
@@ -53,7 +44,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 		},
 		{
 			name: "todo to user is owed by a human and completes with status done",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "t", from: "alpha@s1", to: "user@s1", kind: format.KindTodo},
 			},
 			want: []string{"s1/t/user pending human"},
@@ -65,7 +56,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 		},
 		{
 			name: "file older than max-age is counted unread",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "old", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, age: 20 * 24 * time.Hour},
 			},
 			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
@@ -79,7 +70,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// with refs to its opener opens the new recipient's obligation
 			// instead of folding into the first.
 			name: "delegated todo opens the new recipient's obligation",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "d", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, thread: "p2p/alpha__beta", refs: []string{"m"}},
 			},
@@ -91,7 +82,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// one session must not close work in another. The S2 decision
 			// closes its one exact-participant candidate.
 			name: "reference-free decision closes only its own session",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "t1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "t2", from: "alpha@s2", to: "beta@s2", kind: format.KindTodo},
 				{name: "dec", from: "beta@s2", to: "alpha@s2", kind: format.KindDecision},
@@ -104,7 +95,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// copy of a live queue: unreferenced review requests folded into an
 			// older one and vanished when it was answered.
 			name: "two unreferenced todos are two obligations",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 			},
@@ -115,7 +106,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// owner's question inherited the todo's ref and closed the
 			// unfinished todo.
 			name: "decision closes only its direct target",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}},
 				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"m", "q"}},
@@ -127,7 +118,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// todo keeps kind todo and opened a new obligation owed by the
 			// requester.
 			name: "terminal same-kind reply closes and opens nothing",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "done", from: "beta@s1", to: "alpha@s1", kind: format.KindTodo, labels: []string{"done"}, refs: []string{"m"}},
 			},
@@ -137,7 +128,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// handle, so a cross-session send to the same handle opened
 			// nothing and a same-named sender could close it.
 			name: "same handle in another session is another participant",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "codex@s1", to: "codex@s2", kind: format.KindTodo, thread: "p2p/s1:codex__s2:codex", replyTo: "codex@s1"},
 				{name: "dec", from: "codex@s3", to: "codex@s1", kind: format.KindDecision, thread: "p2p/s1:codex__s2:codex", replyTo: "codex@s3"},
 			},
@@ -147,7 +138,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// Pro review finding 4 (trace T5): the answer route was built
 			// from the obligation's session instead of reply_to.
 			name: "reply destination follows reply_to",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "q", from: "alpha@s1", to: "user@s2", kind: format.KindQuestion, thread: "p2p/s1:alpha__s2:user", replyTo: "alpha@s1"},
 			},
 			want: []string{"s2/q/user pending human"},
@@ -162,7 +153,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// Trace T6: the operator answers from a shell pinned to another
 			// session of the same project.
 			name: "reserved user closes its todo from another session by reference",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "user@s1", kind: format.KindTodo},
 				{name: "ans", from: "user@s2", to: "alpha@s1", kind: format.KindStatus, labels: []string{"done"}, refs: []string{"m"}, replyTo: "user@s2"},
 			},
@@ -171,7 +162,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// Pro review finding 8 (trace T7): a continuation whose parent
 			// was cleaned up opened a reversed obligation.
 			name: "missing direct target is unresolved lineage",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "c", from: "beta@s1", to: "alpha@s1", kind: format.KindTodo, refs: []string{"gone"}},
 			},
 			check: func(t *testing.T, result threadOpenResult, names map[string]string) {
@@ -185,7 +176,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// Trace T8: a send routed to another project leaves only the
 			// outbox copy, which carries no target metadata.
 			name: "routed send without an inbox copy is counted, not owned",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta", kind: format.KindTodo, replyTo: "alpha@s1", replyProject: "proj-a", noInbox: true},
 			},
 			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
@@ -195,38 +186,10 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
-			// #1166 review: a clock-skewed decision visited its unreferenced
-			// parent before the earlier opener, so the status matched nothing
-			// and the todo stayed pending.
-			name: "unreferenced parent resolves against earlier openers despite skew",
-			messages: []message{
-				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
-				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
-				{name: "dec", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}, age: 2 * time.Hour},
-			},
-		},
-		{
-			// #1166 review of the skew fix: two skewed children of one
-			// unreferenced parent made a false cycle; the second child was
-			// marked unresolved and its decision never closed the todo.
-			name: "two skewed children of one unreferenced parent both act",
-			messages: []message{
-				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
-				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
-				{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, refs: []string{"st"}, age: 3 * time.Hour},
-				{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}, age: 2 * time.Hour},
-			},
-			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
-				if un := result.Coverage.UnresolvedLineage; len(un) != 0 {
-					t.Fatalf("unresolved_lineage = %+v, want none", un)
-				}
-			},
-		},
-		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
-			messages: []message{
+			messages: []threadOpenMessage{
 				{name: "a", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "b", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "fin", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, labels: []string{"done"}, refs: []string{"a"}},
@@ -244,75 +207,18 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			base := filepath.Join(t.TempDir(), defaultCoopRoot)
-			ids := map[string]string{}
-			idFor := func(name string, created time.Time) string {
-				if _, ok := ids[name]; !ok {
-					id, err := format.NewMessageID(created)
-					if err != nil {
-						t.Fatal(err)
-					}
-					ids[name] = id
-				}
-				return ids[name]
-			}
 			start := time.Now().UTC().Add(-time.Hour)
-			sessions := []string{}
-			for i, m := range tc.messages {
-				from, fromSession, _ := strings.Cut(m.from, "@")
-				to, toSession, _ := strings.Cut(m.to, "@")
-				created := start.Add(time.Duration(i+1) * time.Second)
+			ids, sessions := writeThreadOpenMessages(t, base, tc.messages, func(i int, m threadOpenMessage) time.Time {
 				if m.age > 0 {
-					created = time.Now().UTC().Add(-m.age)
+					return time.Now().UTC().Add(-m.age)
 				}
-				id := idFor(m.name, created)
-				refs := []string{}
-				for _, ref := range m.refs {
-					refs = append(refs, idFor(ref, start))
-				}
-				threadID := m.thread
-				if threadID == "" {
-					threadID = canonicalP2P(from, to)
-				}
-				data, err := format.Message{Header: format.Header{
-					Schema: format.CurrentSchema, ID: id, From: from, To: []string{to},
-					Thread: threadID, Created: created.Format(time.RFC3339Nano),
-					Refs: refs, Kind: m.kind, Labels: m.labels, Priority: format.PriorityNormal,
-					ReplyTo: m.replyTo, ReplyProject: m.replyProject, FromProject: m.replyProject,
-				}, Body: "body\n"}.Marshal()
-				if err != nil {
-					t.Fatal(err)
-				}
-				fromRoot := filepath.Join(base, fromSession)
-				if err := fsq.EnsureAgentDirs(fromRoot, from); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(fsq.AgentOutboxSent(fromRoot, from), id+".md"), data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				sessions = append(sessions, fromSession)
-				if !m.noInbox {
-					toRoot := filepath.Join(base, toSession)
-					if err := fsq.EnsureAgentDirs(toRoot, to); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(toRoot, to), id+".md"), data, 0o600); err != nil {
-						t.Fatal(err)
-					}
-					sessions = append(sessions, toSession)
-				}
-			}
-
-			args := append([]string{"open", "--json", "--all-sessions", "--root", filepath.Join(base, "s1")}, tc.args...)
-			stdout, stderr := captureOutput(t, func() error { return runThread(args) })
-			var result threadOpenResult
-			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-				t.Fatalf("unmarshal: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
-			}
+				return start.Add(time.Duration(i+1) * time.Second)
+			})
+			result := runThreadOpenJSON(t, base, tc.args...)
 			// Every session that holds a message is scanned, so a row that
 			// expects work in one session to survive cannot pass by skipping
 			// the other.
-			slices.Sort(sessions)
-			if sessions = slices.Compact(sessions); !slices.Equal(result.Sessions, sessions) {
+			if !slices.Equal(result.Sessions, sessions) {
 				t.Fatalf("sessions = %v, want %v", result.Sessions, sessions)
 			}
 			names := map[string]string{}
@@ -334,4 +240,163 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The reduction must not depend on file order or on the clocks of replies:
+// a message with refs acts on its direct target whenever it was written.
+// Only the created order of messages without refs is fixed, because a
+// message without refs is matched against the obligations opened before it.
+// The set holds both #1166 review cases (a skewed decision that visited its
+// unreferenced parent before the earlier opener; two skewed children of one
+// unreferenced parent that made a false cycle) and a reply whose clock
+// decided whether an unreferenced decision had one candidate or two.
+func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	messages := []threadOpenMessage{
+		{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "x"},
+		{name: "st1", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "x"},
+		{name: "dec1", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, thread: "x", refs: []string{"st1"}},
+
+		{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "y"},
+		{name: "st2", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "y"},
+		{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, thread: "y", refs: []string{"st2"}},
+		{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, thread: "y", refs: []string{"st2"}},
+
+		{name: "rr1", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
+		{name: "rr2", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
+		{name: "resp", from: "beta@s1", to: "alpha@s1", kind: format.KindReviewResponse, thread: "z", refs: []string{"rr1"}},
+		{name: "decz", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "z"},
+
+		{name: "t", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "w"},
+		{name: "dg", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, thread: "w", refs: []string{"t"}},
+	}
+	want := "s1/dg/gamma pending; s1/rr2/beta pending; s1/t/beta acknowledged | ambiguous: decz | unresolved: "
+
+	for seed := uint64(0); seed < 4; seed++ {
+		base := filepath.Join(t.TempDir(), defaultCoopRoot)
+		start := time.Now().UTC().Add(-time.Hour)
+		rng := rand.New(rand.NewPCG(seed, seed))
+		unreferenced := 0
+		ids, _ := writeThreadOpenMessages(t, base, messages, func(_ int, m threadOpenMessage) time.Time {
+			if len(m.refs) == 0 {
+				unreferenced++
+				return start.Add(time.Duration(unreferenced) * 10 * time.Second)
+			}
+			// Anywhere from before the first message to after the last.
+			return start.Add(time.Duration(rng.IntN(160)-20) * time.Second)
+		})
+		result := runThreadOpenJSON(t, base)
+		names := map[string]string{}
+		for name, id := range ids {
+			names[id] = name
+		}
+		obligations, ambiguous, unresolved := []string{}, []string{}, []string{}
+		for _, ob := range result.Obligations {
+			obligations = append(obligations, ob.OwedBy.Session+"/"+names[ob.Opener.ID]+"/"+ob.OwedBy.Handle+" "+ob.State)
+		}
+		for _, amb := range result.Coverage.Ambiguous {
+			ambiguous = append(ambiguous, names[amb.ID])
+		}
+		for _, un := range result.Coverage.UnresolvedLineage {
+			unresolved = append(unresolved, names[un.ID])
+		}
+		slices.Sort(obligations)
+		slices.Sort(ambiguous)
+		slices.Sort(unresolved)
+		got := strings.Join(obligations, "; ") + " | ambiguous: " + strings.Join(ambiguous, ", ") + " | unresolved: " + strings.Join(unresolved, ", ")
+		if got != want {
+			t.Fatalf("seed %d:\n got %s\nwant %s", seed, got, want)
+		}
+	}
+}
+
+// threadOpenMessage is one message of a thread open fixture. from and to are
+// handle@session. The sender's outbox copy lands in its session and the
+// recipient's inbox copy in the recipient's session, unless noInbox marks a
+// send routed outside the scan.
+type threadOpenMessage struct {
+	name, from, to, kind, thread string
+	refs, labels                 []string // refs name other messages; an unknown name is a missing id
+	replyTo, replyProject        string
+	noInbox                      bool
+	age                          time.Duration
+}
+
+// writeThreadOpenMessages writes messages under base with the created time
+// that created returns for each, and returns their ids by name and the
+// sorted sessions that hold a copy.
+func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMessage, created func(int, threadOpenMessage) time.Time) (map[string]string, []string) {
+	t.Helper()
+	times := make([]time.Time, len(messages))
+	ids := map[string]string{}
+	newID := func(at time.Time) string {
+		id, err := format.NewMessageID(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	for i, m := range messages {
+		times[i] = created(i, m)
+		ids[m.name] = newID(times[i])
+	}
+	sessions := []string{}
+	for i, m := range messages {
+		from, fromSession, _ := strings.Cut(m.from, "@")
+		to, toSession, _ := strings.Cut(m.to, "@")
+		refs := []string{}
+		for _, ref := range m.refs {
+			if _, ok := ids[ref]; !ok {
+				ids[ref] = newID(times[i].Add(-time.Minute))
+			}
+			refs = append(refs, ids[ref])
+		}
+		threadID := m.thread
+		if threadID == "" {
+			threadID = canonicalP2P(from, to)
+		}
+		id := ids[m.name]
+		data, err := format.Message{Header: format.Header{
+			Schema: format.CurrentSchema, ID: id, From: from, To: []string{to},
+			Thread: threadID, Created: times[i].Format(time.RFC3339Nano),
+			Refs: refs, Kind: m.kind, Labels: m.labels, Priority: format.PriorityNormal,
+			ReplyTo: m.replyTo, ReplyProject: m.replyProject, FromProject: m.replyProject,
+		}, Body: "body\n"}.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fromRoot := filepath.Join(base, fromSession)
+		if err := fsq.EnsureAgentDirs(fromRoot, from); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fsq.AgentOutboxSent(fromRoot, from), id+".md"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, fromSession)
+		if !m.noInbox {
+			toRoot := filepath.Join(base, toSession)
+			if err := fsq.EnsureAgentDirs(toRoot, to); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(toRoot, to), id+".md"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sessions = append(sessions, toSession)
+		}
+	}
+	slices.Sort(sessions)
+	return ids, slices.Compact(sessions)
+}
+
+func runThreadOpenJSON(t *testing.T, base string, extra ...string) threadOpenResult {
+	t.Helper()
+	args := append([]string{"open", "--json", "--all-sessions", "--root", filepath.Join(base, "s1")}, extra...)
+	stdout, stderr := captureOutput(t, func() error { return runThread(args) })
+	var result threadOpenResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	return result
 }
