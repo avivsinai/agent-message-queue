@@ -33,8 +33,8 @@ per-key overlay. See [Session routing and safety](session-routing.md).
 A long-running AMQ process must re-read its configuration while it runs.
 This is the project rule. The wake reloads the agent and machine wake
 settings files, `amq-keepalive supervise` reloads its settings file,
-`amq-remote serve` reloads its relay shares when the manifest bytes change
-and its links when the manifest modification time changes, and `amq-acp`
+`amq-remote serve` reloads its relay shares and its links when the manifest
+bytes change (a deleted manifest means no links and no shares), and `amq-acp`
 reads `~/.amq/acp.settings` at the start of each turn.
 
 - A change applies without a restart.

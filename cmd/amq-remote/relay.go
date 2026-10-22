@@ -113,7 +113,7 @@ type relaySet struct {
 	running   map[string]*relayRun
 	wg        sync.WaitGroup
 
-	raw     []byte            // the manifest bytes last reconciled
+	mf      manifestBytes     // the manifest bytes last reconciled
 	started *manifest.Relay   // the relay block serve started from
 	said    map[string]string // what each report key last said
 }
@@ -157,21 +157,40 @@ func (rs *relaySet) start(ctx context.Context, r *manifest.Relay) {
 // wait returns once every client and the status writer ended.
 func (rs *relaySet) wait() { rs.wg.Wait() }
 
-// tick reconciles the relay shares when the manifest bytes changed. The
-// bytes, not the mtime, decide: a same-second edit or a rename that keeps
-// the mtime still counts. A manifest that does not load keeps every running
-// share and is reported once (docs/configuration.md#hot-reload).
-func (rs *relaySet) tick() {
-	raw, err := os.ReadFile(rs.manifestFile)
+// manifestBytes follows a manifest by its bytes, not its mtime: a
+// same-second edit or a rename that keeps the mtime still counts, and a
+// deleted manifest reads as empty, a change to no links and no shares.
+type manifestBytes struct {
+	raw []byte // nil until the first read
+}
+
+// changed reads path and reports whether its bytes differ from the last
+// read, and whether this was the first read.
+func (m *manifestBytes) changed(path string) (changed, first bool, err error) {
+	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
+		return false, false, err
+	}
+	if m.raw != nil && bytes.Equal(raw, m.raw) {
+		return false, false, nil
+	}
+	first = m.raw == nil
+	m.raw = append([]byte{}, raw...)
+	return true, first, nil
+}
+
+// tick reconciles the relay shares when the manifest bytes changed. A
+// manifest that does not load keeps every running share and is reported
+// once (docs/configuration.md#hot-reload).
+func (rs *relaySet) tick() {
+	changed, first, err := rs.mf.changed(rs.manifestFile)
+	if err != nil {
 		rs.sayOnce("manifest", fmt.Sprintf("relay: reload manifest: %v", err))
 		return
 	}
-	if rs.raw != nil && bytes.Equal(raw, rs.raw) {
+	if !changed {
 		return
 	}
-	first := rs.raw == nil
-	rs.raw = append([]byte{}, raw...)
 	mf, err := manifest.Load(rs.manifestFile)
 	if err != nil {
 		rs.sayOnce("manifest", fmt.Sprintf("relay: the manifest is refused, so the shares stay as they are: %v", err))

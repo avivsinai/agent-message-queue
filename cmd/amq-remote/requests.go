@@ -25,16 +25,21 @@ func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	recs, err := store.List()
+	recs, poison, err := store.ListWithPoison()
 	if err != nil {
 		return nil, 0, err
 	}
 	if *limit > 0 && len(recs) > *limit {
 		recs = recs[len(recs)-*limit:]
 	}
-	out := make([]protocol.Snapshot, 0, len(recs))
+	out := make([]any, 0, len(recs)+len(poison))
 	for _, r := range recs {
 		out = append(out, r.Snapshot)
+	}
+	// A damaged record is always listed: while it stays unreadable,
+	// admission refuses submits to its target.
+	for _, p := range poison {
+		out = append(out, damagedRequest{Schema: "request_damaged", RequestID: p.Key.RequestID, CreatorHost: p.Key.CreatorHost, TargetID: p.Key.TargetID, Path: p.Path, Error: p.Error})
 	}
 	// Include ALL spool envelopes (pending, failed, expired, dispatched)
 	// that have no request-store record yet, with their actual terminal state
@@ -43,9 +48,12 @@ func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 	// records so the same request doesn't appear twice.
 	if spool, err := sender.Open(stateDir); err == nil {
 		if envs, err := spool.List(); err == nil {
-			seen := make(map[string]bool, len(recs))
+			seen := make(map[string]bool, len(recs)+len(poison))
 			for _, r := range recs {
 				seen[r.RequestID] = true
+			}
+			for _, p := range poison {
+				seen[p.Key.RequestID] = true
 			}
 			for _, env := range envs {
 				if seen[env.RequestID] {
@@ -82,4 +90,15 @@ func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 	}
 	return out, 0, nil
+}
+
+// damagedRequest is a request record that cannot be read or decoded. Its
+// identity comes from the file name; the rest is lost.
+type damagedRequest struct {
+	Schema      string `json:"schema"`
+	RequestID   string `json:"request_id,omitempty"`
+	CreatorHost string `json:"creator_host"`
+	TargetID    string `json:"target_id,omitempty"`
+	Path        string `json:"path"`
+	Error       string `json:"error"`
 }
