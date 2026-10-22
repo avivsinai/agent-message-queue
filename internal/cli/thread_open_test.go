@@ -186,6 +186,62 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
+			// #1166 review: two clock-skewed children of one unreferenced
+			// parent made a false cycle; the second was marked unresolved and
+			// its decision never closed the todo.
+			name: "two skewed children of one unreferenced parent both act",
+			messages: []threadOpenMessage{
+				{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, refs: []string{"st"}},
+				{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}},
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
+			},
+			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
+				if un := result.Coverage.UnresolvedLineage; len(un) != 0 {
+					t.Fatalf("unresolved_lineage = %+v, want none", un)
+				}
+				if want := []threadOpenCount{{Session: "s1", Count: 2}}; !slices.Equal(result.Coverage.SkewDeferred, want) {
+					t.Fatalf("skew_deferred = %+v, want %+v", result.Coverage.SkewDeferred, want)
+				}
+			},
+		},
+		{
+			// #1166 review: an opener whose parent is created later must be
+			// open at its own created time, so an unreferenced closer between
+			// the two closes it.
+			name: "opener with a later parent is open for an unreferenced closer",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"p"}},
+				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision},
+				{name: "p", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
+			},
+		},
+		{
+			// #1166 review: a todo closed by a reply is not a candidate, so an
+			// unreferenced decision after the next todo has one candidate and
+			// closes it.
+			name: "unreferenced decision sees closures made by earlier replies",
+			messages: []threadOpenMessage{
+				{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, labels: []string{"done"}, refs: []string{"m1"}},
+				{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision},
+			},
+		},
+		{
+			// #1166 review: a header whose created does not parse opened an
+			// obligation (reported as expired under the default window).
+			name: "invalid created header is skipped and opens nothing",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, badCreated: true},
+			},
+			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
+				if len(result.Coverage.Skipped) != 1 || len(result.Coverage.Expired) != 0 {
+					t.Fatalf("skipped = %+v, expired = %+v; want one skipped and nothing opened", result.Coverage.Skipped, result.Coverage.Expired)
+				}
+			},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
@@ -242,18 +298,20 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 	}
 }
 
-// The reduction must not depend on file order or on the clocks of replies:
-// a message with refs acts on its direct target whenever it was written.
-// Only the created order of messages without refs is fixed, because a
-// message without refs is matched against the obligations opened before it.
-// The set holds both #1166 review cases (a skewed decision that visited its
-// unreferenced parent before the earlier opener; two skewed children of one
-// unreferenced parent that made a false cycle) and a reply whose clock
-// decided whether an unreferenced decision had one candidate or two.
+// A reply acts on its parent's lineage once that lineage is settled, so
+// moving a reply to any time before its parent changes nothing: the result
+// equals the run where each reply directly follows its parent. File order
+// changes nothing either. Openers and unreferenced messages keep their
+// created order, because rule 5 is defined on it. The set holds the #1166
+// review cases: a skewed decision that visited its unreferenced parent
+// early, two skewed children of one unreferenced parent, an opener whose
+// parent is created later, and a reply closure an unreferenced decision
+// must see.
 func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
 	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
 		t.Setenv(key, "")
 	}
+	// Base order: every reply directly follows its parent.
 	messages := []threadOpenMessage{
 		{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "x"},
 		{name: "st1", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "x"},
@@ -265,28 +323,34 @@ func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
 		{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, thread: "y", refs: []string{"st2"}},
 
 		{name: "rr1", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
-		{name: "rr2", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
 		{name: "resp", from: "beta@s1", to: "alpha@s1", kind: format.KindReviewResponse, thread: "z", refs: []string{"rr1"}},
+		{name: "rr2", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
 		{name: "decz", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "z"},
 
 		{name: "t", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "w"},
 		{name: "dg", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, thread: "w", refs: []string{"t"}},
+
+		{name: "mp", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "v", refs: []string{"pp"}},
+		{name: "decp", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "v"},
+		{name: "pp", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "v"},
 	}
-	want := "s1/dg/gamma pending; s1/rr2/beta pending; s1/t/beta acknowledged | ambiguous: decz | unresolved: "
+	moved := map[string]string{"dec1": "st1", "d1": "st2", "d2": "st2", "resp": "rr1"} // reply -> parent
+	want := "s1/dg/gamma pending; s1/t/beta acknowledged | ambiguous:  | unresolved: "
 
 	for seed := uint64(0); seed < 4; seed++ {
 		base := filepath.Join(t.TempDir(), defaultCoopRoot)
 		start := time.Now().UTC().Add(-time.Hour)
-		rng := rand.New(rand.NewPCG(seed, seed))
-		unreferenced := 0
-		ids, _ := writeThreadOpenMessages(t, base, messages, func(_ int, m threadOpenMessage) time.Time {
-			if len(m.refs) == 0 {
-				unreferenced++
-				return start.Add(time.Duration(unreferenced) * 10 * time.Second)
+		times := map[string]time.Time{}
+		for i, m := range messages {
+			times[m.name] = start.Add(time.Duration(i+1) * 10 * time.Second)
+		}
+		if seed > 0 {
+			rng := rand.New(rand.NewPCG(seed, seed))
+			for reply, parent := range moved {
+				times[reply] = times[parent].Add(-time.Duration(1+rng.IntN(300)) * time.Second)
 			}
-			// Anywhere from before the first message to after the last.
-			return start.Add(time.Duration(rng.IntN(160)-20) * time.Second)
-		})
+		}
+		ids, _ := writeThreadOpenMessages(t, base, messages, func(_ int, m threadOpenMessage) time.Time { return times[m.name] })
 		result := runThreadOpenJSON(t, base)
 		names := map[string]string{}
 		for name, id := range ids {
@@ -320,7 +384,7 @@ type threadOpenMessage struct {
 	name, from, to, kind, thread string
 	refs, labels                 []string // refs name other messages; an unknown name is a missing id
 	replyTo, replyProject        string
-	noInbox                      bool
+	noInbox, badCreated          bool
 	age                          time.Duration
 }
 
@@ -358,9 +422,13 @@ func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMes
 			threadID = canonicalP2P(from, to)
 		}
 		id := ids[m.name]
+		createdField := times[i].Format(time.RFC3339Nano)
+		if m.badCreated {
+			createdField = "yesterday"
+		}
 		data, err := format.Message{Header: format.Header{
 			Schema: format.CurrentSchema, ID: id, From: from, To: []string{to},
-			Thread: threadID, Created: times[i].Format(time.RFC3339Nano),
+			Thread: threadID, Created: createdField,
 			Refs: refs, Kind: m.kind, Labels: m.labels, Priority: format.PriorityNormal,
 			ReplyTo: m.replyTo, ReplyProject: m.replyProject, FromProject: m.replyProject,
 		}, Body: "body\n"}.Marshal()

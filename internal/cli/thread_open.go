@@ -110,6 +110,7 @@ type threadOpenCoverage struct {
 	UnresolvedLineage []threadOpenUnresolved `json:"unresolved_lineage"`
 	Ambiguous         []threadOpenAmbiguous  `json:"ambiguous"`
 	OutboundRouted    []threadOpenCount      `json:"outbound_routed"`
+	SkewDeferred      []threadOpenCount      `json:"skew_deferred"`
 	TruncatedByLimit  threadOpenTruncated    `json:"truncated_by_limit"`
 }
 
@@ -135,6 +136,7 @@ type threadOpenUnresolved struct {
 	From       string `json:"from"`
 	Kind       string `json:"kind"`
 	MissingRef string `json:"missing_ref"`
+	Reason     string `json:"reason"` // missing, skipped, or cycle
 }
 
 type threadOpenAmbiguous struct {
@@ -272,6 +274,7 @@ func runThreadOpen(args []string) error {
 	result.Coverage.UnresolvedLineage = red.unresolved
 	result.Coverage.Ambiguous = red.ambiguous
 	result.Coverage.OutboundRouted = countsBySession(result.Sessions, red.outbound)
+	result.Coverage.SkewDeferred = countsBySession(result.Sessions, red.deferred)
 
 	open, expired := red.report(filter)
 	result.Coverage.Expired = expired
@@ -303,27 +306,37 @@ type obligation struct {
 	last      *thread.Entry
 }
 
-// record is one message with its resolved sender and the obligations whose
-// lineage it belongs to.
+// record is one message with its resolved sender, its direct parent, and
+// the obligations whose lineage it belongs to.
 type record struct {
 	entry      *thread.Entry
 	sender     participant
+	hops       int     // records read by name on the way to this one
+	parent     *record // direct target (last ref); nil without refs or when missing
+	opens      []string
 	lineage    []*obligation
-	missingRef string // set when the lineage of the message cannot be resolved
-	hops       int    // records read by name on the way to this one
-	waiting    bool   // waits for its direct target
-	done       bool
+	ready      bool      // lineage is settled
+	deferred   bool      // waits for its parent's lineage
+	waiters    []*record // messages whose acting waits for this lineage
+	unresolved *threadOpenUnresolved
 }
 
-// obligationReducer applies the thread open rules. Phase 1
-// (newObligationReducer) indexes every message by id and resolves its
-// sender; phase 2 (run) reduces over the reference graph.
+// obligationReducer applies the thread open rules in one pass in created
+// order, then id.
+//
+// Every header is classified from headers alone before the pass: its direct
+// parent, and the recipients it opens an obligation for. Openers open at
+// their own created time, so no opener waits for its parent. A message
+// without refs that opens nothing is matched against the obligations open
+// at that moment (rule 5). A message with refs acts on its parent's lineage
+// as soon as that lineage is settled; when the parent's lineage settles
+// later (clock skew), the action is deferred until then and counted in
+// skew_deferred.
 type obligationReducer struct {
 	roots       []thread.ScanRoot
 	cutoff      time.Time
 	records     map[string]*record
 	order       []*record
-	waiting     map[string][]*record // direct target id -> messages waiting for it
 	obligations []*obligation
 	byThread    map[string][]*obligation
 	lookups     int
@@ -331,6 +344,7 @@ type obligationReducer struct {
 	unresolved  []threadOpenUnresolved
 	ambiguous   []threadOpenAmbiguous
 	outbound    map[string]int
+	deferred    map[string]int
 }
 
 func newObligationReducer(roots []thread.ScanRoot, entries []thread.Entry, cutoff time.Time) *obligationReducer {
@@ -339,11 +353,11 @@ func newObligationReducer(roots []thread.ScanRoot, entries []thread.Entry, cutof
 		cutoff:     cutoff,
 		records:    map[string]*record{},
 		byThread:   map[string][]*obligation{},
-		waiting:    map[string][]*record{},
 		skipped:    []threadOpenSkipped{},
 		unresolved: []threadOpenUnresolved{},
 		ambiguous:  []threadOpenAmbiguous{},
 		outbound:   map[string]int{},
+		deferred:   map[string]int{},
 	}
 	for i := range entries {
 		red.order = append(red.order, red.add(&entries[i]))
@@ -357,108 +371,95 @@ func (red *obligationReducer) add(entry *thread.Entry) *record {
 	return rec
 }
 
-// run reduces in two passes, so the result depends on neither file order
-// nor the created time of any message with refs.
-//
-// First every missing direct target is read by name, so the set of
-// messages is fixed before reduction starts.
-//
-// Pass 1 visits the messages without refs in created order, then id. An
-// opener opens its obligations; any other message is matched against the
-// obligations opened by earlier pass 1 openers and not closed by an earlier
-// pass 1 message. Replies are not consulted.
-//
-// Pass 2 visits the messages with refs. Each waits until its direct target
-// has settled and then acts on the target's lineage. Close and acknowledge
-// are sticky and a message's lineage depends only on its settled target,
-// never on its siblings, so the visiting order does not matter. A message
-// still waiting at the end is on a reference cycle and is unresolved.
 func (red *obligationReducer) run() {
-	all := slices.Clone(red.order)
-	for i := 0; i < len(all); i++ {
-		if refs := all[i].entry.Refs; len(refs) > 0 {
-			if found := red.lookup(refs[len(refs)-1], all[i]); found != nil {
-				all = append(all, found)
+	// Load: read each missing direct parent by name, so the message set is
+	// fixed before anything is classified.
+	for i := 0; i < len(red.order); i++ {
+		if refs := red.order[i].entry.Refs; len(refs) > 0 {
+			if found := red.lookup(refs[len(refs)-1], red.order[i]); found != nil {
+				red.order = append(red.order, found)
 			}
 		}
 	}
-	sort.SliceStable(all, func(i, j int) bool {
-		a, b := all[i].entry, all[j].entry
+	sort.SliceStable(red.order, func(i, j int) bool {
+		a, b := red.order[i].entry, red.order[j].entry
 		if !a.RawTime.Equal(b.RawTime) {
 			return a.RawTime.Before(b.RawTime)
 		}
 		return a.ID < b.ID
 	})
-	for _, rec := range all {
-		if len(rec.entry.Refs) == 0 {
-			red.visit(rec)
+
+	// Classify from headers alone.
+	for _, rec := range red.order {
+		if refs := rec.entry.Refs; len(refs) > 0 {
+			rec.parent = red.records[refs[len(refs)-1]]
 		}
+		rec.opens = opensFor(rec)
 	}
-	for _, rec := range all {
-		if len(rec.entry.Refs) > 0 {
-			red.visit(rec)
+
+	for _, rec := range red.order {
+		msg := rec.entry
+		if msg.RawTime.IsZero() {
+			red.skipped = append(red.skipped, threadOpenSkipped{Path: msg.Occurrences[0].Path, Error: fmt.Sprintf("invalid created timestamp %q", msg.Created)})
+			continue
 		}
-	}
-	ids := make([]string, 0, len(red.waiting))
-	for id := range red.waiting {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		for _, rec := range red.waiting[id] {
-			if !rec.done {
-				red.markUnresolved(rec, id)
+		if len(msg.Refs) == 0 {
+			if len(rec.opens) > 0 {
+				red.settle(rec, red.open(rec))
+			} else if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
+				red.settle(rec, red.actWithoutRefs(rec))
+			} else {
+				red.settle(rec, nil)
 			}
+			continue
+		}
+		parentID := msg.Refs[len(msg.Refs)-1]
+		switch {
+		case rec.parent == nil:
+			red.markUnresolved(rec, parentID, "missing")
+			continue
+		case rec.parent.entry.RawTime.IsZero():
+			red.markUnresolved(rec, parentID, "skipped")
+			continue
+		}
+		if opened := red.open(rec); len(opened) > 0 {
+			red.settle(rec, opened)
+		}
+		if rec.parent.ready {
+			red.actOnParent(rec)
+		} else {
+			rec.deferred = true
+			rec.parent.waiters = append(rec.parent.waiters, rec)
+			red.deferred[rec.sender.Session]++
+		}
+	}
+
+	// A message still waiting never reached a settled lineage: it is on a
+	// reference cycle.
+	for _, rec := range red.order {
+		if rec.deferred {
+			red.markUnresolved(rec, rec.entry.Refs[len(rec.entry.Refs)-1], "cycle")
 		}
 	}
 }
 
-func (red *obligationReducer) visit(rec *record) {
-	if rec.done || rec.waiting {
-		return
-	}
+// actOnParent applies a message with refs to its parent's settled lineage:
+// close, then acknowledge, for the owner or the requester addressed to the
+// other party; a message from the owner to someone else acknowledges.
+func (red *obligationReducer) actOnParent(rec *record) {
+	rec.deferred = false
 	msg := rec.entry
-	if msg.RawTime.IsZero() {
-		red.skipped = append(red.skipped, threadOpenSkipped{Path: msg.Occurrences[0].Path, Error: fmt.Sprintf("invalid created timestamp %q", msg.Created)})
-		red.finish(rec, nil)
-		rec.missingRef = msg.ID
-		red.release(rec)
+	if rec.parent.unresolved != nil && !rec.ready {
+		red.markUnresolved(rec, rec.parent.unresolved.MissingRef, rec.parent.unresolved.Reason)
 		return
 	}
-	if len(msg.Refs) == 0 {
-		var acted []*obligation
-		if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
-			acted = red.actWithoutRefs(rec)
-		}
-		red.finish(rec, acted)
-		red.release(rec)
-		return
-	}
-	// The last ref names the direct parent; earlier refs are inherited
-	// context and give no authority.
-	targetID := msg.Refs[len(msg.Refs)-1]
-	target := red.records[targetID]
-	switch {
-	case target == nil:
-		red.markUnresolved(rec, targetID)
-		return
-	case !target.done:
-		rec.waiting = true
-		red.waiting[target.entry.ID] = append(red.waiting[target.entry.ID], rec)
-		return
-	case target.missingRef != "":
-		red.markUnresolved(rec, target.missingRef)
-		return
-	}
-
 	var acted []*obligation
-	for _, ob := range target.lineage {
+	for _, ob := range rec.parent.lineage {
 		owner, requester := roleOf(ob, rec.sender, true)
 		if !owner && !requester {
 			continue
 		}
 		if !slices.Contains(msg.To, otherParty(ob, owner).Handle) {
-			// The owner handing the work to someone else acknowledges it.
 			if owner {
 				acknowledge(ob, msg)
 			}
@@ -467,45 +468,36 @@ func (red *obligationReducer) visit(rec *record) {
 		act(ob, owner, msg)
 		acted = append(acted, ob)
 	}
-	continuation := msg.Kind == defaultReplyKind(target.entry.Kind)
-	if opened := red.open(rec, acted, continuation); len(opened) > 0 {
-		rec.lineage = opened
-	} else {
-		rec.lineage = acted
+	if !rec.ready {
+		red.settle(rec, acted)
 	}
-	rec.done = true
-	red.release(rec)
 }
 
-// finish opens the obligations of a message without a direct target and
-// records its lineage.
-func (red *obligationReducer) finish(rec *record, acted []*obligation) {
-	if opened := red.open(rec, acted, false); len(opened) > 0 {
-		rec.lineage = opened
-	} else {
-		rec.lineage = acted
-	}
-	rec.done = true
-}
-
-// release runs the messages that waited for rec as their direct target.
-func (red *obligationReducer) release(rec *record) {
-	waiters := red.waiting[rec.entry.ID]
-	delete(red.waiting, rec.entry.ID)
+// settle fixes the lineage of rec and runs the actions that waited for it.
+func (red *obligationReducer) settle(rec *record, lineage []*obligation) {
+	rec.lineage = lineage
+	rec.ready = true
+	waiters := rec.waiters
+	rec.waiters = nil
 	for _, waiter := range waiters {
-		waiter.waiting = false
-		red.visit(waiter)
+		red.actOnParent(waiter)
 	}
 }
 
-func (red *obligationReducer) markUnresolved(rec *record, missing string) {
-	rec.missingRef = missing
-	rec.waiting = false
-	rec.done = true
-	red.unresolved = append(red.unresolved, threadOpenUnresolved{
-		ID: rec.entry.ID, Session: rec.sender.Session, From: rec.entry.From, Kind: rec.entry.Kind, MissingRef: missing,
-	})
-	red.release(rec)
+func (red *obligationReducer) markUnresolved(rec *record, missing, reason string) {
+	rec.deferred = false
+	if rec.unresolved != nil {
+		return
+	}
+	rec.unresolved = &threadOpenUnresolved{
+		ID: rec.entry.ID, Session: rec.sender.Session, From: rec.entry.From, Kind: rec.entry.Kind, MissingRef: missing, Reason: reason,
+	}
+	red.unresolved = append(red.unresolved, *rec.unresolved)
+	waiters := rec.waiters
+	rec.waiters = nil
+	for _, waiter := range waiters {
+		red.actOnParent(waiter)
+	}
 }
 
 // lookup reads the header of a direct target the scan did not collect, by
@@ -529,8 +521,29 @@ func (red *obligationReducer) lookup(id string, from *record) *record {
 	return rec
 }
 
-// actWithoutRefs links a message without refs to the one open obligation in
-// its thread between the same two exact participants.
+// opensFor lists the recipients a message opens an obligation for, from
+// headers alone. Only an opener kind without a closing label opens. A
+// recipient who already took part in the parent continues the parent's
+// obligation when the message has the kind reply would default to; any
+// other recipient gets an obligation of their own.
+func opensFor(rec *record) []string {
+	msg := rec.entry
+	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
+		return nil
+	}
+	opens := []string{}
+	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
+		if p := rec.parent; p != nil && msg.Kind == defaultReplyKind(p.entry.Kind) &&
+			(handle == p.entry.From || slices.Contains(p.entry.To, handle)) {
+			continue
+		}
+		opens = append(opens, handle)
+	}
+	return opens
+}
+
+// actWithoutRefs links a message without refs to the one obligation open at
+// its created time in its thread between the same two exact participants.
 func (red *obligationReducer) actWithoutRefs(rec *record) []*obligation {
 	msg := rec.entry
 	recipients := []participant{}
@@ -577,23 +590,12 @@ func (red *obligationReducer) actWithoutRefs(rec *record) []*obligation {
 	return candidates
 }
 
-// open creates one obligation per resolved recipient of an opener. A
-// terminal message opens nothing, and a continuation (the kind reply would
-// default to) opens nothing for the other participant of an obligation it
-// acts on.
-func (red *obligationReducer) open(rec *record, acted []*obligation, continuation bool) []*obligation {
+// open creates one obligation per resolved recipient in rec.opens.
+func (red *obligationReducer) open(rec *record) []*obligation {
 	msg := rec.entry
-	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
-		return nil
-	}
 	opened := []*obligation{}
 	routed := false
-	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
-		if continuation && slices.ContainsFunc(acted, func(ob *obligation) bool {
-			return otherParty(ob, rec.sender != ob.requester).Handle == handle
-		}) {
-			continue
-		}
+	for _, handle := range rec.opens {
 		owner, ok := recipientOf(rec, handle)
 		if !ok {
 			routed = true
