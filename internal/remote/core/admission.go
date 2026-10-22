@@ -203,10 +203,13 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
-	// The resubmit is bound to the session its source proves now, which the
-	// dispatching write below stores. Only the creator host reaches this
-	// record, so the source is the same carrier that stored the tombstone.
-	rec.NativeSession = src.NativeSession
+	// A resubmit that names a session is bound to the session its source
+	// proves now, which the dispatching write below stores; one that names
+	// none keeps the stored binding. Only the creator host reaches this
+	// record.
+	if src.NativeSession != "" {
+		rec.NativeSession = src.NativeSession
+	}
 	if code := e.handoffLocked(rec, t); code != "" {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil

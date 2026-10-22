@@ -43,8 +43,9 @@ type Request struct {
 	Wait *WaitRequest `json:"wait,omitempty"`
 	// NativeSession, when set, requires the command's target to be attached
 	// to exactly this native session; any other session refuses with
-	// unshared before the endpoint sees the command. Local-only: the native
-	// identity never enters the session wire schema.
+	// unshared before the endpoint sees the command, and a submit stays
+	// bound to it until its handoff. Local-only: the native identity never
+	// enters the session wire schema.
 	NativeSession string `json:"native_session,omitempty"`
 	// Native asks which native session a target is attached to, so a local
 	// sharing choice can pin it. Local-only, like NativeSession.
@@ -358,7 +359,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		writeRecord(conn, Response{Reply: mustJSON(NativeReply{NativeSession: id})})
 	case req.Command != nil:
-		reply, err := s.ep.Handle(req.Command, core.Source{Host: LocalHost})
+		// A pinned submit stays bound to the pinned session: core checks it
+		// again at every handoff, also after a restart.
+		reply, err := s.ep.Handle(req.Command, core.Source{Host: LocalHost, NativeSession: req.NativeSession})
 		if err != nil {
 			writeRecord(conn, errorResponse(err))
 			return
