@@ -3,10 +3,11 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -29,12 +30,16 @@ func TestPresenceUpdateKeepsWakeWriteCommittedMidUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := presence.Update(root, "claude", func(p *presence.Presence) {
-		go func() { wakeDone <- setWakeDoorbellStatusInDir(agentDir, "claude", true, 3) }()
-		select {
-		case err := <-wakeDone:
-			wakeDone <- err
-		case <-time.After(200 * time.Millisecond):
+		// Presence writers are serialized by one lock, so a competing writer
+		// cannot acquire it while this callback holds its snapshot.
+		release, ok, err := lock.TryExclusive(filepath.Join(root, "agents", "claude", presence.LockName))
+		if err != nil {
+			t.Error(err)
+		} else if ok {
+			release()
+			t.Error("presence lock was free inside Update; a wake write could interleave with the update")
 		}
+		go func() { wakeDone <- setWakeDoorbellStatusInDir(agentDir, "claude", true, 3) }()
 		p.Note = "reviewing"
 	}); err != nil {
 		t.Fatal(err)
