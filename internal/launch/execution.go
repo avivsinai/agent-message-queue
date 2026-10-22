@@ -676,8 +676,8 @@ func prepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 			if record.LaunchNonce != nonce || !validUUID(ticket.ConversationID) {
 				return ticket, fmt.Errorf("pending conversation does not match execution generation")
 			}
-			// A ticket written before mint tickets carried their backend
-			// identity names none; it keeps the commands identity it had.
+			// A mint ticket without a backend identity keeps the commands
+			// identity.
 			backend, profile := ticket.Backend, ticket.Profile
 			if backend == "" {
 				backend, profile = CommandsBackendName, CommandsProfile().Identity()
@@ -880,8 +880,10 @@ func recordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable, codexHome 
 	if err != nil {
 		return result, err
 	}
-	if record.State == CaptureReady && record.LaunchNonce == nonce && record.ProviderVersion == ticket.ProviderVersion &&
-		record.Identity.Provider == CodexProvider && record.Identity.ID == evidence.conversationID {
+	// A resumed seat runs the captured thread under a new launch nonce.
+	resumed := ticket.ConversationID != "" && ticket.ConversationID == record.Identity.ID
+	if record.State == CaptureReady && record.Identity.Provider == CodexProvider && record.Identity.ID == evidence.conversationID &&
+		(resumed || (record.LaunchNonce == nonce && record.ProviderVersion == ticket.ProviderVersion)) {
 		if len(record.EvidenceRefs) != 1 {
 			return result, fmt.Errorf("ready codex conversation does not have one evidence ref")
 		}

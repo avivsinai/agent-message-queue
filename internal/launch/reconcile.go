@@ -516,7 +516,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if journalActive && journal.Phase == JournalCreated {
 			candidate = journal.Binding
 		} else {
-			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, request.CallerContext, planned, &result, joinBinding)
+			candidate, err = finalizeCreatedState(request.Root, create, backendName, detect, nonce, request.CallerContext, planned, &result, joinBinding)
 			if err != nil {
 				return result, err
 			}
@@ -753,7 +753,7 @@ func revalidateAdoption(request ReconcileRequest, backend Backend, journal Launc
 	return nil
 }
 
-func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, callerContext map[string]string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
+func finalizeCreatedState(root *fsq.DeliveryRoot, create CreateResult, backendName string, detect DetectResult, nonce string, callerContext map[string]string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
 	created := create.Binding
 	created.CallerContext = cloneCallerContext(callerContext)
 	bindingNonce := nonce

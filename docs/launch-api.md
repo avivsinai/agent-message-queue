@@ -247,7 +247,8 @@ Each provider owns its conversation identity:
   (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl`, found by the
   exact thread ID) starts with a `session_meta` for the seat's cwd with
   `source` `cli` and `thread_source` `user`. Any other notify binds nothing
-  and leaves the seat as it is. The hook then forwards the identical
+  and leaves the seat as it is. A resumed seat's notify for its captured
+  thread is already captured. The hook then forwards the identical
   payload to the operator's configured Codex notify command; a missing command
   is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
   unused Codex launch stays pending and cannot be resumed.

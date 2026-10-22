@@ -829,6 +829,27 @@ func TestReconcileCodexSeatStaysPendingUntilNotifyBindsIt(t *testing.T) {
 		record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name {
 		t.Fatalf("record after notify = %#v, %v", record, err)
 	}
+
+	// A resumed seat runs under a new launch nonce; its notify for the same
+	// thread is already captured, not a conflict (seen live on resume).
+	resumed, err := Reconcile(req)
+	if err != nil || resumed.AggregateCode != 0 || resumed.Agents[0].ConversationDisposition != DispositionResumed {
+		t.Fatalf("resume result=%#v err=%v", resumed, err)
+	}
+	ticket, err = LoadExecutionTicket(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := RecordCodexNotify(req.Root, "claude", ticket.AMQExecutable, codexHome, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || !again.AlreadyReady {
+		t.Fatalf("resumed notify = %#v, %v", again, err)
+	}
 }
 
 func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) {
