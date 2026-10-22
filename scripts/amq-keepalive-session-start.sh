@@ -47,6 +47,17 @@ fi
 
 (umask 077 && mkdir -p "$(dirname "$LOG_PATH")") 2>/dev/null || true
 
+# Every start appends to the log, so keep it bounded: past 1 MiB the current
+# log becomes .1 (replacing the previous one) and a new log starts.
+LOG_MAX_BYTES=1048576
+if [[ -f "$LOG_PATH" ]]; then
+    log_size="$(wc -c < "$LOG_PATH" 2>/dev/null)" || log_size=""
+    log_size="${log_size//[[:space:]]/}"
+    if [[ "$log_size" =~ ^[0-9]+$ && "$log_size" -ge "$LOG_MAX_BYTES" ]]; then
+        mv -f "$LOG_PATH" "$LOG_PATH.1" 2>/dev/null || : > "$LOG_PATH" 2>/dev/null || true
+    fi
+fi
+
 log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_PATH" 2>/dev/null || true
 }

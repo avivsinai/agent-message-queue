@@ -79,6 +79,17 @@ fi
 
 (umask 077 && mkdir -p "$(dirname "$LOG_PATH")") 2>/dev/null || true
 
+# Every start appends to the log, so keep it bounded: past 1 MiB the current
+# log becomes .1 (replacing the previous one) and a new log starts.
+LOG_MAX_BYTES=1048576
+if [[ -f "$LOG_PATH" ]]; then
+    log_size="$(wc -c < "$LOG_PATH" 2>/dev/null)" || log_size=""
+    log_size="${log_size//[[:space:]]/}"
+    if [[ "$log_size" =~ ^[0-9]+$ && "$log_size" -ge "$LOG_MAX_BYTES" ]]; then
+        mv -f "$LOG_PATH" "$LOG_PATH.1" 2>/dev/null || : > "$LOG_PATH" 2>/dev/null || true
+    fi
+fi
+
 log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_PATH" 2>/dev/null || true
 }
@@ -243,7 +254,12 @@ type Result struct {
 	TimeoutSeconds     int                    `json:"timeout_seconds"`
 	HookTimeoutSeconds int                    `json:"hook_timeout_seconds"`
 	DryRun             bool                   `json:"dry_run"`
+	Notes              []string               `json:"notes,omitempty"`
 }
+
+// CodexRetrustNote tells the person that Codex skips a new or changed hook
+// until it is trusted.
+const CodexRetrustNote = "Codex runs a new or changed hook only after you trust it in /hooks"
 
 func DefaultScriptPath() (string, error) {
 	home, err := registry.DefaultHome()
@@ -275,7 +291,7 @@ func Install(opts Options) (Result, error) {
 		return Result{}, err
 	}
 	command := buildHookCommand(normalized.BinaryPath, normalized.ScriptPath, normalized.Timeout)
-	hookTimeoutSeconds := int(normalized.Timeout.Seconds()) + 5
+	hookTimeoutSeconds := hookTimeoutSecondsFor(normalized.Timeout)
 	result := Result{
 		Agent:              normalized.Agent,
 		Configs:            map[string]FileResult{},
@@ -288,11 +304,11 @@ func Install(opts Options) (Result, error) {
 
 	if normalized.Agent == AgentClaude || normalized.Agent == AgentBoth {
 		result.Commands[AgentClaude] = command
-		result.Snippets[AgentClaude] = claudeSessionStartEntry(command, hookTimeoutSeconds)
+		result.Snippets[AgentClaude] = sessionStartEntry(AgentClaude, command, hookTimeoutSeconds)
 	}
 	if normalized.Agent == AgentCodex || normalized.Agent == AgentBoth {
 		result.Commands[AgentCodex] = command
-		result.Snippets[AgentCodex] = codexSessionStartEntry(command, hookTimeoutSeconds)
+		result.Snippets[AgentCodex] = sessionStartEntry(AgentCodex, command, hookTimeoutSeconds)
 	}
 
 	scriptResult := FileResult{Path: normalized.ScriptPath}
@@ -309,14 +325,14 @@ func Install(opts Options) (Result, error) {
 	result.Script = scriptResult
 
 	if !normalized.DryRun && (normalized.Agent == AgentClaude || normalized.Agent == AgentBoth) {
-		fileResult, err := installClaudeHook(normalized.ClaudeConfig, command, hookTimeoutSeconds)
+		fileResult, err := installHook(normalized.ClaudeConfig, normalized.ScriptPath, sessionStartEntry(AgentClaude, command, hookTimeoutSeconds))
 		if err != nil {
 			return result, err
 		}
 		result.Configs[AgentClaude] = fileResult
 	}
 	if !normalized.DryRun && (normalized.Agent == AgentCodex || normalized.Agent == AgentBoth) {
-		fileResult, err := installCodexHook(normalized.CodexConfig, command, hookTimeoutSeconds)
+		fileResult, err := installHook(normalized.CodexConfig, normalized.ScriptPath, sessionStartEntry(AgentCodex, command, hookTimeoutSeconds))
 		if err != nil {
 			if result.Configs[AgentClaude].Changed {
 				return result, fmt.Errorf("partial hookinstall commit: %s updated; %s failed: %w", AgentClaude, AgentCodex, err)
@@ -324,18 +340,21 @@ func Install(opts Options) (Result, error) {
 			return result, err
 		}
 		result.Configs[AgentCodex] = fileResult
+		if fileResult.Changed {
+			result.Notes = append(result.Notes, CodexRetrustNote)
+		}
 	}
 	return result, nil
 }
 
 func preflightHookConfigs(opts Options, command string, hookTimeoutSeconds int) error {
 	if opts.Agent == AgentClaude || opts.Agent == AgentBoth {
-		if _, _, err := prepareClaudeHook(opts.ClaudeConfig, command, hookTimeoutSeconds); err != nil {
+		if _, _, err := prepareHook(opts.ClaudeConfig, opts.ScriptPath, sessionStartEntry(AgentClaude, command, hookTimeoutSeconds)); err != nil {
 			return err
 		}
 	}
 	if opts.Agent == AgentCodex || opts.Agent == AgentBoth {
-		if _, _, err := prepareCodexHook(opts.CodexConfig, command, hookTimeoutSeconds); err != nil {
+		if _, _, err := prepareHook(opts.CodexConfig, opts.ScriptPath, sessionStartEntry(AgentCodex, command, hookTimeoutSeconds)); err != nil {
 			return err
 		}
 	}
@@ -404,23 +423,15 @@ func NormalizeOptions(opts Options) (Options, error) {
 	return opts, nil
 }
 
-func installClaudeHook(path, command string, hookTimeoutSeconds int) (FileResult, error) {
-	doc, changed, err := prepareClaudeHook(path, command, hookTimeoutSeconds)
+func installHook(path, scriptPath string, entry map[string]interface{}) (FileResult, error) {
+	doc, changed, err := prepareHook(path, scriptPath, entry)
 	if err != nil {
 		return FileResult{}, err
 	}
 	return saveJSONIfChanged(path, doc, changed)
 }
 
-func installCodexHook(path, command string, hookTimeoutSeconds int) (FileResult, error) {
-	doc, changed, err := prepareCodexHook(path, command, hookTimeoutSeconds)
-	if err != nil {
-		return FileResult{}, err
-	}
-	return saveJSONIfChanged(path, doc, changed)
-}
-
-func prepareClaudeHook(path, command string, hookTimeoutSeconds int) (map[string]interface{}, bool, error) {
+func prepareHook(path, scriptPath string, entry map[string]interface{}) (map[string]interface{}, bool, error) {
 	doc, err := loadJSONObject(path)
 	if err != nil {
 		return nil, false, err
@@ -437,107 +448,109 @@ func prepareClaudeHook(path, command string, hookTimeoutSeconds int) (map[string
 		return nil, false, err
 	}
 	sessionStart, healed := selfHealSessionStart(sessionStart)
+	sessionStart, placed := placeOwnedEntry(sessionStart, scriptPath, entry)
 	hooks["SessionStart"] = sessionStart
 	doc["hooks"] = hooks
-	if claudeHasCommand(sessionStart, command) {
-		return doc, healed, nil
-	}
-	sessionStart = append(sessionStart, claudeSessionStartEntry(command, hookTimeoutSeconds))
-	hooks["SessionStart"] = sessionStart
-	doc["hooks"] = hooks
-	return doc, true, nil
+	return doc, healed || placed, nil
 }
 
-func prepareCodexHook(path, command string, hookTimeoutSeconds int) (map[string]interface{}, bool, error) {
-	doc, err := loadJSONObject(path)
-	if err != nil {
-		return nil, false, err
-	}
-	hooks, err := objectField(doc, "hooks")
-	if err != nil {
-		return nil, false, err
-	}
-	sessionStart, err := arrayField(hooks, "SessionStart")
-	if err != nil {
-		return nil, false, err
-	}
-	if err := validateSessionStartEntries(sessionStart); err != nil {
-		return nil, false, err
-	}
-	sessionStart, healed := selfHealSessionStart(sessionStart)
-	hooks["SessionStart"] = sessionStart
-	doc["hooks"] = hooks
-	if codexHasCommand(sessionStart, command) {
-		return doc, healed, nil
-	}
-	hook := codexHook(command, hookTimeoutSeconds)
-	if len(sessionStart) == 0 {
-		sessionStart = append(sessionStart, map[string]interface{}{"hooks": []interface{}{hook}})
-	} else {
-		first, ok := sessionStart[0].(map[string]interface{})
-		if !ok {
-			sessionStart = append(sessionStart, map[string]interface{}{"hooks": []interface{}{hook}})
-		} else {
-			hookList, err := innerHookList(first)
-			if err != nil {
-				return nil, false, err
-			}
-			first["hooks"] = append(hookList, hook)
-		}
-	}
-	hooks["SessionStart"] = sessionStart
-	doc["hooks"] = hooks
-	return doc, true, nil
-}
-
-func claudeSessionStartEntry(command string, hookTimeoutSeconds int) map[string]interface{} {
-	return map[string]interface{}{
-		"matcher": "*",
-		"hooks": []interface{}{
-			map[string]interface{}{
-				"type":          "command",
-				"command":       command,
-				"timeout":       hookTimeoutSeconds,
-				"statusMessage": "Reattaching AMQ wake...",
-			},
-		},
-	}
-}
-
-func codexSessionStartEntry(command string, hookTimeoutSeconds int) map[string]interface{} {
-	return map[string]interface{}{
-		"hooks": []interface{}{
-			codexHook(command, hookTimeoutSeconds),
-		},
-	}
-}
-
-func codexHook(command string, hookTimeoutSeconds int) map[string]interface{} {
-	return map[string]interface{}{
-		"type":    "command",
-		"command": command,
-		"timeout": hookTimeoutSeconds,
-	}
-}
-
-func claudeHasCommand(entries []interface{}, command string) bool {
-	for _, entry := range entries {
-		obj, ok := entry.(map[string]interface{})
+// placeOwnedEntry makes entry the only SessionStart registration of the owned
+// hook for scriptPath. When exactly one owned hook names scriptPath and its
+// whole group already equals entry, nothing changes, so a rerun is a no-op
+// and a changed matcher, timeout or async field still reaches old installs.
+// Otherwise every owned hook for scriptPath is removed from whatever group
+// holds it, a group is dropped only when that removal emptied it (foreign
+// hooks that shared an old group stay), and entry is appended.
+func placeOwnedEntry(sessionStart []interface{}, scriptPath string, entry map[string]interface{}) ([]interface{}, bool) {
+	matches := 0
+	current := false
+	for _, group := range sessionStart {
+		obj, ok := group.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		for _, hook := range interfaceArray(obj["hooks"]) {
-			hookObj, ok := hook.(map[string]interface{})
-			if ok && strings.TrimSpace(fmt.Sprint(hookObj["command"])) == command {
-				return true
+			if ownedHookForScript(hook, scriptPath) {
+				matches++
+				current = sameJSON(obj, entry)
 			}
 		}
 	}
-	return false
+	if matches == 1 && current {
+		return sessionStart, false
+	}
+	out := make([]interface{}, 0, len(sessionStart)+1)
+	for _, group := range sessionStart {
+		obj, ok := group.(map[string]interface{})
+		if !ok {
+			out = append(out, group)
+			continue
+		}
+		inner := interfaceArray(obj["hooks"])
+		kept := make([]interface{}, 0, len(inner))
+		for _, hook := range inner {
+			if !ownedHookForScript(hook, scriptPath) {
+				kept = append(kept, hook)
+			}
+		}
+		if len(kept) == len(inner) {
+			out = append(out, group)
+			continue
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		obj["hooks"] = kept
+		out = append(out, obj)
+	}
+	return append(out, entry), true
 }
 
-func codexHasCommand(entries []interface{}, command string) bool {
-	return claudeHasCommand(entries, command)
+func ownedHookForScript(hook interface{}, scriptPath string) bool {
+	hookObj, ok := hook.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	parsed, ok := parseHookCommand(strings.TrimSpace(fmt.Sprint(hookObj["command"])))
+	return ok && parsed.ScriptPath == scriptPath
+}
+
+func sameJSON(a, b interface{}) bool {
+	left, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	right, err := json.Marshal(b)
+	return err == nil && bytes.Equal(left, right)
+}
+
+// sessionStartMatcher names the sources reattach acts on. clear and compact
+// keep the same terminal and wake, so they start nothing.
+const sessionStartMatcher = "startup|resume|fork"
+
+// sessionStartEntry renders the SessionStart group the installer owns.
+// Claude runs it async: the hook prints only {}, so it delivers nothing to
+// the model and no session start waits for reattach. Codex stays sync,
+// bounded by the hook timeout.
+func sessionStartEntry(agent, command string, hookTimeoutSeconds int) map[string]interface{} {
+	hook := map[string]interface{}{
+		"type":    "command",
+		"command": command,
+		"timeout": hookTimeoutSeconds,
+	}
+	if agent == AgentClaude {
+		hook["async"] = true
+	}
+	return map[string]interface{}{
+		"matcher": sessionStartMatcher,
+		"hooks":   []interface{}{hook},
+	}
+}
+
+// hookTimeoutSecondsFor gives the harness timeout: the script's own reattach
+// bound plus room for it to log and exit.
+func hookTimeoutSecondsFor(timeout time.Duration) int {
+	return int(timeout.Seconds()) + 5
 }
 
 // isAMQOwnedCommand reports whether a SessionStart hook command was written by
@@ -584,23 +597,24 @@ func classifyHook(hookObj map[string]interface{}) hookClass {
 }
 
 // scriptPathFromAMQCommand extracts the installed script path from an AMQ-owned
-// SessionStart hook command. buildHookCommand emits a fixed layout of three
-// single-quoted tokens: AMQ_KEEPALIVE_BIN=<q> AMQ_KEEPALIVE_TIMEOUT_SECONDS=<q>
-// <q>, where the third token is the script path. This is a forward decoder of
-// that fixed shape: it consumes one single-quoted token at a time (decoding the
-// 4-byte escaped-quote sequence that shellQuote emits for an embedded quote), skips the
-// single space separators, and returns the third token. Any leftover non-space
-// bytes after the third token, or the wrong number of tokens, means the command
-// does not match the shape buildHookCommand produces and is not parseable.
-// Returns the unescaped path and true on success; false (without dropping
-// anything) otherwise.
+// SessionStart hook command. Two fixed layouts of three single-quoted tokens
+// parse: the gated form buildHookCommand emits,
+// AMQ_KEEPALIVE_BIN=<q> AMQ_KEEPALIVE_TIMEOUT_SECONDS=<q><hookGate><q><hookGateTail>,
+// and the older ungated form AMQ_KEEPALIVE_BIN=<q> AMQ_KEEPALIVE_TIMEOUT_SECONDS=<q> <q>
+// that existing installs still carry. The third token is the script path.
+// This is a forward decoder: it consumes one single-quoted token at a time
+// (decoding the 4-byte escaped-quote sequence that shellQuote emits for an
+// embedded quote) and requires the exact separators between them. Any other
+// shape is not parseable. Returns the unescaped path and true on success;
+// false (without dropping anything) otherwise.
 func scriptPathFromAMQCommand(command string) (string, bool) {
 	parsed, ok := parseHookCommand(command)
 	return parsed.ScriptPath, ok
 }
 
 // HookCommand is an AMQ-owned SessionStart hook command read back into the
-// values buildHookCommand wrote. Command is the command string itself.
+// values buildHookCommand (or an older installer) wrote. Command is the
+// command string itself.
 type HookCommand struct {
 	Command    string
 	BinaryPath string
@@ -625,9 +639,9 @@ func parseHookCommand(command string) (HookCommand, bool) {
 	if !ok {
 		return HookCommand{}, false
 	}
-	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>, then a space. The prefix
-	// must be present exactly (CutPrefix, not TrimPrefix) and the decoded token
-	// must be all digits, because buildHookCommand emits shellQuote(fmt.Sprintf("%d",...)).
+	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>. The prefix must be
+	// present exactly (CutPrefix, not TrimPrefix) and the decoded token must be
+	// all digits, because buildHookCommand emits a quoted integer.
 	rest, ok = strings.CutPrefix(rest, "AMQ_KEEPALIVE_TIMEOUT_SECONDS=")
 	if !ok {
 		return HookCommand{}, false
@@ -639,17 +653,24 @@ func parseHookCommand(command string) (HookCommand, bool) {
 	if !isAllDigits(timeoutToken) {
 		return HookCommand{}, false
 	}
-	rest, ok = consumeSingleSpace(rest)
-	if !ok {
+	// The gated form follows with hookGate; the older ungated form with one
+	// space. Either way token 3, the script path, comes next.
+	gated := false
+	if after, isGated := strings.CutPrefix(rest, hookGate); isGated {
+		rest, gated = after, true
+	} else if rest, ok = consumeSingleSpace(rest); !ok {
 		return HookCommand{}, false
 	}
-	// Token 3: the script path.
 	path, left, ok := shellUnquoteToken(rest)
 	if !ok {
 		return HookCommand{}, false
 	}
-	// Any leftover non-space bytes mean a 4th token is present: not parseable.
-	if strings.TrimSpace(left) != "" {
+	if gated {
+		if left != hookGateTail {
+			return HookCommand{}, false
+		}
+	} else if strings.TrimSpace(left) != "" {
+		// Leftover non-space bytes mean a 4th token: not parseable.
 		return HookCommand{}, false
 	}
 	seconds, err := strconv.Atoi(timeoutToken)
@@ -757,10 +778,9 @@ func selfHealSessionStart(sessionStart []interface{}) ([]interface{}, bool) {
 // are preserved, not dropped. Uses classifyHook so it agrees with the doctor
 // scan.
 func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
-	// Duplicate collapse keys on the exact full command string, the same
-	// identity the installer's claudeHasCommand uses: two LIVE owned hooks that
-	// share a script path but differ in AMQ_KEEPALIVE_BIN or timeout are distinct
-	// commands and must both be preserved; only byte-identical commands collapse.
+	// Duplicate collapse keys on the exact full command string: only
+	// byte-identical commands collapse here. Live owned hooks for the script
+	// being installed are reduced to one by placeOwnedEntry, not by self-heal.
 	seen := make(map[string]bool)
 	filtered := make([]interface{}, 0, len(hooks))
 	changed := false
@@ -875,6 +895,79 @@ func OwnedSessionStartHooks(configPath string) ([]HookCommand, error) {
 	return owned, nil
 }
 
+// OutdatedSessionStartHook is an AMQ-owned SessionStart hook that a rerun of
+// install-hook rewrites. Reason is "old form" when its group differs from what
+// this version writes for the same binary, script and timeout (an ungated
+// command, another matcher or timeout, a missing async, or a group shared
+// with other hooks), and "duplicate" when more than one owned hook names the
+// same script.
+type OutdatedSessionStartHook struct {
+	ConfigPath string `json:"config_path"`
+	Agent      string `json:"agent"`
+	ScriptPath string `json:"script_path"`
+	Reason     string `json:"reason"`
+}
+
+// OutdatedSessionStartHooks scans a Claude or Codex hook config, read-only,
+// for live AMQ-owned SessionStart hooks that are not in the current form. It
+// reports one entry per script. Stale hooks are StaleSessionStartHooks' to
+// report, and unparseable ones are left alone.
+func OutdatedSessionStartHooks(configPath, agent string) ([]OutdatedSessionStartHook, error) {
+	doc, err := loadJSONObject(configPath)
+	if err != nil {
+		return nil, err
+	}
+	hooks, _ := doc["hooks"].(map[string]interface{})
+	sessionStart, _ := hooks["SessionStart"].([]interface{})
+	type finding struct {
+		count   int
+		current bool
+	}
+	found := map[string]*finding{}
+	var order []string
+	for _, entry := range sessionStart {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, hook := range interfaceArray(obj["hooks"]) {
+			hookObj, ok := hook.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			class := classifyHook(hookObj)
+			if !class.owned || class.scriptPath == "" || class.stale {
+				continue
+			}
+			parsed, _ := parseHookCommand(strings.TrimSpace(fmt.Sprint(hookObj["command"])))
+			want := sessionStartEntry(agent, buildHookCommand(parsed.BinaryPath, parsed.ScriptPath, parsed.Timeout), hookTimeoutSecondsFor(parsed.Timeout))
+			f := found[parsed.ScriptPath]
+			if f == nil {
+				f = &finding{}
+				found[parsed.ScriptPath] = f
+				order = append(order, parsed.ScriptPath)
+			}
+			f.count++
+			f.current = sameJSON(obj, want)
+		}
+	}
+	var outdated []OutdatedSessionStartHook
+	for _, script := range order {
+		f := found[script]
+		reason := ""
+		switch {
+		case f.count > 1:
+			reason = "duplicate"
+		case !f.current:
+			reason = "old form"
+		default:
+			continue
+		}
+		outdated = append(outdated, OutdatedSessionStartHook{ConfigPath: configPath, Agent: agent, ScriptPath: script, Reason: reason})
+	}
+	return outdated, nil
+}
+
 func loadJSONObject(path string) (map[string]interface{}, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -909,11 +1002,16 @@ func saveJSONIfChanged(path string, doc map[string]interface{}, changed bool) (F
 	if !changed {
 		return result, nil
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
+	// The hook command holds shell operators; keep && readable in the file
+	// instead of the default \u0026 escape.
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(doc); err != nil {
 		return FileResult{}, err
 	}
-	data = append(data, '\n')
+	data := buf.Bytes()
 	backup, err := backupIfExists(path)
 	if err != nil {
 		return FileResult{}, err
@@ -1072,12 +1170,20 @@ func innerHookList(entry map[string]interface{}) ([]interface{}, error) {
 	return values, nil
 }
 
+// hookGate sits between the timeout assignment and the quoted script path.
+// It repeats the script's own early exits in sh: no terminal target, or no
+// handle for reattach (Me comes only from AM_ME or the override, never from
+// .amqrc). A session that fails it starts only the harness shell; one that
+// passes replaces the shell with the script.
+const (
+	hookGate     = `; export AMQ_KEEPALIVE_BIN AMQ_KEEPALIVE_TIMEOUT_SECONDS; [ -n "${CMUX_SURFACE_ID-}${AMQ_KEEPALIVE_TARGET-}" ] && [ -n "${AM_ME-}${AMQ_KEEPALIVE_ME-}" ] && exec `
+	hookGateTail = `; echo '{}'`
+)
+
 func buildHookCommand(binaryPath, scriptPath string, timeout time.Duration) string {
-	return fmt.Sprintf("AMQ_KEEPALIVE_BIN=%s AMQ_KEEPALIVE_TIMEOUT_SECONDS=%s %s",
-		shellQuote(binaryPath),
-		shellQuote(fmt.Sprintf("%d", int(timeout.Seconds()))),
-		shellQuote(scriptPath),
-	)
+	return amqOwnedCommandPrefix + shellQuote(binaryPath) +
+		" AMQ_KEEPALIVE_TIMEOUT_SECONDS=" + shellQuote(strconv.Itoa(int(timeout.Seconds()))) +
+		hookGate + shellQuote(scriptPath) + hookGateTail
 }
 
 func shellQuote(value string) string {
