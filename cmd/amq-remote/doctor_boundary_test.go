@@ -111,7 +111,8 @@ func doctorHasBoundary(out any, boundary, subject string) bool {
 // agent-message-queue-611.71: one unreadable request record made admission
 // refuse every submit to its target ("reservation state undeterminable"),
 // while doctor read the store through List, dropped the poison, and exited 0.
-// A damaged Buzz outbox row is never sent, and doctor named nothing either.
+// A damaged Buzz outbox row is never sent, and doctor named nothing either;
+// `amq-remote requests` hid the damaged request record too.
 func TestDoctorNamesDamagedRecords(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "extensions", "remote")
@@ -147,5 +148,8 @@ func TestDoctorNamesDamagedRecords(t *testing.T) {
 	}
 	if code != protocol.ExitActionRequired || !named["request"] || !named["outbox"] {
 		t.Fatalf("damaged records not named: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	}
+	if code, listed, _ := cli(t, "", "requests", "--root", root, "--json"); code != 0 || !strings.Contains(listed, `"request_damaged"`) || !strings.Contains(listed, "fake__deadbeef.json") {
+		t.Fatalf("requests exit=%d out=%s, want the damaged record listed", code, listed)
 	}
 }
