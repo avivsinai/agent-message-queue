@@ -111,24 +111,41 @@ func doctorHasBoundary(out any, boundary, subject string) bool {
 // agent-message-queue-611.71: one unreadable request record made admission
 // refuse every submit to its target ("reservation state undeterminable"),
 // while doctor read the store through List, dropped the poison, and exited 0.
-func TestDoctorNamesAnUnreadableRequestRecord(t *testing.T) {
+// A damaged Buzz outbox row is never sent, and doctor named nothing either.
+func TestDoctorNamesDamagedRecords(t *testing.T) {
 	root := t.TempDir()
-	hostDir := filepath.Join(root, "extensions", "remote", "v1", "requests", "host-1")
-	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+	stateDir := filepath.Join(root, "extensions", "remote")
+	hostDir := filepath.Join(stateDir, "v1", "requests", "host-1")
+	outbox := filepath.Join(stateDir, "shares", "work", "buzz", "outbox")
+	for _, dir := range []string{hostDir, outbox} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, "fake__deadbeef.json"), []byte(`{"state":"runn`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	poison := filepath.Join(hostDir, "fake__deadbeef.json")
-	if err := os.WriteFile(poison, []byte(`{"state":"runn`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(outbox, "0a.json"), []byte(`{"key":"row/old/1","acc`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := json.Marshal(relayStatusDoc{URL: "wss://relay.example", Shares: []relayShareStatus{{Session: "work", Target: "cx", State: "authenticated"}}})
+	if err := os.WriteFile(filepath.Join(stateDir, relayStatusFile), status, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, code, err := doctor([]string{"--root", root})
 	if err != nil {
 		t.Fatal(err)
 	}
+	named := map[string]bool{}
 	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
-		if f.Boundary == "request_store" && f.Subject == "fake" && strings.Contains(f.Detail, poison) && f.Remedy != "" && code == protocol.ExitActionRequired {
-			return
+		switch {
+		case f.Boundary == "request_store" && f.Subject == "fake" && strings.Contains(f.Detail, "fake__deadbeef.json") && f.Remedy != "":
+			named["request"] = true
+		case f.Boundary == "publication" && f.Subject == "work" && strings.Contains(f.Detail, "0a.json") && f.Remedy != "":
+			named["outbox"] = true
 		}
 	}
-	t.Fatalf("unreadable record not named: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	if code != protocol.ExitActionRequired || !named["request"] || !named["outbox"] {
+		t.Fatalf("damaged records not named: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	}
 }
