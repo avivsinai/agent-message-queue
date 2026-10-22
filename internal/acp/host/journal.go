@@ -49,8 +49,10 @@ func turnsDir(me string) string {
 	return filepath.Join("agents", me, "extensions", extensionLayer, "turns")
 }
 
-// claimTurn creates the record exclusively and syncs it before the message
-// is moved. os.ErrExist means a record for this message already exists.
+// claimTurn creates the record exclusively and makes it durable before the
+// message is moved: the record, turns/, and every directory above it, which
+// the first claim may have just created. os.ErrExist means a record for
+// this message already exists.
 func claimTurn(root *fsq.DeliveryRoot, me string, rec turnRecord) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -63,7 +65,7 @@ func claimTurn(root *fsq.DeliveryRoot, me string, rec turnRecord) error {
 		}
 		return err
 	}
-	return root.SyncDir(dir)
+	return root.SyncDirChain(dir)
 }
 
 // saveTurn replaces the record atomically and durably.

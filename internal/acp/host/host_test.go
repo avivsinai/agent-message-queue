@@ -714,3 +714,41 @@ func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
 		t.Fatalf("the next turn received the earlier cancel: %+v", next)
 	}
 }
+
+// A verifier review of the ACP host found that the first turn was claimed
+// and its message moved to cur before extensions/acp-host/ (which gained
+// turns/) was fsynced: a power loss could keep the moved message and lose
+// its journal. The directory chain of turns/ must be synced before the move.
+func TestHostSyncsTheJournalDirectoryChainBeforeTakingAMessage(t *testing.T) {
+	root := newRoot(t)
+	var mu sync.Mutex
+	var synced []string
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		mu.Lock()
+		synced = append(synced, filepath.ToSlash(dir))
+		mu.Unlock()
+		return nil
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+	send(t, root, "codex", format.KindQuestion, "what is 2+2?")
+	startHost(t, root, &fakeAgent{})
+	waitReply(t, root)
+
+	mu.Lock()
+	defer mu.Unlock()
+	turns, cur := -1, -1
+	for i, dir := range synced {
+		if turns < 0 && strings.HasSuffix(dir, "extensions/acp-host/turns") {
+			turns = i
+		}
+		if turns >= 0 && cur < 0 && strings.HasSuffix(dir, "grok/inbox/cur") {
+			cur = i
+		}
+	}
+	if turns < 0 || cur < 0 {
+		t.Fatalf("syncs=%q; want the turns directory, then grok's inbox/cur", synced)
+	}
+	if !slices.ContainsFunc(synced[turns:cur], func(dir string) bool { return strings.HasSuffix(dir, "grok/extensions/acp-host") }) {
+		t.Fatalf("syncs between the claim and the move=%q; want extensions/acp-host synced before the message moves", synced[turns:cur])
+	}
+}

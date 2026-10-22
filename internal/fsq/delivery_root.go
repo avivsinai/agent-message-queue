@@ -951,6 +951,16 @@ func (r *DeliveryRoot) ensureLedgerDirDurability(dir string) error {
 	return r.syncDirChain(dir)
 }
 
+// SyncDirChain fsyncs dir and every ancestor through the root, so a
+// directory created with its parents survives a power loss along with what
+// it holds.
+func (r *DeliveryRoot) SyncDirChain(dir string) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	return r.syncDirChain(dir)
+}
+
 // syncDirChain fsyncs dir itself, then every ancestor down through
 // root-relative dot, oldest first (dot last). Existing directories re-sync
 // harmlessly (idempotent).
