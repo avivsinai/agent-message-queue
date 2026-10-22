@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.105.1](https://github.com/avivsinai/agent-message-queue/compare/v0.105.0...v0.105.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **acp:** report only new agy tool denials per turn ([#1162](https://github.com/avivsinai/agent-message-queue/issues/1162)) ([e63cd8f](https://github.com/avivsinai/agent-message-queue/commit/e63cd8fc62fd30aa81b357009cdc8d9c643f5596))
+* **coop:** ring the wake doorbell for agy again ([#1164](https://github.com/avivsinai/agent-message-queue/issues/1164)) ([066d068](https://github.com/avivsinai/agent-message-queue/commit/066d0681cf8f02d6fde264edc68075ed6ac48cd8))
+* **hooks:** under a live wake, block the stop only for baseline mail ([#1152](https://github.com/avivsinai/agent-message-queue/issues/1152)) ([790736e](https://github.com/avivsinai/agent-message-queue/commit/790736ebccc742d740423ab4a6a4c80853e4718d))
+* **presence:** keep the wake's notifier fields when presence changes ([#1161](https://github.com/avivsinai/agent-message-queue/issues/1161)) ([5890cff](https://github.com/avivsinai/agent-message-queue/commit/5890cffcb39fe2826ff46b70a06df727c6caeedf))
+
 ## [0.105.0](https://github.com/avivsinai/agent-message-queue/compare/v0.104.0...v0.105.0) (2026-10-22)
 
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 func TestRunPresenceSetUserListsAsHuman(t *testing.T) {
@@ -56,5 +57,43 @@ func TestRunPresenceSetUserListsAsHuman(t *testing.T) {
 	}
 	if user.Kind != "human" || user.PresenceApplicable || user.Status != "available" || user.Note != "watching gates" || user.LastSeen == "" {
 		t.Fatalf("user = %+v, want real human presence item marked not applicable", *user)
+	}
+}
+
+// presence set rewrote presence.json from scratch and dropped the wake's
+// notifier and doorbell fields, so doctor --ops lost the wake state and wake
+// check stopped reporting doorbell_ready (found during PR #1152).
+func TestRunPresenceSetKeepsWakeFields(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := presence.SetNotifierStatus(root, "claude", "input_recovery_required", "raw", "inspect the composer"); err != nil {
+		t.Fatal(err)
+	}
+	wake, err := presence.Read(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wake.DoorbellParked = true
+	wake.DoorbellAttempts = 3
+	if err := presence.Write(root, wake); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := captureEnvStdout(t, func() error {
+		return runPresenceSet([]string{"--root", root, "--me", "claude", "--status", "busy", "--note", "reviewing"})
+	}); err != nil {
+		t.Fatalf("runPresenceSet: %v", err)
+	}
+	got, err := presence.Read(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "busy" || got.Note != "reviewing" ||
+		got.NotifierStatus != "input_recovery_required" || got.NotifierMode != "raw" ||
+		got.NotifierReason != "inspect the composer" ||
+		!got.DoorbellParked || got.DoorbellAttempts != 3 {
+		t.Fatalf("presence after set = %#v", got)
 	}
 }

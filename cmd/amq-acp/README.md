@@ -480,8 +480,11 @@ new one), the host says so and records the new id.
 agy denies every tool call that needs a permission unless its own arguments
 or its `permissions.allow` settings grant it, for example
 `--dangerously-skip-permissions`; the host adds no permission flag. The reply
-counts the denied calls (`denied_actions`). agy asks for no approval
-headless, so a remote request never raises one.
+counts the calls denied in that turn (`denied_actions`). agy asks for no
+approval headless, so a remote request never raises one. With its default
+permissions agy reads a file through a shell command, which is denied, so a
+review that names a file gets no answer: put the content in the message, or
+allow reading in agy's `permissions.allow`.
 
 Limits:
 

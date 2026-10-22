@@ -161,11 +161,25 @@ amq-keepalive install-hook --agent both
 amq-keepalive install-hook --agent both --dry-run
 ```
 
-The installer backs up configuration before modifying it and installs an
-idempotent SessionStart registration. The wrapper selects cmux when
-`CMUX_SURFACE_ID` is present and otherwise selects Ghostty. Discovery and
-reattach are bounded; failures are logged and do not prevent agent startup.
-Read `session-start.log` in the keepalive home for hook failures.
+The installer backs up configuration before modifying it and keeps exactly
+one SessionStart registration per script: a rerun changes nothing when the
+entry is current and replaces an older or duplicated entry. `amq doctor`
+reports an older form or a duplicate with this command as the remedy.
+
+The registration matches `startup`, `resume`, and `fork`; `clear` and
+`compact` keep the same terminal and wake, so they start nothing. Claude Code
+runs it async, so a session start never waits for reattach. Codex runs it
+synchronously, bounded by the hook timeout. Codex skips a hook whose
+definition changed until you trust it again in `/hooks`, so after an upgrade
+that rewrites the entry, Codex asks for one review.
+
+The command tests the environment in `sh` before it starts the wrapper: with
+no terminal target (`CMUX_SURFACE_ID` or `AMQ_KEEPALIVE_TARGET`) or no handle
+(`AM_ME` or `AMQ_KEEPALIVE_ME`), it prints `{}` and starts nothing else. The
+wrapper selects cmux when `CMUX_SURFACE_ID` is present and otherwise selects
+Ghostty. Discovery and reattach are bounded; failures are logged and do not
+prevent agent startup. Read `session-start.log` in the keepalive home for
+hook failures; past 1 MiB it moves to `session-start.log.1`.
 `AMQ_KEEPALIVE_LOG` changes the log path.
 
 Useful overrides include `AMQ_KEEPALIVE_BIN`, `AMQ_KEEPALIVE_ADAPTER`,

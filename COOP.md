@@ -208,12 +208,9 @@ submitted after the quiet window. Urgent interrupts bypass input deferral;
 when input remains active through `--input-max-hold`, wake emits an out-of-band
 notice instead of injecting. Unavailable input sampling remains best-effort.
 
-`amq coop exec agy` starts its wake with `--wake-inject-mode none` unless you
-pass `--wake-inject-mode` or `--wake-inject-via`. agy runs no hooks, so no
-dialog guard can hold the doorbell, and the doorbell's Enter approves an open
-agy permission prompt. New mail goes to the wake log only: ask agy to run
-`amq drain --include-body`, or have it drain between tasks. Pass
-`--wake-inject-mode paste` to accept the risk and type the doorbell.
+agy runs no hooks with Google Cloud sign-in, so the wake cannot see agy's
+permission prompt; a doorbell that arrives while agy asks "Run this command?"
+can answer it (known limitation; a fix is in progress in a follow-up).
 
 ### Supervisor recipes
 

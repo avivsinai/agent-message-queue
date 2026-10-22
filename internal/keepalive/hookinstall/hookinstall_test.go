@@ -593,6 +593,12 @@ func TestSessionStartScriptSkipsTargetlessGhostty(t *testing.T) {
 printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 `)
 
+	// The log had no cap and grew a line on every start (hook audit
+	// 2026-10-22, H7). A log at 1 MiB moves to .1 before the next line.
+	logPath := filepath.Join(dir, "session-start.log")
+	full := bytes.Repeat([]byte("x"), 1<<20)
+	mustWrite(t, logPath, full)
+
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Stdin = strings.NewReader("{}\n")
 	cmd.Env = append(withoutEnv(os.Environ(),
@@ -602,7 +608,7 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 	),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_CAPTURE="+argsPath,
-		"AMQ_KEEPALIVE_LOG="+filepath.Join(dir, "session-start.log"),
+		"AMQ_KEEPALIVE_LOG="+logPath,
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
 	)
 	if err := cmd.Run(); err != nil {
@@ -611,12 +617,15 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 	if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
 		t.Fatalf("targetless Ghostty invoked binary: stat error = %v", err)
 	}
-	logData, err := os.ReadFile(filepath.Join(dir, "session-start.log"))
+	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	if !strings.Contains(string(logData), "skip: no exact terminal target adapter=ghostty") {
-		t.Fatalf("missing targetless skip log:\n%s", logData)
+	if !strings.Contains(string(logData), "skip: no exact terminal target adapter=ghostty") || len(logData) >= len(full) {
+		t.Fatalf("log after a full log = %d bytes, want only the skip line:\n%.200s", len(logData), logData)
+	}
+	if rotated, err := os.ReadFile(logPath + ".1"); err != nil || !bytes.Equal(rotated, full) {
+		t.Fatalf("rotated log = %d bytes, %v; want the full old log", len(rotated), err)
 	}
 }
 
@@ -1472,48 +1481,77 @@ func TestSelfHealPreservesNonFixedShapeAMQCommand(t *testing.T) {
 	})
 }
 
-// TestSelfHealDedupKeysOnFullCommand is the B3 contract: duplicate collapse
-// keys on the exact full command string, not the decoded script path. Two LIVE
-// owned hooks that share a script path but differ in timeout are distinct
-// commands and must both be preserved; only byte-identical commands collapse to
-// one.
-func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
-	withIsolatedHome(t, func(t *testing.T) {
-		dir := t.TempDir()
-		liveScript := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
-		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
-		codexConfig := filepath.Join(dir, "codex", "hooks.json")
-		mustWrite(t, liveScript, []byte(SessionStartScript))
-		if err := os.Chmod(liveScript, 0o755); err != nil {
-			t.Fatalf("chmod: %v", err)
-		}
-		// Two live AMQ hooks, same script, different timeout -> distinct commands.
-		cmdTimeout1 := buildHookCommand(binaryPath, liveScript, 1*time.Second)
-		cmdTimeout2 := buildHookCommand(binaryPath, liveScript, 2*time.Second)
-		// A byte-identical duplicate of cmdTimeout1 -> should collapse to one.
-		seed := fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[`+
-			`{"type":"command","command":%q,"timeout":6},`+
-			`{"type":"command","command":%q,"timeout":6},`+
-			`{"type":"command","command":%q,"timeout":6}`+
-			`]}]}}`, cmdTimeout1, cmdTimeout2, cmdTimeout1)
-		mustWrite(t, codexConfig, []byte(seed))
+// TestReinstallWithNewCommandLeavesOneOwnedEntry is the regression for the
+// duplicate found in the hook audit (2026-10-22, H7): when the command
+// differed from the installed one (an upgrade or a new --timeout), the
+// installer appended a second owned entry and kept the first, because its
+// script still existed, so both ran on every start. Codex's old entry sat
+// inside the first group next to foreign hooks. A rerun now leaves one entry
+// in the current form, and the foreign hook stays.
+func TestReinstallWithNewCommandLeavesOneOwnedEntry(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeExecutableBody(t, filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh"), SessionStartScript)
+	binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+	claudeConfig := filepath.Join(dir, "claude", "settings.json")
+	codexConfig := filepath.Join(dir, "codex", "hooks.json")
+	old := "AMQ_KEEPALIVE_BIN='" + binaryPath + "' AMQ_KEEPALIVE_TIMEOUT_SECONDS='10' '" + scriptPath + "'"
+	mustWrite(t, claudeConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":%q,"timeout":15,"statusMessage":"Reattaching AMQ wake..."}]}]}}`, old)))
+	mustWrite(t, codexConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo foreign"},{"type":"command","command":%q,"timeout":15}]}]}}`, old)))
 
-		if _, err := Install(Options{
-			Agent:       AgentCodex,
-			ScriptPath:  liveScript,
-			BinaryPath:  binaryPath,
-			CodexConfig: codexConfig,
-			Timeout:     time.Second,
-		}); err != nil {
-			t.Fatalf("Install() error = %v", err)
-		}
-		doc := readJSON(t, codexConfig)
-		// Both distinct-timeout live hooks preserved.
-		if countCommand(doc, cmdTimeout1) != 1 {
-			t.Fatalf("timeout-1 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
-		}
-		if countCommand(doc, cmdTimeout2) != 1 {
-			t.Fatalf("timeout-2 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
-		}
+	result, err := Install(Options{
+		Agent:        AgentBoth,
+		ScriptPath:   scriptPath,
+		BinaryPath:   binaryPath,
+		ClaudeConfig: claudeConfig,
+		CodexConfig:  codexConfig,
+		Timeout:      10 * time.Second,
 	})
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	for agent, config := range map[string]string{AgentClaude: claudeConfig, AgentCodex: codexConfig} {
+		owned, err := OwnedSessionStartHooks(config)
+		if err != nil || len(owned) != 1 || owned[0].Command != result.Commands[agent] {
+			t.Fatalf("%s owned hooks = %+v, %v; want only %q", agent, owned, err, result.Commands[agent])
+		}
+		if outdated, err := OutdatedSessionStartHooks(config, agent); err != nil || len(outdated) != 0 {
+			t.Fatalf("%s outdated after install = %+v, %v", agent, outdated, err)
+		}
+	}
+	if countCommand(readJSON(t, codexConfig), "echo foreign") != 1 {
+		t.Fatalf("foreign Codex hook not kept:\n%s", mustMarshal(t, readJSON(t, codexConfig)))
+	}
+}
+
+// TestInstalledCommandStartsScriptOnlyWithTargetAndHandle runs the installed
+// command string the way the harness does (sh -c). A session with no
+// terminal target, or with no handle for reattach, starts no script.
+func TestInstalledCommandStartsScriptOnlyWithTargetAndHandle(t *testing.T) {
+	requireHookScriptLane(t)
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "ran")
+	script := writeExecutableBody(t, filepath.Join(dir, "hook.sh"), "#!/bin/sh\n: > '"+ran+"'\necho '{}'\n")
+	command := buildHookCommand("/nonexistent/amq-keepalive", script, time.Second)
+	for _, tc := range []struct {
+		name string
+		env  []string
+		runs bool
+	}{
+		{name: "no target", env: []string{"AM_ME=alice"}},
+		{name: "target without handle", env: []string{"CMUX_SURFACE_ID=s1"}},
+		{name: "cmux target and handle", env: []string{"CMUX_SURFACE_ID=s1", "AM_ME=alice"}, runs: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(ran)
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, tc.env...)
+			out, err := cmd.Output()
+			if err != nil || strings.TrimSpace(string(out)) != "{}" {
+				t.Fatalf("hook output = %q, %v; want {}", out, err)
+			}
+			if _, err := os.Stat(ran); (err == nil) != tc.runs {
+				t.Fatalf("script ran = %v, want %v", err == nil, tc.runs)
+			}
+		})
+	}
 }

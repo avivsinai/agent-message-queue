@@ -114,6 +114,8 @@ type wakeCheckWakeDecision struct {
 	OwnerBound   bool
 	Generation   *string
 	TargetDigest *string
+	StartedAt    *string
+	BaselineAt   *string
 }
 
 type wakeCheckImageDecision struct {

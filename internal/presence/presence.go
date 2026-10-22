@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // Presence captures the current presence for an agent handle.
@@ -58,58 +59,110 @@ func WriteDeliveryRoot(root *fsq.DeliveryRoot, p Presence) error {
 	return err
 }
 
-// Touch updates the LastSeen timestamp for an agent's presence.
-// If presence already exists, it preserves Status and Note.
-// If no presence exists, it creates one with status "active".
-func Touch(root, handle string) error {
-	p, err := Read(root, handle)
-	if err != nil {
-		if !os.IsNotExist(err) {
+// LockName is the file in an agent directory that every presence writer
+// locks around its read-modify-write of presence.json, across processes.
+const LockName = ".presence.lock"
+
+// Update applies change to the stored presence, or to a default "active"
+// presence when none exists, refreshes LastSeen, and writes the result under
+// the presence lock. Each writer changes only the fields it owns, so the
+// agent's status and note and the wake's notifier and doorbell state survive
+// each other's writes.
+func Update(root, handle string, change func(*Presence)) (Presence, error) {
+	dir := filepath.Join(root, "agents", handle)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Presence{}, err
+	}
+	var p Presence
+	err := lock.WithExclusiveFileLock(filepath.Join(dir, LockName), func() error {
+		data, err := os.ReadFile(filepath.Join(dir, "presence.json"))
+		if p, err = updated(handle, data, err, change); err != nil {
 			return err
 		}
-		// No existing presence — create a default.
-		p = New(handle, "active", "", time.Now())
-	} else {
-		p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
+		return Write(root, p)
+	})
+	if err != nil {
+		return Presence{}, err
 	}
-	return Write(root, p)
+	return p, nil
 }
 
-// SetNotifierStatus records notifier capability without overwriting the
-// agent's own presence status or note. Empty values clear a stale notifier
-// diagnosis when a later wake starts with a usable injector.
-func SetNotifierStatus(root, handle, status, mode, reason string) error {
-	p, err := Read(root, handle)
+// UpdateDeliveryRoot is Update through a pinned root capability.
+func UpdateDeliveryRoot(root *fsq.DeliveryRoot, handle string, change func(*Presence)) (Presence, error) {
+	dir := filepath.Join("agents", handle)
+	f, err := root.OpenLockFile(dir, LockName, 0o600)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		p = New(handle, "active", "", time.Now())
+		return Presence{}, err
 	}
-	p.NotifierStatus = status
-	p.NotifierMode = mode
-	p.NotifierReason = reason
-	p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
-	return Write(root, p)
+	defer func() { _ = f.Close() }()
+	if err := lock.Lock(f); err != nil {
+		return Presence{}, err
+	}
+	defer func() { _ = lock.Unlock(f) }()
+	data, err := root.ReadFile(filepath.Join(dir, "presence.json"))
+	p, err := updated(handle, data, err, change)
+	if err != nil {
+		return Presence{}, err
+	}
+	return p, WriteDeliveryRoot(root, p)
+}
+
+func updated(handle string, data []byte, readErr error, change func(*Presence)) (Presence, error) {
+	now := time.Now()
+	p := New(handle, "active", "", now)
+	switch {
+	case readErr == nil:
+		if err := json.Unmarshal(data, &p); err != nil {
+			return Presence{}, err
+		}
+		p.LastSeen = now.UTC().Format(time.RFC3339Nano)
+	case !os.IsNotExist(readErr):
+		return Presence{}, readErr
+	}
+	if change != nil {
+		change(&p)
+	}
+	return p, nil
+}
+
+// SetStatus records the agent's own status and note.
+func SetStatus(root, handle, status, note string) (Presence, error) {
+	return Update(root, handle, statusChange(status, note))
+}
+
+// SetStatusDeliveryRoot is SetStatus through a pinned root capability.
+func SetStatusDeliveryRoot(root *fsq.DeliveryRoot, handle, status, note string) (Presence, error) {
+	return UpdateDeliveryRoot(root, handle, statusChange(status, note))
+}
+
+func statusChange(status, note string) func(*Presence) {
+	return func(p *Presence) {
+		p.Status = status
+		p.Note = note
+	}
+}
+
+// Touch updates the LastSeen timestamp for an agent's presence.
+func Touch(root, handle string) error {
+	_, err := Update(root, handle, nil)
+	return err
+}
+
+// SetNotifierStatus records notifier capability. Empty values clear a stale
+// notifier diagnosis when a later wake starts with a usable injector.
+func SetNotifierStatus(root, handle, status, mode, reason string) error {
+	_, err := Update(root, handle, func(p *Presence) {
+		p.NotifierStatus = status
+		p.NotifierMode = mode
+		p.NotifierReason = reason
+	})
+	return err
 }
 
 // TouchDeliveryRoot updates presence through a pinned root capability.
 func TouchDeliveryRoot(root *fsq.DeliveryRoot, handle string) error {
-	path := filepath.Join("agents", handle, "presence.json")
-	data, err := root.ReadFile(path)
-	var p Presence
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		p = New(handle, "active", "", time.Now())
-	} else {
-		if err := json.Unmarshal(data, &p); err != nil {
-			return err
-		}
-		p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	return WriteDeliveryRoot(root, p)
+	_, err := UpdateDeliveryRoot(root, handle, nil)
+	return err
 }
 
 func Read(root, handle string) (Presence, error) {
