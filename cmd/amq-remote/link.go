@@ -105,12 +105,16 @@ func (ls *linkSet) start(ctx context.Context, ep *core.Endpoint, mf manifest.Fil
 // edit made during startup is not missed; a manifest that does not load
 // keeps every running link and is reported once.
 func (ls *linkSet) tick() {
-	if changed, _, err := ls.mf.changed(ls.manifestFile); err != nil {
+	changed, _, err := ls.mf.changed(ls.manifestFile)
+	if err != nil {
 		if err.Error() != ls.mfErr {
 			ls.mfErr = err.Error()
 			say(ls.stderr, "link: reload manifest: %v", err)
 		}
-	} else if ls.mfErr = ""; changed {
+	} else {
+		ls.mfErr = ""
+	}
+	if changed {
 		if mf, err := manifest.Load(ls.manifestFile); err == nil {
 			ls.sync(mf)
 		} else {
