@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const (
@@ -278,7 +279,7 @@ func (l *Lease) authorizeLive() error {
 
 func (l *Lease) unlockHandles() {
 	for i := len(l.handles) - 1; i >= 0; i-- {
-		_ = unlockExclusive(l.handles[i])
+		_ = lock.Unlock(l.handles[i])
 		_ = l.handles[i].Close()
 	}
 	l.handles = nil
@@ -425,8 +426,15 @@ func withLeaseInterlock(root *fsq.DeliveryRoot, fn func() error) error {
 	if err := lockExclusive(file); err != nil {
 		return err
 	}
-	defer func() { _ = unlockExclusive(file) }()
+	defer func() { _ = lock.Unlock(file) }()
 	return fn()
+}
+
+func lockExclusive(file *os.File) error {
+	if err := lock.Lock(file); err != nil {
+		return fmt.Errorf("acquire launch lease lock: %w", err)
+	}
+	return nil
 }
 
 func openAdvisoryLock(root *fsq.DeliveryRoot, rel string) (*os.File, error) {

@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -156,34 +155,4 @@ func pidAlive(pid int) (bool, error) {
 	default:
 		return false, fmt.Errorf("wait process returned status %#x", status)
 	}
-}
-
-func tryFlockExclusive(path string) (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	var overlapped windows.Overlapped
-	err = windows.LockFileEx(
-		windows.Handle(f.Fd()),
-		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
-		0,
-		^uint32(0),
-		^uint32(0),
-		&overlapped,
-	)
-	if err != nil {
-		_ = f.Close()
-		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return nil, errInjectBusy
-		}
-		return nil, err
-	}
-	return func() {
-		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, ^uint32(0), ^uint32(0), &overlapped)
-		_ = f.Close()
-	}, nil
 }

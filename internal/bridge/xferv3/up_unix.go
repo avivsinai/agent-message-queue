@@ -3,13 +3,12 @@
 package xferv3
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 
-	"golang.org/x/sys/unix"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 func HoldPID(root string, fn func() error) error {
@@ -22,13 +21,14 @@ func HoldPID(root string, fn func() error) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return ErrUpRunning
-		}
+	ok, err := lock.TryLock(file)
+	if err != nil {
 		return fmt.Errorf("up pidfile: %w", err)
 	}
-	defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
+	if !ok {
+		return ErrUpRunning
+	}
+	defer func() { _ = lock.Unlock(file) }()
 	if err := file.Truncate(0); err != nil {
 		return err
 	}

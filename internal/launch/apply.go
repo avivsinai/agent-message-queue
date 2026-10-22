@@ -15,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const (
@@ -730,7 +731,7 @@ func WithSessionCreationLock(base *fsq.DeliveryRoot, session string, operation f
 	if err := lockExclusive(file); err != nil {
 		return err
 	}
-	defer func() { returnErr = errors.Join(returnErr, unlockExclusive(file)) }()
+	defer func() { returnErr = errors.Join(returnErr, lock.Unlock(file)) }()
 	return operation()
 }
 

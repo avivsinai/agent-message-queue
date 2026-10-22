@@ -11,6 +11,8 @@ var errCrossProcessLockUnsupported = errors.New("cross-process registry locking 
 
 // These fail-closed fallbacks keep unsupported platforms compilable without
 // silently weakening the registry's cross-process ownership guarantees.
+// Windows has a lock (internal/lock), but the registry's lock identity checks
+// expect unix modes, so it stays fail-closed there.
 func flockExclusive(_ *os.File) error {
 	return errCrossProcessLockUnsupported
 }

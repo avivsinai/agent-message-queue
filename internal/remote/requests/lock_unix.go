@@ -8,6 +8,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -22,12 +23,14 @@ func acquireOwnerLock(path string) (*ownerLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open owner lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	ok, err := lock.TryLock(f)
+	if err != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, protocol.Refuse(protocol.CodeEndpointAlreadyRunning, "another endpoint owns %s", path)
-		}
 		return nil, fmt.Errorf("lock owner file: %w", err)
+	}
+	if !ok {
+		_ = f.Close()
+		return nil, protocol.Refuse(protocol.CodeEndpointAlreadyRunning, "another endpoint owns %s", path)
 	}
 	return &ownerLock{f: f}, nil
 }
@@ -36,7 +39,7 @@ func (l *ownerLock) release() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	unlockErr := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+	unlockErr := lock.Unlock(l.f)
 	closeErr := l.f.Close()
 	l.f = nil
 	if unlockErr != nil {
