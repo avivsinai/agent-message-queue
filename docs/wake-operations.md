@@ -154,8 +154,25 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   it blocks a delivery attempt, the wake adds attention output (title, bell,
   desktop notice) on the attention cadence instead of waiting silently.
 
-The guard does not cover dialogs without a hook: the workspace trust dialog,
-MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
+- **Startup trust dialog.** Claude Code and Codex ask whether to trust a
+  new directory before the session starts, and Enter at that dialog ends the
+  session. Before it execs either harness, `amq coop exec` reads where the
+  harness records trust: Claude Code's `.claude.json` (in `CLAUDE_CONFIG_DIR`
+  or the home directory) for the directory or an ancestor inside its Git
+  checkout, and Codex's `config.toml` `[projects]` for the directory or its
+  Git trust root (a directory outside any checkout asks nothing in Codex).
+  When no decision is recorded, coop exec writes a `Startup` marker that
+  names the harness and directory; when one is, it removes a `Startup`
+  marker an earlier launch left. The `SessionStart` close removes the marker
+  when the hook is installed. Without the hook, the wake reads the trust file
+  again on each recheck while the marker exists and treats the marker as
+  closed once the harness has recorded the decision, so the doorbell rings
+  within 2 seconds of the answer. A file AMQ cannot read counts as trusted,
+  which leaves the doorbell as it is without the guard. A Codex directory
+  saved as untrusted still shows a restricted dialog that the guard does not
+  hold.
+
+The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the
 terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
 must write no terminal input at all.

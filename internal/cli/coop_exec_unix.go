@@ -135,6 +135,8 @@ func runCoopExec(args []string) error {
 	if err := c.provisionRoot(); err != nil {
 		return err
 	}
+	// Before the wake can ring: the harness may open on its trust dialog.
+	writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 	if !*c.noWakeFlag {
 		if err := prepareCoopWakeLock(
 			c.root,

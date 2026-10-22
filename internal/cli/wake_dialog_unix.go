@@ -55,12 +55,15 @@ type wakeDialogHookInput struct {
 	Cwd       string `json:"cwd"`
 }
 
-// wakeDialogMarker is the .wake.dialog content. The wake uses only the
-// file's presence and mtime; tool_use_id scopes a PostToolUse close and the
+// wakeDialogMarker is the .wake.dialog content. The wake uses the file's
+// presence and mtime, and for a Startup marker its harness and cwd
+// (startupDialogClosed); tool_use_id scopes a PostToolUse close and the
 // rest is for diagnosis.
 type wakeDialogMarker struct {
 	Schema    int    `json:"schema"`
 	Event     string `json:"event,omitempty"`
+	Harness   string `json:"harness,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -69,17 +72,21 @@ type wakeDialogMarker struct {
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
 // through the canonical agent directory; a detached directory cannot show
-// the hook's marker, so it reads as unknown, never as closed.
+// the hook's marker, so it reads as unknown, never as closed. A Startup
+// marker reads as closed once the harness has recorded its trust decision,
+// so the doorbell rings without a SessionStart hook.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
+	var startup startupDialogCache
 	return func(now time.Time) (wakeDialogState, error) {
 		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
 			return wakeDialogUnknown, err
 		}
+		var raw []byte
 		var info os.FileInfo
 		var exists bool
 		var readErr error
 		if err := agentDir.withFD(func(dirfd int) error {
-			_, info, exists, readErr = readWakeRepairMetadataAt(
+			raw, info, exists, readErr = readWakeRepairMetadataAt(
 				dirfd,
 				wakeDialogFileName,
 				"wake dialog marker",
@@ -89,6 +96,9 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 			return nil
 		}); err != nil {
 			return wakeDialogUnknown, err
+		}
+		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
+			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
 		if info != nil {
