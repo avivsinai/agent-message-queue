@@ -371,3 +371,89 @@ func TestLinkStatusNamesAShareWhoseSessionChanged(t *testing.T) {
 		t.Fatalf("changed session = %q, want 'session changed: ...'", got)
 	}
 }
+
+// agent-message-queue-611.67: link keys add wrote back the key list it read
+// before the redeem call and the typed fingerprint, so a key the endpoint
+// dropped on the server's key_revoked meanwhile was back on disk, trusted
+// again after a restart. The redeem call is the window, so the test runs it
+// against a loopback server, as linking does.
+func TestLinkKeysAddKeepsAKeyDroppedDuringRedeem(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AM_ROOT", "")
+	first := linkio.ConsentKey{CredentialID: "C32Z2-E6ARE-BkrOVOybpw", SPKI: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE", Alg: -7,
+		RPID: "sign.example.test", Origin: "https://sign.example.test"}
+	second := first
+	second.CredentialID, second.Alg = "D43a3-F7BSF-ClsPWPzcqx", -8
+	root := t.TempDir()
+	stateDir := filepath.Join(root, stateDirName)
+	dropDuringRedeem := false
+	redeem := func(ck linkio.ConsentKey) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var req redeemRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			spki, _ := base64.RawURLEncoding.DecodeString(req.DeviceKey)
+			if dropDuringRedeem {
+				// What the endpoint's revoke worker does on key_revoked.
+				if dropped, err := linkio.DropConsentKey(stateDir, "example", first.CredentialID); err != nil || !dropped {
+					t.Errorf("drop = %v, %v", dropped, err)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(redeemReply{DeviceID: linkio.HostOf(spki), ServerID: "srv_example", User: "U", ConsentKeys: []linkio.ConsentKey{ck}})
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/link/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(linkInfo{ServerID: "srv_example", LinkURL: "wss://link.example.test/api/v1/link"})
+	})
+	mux.HandleFunc("POST /api/v1/link/redeem", redeem(first))
+	mux.HandleFunc("POST /api/v1/link/consent-keys/redeem", redeem(second))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	fp1, _ := linkio.Fingerprint(first)
+	if _, code, err := linkAdd([]string{"--root", root, "example", srv.URL, "--code", "K7Q4-M2XD"}, strings.NewReader(fp1+"\n"), io.Discard, &jsonProbe{}); err != nil || code != 0 {
+		t.Fatalf("link add = %d, %v", code, err)
+	}
+	dropDuringRedeem = true
+	fp2, _ := linkio.Fingerprint(second)
+	if _, code, err := linkKeysAdd([]string{"--root", root, "example", "--code", "P9R2-X4KD"}, strings.NewReader(fp2+"\n"), io.Discard, &jsonProbe{}); err != nil || code != 0 {
+		t.Fatalf("link keys add = %d, %v", code, err)
+	}
+	keys, _ := linkio.LoadConsentKeys(stateDir, "example")
+	if len(keys) != 1 || keys[0].CredentialID != second.CredentialID {
+		t.Errorf("consent keys on disk = %+v, want only the added key", keys)
+	}
+}
+
+// agent-message-queue-611.67: a deleted links manifest, which a restart reads
+// as no links, left the running endpoint dialing its links.
+func TestLinkTickStopsLinksWhenTheManifestIsDeleted(t *testing.T) {
+	root := canonicalTempDir(t)
+	stateDir := filepath.Join(root, stateDirName)
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.WritePin(stateDir, "example", linkio.Pin{ServerID: "srv_example"}); err != nil {
+		t.Fatal(err)
+	}
+	mfPath := manifest.DefaultPath(stateDir)
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://127.0.0.1:1/link"}}}
+	if err := manifest.Write(mfPath, mf); err != nil {
+		t.Fatal(err)
+	}
+	ls := newLinkSet(root, stateDir, mfPath, "test", io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ls.start(ctx, nil, mf)
+	if len(ls.running) != 1 {
+		t.Fatalf("setup: running %d links", len(ls.running))
+	}
+	if err := os.Remove(mfPath); err != nil {
+		t.Fatal(err)
+	}
+	ls.tick()
+	if n := len(ls.running); n != 0 {
+		t.Errorf("manifest deleted; %d link(s) still running after tick", n)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,5 +283,59 @@ func TestCancelWaitsForItsOwnSubmit(t *testing.T) {
 	close(release)
 	if first, second := fs.next(), fs.next(); first.Re != "m_s1" || second.Re != "m_x1" {
 		t.Fatalf("answered %s then %s, want the submit then its cancel", first.Re, second.Re)
+	}
+}
+
+// agent-message-queue-611.67: a signed submit whose key read started before
+// a key_revoked frame stored the revoked key back into the live snapshot, so
+// the submit ran and core's handoff check still accepted the key.
+func TestRevokedKeyStaysRevokedPastAStaleKeyRead(t *testing.T) {
+	view, key := goldenView(t)
+	var frame struct {
+		Frame struct {
+			Body SignedSubmit `json:"body"`
+		} `json:"frame"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "frames/04-signed_submit.json"), &frame); err != nil {
+		t.Fatal(err)
+	}
+	dk, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	handled := make(chan struct{}, 1)
+	c, err := New(Config{
+		Name: "example", Pin: Pin{URL: "wss://link.example.test/link", ServerID: testServerID}, StoreID: view.StoreID, Key: dk,
+		Now:      func() time.Time { return time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC) },
+		Bindings: func() []Binding { return []Binding{view.Bindings["pi-demo"]} },
+		ConsentKeys: func() []ConsentKey {
+			if calls.Add(1) == 2 { // the submit's read, still listing the key
+				close(entered)
+				<-release
+			}
+			return []ConsentKey{key}
+		},
+		ConsentKeyRevoked: func(string) {},
+		Handle: func(*protocol.Command, core.Source) (any, error) {
+			handled <- struct{}{}
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = c.admitSigned(frame.Frame.Body) }()
+	<-entered
+	c.markRevoked(key.CredentialID)
+	close(release)
+	<-done
+	if len(handled) != 0 {
+		t.Error("a submit signed by the revoked key reached the endpoint")
+	}
+	if c.ConsentLive(key.CredentialID) {
+		t.Error("the revoked key is live again after the stale read was stored")
 	}
 }

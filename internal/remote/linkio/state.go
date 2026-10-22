@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
 )
 
@@ -267,24 +268,77 @@ func LoadConsentKeys(stateDir, name string) ([]ConsentKey, error) {
 	return keys, err
 }
 
+// ErrConsentKeyExists is returned by AddConsentKey for a key the link
+// already accepts.
+var ErrConsentKeyExists = errors.New("consent key already accepted")
+
+// AddConsentKey adds one consent key and returns how many the link now
+// accepts. It reads the list again under the link's key lock, so a key the
+// endpoint dropped meanwhile stays dropped. The caller holds no lock across
+// the redeem call or the typed fingerprint; it calls this only after both.
+// Without an advisory file lock it refuses: an add raises authority.
+func AddConsentKey(stateDir, name string, ck ConsentKey) (int, error) {
+	if !lock.AdvisoryLockAvailable() {
+		return 0, errors.New("refusing to add a consent key without an advisory file lock")
+	}
+	n := 0
+	err := withConsentKeys(stateDir, name, func() error {
+		keys, err := LoadConsentKeys(stateDir, name)
+		if err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if k.CredentialID == ck.CredentialID {
+				return ErrConsentKeyExists
+			}
+		}
+		n = len(keys) + 1
+		return WriteConsentKeys(stateDir, name, append(keys, ck))
+	})
+	return n, err
+}
+
 // DropConsentKey removes one consent key. Removing a key only lowers
 // authority, so the server may ask for it; adding one never comes from the
-// server.
+// server. It runs under the link's key lock so a concurrent add cannot
+// write the key back; without an advisory file lock it still drops, since
+// refusing would keep authority the server took away.
 func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
-	keys, err := LoadConsentKeys(stateDir, name)
-	if err != nil {
-		return false, err
-	}
-	kept := keys[:0]
-	for _, k := range keys {
-		if k.CredentialID != credentialID {
-			kept = append(kept, k)
+	dropped := false
+	drop := func() error {
+		keys, err := LoadConsentKeys(stateDir, name)
+		if err != nil {
+			return err
 		}
+		kept := keys[:0]
+		for _, k := range keys {
+			if k.CredentialID != credentialID {
+				kept = append(kept, k)
+			}
+		}
+		if len(kept) == len(keys) {
+			return nil
+		}
+		dropped = true
+		return WriteConsentKeys(stateDir, name, kept)
 	}
-	if len(kept) == len(keys) {
-		return false, nil
+	if !lock.AdvisoryLockAvailable() {
+		err := drop()
+		return dropped, err
 	}
-	return true, WriteConsentKeys(stateDir, name, kept)
+	err := withConsentKeys(stateDir, name, drop)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil // the link is gone, and its keys with it
+	}
+	return dropped, err
+}
+
+// withConsentKeys runs fn under the lock that serializes a link's consent
+// key changes. The lock file sits beside the key list, so the list can
+// still be replaced by atomic rename. It never creates the link directory:
+// a retired link stays deleted.
+func withConsentKeys(stateDir, name string, fn func() error) error {
+	return lock.WithExclusiveFileLock(filepath.Join(LinkDir(stateDir, name), consentKeysFile+".lock"), fn)
 }
 
 // Retire makes a link's sink permanent history: it writes the retirement
