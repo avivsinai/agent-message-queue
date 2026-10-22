@@ -832,8 +832,17 @@ func (c *coopExecRun) execAgent() error {
 	if err != nil {
 		return err
 	}
-	if err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
+	recorded, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity)
+	if err != nil {
 		return err
+	}
+	// A managed plan carries the identity overrides as its own dynamic
+	// slots, which the launch wrapper fills.
+	if c.managedLaunchNonce == "" {
+		c.agentArgs, err = pinCodexShellIdentity(c.binaryPath, c.agentArgs, env, recorded)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Build argv: command name + agent args.

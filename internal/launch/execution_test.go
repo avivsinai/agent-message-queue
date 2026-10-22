@@ -147,7 +147,7 @@ func TestPrepareExecutionAcceptsDeclaredWrapperTarget(t *testing.T) {
 	if err != nil || prepared.State != ExecutionAcknowledged {
 		t.Fatalf("PrepareExecution = %#v, %v", prepared, err)
 	}
-	resolved, err := ResolveExecutionArgv(prepared)
+	resolved, err := ResolveExecutionArgv(prepared, nil)
 	if err != nil || !slices.Equal(resolved, targetArgv) {
 		t.Fatalf("ResolveExecutionArgv = %#v, %v", resolved, err)
 	}
@@ -294,7 +294,7 @@ func TestPrepareCursorPreSpawnReusesAcquisitionAcrossCrashes(t *testing.T) {
 			if err != nil || prepared.State != ExecutionAcknowledged || acquirer.calls != 1 {
 				t.Fatalf("retry prepare = %#v, %v; acquisition calls = %d", prepared, err, acquirer.calls)
 			}
-			argv, err := ResolveExecutionArgv(prepared)
+			argv, err := ResolveExecutionArgv(prepared, nil)
 			if err != nil || argv[ticket.DynamicArgv[0].Index] != testConversationID || argv[ticket.DynamicArgv[0].Index] == preSpawnConversationPlaceholder {
 				t.Fatalf("resolved argv = %#v, %v", argv, err)
 			}
@@ -367,6 +367,47 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	}
 }
 
+// TestResolveCodexExecutionFillsIdentityFromEnvironment covers the managed
+// half of bead agent-message-queue-vd4.1: a managed Codex seat's shell tool
+// lost AM_* under shell_environment_policy.inherit = "core", so its amq
+// commands searched other projects for a root.
+func TestResolveCodexExecutionFillsIdentityFromEnvironment(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	ticket := seedPendingCodexNotifyExecution(t, fixture, "97979797-9797-4979-8979-979797979797")
+	env := []string{"AM_ROOT=" + fixture.session, "AM_BASE_ROOT=" + fixture.project, "AM_SESSION=", "AM_ME=7",
+		"AM_ROOT_ID=r\\1", "AM_BASE_ROOT_ID=b\"1"}
+	argv, err := ResolveExecutionArgv(ticket, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`shell_environment_policy.set.AM_ROOT="` + fixture.session + `"`, `shell_environment_policy.set.AM_SESSION=""`,
+		`shell_environment_policy.set.AM_ME="7"`, `shell_environment_policy.set.AM_ROOT_ID="r\\1"`,
+		`shell_environment_policy.set.AM_BASE_ROOT_ID="b\"1"`,
+	} {
+		if !slices.Contains(argv, want) {
+			t.Fatalf("resolved argv %q lacks %s", argv, want)
+		}
+	}
+	if _, err := ResolveExecutionArgv(ticket, env[:5]); err == nil {
+		t.Fatal("a seat without AM_BASE_ROOT_ID resolved")
+	}
+	// Pre-merge review: the trust digest names only a slot's kind, so a plan
+	// whose slots all set AM_ME digested like the real one and ran with no
+	// AM_ROOT.
+	duplicate := AgentPlan{Handle: "codex", Argv: slices.Clone(ticket.TargetArgv), DynamicArgv: ticket.DynamicArgv,
+		Cwd: fixture.cwd, AdapterMode: AdapterModeCapture, ResumePolicy: ResumeFresh}
+	if err := duplicate.validate(); err != nil {
+		t.Fatalf("valid identity slots refused: %v", err)
+	}
+	for _, dynamic := range duplicate.DynamicArgv {
+		duplicate.Argv[dynamic.Index] = codexIdentitySetPrefix + "AM_ME=" + codexIdentityPlaceholder
+	}
+	if err := duplicate.validate(); err == nil {
+		t.Fatal("a plan whose identity slots repeat AM_ME validated")
+	}
+}
+
 func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, nonce string) ExecutionTicket {
 	t.Helper()
 	notify, err := codexNotifyOverride(PlanRequest{
@@ -375,11 +416,12 @@ func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, non
 	if err != nil {
 		t.Fatal(err)
 	}
+	argv, identity := codexIdentitySlots([]string{fixture.provider, "-c", notify})
 	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
 		Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureMinimumVersion,
 		Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), ProjectRoot: fixture.project, SessionRoot: fixture.session,
 		Cwd: fixture.cwd, ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
-		TargetArgv: []string{fixture.provider, "-c", notify}, State: ExecutionPending,
+		TargetArgv: argv, DynamicArgv: identity, State: ExecutionPending,
 	})
 	if err != nil {
 		t.Fatal(err)
