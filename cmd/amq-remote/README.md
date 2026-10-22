@@ -794,6 +794,19 @@ it installs a reject-only hook. With an owner it pins that owner's one relay
 share with a DM channel (or the `--session` one) on the hook's command line.
 Run the installer again after the share's relay, channel or body changes.
 
+For a Claude session that a Buzz Desktop agent drives with `--native` (no
+relay share), pin that agent's DM instead:
+
+```text
+amq-remote claude install-approval-hook --desktop --owner <hex|npub> --body <agent hex|npub> --channel <DM channel id>
+```
+
+Use the agent's public key and its DM channel id with the owner, and check
+the values the installer prints. The hook then allows a call on
+the owner's ✅ only with the agent's signed grant; an approval from another
+agent or channel can only deny. See
+[Claude Code approvals from Buzz](../../docs/amq-remote-approvals.md#buzz-desktop).
+
 The DM offers ✅ only for a Bash call it shows whole, when the installed hook
 pins the share's owner and the approval is bound to one tool call; otherwise
 it offers ❌ only. A call that may contain a secret shows "Command hidden: it

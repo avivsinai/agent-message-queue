@@ -203,7 +203,8 @@ type Command struct {
 	Option        string       `json:"option,omitempty"`
 	// Evidence is a surface's opaque proof for an interaction answer, such
 	// as the owner's signed Buzz reaction for a Claude allow. It is
-	// in-process only (never on the wire) and grants nothing by itself:
+	// in-process or on the local socket (ipc.Request.Evidence), never on
+	// the session wire, and grants nothing by itself:
 	// the attachment's own verifier decides what it proves.
 	Evidence json.RawMessage `json:"-"`
 }

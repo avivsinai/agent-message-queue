@@ -282,22 +282,29 @@ func localSubmitted(src Source, rec *requests.Record) bool {
 	return src.Host == LocalHost && len(src.Origin) == 0 && rec.CreatorHost == LocalHost && len(rec.Origin) == 0
 }
 
-// localDeny reports whether src may answer cmd as a local deny: the Buzz
-// Desktop agent (amq-acp) relays the owner's ❌ over the local socket, which
-// has no owner share. It holds only
-// for a local request answered from the local socket, while t is the
-// Claude attachment the request runs on, its pending interaction is exactly
-// cmd.InteractionID, a Claude approval that takes a remote answer, and the
-// option is that approval's reject option. Allow from a local client stays
-// refused: only the owner's signed reaction on a share can allow. The
-// caller reads rec and t together under e.mu.
-func localDeny(src Source, rec *requests.Record, t *target, cmd *protocol.Command) bool {
+// localAnswer reports whether src may answer cmd although it is no owner
+// share: the Buzz Desktop agent (amq-acp) relays the owner's answer over the
+// local socket, which has no owner share. It holds only for a local request
+// answered from the local socket, while t is the Claude attachment the
+// request runs on and its pending interaction is exactly cmd.InteractionID,
+// a Claude approval that takes a remote answer. The option is that
+// approval's reject option, or its approve option when the approval offers
+// allow with proof and cmd carries evidence. The endpoint verifies nothing
+// here: the attachment and then the hook check the evidence against the
+// hook's own pin, and nothing else allows. The caller reads rec and t
+// together under e.mu.
+func localAnswer(src Source, rec *requests.Record, t *target, cmd *protocol.Command) bool {
 	if !localSubmitted(src, rec) || t == nil {
 		return false
 	}
 	in := rec.Interaction
 	if in == nil || in.InteractionID != cmd.InteractionID || in.Kind != "approval" || !in.RemoteAnswer ||
-		in.RejectOption == "" || in.RejectOption == in.ApproveOption || cmd.Option != in.RejectOption {
+		in.RejectOption == "" || in.RejectOption == in.ApproveOption {
+		return false
+	}
+	deny := cmd.Option == in.RejectOption
+	allow := in.ApproveOption != "" && in.ApproveProof && cmd.Option == in.ApproveOption && len(cmd.Evidence) > 0
+	if !deny && !allow {
 		return false
 	}
 	s := t.att.Inspect()
