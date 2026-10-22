@@ -7,17 +7,21 @@ package cli
 // harness; it breaks if the wake types while a Claude Code dialog is open,
 // if the hold spends the reminder budget, or if the doorbell does not ring
 // in full after the dialog closes. The installer test breaks if
-// install-dialog-hook misses an event or matcher, or is not idempotent.
+// install-dialog-hook misses an event, matcher or timeout, or is not
+// idempotent. The gate test runs the installed command strings under /bin/sh,
+// the boundary where the defect lived.
 
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // Regression: #1054, an injected doorbell answered an open
@@ -90,20 +94,24 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 			Matcher string `json:"matcher"`
 			Hooks   []struct {
 				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(first, &settings); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []struct{ event, matcher, verb string }{
-		{"PreToolUse", "AskUserQuestion|ExitPlanMode", "open"},
-		{"PermissionRequest", "", "open"},
-		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close"},
-		{"UserPromptSubmit", "", "close"},
-		{"Stop", "", "close"},
-		{"SessionStart", "", "close"},
-		{"SessionEnd", "", "close"},
+	for _, want := range []struct {
+		event, matcher, verb string
+		timeout              int
+	}{
+		{"PreToolUse", "AskUserQuestion|ExitPlanMode", "open", 5},
+		{"PermissionRequest", "", "open", 5},
+		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close", 5},
+		{"UserPromptSubmit", "", "close", 5},
+		{"Stop", "", "close", 5},
+		{"SessionStart", "", "close", 5},
+		{"SessionEnd", "", "close", 1},
 	} {
 		groups := settings.Hooks[want.event]
 		if len(groups) != 1 || len(groups[0].Hooks) != 1 {
@@ -111,14 +119,108 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 		}
 		command := groups[0].Hooks[0].Command
 		if groups[0].Matcher != want.matcher ||
+			groups[0].Hooks[0].Timeout != want.timeout ||
 			!strings.HasPrefix(command, wakeDialogHookMarker) ||
 			!strings.HasSuffix(command, " wake dialog "+want.verb+" || true") {
-			t.Fatalf("%s entry = matcher %q command %q, want matcher %q and wake dialog %s",
-				want.event, groups[0].Matcher, command, want.matcher, want.verb)
+			t.Fatalf("%s entry = matcher %q timeout %d command %q, want matcher %q, timeout %d and wake dialog %s",
+				want.event, groups[0].Matcher, groups[0].Hooks[0].Timeout, command, want.matcher, want.timeout, want.verb)
 		}
 	}
 
 	if second := install(); string(second) != string(first) {
 		t.Fatalf("second install changed settings:\n%s\nwant:\n%s", second, first)
+	}
+}
+
+// Regression: hook audit inventory #7, every Claude Code session started
+// amq through the dialog guard on each prompt, stop, and session start and
+// end, with or without AM_ME.
+func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "ran")
+	fake := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\ntouch \"$RAN\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "root")
+	agent := fsq.AgentBase(root, "codex")
+	if err := os.MkdirAll(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(agent, wakeDialogFileName)
+
+	for _, tc := range []struct {
+		name       string
+		env        []string
+		marker     bool
+		open, shut bool // whether the open and close commands start amq
+	}{
+		{"no AM_ME", nil, true, false, false},
+		{"participant without marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, false, true, false},
+		{"participant with marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, true, true, true},
+		{"participant without AM_ROOT", []string{"AM_ME=codex"}, false, true, true},
+	} {
+		for _, hook := range wakeDialogHooks(fake) {
+			_ = os.Remove(ran)
+			_ = os.Remove(marker)
+			if tc.marker {
+				if err := os.WriteFile(marker, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("/bin/sh", "-c", hook.Command)
+			cmd.Dir = dir
+			cmd.Env = append([]string{"PATH=/usr/bin:/bin", "RAN=" + ran}, tc.env...)
+			cmd.Stdin = strings.NewReader(`{"hook_event_name":"` + hook.Event + `"}`)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s %s: %v: %s", tc.name, hook.Event, err, out)
+			}
+			_, err := os.Stat(ran)
+			started := err == nil
+			want := tc.shut
+			if wakeDialogHookVerb(hook.Event) == "open" {
+				want = tc.open
+			}
+			if started != want {
+				t.Errorf("%s %s: started amq = %v, want %v", tc.name, hook.Event, started, want)
+			}
+		}
+	}
+}
+
+// Regression: hook audit, the doctor regex read the binary only right after
+// the marker, so a new-form hook with a missing binary passed as installed,
+// and an old form passed without a remedy.
+func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldForm := func(bin string) []claude.CommandHook {
+		hooks := wakeDialogHooks(bin)
+		for i := range hooks {
+			hooks[i].Command = wakeDialogHookMarker + "'" + bin + "' --no-update-check wake dialog " +
+				wakeDialogHookVerb(hooks[i].Event) + " || true"
+		}
+		return hooks
+	}
+	for _, tc := range []struct {
+		name  string
+		hooks []claude.CommandHook
+		want  string
+	}{
+		{"old form", oldForm(bin), "stale form"},
+		{"missing binary", wakeDialogHooks(filepath.Join(t.TempDir(), "gone", "amq")), "missing amq binary"},
+		{"current", wakeDialogHooks(bin), "installed"},
+	} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := claude.InstallCommandHooks(home, tc.hooks); err != nil {
+			t.Fatal(err)
+		}
+		check, ok := checkClaudeDialogHook()
+		if !ok || !strings.Contains(check.Message, tc.want) {
+			t.Errorf("%s: doctor = %+v, want message with %q", tc.name, check, tc.want)
+		}
 	}
 }
