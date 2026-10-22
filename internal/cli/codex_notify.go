@@ -28,10 +28,6 @@ func runCodexNotify(args []string) error {
 		return fmt.Errorf("codex notify requires --root, --handle, and one payload")
 	}
 	rootPath, handle := args[1], args[3]
-	nonce := strings.TrimSpace(os.Getenv(launch.InternalLaunchNonceEnv))
-	if nonce == "" {
-		return fmt.Errorf("codex notify requires %s", launch.InternalLaunchNonceEnv)
-	}
 	payload := []byte(args[4])
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
@@ -49,7 +45,7 @@ func runCodexNotify(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve codex notify executable: %w", err)
 	}
-	if _, err := launch.RecordCodexNotify(root, handle, nonce, amqExecutable, payload); err != nil {
+	if _, err := launch.RecordCodexNotify(root, handle, amqExecutable, payload); err != nil {
 		return err
 	}
 	if err := codexNotifyForward(amqExecutable, payload); err != nil {
