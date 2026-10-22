@@ -1215,9 +1215,12 @@ func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err err
 // A Claude target gets its native approval pin from pin when non-nil. A
 // target attached already is built again when its entry gained approve, so
 // the running endpoint answers approvals as a restart would; the replaced
-// attachment ends when the endpoint unsubscribes it.
+// attachment ends when the endpoint unsubscribes it. The target stays due
+// for that rebuild until one succeeds: the manifest already holds approve,
+// so a retry after a failed build reports no change.
 func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
 	var mu sync.Mutex
+	rebuild := map[string]bool{} // targets whose running attachment predates their entry
 	return func(r ipc.RegisterRequest) (protocol.Session, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1226,7 +1229,10 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.A
 		if err != nil {
 			return protocol.Session{}, err
 		}
-		if _, ok := ep.AttachmentOf(r.Target); !ok || upgraded {
+		if upgraded {
+			rebuild[r.Target] = true
+		}
+		if _, ok := ep.AttachmentOf(r.Target); !ok || rebuild[r.Target] {
 			out := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{a}})
 			if len(out) != 1 || out[0].Refusal != nil {
 				reason := "no adapter built"
@@ -1236,6 +1242,7 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.A
 				return protocol.Session{}, protocol.Refuse(protocol.CodeUnsupported, "attach %s: %s", r.Target, reason)
 			}
 			ep.Register(out[0].Attachment)
+			delete(rebuild, r.Target)
 			if pin != nil {
 				pin(a)
 			}

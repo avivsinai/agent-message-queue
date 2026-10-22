@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -752,43 +753,63 @@ func TestDetachSelfRemovesABindingMadeThroughALinkRoot(t *testing.T) {
 // agent-message-queue-611.67: attaching a running Claude target with approve
 // persisted approve but kept the attachment startup built without it and set
 // no approval pin, so the endpoint answered no approvals until a restart.
+// The retry row is from the #1145 review: an upgrade whose rebuild failed
+// left approve persisted, so the retry saw no change and kept the old
+// attachment.
 func TestLiveRegisterAppliesAnApproveUpgrade(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	pid := os.Getpid()
-	sessions := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessions, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	reg, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s1", "kind": "interactive"})
-	if err := os.WriteFile(filepath.Join(sessions, strconv.Itoa(pid)+".json"), reg, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	root := canonicalTempDir(t)
-	stateDir := filepath.Join(root, stateDirName)
-	target := "claude-" + strconv.Itoa(pid)
-	before := manifest.Adapter{Kind: "claude", Target: target, Config: json.RawMessage(`{"pid":` + strconv.Itoa(pid) + `}`)}
-	if _, err := persistAdapter(stateDir, before); err != nil {
-		t.Fatal(err)
-	}
-	store, err := requests.Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ep := core.New(core.Config{Store: store})
-	t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
-	built := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{before}})
-	if len(built) != 1 || built[0].Refusal != nil {
-		t.Fatalf("setup: build = %+v", built)
-	}
-	ep.Register(built[0].Attachment) // what startup built: approve off
-	pinned := 0
-	register := liveRegistrar(root, stateDir, ep, func(manifest.Adapter) { pinned++ })
-	if _, err := register(ipc.RegisterRequest{Kind: "claude", Target: target, Config: json.RawMessage(`{"pid":` + strconv.Itoa(pid) + `,"approve":true}`)}); err != nil {
-		t.Fatalf("register = %v", err)
-	}
-	att, _ := ep.AttachmentOf(target)
-	if att == built[0].Attachment || pinned != 1 {
-		t.Errorf("after the approve upgrade: attachment replaced = %v, pin ran %d times", att != built[0].Attachment, pinned)
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failFirst=%v", failFirst), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			pid := os.Getpid()
+			sessions := filepath.Join(home, ".claude", "sessions")
+			if err := os.MkdirAll(sessions, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			regPath := filepath.Join(sessions, strconv.Itoa(pid)+".json")
+			reg, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s1", "kind": "interactive"})
+			if err := os.WriteFile(regPath, reg, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root := canonicalTempDir(t)
+			stateDir := filepath.Join(root, stateDirName)
+			target := "claude-" + strconv.Itoa(pid)
+			before := manifest.Adapter{Kind: "claude", Target: target, Config: json.RawMessage(`{"pid":` + strconv.Itoa(pid) + `}`)}
+			if _, err := persistAdapter(stateDir, before); err != nil {
+				t.Fatal(err)
+			}
+			store, err := requests.Open(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := core.New(core.Config{Store: store})
+			t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
+			built := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{before}})
+			if len(built) != 1 || built[0].Refusal != nil {
+				t.Fatalf("setup: build = %+v", built)
+			}
+			ep.Register(built[0].Attachment) // what startup built: approve off
+			pinned := 0
+			register := liveRegistrar(root, stateDir, ep, func(manifest.Adapter) { pinned++ })
+			upgrade := ipc.RegisterRequest{Kind: "claude", Target: target, Config: json.RawMessage(`{"pid":` + strconv.Itoa(pid) + `,"approve":true}`)}
+			if failFirst {
+				if err := os.Remove(regPath); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := register(upgrade); err == nil {
+					t.Fatal("setup: the upgrade built with no session registry entry")
+				}
+				if err := os.WriteFile(regPath, reg, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := register(upgrade); err != nil {
+				t.Fatalf("register = %v", err)
+			}
+			att, _ := ep.AttachmentOf(target)
+			if att == built[0].Attachment || pinned != 1 {
+				t.Errorf("after the approve upgrade: attachment replaced = %v, pin ran %d times", att != built[0].Attachment, pinned)
+			}
+		})
 	}
 }
