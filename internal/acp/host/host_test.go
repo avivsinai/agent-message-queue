@@ -1032,3 +1032,44 @@ func TestAgyHostRespawnsAfterACancelledTurn(t *testing.T) {
 		t.Fatalf("spawns=%q; want a second start on conversation conv-1", spawned)
 	}
 }
+
+// The live agy test on 2026-10-22 found that agy's result.denied_actions is
+// cumulative per process, like num_turns: after one denied tool call every
+// later reply repeated the note. Only the denials new in a turn count.
+func TestAgyHostCountsOnlyNewDenialsPerTurn(t *testing.T) {
+	root := newRoot(t)
+	denial := []map[string]string{{"action": "command", "display_name": "RunCommand"}}
+	var procs []*scriptedAgy
+	spawn := func([]string) (AgentProcess, error) {
+		a := newScriptedAgy("conv-1")
+		procs = append(procs, a)
+		go func() {
+			enc := json.NewEncoder(a.outW)
+			scanner := bufio.NewScanner(a.inR)
+			for turn := 1; scanner.Scan(); turn++ {
+				_ = enc.Encode(map[string]any{"event": "result", "result": map[string]any{
+					"conversation_id": "conv-1", "status": "SUCCESS", "response": fmt.Sprintf("answer %d", turn),
+					"denied_actions": denial, // the first turn's denial, repeated
+				}})
+			}
+		}()
+		return a, nil
+	}
+	t.Cleanup(func() {
+		for _, a := range procs {
+			a.Stop()
+		}
+	})
+	send(t, root, "codex", format.KindQuestion, "first")
+	startAgyHost(t, root, spawn)
+	first := waitReplies(t, root, 1)
+	send(t, root, "codex", format.KindQuestion, "second")
+	second := waitReplies(t, root, 2)
+
+	if !strings.Contains(first, "agy denied 1 tool call(s)") {
+		t.Fatalf("first reply=%q; want the denial noted", first)
+	}
+	if strings.Contains(second, "denied") {
+		t.Fatalf("second reply=%q; want no note for a denial already reported", second)
+	}
+}
