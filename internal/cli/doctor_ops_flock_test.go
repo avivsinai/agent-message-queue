@@ -12,14 +12,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
 
-// TestRunOpsChecks_LocklessCompanionReportsStale pins review-b8 P1-1
-// (611.13.2): a companion row whose process is gone (kill -9) holds no
-// lifetime lock. checkCompanions probes the lock and projects state
-// "stale" with lock "not-held" - the same verdict amq-keepalive doctor
-// --ops prints - instead of parroting the recorded state. A held lock
-// keeps the recorded state and reports lock "held". Lives in a
-// flock-constrained file (review 19:21Z: the runtime OS skip cannot
+// TestRunOpsChecks_LocklessCompanionReportsStale pins that a companion row
+// whose process is gone (kill -9) holds no lifetime lock. checkCompanions
+// probes the lock and projects state "stale" with lock "not-held" - the same
+// verdict amq-keepalive doctor --ops prints - instead of parroting the
+// recorded state. A held lock keeps the recorded state and reports lock
+// "held". Lives in a flock-constrained file (the runtime OS skip cannot
 // prevent compilation of syscall.Flock references on Windows).
+// Regression: #817.
 func TestRunOpsChecks_LocklessCompanionReportsStale(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

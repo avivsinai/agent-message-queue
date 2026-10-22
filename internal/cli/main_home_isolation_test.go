@@ -12,12 +12,11 @@ import (
 // one fresh temp dir for the whole package run, and temp-directory selection
 // (TMPDIR/TMP/TEMP) at a private dir inside it: with the operator's real home
 // visible, ~/.amqrc leaked authority into root resolution and tests wrote
-// through to the live ~/.agent-mail (issue #988, observed 2026-09-22 by the
-// #846 round-7 verifier: TestSetup*/TestRunEnvJSON*/TestCoopExec*/
+// through to the live ~/.agent-mail (issue #988: TestSetup*/TestRunEnvJSON*/TestCoopExec*/
 // TestEnvAndBareSend* failed identically on main and ~/.agent-mail was
 // modified during the run). Reverting the HOME override fails the home
 // assertions; reverting the temp-dir override fails the TempDir assertions
-// (rev-853 P0: with a TMPDIR inside the real home, the cwd-ancestor walk
+// (with a TMPDIR inside the real home, the cwd-ancestor walk
 // escaped the fake home and resolved the live ~/.amqrc).
 func TestTestHomeIsIsolatedFromRealHome(t *testing.T) {
 	if testRealHome == "" {
@@ -59,12 +58,12 @@ func TestTestHomeIsIsolatedFromRealHome(t *testing.T) {
 	}
 }
 
-// TestWalkCeilingStopsAncestorEscapes is the regression for the issue #988
-// rev-853 P0 vector: a fixture re-points HOME at a sibling temp dir
+// TestWalkCeilingStopsAncestorEscapes is the regression for issue #988:
+// a fixture re-points HOME at a sibling temp dir
 // (t.Setenv("HOME", t.TempDir())) and chdirs to another sibling; the
 // cwd-ancestor walks must then stop at the isolated home instead of climbing
 // to the operator's real home and resolving the live ~/.amqrc / ~/.agent-mail
-// (observed 2026-09-22: TestSetup*/TestRunEnvJSON*/TestCoopExec* failed on
+// (TestSetup*/TestRunEnvJSON*/TestCoopExec* failed on
 // main and the run modified the live queue). A marker .amqrc placed at the
 // boundary makes the check machine-independent: without the ceiling the walk
 // loads the marker as project config; with it, the boundary is skipped

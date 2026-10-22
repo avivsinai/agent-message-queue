@@ -20,7 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// #1054 (field, 2026-10-13): an injected doorbell answered an open
+// Regression: #1054, an injected doorbell answered an open
 // AskUserQuestion dialog in Claude Code.
 func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})

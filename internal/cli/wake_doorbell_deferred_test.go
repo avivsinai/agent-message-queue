@@ -53,7 +53,7 @@ func TestDeferredAttemptReArmsAnnouncedCohortOnAddition(t *testing.T) {
 	}
 }
 
-// PR #1008 review: an urgent interrupt's deferred control injection runs before
+// Regression: #1008, an urgent interrupt's deferred control injection runs before
 // planHeld. The capped revival consumed its identity while leaving the cohort
 // parked, so the unseen urgent message had no retry deadline. One new urgent
 // message grants one reminder; deferral does not spend it or grant more.

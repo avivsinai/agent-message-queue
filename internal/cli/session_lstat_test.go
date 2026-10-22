@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-// TestB42NonEnoentSessionLstatIsTransient verifies that a non-ENOENT Lstat
+// TestNonEnoentSessionLstatIsTransient verifies that a non-ENOENT Lstat
 // failure on the session directory (e.g. EACCES) is classified as
 // ErrPeerRootUnreachable (transient, retryable) rather than
 // ContextMismatchError (permanent, DLQs the command).
-// Bead agent-message-queue-611.22.42.
-func TestB42NonEnoentSessionLstatIsTransient(t *testing.T) {
+// Regression: #780.
+func TestNonEnoentSessionLstatIsTransient(t *testing.T) {
 	// chmod(000) is the mechanism to produce a non-ENOENT Lstat failure
 	// (EACCES). It cannot revoke directory traversal on Windows (Chmod only
 	// toggles the read-only attribute) and is bypassed by privileged POSIX
@@ -59,9 +59,9 @@ func TestB42NonEnoentSessionLstatIsTransient(t *testing.T) {
 	}
 }
 
-// TestB42EnoentSessionLstatIsStillNotFound verifies ENOENT stays NotFound
+// TestEnoentSessionLstatIsStillNotFound verifies ENOENT stays NotFound
 // (not ErrPeerRootUnreachable — the session genuinely doesn't exist yet).
-func TestB42EnoentSessionLstatIsStillNotFound(t *testing.T) {
+func TestEnoentSessionLstatIsStillNotFound(t *testing.T) {
 	base := t.TempDir()
 	session := "nonexistent"
 

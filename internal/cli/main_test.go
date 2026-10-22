@@ -15,7 +15,7 @@ const (
 	cliHelperEnv = "AMQ_TEST_CLI_HELPER"
 	// cliTestWalkCeilingEnv carries the isolated home's walk ceiling from the
 	// parent test process into helper subprocesses (os.Args[0] re-execs),
-	// which start with walkCeilingForTests empty (codex #853 r2).
+	// which start with walkCeilingForTests empty.
 	cliTestWalkCeilingEnv        = "AMQ_TEST_WALK_CEILING"
 	wakeRestartPTYOwnerHelperEnv = "AMQ_TEST_WAKE_RESTART_PTY_OWNER"
 )
@@ -28,8 +28,8 @@ var testRealHome string
 
 // cliTestPackageDir is this package's source directory, resolved from the
 // test source file itself rather than from cwd. TestMain moves the process cwd
-// to the secure temp root (issue #707), so tests that need the repository
-// (building ./cmd/amq, launchapi goldens, git history) resolve it from here.
+// to the secure temp root, so tests that need the repository (building
+// ./cmd/amq, launchapi goldens, git history) resolve it from here.
 var cliTestPackageDir = func() string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -44,224 +44,25 @@ func cliTestRepoRoot() (string, error) {
 	return filepath.Abs(filepath.Join(cliTestPackageDir, "..", ".."))
 }
 
-// TestMain gives the cli package a hermetic environment so the developer's shell
-// can't leak routing context into tests. The cross-tree send guard (issue #144)
-// keys off AM_ROOT / AM_BASE_ROOT; without this, running the suite from inside a
-// coop session (where those are set) would make tests that pass --root to a temp
-// dir look like refused cross-tree sends. Tests that need these signals set them
-// explicitly via t.Setenv, which overrides and restores around this clean baseline.
+// TestMain runs the cli package in a hermetic environment: no routing context
+// from the developer's shell, and no read or write through to the operator's
+// real home, temp directory, toolchain caches, or update cache. Tests that need
+// a signal set it with t.Setenv, which overrides and restores around this
+// baseline.
 func TestMain(m *testing.M) {
+	// A host's legacy TIOCSTI sysctl must not decide which injection path a
+	// wake test exercises; tests that need it stub it themselves.
 	readTIOCSTILegacySysctl = func() ([]byte, error) {
 		return nil, os.ErrNotExist
 	}
-	// Helper subprocesses re-exec this binary and never reach the parent's
-	// isolation setup below; they inherit its HOME/TMPDIR through the
-	// environment, and take the walk ceiling from it too, before anything
-	// resolves a root (codex #853 r2: explicit --root still evaluates
-	// defaultRoot during flag registration). A helper without the ceiling
-	// refuses to run rather than walk unbounded toward the real home.
-	isHelper := os.Getenv(cliHelperEnv) == "1" || os.Getenv(injectViaHelperEnv) == "1" ||
-		os.Getenv(wakeRestartPTYOwnerHelperEnv) == "1" || os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != ""
-	if isHelper {
-		walkCeilingForTests = os.Getenv(cliTestWalkCeilingEnv)
-		if walkCeilingForTests == "" {
-			_, _ = fmt.Fprintln(os.Stderr, "cli test helper: "+cliTestWalkCeilingEnv+" is unset; refusing to run without the isolated walk ceiling")
-			os.Exit(1)
-		}
-	}
-	if os.Getenv(cliHelperEnv) == "1" {
-		if err := Run(os.Args[1:], "test"); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(GetExitCode(err))
-		}
-		os.Exit(0)
-	}
-	if os.Getenv(injectViaHelperEnv) == "1" || os.Getenv(wakeRestartPTYOwnerHelperEnv) == "1" ||
-		os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != "" {
-		os.Exit(m.Run())
-	}
+	runTestHelperProcess(m)
 	guardTestProcessReplacement()
+	clearRoutingEnv()
 
-	for _, k := range []string{"AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AMQ_GLOBAL_ROOT", envWakeOwner, "AMQ_WAKE_PRIVATE_STOP_FD"} {
-		_ = os.Unsetenv(k)
-	}
-
-	realHome, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(realHome) == "" {
-		_, _ = fmt.Fprintf(os.Stderr, "resolve real home directory for test isolation: %v\n", err)
-		os.Exit(1)
-	}
-	testRealHome = realHome
-	// Create the isolated home under the real home, NOT under os.TempDir():
-	// the --inject-via ancestor check refuses group/world-writable ancestors
-	// and os.TempDir() is /tmp (mode 1777) on Linux CI runners, so a home
-	// under it fails every wake-target test there (issue #988, first CI red).
-	// The real home is the established placement for secure test roots (see
-	// keepalive's secureAMQTestRoot); detectAgentMailDir stops at HOME via
-	// isHomeConfigDir, so the real home's own queue is never inspected.
-	fakeHome, err := os.MkdirTemp(realHome, ".amq-cli-test-home-")
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.Chmod(fakeHome, 0o700); err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "secure isolated test home: %v\n", err)
-		os.Exit(1)
-	}
-	// Pin the Go toolchain caches to the real home's locations BEFORE the home
-	// override: GOPATH/GOCACHE default under $HOME, and a module cache inside
-	// the disposable test home both slows the run (re-downloads) and breaks
-	// cleanup (mod cache files are read-only). Env-set values win unchanged.
-	realGopath := os.Getenv("GOPATH")
-	if realGopath == "" {
-		realGopath = filepath.Join(realHome, "go")
-	}
-	realGomodcache := os.Getenv("GOMODCACHE")
-	if realGomodcache == "" && realGopath != "" {
-		realGomodcache = filepath.Join(realGopath, "pkg", "mod")
-	}
-	realGocache := os.Getenv("GOCACHE")
-	if realGocache == "" {
-		if userCache, uerr := os.UserCacheDir(); uerr == nil {
-			realGocache = filepath.Join(userCache, "go-build")
-		}
-	}
-	// Isolate temp-directory selection too, not just HOME (issue #988, rev-853
-	// P0). The cwd-ancestor root-discovery walk starts from the test cwd, and
-	// tests chdir into t.TempDir(), which resolves under $TMPDIR. On machines
-	// whose TMPDIR sits inside the operator's home (every agent harness here),
-	// the walk climbed out of the temp dir, past the fake home — which the walk
-	// no longer recognizes as home because HOME is overridden — and resolved
-	// the live ~/.amqrc / ~/.agent-mail. Pointing TMPDIR (Unix) and TMP/TEMP
-	// (Windows) at a private dir inside the isolated home makes every
-	// t.TempDir() an ancestor-STOP child of the fake home: the walk reaches
-	// isHomeConfigDir at the fake home and stops, so the real home is never an
-	// ancestor of any test cwd. Ancestor modes stay safe: the dir is under the
-	// fake home, which is under the real home (never world-writable), so the
-	// --inject-via ancestor check still holds (see P0-1 above).
-	testTmpDir := filepath.Join(fakeHome, "tmp")
-	if err := os.MkdirAll(testTmpDir, 0o700); err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "create isolated test temp dir: %v\n", err)
-		os.Exit(1)
-	}
-	// Override every variable os.UserHomeDir (and the tools it fronts) consults
-	// so tests can never read or write the operator's real home: ~/.amqrc must
-	// not leak authority into root resolution (issue #988: with a live ~/.amqrc
-	// pointing at ~/.agent-mail, TestSetup*/TestRunEnvJSON*/TestCoopExec*/
-	// TestEnvAndBareSend* failed identically on main), and nothing may write
-	// through to the live ~/.agent-mail. Per-test t.Setenv("HOME", ...) keeps
-	// working: it overrides and restores around this baseline. HOMEDRIVE and
-	// HOMEPATH are set for Windows callers and tools that resolve the home from
-	// the drive-letter pair rather than USERPROFILE.
-	for _, env := range []struct{ key, value string }{
-		{"HOME", fakeHome},
-		{"USERPROFILE", fakeHome},
-		{"HOMEDRIVE", filepath.VolumeName(fakeHome)},
-		{"HOMEPATH", strings.TrimPrefix(fakeHome, filepath.VolumeName(fakeHome))},
-		{"TMPDIR", testTmpDir},
-		{"TMP", testTmpDir},
-		{"TEMP", testTmpDir},
-		{"GOPATH", realGopath},
-		{"GOMODCACHE", realGomodcache},
-		{"GOCACHE", realGocache},
-	} {
-		if err := os.Setenv(env.key, env.value); err != nil {
-			_ = os.RemoveAll(fakeHome)
-			_, _ = fmt.Fprintf(os.Stderr, "set %s for tests: %v\n", env.key, err)
-			os.Exit(1)
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "resolve test home directory: %v\n", err)
-		os.Exit(1)
-	}
-	home, err = filepath.EvalSymlinks(home)
-	if err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "resolve test home directory symlinks: %v\n", err)
-		os.Exit(1)
-	}
-	// P0 (issue #988, rev-853): the isolated home is also the hard boundary
-	// for the cwd-ancestor resolution walks. Per-test fixtures re-point HOME
-	// at sibling temp dirs (t.Setenv("HOME", t.TempDir())), which moves the
-	// isHomeConfigDir stop off the walk's ancestor chain; without this ceiling
-	// the walk climbs past the fake home and resolves the operator's real
-	// ~/.amqrc / ~/.agent-mail. Production never sets walkCeilingForTests, so
-	// live resolution is unchanged.
-	walkCeilingForTests = home
-	if err := os.Setenv(cliTestWalkCeilingEnv, home); err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "export test walk ceiling: %v\n", err)
-		os.Exit(1)
-	}
-	tempRoot, err := os.MkdirTemp(home, ".amq-cli-test-")
-	if err != nil {
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "create secure test temp root: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.Chmod(tempRoot, 0o700); err != nil {
-		_ = os.RemoveAll(tempRoot)
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "secure test temp root: %v\n", err)
-		os.Exit(1)
-	}
-
-	cliSecureTempRoot = tempRoot
-	workingDir, err := os.Getwd()
-	if err != nil {
-		_ = os.RemoveAll(tempRoot)
-		_ = os.RemoveAll(fakeHome)
-		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
-		os.Exit(1)
-	}
-	// Run every test from the secure temp root, not the package directory.
-	// The cwd-local routing guard walks up from cwd to the Git top looking for
-	// an initialized .agent-mail; on a developer checkout that finds the live
-	// queue, and every test that pins a temp root then fails with "active
-	// root ... conflicts with initialized repo-local root ... detected from
-	// cwd" (issue #707). CI never sees this because its checkout has no queue.
-	// The walk's ceiling is isHomeConfigDir (os.UserHomeDir, now the fake
-	// home): the temp root sits directly under the fake home, and so does
-	// every t.TempDir() (TMPDIR points into the fake home), so the walk stops
-	// at the fake home and never climbs into the real home. A developer whose
-	// real HOME is a Git worktree (dotfiles kept as a repo in HOME) is
-	// covered by the same stop: the walk reaches the fake home first.
-	if err := os.Chdir(tempRoot); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
-		_ = os.RemoveAll(tempRoot)
-		_ = os.RemoveAll(fakeHome)
-		os.Exit(1)
-	}
-
-	// Isolate the update-check cache (issue #646 class) so tests that drive
-	// runUpgrade / the update Notifier never write through to the developer's
-	// real ~/Library/Caches/amq. AMQ_CACHE_DIR is the authoritative override
-	// (darwin's os.UserCacheDir ignores HOME); XDG_CACHE_HOME covers any code
-	// path that consults it directly.
-	testCacheDir := filepath.Join(tempRoot, "cache")
-	if err := os.MkdirAll(testCacheDir, 0o700); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "create test cache dir: %v\n", err)
-		os.Exit(1)
-	}
-	for _, env := range []struct {
-		key   string
-		value string
-	}{
-		{key: update.EnvCacheDir, value: testCacheDir},
-		{key: "XDG_CACHE_HOME", value: testCacheDir},
-	} {
-		if err := os.Setenv(env.key, env.value); err != nil {
-			_ = os.RemoveAll(tempRoot)
-			_ = os.RemoveAll(fakeHome)
-			_, _ = fmt.Fprintf(os.Stderr, "set %s for tests: %v\n", env.key, err)
-			os.Exit(1)
-		}
-	}
+	var cleanup testMainCleanup
+	fakeHome := isolateHome(&cleanup)
+	tempRoot, workingDir := enterSecureTempRoot(&cleanup, fakeHome)
+	isolateUpdateCache(&cleanup, tempRoot)
 
 	exitCode := m.Run()
 	if err := os.Chdir(workingDir); err != nil {
@@ -278,4 +79,197 @@ func TestMain(m *testing.M) {
 		exitCode = 1
 	}
 	os.Exit(exitCode)
+}
+
+// testMainCleanup removes the directories TestMain created when setup fails
+// before the run, so a failed setup leaves nothing in the real home.
+type testMainCleanup struct {
+	dirs []string
+}
+
+func (c *testMainCleanup) add(dir string) {
+	c.dirs = append(c.dirs, dir)
+}
+
+func (c *testMainCleanup) fatalf(format string, args ...any) {
+	for i := len(c.dirs) - 1; i >= 0; i-- {
+		_ = os.RemoveAll(c.dirs[i])
+	}
+	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+// runTestHelperProcess serves the subprocess roles this test binary re-execs
+// itself as, and exits for each of them. A helper never reaches the parent's
+// isolation setup; it inherits HOME and TMPDIR through the environment and
+// must take the walk ceiling from it before anything resolves a root, because
+// flag registration evaluates defaultRoot even with an explicit --root. A
+// helper without the ceiling refuses to run rather than walk unbounded toward
+// the real home.
+func runTestHelperProcess(m *testing.M) {
+	cliHelper := os.Getenv(cliHelperEnv) == "1"
+	testHelper := os.Getenv(injectViaHelperEnv) == "1" || os.Getenv(wakeRestartPTYOwnerHelperEnv) == "1" ||
+		os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != ""
+	if !cliHelper && !testHelper {
+		return
+	}
+	walkCeilingForTests = os.Getenv(cliTestWalkCeilingEnv)
+	if walkCeilingForTests == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "cli test helper: "+cliTestWalkCeilingEnv+" is unset; refusing to run without the isolated walk ceiling")
+		os.Exit(1)
+	}
+	if cliHelper {
+		if err := Run(os.Args[1:], "test"); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(GetExitCode(err))
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// clearRoutingEnv drops the session and wake context of the shell that runs
+// the suite. The cross-tree send guard keys off AM_ROOT and AM_BASE_ROOT, so
+// from inside a coop session every test that passes --root to a temp dir
+// would look like a refused cross-tree send (#144).
+func clearRoutingEnv() {
+	for _, k := range []string{"AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AMQ_GLOBAL_ROOT", envWakeOwner, "AMQ_WAKE_PRIVATE_STOP_FD"} {
+		_ = os.Unsetenv(k)
+	}
+}
+
+// isolateHome points every home and temp variable at a private home and
+// returns it. A live ~/.amqrc must not lend authority to root resolution, and
+// nothing may write through to the live ~/.agent-mail (#988).
+//
+// The private home lives under the real home, not under os.TempDir(): the
+// --inject-via ancestor check refuses group- or world-writable ancestors, and
+// os.TempDir() is /tmp (mode 1777) on Linux runners. detectAgentMailDir stops
+// at HOME, so the real home's own queue is never inspected.
+//
+// TMPDIR, TMP and TEMP point inside the private home because the cwd-ancestor
+// root walk starts from t.TempDir(). With a TMPDIR inside the real home, the
+// walk would climb past the private home, which it no longer recognizes as
+// home, and resolve the live ~/.amqrc.
+//
+// The private home is also the walk ceiling. Fixtures that re-point HOME at a
+// sibling temp dir move the home stop off the walk's ancestor chain; the
+// ceiling still stops the walk. Production never sets walkCeilingForTests.
+func isolateHome(cleanup *testMainCleanup) string {
+	realHome, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(realHome) == "" {
+		cleanup.fatalf("resolve real home directory for test isolation: %v", err)
+	}
+	testRealHome = realHome
+	fakeHome, err := os.MkdirTemp(realHome, ".amq-cli-test-home-")
+	if err != nil {
+		cleanup.fatalf("create isolated test home: %v", err)
+	}
+	cleanup.add(fakeHome)
+	if err := os.Chmod(fakeHome, 0o700); err != nil {
+		cleanup.fatalf("secure isolated test home: %v", err)
+	}
+	testTmpDir := filepath.Join(fakeHome, "tmp")
+	if err := os.MkdirAll(testTmpDir, 0o700); err != nil {
+		cleanup.fatalf("create isolated test temp dir: %v", err)
+	}
+	gopath, gomodcache, gocache := realGoCaches(realHome)
+	// HOMEDRIVE and HOMEPATH serve Windows tools that resolve the home from
+	// the drive-letter pair rather than USERPROFILE.
+	setTestEnv(cleanup, map[string]string{
+		"HOME":        fakeHome,
+		"USERPROFILE": fakeHome,
+		"HOMEDRIVE":   filepath.VolumeName(fakeHome),
+		"HOMEPATH":    strings.TrimPrefix(fakeHome, filepath.VolumeName(fakeHome)),
+		"TMPDIR":      testTmpDir,
+		"TMP":         testTmpDir,
+		"TEMP":        testTmpDir,
+		"GOPATH":      gopath,
+		"GOMODCACHE":  gomodcache,
+		"GOCACHE":     gocache,
+	})
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		cleanup.fatalf("resolve test home directory: %v", err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		cleanup.fatalf("resolve test home directory symlinks: %v", err)
+	}
+	walkCeilingForTests = home
+	setTestEnv(cleanup, map[string]string{cliTestWalkCeilingEnv: home})
+	return home
+}
+
+// realGoCaches resolves the toolchain caches from the real home before HOME
+// moves. GOPATH and GOCACHE default under $HOME; a module cache inside the
+// disposable home re-downloads every run and breaks cleanup, because module
+// files are read-only. Values already set in the environment win unchanged.
+func realGoCaches(realHome string) (gopath, gomodcache, gocache string) {
+	gopath = os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(realHome, "go")
+	}
+	gomodcache = os.Getenv("GOMODCACHE")
+	if gomodcache == "" && gopath != "" {
+		gomodcache = filepath.Join(gopath, "pkg", "mod")
+	}
+	gocache = os.Getenv("GOCACHE")
+	if gocache == "" {
+		if userCache, err := os.UserCacheDir(); err == nil {
+			gocache = filepath.Join(userCache, "go-build")
+		}
+	}
+	return gopath, gomodcache, gocache
+}
+
+// enterSecureTempRoot creates the shared secure temp root under the private
+// home and makes it the process cwd. The cwd-local routing guard walks up from
+// cwd to the Git top looking for an initialized .agent-mail; from the package
+// directory of a developer checkout it finds the live queue, and every test
+// that pins a temp root fails with a repo-local root conflict (#707). From the
+// temp root the walk stops at the private home, which also covers a developer
+// whose real HOME is a Git worktree.
+func enterSecureTempRoot(cleanup *testMainCleanup, home string) (tempRoot, workingDir string) {
+	tempRoot, err := os.MkdirTemp(home, ".amq-cli-test-")
+	if err != nil {
+		cleanup.fatalf("create secure test temp root: %v", err)
+	}
+	cleanup.add(tempRoot)
+	if err := os.Chmod(tempRoot, 0o700); err != nil {
+		cleanup.fatalf("secure test temp root: %v", err)
+	}
+	cliSecureTempRoot = tempRoot
+	workingDir, err = os.Getwd()
+	if err != nil {
+		cleanup.fatalf("resolve test working directory: %v", err)
+	}
+	if err := os.Chdir(tempRoot); err != nil {
+		cleanup.fatalf("isolate test working directory: %v", err)
+	}
+	return tempRoot, workingDir
+}
+
+// isolateUpdateCache keeps runUpgrade and the update notifier out of the
+// developer's real cache (#646). AMQ_CACHE_DIR is the authoritative override,
+// because darwin's os.UserCacheDir ignores HOME; XDG_CACHE_HOME covers any path
+// that reads it directly.
+func isolateUpdateCache(cleanup *testMainCleanup, tempRoot string) {
+	testCacheDir := filepath.Join(tempRoot, "cache")
+	if err := os.MkdirAll(testCacheDir, 0o700); err != nil {
+		cleanup.fatalf("create test cache dir: %v", err)
+	}
+	setTestEnv(cleanup, map[string]string{
+		update.EnvCacheDir: testCacheDir,
+		"XDG_CACHE_HOME":   testCacheDir,
+	})
+}
+
+func setTestEnv(cleanup *testMainCleanup, values map[string]string) {
+	for key, value := range values {
+		if err := os.Setenv(key, value); err != nil {
+			cleanup.fatalf("set %s for tests: %v", key, err)
+		}
+	}
 }

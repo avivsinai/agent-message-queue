@@ -21,7 +21,7 @@ type doctorMailboxJSON struct {
 	Remedy         string   `json:"remedy"`
 }
 
-func TestDoctorIssue289ConfiguredOnlyMailboxIsReported(t *testing.T) {
+func TestDoctorMailboxConfiguredOnlyMailboxIsReported(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestDoctorExplicitRootRepairRequiresPinMatchOrOverride(t *testing.T) {
 	}
 }
 
-func TestDoctorIssue289RepairCreatesOnlyMissingDirsAndIsIdempotent(t *testing.T) {
+func TestDoctorMailboxRepairCreatesOnlyMissingDirsAndIsIdempotent(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestDoctorIssue289RepairCreatesOnlyMissingDirsAndIsIdempotent(t *testing.T)
 	}
 }
 
-func TestDoctorIssue289RepairRefusesSymlinkWithoutMutation(t *testing.T) {
+func TestDoctorMailboxRepairRefusesSymlinkWithoutMutation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires platform privileges")
 	}
@@ -363,7 +363,7 @@ func findDoctorCheck(t *testing.T, checks []doctorCheck, name string) doctorChec
 	return doctorCheck{}
 }
 
-func TestDoctorIssue289InspectionIgnoresMismatchedSessionPin(t *testing.T) {
+func TestDoctorMailboxInspectionIgnoresMismatchedSessionPin(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
 	setDoctorIdentityPin(t, pinnedRoot)
@@ -383,7 +383,7 @@ func TestDoctorIssue289InspectionIgnoresMismatchedSessionPin(t *testing.T) {
 	}
 }
 
-func TestDoctorIssue289InspectionWithoutSessionPinFailsOpen(t *testing.T) {
+func TestDoctorMailboxInspectionWithoutSessionPinFailsOpen(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	clearDoctorSessionPin(t)
 
@@ -402,7 +402,7 @@ func TestDoctorIssue289InspectionWithoutSessionPinFailsOpen(t *testing.T) {
 	}
 }
 
-func TestDoctorIssue289RunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T) {
+func TestDoctorMailboxRunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
 	setDoctorIdentityPin(t, pinnedRoot)
@@ -422,7 +422,7 @@ func TestDoctorIssue289RunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T)
 	}
 }
 
-func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T) {
+func TestDoctorMailboxRepairRefusesMismatchedSessionPinWithRemedy(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
 	setDoctorIdentityPin(t, pinnedRoot)
@@ -445,7 +445,7 @@ func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T)
 	}
 }
 
-func TestDoctorIssue289DiscoveredOnlyMailboxIsNotRepairEligible(t *testing.T) {
+func TestDoctorMailboxDiscoveredOnlyMailboxIsNotRepairEligible(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -478,7 +478,7 @@ func TestDoctorIssue289DiscoveredOnlyMailboxIsNotRepairEligible(t *testing.T) {
 	}
 }
 
-func TestDoctorIssue289ConfiguredDiscoveredLegacyMailbox(t *testing.T) {
+func TestDoctorMailboxConfiguredDiscoveredLegacyMailbox(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)

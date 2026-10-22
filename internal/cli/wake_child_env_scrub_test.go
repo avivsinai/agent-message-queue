@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Test7raWakeChildEnvScrubbed (7ra) proves the amq wake injector child does not
+// TestWakeChildEnvScrubbed proves the amq wake injector child does not
 // inherit the full parent shell env. A compromised/buggy injector child must
 // not see unrelated parent-shell secrets/tokens.
 //
@@ -17,13 +17,10 @@ import (
 // child. A parent shell that exports SECRET_TOKEN=... would leak it into the
 // injector child process.
 //
-// Fix (7ra): scrubWakeChildEnv filters the base env to an allowlist
+// Regression: #790. scrubWakeChildEnv filters the base env to an allowlist
 // (AM_*/AMQ_* + PATH + HOME) before the child is spawned. wakeCommandEnv
 // scrubs its base; attachWakeAttentionFD scrubs its nil-fallback.
-//
-// Mutation RED: scrubWakeChildEnv returns its input unchanged (no filtering) ->
-// SECRET_TOKEN survives into the child env -> the assertion fails.
-func Test7raWakeChildEnvScrubbed(t *testing.T) {
+func TestWakeChildEnvScrubbed(t *testing.T) {
 	// Simulate a parent shell env with AMQ-internal vars, required OS vars, and
 	// unrelated secrets that must NOT leak.
 	parent := []string{
@@ -55,13 +52,13 @@ func Test7raWakeChildEnvScrubbed(t *testing.T) {
 	// Secrets must be dropped.
 	for _, leaked := range []string{"SECRET_TOKEN", "AWS_SECRET_ACCESS_KEY", "SHLVL", "PS1"} {
 		if _, ok := scrubbedMap[leaked]; ok {
-			t.Fatalf("scrubWakeChildEnv leaked non-allowlisted env var %s into the wake child env (7ra): must be dropped", leaked)
+			t.Fatalf("scrubWakeChildEnv leaked non-allowlisted env var %s into the wake child env: must be dropped", leaked)
 		}
 	}
 	// Required OS vars + AMQ-internal vars must survive.
 	for _, keep := range []string{"PATH", "HOME", "XDG_STATE_HOME", "TERM_PROGRAM", "CMUX_SURFACE_ID", "AM_ROOT", "AM_ME", "AMQ_WAKE_OWNER", "AMQ_GLOBAL_ROOT"} {
 		if _, ok := scrubbedMap[keep]; !ok {
-			t.Fatalf("scrubWakeChildEnv dropped required env var %s (7ra): must be retained on the allowlist", keep)
+			t.Fatalf("scrubWakeChildEnv dropped required env var %s: must be retained on the allowlist", keep)
 		}
 	}
 
@@ -73,7 +70,7 @@ func Test7raWakeChildEnvScrubbed(t *testing.T) {
 	}
 	for _, kv := range env {
 		if len(kv) > len("SECRET_TOKEN=") && kv[:len("SECRET_TOKEN=")] == "SECRET_TOKEN=" {
-			t.Fatalf("wakeCommandEnv leaked SECRET_TOKEN into the wake child env (7ra): %s", kv)
+			t.Fatalf("wakeCommandEnv leaked SECRET_TOKEN into the wake child env: %s", kv)
 		}
 	}
 	// wakeCommandEnv must still set AM_ROOT to the provided root (override).
@@ -86,10 +83,10 @@ func Test7raWakeChildEnvScrubbed(t *testing.T) {
 	}
 }
 
-// Test7raAttachWakeAttentionFDScrubbedNilEnv (7ra) proves the
+// TestAttachWakeAttentionFDScrubbedNilEnv proves the
 // attachWakeAttentionFD nil-fallback scrubs the parent env instead of passing
 // os.Environ() verbatim.
-func Test7raAttachWakeAttentionFDScrubbedNilEnv(t *testing.T) {
+func TestAttachWakeAttentionFDScrubbedNilEnv(t *testing.T) {
 	// Poison the process env with a secret; attachWakeAttentionFD must not
 	// propagate it when cmd.Env == nil.
 	t.Setenv("SECRET_TOKEN_7RA", "leak-me-not")
@@ -110,7 +107,7 @@ func Test7raAttachWakeAttentionFDScrubbedNilEnv(t *testing.T) {
 	}
 	for _, kv := range cmd.Env {
 		if len(kv) > len("SECRET_TOKEN_7RA=") && kv[:len("SECRET_TOKEN_7RA=")] == "SECRET_TOKEN_7RA=" {
-			t.Fatalf("attachWakeAttentionFD nil-fallback leaked parent env var SECRET_TOKEN_7RA into the injector child (7ra): %s", kv)
+			t.Fatalf("attachWakeAttentionFD nil-fallback leaked parent env var SECRET_TOKEN_7RA into the injector child: %s", kv)
 		}
 	}
 	// PATH/HOME must survive the scrub.
@@ -124,9 +121,9 @@ func Test7raAttachWakeAttentionFDScrubbedNilEnv(t *testing.T) {
 		}
 	}
 	if !havePATH {
-		t.Fatalf("attachWakeAttentionFD nil-fallback dropped PATH (7ra): required for exec.LookPath")
+		t.Fatalf("attachWakeAttentionFD nil-fallback dropped PATH: required for exec.LookPath")
 	}
 	if !haveHOME {
-		t.Fatalf("attachWakeAttentionFD nil-fallback dropped HOME (7ra): required for os.UserHomeDir")
+		t.Fatalf("attachWakeAttentionFD nil-fallback dropped HOME: required for os.UserHomeDir")
 	}
 }

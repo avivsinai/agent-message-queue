@@ -1065,7 +1065,7 @@ func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
 	// Regression guard for the v0.41.0 Enter swallow: the settle (and rescue
 	// spacing, which reuses it) must exceed codex-tui's Enter-suppress window,
 	// or injected CRs are inserted as pasted newlines instead of submitting.
-	// A revert to the old 50ms floor must fail this test, not just review.
+	// A revert to the old 50ms floor must fail this test.
 	if rawInjectSettleDelay <= codexTUIEnterSuppressWindow {
 		t.Fatalf("rawInjectSettleDelay = %s, must exceed codex-tui Enter-suppress window %s",
 			rawInjectSettleDelay, codexTUIEnterSuppressWindow)
@@ -1092,7 +1092,7 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 	}
 }
 
-// PR #1008 review: held raw and output-only scans recorded "written" before
+// Regression: #1008, held raw and output-only scans recorded "written" before
 // any notification. Existing ledger tests exercised actual attempts only.
 func TestWakeHoldRecordsOnlyAttemptedNotifications(t *testing.T) {
 	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModeNone} {

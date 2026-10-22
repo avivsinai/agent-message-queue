@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestDarwinControlBindRefusesDetachedDirectoryOnSwap (65s) proves the
+// TestDarwinControlBindRefusesDetachedDirectoryOnSwap proves the
 // validate-bind window is closed: a directory swap after validation but before
 // bind causes the listener to REFUSE, not bind a socket in the detached OLD
 // directory that canonical clients cannot reach.
@@ -25,9 +25,8 @@ import (
 // retained dirfd) immediately before bind. A swap renames the old directory
 // away and replaces it at the canonical path, so SameFile fails and we refuse.
 //
-// Mutation RED: revert to binding OUTSIDE the guard (remove the revalidation
-// and the in-guard bind) -> the swap goes undetected, the listener binds the
-// detached directory, and start returns nil instead of an error.
+// Regression: #787, the listener bound outside the guard, so the swap went
+// undetected and start returned nil instead of an error.
 func TestDarwinControlBindRefusesDetachedDirectoryOnSwap(t *testing.T) {
 	root := secureTempDirForTest(t)
 	agent := "codex"
@@ -96,7 +95,7 @@ func TestDarwinControlBindRefusesDetachedDirectoryOnSwap(t *testing.T) {
 	agentPath := filepath.Join(root, "agents", agent)
 	hooks := &darwinWakeControlTestHooks{
 		beforeBindRevalidate: func(_ *wakeAgentDir) {
-			detached := agentPath + ".detached-65s"
+			detached := agentPath + ".detached"
 			if err := os.Rename(agentPath, detached); err != nil {
 				t.Fatalf("swap: rename old away: %v", err)
 			}
@@ -110,6 +109,6 @@ func TestDarwinControlBindRefusesDetachedDirectoryOnSwap(t *testing.T) {
 		agentDir, root, agent, lock, false, hooks, nil,
 	)
 	if err == nil {
-		t.Fatal("control listener started despite directory swap (65s: must REFUSE rather than bind a detached directory)")
+		t.Fatal("control listener started despite directory swap (must refuse rather than bind a detached directory)")
 	}
 }

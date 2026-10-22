@@ -13,8 +13,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// TestBycNotifyNewMessagesRefusesDetachedInbox (byc-b) proves the retained
-// inbox is revalidated for canonical identity before each authoritative read.
+// TestNotifyNewMessagesRefusesDetachedInbox proves the retained inbox is
+// revalidated for canonical identity before each authoritative read.
 //
 // Before the fix, notifyNewMessages called cfg.retainedInbox.ReadDir() WITHOUT
 // calling ValidateCanonical first. A directory swap after admission left the
@@ -26,10 +26,8 @@ import (
 // it; the retained FD still points at the OLD inode, so SameFile fails and we
 // refuse rather than reading a detached namespace.
 //
-// Mutation RED: remove the ValidateCanonical call in notifyNewMessages -> the
-// swap goes undetected, ReadDir reads the detached OLD inbox (empty), returns
-// nil, and the test's refusal assertion fails.
-func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
+// Regression: #788.
+func TestNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatal(err)
@@ -63,7 +61,7 @@ func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 	// it with a fresh directory at the same path. The retained FD still points
 	// at the OLD (now-detached) inode.
 	inboxNew := filepath.Join(root, "agents", "codex", "inbox", "new")
-	detached := inboxNew + ".detached-byc"
+	detached := inboxNew + ".detached"
 	if err := os.Rename(inboxNew, detached); err != nil {
 		t.Fatalf("swap: rename canonical inbox/new away: %v", err)
 	}
@@ -76,41 +74,41 @@ func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 	// The swap error must be a DEDICATED *wakeInboxCanonicalMismatchError
 	// (distinct from *wakeInboxScanError) so the caller's errors.As(scanErr)
 	// check does NOT match and it falls through to classifyWakeFailure ->
-	// wakeFailureFatal (codex #788).
+	// wakeFailureFatal (#788).
 	err = notifyNewMessages(cfg)
 	if err == nil {
-		t.Fatal("notifyNewMessages read the detached inbox without error (byc: must revalidate canonical identity before ReadDir and refuse on a swap)")
+		t.Fatal("notifyNewMessages read the detached inbox without error (must revalidate canonical identity before ReadDir and refuse on a swap)")
 	}
 	// (1) Must NOT match *wakeInboxScanError — otherwise the caller's ordinary
 	// scan-retry loop keeps re-validating the same detached inbox forever.
 	var scanErr *wakeInboxScanError
 	if errors.As(err, &scanErr) {
-		t.Fatalf("notifyNewMessages swap error must NOT be *wakeInboxScanError (codex #788): the caller would route it to ordinary scan retry and loop on the detached inbox; got %T: %v", err, err)
+		t.Fatalf("notifyNewMessages swap error must NOT be *wakeInboxScanError (#788): the caller would route it to ordinary scan retry and loop on the detached inbox; got %T: %v", err, err)
 	}
 	// (2) Must be a dedicated *wakeInboxCanonicalMismatchError so
 	// classifyWakeFailure routes it to wakeFailureFatal (terminal exit), not
 	// ordinary retry.
 	var mismatch *wakeInboxCanonicalMismatchError
 	if !errors.As(err, &mismatch) {
-		t.Fatalf("notifyNewMessages swap error must be *wakeInboxCanonicalMismatchError (codex #788) so the caller exits instead of ordinary scan-retry; got %T: %v", err, err)
+		t.Fatalf("notifyNewMessages swap error must be *wakeInboxCanonicalMismatchError (#788) so the caller exits instead of ordinary scan-retry; got %T: %v", err, err)
 	}
 	if got := classifyWakeFailure(err); got != wakeFailureFatal {
-		t.Fatalf("classifyWakeFailure(swap error) = %v, want wakeFailureFatal (byc: canonical authority loss must terminate, not loop in ordinary scan retry)", got)
+		t.Fatalf("classifyWakeFailure(swap error) = %v, want wakeFailureFatal (canonical authority loss must terminate, not loop in ordinary scan retry)", got)
 	}
 }
 
-// TestBycCallerRoutingFatalExitOnDetachedRetainedInbox (byc-b, codex #788)
-// exercises the CALLER's dispatch routing (runWakeLoop wake_unix.go:3745-3759),
+// TestCallerRoutingFatalExitOnDetachedRetainedInbox exercises the caller's
+// dispatch routing (runWakeLoop),
 // not just notifyNewMessages returning an error. The caller checks
 // errors.As(err, &scanErr) FIRST: a *wakeInboxScanError routes to ordinary scan
 // retry (loops on the same detached inbox). A *wakeInboxCanonicalMismatchError
 // must bypass that check and fall through to classifyWakeFailure -> fatal exit.
 //
 // This replicates the caller's exact two-step decision and asserts the swap
-// error routes to TERMINAL EXIT, not ordinary retry. Mutation RED: return
-// *wakeInboxScanError instead -> the caller's errors.As(scanErr) matches ->
-// ordinary retry loop -> the fatal-exit assertion fails.
-func TestBycCallerRoutingFatalExitOnDetachedRetainedInbox(t *testing.T) {
+// error routes to TERMINAL EXIT, not ordinary retry.
+//
+// Regression: #788.
+func TestCallerRoutingFatalExitOnDetachedRetainedInbox(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatal(err)
@@ -135,7 +133,7 @@ func TestBycCallerRoutingFatalExitOnDetachedRetainedInbox(t *testing.T) {
 	// Swap the canonical inbox/new (rename old away, mkdir replacement). The
 	// retained FD still points at the OLD (now-detached) inode.
 	inboxNew := filepath.Join(root, "agents", "codex", "inbox", "new")
-	detached := inboxNew + ".detached-byc-caller"
+	detached := inboxNew + ".detached-caller"
 	if err := os.Rename(inboxNew, detached); err != nil {
 		t.Fatalf("swap: rename canonical inbox/new away: %v", err)
 	}
@@ -153,16 +151,16 @@ func TestBycCallerRoutingFatalExitOnDetachedRetainedInbox(t *testing.T) {
 	// scan retry (loop). Otherwise classifyWakeFailure -> fatal exit.
 	var scanErr *wakeInboxScanError
 	if errors.As(notifyErr, &scanErr) {
-		t.Fatalf("caller would route swap error to ORDINARY SCAN RETRY (loop on detached inbox) — codex #788: errors.As(scanErr) matched; got %T: %v", notifyErr, notifyErr)
+		t.Fatalf("caller would route swap error to ORDINARY SCAN RETRY (loop on detached inbox) — #788: errors.As(scanErr) matched; got %T: %v", notifyErr, notifyErr)
 	}
 	// Fell through to classifyWakeFailure — must be fatal (terminal exit).
 	if got := classifyWakeFailure(notifyErr); got != wakeFailureFatal {
-		t.Fatalf("caller classifyWakeFailure(swap error) = %v, want wakeFailureFatal (byc: canonical authority loss must terminate, not loop in ordinary scan retry)", got)
+		t.Fatalf("caller classifyWakeFailure(swap error) = %v, want wakeFailureFatal (canonical authority loss must terminate, not loop in ordinary scan retry)", got)
 	}
 }
 
-// TestBycRebindableCallerReadmitsOnCanonicalMismatch (byc-b, codex #788 r3)
-// is an INTEGRATION smoke test of the ordinary/rebindable caller path: the
+// TestRebindableCallerReadmitsOnCanonicalMismatch is an INTEGRATION smoke
+// test of the ordinary/rebindable caller path: the
 // wake loop admits with an ordinary (rebindable) retained inbox; the canonical
 // inbox/new is swapped (rename old away, mkdir replacement); a message is
 // delivered to the NEW canonical inbox. The loop must re-arm and emit
@@ -170,11 +168,11 @@ func TestBycCallerRoutingFatalExitOnDetachedRetainedInbox(t *testing.T) {
 //
 // NOTE: in the live loop a directory rename also fires an independent watcher
 // event that re-arms via retryWatcher, so this integration test can be masked
-// by that independent rearm. The PRECISE codex #788 rebindable routing
+// by that independent rearm. The PRECISE #788 rebindable routing
 // (canonical mismatch -> invalidate watcher -> rebindWatcher re-arms) is proven
-// by TestBycClassifyCanonicalMismatch, the unit test of the extracted routing
+// by TestClassifyCanonicalMismatch, the unit test of the extracted routing
 // decision. Both tests together cover the rebindable path.
-func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
+func TestRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 	originalScanRetryBase := wakeInboxScanRetryBase
 	originalScanRetryMax := wakeInboxScanRetryMax
 	wakeInboxScanRetryBase = 20 * time.Millisecond
@@ -231,7 +229,7 @@ func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 
 	// Swap the canonical inbox/new: the retained FD still points at the OLD
 	// (now-detached) inode. Deliver a message to the NEW canonical inbox.
-	detached := inboxPath + ".detached-byc-rebind"
+	detached := inboxPath + ".detached-rebind"
 	if err := os.Rename(inboxPath, detached); err != nil {
 		t.Fatalf("swap: rename canonical inbox/new away: %v", err)
 	}
@@ -240,16 +238,16 @@ func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 	}
 	// Drop a message ONLY in the NEW canonical inbox. If the loop is stuck on
 	// the detached OLD inbox, this message is never seen.
-	deliverWakeWatcherMessageForTest(t, root, "codex", "byc-rebind-readmit", "readmit")
+	deliverWakeWatcherMessageForTest(t, root, "codex", "rebind-readmit", "readmit")
 
 	// The loop must re-arm on the NEW canonical inbox and emit attention for
-	// the message that lives only there. This is the codex #788 rebindable
+	// the message that lives only there. This is the #788 rebindable
 	// re-admission assertion: the new canonical inbox is REACHED, not looped
 	// past on the detached one.
 	awaitWakeAttentionFrom(t, attention, done, "readmit")
 }
 
-// TestBycClassifyCanonicalMismatch (byc-b, codex #788 r3) unit-tests the
+// TestClassifyCanonicalMismatch unit-tests the
 // rebindable routing decision extracted from attemptNotification.
 // notifyNewMessages returns *wakeInboxCanonicalMismatchError for canonical
 // authority loss (both rebindable and !rebindable). The caller routes it via
@@ -261,7 +259,7 @@ func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 //     rebindWatcher's retained-authority handling).
 //   - non-mismatch -> canonicalMismatchNone (ordinary scan retry / fatal via
 //     classifyWakeFailure).
-func TestBycClassifyCanonicalMismatch(t *testing.T) {
+func TestClassifyCanonicalMismatch(t *testing.T) {
 	mismatchErr := &wakeInboxCanonicalMismatchError{
 		detachedPath: "/tmp/inbox/new",
 		cause:        errors.New("retained wake inbox directory no longer matches component authority"),

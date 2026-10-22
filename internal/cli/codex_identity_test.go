@@ -13,7 +13,7 @@ import (
 // Bead agent-message-queue-611.61 (live, codex-cli 0.160.1): tool commands of
 // a Codex thread on the shared daemon see no AM_* variables, only
 // CODEX_THREAD_ID. An amq command there takes the identity coop exec
-// recorded for the thread. Design review of 611.61 (Pro): a later coop exec
+// recorded for the thread. A later coop exec
 // for the same handle revokes the old thread's identity, and any explicit
 // identity variable, even empty, wins.
 func TestCodexThreadTakesItsRecordedIdentity(t *testing.T) {
@@ -96,7 +96,7 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 	}
 }
 
-// Review of #993 (Pro, P1): a record that cannot be written stopped nothing;
+// Regression: #993, a record that cannot be written stopped nothing;
 // the launch resumed the thread without an identity.
 func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
 	err := recordResumedCodexThread("codex", []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91aa"}, func(string) error { return errors.New("disk full") })
@@ -106,7 +106,7 @@ func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
 	}
 }
 
-// Review of #993 r3 (Pro, P1): a resume that names no thread id let Codex
+// Regression: #993, a resume that names no thread id let Codex
 // pick a thread, possibly one recorded for another session or handle, and
 // amq there took that other identity. AMQ refuses it before exec; --last and
 // a name are resolved to an id first (resolveCodexResumeLaunch).
@@ -117,7 +117,7 @@ func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 	for _, args := range [][]string{
 		{"resume", "--all"},
 		{"resume", "-i", "shot.png", id},
-		// Review of #993 r4 (Pro, P1): options before the subcommand.
+		// #993: options before the subcommand.
 		{"-c", "model=x", "resume"},
 		// Review of #1001: --last with two positionals is Codex's argument
 		// conflict, and an option AMQ does not know hides the resume.
@@ -163,7 +163,7 @@ func TestCodexResumeLastCarriesTheSelectedThread(t *testing.T) {
 	}
 }
 
-// Review of #993 r3 (Pro): session s2 resuming by id a thread recorded for
+// Regression: #993, session s2 resuming by id a thread recorded for
 // s1 must act as s2, not take s1's identity from the old record.
 func TestResumeByIDTakesTheLaunchingSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

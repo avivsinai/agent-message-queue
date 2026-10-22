@@ -30,7 +30,7 @@ func TestDarwinWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
 	// TempDir RemoveAll cleanups. Without this the real-PTY wake daemon (a
 	// detached child of `script`/`coop exec`) keeps writing to
 	// root/agents/codex after the test returns and TempDir cleanup fails with
-	// "directory not empty" (bead agent-message-queue-sqx). The PID is captured
+	// "directory not empty" (#689). The PID is captured
 	// from the helper's AMQ_SELF_UPGRADE_HELPER_OK line after CombinedOutput.
 	var spawnedWakePID int
 	t.Cleanup(func() {

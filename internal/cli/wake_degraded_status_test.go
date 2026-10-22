@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-// TestT64AttentionOnlyFallbackPersistsDegraded verifies that when the wake
+// TestAttentionOnlyFallbackPersistsDegraded verifies that when the wake
 // falls back to attention-only delivery, persistWakeNotifierStatus is called
 // with "degraded" so `amq doctor --ops` can distinguish a fully-injecting wake
 // from a downgraded one.
-// Bead agent-message-queue-t64.
-func TestT64AttentionOnlyFallbackPersistsDegraded(t *testing.T) {
+// Regression: #796.
+func TestAttentionOnlyFallbackPersistsDegraded(t *testing.T) {
 	var recordedStatus string
 	var recordedReason string
 	cfg := &wakeConfig{
@@ -47,12 +47,12 @@ func TestT64AttentionOnlyFallbackPersistsDegraded(t *testing.T) {
 	}
 }
 
-// TestT64SuccessfulInjectDoesNotPersistDegraded verifies the negative: when
+// TestSuccessfulInjectDoesNotPersistDegraded verifies the negative: when
 // injection succeeds, degraded status is NOT persisted (the naive fix that
 // marks everything degraded would pass the test above but break this).
-// Bead agent-message-queue-oug: injectViaHook is the same legacy exit-zero
+// injectViaHook is the same legacy exit-zero
 // result as the old shell injector, without a 5s process timeout.
-func TestT64SuccessfulInjectDoesNotPersistDegraded(t *testing.T) {
+func TestSuccessfulInjectDoesNotPersistDegraded(t *testing.T) {
 	var recordedStatus string
 	cfg := &wakeConfig{
 		me:         "codex",
@@ -85,11 +85,11 @@ func TestT64SuccessfulInjectDoesNotPersistDegraded(t *testing.T) {
 	}
 }
 
-// TestT64SuccessfulInjectClearsDegradedAfterFallback verifies the recovery
+// TestSuccessfulInjectClearsDegradedAfterFallback verifies the recovery
 // transition codex requested: after an attention-only fallback persists
 // "degraded", a subsequent successful inject clears it so doctor --ops
 // reports healthy again.
-func TestT64SuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
+func TestSuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 	// First delivery: injectMode=none forces attention-only → "degraded"
 	var statuses []struct{ status, mode, reason string }
 	cfg := &wakeConfig{
@@ -116,7 +116,7 @@ func TestT64SuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 	}
 
 	// Second delivery: legacy exit-zero inject, through the test hook so the
-	// clear does not wait on a subprocess (bead agent-message-queue-oug).
+	// clear does not wait on a subprocess.
 	cfg.injectMode = wakeInjectModePaste
 	cfg.injectVia = "test-hook"
 	cfg.injectViaHook = func(string) (string, error) {
@@ -135,11 +135,11 @@ func TestT64SuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 	}
 }
 
-// TestT64FailedSpecificStatusWriteRetainsPendingIntent verifies that when
+// TestFailedSpecificStatusWriteRetainsPendingIntent verifies that when
 // recordNotifierStatus fails for a specific status (injector_unsupported),
 // the attention-only fallback does not overwrite the pending intent with
 // generic "degraded". The pending specific status must be retained.
-func TestT64FailedSpecificStatusWriteRetainsPendingIntent(t *testing.T) {
+func TestFailedSpecificStatusWriteRetainsPendingIntent(t *testing.T) {
 	var statuses []struct{ status, mode, reason string }
 	var failNext bool
 	cfg := &wakeConfig{
@@ -187,10 +187,10 @@ func TestT64FailedSpecificStatusWriteRetainsPendingIntent(t *testing.T) {
 	}
 }
 
-// TestT64NativeInjectionClearsDegradedAfterFallback verifies that after an
+// TestNativeInjectionClearsDegradedAfterFallback verifies that after an
 // attention-only fallback persists "degraded", a subsequent successful native
 // injection (raw/paste mode, not external inject-via) clears it.
-func TestT64NativeInjectionClearsDegradedAfterFallback(t *testing.T) {
+func TestNativeInjectionClearsDegradedAfterFallback(t *testing.T) {
 	var statuses []struct{ status, mode, reason string }
 	cfg := &wakeConfig{
 		me:             "codex",

@@ -115,7 +115,7 @@ func TestWakeConfigRoundTrip(t *testing.T) {
 		t.Fatalf("after reset hold_low = %+v, file %+v, want 1m0s from file, ok", s, got.File)
 	}
 
-	// Regression (#1014 live E2E S8): a typo handle exited 1 because the wake
+	// Regression: #1014, a typo handle exited 1 because the wake
 	// diagnostic wrap hid the not-found code.
 	_, err = captureStdout(t, func() error { return runWakeConfig([]string{"--root", root, "--me", "nosuch"}) })
 	if GetExitCode(err) != ExitNotFound {
@@ -126,7 +126,7 @@ func TestWakeConfigRoundTrip(t *testing.T) {
 	}
 }
 
-// #1014 round-3 review findings 2 and 4b: with a valid wake lock, no status
+// Regression: #1014, with a valid wake lock, no status
 // sidecar and an absent file, set exits 6 only after the startup grace and
 // writes nothing.
 func TestWakeConfigSetRefusesUnreportedWakeAfterGrace(t *testing.T) {
@@ -174,7 +174,7 @@ func TestWakeConfigSetRefusesUnreportedWakeAfterGrace(t *testing.T) {
 }
 
 // machineConfigWakeFixture starts a valid wake lock for agent "codex" and
-// returns its root. Helper for the machine-layer review r1 rows below.
+// returns its root. Helper for the machine-layer rows below.
 func machineConfigWakeFixture(t *testing.T) string {
 	t.Helper()
 	const wakePID = 4243
@@ -224,7 +224,7 @@ func writeWakeAppliedForTest(t *testing.T, root string, applied wakeSettingsAppl
 	}
 }
 
-// review r1: a machine file made set refuse a running 0.94.0 wake that has no
+// Regression: #1036, a machine file made set refuse a running 0.94.0 wake that has no
 // agent file. Its sidecar has no machine fields and matches the absent agent
 // digest, so the unseeded-argv gate must let the set through.
 func TestWakeConfigSetIgnoresMachineFileForUnseededGate(t *testing.T) {
@@ -245,7 +245,7 @@ func TestWakeConfigSetIgnoresMachineFileForUnseededGate(t *testing.T) {
 	}
 }
 
-// review r1: an agent-only --wait change exited 1 although the wake applied
+// Regression: #1036, an agent-only --wait change exited 1 although the wake applied
 // it, whenever the machine file was refused.
 func TestWakeConfigAgentWaitIgnoresRefusedMachineFile(t *testing.T) {
 	root := machineConfigWakeFixture(t)
@@ -288,7 +288,7 @@ func TestWakeConfigAgentWaitIgnoresRefusedMachineFile(t *testing.T) {
 	}
 }
 
-// review r2: --machine --wait still exits 1 on a refused agent file although
+// Regression: #1036, --machine --wait still exits 1 on a refused agent file although
 // the wake applied the machine change.
 func TestWakeConfigMachineWaitIgnoresRefusedAgentFile(t *testing.T) {
 	root := machineConfigWakeFixture(t)
@@ -324,7 +324,7 @@ func TestWakeConfigMachineWaitIgnoresRefusedAgentFile(t *testing.T) {
 	}
 }
 
-// review r1: with a group-writable ~/.amq and no wake.settings, every wake
+// Regression: #1036, with a group-writable ~/.amq and no wake.settings, every wake
 // reported the machine layer as refused for a file nobody made.
 func TestReadMachineWakeSettingsGroupWritableHomeNoFile(t *testing.T) {
 	home := secureTempDirForTest(t)
@@ -342,7 +342,7 @@ func TestReadMachineWakeSettingsGroupWritableHomeNoFile(t *testing.T) {
 	}
 }
 
-// review r1: --machine --me reported the machine file ok while the agent's
+// Regression: #1036, --machine --me reported the machine file ok while the agent's
 // wake refused it, because only plain --me layered the two files.
 func TestWakeConfigMachineWithMeReportsLayeredRefusal(t *testing.T) {
 	t.Setenv("HOME", secureTempDirForTest(t))

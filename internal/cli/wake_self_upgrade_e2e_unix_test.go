@@ -22,8 +22,7 @@ const wakeSelfUpgradePTYOwnerHelperEnv = "AMQ_TEST_WAKE_SELF_UPGRADE_PTY_OWNER"
 // replacement and takes ~35-45 s — far over the repo test bar (under 5 s, no
 // child process) — so it runs only behind this opt-in switch, like the
 // AMQ_*_LIVE proofs in CONTRIBUTING.md, and CI never runs it. The observed
-// failure class it guards (CI run 37481134450, bead
-// agent-message-queue-4sc) was an environment flake, not a code defect.
+// failure class it guards (#973) was an environment flake, not a code defect.
 const (
 	wakeSelfUpgradePTYLiveEnv  = "AMQ_WAKE_SELF_UPGRADE_PTY_LIVE"
 	wakeSelfUpgradePTYLiveSkip = "AMQ_WAKE_SELF_UPGRADE_PTY_LIVE=1 required; run in an isolated environment per CONTRIBUTING.md live proofs"
@@ -52,7 +51,7 @@ func prepareWakeSelfUpgradeE2E(t *testing.T) (stable, oldBinary, newBinary, root
 		t.Fatal(err)
 	}
 	root = filepath.Join(temp, "root")
-	// Fixture-owned Git boundary (codex #853 r3): these are production
+	// Fixture-owned Git boundary: these are production
 	// binaries, which cannot see the test-only walk ceiling, and an ancestor
 	// HOME alone does not stop their Git discovery when the real home is a
 	// Git worktree. Every binary here runs with its cwd in work/, whose .git
