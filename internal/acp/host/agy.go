@@ -144,7 +144,10 @@ type agySession struct {
 	h     *Host
 	spawn Spawner
 	cur   *agyProc
-	id    string
+	// retire is the process a cancel interrupted: it ends its turn and
+	// exits, so the next turn replaces it even before its stdout ends.
+	retire *agyProc
+	id     string
 }
 
 func (s *agySession) agentName() string { return "agy" }
@@ -192,16 +195,22 @@ func (s *agySession) open(ctx context.Context, recorded *sessionRecord) (string,
 }
 
 // ensure respawns agy on the current conversation when its process has
-// exited. A respawn that lands on another conversation is recorded.
+// exited or a cancel retired it. The old process is stopped and its reader
+// joined first. A respawn that lands on another conversation is recorded.
 func (s *agySession) ensure() error {
 	if s.cur != nil {
+		exited := false
 		select {
 		case <-s.cur.exited:
-			s.cur.p.Stop()
-			s.cur = nil
+			exited = true
 		default:
+		}
+		if !exited && s.cur != s.retire {
 			return nil
 		}
+		s.cur.p.Stop()
+		<-s.cur.exited
+		s.cur, s.retire = nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
 	defer cancel()
@@ -239,13 +248,15 @@ func (s *agySession) send(text string, _ map[string]any, sent func(id int64) err
 			dispatched <- err
 			return
 		}
+		// The turn counts as dispatched before any byte is written, so an
+		// agy that stops reading stdin cannot keep the host from its
+		// timeout, cancel and busy handling.
+		dispatched <- nil
 		if _, err := proc.p.Stdin().Write(append(line, '\n')); err != nil {
 			// The line may be partly written: the turn is uncertain.
-			dispatched <- nil
 			ended <- turnEnd{err: fmt.Errorf("%w: %v", errClosed, err)}
 			return
 		}
-		dispatched <- nil
 		select {
 		case res := <-proc.results:
 			ended <- s.finish(turn, res)
@@ -295,6 +306,7 @@ func (s *agySession) cancel() <-chan struct{} {
 	delivered := make(chan struct{})
 	if s.cur != nil {
 		_ = s.cur.p.Interrupt()
+		s.retire = s.cur
 	}
 	close(delivered)
 	return delivered

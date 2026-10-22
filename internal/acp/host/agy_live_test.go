@@ -83,14 +83,26 @@ func runAgyHostFor(t *testing.T, root, dir string, n int) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- h.RunAgy(ctx, spawnRealAgy(t, dir)) }()
+	// Stop agy and the host before the lock is released, also when an
+	// assertion fails.
+	var runErr error
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopped = true
+			cancel()
+			runErr = <-done
+			h.Close()
+		}
+	}
+	defer stop()
 	body := waitReplies(t, root, n, 3*time.Minute)
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("agy host: %v", err)
+	stop()
+	if runErr != nil {
+		t.Fatalf("agy host: %v", runErr)
 	}
 	return body
 }

@@ -789,3 +789,167 @@ func TestAgyHostAnswersAMessageAndRecordsItsConversation(t *testing.T) {
 		t.Fatalf("agy spawned with %q; want one start in stream-json mode", spawned)
 	}
 }
+
+// scriptedAgy is one fake agy process whose behavior a test chooses.
+type scriptedAgy struct {
+	inR       *io.PipeReader
+	inW       *io.PipeWriter
+	outR      *io.PipeReader
+	outW      *io.PipeWriter
+	interrupt func(*scriptedAgy)
+}
+
+func (a *scriptedAgy) Stdin() io.WriteCloser { return a.inW }
+func (a *scriptedAgy) Stdout() io.Reader     { return a.outR }
+func (a *scriptedAgy) Interrupt() error {
+	if a.interrupt != nil {
+		go a.interrupt(a)
+	}
+	return nil
+}
+func (a *scriptedAgy) Stop() {
+	_ = a.inW.Close()
+	_ = a.inR.Close()
+	_ = a.outW.Close()
+}
+
+func newScriptedAgy(conversation string) *scriptedAgy {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	a := &scriptedAgy{inR: inR, inW: inW, outR: outR, outW: outW}
+	go func() {
+		_ = json.NewEncoder(outW).Encode(map[string]any{"event": "init", "conversation_id": conversation})
+	}()
+	return a
+}
+
+// startAgyHost runs an agy host for grok. stop cancels it and returns once
+// it has stopped; the test's cleanup stops it too and releases the lock.
+func startAgyHost(t *testing.T, root string, spawn Spawner) (stop func(timeout time.Duration) bool) {
+	t.Helper()
+	h, err := Open(Config{Root: root, Me: "grok", Cwd: root, Version: "test", Agent: "agy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = h.RunAgy(ctx, spawn)
+		close(done)
+	}()
+	stop = func(timeout time.Duration) bool {
+		cancel()
+		select {
+		case <-done:
+			return true
+		case <-time.After(timeout):
+			return false
+		}
+	}
+	t.Cleanup(func() {
+		if stop(10 * time.Second) {
+			h.Close()
+		}
+	})
+	return stop
+}
+
+// Review of #1143 (P1): a turn reported its dispatch only after its stdin
+// write returned, so an agy that stopped reading stdin held the host past
+// cancel and timeout.
+func TestAgyHostStopsWhileAgyIsNotReadingStdin(t *testing.T) {
+	root := newRoot(t)
+	var procs []*scriptedAgy
+	spawn := func([]string) (AgentProcess, error) {
+		a := newScriptedAgy("conv-1")
+		// agy interrupted mid-write gives up its stdin and exits.
+		a.interrupt = func(a *scriptedAgy) { a.Stop() }
+		procs = append(procs, a)
+		return a, nil
+	}
+	send(t, root, "codex", format.KindQuestion, strings.Repeat("a long question ", 8192))
+	t.Cleanup(func() {
+		for _, a := range procs {
+			a.Stop()
+		}
+	})
+	stop := startAgyHost(t, root, spawn)
+	record := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns")
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if entries, _ := os.ReadDir(record); len(entries) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the host never claimed the message")
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if !stop(3 * time.Second) {
+		t.Fatal("the host did not stop while agy was not reading its stdin")
+	}
+}
+
+// Review of #1143 (P2): a cancelled agy that had not exited yet was reused
+// for the next turn, which then failed; the cancelled process must be
+// replaced, on the same conversation.
+func TestAgyHostRespawnsAfterACancelledTurn(t *testing.T) {
+	root := newRoot(t)
+	ext := filepath.Join(root, "agents", "grok", "extensions", extensionLayer)
+	if err := os.MkdirAll(ext, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ext, "settings.json"), []byte(`{"turn_timeout":"1s"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var spawned []string
+	var procs []*scriptedAgy
+	spawn := func(extra []string) (AgentProcess, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		spawned = append(spawned, strings.Join(extra, " "))
+		a := newScriptedAgy("conv-1")
+		first := len(procs) == 0
+		procs = append(procs, a)
+		go func() {
+			enc := json.NewEncoder(a.outW)
+			scanner := bufio.NewScanner(a.inR)
+			for scanner.Scan() {
+				if first {
+					continue // holds the turn until interrupted
+				}
+				_ = enc.Encode(map[string]any{"event": "result", "result": map[string]any{"conversation_id": "conv-1", "status": "SUCCESS", "response": "second answer"}})
+			}
+		}()
+		if first {
+			// agy answers SIGINT with an interrupted result and exits a
+			// moment later.
+			a.interrupt = func(a *scriptedAgy) {
+				_ = json.NewEncoder(a.outW).Encode(map[string]any{"event": "result", "result": map[string]any{"conversation_id": "conv-1", "status": "ERROR", "error": "interrupted"}})
+				time.Sleep(300 * time.Millisecond)
+				a.Stop()
+			}
+		}
+		return a, nil
+	}
+	send(t, root, "codex", format.KindQuestion, "first")
+	send(t, root, "codex", format.KindQuestion, "second")
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, a := range procs {
+			a.Stop()
+		}
+	})
+	startAgyHost(t, root, spawn)
+
+	body := waitReplies(t, root, 2, 4*time.Second)
+	if strings.TrimRight(body, "\n") != "second answer" {
+		t.Fatalf("second reply=%q; want the respawned agy's answer", body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawned) != 2 || !strings.HasSuffix(spawned[1], "--conversation conv-1") {
+		t.Fatalf("spawns=%q; want a second start on conversation conv-1", spawned)
+	}
+}
