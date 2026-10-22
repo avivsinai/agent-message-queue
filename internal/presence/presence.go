@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // Presence captures the current presence for an agent handle.
@@ -58,22 +59,47 @@ func WriteDeliveryRoot(root *fsq.DeliveryRoot, p Presence) error {
 	return err
 }
 
+// LockName is the file in an agent directory that every presence writer
+// locks around its read-modify-write of presence.json, across processes.
+const LockName = ".presence.lock"
+
 // Update applies change to the stored presence, or to a default "active"
-// presence when none exists, refreshes LastSeen, and writes the result. Each
-// writer changes only the fields it owns, so the agent's status and note and
-// the wake's notifier and doorbell state survive each other's writes.
+// presence when none exists, refreshes LastSeen, and writes the result under
+// the presence lock. Each writer changes only the fields it owns, so the
+// agent's status and note and the wake's notifier and doorbell state survive
+// each other's writes.
 func Update(root, handle string, change func(*Presence)) (Presence, error) {
-	data, err := os.ReadFile(filepath.Join(root, "agents", handle, "presence.json"))
-	p, err := updated(handle, data, err, change)
+	dir := filepath.Join(root, "agents", handle)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Presence{}, err
+	}
+	var p Presence
+	err := lock.WithExclusiveFileLock(filepath.Join(dir, LockName), func() error {
+		data, err := os.ReadFile(filepath.Join(dir, "presence.json"))
+		if p, err = updated(handle, data, err, change); err != nil {
+			return err
+		}
+		return Write(root, p)
+	})
 	if err != nil {
 		return Presence{}, err
 	}
-	return p, Write(root, p)
+	return p, nil
 }
 
 // UpdateDeliveryRoot is Update through a pinned root capability.
 func UpdateDeliveryRoot(root *fsq.DeliveryRoot, handle string, change func(*Presence)) (Presence, error) {
-	data, err := root.ReadFile(filepath.Join("agents", handle, "presence.json"))
+	dir := filepath.Join("agents", handle)
+	f, err := root.OpenLockFile(dir, LockName, 0o600)
+	if err != nil {
+		return Presence{}, err
+	}
+	defer func() { _ = f.Close() }()
+	if err := lock.Lock(f); err != nil {
+		return Presence{}, err
+	}
+	defer func() { _ = lock.Unlock(f) }()
+	data, err := root.ReadFile(filepath.Join(dir, "presence.json"))
 	p, err := updated(handle, data, err, change)
 	if err != nil {
 		return Presence{}, err

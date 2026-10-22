@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
@@ -875,43 +876,7 @@ func (d *wakeInboxDir) Close() error {
 }
 
 func touchWakePresenceInDir(agentDir *wakeAgentDir, me string) error {
-	if agentDir == nil {
-		return fmt.Errorf("wake repair agent directory capability is missing")
-	}
-	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
-		path := filepath.Join(agentDir.path, "presence.json")
-		data, _, exists, err := readWakeRepairMetadataAt(
-			dirfd,
-			"presence.json",
-			"wake presence",
-			path,
-			maxWakeMetadataFileBytes,
-		)
-		var value presence.Presence
-		switch {
-		case err != nil:
-			return err
-		case !exists:
-			value = presence.New(me, "active", "", time.Now())
-		default:
-			if err := json.Unmarshal(data, &value); err != nil {
-				return fmt.Errorf("parse wake presence: %w", err)
-			}
-			value.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		encoded, err := json.MarshalIndent(value, "", "  ")
-		if err != nil {
-			return err
-		}
-		return writeWakeRepairMetadataAt(
-			dirfd,
-			agentDir,
-			"presence.json",
-			"wake presence",
-			append(encoded, '\n'),
-			maxWakeMetadataFileBytes,
-		)
-	})
+	return updateWakePresenceInDir(agentDir, me, func(*presence.Presence) {})
 }
 
 func setWakeNotifierStatusInDir(
@@ -949,38 +914,77 @@ func updateWakePresenceInDir(
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
 	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
-		path := filepath.Join(agentDir.path, "presence.json")
-		data, _, exists, err := readWakeRepairMetadataAt(
-			dirfd,
-			"presence.json",
-			"wake presence",
-			path,
-			maxWakeMetadataFileBytes,
-		)
-		var value presence.Presence
-		switch {
-		case err != nil:
-			return err
-		case !exists:
-			value = presence.New(me, "active", "", time.Now())
-		default:
-			if err := json.Unmarshal(data, &value); err != nil {
-				return fmt.Errorf("parse wake presence: %w", err)
-			}
-		}
-		update(&value)
-		value.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
-		encoded, err := json.MarshalIndent(value, "", "  ")
-		if err != nil {
-			return err
-		}
-		return writeWakeRepairMetadataAt(
-			dirfd,
-			agentDir,
-			"presence.json",
-			"wake presence",
-			append(encoded, '\n'),
-			maxWakeMetadataFileBytes,
-		)
+		return withPresenceLockAt(dirfd, func() error {
+			return updateWakePresenceAt(dirfd, agentDir, me, update)
+		})
 	})
+}
+
+func updateWakePresenceAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	me string,
+	update func(*presence.Presence),
+) error {
+	path := filepath.Join(agentDir.path, "presence.json")
+	data, _, exists, err := readWakeRepairMetadataAt(
+		dirfd,
+		"presence.json",
+		"wake presence",
+		path,
+		maxWakeMetadataFileBytes,
+	)
+	var value presence.Presence
+	switch {
+	case err != nil:
+		return err
+	case !exists:
+		value = presence.New(me, "active", "", time.Now())
+	default:
+		if err := json.Unmarshal(data, &value); err != nil {
+			return fmt.Errorf("parse wake presence: %w", err)
+		}
+	}
+	update(&value)
+	value.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeWakeRepairMetadataAt(
+		dirfd,
+		agentDir,
+		"presence.json",
+		"wake presence",
+		append(encoded, '\n'),
+		maxWakeMetadataFileBytes,
+	)
+}
+
+// withPresenceLockAt holds the presence lock that every presence writer takes
+// around its read-modify-write, opened through the retained agent directory.
+func withPresenceLockAt(dirfd int, fn func() error) error {
+	fd, err := unix.Openat(
+		dirfd,
+		presence.LockName,
+		unix.O_RDWR|unix.O_CREAT|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0o600,
+	)
+	if err != nil {
+		return fmt.Errorf("open presence lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), presence.LockName)
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat presence lock: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("presence lock %s is not a regular file", presence.LockName)
+	}
+	if err := lock.Lock(file); err != nil {
+		return fmt.Errorf("acquire presence lock: %w", err)
+	}
+	defer func() { _ = lock.Unlock(file) }()
+	return fn()
 }
