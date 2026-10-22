@@ -30,6 +30,13 @@ type fakeAgent struct {
 	holdUntilCancel bool
 	// gate, when set, holds each prompt's answer until it is closed.
 	gate chan struct{}
+	// With stall, the agent stops reading after a prompt: it answers the
+	// prompt end_turn when answer closes and reads on when resume closes.
+	// cancelSent closes when the host starts writing session/cancel.
+	stall      bool
+	answer     chan struct{}
+	resume     chan struct{}
+	cancelSent chan struct{}
 
 	mu       sync.Mutex
 	methods  []string
@@ -89,6 +96,12 @@ func (f *fakeAgent) serve(in io.Reader, out io.WriteCloser) {
 			if f.gate != nil {
 				<-f.gate
 			}
+			if f.stall {
+				<-f.answer
+				respond(msg.ID, map[string]string{"stopReason": "end_turn"})
+				<-f.resume
+				continue
+			}
 			if f.holdUntilCancel {
 				held = msg.ID
 				continue
@@ -137,13 +150,17 @@ func startHost(t *testing.T, root string, agent *fakeAgent) {
 	}
 	hostOut, agentIn := io.Pipe()
 	agentOut, hostIn := io.Pipe()
+	var toAgent io.Writer = agentIn
+	if agent.cancelSent != nil {
+		toAgent = &cancelWatch{w: agentIn, seen: agent.cancelSent}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); agent.serve(hostOut, hostIn) }()
 	go func() {
 		defer wg.Done()
-		if err := h.Run(ctx, agentOut, agentIn); err != nil {
+		if err := h.Run(ctx, agentOut, toAgent); err != nil {
 			t.Errorf("host run: %v", err)
 		}
 		_ = agentIn.Close()
@@ -153,6 +170,21 @@ func startHost(t *testing.T, root string, agent *fakeAgent) {
 		wg.Wait()
 		h.Close()
 	})
+}
+
+// cancelWatch closes seen when a write to the agent carries session/cancel,
+// before the write itself, which blocks while the agent does not read.
+type cancelWatch struct {
+	w    io.Writer
+	seen chan struct{}
+	once sync.Once
+}
+
+func (c *cancelWatch) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), `"session/cancel"`) {
+		c.once.Do(func() { close(c.seen) })
+	}
+	return c.w.Write(p)
 }
 
 func newRoot(t *testing.T) string {
@@ -627,4 +659,54 @@ func TestHostRefusesARequestPublishedDuringAPeerTurn(t *testing.T) {
 
 	waitEvent(t, root, testRef, "refused")
 	assertNeverRan(t, root, testRef)
+}
+
+// Review of #1135: the prompt ended on its own after the host saw the cancel
+// but before its session/cancel write finished, the host started the next
+// turn, and the late session-wide cancel reached that turn. The turn must
+// stay occupied until the cancel write is done.
+func TestHostStartsNoTurnUntilTheCancelWriteFinishes(t *testing.T) {
+	root := newRoot(t)
+	agent := &fakeAgent{stall: true, answer: make(chan struct{}), resume: make(chan struct{}), cancelSent: make(chan struct{})}
+	startHost(t, root, agent)
+	var resumed sync.Once
+	resume := func() { resumed.Do(func() { close(agent.resume) }) }
+	t.Cleanup(resume) // runs before the host stops
+
+	publishRequest(t, root, testRef, "a long task")
+	waitEvent(t, root, testRef, "started")
+	cancel, err := json.Marshal(map[string]string{"protocol": BridgeProtocol, "ref": testRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancels := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "cancels")
+	if err := os.MkdirAll(cancels, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cancels, testRef+".json"), cancel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-agent.cancelSent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the host never wrote session/cancel")
+	}
+
+	// The prompt ends on its own while the cancel write is still blocked:
+	// the turn must not end, so no later turn can start under the cancel.
+	close(agent.answer)
+	events := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "events", testRef+".jsonl")
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if data, _ := os.ReadFile(events); strings.Contains(string(data), `"event":"completed"`) {
+			t.Fatalf("the turn ended while its session/cancel write was still pending: %s", data)
+		}
+	}
+
+	resume()
+	waitEvent(t, root, testRef, "completed")
+	publishRequest(t, root, otherRef, "the next task")
+	next := waitEvent(t, root, otherRef, "completed")
+	if slices.ContainsFunc(next, func(ev bridgeEvent) bool { return ev.Event == "cancelled" }) {
+		t.Fatalf("the next turn received the earlier cancel: %+v", next)
+	}
 }

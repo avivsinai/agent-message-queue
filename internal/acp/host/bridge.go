@@ -488,6 +488,9 @@ func (h *Host) runRequest(ctx context.Context, root *fsq.DeliveryRoot, req bridg
 		return err
 	}
 	ev, fatal := requestOutcome(res, h.cfg.AgentExit)
+	if fatal == nil {
+		fatal = res.stuck
+	}
 	if err := h.appendEvent(root, req.Ref, bt, ev); err != nil {
 		return err
 	}

@@ -737,6 +737,9 @@ func (h *Host) runTurn(ctx context.Context, root *fsq.DeliveryRoot, rec *turnRec
 	}
 	rec.State = stateAnswered
 	rec.StopReason, rec.ReplyBody, fatal = replyFor(res.answer, res.cancelled, res.raw, res.err, h.cfg.AgentExit)
+	if fatal == nil {
+		fatal = res.stuck
+	}
 	if res.refused > 0 {
 		rec.ReplyBody += fmt.Sprintf("\n\nThe host rejected %d tool call(s) the agent asked to run.", res.refused)
 	}
@@ -753,6 +756,9 @@ type turnResult struct {
 	cancelled string
 	answer    string
 	refused   int
+	// stuck is set when the turn ended but its session/cancel write never
+	// finished: the host must stop before any next turn.
+	stuck error
 }
 
 // prompt sends one session/prompt with text and waits for it to end, cancel
@@ -836,18 +842,38 @@ wait:
 			h.refuseBusy(root)
 		}
 	}
+	var stuck error
 	if cancelled != "" {
 		// A pending approval answers cancelled before the cancel goes out.
-		// The write runs apart: an agent that stopped reading its stdin
-		// cannot hold the turn past the grace.
+		// The write runs apart, so an agent that stopped reading its stdin
+		// cannot hold the turn past the grace. session/cancel is
+		// session-wide: the turn ends only once both the prompt response and
+		// the write are done, so the cancel can never reach a later turn. A
+		// write still pending at the grace stops the host instead.
 		close(collect.cancelled)
-		go func() { _ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID}) }()
+		wrote := make(chan struct{})
+		go func() {
+			_ = h.conn.notify("session/cancel", map[string]string{"sessionId": h.sessionID})
+			close(wrote)
+		}()
 		grace := time.NewTimer(cancelGrace)
 		defer grace.Stop()
-		select {
-		case result = <-done:
-		case <-grace.C:
-			result.err = fmt.Errorf("the agent did not answer the cancel within %s", cancelGrace)
+		answered := false
+	drain:
+		for !answered || wrote != nil {
+			select {
+			case result = <-done:
+				answered = true
+			case <-wrote:
+				wrote = nil
+			case <-grace.C:
+				if !answered {
+					result.err = fmt.Errorf("the agent did not answer the cancel within %s", cancelGrace)
+				} else {
+					stuck = fmt.Errorf("the session/cancel write did not finish within %s; the host stops so the cancel cannot reach a later turn", cancelGrace)
+				}
+				break drain
+			}
 		}
 	}
 
@@ -856,7 +882,7 @@ wait:
 	h.refuseBusy(root)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return turnResult{raw: result.raw, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused}, nil
+	return turnResult{raw: result.raw, err: result.err, cancelled: cancelled, answer: collect.text.String(), refused: collect.refused, stuck: stuck}, nil
 }
 
 // replyFor maps a turn's outcome to the stop label, the reply body, and
