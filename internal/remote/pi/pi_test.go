@@ -398,7 +398,7 @@ func TestLookupNoReceiptUncertain(t *testing.T) {
 	}
 }
 
-// TestAcknowledgeReleasesResult pins the ack contract with the stable
+// TestAcknowledgeReleasesResult pins the ack contract with the full
 // digest; a wrong digest releases nothing.
 func TestAcknowledgeReleasesResult(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -415,7 +415,7 @@ func TestAcknowledgeReleasesResult(t *testing.T) {
 	if ev2, _ := a.Lookup(key, "gen-1"); ev2.Class == core.EvidenceNone {
 		t.Fatal("wrong digest must not release the result")
 	}
-	a.AcknowledgeResult(key, "gen-1", protocol.EvidenceDigestStable(ev.Result))
+	a.AcknowledgeResult(key, "gen-1", protocol.EvidenceDigest(ev.Result))
 	if ev3, _ := a.Lookup(key, "gen-1"); ev3.Class != core.EvidenceNone {
 		t.Fatalf("evidence after ack = %q, want none", ev3.Class)
 	}
