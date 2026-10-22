@@ -35,14 +35,16 @@ resolved="$(printf '%s' "$env_json" | python3 -c \
   exit 0
 IFS=$'\x1f' read -r ROOT SESSION ME <<<"$resolved"
 
-# A live wake that types into this terminal already rings for new mail, so a
-# block here only repeats that doorbell. Any doubt falls through to the check.
-wake_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
-  amq wake check --root "$ROOT" --me "$ME" --json 2>/dev/null)" || wake_json=""
-if printf '%s' "$wake_json" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-sys.exit(0 if d.get("live_wake") is True and d.get("wake_mode") not in (None,"","none") else 1)' 2>/dev/null; then
+# A wake that is proven to type a doorbell for new mail already rings, so a
+# block here only repeats it. Any doubt, error, or slow probe keeps the block.
+if python3 -c '
+import json,subprocess,sys
+root,me,cwd=sys.argv[1:]
+try:
+  r=subprocess.run(["amq","wake","check","--root",root,"--me",me,"--json"],
+    cwd=cwd,capture_output=True,timeout=2)
+  sys.exit(0 if r.returncode==0 and json.loads(r.stdout).get("doorbell_ready") is True else 1)
+except Exception: sys.exit(1)' "$ROOT" "$ME" "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null; then
   exit 0
 fi
 

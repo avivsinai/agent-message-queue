@@ -117,23 +117,34 @@ python3 - "$state" "$id1" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1])); assert sys.argv[2] not in d["blocked_ids"]
 PY
-# A live typing wake already rings for new mail, so the hook stays silent
-# (observed 2026-10-22: every turn end under wake=live(raw) showed a Stop hook
-# error for mail the doorbell was about to deliver).
+# A wake proven to type a doorbell already rings for new mail, so the hook
+# stays silent; a live wake without that proof still blocks (observed
+# 2026-10-22: every turn end under wake=live(raw) showed a Stop hook error for
+# mail the doorbell was about to deliver; PR #1152 review: a live wake can be
+# demoted, recovering, or parked).
 mkdir -p "$TMP/live-wake-bin"
 cat >"$TMP/live-wake-bin/amq" <<EOF
 #!/usr/bin/env bash
 if [ "\${1:-}" = wake ] && [ "\${2:-}" = check ]; then
-  printf '{"live_wake":true,"wake_mode":"raw"}\n'
+  printf '%s\n' "\$WAKE_CHECK_JSON"
   exit 0
 fi
 exec "$BIN" "\$@"
 EOF
 chmod +x "$TMP/live-wake-bin/amq"
+run_hook_with_wake() {
+  printf '{"stop_hook_active":false}\n' |
+    env -u AM_ROOT AM_BASE_ROOT="$BASE" AM_SESSION=session1 AM_ME=claude \
+      AMQ_NO_UPDATE_CHECK=1 PATH="$TMP/live-wake-bin:$PATH" \
+      WAKE_CHECK_JSON="$1" CLAUDE_PROJECT_DIR="$TMP" bash "$HOOK"
+}
+send unrung >/dev/null
+unrung_out="$(run_hook_with_wake '{"live_wake":true,"wake_mode":"raw","doorbell_ready":false}')"
+python3 - "$unrung_out" <<'PY'
+import json, sys
+assert json.loads(sys.argv[1])["decision"]=="block"
+PY
 send live >/dev/null
-live_out="$(printf '{"stop_hook_active":false}\n' |
-  env -u AM_ROOT AM_BASE_ROOT="$BASE" AM_SESSION=session1 AM_ME=claude \
-    AMQ_NO_UPDATE_CHECK=1 PATH="$TMP/live-wake-bin:$PATH" \
-    CLAUDE_PROJECT_DIR="$TMP" bash "$HOOK")"
-assert_eq "" "$live_out" "live wake output"
+live_out="$(run_hook_with_wake '{"live_wake":true,"wake_mode":"raw","doorbell_ready":true}')"
+assert_eq "" "$live_out" "doorbell-ready wake output"
 echo "stop hook tests ok"

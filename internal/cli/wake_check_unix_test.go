@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,6 +25,7 @@ type wakeCheckWire struct {
 	StartMode                string `json:"start_mode"`
 	StartReason              string `json:"start_reason"`
 	LiveWake                 bool   `json:"live_wake"`
+	DoorbellReady            bool   `json:"doorbell_ready"`
 	WakeStatus               string `json:"wake_status"`
 	WakePID                  int    `json:"wake_pid"`
 	WakeMode                 string `json:"wake_mode"`
@@ -198,6 +200,71 @@ func TestWakeCheckReportsEligibleInjectViaRepairAsAgentSafe(t *testing.T) {
 		t.Fatalf("next_action = %q, want %q", got.NextAction, wantAction)
 	}
 	assertWakeCheckTreeUnchanged(t, root, before)
+}
+
+// A live wake can stop typing doorbells while its lock stays valid; the Stop
+// hook skips its drain block only on doorbell_ready (PR #1152 review).
+func TestWakeCheckDoorbellReadyFollowsCurrentWakeState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		presence presence.Presence
+		want     bool
+	}{
+		{name: "typing", presence: presence.Presence{NotifierMode: wakeInjectModeRaw}, want: true},
+		{name: "demoted", presence: presence.Presence{NotifierStatus: wakeInjectorUnsupportedStatus, NotifierMode: wakeInjectModeRaw}},
+		{name: "recovery", presence: presence.Presence{NotifierStatus: wakeInputRecoveryRequiredStatus, NotifierMode: wakeInjectModeRaw}},
+		{name: "parked", presence: presence.Presence{NotifierMode: wakeInjectModeRaw, DoorbellParked: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+				t.Fatal(err)
+			}
+			writeWakeLockForTest(t, root, "claude", wakeLock{
+				PID:          4242,
+				TTY:          "/dev/ttys005",
+				Root:         canonicalWakeRoot(root),
+				Agent:        "claude",
+				Started:      "2026-10-22T01:00:00Z",
+				ProcessStart: "12345",
+				BootID:       "11111111-1111-1111-1111-111111111111",
+				Executable:   "amq",
+				WakeMode:     wakeInjectModeRaw,
+				Generation:   "live-raw-generation",
+			})
+			stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+				return wakeProcessInfo{
+					PID:        gotPID,
+					Running:    true,
+					StartToken: "12345",
+					BootID:     "11111111-1111-1111-1111-111111111111",
+					Executable: "amq",
+					Args:       []string{"amq", "wake", "--root", root, "--me", "claude"},
+				}
+			})
+			stubWakeCheckRuntime(t, false, "0.49.14")
+			tc.presence.Schema = 1
+			tc.presence.Handle = "claude"
+			if err := presence.Write(root, tc.presence); err != nil {
+				t.Fatal(err)
+			}
+
+			output, err := captureEnvStdout(t, func() error {
+				return runWake([]string{"check", "--root", root, "--me", "claude", "--json"})
+			})
+			if err != nil {
+				t.Fatalf("wake check: %v", err)
+			}
+			var got wakeCheckWire
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatalf("decode wake check JSON: %v\n%s", err, output)
+			}
+			if !got.LiveWake || got.DoorbellReady != tc.want {
+				t.Fatalf("live_wake=%t doorbell_ready=%t, want live and %t\n%s",
+					got.LiveWake, got.DoorbellReady, tc.want, output)
+			}
+		})
+	}
 }
 
 func stubWakeCheckRuntime(t *testing.T, tty bool, version string) {

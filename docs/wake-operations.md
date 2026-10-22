@@ -29,6 +29,15 @@ evidence is JSON `null`, including `wake.generation` and `wake.target_digest`;
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
+`doorbell_ready` (schema 1, present only when true) and `wake.doorbell_ready`
+(schema 2) report that the live wake still types a doorbell for new mail. It
+reads the wake's current state, not the lock's start mode: the lock mode and
+the mode the wake records in presence are `raw` or `paste`, no notifier status
+is recorded (an output-only demotion, attention-only fallback, or input
+recovery records one), and the doorbell is not parked. Unreadable or missing
+state reports false. Only `doorbell_ready` proves that pending mail rings;
+`live_wake` alone does not.
+
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only
 terminal-safe attention output, so fatal-error text stays out of full-screen
