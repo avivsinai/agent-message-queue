@@ -355,7 +355,7 @@ amq upgrade        # direct installs
 ```
 
 `amq upgrade --all` also upgrades directly installed `amq-keepalive`,
-`amq-bridge`, `amq-acp`, `amq-remote`, and `amq-owner-sign` when their targets
+`amq-bridge`, `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-board` when their targets
 are unambiguous and match the release build identity. A running `amq-remote`
 keeps its old image until restarted. Package-managed installs are delegated
 to their package manager. On Windows, `--all` upgrades only

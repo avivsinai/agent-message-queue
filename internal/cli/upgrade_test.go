@@ -198,12 +198,13 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	if err := os.WriteFile(amqBin, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Four companions present next to amq; amq-acp absent.
+	// Five companions present next to amq; amq-acp absent.
 	keepalive := filepath.Join(binDir, "amq-keepalive")
 	bridge := filepath.Join(binDir, "amq-bridge")
 	remote := filepath.Join(binDir, "amq-remote")
 	ownerSign := filepath.Join(binDir, "amq-owner-sign")
-	for _, p := range []string{keepalive, bridge, remote, ownerSign} {
+	board := filepath.Join(binDir, "amq-board")
+	for _, p := range []string{keepalive, bridge, remote, ownerSign, board} {
 		if err := os.WriteFile(p, []byte("old"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +233,7 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	}
 	// amq + present companions replaced; amq-acp skipped.
 	want := map[string]bool{amqBin: false}
-	for _, path := range []string{keepalive, bridge, remote, ownerSign} {
+	for _, path := range []string{keepalive, bridge, remote, ownerSign, board} {
 		canonical, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			t.Fatal(err)
