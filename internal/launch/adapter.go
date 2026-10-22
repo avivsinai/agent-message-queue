@@ -3,6 +3,7 @@ package launch
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,20 +75,23 @@ type StaticInputCapabilities struct {
 }
 
 // ProviderStaticInputCapabilities is the single public-compiler projection of
-// the same deny-by-default tables used by validation.
+// the same deny-by-default tables used by validation. The advertised argument
+// forms are the keys of the provider's validation table, so they change only
+// when validation changes, and GrammarVersion changes with them.
 func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 	switch provider {
 	case ClaudeProvider:
 		return StaticInputCapabilities{
-			GrammarVersion: 2, VerifiedProviderVersion: "2.1.233",
-			AllowedArgumentForms: []string{"--allowedTools", "-n", "--name"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+			GrammarVersion: 3, VerifiedProviderVersion: "2.1.233",
+			AllowedArgumentForms: argumentForms(claudeArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	case CodexProvider:
 		reasoningValues := slices.Clone(codexReasoningEffortValues)
 		reviewerValues := slices.Clone(codexApprovalsReviewerValues)
 		return StaticInputCapabilities{
-			GrammarVersion: 2, VerifiedProviderVersion: codexCaptureVerifiedVersion,
-			AllowedArgumentForms: []string{"-c"},
+			GrammarVersion: 3, VerifiedProviderVersion: codexCaptureVerifiedVersion,
+			AllowedArgumentForms: argumentForms(codexArgRules()),
 			ConfigOverrides: []ConfigOverrideCapability{
 				{Key: "model_reasoning_effort", AllowedValues: reasoningValues},
 				{Key: "approvals_reviewer", AllowedValues: reviewerValues},
@@ -96,12 +100,24 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 		}
 	case GrokProvider:
 		return StaticInputCapabilities{
-			GrammarVersion: 1, VerifiedProviderVersion: grokBuildVersion,
-			AllowedArgumentForms: []string{"--tools", "--disallowed-tools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+			GrammarVersion: 2, VerifiedProviderVersion: grokBuildVersion,
+			AllowedArgumentForms: argumentForms(grokArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
+		}
+	case CursorProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: cursorCaptureVersion,
+			AllowedArgumentForms: argumentForms(cursorArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{},
 		}
 	default:
 		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
 	}
+}
+
+// argumentForms lists a validation table's argument forms in sorted order.
+func argumentForms(rules map[string]argumentRule) []string {
+	return slices.Sorted(maps.Keys(rules))
 }
 
 type PlanRequest struct {
