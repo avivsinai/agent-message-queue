@@ -1353,3 +1353,79 @@ func TestStopConfirmsOnceInTheDM(t *testing.T) {
 		}
 	})
 }
+
+// Regression (agent-message-queue-37o.7, finding 8): a damaged final marker
+// (truncated JSON, {}, a directory) was read as "the agent already
+// answered", so a prompt that was never delivered ended replied/end_turn.
+// It still blocks a new delivery, but the outcome is uncertain.
+func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
+	cases := map[string]func(path string) error{
+		"truncated-json": func(p string) error { return os.WriteFile(p, []byte(`{"reply_id":"x`), 0o600) },
+		"empty-object":   func(p string) error { return os.WriteFile(p, []byte(`{}`), 0o600) },
+		"directory":      func(p string) error { return os.Mkdir(p, 0o700) },
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, root := mailboxServer(t)
+			event := strings.Repeat("8", 64)
+			if err := os.MkdirAll(s.eventDir(event), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := plant(filepath.Join(s.eventDir(event), event+".posted.final")); err != nil {
+				t.Fatal(err)
+			}
+			res, rpcErr := s.runRemote("s", "hello", event, newTurn(), func(any) error { return nil })
+			if rpcErr != nil {
+				t.Fatal(rpcErr)
+			}
+			got := res.(remotePromptResult)
+			if got.StopReason == StopReasonEndTurn || got.Meta.Remote.State != remoteUncertain {
+				t.Fatalf("stop=%s state=%s; want an uncertain refusal", got.StopReason, got.Meta.Remote.State)
+			}
+			if n := len(inboxPrompts(t, root)); n != 0 {
+				t.Fatalf("a damaged marker let %d prompts through", n)
+			}
+		})
+	}
+}
+
+// Regression (agent-message-queue-37o.7, finding 16): the final marker was
+// reserved before the post, so a post that failed before it started (no
+// buzz CLI) consumed the answer: neither the sweep nor a redelivery ever
+// posted it. Once the CLI is fixed, the next sweep posts it, once.
+func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
+	s, root := mailboxServer(t)
+	var posts []string
+	broken := true
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		if broken {
+			_, err := buzzCLIFrom("/nonexistent", "relative")
+			return "", err
+		}
+		posts = append(posts, content)
+		return "id", nil
+	}
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	event := strings.Repeat("6", 64)
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	replied := false
+	if _, rpcErr := s.runRemote("s", prompt, event, turn, func(any) error {
+		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
+			replied = true
+			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "the answer")
+		}
+		return nil
+	}); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	broken = false
+	for range 2 {
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if len(posts) != 1 || posts[0] != "the answer" {
+		t.Fatalf("posts after the CLI was fixed: %q; want the answer once", posts)
+	}
+}

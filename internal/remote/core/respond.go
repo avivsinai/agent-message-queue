@@ -83,9 +83,11 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	// interaction BEFORE anything durable happens, and only an answer-INTENT
 	// — not a completed answer — is persisted. A positive native refusal
 	// clears the intent, so the refused answer consumes nothing and the
-	// retried valid answer reaches the attachment. The intent still makes a
-	// crash-then-replay idempotent: replay hits Answered and never invokes
-	// the attachment a second time.
+	// retried valid answer reaches the attachment. After a crash, a replay
+	// with the same option sends it to the attachment again unless the
+	// answer is already settled, so the attachment must recognize an answer
+	// it already published. While the intent stands, a different option is
+	// refused (unless the attachment says the earlier answer was retired).
 	e.mu.Lock()
 	rec, exists, err = e.store.Get(key)
 	if err != nil {

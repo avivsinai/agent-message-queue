@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
@@ -148,11 +149,14 @@ func (s *Server) sweepLateReplies(now time.Time) {
 	l := &s.late
 	s.discoverClaims(now)
 	byRoot := map[string]map[string]*lateClaim{}
+	var resend []*lateClaim
 	for _, eventID := range l.pendingIDs() {
 		c, keep := s.loadLateClaim(eventID, now)
 		switch {
 		case !keep:
 			l.drop(eventID)
+		case c != nil && c.unsentReply != "":
+			resend = append(resend, c)
 		case c != nil:
 			if byRoot[c.b.Root] == nil {
 				byRoot[c.b.Root] = map[string]*lateClaim{}
@@ -160,8 +164,15 @@ func (s *Server) sweepLateReplies(now time.Time) {
 			byRoot[c.b.Root][c.claim.MessageID] = c
 		}
 	}
-	scans := map[string][2]*inboxScan{}
 	posts := 0
+	for _, c := range resend {
+		if posts == lateReplyPosts {
+			break
+		}
+		posts++
+		s.resendFinal(c)
+	}
+	scans := map[string][2]*inboxScan{}
 	for root, index := range byRoot {
 		if posts == lateReplyPosts {
 			break
@@ -190,7 +201,7 @@ func (s *Server) sweepLateReplies(now time.Time) {
 				continue
 			}
 			if won && !final.Cancelled {
-				_ = s.publish(c.channel, text)
+				_ = s.publishFinal(c.eventID, c.channel, text)
 			}
 			l.drop(c.eventID)
 		}
@@ -270,16 +281,22 @@ type lateClaim struct {
 	claim            mailboxClaim
 	created          time.Time
 	b                binding.Binding
+	// unsentReply is the reply id of an answer that is the event's outcome
+	// but was never posted (finalUnsent).
+	unsentReply string
 }
 
 // loadLateClaim returns the event's claim when the sweep may post for it
 // now; keep is false when the event leaves the sweep for good.
 func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool) {
-	if _, ok := s.mailboxAnswered(eventID); ok {
-		return nil, false
+	c := lateClaim{eventID: eventID}
+	if out, ok := s.mailboxAnswered(eventID); ok {
+		if !s.finalUnsent(eventID, out) {
+			return nil, false
+		}
+		c.unsentReply = out.ReplyID
 	}
 	dir := s.eventDir(eventID)
-	c := lateClaim{eventID: eventID}
 	// Only this agent's own claim: another agent posts its own replies.
 	var rec eventClaim
 	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec, "") {
@@ -298,7 +315,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	if d, err := time.Parse(time.RFC3339Nano, c.claim.Deadline); err == nil {
 		turnEnds = d
 	}
-	if now.Before(turnEnds) {
+	if now.Before(turnEnds) && c.unsentReply == "" {
 		return nil, true // its turn can still be open
 	}
 	// No delivery named a channel yet: a later one may record it.
@@ -306,4 +323,27 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 		return nil, true
 	}
 	return &c, true
+}
+
+// resendFinal posts an answer that is its event's outcome but was never
+// posted. The check and the post run under the event's post lock, so two
+// sweeps never post it twice; a post that fails before the CLI starts again
+// leaves it for the next sweep.
+func (s *Server) resendFinal(c *lateClaim) {
+	text := ""
+	for _, dir := range []string{fsq.AgentInboxCur(c.b.Root, mailboxSender), fsq.AgentInboxNew(c.b.Root, mailboxSender)} {
+		if msg, err := format.ReadMessageFile(filepath.Join(dir, c.unsentReply+".md")); err == nil {
+			text = strings.TrimRight(msg.Body, "\n")
+			break
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	_ = s.withPostLock(c.eventID, func() error {
+		if out, ok := s.mailboxAnswered(c.eventID); ok && s.finalUnsent(c.eventID, out) {
+			s.publishFinal(c.eventID, c.channel, text)
+		}
+		return nil
+	})
 }

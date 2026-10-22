@@ -267,7 +267,10 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   recalled. A final reply that
   arrives after the turn timed out or the client left is still posted to the
   DM, once, by a sweep at the next prompt and every 30 s while a stream is
-  open, for up to 24 h. A reply after Stop is not posted.
+  open, for up to 24 h. A reply after Stop is not posted. When a final
+  reply's post fails before the Buzz CLI starts (for example, no CLI is
+  found), the same sweep posts it once the CLI works; a post that started
+  and then failed is uncertain and is not repeated.
 - Follow-up DMs: a second `session/prompt` while a turn is open is still
   refused, but `initialize` advertises `_meta.steering.supported: true` in
   binding mode, so Buzz sends a follow-up as `_session/steering`. Once the
@@ -334,8 +337,12 @@ replacement: pathname validation is not atomic with exec.
 
 ### Trust limits
 
-In Buzz Desktop, the managed agent's identity and grant belong to Desktop,
-and amq-acp never receives the key. Desktop signs a grant with no kind limit
+Buzz Desktop owns the managed agent's identity and grant, and starts amq-acp
+with that agent's key (`BUZZ_PRIVATE_KEY`) in its environment. amq-acp keeps
+the key in memory, strips it from its own environment, and passes it only to
+the Buzz CLI child that posts, reads reactions, and archives. amq-acp
+receives no owner private key, only the owner's signed grant
+(`BUZZ_AUTH_TAG`). Desktop signs a grant with no kind limit
 and no expiry. Archiving the agent hides it and removes Desktop's local key;
 it does not invalidate a copied key and grant. Only removing the agent's relay
 access does that. Buzz's owner-only setting also admits the owner's other
