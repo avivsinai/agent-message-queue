@@ -24,6 +24,11 @@ import (
 // operator must resolve.
 const exitActionRequired = 6
 
+// hostStopSignals run the host's normal stop: close the agent's stdin, wait
+// for it, then kill what is left of its process group. SIGHUP is how a
+// closed terminal pane, the usual end of a launch seat, reaches the host.
+var hostStopSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
 // childExitWait bounds how long the host waits for the agent to exit after
 // its stdin closes, before it kills the agent's process group.
 const childExitWait = 5 * time.Second
@@ -111,7 +116,7 @@ func runHost(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitGeneral
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), hostStopSignals...)
 	defer stop()
 	go func() {
 		// After the first signal the host finishes the turn in flight; a
@@ -136,7 +141,7 @@ func runCheck(argv []string, dir string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp host:", err)
 		return exitActionRequired
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), hostStopSignals...)
 	res, err := host.Check(ctx, agent.stdout, agent.stdin, version)
 	stop()
 	agent.stop()

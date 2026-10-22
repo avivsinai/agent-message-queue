@@ -689,6 +689,18 @@ func prepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 			return ticket, fmt.Errorf("ready conversation does not match execution target")
 		}
 		return CompareAndSwapExecutionTicket(root, lease, handle, ExecutionSpawnAttempted, ExecutionAcknowledged, "child_spawn_acknowledged")
+	case AdapterModeUnsupported:
+		// Launch owns no conversation identity for this seat; the process
+		// keeps its own. Starting it is the whole acknowledgement.
+		if ticket.State == ExecutionPending {
+			ticket, err = CompareAndSwapExecutionTicket(root, lease, handle, ExecutionPending, ExecutionSpawnAttempted, "spawn_attempted")
+			if err != nil {
+				return ticket, err
+			}
+		} else if ticket.State != ExecutionSpawnAttempted {
+			return ticket, fmt.Errorf("execution ticket state is %q, want pending", ticket.State)
+		}
+		return CompareAndSwapExecutionTicket(root, lease, handle, ExecutionSpawnAttempted, ExecutionAcknowledged, "child_spawn_acknowledged")
 	default:
 		return ticket, fmt.Errorf("execution mode %q cannot acknowledge a provider process", ticket.Mode)
 	}
@@ -1040,6 +1052,10 @@ func RevertExecution(root *fsq.DeliveryRoot, handle, nonce string) (returnErr er
 				return err
 			}
 		}
+		_, err = CompareAndSwapExecutionTicket(root, lease, handle, ExecutionAcknowledged, ExecutionPending, "spawn_failed")
+		return err
+	}
+	if ticket.Mode == AdapterModeUnsupported {
 		_, err = CompareAndSwapExecutionTicket(root, lease, handle, ExecutionAcknowledged, ExecutionPending, "spawn_failed")
 		return err
 	}
