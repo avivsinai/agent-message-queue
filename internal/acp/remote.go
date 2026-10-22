@@ -902,7 +902,9 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 //     marker records a cancel.
 //     Config.PostTimeout bounds the hold, and a crash releases the flock.
 //
-// A post that failed is not retried: the post has no idempotency key. The
+// A post that failed is not retried, because the post has no idempotency
+// key, with one exception: a mailbox answer whose post failed before the
+// buzz CLI started is posted again by the late-reply sweep (finalUnsent). The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
 // eventIDsFromMeta), so it cannot leave the state dir. Without an event id
 // it just posts; without a channel it posts nothing and records nothing.
@@ -918,7 +920,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 		case !won:
 			return "duplicate: this event already posted its " + kind + " text"
 		}
-		return s.publish(channel, text)
+		return s.publishFinal(eventID, channel, text)
 	}
 	dir := s.eventDir(eventID)
 	result := ""

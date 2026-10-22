@@ -44,6 +44,13 @@ var postAnswer = postWithBuzzCLI
 // there is nothing to post as; the ACP text is the only channel.
 var errNoBuzzIdentity = errors.New("no Buzz agent identity")
 
+// notSentError marks a post that failed before the buzz CLI started, so
+// nothing can have reached the relay and the post may be made again.
+type notSentError struct{ err error }
+
+func (e *notSentError) Error() string { return e.err.Error() }
+func (e *notSentError) Unwrap() error { return e.err }
+
 // channelRe finds the channel UUID in the Channel line of the prompt's
 // <context> block, the reply destination buzz-acp supplies.
 var channelRe = regexp.MustCompile(`(?m)^Channel: [^\n]*\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)`)
@@ -136,7 +143,10 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return nil, &notSentError{fmt.Errorf("buzz %s: %w", strings.Join(args[:2], " "), err)}
+	}
+	if err := cmd.Wait(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[:300]
@@ -146,8 +156,9 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 	return stdout.Bytes(), nil
 }
 
-// buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
-// else the CLI inside Buzz.app under /Applications or the user's Applications.
+// buzzCLI finds the buzz binary that receives the managed agent's key:
+// AMQ_ACP_BUZZ_CLI, else the CLI inside Buzz.app under /Applications or the
+// user's Applications.
 // There is no PATH fallback: an unrelated buzz on PATH must never receive
 // BUZZ_PRIVATE_KEY.
 func buzzCLI() (string, error) {
@@ -170,7 +181,7 @@ func buzzCLIFrom(systemApps, home string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")
+	return "", &notSentError{errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")}
 }
 
 // bundledBuzz returns the CLI inside one Buzz.app, or "" unless the whole path
@@ -196,16 +207,83 @@ func bundledBuzz(app string) string {
 // reports the outcome for the result meta: "posted", "" when there is no
 // Buzz channel or identity, or the error.
 func (s *Server) publish(channel, text string) string {
+	result, _ := s.post(channel, text)
+	return result
+}
+
+// Outbound states of an event's final post, each a marker beside the final
+// marker. accepted, uncertain and unsent are created once a post returns; a
+// retry renames unsent to sending before it posts. A final marker with no
+// unsent marker is a post in flight, interrupted, or made by an older
+// build: uncertain, never posted again.
+const (
+	finalAccepted  = "accepted"
+	finalUncertain = "uncertain"
+	finalUnsent    = "unsent"
+	finalSending   = "sending"
+)
+
+// publishFinal is publish for an event's final text: it also records what
+// the post proves. Only a post that failed before the CLI started is
+// unsent, and the late-reply sweep may make it again (resendFinal).
+func (s *Server) publishFinal(eventID, channel, text string) string {
+	result, err := s.post(channel, text)
+	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
+		return result
+	}
+	return s.recordFinal(eventID, result, err)
+}
+
+// recordFinal records what a final post proves and returns its result.
+func (s *Server) recordFinal(eventID, result string, err error) string {
+	if errors.Is(err, errNoBuzzIdentity) {
+		return result
+	}
+	state := finalAccepted
+	var notSent *notSentError
+	switch {
+	case errors.As(err, &notSent):
+		state = finalUnsent
+	case err != nil:
+		state = finalUncertain
+	}
+	if _, err := createExclusive(s.finalStatePath(eventID, state), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n")); err != nil {
+		return result + "; record post state: " + err.Error()
+	}
+	return result
+}
+
+// post is publish that also returns the post's error.
+func (s *Server) post(channel, text string) (string, error) {
 	if channel == "" || strings.TrimSpace(text) == "" {
-		return ""
+		return "", nil
 	}
 	_, err := postAnswer(channel, text, s.cfg.PostTimeout)
 	switch {
 	case err == nil:
-		return "posted"
+		return "posted", nil
 	case errors.Is(err, errNoBuzzIdentity):
-		return ""
+		return "", err
 	default:
-		return "error: " + err.Error()
+		return "error: " + err.Error(), err
 	}
+}
+
+func (s *Server) finalStatePath(eventID, state string) string {
+	return filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal+"."+state)
+}
+
+// finalUnsent reports whether the event's final answer is a reply that was
+// definitely never posted: unsent, and neither accepted nor uncertain.
+func (s *Server) finalUnsent(eventID string, out mailboxOutcome) bool {
+	if out.ReplyID == "" || out.damaged != nil {
+		return false
+	}
+	for _, state := range []string{finalAccepted, finalUncertain} {
+		if _, err := os.Lstat(s.finalStatePath(eventID, state)); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	_, err := os.Lstat(s.finalStatePath(eventID, finalUnsent))
+	return err == nil
 }

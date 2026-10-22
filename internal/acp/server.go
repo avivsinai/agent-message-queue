@@ -109,6 +109,10 @@ type turnState struct {
 	// prompt is the delivered prompt's message id; only a reply whose refs
 	// name it answers this turn.
 	prompt string
+	// to and thread are the delivered prompt's recipient and thread. A
+	// replayed event keeps its first delivery's, which can differ from the
+	// worker's recipient and the session's thread; steering follows them.
+	to, thread string
 	// done is closed when the turn is settled from outside the wait loop
 	// (cancel or stream close).
 	done chan struct{}
@@ -781,7 +785,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		delivery, err := DeliverCockpitPrompt(s.cfg, text, session.Thread, eventID)
 		s.mu.Lock()
 		if err == nil {
-			turn.prompt = delivery.MessageID
+			turn.prompt, turn.to, turn.thread = delivery.MessageID, delivery.To, delivery.Thread
 		}
 		close(turn.ready)
 		s.mu.Unlock()
@@ -828,7 +832,7 @@ func disconnectedRefusal() promptResult {
 // a fresh reply. Every wait is bounded; a timeout is a typed refusal, never a
 // fabricated success.
 func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnState, emit func(any) error) (any, *rpcError) {
-	if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Waiting for a reply from %s on AMQ thread %s.", s.cfg.To, delivery.Thread)); err != nil {
+	if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Waiting for a reply from %s on AMQ thread %s.", delivery.To, delivery.Thread)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
@@ -877,7 +881,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 		case <-poll.C:
 		case <-heartbeat.C:
 			scan = inboxCur
-			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s on AMQ thread %s.", s.cfg.To, delivery.Thread)); err != nil {
+			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s on AMQ thread %s.", delivery.To, delivery.Thread)); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 			}
 		}
@@ -912,7 +916,7 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 	}
 }
 
-// replyForDelivery returns the freshest reply from the configured peer in
+// replyForDelivery returns the freshest reply from the prompt's recipient in
 // one box of cfg.Me's inbox that refs this prompt and was created no earlier
 // than it. It never moves a file: other consumers drain cfg.Me. Stale or
 // thread-rent messages are never picked up; a malformed unrelated mailbox
@@ -922,7 +926,7 @@ func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, b
 	// alone would let a late answer to a cancelled prompt complete the next
 	// one. amq reply sets refs to the answered message plus its refs, so a
 	// reply to an in-turn steer, which refs the prompt, also qualifies.
-	hits, err := scan.replies(s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
+	hits, err := scan.replies(delivery.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err
 	}
@@ -1175,14 +1179,15 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		}
 		s.mu.Lock()
 	}
-	turnPrompt := ""
-	if t := session.turn; t != nil && t.outcome == "" {
-		turnPrompt = t.prompt
+	// Steering into a turn goes where that turn's prompt went.
+	turnPrompt, cfg, thread := "", s.cfg, session.Thread
+	if t := session.turn; t != nil && t.outcome == "" && t.prompt != "" {
+		turnPrompt, cfg.To, thread = t.prompt, t.to, t.thread
 	}
-	delivery, err := DeliverSteering(s.cfg, formatSteeringBody(text), session.Thread, turnPrompt, eventID)
+	delivery, err := DeliverSteering(cfg, formatSteeringBody(text), thread, turnPrompt, eventID)
 	s.mu.Unlock()
 	if err != nil {
-		return nil, newRPCError(codeInternalError, "deliver steering to %s: %v", s.cfg.To, err)
+		return nil, newRPCError(codeInternalError, "deliver steering to %s: %v", cfg.To, err)
 	}
 	// The outcome names the delivery mode only. An urgent AMQ write is not
 	// proof the peer steered or started anything; the evidence fields say

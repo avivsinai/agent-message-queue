@@ -67,15 +67,16 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 
 	// One canonical builder appends the nostr label exactly once: the first
 	// attempt and a replay must serialize identical bytes, or the no-replace
-	// inbox write refuses one of them as a collision.
-	build := func(messageID, created string) ([]byte, error) {
+	// inbox write refuses one of them as a collision. A replay passes the
+	// claim's recipient and thread, never the current call's.
+	build := func(messageID, created, to, thread string) ([]byte, error) {
 		all := append(append([]string(nil), labels...), "nostr:"+eventID)
 		data, err := format.Message{
 			Header: format.Header{
 				Schema:   format.CurrentSchema,
 				ID:       messageID,
 				From:     cfg.Me,
-				To:       []string{cfg.To},
+				To:       []string{to},
 				Thread:   thread,
 				Subject:  subject,
 				Created:  created,
@@ -106,11 +107,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		if !lock.AdvisoryLockAvailable() {
 			return Delivery{}, fmt.Errorf("refusing to deliver a Buzz event without an advisory file lock")
 		}
-		identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-		if err != nil {
-			return Delivery{}, err
-		}
-		root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
+		root, err := openPinnedRoot(cfg.Root)
 		if err != nil {
 			return Delivery{}, err
 		}
@@ -129,11 +126,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		return out, err
 	}
 
-	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-	if err != nil {
-		return Delivery{}, err
-	}
-	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
+	root, err := openPinnedRoot(cfg.Root)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -143,11 +136,30 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 	if err != nil {
 		return Delivery{}, err
 	}
-	data, err := build(id, now.UTC().Format(time.RFC3339Nano))
+	data, err := build(id, now.UTC().Format(time.RFC3339Nano), cfg.To, thread)
 	if err != nil {
 		return Delivery{}, err
 	}
 	return writeToInbox(cfg, root, claimIdentity("", id, cfg.To, thread), now, data)
+}
+
+// openPinnedRoot opens the queue root and authenticates the session pin
+// against the opened directory, so a tree that replaced the pinned root at
+// the same path after startup is refused instead of written into.
+func openPinnedRoot(path string) (*fsq.DeliveryRoot, error) {
+	identity, err := fsq.SnapshotDeliveryRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := fsq.OpenDeliveryRoot(path, identity)
+	if err != nil {
+		return nil, err
+	}
+	if err := VerifySessionPinOn(root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	return root, nil
 }
 
 // deliverLocked serves one event-keyed delivery attempt while holding the
@@ -160,8 +172,8 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 // file itself through the pinned root, then the full directory chain
 // acp-events -> outbox -> agent dir, so the journal survives a crash before
 // anything names it.
-func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (Delivery, error) {
-	claim, durable, err := claimEvent(cfg, root, build, thread, eventID)
+func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created, to, thread string) ([]byte, error), thread, eventID string) (Delivery, error) {
+	claim, durable, err := claimEvent(cfg, root, thread, eventID)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -207,7 +219,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 	// A legacy journal with no created time and no delivered message takes
 	// its header time from the delivered message too.
 	if claim.Created == "" {
-		data, err := build(claim.MessageID, "")
+		data, err := build(claim.MessageID, "", claim.To, claim.Thread)
 		if err != nil {
 			return Delivery{}, err
 		}
@@ -217,14 +229,14 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 		}
 		claim.Created = msg.Header.Created
 		created, _ = time.Parse(time.RFC3339Nano, claim.Created)
-		data, err = build(claim.MessageID, claim.Created)
+		data, err = build(claim.MessageID, claim.Created, claim.To, claim.Thread)
 		if err != nil {
 			return Delivery{}, err
 		}
 		return writeToInbox(cfg, root, &claim, created, data)
 	}
 
-	data, err := build(claim.MessageID, claim.Created)
+	data, err := build(claim.MessageID, claim.Created, claim.To, claim.Thread)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -240,7 +252,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 // chain acp-events -> outbox -> agent dir (a freshly created acp-events
 // needs its parent synced). A claim that cannot be made durable refuses
 // the attempt; a replay retries the sync.
-func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (eventRecord, func() error, error) {
+func claimEvent(cfg Config, root *fsq.DeliveryRoot, thread, eventID string) (eventRecord, func() error, error) {
 	if rec, err := readEventClaim(cfg, root, eventID); err != nil {
 		return eventRecord{}, nil, err
 	} else if rec != nil {

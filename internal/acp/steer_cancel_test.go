@@ -153,3 +153,29 @@ func TestReplayedSteerReportsDuplicate(t *testing.T) {
 		t.Fatalf("replayed steer outcome = %v, want %s", second["outcome"], SteeringDuplicate)
 	}
 }
+
+// Regression (agent-message-queue-37o.7, #1149 review): a replayed event's
+// turn waits on its first delivery's recipient and thread, but steering went
+// to the worker's current recipient on the new session's thread.
+func TestSteeringFollowsAReplayedTurn(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TurnTimeout = time.Second
+	event := strings.Repeat("5", 64)
+	claim := eventRecord{Schema: 1, EventID: event, MessageID: "2026-10-22T09-00-00.000Z_pid1_c0ffee00", To: "agent", Thread: cockpitThread("acp-sessionA"),
+		Created: time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)}
+	if err := rememberEvent(cfg, claim); err != nil {
+		t.Fatal(err)
+	}
+	live, sessionID, _ := newLiveSession(t, cfg, "steer-replay")
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"build"}],"_meta":{"nostr":{"eventId":%q}}}}`, sessionID, event))
+	live.readUntilUpdate("agent_thought_chunk")
+	live.send(steeringRequest(4, sessionID, "use the smaller design"))
+	if outcome := live.readUntilResult()["result"].(map[string]any)["outcome"]; outcome != SteeringInjected {
+		t.Fatalf("steering outcome = %v, want %s", outcome, SteeringInjected)
+	}
+	steer := readInboxMessageSubject(t, cfg.Root, "agent", CockpitSteeringSubject)
+	if steer.Header.Thread != claim.Thread || !slices.Contains(steer.Header.Refs, claim.MessageID) {
+		t.Fatalf("steer thread %q refs %v; want the replayed turn's %q and %s", steer.Header.Thread, steer.Header.Refs, claim.Thread, claim.MessageID)
+	}
+	live.readUntilResult() // the turn ends unanswered
+}

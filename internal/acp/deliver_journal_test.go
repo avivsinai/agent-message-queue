@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -479,5 +480,86 @@ func TestLegacyJournalWithoutCreatedIsProvenFromTheInbox(t *testing.T) {
 	}
 	if n := len(inboxPrompts(t, root)); n != 1 {
 		t.Fatalf("inbox holds %d messages after the legacy replay; want one", n)
+	}
+}
+
+// Regression (agent-message-queue-37o.7, finding 3): the root pin was checked
+// only at startup, so a worker pinned to root A delivered prompts and replays
+// into a replacement tree B at the same path.
+func TestDeliveryRefusesAReplacedPinnedRoot(t *testing.T) {
+	for _, event := range []string{"", strings.Repeat("3", 64)} {
+		clearContextEnv(t)
+		base := canonicalTempDir(t)
+		root := filepath.Join(base, "s1")
+		ensure := func() {
+			for _, h := range []string{"buzz", "agent"} {
+				if err := fsq.EnsureAgentDirs(root, h); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		ensure()
+		t.Setenv(EnvRoot, root)
+		t.Setenv(EnvBaseRoot, base)
+		t.Setenv(EnvSession, "s1")
+		t.Setenv(EnvRootID, treeIdentity(t, root))
+		t.Setenv(EnvBaseRootID, treeIdentity(t, base))
+		t.Setenv(EnvMe, "buzz")
+		t.Setenv(EnvTo, "agent")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(root, root+".A"); err != nil {
+			t.Fatal(err)
+		}
+		ensure()
+		var refused *ContextError
+		if _, err := DeliverCockpitPrompt(cfg, "secret prompt", cockpitThread("s"), event); !errors.As(err, &refused) {
+			t.Fatalf("event %q: prompt into the replacement root: %v", event, err)
+		}
+		if _, err := DeliverSteering(cfg, "steer", cockpitThread("s"), "", event); !errors.As(err, &refused) {
+			t.Fatalf("event %q: steer into the replacement root: %v", event, err)
+		}
+		if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "agent")); len(entries) != 0 {
+			t.Fatalf("event %q: replacement inbox holds %d messages", event, len(entries))
+		}
+	}
+}
+
+// Regression (agent-message-queue-37o.7, finding 7): a claim made by ACP
+// session A and replayed from session B after a restart was written with
+// B's thread and the restarted worker's recipient, while the turn waited on
+// A's thread, so the peer's correct reply never ended the turn.
+func TestReplayDeliversAndWaitsOnTheClaimedThread(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, h := range []string{"buzz", "agent", "other"} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	event := strings.Repeat("7", 64)
+	claim := eventRecord{Schema: 1, EventID: event, MessageID: "2026-10-22T09-00-00.000Z_pid1_deadbeef", To: "agent", Thread: cockpitThread("acp-sessionA"),
+		Created: time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)}
+	if err := rememberEvent(Config{Root: root, Me: "buzz", To: "agent"}, claim); err != nil {
+		t.Fatal(err)
+	}
+	// The restarted worker names another recipient and serves session B.
+	cfg := Config{Root: root, Me: "buzz", To: "other"}
+	d, err := DeliverCockpitPrompt(cfg, "build", cockpitThread("acp-sessionB"), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, d.To), d.MessageID+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.Thread != claim.Thread || d.Thread != claim.Thread || len(msg.Header.To) != 1 || msg.Header.To[0] != "agent" || d.To != "agent" {
+		t.Fatalf("header thread %q to %v, delivery thread %q to %q; want the claim's %q and agent", msg.Header.Thread, msg.Header.To, d.Thread, d.To, claim.Thread)
+	}
+	replyAs(t, root, msg.Header.Thread, d.MessageID, format.KindAnswer, "done")
+	got, found, err := NewServer(cfg, "test").replyForDelivery(d, newInboxScan(fsq.AgentInboxNew(root, "buzz")))
+	if err != nil || !found || got != "done" {
+		t.Fatalf("reply on the delivered thread: %q found=%v err=%v", got, found, err)
 	}
 }

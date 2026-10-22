@@ -60,6 +60,10 @@ type mailboxOutcome struct {
 	// redelivery of the event ends here instead of publishing it later.
 	NotSubmitted bool   `json:"not_submitted,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	// damaged is set when the marker exists but holds no readable outcome.
+	// The event stays decided, so nothing is delivered or posted again, but
+	// the turn reports an uncertain outcome, never a reply.
+	damaged error
 }
 
 // runMailbox delivers the prompt as an AMQ message to the bound handle and
@@ -230,6 +234,9 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 // cancelled event ends as cancelled. An answered one shows the client that
 // reply again and posts nothing.
 func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
+	if out.damaged != nil {
+		return r.failed(remoteUncertain, out.damaged)
+	}
 	if out.Cancelled {
 		return s.mailboxStopped(r, r.settle("session_cancelled"), b)
 	}
@@ -243,6 +250,9 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailb
 // that its message was not delivered. It was posted by whoever decided that
 // outcome; this turn posts nothing.
 func (s *Server) answeredResult(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
+	if out.damaged != nil {
+		return r.failed(remoteUncertain, out.damaged)
+	}
 	if out.NotSubmitted {
 		r.meta.State, r.meta.Code, r.meta.Reason, r.meta.RequestRef = remoteNotSubmitted, "not_delivered", out.Reason, ""
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", notDeliveredText(b.Handle, out.Reason)); err != nil {
@@ -348,7 +358,7 @@ func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string
 		}
 	}
 	if dest != "" {
-		r.meta.Posted = s.publish(dest, text)
+		r.meta.Posted = s.publishFinal(r.eventID, dest, text)
 	}
 	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
@@ -367,17 +377,28 @@ func (s *Server) adoptOutcome(r *remoteTurn, b binding.Binding, out mailboxOutco
 }
 
 // mailboxAnswered returns the event's outcome once its final-answer marker
-// exists. An unreadable marker counts as an outcome with no reply id.
+// exists. The marker holds an outcome record, or one timestamp line (a final
+// text posted with no reply id: the remote path, and mailbox builds before
+// outcome records). Anything else is a damaged marker: the event counts as
+// decided, with damaged set.
 func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	if eventID == "" {
 		return mailboxOutcome{}, false
 	}
 	raw, err := readSmallRegular(filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal))
+	if errors.Is(err, os.ErrNotExist) {
+		return mailboxOutcome{}, false
+	}
 	if err != nil {
-		return mailboxOutcome{}, !errors.Is(err, os.ErrNotExist)
+		return mailboxOutcome{damaged: fmt.Errorf("the event's final marker is unreadable: %w", err)}, true
+	}
+	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSuffix(string(raw), "\n")); err == nil {
+		return mailboxOutcome{}, true
 	}
 	var out mailboxOutcome
-	_ = json.Unmarshal(raw, &out)
+	if err := json.Unmarshal(raw, &out); err != nil || (out.ReplyID == "" && !out.Cancelled && !out.NotSubmitted) {
+		return mailboxOutcome{damaged: errors.New("the event's final marker records no outcome")}, true
+	}
 	return out, true
 }
 
