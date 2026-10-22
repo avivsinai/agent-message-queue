@@ -65,9 +65,6 @@ type permissionHook struct {
 	// its poller sees the delivery line, which can trail the first tool call
 	// by a tick. A prompt with no run in flight does not wait.
 	markerGrace time.Duration
-	// afterMarkerMiss runs between a missed marker read and the inflight
-	// read; tests set it to move a run out of inflight at that moment.
-	afterMarkerMiss func()
 	// ticks paces the poll when set; nil uses a ticker of poll.
 	ticks <-chan time.Time
 	// stderr receives the one note about an answer the hook ignored.
@@ -256,9 +253,6 @@ func (h permissionHook) awaitRunMarker(sessionID, promptID string, done <-chan s
 	for {
 		if runMarked(h.home, sessionID, promptID) {
 			return true
-		}
-		if h.afterMarkerMiss != nil {
-			h.afterMarkerMiss()
 		}
 		now := h.now()
 		if !inflightLive(h.home, sessionID, now) {

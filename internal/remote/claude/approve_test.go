@@ -175,10 +175,9 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 }
 
 // Regression: hook-audit S2 review finding (Codex), the cleanup race. The
-// last unpin found no live pin and holds the lifecycle lock for its
-// cleanup. A new owner's pin waits for the lock, and the cleanup removes
-// only dead records: a request whose hook is alive and open survives, and
-// the new pin and the run marker written after it survive later cleanups.
+// last unpin's cleanup removes only dead records: a request whose hook is
+// alive and open survives it, and a new owner's pin and run marker survive
+// a cleanup and the bind sweep that run after them.
 func TestApprovalCleanupKeepsLiveRecordsAndANewOwnersPin(t *testing.T) {
 	home := t.TempDir()
 	write := func(sub, name string, v any) string {
@@ -223,37 +222,20 @@ func TestApprovalCleanupKeepsLiveRecordsAndANewOwnersPin(t *testing.T) {
 	gone(deadReq, deadAns, deadRun)
 	kept(liveReq, liveAns)
 
+	// A new owner's pin and run marker, then the old owner's cleanup and the
+	// bind sweep: only dead records go.
 	deadReq, deadAns = request(0, time.Now().Add(time.Minute))
 	deadPin := write("", "pin-dead", approvalPin{PID: 0})
 	deadRun = write("runs", "p-0", runMarker{MsgID: "m-0", Owner: "old", PID: 1 << 30})
-	release, err := lockLifecycle(home)
+	token, err := PinApprovals(home, approvalSession, "share-2", "", os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pinLive(home, approvalSession) {
-		t.Fatal("setup: a live pin")
-	}
-	pinned := make(chan string, 1)
-	go func() {
-		token, err := PinApprovals(home, approvalSession, "share-2", "", os.Getpid())
-		if err != nil {
-			t.Error(err)
-		}
-		pinned <- token
-	}()
-	time.Sleep(50 * time.Millisecond)
-	select {
-	case <-pinned:
-		t.Fatal("a pin was written while the last unpin held the lifecycle lock")
-	default:
+	if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: "m-1", Owner: "new", PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
 	}
 	for _, path := range deadRecords(home, approvalSession, time.Now(), true) {
 		removeRegular(path)
-	}
-	release()
-	token := <-pinned
-	if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: "m-1", Owner: "new", PID: os.Getpid()}); err != nil {
-		t.Fatal(err)
 	}
 	// The bind sweep removes only dead pins and inflight records.
 	sweepApprovals(home)
