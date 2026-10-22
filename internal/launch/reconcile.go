@@ -634,6 +634,9 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
 			return nil, fmt.Errorf("launch journal provider for %q: %w", plan.Handle, err)
 		}
+		if err := prepareCompanion(adapter, request); err != nil {
+			return nil, fmt.Errorf("launch journal companion for %q: %w", plan.Handle, err)
+		}
 		capabilities := adapter.Capabilities(request.Context)
 		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
 			return nil, err
@@ -984,6 +987,11 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			result.Agents = append(result.Agents, item)
 			continue
 		}
+		if err := prepareCompanion(adapter, request); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
+			result.Agents = append(result.Agents, item)
+			continue
+		}
 		capabilities := adapter.Capabilities(request.Context)
 		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
 			item.Code, item.ConversationDisposition, item.Reason = 1, DispositionDegraded, "invalid_adapter_capabilities"
@@ -1155,6 +1163,21 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		})
 	}
 	return planned, nil
+}
+
+// companionAdapter is an adapter whose plan runs a companion executable
+// around its provider. Reconcile validates the companion against the
+// project before any capability probe executes it.
+type companionAdapter interface {
+	prepareCompanion(projectRoot, amqExecutable string) error
+}
+
+func prepareCompanion(adapter HarnessAdapter, request ReconcileRequest) error {
+	companion, ok := adapter.(companionAdapter)
+	if !ok {
+		return nil
+	}
+	return companion.prepareCompanion(request.ProjectRoot, request.AMQPath)
 }
 
 // inboxConsumer is an adapter whose seat consumes its own inbox. Launch runs

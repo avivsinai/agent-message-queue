@@ -188,6 +188,9 @@ func (cfg ProjectConfig) Validate() error {
 		if agent.Adapter == ACPProvider && agent.ResumePolicy == ResumeEnabled {
 			return fmt.Errorf("agent %q: the ACP host resumes its own session; use resume_policy %q", agent.Handle, ResumeFresh)
 		}
+		if agent.Adapter == ACPProvider && agent.Wrapper != nil {
+			return fmt.Errorf("agent %q: an acp seat runs amq-acp as its wrapper and takes no other", agent.Handle)
+		}
 	}
 	if cfg.Layout.Type != LayoutColumns {
 		return fmt.Errorf("unsupported layout intent %q", cfg.Layout.Type)

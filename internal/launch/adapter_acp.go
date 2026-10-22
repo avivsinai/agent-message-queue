@@ -22,12 +22,17 @@ const acpHostCommand = "amq-acp"
 // consumes its own inbox, so a doorbell has nothing to wake.
 const acpNoWakeReason = "amq-acp host consumes its own inbox"
 
-// ACPAdapter plans `amq-acp host -- <agent argv>`. Launch owns no
-// conversation identity for the seat: the host records its ACP session and
-// loads it again on every start, so every launch is planned fresh.
+// ACPAdapter plans `amq-acp host -- <agent argv>`. The plan's provider is
+// the agent and amq-acp is its wrapper, so the ticket binds and rechecks the
+// identity of both. Launch owns no conversation identity for the seat: the
+// host records its ACP session and loads it again on every start, so every
+// launch is planned fresh.
 type ACPAdapter struct {
 	amq   string
 	probe commandProbe
+	// host is the amq-acp that prepareCompanion validated for the project;
+	// nothing executes or plans another one.
+	host string
 }
 
 // NewACPAdapter builds the adapter. amqExecutable is the running amq; the
@@ -49,11 +54,30 @@ func (adapter *ACPAdapter) ValidateCommittedConfig(request CommittedConfigReques
 	return validateCommittedConfig(CommittedConfigRequest{ProjectRoot: request.ProjectRoot, Cwd: request.Cwd, EnvOverlay: request.EnvOverlay}, commonCommittedEnvRules(), nil)
 }
 
+// prepareCompanion resolves amq-acp beside the amq executable (else through
+// PATH) and refuses one inside the project, before anything executes it.
+func (adapter *ACPAdapter) prepareCompanion(projectRoot, amqExecutable string) error {
+	adapter.host = ""
+	if strings.TrimSpace(amqExecutable) == "" {
+		amqExecutable = adapter.amq
+	}
+	path, err := acpHostPath(amqExecutable, adapter.probe)
+	if err != nil {
+		return err
+	}
+	host, err := resolveExternalExecutable(path, projectRoot, acpHostCommand, false)
+	if err != nil {
+		return err
+	}
+	adapter.host = host
+	return nil
+}
+
 func (adapter *ACPAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
 	result := AdapterCapabilities{Provider: ACPProvider, Mode: adapter.Mode()}
-	host, err := acpHostPath(adapter.amq, adapter.probe)
-	if err != nil {
-		result.Reason = "executable_not_found"
+	host := adapter.host
+	if host == "" {
+		result.Reason = "companion_unvalidated"
 		return result
 	}
 	version, err := adapter.probe.Output(ctx, host, "--version")
@@ -84,13 +108,8 @@ func (adapter *ACPAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	if request.InitialInput != nil {
 		return AgentPlan{}, fmt.Errorf("initial input is unsupported for an acp seat")
 	}
-	hostPath, err := acpHostPath(request.AMQExecutable, adapter.probe)
-	if err != nil {
-		return AgentPlan{}, err
-	}
-	host, err := resolveExternalExecutable(hostPath, request.ProjectRoot, acpHostCommand, false)
-	if err != nil {
-		return AgentPlan{}, err
+	if adapter.host == "" {
+		return AgentPlan{}, fmt.Errorf("%s is not validated for this project", acpHostCommand)
 	}
 	agent, err := resolveExternalExecutable(request.Command[0], request.ProjectRoot, "acp agent", false)
 	if err != nil {
@@ -103,8 +122,12 @@ func (adapter *ACPAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 		return AgentPlan{}, err
 	}
 	plan := AgentPlan{
-		Handle: request.Handle, Argv: acpHostArgv(host, agent, request.Command[1:]), EnvOverlay: cloneEnv(request.EnvOverlay),
+		Handle: request.Handle, Argv: append([]string{agent}, request.Command[1:]...), EnvOverlay: cloneEnv(request.EnvOverlay),
 		Cwd: request.Cwd, AdapterMode: AdapterModeUnsupported, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
+	}
+	plan, err = applyWrapper(plan, acpHostWrapper(adapter.host))
+	if err != nil {
+		return AgentPlan{}, err
 	}
 	if err := ValidateAdapterPlan(adapter, plan); err != nil {
 		return AgentPlan{}, err
@@ -112,10 +135,10 @@ func (adapter *ACPAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	return plan, nil
 }
 
-// acpHostArgv is the one place that builds the seat's command line.
-func acpHostArgv(host, agent string, agentArgs []string) []string {
-	argv := []string{host, "host", "--", agent}
-	return append(argv, agentArgs...)
+// acpHostWrapper is the one place that builds the seat's host command: the
+// plan runs `<host> host -- <agent argv>`.
+func acpHostWrapper(host string) *Wrapper {
+	return &Wrapper{Executable: host, Args: []string{"host", "--"}}
 }
 
 func (adapter *ACPAdapter) PlanResume(ResumeRequest) (AgentPlan, error) {

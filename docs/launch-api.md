@@ -218,7 +218,10 @@ for example `{"handle": "grok", "adapter": "acp", "resume_policy": "fresh",
 argv, because the plan trust digest binds it byte for byte. Its `env` takes
 the common keys only. The plan runs `amq-acp host -- <agent argv>`, using the
 `amq-acp` beside `amq` (else from PATH) and the agent executable resolved to
-an absolute path outside the project. The seat runs with wake disabled
+an absolute path outside the project. Launch checks `amq-acp` against the
+project before it runs anything. In the plan and the execution ticket the
+agent is the provider and `amq-acp` its wrapper, so both identities are bound
+and checked again before exec; an acp seat takes no other `wrapper`. The seat runs with wake disabled
 (audit reason `amq-acp host consumes its own inbox`), because the host takes
 its inbox itself. Launch owns no conversation identity for it: the host loads
 its own ACP session again on every start, so `resume_policy` is `fresh` or
