@@ -2783,17 +2783,11 @@ func (s *wakeStart) prepareNotifier() error {
 		)
 	}
 
-	// The recorded mode is the wake's current input mode; wake check reads it
-	// to tell a typing wake from presence written by another writer.
-	initialMode := s.initialNotifierMode
-	if initialMode == "" {
-		initialMode = effectiveInjectMode(&wakeConfig{me: s.me, injectMode: s.injectMode})
-	}
 	if err := setWakeNotifierStatusInDir(
 		s.activeAgentDir,
 		s.me,
 		s.initialNotifierStatus,
-		initialMode,
+		s.initialNotifierMode,
 		s.initialNotifierReason,
 	); err != nil {
 		return fmt.Errorf("record wake notifier status: %w", err)

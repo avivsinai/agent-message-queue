@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 type wakeCheckResult struct {
@@ -23,7 +22,7 @@ type wakeCheckResult struct {
 	StartMode                string `json:"start_mode"`
 	StartReason              string `json:"start_reason,omitempty"`
 	LiveWake                 bool   `json:"live_wake"`
-	DoorbellReady            bool   `json:"doorbell_ready,omitempty"`
+	StartedAt                string `json:"started_at,omitempty"`
 	WakeStatus               string `json:"wake_status"`
 	WakePID                  int    `json:"wake_pid,omitempty"`
 	WakeMode                 string `json:"wake_mode,omitempty"`
@@ -332,7 +331,6 @@ func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) w
 	decision := buildWakeCheckDecision(root, me, inspection, nil, false)
 	detail := "wake state changed during inspection"
 	reason := wakeRepairReasonExactEvidenceMissing
-	decision.Wake.DoorbellReady = false
 	decision.Repair.InjectViaAvailable = false
 	decision.Repair.ReasonCode = &reason
 	decision.Repair.Detail = &detail
@@ -440,6 +438,7 @@ func buildWakeCheckDecision(
 			OwnerBound:   ownerBound,
 			Generation:   wakeCheckOptionalString(inspection.Lock.Generation),
 			TargetDigest: wakeCheckOptionalString(inspection.Lock.TargetDigest),
+			StartedAt:    wakeCheckOptionalString(inspection.Lock.Started),
 		},
 		Image: wakeCheckImageDecision{
 			Current: wakeCheckImageEvidenceDecision{
@@ -454,8 +453,6 @@ func buildWakeCheckDecision(
 		inspection.Status == wakeLockValid &&
 		inspection.IdentityConfirmed &&
 		inspection.Process.Running
-	decision.Wake.DoorbellReady = decision.Wake.Live &&
-		wakeDoorbellReady(root, me, inspection.Lock.WakeMode)
 	if decision.Wake.Live {
 		decision.Image.Running.Path = wakeCheckOptionalString(wakeCheckRunningImagePath(inspection))
 		decision.Image.Running.Version = wakeCheckOptionalString(wakeCheckVersion(inspection.Lock.ImageVersion))
@@ -487,24 +484,6 @@ func buildWakeCheckDecision(
 	classifyWakeCheckRestart(&decision, inspection, opsLock)
 	finalizeWakeCheckDecision(&decision)
 	return decision
-}
-
-// wakeDoorbellReady reports whether a live wake still types a doorbell for
-// new mail. The lock records only the start mode; the wake's current notifier
-// and doorbell state live in presence. A demoted, degraded, or recovering wake
-// records a notifier status, a parked wake records doorbell_parked, and any
-// unreadable or unrecorded state is not ready.
-func wakeDoorbellReady(root, me, lockMode string) bool {
-	if lockMode != wakeInjectModeRaw && lockMode != wakeInjectModePaste {
-		return false
-	}
-	p, err := presence.Read(root, me)
-	if err != nil {
-		return false
-	}
-	return p.NotifierStatus == "" &&
-		(p.NotifierMode == wakeInjectModeRaw || p.NotifierMode == wakeInjectModePaste) &&
-		!p.DoorbellParked
 }
 
 func classifyWakeCheckReload(root, agent string, inspection wakeLockInspection) wakeCheckReloadDecision {
@@ -563,7 +542,7 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		StartMode:                decision.Start.Mode,
 		StartReason:              wakeCheckStringValue(decision.Start.Detail, ""),
 		LiveWake:                 decision.Wake.Live,
-		DoorbellReady:            decision.Wake.DoorbellReady,
+		StartedAt:                wakeCheckStringValue(decision.Wake.StartedAt, ""),
 		WakeStatus:               decision.Wake.Status,
 		WakePID:                  wakeCheckIntValue(decision.Wake.PID),
 		WakeMode:                 wakeCheckStringValue(decision.Wake.Mode, ""),

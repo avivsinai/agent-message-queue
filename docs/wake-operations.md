@@ -21,22 +21,22 @@ state before it changes anything.
 
 `wake check` and `doctor` JSON has two schemas. Schema 1 is the default and is
 byte-compatible for a missing lock; a live or stale lock adds
-`wake_generation` and `wake_target_digest` when they exist (omitted when
-empty). Schema 2 is explicit with `--json-schema=2` (which requires `--json`).
-It gives a closed action kind, actor, reason code, and an argv command object
-for a directly executable action or a safe operator diagnostic. Missing
+`wake_generation`, `wake_target_digest`, and `started_at` (the lock's start
+time) when they exist (omitted when empty). Schema 2 is explicit with
+`--json-schema=2` (which requires `--json`). It gives a closed action kind,
+actor, reason code, and an argv command object for a directly executable
+action or a safe operator diagnostic. Missing
 evidence is JSON `null`, including `wake.generation` and `wake.target_digest`;
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
-`doorbell_ready` (schema 1, present only when true) and `wake.doorbell_ready`
-(schema 2) report that the live wake still types a doorbell for new mail. It
-reads the wake's current state, not the lock's start mode: the lock mode and
-the mode the wake records in presence are `raw` or `paste`, no notifier status
-is recorded (an output-only demotion, attention-only fallback, or input
-recovery records one), and the doorbell is not parked. Unreadable or missing
-state reports false. Only `doorbell_ready` proves that pending mail rings;
-`live_wake` alone does not.
+The co-op Stop hook (`scripts/amq-stop-hook.sh`) blocks a stop only for mail
+no wake will ring for. With no live wake, every pending message counts. Under a
+live wake, only mail created at or before `started_at` counts, because a wake
+started with `--baseline-existing` never rings for that cohort; a probe that
+fails or takes more than 2 seconds counts every message. A live wake that is
+demoted or parked signals through its own pane attention and `doctor --ops`
+(`doorbell_parked`); the Stop hook does not duplicate that.
 
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only

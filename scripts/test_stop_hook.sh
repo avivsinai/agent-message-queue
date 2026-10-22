@@ -117,11 +117,11 @@ python3 - "$state" "$id1" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1])); assert sys.argv[2] not in d["blocked_ids"]
 PY
-# A wake proven to type a doorbell already rings for new mail, so the hook
-# stays silent; a live wake without that proof still blocks (observed
-# 2026-10-22: every turn end under wake=live(raw) showed a Stop hook error for
-# mail the doorbell was about to deliver; PR #1152 review: a live wake can be
-# demoted, recovering, or parked).
+# Under a live wake the hook blocks only for mail created at or before the
+# wake's lock start, the --baseline-existing cohort the wake never rings for
+# (observed 2026-10-22: every turn end under wake=live(raw) showed a Stop hook
+# error for mail the doorbell was about to deliver; PR #1152 review: coop exec
+# baselines startup mail, which then never rings).
 mkdir -p "$TMP/live-wake-bin"
 cat >"$TMP/live-wake-bin/amq" <<EOF
 #!/usr/bin/env bash
@@ -138,13 +138,17 @@ run_hook_with_wake() {
       AMQ_NO_UPDATE_CHECK=1 PATH="$TMP/live-wake-bin:$PATH" \
       WAKE_CHECK_JSON="$1" CLAUDE_PROJECT_DIR="$TMP" bash "$HOOK"
 }
-send unrung >/dev/null
-unrung_out="$(run_hook_with_wake '{"live_wake":true,"wake_mode":"raw","doorbell_ready":false}')"
-python3 - "$unrung_out" <<'PY'
+assert_block() { # output label
+  python3 - "$1" "$2" <<'PY'
 import json, sys
-assert json.loads(sys.argv[1])["decision"]=="block"
+assert json.loads(sys.argv[1] or "{}").get("decision")=="block", sys.argv[2]
 PY
-send live >/dev/null
-live_out="$(run_hook_with_wake '{"live_wake":true,"wake_mode":"raw","doorbell_ready":true}')"
-assert_eq "" "$live_out" "doorbell-ready wake output"
+}
+send after >/dev/null
+after_out="$(run_hook_with_wake '{"live_wake":true,"started_at":"2000-01-01T00:00:00Z"}')"
+assert_eq "" "$after_out" "mail after wake start"
+send baseline >/dev/null
+assert_block "$(run_hook_with_wake '{"live_wake":true,"started_at":"2999-01-01T00:00:00Z"}')" "baseline mail"
+send unwoken >/dev/null
+assert_block "$(run_hook_with_wake '{"live_wake":false,"started_at":"2000-01-01T00:00:00Z"}')" "no live wake"
 echo "stop hook tests ok"

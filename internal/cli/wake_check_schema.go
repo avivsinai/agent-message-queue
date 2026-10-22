@@ -107,14 +107,14 @@ type wakeCheckStartDecision struct {
 }
 
 type wakeCheckWakeDecision struct {
-	Status        string
-	Live          bool
-	DoorbellReady bool
-	PID           *int
-	Mode          *string
-	OwnerBound    bool
-	Generation    *string
-	TargetDigest  *string
+	Status       string
+	Live         bool
+	PID          *int
+	Mode         *string
+	OwnerBound   bool
+	Generation   *string
+	TargetDigest *string
+	StartedAt    *string
 }
 
 type wakeCheckImageDecision struct {
@@ -207,14 +207,13 @@ type wakeCheckStartV2 struct {
 }
 
 type wakeCheckWakeV2 struct {
-	Status        string  `json:"status"`
-	Live          bool    `json:"live"`
-	DoorbellReady bool    `json:"doorbell_ready"`
-	PID           *int    `json:"pid"`
-	Mode          *string `json:"mode"`
-	OwnerBound    bool    `json:"owner_bound"`
-	Generation    *string `json:"generation"`
-	TargetDigest  *string `json:"target_digest"`
+	Status       string  `json:"status"`
+	Live         bool    `json:"live"`
+	PID          *int    `json:"pid"`
+	Mode         *string `json:"mode"`
+	OwnerBound   bool    `json:"owner_bound"`
+	Generation   *string `json:"generation"`
+	TargetDigest *string `json:"target_digest"`
 }
 
 type wakeCheckImageV2 struct {
@@ -287,14 +286,13 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			Detail:     decision.Start.Detail,
 		},
 		Wake: wakeCheckWakeV2{
-			Status:        decision.Wake.Status,
-			Live:          decision.Wake.Live,
-			DoorbellReady: decision.Wake.DoorbellReady,
-			PID:           decision.Wake.PID,
-			Mode:          decision.Wake.Mode,
-			OwnerBound:    decision.Wake.OwnerBound,
-			Generation:    decision.Wake.Generation,
-			TargetDigest:  decision.Wake.TargetDigest,
+			Status:       decision.Wake.Status,
+			Live:         decision.Wake.Live,
+			PID:          decision.Wake.PID,
+			Mode:         decision.Wake.Mode,
+			OwnerBound:   decision.Wake.OwnerBound,
+			Generation:   decision.Wake.Generation,
+			TargetDigest: decision.Wake.TargetDigest,
 		},
 		Image: wakeCheckImageV2{
 			Running: wakeCheckImageEvidenceV2(decision.Image.Running),

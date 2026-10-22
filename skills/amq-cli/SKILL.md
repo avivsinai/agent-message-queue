@@ -32,8 +32,8 @@ raw `--root`.
 ## Receive under a live wake
 
 If session-start context says `wake=live(...)`, or
-`amq wake check --me <handle> --json` reports `doorbell_ready: true`, the wake
-delivers a doorbell for you.
+`amq wake check --me <handle> --json` reports `live_wake: true` with an
+injection mode other than `none`, the wake delivers a doorbell for you.
 Run `amq drain --include-body` when it fires, then act on the messages.
 
 The default drain reads at most 20 messages in filename order, including held
