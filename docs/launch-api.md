@@ -209,8 +209,24 @@ Without the flag:
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build.
-Pi, Gemini CLI, and OpenCode have no launch adapter. Pi stays direct-only.
+The adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build,
+plus adapter `acp` for any Agent Client Protocol agent. Pi stays direct-only.
+
+An `acp` seat in committed `.amq/launch.json` names the agent's ACP command,
+for example `{"handle": "grok", "adapter": "acp", "resume_policy": "fresh",
+"command": ["grok", "agent", "--no-leader", "stdio"]}`. Its `command` is any
+argv, because the plan trust digest binds it byte for byte. Its `env` takes
+the common keys only. The plan runs `amq-acp host -- <agent argv>`, using the
+`amq-acp` beside `amq` (else from PATH) and the agent executable resolved to
+an absolute path outside the project. Launch checks `amq-acp` against the
+project before it runs anything. In the plan and the execution ticket the
+agent is the provider and `amq-acp` its wrapper, so both identities are bound
+and checked again before exec; an acp seat takes no other `wrapper`. The seat runs with wake disabled
+(audit reason `amq-acp host consumes its own inbox`), because the host takes
+its inbox itself. Launch owns no conversation identity for it: the host loads
+its own ACP session again on every start, so `resume_policy` is `fresh` or
+`disabled`, and `resume` is refused. `amq setup` never adds an `acp` seat and
+keeps one written by hand. A public intent cannot select `acp`.
 
 Each provider owns its conversation identity:
 
