@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.106.0](https://github.com/avivsinai/agent-message-queue/compare/v0.105.1...v0.106.0) (2026-10-22)
+
+
+### Features
+
+* **acp:** label mailbox-binding prompts with their Buzz DM event id ([#1168](https://github.com/avivsinai/agent-message-queue/issues/1168)) ([cdba235](https://github.com/avivsinai/agent-message-queue/commit/cdba235bb69e5590108d768c641000149e2cec8c))
+* **remote:** allow a Claude tool call from the Buzz Desktop DM ([#1173](https://github.com/avivsinai/agent-message-queue/issues/1173)) ([a93c2fe](https://github.com/avivsinai/agent-message-queue/commit/a93c2fea47724a8b1c41760ece9b40211fad8b10))
+
+
+### Bug Fixes
+
+* **relay:** give AMQ-signed Nostr events the id NIP-01 clients compute ([#1170](https://github.com/avivsinai/agent-message-queue/issues/1170)) ([171bcb0](https://github.com/avivsinai/agent-message-queue/commit/171bcb0c2bb04a3f9f4cc1ea72626226231670d9))
+
 ## [0.105.1](https://github.com/avivsinai/agent-message-queue/compare/v0.105.0...v0.105.1) (2026-10-22)
 
 
