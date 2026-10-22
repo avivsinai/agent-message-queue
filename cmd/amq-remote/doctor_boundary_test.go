@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
@@ -105,4 +106,29 @@ func doctorHasBoundary(out any, boundary, subject string) bool {
 		}
 	}
 	return false
+}
+
+// agent-message-queue-611.71: one unreadable request record made admission
+// refuse every submit to its target ("reservation state undeterminable"),
+// while doctor read the store through List, dropped the poison, and exited 0.
+func TestDoctorNamesAnUnreadableRequestRecord(t *testing.T) {
+	root := t.TempDir()
+	hostDir := filepath.Join(root, "extensions", "remote", "v1", "requests", "host-1")
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	poison := filepath.Join(hostDir, "fake__deadbeef.json")
+	if err := os.WriteFile(poison, []byte(`{"state":"runn`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
+		if f.Boundary == "request_store" && f.Subject == "fake" && strings.Contains(f.Detail, poison) && f.Remedy != "" && code == protocol.ExitActionRequired {
+			return
+		}
+	}
+	t.Fatalf("unreadable record not named: exit=%d failing=%v", code, out.(map[string]any)["failing"])
 }
