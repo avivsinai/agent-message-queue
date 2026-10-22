@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,8 +16,8 @@ import (
 
 // Co-op hook receivers: amq coop install-hooks writes Claude Code hooks that
 // start these only when AM_ME is set. A receiver reads the participant from
-// AM_ME and AM_ROOT alone, never walks directories for .amqrc,
-// and prints nothing unless it has something for the model.
+// AM_ME, AM_ROOT and the session pin alone, never walks directories for
+// .amqrc, and prints nothing unless it has something for the model.
 
 // coopHookPeerActive is how recent a peer's presence must be to show it as
 // active in the preamble.
@@ -26,19 +27,20 @@ func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
 	usage := usageWithFlags(fs, "amq coop hook session-start|stop",
 		"Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.",
-		"They read AM_ME and AM_ROOT from the environment and always exit 0 once the",
-		"arguments parse.",
+		"They read AM_ME, AM_ROOT and the session pin from the environment, never read",
+		".amqrc, and always exit 0 once the arguments parse.",
 		"",
 		"session-start prints the co-op preamble as SessionStart additionalContext:",
 		"the agent's handle, session and peers, its unread count, and whether a wake",
-		"rings this terminal. Without AM_ME or AM_ROOT, or when the mailbox does not",
-		"exist, it prints nothing.",
+		"rings this terminal. Without AM_ME or an absolute AM_ROOT, with a session pin",
+		"that does not match AM_ROOT, or when the mailbox does not exist, it prints",
+		"nothing.",
 		"",
 		"stop blocks the stop once for unread mail it has not reported yet. Under a",
 		"live wake it counts only mail created at or before the wake's startup",
 		"baseline, because the wake rings for later mail. It allows the stop after",
-		"5 blocks in one chain, and prints a systemMessage when the mailbox cannot be",
-		"read.")
+		"5 blocks in one chain, and prints a systemMessage when the context conflicts",
+		"or the mailbox cannot be read.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -57,29 +59,45 @@ func runCoopHook(args []string) error {
 	}
 }
 
-// coopHookParticipant returns the root and handle from the environment, or
-// ok=false when this session does not take part in co-op.
-func coopHookParticipant() (root, me string, ok bool) {
-	me, err := normalizeHandle(os.Getenv(envMe))
+// coopHookContext reads the participant from AM_ME, AM_ROOT and the session
+// pin alone, with no .amqrc discovery. me is "" when AM_ME is not a valid
+// handle, and root is "" when AM_ROOT is unset or relative. err reports pin
+// evidence that does not match AM_ROOT, which amq env also refuses. session
+// comes only from a pin that matches.
+func coopHookContext() (root, me, session string, err error) {
+	if me, err = normalizeHandle(os.Getenv(envMe)); err != nil {
+		return "", "", "", nil
+	}
+	root = strings.TrimSpace(os.Getenv(envRoot))
+	if !filepath.IsAbs(root) {
+		return "", me, "", nil
+	}
+	root = absPath(filepath.Clean(root))
+	pin, err := loadSessionPin()
 	if err != nil {
-		return "", "", false
+		return root, me, "", err
 	}
-	root = resolveRoot(os.Getenv(envRoot))
-	if root == "" {
-		return "", "", false
+	if !pin.Present {
+		return root, me, "", nil
 	}
-	if info, err := os.Stat(fsq.AgentBase(root, me)); err != nil || !info.IsDir() {
-		return "", "", false
+	mismatch, err := sessionPinMismatchWithPin(root, pin)
+	if err != nil {
+		return root, me, "", err
 	}
-	return root, me, true
+	if mismatch != nil {
+		return root, me, "", mismatch
+	}
+	return root, me, pin.Session, nil
 }
 
 func writeCoopSessionStart(w io.Writer, now time.Time) error {
-	root, me, ok := coopHookParticipant()
-	if !ok {
+	root, me, session, err := coopHookContext()
+	if err != nil || root == "" || me == "" {
 		return nil
 	}
-	session := inferredSessionIdentity(root)
+	if info, err := os.Stat(fsq.AgentBase(root, me)); err != nil || !info.IsDir() {
+		return nil
+	}
 	peers := coopHookPeers(root, me, now)
 	unread := coopHookUnread(root, me)
 

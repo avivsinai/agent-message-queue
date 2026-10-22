@@ -45,14 +45,15 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in); err != nil {
 		return nil
 	}
-	me, err := normalizeHandle(os.Getenv(envMe))
-	if err != nil {
+	root, me, session, err := coopHookContext()
+	switch {
+	case me == "":
 		return nil
-	}
-	root := resolveRoot(os.Getenv(envRoot))
-	if root == "" {
+	case err != nil:
+		return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf("AMQ context conflict (%v); pending messages may exist. Resolve the session context and drain before stopping.", err)})
+	case root == "":
 		if coopStopProjectUsesAMQ() {
-			return writeCoopHookJSON(w, map[string]string{"systemMessage": "AMQ context unresolved: AM_ROOT is not set; pending messages may exist. Resolve the project/session context and drain before stopping."})
+			return writeCoopHookJSON(w, map[string]string{"systemMessage": "AMQ context unresolved: AM_ROOT is not an absolute path; pending messages may exist. Resolve the project/session context and drain before stopping."})
 		}
 		return nil
 	}
@@ -66,7 +67,6 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 			baseline = &at
 		}
 	}
-	session := inferredSessionIdentity(root)
 	if session == "" {
 		session = "(none)"
 	}

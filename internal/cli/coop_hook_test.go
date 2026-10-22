@@ -21,36 +21,67 @@ import (
 
 func TestCoopHookSessionStartPrintsThePreamble(t *testing.T) {
 	clearSendMailboxTestEnv(t)
-	root := filepath.Join(t.TempDir(), ".agent-mail", "collab")
-	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := captureStdout(t, func() error {
-		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(envMe, "claude")
-	t.Setenv(envRoot, root)
-
-	var out bytes.Buffer
-	if err := writeCoopSessionStart(&out, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("output %q: %v", out.String(), err)
-	}
-	context := got.HookSpecificOutput.AdditionalContext
-	for _, want := range []string{"me=claude session=collab peers=codex", "Inbox: 1 unread."} {
-		if got.HookSpecificOutput.HookEventName != "SessionStart" || !strings.Contains(context, want) {
-			t.Fatalf("preamble = %+v, want SessionStart with %q", got.HookSpecificOutput, want)
+	dir := t.TempDir()
+	base := filepath.Join(dir, ".agent-mail")
+	root := filepath.Join(base, "collab")
+	queue := filepath.Join(dir, "queue")
+	for _, r := range []string{root, filepath.Join(base, "other"), queue} {
+		if err := runInit([]string{"--root", r, "--agents", "claude,codex"}); err != nil {
+			t.Fatal(err)
 		}
+		if _, err := captureStdout(t, func() error {
+			return runSend([]string{"--root", r, "--me", "codex", "--to", "claude", "--body", "hi"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".amqrc"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		root, base, sesh string
+		want             []string // empty: the hook prints nothing
+	}{
+		{"pinned session", root, base, "collab", []string{"me=claude session=collab peers=codex", "Inbox: 1 unread."}},
+		// Regression (#1171 review): AM_ROOT names one session and the pin
+		// another; amq env refuses this, so the hook must not pick a side.
+		{"pin names another session", filepath.Join(base, "other"), base, "collab", nil},
+		// Regression (#1171 review): the session came from .amqrc discovery,
+		// so a malformed .amqrc near AM_ROOT printed a warning.
+		{"no pin, malformed .amqrc nearby", queue, "", "", []string{"me=claude peers=codex", "Inbox: 1 unread."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envMe, "claude")
+			t.Setenv(envRoot, tc.root)
+			setOptionalEnv(t, envBaseRoot, tc.base, tc.base != "")
+			setOptionalEnv(t, envSession, tc.sesh, tc.sesh != "")
+			stdout, stderr := captureOutput(t, func() error { return writeCoopSessionStart(os.Stdout, time.Now()) })
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want none", stderr)
+			}
+			if tc.want == nil {
+				if stdout != "" {
+					t.Fatalf("stdout = %q, want none", stdout)
+				}
+				return
+			}
+			var got struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("output %q: %v", stdout, err)
+			}
+			for _, want := range tc.want {
+				if got.HookSpecificOutput.HookEventName != "SessionStart" || !strings.Contains(got.HookSpecificOutput.AdditionalContext, want) {
+					t.Fatalf("preamble = %+v, want SessionStart with %q", got.HookSpecificOutput, want)
+				}
+			}
+		})
 	}
 }
 
@@ -112,7 +143,8 @@ func mustExecutable(t *testing.T) string {
 
 func TestCoopHookStopBlocksOnceForNewMail(t *testing.T) {
 	clearSendMailboxTestEnv(t)
-	root := filepath.Join(t.TempDir(), ".agent-mail", "collab")
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	root := filepath.Join(base, "collab")
 	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +155,8 @@ func TestCoopHookStopBlocksOnceForNewMail(t *testing.T) {
 	}
 	t.Setenv(envMe, "claude")
 	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "collab")
 
 	stop := func(active string) string {
 		t.Helper()
