@@ -16,53 +16,82 @@ import (
 )
 
 const (
-	threadOpenSchema        = "amq/thread-open/v1"
-	threadOpenDefaultMaxAge = 14 * 24 * time.Hour
+	threadOpenSchema = "amq/thread-open/v1"
 
 	obligationPending      = "pending"
 	obligationAcknowledged = "acknowledged"
+
+	// A continuation whose direct target is not in the scan is looked up by
+	// file name: at most this many missing hops per message and lookups per
+	// run.
+	threadOpenMaxHops    = 8
+	threadOpenMaxLookups = 512
 )
 
 // openerKinds are the kinds that open an obligation for each recipient.
 var openerKinds = []string{format.KindReviewRequest, format.KindQuestion, format.KindTodo}
 
+// closingLabels make a message terminal: it never opens an obligation.
+var closingLabels = []string{"done", "merged", "closed", "wontfix", "withdrawn"}
+
 type threadOpenResult struct {
-	Schema        string                 `json:"schema"`
-	GeneratedAt   string                 `json:"generated_at"`
-	BaseRoot      string                 `json:"base_root"`
-	Sessions      []string               `json:"sessions"`
-	MaxAgeSeconds int64                  `json:"max_age_seconds"`
-	Obligations   []threadOpenObligation `json:"obligations"`
-	Expired       []threadOpenExpired    `json:"expired"`
-	PrunedFiles   []threadOpenPruned     `json:"pruned_files"`
-	Skipped       []threadOpenSkipped    `json:"skipped"`
+	Schema      string                 `json:"schema"`
+	GeneratedAt string                 `json:"generated_at"`
+	BaseRoot    string                 `json:"base_root"`
+	Sessions    []string               `json:"sessions"`
+	Obligations []threadOpenObligation `json:"obligations"`
+	Coverage    threadOpenCoverage     `json:"coverage"`
 }
 
 type threadOpenObligation struct {
-	Key          string              `json:"key"`
-	Session      string              `json:"session"`
-	Thread       string              `json:"thread"`
-	Opener       threadOpenOpener    `json:"opener"`
-	OwedBy       string              `json:"owed_by"`
-	OwedByKind   string              `json:"owed_by_kind"`
-	OwedTo       string              `json:"owed_to"`
-	State        string              `json:"state"`
-	Expects      []string            `json:"expects"`
-	LastActivity *threadOpenActivity `json:"last_activity,omitempty"`
-	AgeSeconds   int64               `json:"age_seconds"`
+	Key                   string                 `json:"key"`
+	Thread                string                 `json:"thread"`
+	Opener                threadOpenOpener       `json:"opener"`
+	OwedBy                participant            `json:"owed_by"`
+	OwedByKind            string                 `json:"owed_by_kind"`
+	OwedTo                participant            `json:"owed_to"`
+	ReplyDestination      *threadOpenDestination `json:"reply_destination"`
+	ReplyDestinationError string                 `json:"reply_destination_error,omitempty"`
+	State                 string                 `json:"state"`
+	Completion            threadOpenRecipe       `json:"completion"`
+	Acknowledge           threadOpenRecipe       `json:"acknowledge"`
+	LastActivity          *threadOpenActivity    `json:"last_activity,omitempty"`
+	AgeSeconds            int64                  `json:"age_seconds"`
 }
 
 type threadOpenOpener struct {
-	ID          string   `json:"id"`
-	Kind        string   `json:"kind"`
-	From        string   `json:"from"`
-	FromProject string   `json:"from_project"`
-	ReplyTo     string   `json:"reply_to"`
-	To          []string `json:"to"`
-	Subject     string   `json:"subject"`
-	Created     string   `json:"created"`
-	Priority    string   `json:"priority"`
-	Labels      []string `json:"labels"`
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	From         string   `json:"from"`
+	To           []string `json:"to"`
+	ReplyTo      string   `json:"reply_to"`
+	ReplyProject string   `json:"reply_project"`
+	FromProject  string   `json:"from_project"`
+	Subject      string   `json:"subject"`
+	Created      string   `json:"created"`
+	Priority     string   `json:"priority"`
+	Labels       []string `json:"labels"`
+}
+
+// participant is one party to an obligation. Project is empty for the
+// project under scan; Session is empty for a base root. Handles alone never
+// identify a participant.
+type participant struct {
+	Project string `json:"project"`
+	Session string `json:"session"`
+	Handle  string `json:"handle"`
+}
+
+type threadOpenDestination struct {
+	Handle  string `json:"handle"`
+	Session string `json:"session"`
+	Project string `json:"project"`
+	Source  string `json:"source"`
+}
+
+type threadOpenRecipe struct {
+	Kind   string   `json:"kind"`
+	Labels []string `json:"labels"`
 }
 
 type threadOpenActivity struct {
@@ -72,14 +101,26 @@ type threadOpenActivity struct {
 	Created string `json:"created"`
 }
 
-type threadOpenExpired struct {
+type threadOpenCoverage struct {
+	MaxAgeSeconds     int64                  `json:"max_age_seconds"`
+	AssessedSince     string                 `json:"assessed_since,omitempty"`
+	PrunedFiles       []threadOpenCount      `json:"pruned_files"`
+	Expired           []threadOpenExpired    `json:"expired"`
+	Skipped           []threadOpenSkipped    `json:"skipped"`
+	UnresolvedLineage []threadOpenUnresolved `json:"unresolved_lineage"`
+	Ambiguous         []threadOpenAmbiguous  `json:"ambiguous"`
+	OutboundRouted    []threadOpenCount      `json:"outbound_routed"`
+	TruncatedByLimit  threadOpenTruncated    `json:"truncated_by_limit"`
+}
+
+type threadOpenCount struct {
 	Session string `json:"session"`
-	OwedBy  string `json:"owed_by"`
 	Count   int    `json:"count"`
 }
 
-type threadOpenPruned struct {
+type threadOpenExpired struct {
 	Session string `json:"session"`
+	OwedBy  string `json:"owed_by"`
 	Count   int    `json:"count"`
 }
 
@@ -88,28 +129,35 @@ type threadOpenSkipped struct {
 	Error string `json:"error"`
 }
 
-// obligation is the open debt of one recipient (owner) to the sender
-// (requester) of one opener message.
-type obligation struct {
-	key           string
-	session       string // recipient session
-	senderSession string // session the opener was sent from
-	opener        *thread.Entry
-	owner         string
-	requester     string
-	state         string
-	closed        bool
-	last          *thread.Entry
+type threadOpenUnresolved struct {
+	ID         string `json:"id"`
+	Session    string `json:"session"`
+	From       string `json:"from"`
+	Kind       string `json:"kind"`
+	MissingRef string `json:"missing_ref"`
+}
+
+type threadOpenAmbiguous struct {
+	ID         string   `json:"id"`
+	Session    string   `json:"session"`
+	From       string   `json:"from"`
+	Reason     string   `json:"reason"`
+	Candidates []string `json:"candidates"`
+}
+
+type threadOpenTruncated struct {
+	Limit   int `json:"limit"`
+	Omitted int `json:"omitted"`
 }
 
 type threadOpenFilter struct {
 	owedBy, owedTo, kinds []string
 }
 
-func (f threadOpenFilter) match(kind, owner, requester string) bool {
-	return (len(f.kinds) == 0 || slices.Contains(f.kinds, kind)) &&
-		(len(f.owedBy) == 0 || slices.Contains(f.owedBy, owner)) &&
-		(len(f.owedTo) == 0 || slices.Contains(f.owedTo, requester))
+func (f threadOpenFilter) match(ob *obligation) bool {
+	return (len(f.kinds) == 0 || slices.Contains(f.kinds, ob.opener.Kind)) &&
+		(len(f.owedBy) == 0 || slices.Contains(f.owedBy, ob.owner.Handle)) &&
+		(len(f.owedTo) == 0 || slices.Contains(f.owedTo, ob.requester.Handle))
 }
 
 func runThreadOpen(args []string) error {
@@ -120,7 +168,7 @@ func runThreadOpen(args []string) error {
 	owedToFlag := fs.String("owed-to", "", "Comma-separated handles that are owed a reply")
 	kindFlag := fs.String("kind", "", "Comma-separated opener kinds: review_request, question, todo")
 	maxAgeFlag := fs.String("max-age", "14d", "Ignore openers older than this (e.g. 14d, 36h; 0 = read every file)")
-	limitFlag := fs.Int("limit", 0, "Limit number of obligations, oldest first (0 = no limit)")
+	limitFlag := fs.Int("limit", 0, "List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)")
 	schemaFlag := fs.Int("json-schema", 1, "JSON schema version: 1 (requires --json)")
 
 	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]",
@@ -171,7 +219,11 @@ func runThreadOpen(args []string) error {
 	}
 
 	baseRoot := absPath(baseRootOf(root))
-	scanRoots := []thread.ScanRoot{{Session: sessionName(root), Root: root}}
+	session := ""
+	if root != baseRoot {
+		session = sessionName(root)
+	}
+	scanRoots := []thread.ScanRoot{{Session: session, Root: root}}
 	if *allSessions {
 		if baseRoot, err = sessionBaseRoot(root); err != nil {
 			return err
@@ -187,41 +239,49 @@ func runThreadOpen(args []string) error {
 		cutoff = now.Add(-maxAge)
 	}
 	result := threadOpenResult{
-		Schema:        threadOpenSchema,
-		GeneratedAt:   now.Format(time.RFC3339),
-		BaseRoot:      baseRoot,
-		Sessions:      []string{},
-		MaxAgeSeconds: int64(maxAge / time.Second),
-		Obligations:   []threadOpenObligation{},
-		Expired:       []threadOpenExpired{},
-		PrunedFiles:   []threadOpenPruned{},
-		Skipped:       []threadOpenSkipped{},
+		Schema:      threadOpenSchema,
+		GeneratedAt: now.Format(time.RFC3339),
+		BaseRoot:    baseRoot,
+		Sessions:    []string{},
+		Obligations: []threadOpenObligation{},
+		Coverage: threadOpenCoverage{
+			MaxAgeSeconds: int64(maxAge / time.Second),
+			PrunedFiles:   []threadOpenCount{},
+			Skipped:       []threadOpenSkipped{},
+		},
+	}
+	if !cutoff.IsZero() {
+		result.Coverage.AssessedSince = cutoff.Format(time.RFC3339)
 	}
 	for _, scanRoot := range scanRoots {
 		result.Sessions = append(result.Sessions, scanRoot.Session)
 	}
 
 	scan, err := thread.CollectAll(scanRoots, cutoff, func(path string, parseErr error) error {
-		result.Skipped = append(result.Skipped, threadOpenSkipped{Path: path, Error: parseErr.Error()})
+		result.Coverage.Skipped = append(result.Coverage.Skipped, threadOpenSkipped{Path: path, Error: parseErr.Error()})
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	for _, session := range result.Sessions {
-		if count := scan.Pruned[session]; count > 0 {
-			result.PrunedFiles = append(result.PrunedFiles, threadOpenPruned{Session: session, Count: count})
-		}
-	}
+	result.Coverage.PrunedFiles = countsBySession(result.Sessions, scan.Pruned)
 
-	open, expired, skipped := computeObligations(scan.Entries, cutoff, filter)
-	result.Skipped = append(result.Skipped, skipped...)
-	result.Expired = append(result.Expired, expired...)
+	red := newObligationReducer(scanRoots, scan.Entries, cutoff)
+	red.run()
+	result.Coverage.Skipped = append(result.Coverage.Skipped, red.skipped...)
+	result.Coverage.UnresolvedLineage = red.unresolved
+	result.Coverage.Ambiguous = red.ambiguous
+	result.Coverage.OutboundRouted = countsBySession(result.Sessions, red.outbound)
+
+	open, expired := red.report(filter)
+	result.Coverage.Expired = expired
+	result.Coverage.TruncatedByLimit.Limit = *limitFlag
+	if *limitFlag > 0 && len(open) > *limitFlag {
+		result.Coverage.TruncatedByLimit.Omitted = len(open) - *limitFlag
+		open = open[:*limitFlag]
+	}
 	for _, ob := range open {
 		result.Obligations = append(result.Obligations, obligationJSON(ob, now))
-	}
-	if *limitFlag > 0 && len(result.Obligations) > *limitFlag {
-		result.Obligations = result.Obligations[:*limitFlag]
 	}
 
 	if common.JSON {
@@ -230,105 +290,267 @@ func runThreadOpen(args []string) error {
 	return writeThreadOpenText(result)
 }
 
-// computeObligations replays messages in header created order, then id, and
-// returns the obligations still open, oldest first; the expired openers; and
-// the messages whose created stamp does not parse.
-func computeObligations(entries []thread.Entry, cutoff time.Time, filter threadOpenFilter) ([]*obligation, []threadOpenExpired, []threadOpenSkipped) {
-	byOpener := map[string][]*obligation{}
-	byThread := map[string][]*obligation{}
-	all := []*obligation{}
-	expiredCount := map[[2]string]int{}
-	skipped := []threadOpenSkipped{}
+// obligation is the open debt of one recipient (owner) to the sender
+// (requester) of one opener message.
+type obligation struct {
+	key       string
+	opener    *thread.Entry
+	owner     participant
+	requester participant
+	state     string
+	closed    bool
+	expired   bool
+	last      *thread.Entry
+}
 
+// record is one message with its resolved sender and the obligations whose
+// lineage it belongs to.
+type record struct {
+	entry      *thread.Entry
+	sender     participant
+	lineage    []*obligation
+	missingRef string // set when the lineage of the message cannot be resolved
+	busy, done bool
+}
+
+// obligationReducer applies the thread open rules. Phase 1
+// (newObligationReducer) indexes every message by id and resolves its
+// sender; phase 2 (run) settles each message's direct target before the
+// message itself, so a reference links regardless of created order.
+type obligationReducer struct {
+	roots       []thread.ScanRoot
+	cutoff      time.Time
+	records     map[string]*record
+	order       []*record
+	obligations []*obligation
+	byThread    map[string][]*obligation
+	lookups     int
+	skipped     []threadOpenSkipped
+	unresolved  []threadOpenUnresolved
+	ambiguous   []threadOpenAmbiguous
+	outbound    map[string]int
+}
+
+func newObligationReducer(roots []thread.ScanRoot, entries []thread.Entry, cutoff time.Time) *obligationReducer {
+	red := &obligationReducer{
+		roots:      roots,
+		cutoff:     cutoff,
+		records:    map[string]*record{},
+		byThread:   map[string][]*obligation{},
+		skipped:    []threadOpenSkipped{},
+		unresolved: []threadOpenUnresolved{},
+		ambiguous:  []threadOpenAmbiguous{},
+		outbound:   map[string]int{},
+	}
 	for i := range entries {
-		msg := &entries[i]
-		if msg.RawTime.IsZero() {
-			skipped = append(skipped, threadOpenSkipped{Path: msg.Occurrences[0].Path, Error: fmt.Sprintf("invalid created timestamp %q", msg.Created)})
-			continue
-		}
-		sender := msg.From
+		red.order = append(red.order, red.add(&entries[i]))
+	}
+	return red
+}
 
-		// 1. Link: by reference back to the opener, or by thread within the
-		// same session when the message carries no reference.
-		linked := []*obligation{}
-		if len(msg.Refs) > 0 {
-			for _, ref := range msg.Refs {
-				for _, ob := range byOpener[ref] {
-					if !ob.closed && (ob.owner == sender || ob.requester == sender) && !slices.Contains(linked, ob) {
-						linked = append(linked, ob)
-					}
-				}
-			}
-		} else {
-			for _, ob := range byThread[msg.Thread] {
-				if ob.closed {
-					continue
-				}
-				switch sender {
-				case ob.owner:
-					if sentFrom(msg, ob.session) {
-						linked = append(linked, ob)
-					}
-				case ob.requester:
-					if sentFrom(msg, ob.senderSession) {
-						linked = append(linked, ob)
-					}
-				}
-			}
-		}
+func (red *obligationReducer) add(entry *thread.Entry) *record {
+	rec := &record{entry: entry, sender: senderOf(entry)}
+	red.records[entry.ID] = rec
+	return rec
+}
 
-		// 2. Close, then 3. acknowledge.
-		for _, ob := range linked {
-			ob.last = msg
-			if closesObligation(ob.opener.Kind, sender == ob.owner, msg) {
-				ob.closed = true
-				continue
-			}
-			if sender == ob.owner {
-				ob.state = obligationAcknowledged
-			}
-		}
+// run processes messages in created order, then id. The reference-free path
+// depends on that order; reference links do not.
+func (red *obligationReducer) run() {
+	for _, rec := range red.order {
+		red.process(rec, 0)
+	}
+}
 
-		// 4. Open one obligation per new recipient.
-		if !slices.Contains(openerKinds, msg.Kind) {
-			continue
-		}
-		senderSession := messageSenderSession(msg)
-		expired := !cutoff.IsZero() && msg.RawTime.Before(cutoff)
-		seen := map[string]bool{}
-		for _, recipient := range msg.To {
-			if recipient == sender || seen[recipient] {
-				continue
-			}
-			seen[recipient] = true
-			if len(msg.Refs) > 0 && continuesObligation(linked, msg.Kind, sender, recipient) {
-				continue
-			}
-			session := recipientSession(msg, recipient, senderSession)
-			if expired {
-				if filter.match(msg.Kind, recipient, sender) {
-					expiredCount[[2]string{session, recipient}]++
-				}
-				continue
-			}
-			ob := &obligation{
-				key:           session + "/" + msg.ID + "/" + recipient,
-				session:       session,
-				senderSession: senderSession,
-				opener:        msg,
-				owner:         recipient,
-				requester:     sender,
-				state:         obligationPending,
-			}
-			byOpener[msg.ID] = append(byOpener[msg.ID], ob)
-			byThread[msg.Thread] = append(byThread[msg.Thread], ob)
-			all = append(all, ob)
-		}
+func (red *obligationReducer) process(rec *record, hops int) {
+	if rec.done || rec.busy {
+		return
+	}
+	rec.busy = true
+	defer func() { rec.busy, rec.done = false, true }()
+	msg := rec.entry
+	if msg.RawTime.IsZero() {
+		red.skipped = append(red.skipped, threadOpenSkipped{Path: msg.Occurrences[0].Path, Error: fmt.Sprintf("invalid created timestamp %q", msg.Created)})
+		rec.missingRef = msg.ID
+		return
 	}
 
+	var acted []*obligation
+	continuation := false
+	if len(msg.Refs) > 0 {
+		// The last ref names the direct parent; earlier refs are inherited
+		// context and give no authority.
+		targetID := msg.Refs[len(msg.Refs)-1]
+		target, targetHops := red.resolve(targetID, rec, hops)
+		if target != nil {
+			red.process(target, targetHops)
+		}
+		switch {
+		case target == nil || target.busy:
+			rec.missingRef = targetID
+		case target.missingRef != "":
+			rec.missingRef = target.missingRef
+		}
+		if rec.missingRef != "" {
+			red.unresolved = append(red.unresolved, threadOpenUnresolved{
+				ID: msg.ID, Session: rec.sender.Session, From: msg.From, Kind: msg.Kind, MissingRef: rec.missingRef,
+			})
+			return
+		}
+		for _, ob := range target.lineage {
+			owner, requester := roleOf(ob, rec.sender, true)
+			if !owner && !requester {
+				continue
+			}
+			if !slices.Contains(msg.To, otherParty(ob, owner).Handle) {
+				// The owner handing the work to someone else acknowledges it.
+				if owner {
+					acknowledge(ob, msg)
+				}
+				continue
+			}
+			act(ob, owner, msg)
+			acted = append(acted, ob)
+		}
+		continuation = msg.Kind == defaultReplyKind(target.entry.Kind)
+	} else if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
+		acted = red.actWithoutRefs(rec)
+	}
+
+	if opened := red.open(rec, acted, continuation); len(opened) > 0 {
+		rec.lineage = opened
+	} else {
+		rec.lineage = acted
+	}
+}
+
+// resolve finds the record of id, reading its header by name when the scan
+// did not collect it.
+func (red *obligationReducer) resolve(id string, from *record, hops int) (*record, int) {
+	if rec, ok := red.records[id]; ok {
+		return rec, hops
+	}
+	if hops >= threadOpenMaxHops || red.lookups >= threadOpenMaxLookups {
+		return nil, hops
+	}
+	red.lookups++
+	agents := append([]string{from.entry.From}, from.entry.To...)
+	entry, ok := thread.ReadByID(red.roots, agents, id)
+	if !ok {
+		return nil, hops
+	}
+	return red.add(&entry), hops + 1
+}
+
+// actWithoutRefs links a message without refs to the one open obligation in
+// its thread between the same two exact participants.
+func (red *obligationReducer) actWithoutRefs(rec *record) []*obligation {
+	msg := rec.entry
+	recipients := []participant{}
+	unresolved := false
+	for _, handle := range msg.To {
+		if p, ok := recipientOf(rec, handle); ok {
+			recipients = append(recipients, p)
+		} else {
+			unresolved = true
+		}
+	}
+	candidates := []*obligation{}
+	for _, ob := range red.byThread[msg.Thread] {
+		if ob.closed || !ob.opener.RawTime.Before(msg.RawTime) {
+			continue
+		}
+		owner, requester := roleOf(ob, rec.sender, false)
+		if !owner && !requester {
+			continue
+		}
+		if unresolved || slices.Contains(recipients, otherParty(ob, owner)) {
+			candidates = append(candidates, ob)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if unresolved || len(candidates) > 1 {
+		reason := fmt.Sprintf("%d candidates", len(candidates))
+		if unresolved {
+			reason = "recipient unresolved"
+		}
+		keys := []string{}
+		for _, ob := range candidates {
+			keys = append(keys, ob.key)
+		}
+		red.ambiguous = append(red.ambiguous, threadOpenAmbiguous{
+			ID: msg.ID, Session: rec.sender.Session, From: msg.From, Reason: reason, Candidates: keys,
+		})
+		return nil
+	}
+	owner, _ := roleOf(candidates[0], rec.sender, false)
+	act(candidates[0], owner, msg)
+	return candidates
+}
+
+// open creates one obligation per resolved recipient of an opener. A
+// terminal message opens nothing, and a continuation (the kind reply would
+// default to) opens nothing for the other participant of an obligation it
+// acts on.
+func (red *obligationReducer) open(rec *record, acted []*obligation, continuation bool) []*obligation {
+	msg := rec.entry
+	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
+		return nil
+	}
+	opened := []*obligation{}
+	routed := false
+	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
+		if continuation && slices.ContainsFunc(acted, func(ob *obligation) bool {
+			return otherParty(ob, rec.sender != ob.requester).Handle == handle
+		}) {
+			continue
+		}
+		owner, ok := recipientOf(rec, handle)
+		if !ok {
+			routed = true
+			continue
+		}
+		if owner == rec.sender {
+			continue
+		}
+		session := owner.Session
+		if session == "" {
+			session = "."
+		}
+		ob := &obligation{
+			key:       session + "/" + msg.ID + "/" + owner.Handle,
+			opener:    msg,
+			owner:     owner,
+			requester: rec.sender,
+			state:     obligationPending,
+			expired:   !red.cutoff.IsZero() && msg.RawTime.Before(red.cutoff),
+		}
+		opened = append(opened, ob)
+		red.obligations = append(red.obligations, ob)
+		red.byThread[msg.Thread] = append(red.byThread[msg.Thread], ob)
+	}
+	if routed {
+		red.outbound[rec.sender.Session]++
+	}
+	return opened
+}
+
+// report returns the obligations still open, oldest opener first, and the
+// expired openers counted per owner.
+func (red *obligationReducer) report(filter threadOpenFilter) ([]*obligation, []threadOpenExpired) {
 	open := []*obligation{}
-	for _, ob := range all {
-		if !ob.closed && filter.match(ob.opener.Kind, ob.owner, ob.requester) {
+	expiredCount := map[[2]string]int{}
+	for _, ob := range red.obligations {
+		if !filter.match(ob) {
+			continue
+		}
+		if ob.expired {
+			expiredCount[[2]string{ob.owner.Session, ob.owner.Handle}]++
+			continue
+		}
+		if !ob.closed {
 			open = append(open, ob)
 		}
 	}
@@ -339,7 +561,6 @@ func computeObligations(entries []thread.Entry, cutoff time.Time, filter threadO
 		}
 		return open[i].key < open[j].key
 	})
-
 	expired := []threadOpenExpired{}
 	for k, count := range expiredCount {
 		expired = append(expired, threadOpenExpired{Session: k[0], OwedBy: k[1], Count: count})
@@ -350,47 +571,125 @@ func computeObligations(entries []thread.Entry, cutoff time.Time, filter threadO
 		}
 		return expired[i].OwedBy < expired[j].OwedBy
 	})
-	return open, expired, skipped
+	return open, expired
 }
 
-// continuesObligation reports whether an open linked obligation of the same
-// kind already binds the same pair: a requester's nudge, or an owner's reply
-// that kept the default same kind. Only a message with refs can continue an
-// obligation: reply always carries refs, so a message without refs is a new
-// request even when it shares the thread with an open one.
-func continuesObligation(linked []*obligation, kind, sender, recipient string) bool {
-	for _, ob := range linked {
-		if ob.closed || ob.opener.Kind != kind {
-			continue
-		}
-		if (ob.owner == recipient && ob.requester == sender) || (ob.owner == sender && ob.requester == recipient) {
-			return true
+// roleOf reports whether sender is the owner or the requester of ob. Through
+// an exact reference, the reserved human of the project under scan acts as
+// the owner from any of its sessions.
+func roleOf(ob *obligation, sender participant, byReference bool) (owner, requester bool) {
+	switch {
+	case sender == ob.owner:
+		return true, false
+	case sender == ob.requester:
+		return false, true
+	case byReference && sender.Handle == reservedHumanHandle && sender.Project == "" &&
+		ob.owner.Handle == reservedHumanHandle && ob.owner.Project == "":
+		return true, false
+	}
+	return false, false
+}
+
+// otherParty is the participant a message from the owner (or, when owner is
+// false, from the requester) of ob must be addressed to.
+func otherParty(ob *obligation, owner bool) participant {
+	if owner {
+		return ob.requester
+	}
+	return ob.owner
+}
+
+func act(ob *obligation, fromOwner bool, msg *thread.Entry) {
+	touch(ob, msg)
+	if ob.closed {
+		return
+	}
+	if closesObligation(ob.opener.Kind, fromOwner, msg) {
+		ob.closed = true
+		return
+	}
+	if fromOwner {
+		ob.state = obligationAcknowledged
+	}
+}
+
+func acknowledge(ob *obligation, msg *thread.Entry) {
+	touch(ob, msg)
+	if !ob.closed {
+		ob.state = obligationAcknowledged
+	}
+}
+
+func touch(ob *obligation, msg *thread.Entry) {
+	if ob.last == nil || ob.last.RawTime.Before(msg.RawTime) {
+		ob.last = msg
+	}
+}
+
+// senderOf resolves who sent msg: the sender's outbox copy wins; otherwise
+// the routing fields; otherwise the session of the inbox copy, where a local
+// message is delivered.
+func senderOf(msg *thread.Entry) participant {
+	for _, occ := range msg.Occurrences {
+		if occ.Dir == fsq.MailboxOutboxSent {
+			return participant{Session: occ.Session, Handle: occ.Agent}
 		}
 	}
-	return false
+	_, replySession, _ := strings.Cut(msg.ReplyTo, "@")
+	if msg.ReplyProject != "" {
+		return participant{Project: msg.ReplyProject, Session: replySession, Handle: msg.From}
+	}
+	if msg.ReplyTo != "" {
+		return participant{Session: replySession, Handle: msg.From}
+	}
+	return participant{Session: msg.Occurrences[0].Session, Handle: msg.From}
+}
+
+// recipientOf resolves a recipient handle of a message: the session of its
+// inbox copy; else the sender's session for a local message. A routed
+// message with no inbox copy in scope has no target metadata, so its
+// recipient is unresolved.
+func recipientOf(rec *record, handle string) (participant, bool) {
+	for _, occ := range rec.entry.Occurrences {
+		if occ.Agent == handle && (occ.Dir == fsq.MailboxInboxNew || occ.Dir == fsq.MailboxInboxCur) {
+			return participant{Session: occ.Session, Handle: handle}, true
+		}
+	}
+	if rec.entry.ReplyTo == "" && rec.sender.Project == "" {
+		return participant{Session: rec.sender.Session, Handle: handle}, true
+	}
+	return participant{}, false
+}
+
+// defaultReplyKind is the kind amq reply sends when none is named.
+func defaultReplyKind(kind string) string {
+	switch kind {
+	case format.KindReviewRequest:
+		return format.KindReviewResponse
+	case format.KindQuestion:
+		return format.KindAnswer
+	}
+	return kind
+}
+
+func isTerminal(msg *thread.Entry) bool {
+	return slices.ContainsFunc(msg.Labels, func(label string) bool { return slices.Contains(closingLabels, label) })
 }
 
 // closesObligation applies the closer table: which kinds and labels from the
 // owner or the requester close an opener of the given kind.
 func closesObligation(openerKind string, fromOwner bool, msg *thread.Entry) bool {
 	hasLabel := func(labels ...string) bool {
-		for _, label := range msg.Labels {
-			if slices.Contains(labels, label) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(msg.Labels, func(label string) bool { return slices.Contains(labels, label) })
 	}
 	if msg.Kind == format.KindDecision {
 		return true
 	}
 	if !fromOwner {
-		switch openerKind {
-		case format.KindReviewRequest:
+		if openerKind == format.KindReviewRequest {
 			return hasLabel("withdrawn", "done", "merged", "closed")
-		default:
-			return hasLabel("withdrawn", "done", "closed")
 		}
+		return hasLabel("withdrawn", "done", "closed")
 	}
 	switch openerKind {
 	case format.KindReviewRequest:
@@ -398,114 +697,84 @@ func closesObligation(openerKind string, fromOwner bool, msg *thread.Entry) bool
 	case format.KindQuestion:
 		return msg.Kind == format.KindAnswer || hasLabel("done", "closed")
 	case format.KindTodo:
-		return (msg.Kind == format.KindStatus || msg.Kind == format.KindTodo) && hasLabel("done", "merged", "closed", "wontfix")
+		return hasLabel("done", "merged", "closed", "wontfix")
 	}
 	return false
 }
 
-// expectedReplies lists the owner reply kinds that can close an opener.
-func expectedReplies(openerKind string) []string {
+// completionRecipe is the owner message that closes an opener of the kind.
+func completionRecipe(openerKind string) threadOpenRecipe {
 	switch openerKind {
 	case format.KindReviewRequest:
-		return []string{format.KindReviewResponse, format.KindDecision}
+		return threadOpenRecipe{Kind: format.KindReviewResponse, Labels: []string{}}
 	case format.KindQuestion:
-		return []string{format.KindAnswer, format.KindDecision}
-	default:
-		return []string{format.KindStatus, format.KindTodo, format.KindDecision}
+		return threadOpenRecipe{Kind: format.KindAnswer, Labels: []string{}}
 	}
+	return threadOpenRecipe{Kind: format.KindStatus, Labels: []string{"done"}}
 }
 
-// sentFrom reports whether the sender's outbox in session holds msg.
-func sentFrom(msg *thread.Entry, session string) bool {
-	for _, occ := range msg.Occurrences {
-		if occ.Session == session && occ.Mailbox == msg.From && occ.Dir == fsq.MailboxOutboxSent {
-			return true
+// replyDestination derives the route back to the requester by the rules amq
+// reply uses: reply_project, then reply_to, then the sender in the owner's
+// session.
+func replyDestination(ob *obligation) (*threadOpenDestination, error) {
+	opener := ob.opener
+	if opener.ReplyProject != "" {
+		if strings.TrimSpace(opener.ReplyProject) != opener.ReplyProject {
+			return nil, fmt.Errorf("invalid reply_project %q", opener.ReplyProject)
 		}
-	}
-	return false
-}
-
-// messageSenderSession is the session of the sender's outbox copy; else the
-// session named by reply_to or by the sender's side of a cross-session thread
-// id; else the session of the first copy seen.
-func messageSenderSession(msg *thread.Entry) string {
-	for _, occ := range msg.Occurrences {
-		if occ.Mailbox == msg.From && occ.Dir == fsq.MailboxOutboxSent {
-			return occ.Session
+		handle, session, err := parseReplyToRoute(opener.ReplyTo, true)
+		if err != nil {
+			return nil, err
 		}
+		return &threadOpenDestination{Handle: handle, Session: session, Project: opener.ReplyProject, Source: "reply_project"}, nil
 	}
-	if handle, session, ok := strings.Cut(msg.ReplyTo, "@"); ok && handle == msg.From && session != "" {
-		return session
-	}
-	if session, ok := threadSessionFor(msg.Thread, msg.From); ok {
-		return session
-	}
-	return msg.Occurrences[0].Session
-}
-
-// recipientSession is the session whose inbox for recipient holds msg; else
-// the session named by the recipient's side of a cross-session thread id;
-// else the sender's session.
-func recipientSession(msg *thread.Entry, recipient, senderSession string) string {
-	for _, occ := range msg.Occurrences {
-		if occ.Mailbox == recipient && (occ.Dir == fsq.MailboxInboxNew || occ.Dir == fsq.MailboxInboxCur) {
-			return occ.Session
+	if opener.ReplyTo != "" {
+		handle, session, err := parseReplyToRoute(opener.ReplyTo, false)
+		if err != nil {
+			return nil, err
 		}
+		return &threadOpenDestination{Handle: handle, Session: session, Source: "reply_to"}, nil
 	}
-	if session, ok := threadSessionFor(msg.Thread, recipient); ok {
-		return session
+	if handle, err := normalizeHandle(opener.From); err != nil || handle != opener.From {
+		return nil, fmt.Errorf("invalid sender handle %q", opener.From)
 	}
-	return senderSession
-}
-
-// threadSessionFor reads the session of handle from a cross-session thread
-// id of the form p2p/<session>:<a>__<session>:<b>.
-func threadSessionFor(threadID, handle string) (string, bool) {
-	pair, ok := strings.CutPrefix(threadID, "p2p/")
-	if !ok {
-		return "", false
-	}
-	left, right, ok := strings.Cut(pair, "__")
-	if !ok {
-		return "", false
-	}
-	for _, side := range []string{left, right} {
-		session, name, ok := strings.Cut(side, ":")
-		if ok && name == handle && session != "" && !strings.Contains(name, ":") {
-			return session, true
-		}
-	}
-	return "", false
+	return &threadOpenDestination{Handle: opener.From, Session: ob.owner.Session, Source: "local"}, nil
 }
 
 func obligationJSON(ob *obligation, now time.Time) threadOpenObligation {
 	opener := ob.opener
 	owedByKind := "agent"
-	if ob.owner == reservedHumanHandle {
+	if ob.owner.Handle == reservedHumanHandle {
 		owedByKind = "human"
 	}
 	out := threadOpenObligation{
-		Key:     ob.key,
-		Session: ob.session,
-		Thread:  opener.Thread,
+		Key:    ob.key,
+		Thread: opener.Thread,
 		Opener: threadOpenOpener{
-			ID:          opener.ID,
-			Kind:        opener.Kind,
-			From:        opener.From,
-			FromProject: opener.FromProject,
-			ReplyTo:     opener.ReplyTo,
-			To:          nonNil(opener.To),
-			Subject:     opener.Subject,
-			Created:     opener.Created,
-			Priority:    opener.Priority,
-			Labels:      nonNil(opener.Labels),
+			ID:           opener.ID,
+			Kind:         opener.Kind,
+			From:         opener.From,
+			To:           nonNil(opener.To),
+			ReplyTo:      opener.ReplyTo,
+			ReplyProject: opener.ReplyProject,
+			FromProject:  opener.FromProject,
+			Subject:      opener.Subject,
+			Created:      opener.Created,
+			Priority:     opener.Priority,
+			Labels:       nonNil(opener.Labels),
 		},
-		OwedBy:     ob.owner,
-		OwedByKind: owedByKind,
-		OwedTo:     ob.requester,
-		State:      ob.state,
-		Expects:    expectedReplies(opener.Kind),
-		AgeSeconds: int64(now.Sub(opener.RawTime) / time.Second),
+		OwedBy:      ob.owner,
+		OwedByKind:  owedByKind,
+		OwedTo:      ob.requester,
+		State:       ob.state,
+		Completion:  completionRecipe(opener.Kind),
+		Acknowledge: threadOpenRecipe{Kind: format.KindStatus, Labels: []string{}},
+		AgeSeconds:  int64(now.Sub(opener.RawTime) / time.Second),
+	}
+	if dest, err := replyDestination(ob); err != nil {
+		out.ReplyDestinationError = err.Error()
+	} else {
+		out.ReplyDestination = dest
 	}
 	if ob.last != nil {
 		out.LastActivity = &threadOpenActivity{ID: ob.last.ID, Kind: ob.last.Kind, From: ob.last.From, Created: ob.last.Created}
@@ -525,26 +794,75 @@ func writeThreadOpenText(result threadOpenResult) error {
 			subject = "(no subject)"
 		}
 		age := (time.Duration(ob.AgeSeconds) * time.Second).Round(time.Minute)
-		if err := writeStdout("%s  %s  %s owes %s  %s  %s  %s\n", ob.Session, age, ob.OwedBy, ob.OwedTo, ob.Opener.Kind, ob.State, subject); err != nil {
+		if err := writeStdout("%s  %s owes %s  %s  %s  %s\n", age, participantLabel(ob.OwedBy), participantLabel(ob.OwedTo), ob.Opener.Kind, ob.State, subject); err != nil {
 			return err
 		}
 	}
-	for _, exp := range result.Expired {
-		if err := writeStdout("expired: %s  %s owes %d older than the cutoff\n", exp.Session, exp.OwedBy, exp.Count); err != nil {
+	cov := result.Coverage
+	for _, exp := range cov.Expired {
+		if err := writeStdout("expired: %s owes %d older than the cutoff\n", participantLabel(participant{Session: exp.Session, Handle: exp.OwedBy}), exp.Count); err != nil {
 			return err
 		}
 	}
-	for _, pruned := range result.PrunedFiles {
-		if err := writeStdout("pruned: %s  %d files older than the cutoff were not read\n", pruned.Session, pruned.Count); err != nil {
+	for _, pruned := range cov.PrunedFiles {
+		if err := writeStdout("pruned: %d files in %s older than the cutoff were not read\n", pruned.Count, sessionLabel(pruned.Session)); err != nil {
 			return err
 		}
 	}
-	for _, skip := range result.Skipped {
+	for _, routed := range cov.OutboundRouted {
+		if err := writeStdout("routed: %d requests from %s went to a root outside the scan\n", routed.Count, sessionLabel(routed.Session)); err != nil {
+			return err
+		}
+	}
+	for _, un := range cov.UnresolvedLineage {
+		if err := writeStdout("unresolved: %s from %s refers to missing %s\n", un.ID, un.From, un.MissingRef); err != nil {
+			return err
+		}
+	}
+	for _, amb := range cov.Ambiguous {
+		if err := writeStdout("ambiguous: %s from %s (%s)\n", amb.ID, amb.From, amb.Reason); err != nil {
+			return err
+		}
+	}
+	if cov.TruncatedByLimit.Omitted > 0 {
+		if err := writeStdout("limit: %d more not shown\n", cov.TruncatedByLimit.Omitted); err != nil {
+			return err
+		}
+	}
+	for _, skip := range cov.Skipped {
 		if err := writeStderr("warning: skipping unreadable message %s: %s\n", skip.Path, skip.Error); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func participantLabel(p participant) string {
+	label := p.Handle
+	if p.Session != "" {
+		label += "@" + p.Session
+	}
+	if p.Project != "" {
+		label += " (" + p.Project + ")"
+	}
+	return label
+}
+
+func sessionLabel(session string) string {
+	if session == "" {
+		return "the base root"
+	}
+	return session
+}
+
+func countsBySession(sessions []string, counts map[string]int) []threadOpenCount {
+	out := []threadOpenCount{}
+	for _, session := range sessions {
+		if counts[session] > 0 {
+			out = append(out, threadOpenCount{Session: session, Count: counts[session]})
+		}
+	}
+	return out
 }
 
 // canonicalSessionRoots lists the canonical sessions under base, sorted by

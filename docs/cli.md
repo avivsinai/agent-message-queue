@@ -1167,7 +1167,7 @@ Options:
   -kind string
         Comma-separated opener kinds: review_request, question, todo
   -limit int
-        Limit number of obligations, oldest first (0 = no limit)
+        List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)
   -max-age string
         Ignore openers older than this (e.g. 14d, 36h; 0 = read every file) (default "14d")
   -me string

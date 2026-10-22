@@ -39,13 +39,14 @@ type Entry struct {
 
 // Occurrence is one copy of a message in a mailbox directory.
 type Occurrence struct {
-	Session string          // session name of the queue root that holds the copy
-	Mailbox string          // agent handle that owns the mailbox
+	Session string          // session of the queue root that holds the copy; empty for a base root
+	Agent   string          // agent handle that owns the mailbox
 	Dir     fsq.MailboxLeaf // inbox/new, inbox/cur, or outbox/sent
 	Path    string
 }
 
-// ScanRoot names one queue root for CollectAll.
+// ScanRoot names one queue root for CollectAll and ReadByID. Session is
+// empty for a base root.
 type ScanRoot struct {
 	Session string
 	Root    string
@@ -218,7 +219,7 @@ func CollectAll(roots []ScanRoot, cutoff time.Time, onError func(path string, er
 						}
 					}
 					path := filepath.Join(dir, name)
-					occurrence := Occurrence{Session: scanRoot.Session, Mailbox: agent, Dir: leaf, Path: path}
+					occurrence := Occurrence{Session: scanRoot.Session, Agent: agent, Dir: leaf, Path: path}
 					// Every copy of a message is named <id>.md, so a copy of an
 					// id already read is recorded without opening it again.
 					if idx, ok := byID[strings.TrimSuffix(name, ".md")]; ok {
@@ -249,4 +250,44 @@ func CollectAll(roots []ScanRoot, cutoff time.Time, onError func(path string, er
 	}
 	format.SortByTimestamp(result.Entries)
 	return result, nil
+}
+
+// ReadByID reads the header of message id by its file name, <id>.md, from
+// the inbox and sent directories of agents in each root. It lists no
+// directory and ignores the cutoff. It returns one record with every copy it
+// found; ok is false when no readable copy exists. An invalid id or handle
+// is never joined into a path.
+func ReadByID(roots []ScanRoot, agents []string, id string) (Entry, bool) {
+	name := id + ".md"
+	if fsq.ValidateMessageFilename(name) != nil {
+		return Entry{}, false
+	}
+	leaves := []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur, fsq.MailboxOutboxSent}
+	var entry Entry
+	found := false
+	for _, scanRoot := range roots {
+		for _, agent := range agents {
+			if fsq.ValidateHandle(agent) != nil {
+				continue
+			}
+			for _, leaf := range leaves {
+				path := filepath.Join(fsq.AgentMailboxPath(scanRoot.Root, agent, leaf), name)
+				occurrence := Occurrence{Session: scanRoot.Session, Agent: agent, Dir: leaf, Path: path}
+				if found {
+					if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+						entry.Occurrences = append(entry.Occurrences, occurrence)
+					}
+					continue
+				}
+				header, err := format.ReadHeaderFile(path)
+				if err != nil || header.ID != id {
+					continue
+				}
+				entry = entryFromHeader(header)
+				entry.Occurrences = []Occurrence{occurrence}
+				found = true
+			}
+		}
+	}
+	return entry, found
 }
