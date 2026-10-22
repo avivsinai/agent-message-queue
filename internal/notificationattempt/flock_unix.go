@@ -11,6 +11,8 @@ import (
 // required to coordinate journal rotation.
 const LedgerSupported = true
 
+// These stay on syscall.Flock because internal/lock has exclusive locks only.
+
 // flockShared takes a shared advisory lock on the open lock file, blocking
 // until it is available. Shared locks do not contend with each other, so
 // concurrent appenders stay concurrent — the O_APPEND hot path keeps its

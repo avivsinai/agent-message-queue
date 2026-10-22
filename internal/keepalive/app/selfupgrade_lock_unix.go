@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"golang.org/x/sys/unix"
 )
 
@@ -42,7 +43,7 @@ func acquireSelfUpgradeStateLock(statePath string) (func() error, error) {
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		return nil, errors.New("self-upgrade state lock is not a private regular file")
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+	if err := lock.Lock(file); err != nil {
 		return nil, fmt.Errorf("lock self-upgrade state: %w", err)
 	}
 	closeOnError = false
@@ -52,7 +53,7 @@ func acquireSelfUpgradeStateLock(statePath string) (func() error, error) {
 			return nil
 		}
 		released = true
-		unlockErr := unix.Flock(fd, unix.LOCK_UN)
+		unlockErr := lock.Unlock(file)
 		closeErr := file.Close()
 		if unlockErr != nil && closeErr != nil {
 			return errors.Join(

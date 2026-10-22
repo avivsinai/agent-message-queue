@@ -8,6 +8,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -45,7 +46,7 @@ func acquireSpoolLock(path string) (*spoolLock, error) {
 	// Blocking exclusive lock: wait for any other writer to finish its
 	// transaction. The transaction is short (read+write+rename), so a brief
 	// wait is the correct behavior, not a failure.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lock.Lock(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EINTR) {
 			return nil, fmt.Errorf("interrupted waiting for spool lock: %w", err)
@@ -59,7 +60,7 @@ func (l *spoolLock) release() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	unlockErr := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+	unlockErr := lock.Unlock(l.f)
 	closeErr := l.f.Close()
 	l.f = nil
 	if unlockErr != nil {

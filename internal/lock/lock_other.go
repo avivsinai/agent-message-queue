@@ -1,34 +1,18 @@
-//go:build !darwin && !linux
+//go:build !(darwin || dragonfly || freebsd || linux || netbsd || openbsd || windows)
 
 package lock
 
-import "errors"
+import "os"
 
-// AdvisoryLockAvailable reports whether WithExclusiveFileLock holds a real
-// interprocess lock. This platform does not.
+// AdvisoryLockAvailable reports whether this platform has a real
+// interprocess file lock. This one does not.
 func AdvisoryLockAvailable() bool { return false }
 
-// ErrStopped mirrors the unix value; it is never returned here.
-var ErrStopped = errors.New("stopped before the lock was acquired")
+// Lock returns ErrUnsupported: this platform has no interprocess file lock.
+func Lock(*os.File) error { return ErrUnsupported }
 
-// ErrUnsupported is returned by TryExclusive on this platform.
-var ErrUnsupported = errors.New("advisory locks are not available on this platform")
+// TryLock returns ErrUnsupported: this platform has no interprocess file lock.
+func TryLock(*os.File) (bool, error) { return false, ErrUnsupported }
 
-// TryExclusive holds no lock on unsupported platforms; it returns
-// ErrUnsupported.
-func TryExclusive(_ string) (release func(), ok bool, err error) {
-	return nil, false, ErrUnsupported
-}
-
-// WithExclusiveFileLockUntil runs fn with no lock on unsupported platforms.
-func WithExclusiveFileLockUntil(_ string, _ func() bool, fn func() error) error {
-	return fn()
-}
-
-// WithExclusiveFileLock is a best-effort no-op on unsupported platforms.
-//
-// Swarm interop is primarily used on macOS/Linux; keep non-unix builds compiling
-// without introducing platform-specific locking code.
-func WithExclusiveFileLock(_ string, fn func() error) error {
-	return fn()
-}
+// Unlock returns ErrUnsupported: this platform has no interprocess file lock.
+func Unlock(*os.File) error { return ErrUnsupported }
