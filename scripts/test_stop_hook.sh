@@ -117,4 +117,23 @@ python3 - "$state" "$id1" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1])); assert sys.argv[2] not in d["blocked_ids"]
 PY
+# A live typing wake already rings for new mail, so the hook stays silent
+# (observed 2026-10-22: every turn end under wake=live(raw) showed a Stop hook
+# error for mail the doorbell was about to deliver).
+mkdir -p "$TMP/live-wake-bin"
+cat >"$TMP/live-wake-bin/amq" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = wake ] && [ "\${2:-}" = check ]; then
+  printf '{"live_wake":true,"wake_mode":"raw"}\n'
+  exit 0
+fi
+exec "$BIN" "\$@"
+EOF
+chmod +x "$TMP/live-wake-bin/amq"
+send live >/dev/null
+live_out="$(printf '{"stop_hook_active":false}\n' |
+  env -u AM_ROOT AM_BASE_ROOT="$BASE" AM_SESSION=session1 AM_ME=claude \
+    AMQ_NO_UPDATE_CHECK=1 PATH="$TMP/live-wake-bin:$PATH" \
+    CLAUDE_PROJECT_DIR="$TMP" bash "$HOOK")"
+assert_eq "" "$live_out" "live wake output"
 echo "stop hook tests ok"

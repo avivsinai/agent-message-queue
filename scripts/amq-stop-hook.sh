@@ -35,6 +35,17 @@ resolved="$(printf '%s' "$env_json" | python3 -c \
   exit 0
 IFS=$'\x1f' read -r ROOT SESSION ME <<<"$resolved"
 
+# A live wake that types into this terminal already rings for new mail, so a
+# block here only repeats that doorbell. Any doubt falls through to the check.
+wake_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
+  amq wake check --root "$ROOT" --me "$ME" --json 2>/dev/null)" || wake_json=""
+if printf '%s' "$wake_json" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if d.get("live_wake") is True and d.get("wake_mode") not in (None,"","none") else 1)' 2>/dev/null; then
+  exit 0
+fi
+
 list_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
   amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null)" || {
   python3 -c 'import json,sys; print(json.dumps({"systemMessage":f"AMQ mailbox unreadable at {sys.argv[1]}; pending messages may exist."},separators=(",",":")))' "$ROOT"
