@@ -107,6 +107,8 @@ type Evidence struct {
 	Value  string    `json:"value"`
 	Text   string    `json:"text,omitempty"`
 	At     time.Time `json:"at"`
+	// URL is an https link from a forge or provider; empty otherwise.
+	URL string `json:"url,omitempty"`
 }
 
 // Mention is a candidate token found in free text.

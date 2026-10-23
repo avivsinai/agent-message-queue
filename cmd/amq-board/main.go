@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 )
@@ -28,16 +30,20 @@ const (
 	exitUsage   = 2
 )
 
-const usage = `Usage: amq-board [--json]
+const usage = `Usage: amq-board [--json] [--refresh]
 
 Print the fleet board for the AMQ project of the current directory: the
 columns Waiting on you, In flight, Blocked, and Unclaimed, the source health
 strip, and the roster per session. Sources are read-only: AMQ through the amq
-CLI, beads through bd --readonly --sandbox when a .beads directory exists.
+CLI, beads through bd --readonly --sandbox when a .beads directory exists,
+GitHub pull requests and issues through one gh api graphql call cached for
+the TTL (default 10m) when the origin remote is on github.com, and external
+providers registered in ~/.amq/board.json.
 Commands on cards are printed for you to copy; amq-board never runs them.
 
 Flags:
   --json      print the board model as JSON (schema amq/board/v1)
+  --refresh   ignore the GitHub cache and fetch once
   --version   print the version
 `
 
@@ -51,6 +57,7 @@ func run(args []string) int {
 	flags.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	asJSON := flags.Bool("json", false, "print the board model as JSON")
 	showVersion := flags.Bool("version", false, "print the version")
+	refresh := flags.Bool("refresh", false, "ignore the GitHub cache and fetch once")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -81,8 +88,54 @@ func run(args []string) int {
 			return err == nil && info.IsDir()
 		},
 	}
-	sources := []board.Source{source.AMQ{}, source.Beads{}}
-	model := board.Run(context.Background(), env, sources, board.DefaultConfig(), version)
+	userPath := ""
+	if home, err := amqhome.Dir(); err == nil {
+		userPath = filepath.Join(home, board.ConfigFile)
+	}
+	cfg, warnings := board.LoadConfig(userPath, filepath.Join(dir, ".amq", board.ConfigFile))
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	}
+
+	ctx := context.Background()
+	gh := source.GitHub{
+		Repos:                    cfg.GitHubRepos,
+		Humans:                   cfg.GitHubLogins,
+		Identities:               cfg.GitHubIdentities,
+		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
+		TTL:                      cfg.GitHubTTL,
+		Refresh:                  *refresh,
+	}
+	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
+	if cfg.SourceBeads {
+		beads := source.Beads{Humans: cfg.BeadsAssignees}
+		// A bead's external_ref gh-<n> names a PR only when exactly one
+		// GitHub repository is in scope.
+		if repos := gh.RepoSet(ctx, env); len(repos) == 1 {
+			beads.GitHubRepo = repos[0]
+		}
+		sources = append(sources, beads)
+	} else {
+		sources = append(sources, board.Disabled{SourceName: "beads"})
+	}
+	if cfg.SourceGitHub {
+		if home, err := amqhome.EnsureDir(); err == nil {
+			gh.Cache = source.DirCache{Dir: filepath.Join(home, "board", "cache")}
+		} else {
+			fmt.Fprintln(os.Stderr, "amq-board: GitHub cache off:", err)
+		}
+		sources = append(sources, gh)
+	} else {
+		sources = append(sources, board.Disabled{SourceName: "github"})
+	}
+	for _, p := range cfg.Providers {
+		if p.Enabled {
+			sources = append(sources, source.External{Provider: p})
+		} else {
+			sources = append(sources, board.Disabled{SourceName: source.External{Provider: p}.Name()})
+		}
+	}
+	model := board.Run(ctx, env, sources, cfg.Board, version)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -111,7 +164,7 @@ func (execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, e
 		// Tools print warnings before the error; the last line is the cause.
 		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 		if msg := strings.TrimSpace(lines[len(lines)-1]); msg != "" {
-			return nil, fmt.Errorf("%s: %s", argv[0], msg)
+			return nil, fmt.Errorf("%s: %s", argv[0], strings.TrimPrefix(msg, argv[0]+": "))
 		}
 		return nil, fmt.Errorf("%s: %w", argv[0], err)
 	}

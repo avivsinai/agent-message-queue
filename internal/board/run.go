@@ -22,6 +22,10 @@ func Run(ctx context.Context, env Env, sources []Source, cfg Config, version str
 	var wg sync.WaitGroup
 	for i, s := range sources {
 		results[i].Name = s.Name()
+		if _, off := s.(Disabled); off {
+			results[i].Result = Result{Status: StatusDisabled, Detail: "disabled in configuration"}
+			continue
+		}
 		if ok, why := s.Discover(env); !ok {
 			results[i].Result = Result{Status: StatusUnavailable, Detail: why}
 			continue
@@ -75,6 +79,14 @@ func Run(ctx context.Context, env Env, sources []Source, cfg Config, version str
 	return Build(Input{Results: results, Known: known, Config: cfg, Now: env.Now(), Version: version, Dir: env.Dir})
 }
 
+// Disabled stands in for a source the configuration turns off, so the
+// sources strip shows it as disabled instead of leaving it out.
+type Disabled struct{ SourceName string }
+
+func (d Disabled) Name() string                   { return d.SourceName }
+func (Disabled) Discover(Env) (bool, string)      { return false, "disabled in configuration" }
+func (Disabled) Read(context.Context, Env) Result { return Result{Status: StatusDisabled} }
+
 func readIsolated(ctx context.Context, env Env, s Source) (res Result) {
 	ctx, cancel := context.WithTimeout(ctx, SourceTimeout)
 	defer cancel()
@@ -94,19 +106,30 @@ func mentionCandidates(results []NamedResult, known map[string]string) []string 
 	for _, nr := range results {
 		for _, it := range nr.Result.Items {
 			for _, m := range it.Mentions {
-				if _, ok := known[m.Token]; ok || seen[m.Token] {
+				cands := BeadCandidates(m.Token)
+				if anyKnown(cands, known) {
 					continue
 				}
-				if _, ok := Bead(m.Token); !ok {
-					continue
+				for _, c := range cands {
+					if !seen[c] {
+						seen[c] = true
+						out = append(out, c)
+					}
 				}
-				seen[m.Token] = true
-				out = append(out, m.Token)
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+func anyKnown(ids []string, known map[string]string) bool {
+	for _, id := range ids {
+		if _, ok := known[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func joinDetail(a, b string) string {

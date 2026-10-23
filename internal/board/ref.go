@@ -13,6 +13,8 @@ const (
 	RefForge      = "forge"
 	RefObligation = "amq-obligation"
 	RefAMQThread  = "amq-thread"
+	RefBranch     = "branch"
+	RefExternal   = "ext"
 )
 
 // beadTokenRe finds candidate bead ids in free text (design 4.2). A token is
@@ -25,6 +27,23 @@ var forgeNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 
 // forgeURLRe finds GitHub pull request and issue URLs in free text.
 var forgeURLRe = regexp.MustCompile(`https://(github\.com)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:pull|issues)/([0-9]+)`)
+
+// Forge item types, carried as evidence field "type": PRs and issues share
+// one number space, so the type is display and action data, not identity.
+const (
+	ForgePullRequest = "pull_request"
+	ForgeIssue       = "issue"
+)
+
+// ForgeType returns an item's forge type from its evidence.
+func ForgeType(it Item) string {
+	for _, e := range it.Evidence {
+		if e.Field == "type" {
+			return e.Value
+		}
+	}
+	return ""
+}
 
 // Bead builds bead:<id>. The shape check is necessary, not sufficient: the
 // link step also requires vocabulary membership.
@@ -63,6 +82,26 @@ func AMQThread(session, thread string) (Ref, bool) {
 	return Ref{Kind: RefAMQThread, ID: session + "/" + thread}, true
 }
 
+// Branch builds branch:<host>/<owner>/<repo>:<name>. A branch is never a
+// work identity; it is a related reference only.
+func Branch(host, owner, repo, name string) (Ref, bool) {
+	host, owner, repo = strings.ToLower(host), strings.ToLower(owner), strings.ToLower(repo)
+	if !forgeNameRe.MatchString(host) || !forgeNameRe.MatchString(owner) || !forgeNameRe.MatchString(repo) ||
+		name == "" || len(name) > 255 || hasControl(name) || strings.ContainsAny(name, " ~^:?*[\\") {
+		return Ref{}, false
+	}
+	return Ref{Kind: RefBranch, ID: host + "/" + owner + "/" + repo + ":" + name}, true
+}
+
+// External builds ext:<provider>:<id> for an item of a configured external
+// provider, so no provider can pose as another source's ref.
+func External(provider, id string) (Ref, bool) {
+	if !providerNameRe.MatchString(provider) || id == "" || len(id) > 256 || hasControl(id) {
+		return Ref{}, false
+	}
+	return Ref{Kind: RefExternal, ID: provider + ":" + id}, true
+}
+
 // GitHubRepoRef builds the ForgeItem of number n in a configured
 // "owner/repo" GitHub repository.
 func GitHubRepoRef(ownerRepo string, n int) (Ref, bool) {
@@ -76,6 +115,22 @@ func GitHubRepoRef(ownerRepo string, n int) (Ref, bool) {
 // BeadTokens returns the distinct candidate bead tokens in text.
 func BeadTokens(text string) []string {
 	return distinct(beadTokenRe.FindAllString(strings.ToLower(text), -1))
+}
+
+// BeadCandidates lists the ids a text token may name, longest first: the
+// token and each prefix cut at a hyphen, so the branch feat/demo-a1b-parser
+// can name bead demo-a1b. Only vocabulary members become refs.
+func BeadCandidates(token string) []string {
+	var out []string
+	for t := token; beadShapeRe.MatchString(t); {
+		out = append(out, t)
+		i := strings.LastIndexByte(t, '-')
+		if i <= 0 {
+			break
+		}
+		t = t[:i]
+	}
+	return out
 }
 
 // ForgeURLRefs returns the forge refs of GitHub URLs in text.
@@ -106,6 +161,9 @@ func distinct(in []string) []string {
 	}
 	return out
 }
+
+// HasControl reports whether s holds a control character (see isControl).
+func HasControl(s string) bool { return hasControl(s) }
 
 func hasControl(s string) bool {
 	for _, r := range s {

@@ -20,6 +20,7 @@ type fakeRunner struct {
 	t       *testing.T
 	outputs map[string]string // argv joined by spaces -> testdata file
 	failAMQ bool
+	calls   map[string]int // optional: calls per key
 }
 
 func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, error) {
@@ -27,6 +28,12 @@ func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, err
 		return nil, errors.New("amq: base root not found")
 	}
 	key := strings.Join(argv, " ")
+	if strings.HasPrefix(key, "gh api graphql ") {
+		key = "gh api graphql" // the query text is long; one key stands for it
+	}
+	if f.calls != nil {
+		f.calls[key]++
+	}
 	name, ok := f.outputs[key]
 	if !ok {
 		f.t.Errorf("unexpected command: %s", key)
