@@ -70,25 +70,38 @@ providers without executing a caller-supplied provider.
 
 - `grammar_version` is the adapter-owned version that consumers compare. It
   changes when the allowed argument forms, configuration overrides, or carrier
-  support change. The adapter table in `internal/launch/adapter.go` owns the
-  values.
+  support change. `allowed_argument_forms` is derived from the same table that
+  validates committed arguments, so the advertised list changes only when what
+  validation admits changes, and each such change bumps `grammar_version`
+  once. The adapter table in `internal/launch/adapter.go` owns the values.
 - `verified_provider_version` is informational. It names the newest provider
   release on which AMQ verified the grammar. It is neither an exact pin nor
   the installed version.
 
-Provider argument grammar:
+Provider argument grammar. Each form is one argument, followed by one value
+when the form takes one. A "safe value" is 1 to 128 characters from
+`[A-Za-z0-9_.@+:-]` and does not start with `-`. A "session label" is one or
+two `/`-separated parts, each matching `[a-z0-9_][a-z0-9_-]*`.
 
-- Claude admits one `--allowedTools <comma-separated-list>` pair, scoped as
-  `entry := name["("spec")"]`, and the `-n`, `--name`, and `--name=` session
-  labels.
-- Grok Build uses `--tools <list>` and `--disallowed-tools <list>`. Their
-  values are opaque Grok tool names; the Claude `--allowedTools` validator
-  does not check them.
-- Codex admits ordered `-c model_reasoning_effort=<value>` pairs with the
-  values `minimal`, `low`, `medium`, `high`, or `xhigh`. Duplicate keys and
-  unknown keys or values are rejected.
-- Codex `--ask-for-approval` admits only `on-request`. codex-cli refuses
-  `untrusted` at start, and `never` is not admitted.
+| Provider | Form | Value |
+| --- | --- | --- |
+| Claude | `--allowedTools` | comma-separated list, at most 512 bytes, of `name["("spec")"]` entries |
+| Claude | `--effort` | `low`, `medium`, `high`, `xhigh`, or `max` |
+| Claude | `--model` | safe value |
+| Claude | `-n`, `--name` | session label; `--name=<label>` is also accepted |
+| Claude | `--no-chrome`, `--safe-mode`, `--verbose` | none |
+| Claude | `--permission-mode` | `acceptEdits`, `auto`, `manual`, `dontAsk`, or `plan` |
+| Codex | `-c` | `model_reasoning_effort=<value>` with `minimal`, `low`, `medium`, `high`, or `xhigh`, or `approvals_reviewer=<value>` with `user`, `auto_review`, or `guardian_subagent`; the value may carry one surrounding pair of double quotes; duplicate or unknown keys are rejected |
+| Codex | `--ask-for-approval` | `on-request` only; codex-cli refuses `untrusted` at start, and `never` is not admitted |
+| Codex | `--model` | safe value |
+| Codex | `--sandbox` | `read-only` or `workspace-write` |
+| Codex | `--no-alt-screen`, `--search` | none |
+| Grok Build | `--tools`, `--disallowed-tools` | opaque Grok tool names, 1 to 256 UTF-8 bytes, no C0 control characters or DEL, no surrounding whitespace, not starting with `-`; the Claude `--allowedTools` validator does not check them |
+| Grok Build | `--effort` | `low`, `medium`, `high`, `xhigh`, or `max` |
+| Grok Build | `--model`, `--sandbox` | safe value |
+| Grok Build | `--no-alt-screen`, `--no-auto-update` | none |
+| Cursor CLI | `--model` | safe value |
+
 - Every `env_overlay` key matches the POSIX environment grammar
   `[A-Za-z_][A-Za-z0-9_]*`. A key with shell syntax, such as `a;b c`, is
   refused.

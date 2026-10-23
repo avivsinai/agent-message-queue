@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,20 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 // accepts strict releases at or above 0.147.0, including newer unverified
 // releases, and refuses older ones by numeric (not string) comparison while
 // resume stays available.
+// #1154: the advertised forms drifted from what validation admits (Claude
+// --model, Codex --sandbox, all of Cursor), so callers could not rely on them.
+func TestAdvertisedArgumentFormsEqualValidationTables(t *testing.T) {
+	for provider, rules := range map[string]map[string]argumentRule{
+		ClaudeProvider: claudeArgRules(), CodexProvider: codexArgRules(),
+		GrokProvider: grokArgRules(), CursorProvider: cursorArgRules(),
+	} {
+		capabilities := ProviderStaticInputCapabilities(provider)
+		if capabilities.GrammarVersion == 0 || !slices.Equal(capabilities.AllowedArgumentForms, slices.Sorted(maps.Keys(rules))) {
+			t.Errorf("%s capabilities = %#v, validation keys %v", provider, capabilities, slices.Sorted(maps.Keys(rules)))
+		}
+	}
+}
+
 func TestCodexCaptureVersionFloor(t *testing.T) {
 	for _, tc := range []struct {
 		version string
