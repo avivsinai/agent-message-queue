@@ -160,8 +160,20 @@ test("a late end of one prompt keeps the next prompt's hold", async () => {
 	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
 	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "select" });
 	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm" });
-	assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).kind, "select");
+	assert.equal(fs.existsSync(marker), true);
 	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "select" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
+// #1199 review: pi 1.3.0 can deliver a prompt's end to this extension
+// before its start; the late start must not leave a hold nothing clears.
+test("an end delivered before its start leaves no hold", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm" });
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
 	assert.equal(fs.existsSync(marker), false);
 	await h.done();
 });
