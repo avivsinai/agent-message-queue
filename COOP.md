@@ -224,6 +224,13 @@ doorbell while agy reports a permission or sign-in prompt. When you set
 `AGY_CLI_OSC7501` to anything but `on`, agy runs as before and a doorbell can
 answer its permission prompt.
 
+Cursor shows no signal AMQ can read when its approval prompt opens or
+closes, so `amq coop exec cursor-agent` keeps the full doorbell, and a
+doorbell that arrives while Cursor asks for approval can answer it (Enter
+selects the highlighted choice). Grok has no hook for its approval prompt, so
+`amq coop exec grok` keeps the full doorbell, and a doorbell that arrives
+while Grok asks for approval can answer it. Both are known limits.
+
 ### Supervisor recipes
 
 AMQ remains daemon-free. Let the operating system supervise the CLI process.

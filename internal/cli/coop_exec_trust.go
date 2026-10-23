@@ -347,3 +347,27 @@ func withWakeStartupHold(source func(time.Time) (wakeDialogState, error), releas
 		}
 	}
 }
+
+// inspectWakeStartupHold reads the agent's dialog marker, or nil when it is
+// not a Startup marker.
+func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHoldStatus {
+	path := filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil
+	}
+	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
+	var marker wakeDialogMarker
+	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent {
+		return nil
+	}
+	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; input stays held, with attention output after %s",
+		marker.Harness, wakeDialogQuietHold)
+	if marker.Harness == launch.CodexProvider {
+		release += "; a directory kept untrusted releases only through the Codex hook: amq wake install-dialog-hook --harness codex"
+	}
+	return &wakeStartupHoldStatus{
+		Harness: marker.Harness, Dir: marker.Cwd,
+		AgeSeconds: int64(now.Sub(info.ModTime()).Seconds()), Release: release,
+	}
+}
