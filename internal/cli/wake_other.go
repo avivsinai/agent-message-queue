@@ -37,3 +37,8 @@ func wakeCheckV2OptInPresent(args []string) bool {
 func checkClaudeDialogHook() (doctorCheck, bool) {
 	return doctorCheck{}, false
 }
+
+// checkCodexDialogHook has nothing to report where amq wake cannot run.
+func checkCodexDialogHook() (doctorCheck, bool) {
+	return doctorCheck{}, false
+}

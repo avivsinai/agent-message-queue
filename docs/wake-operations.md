@@ -186,6 +186,52 @@ rewind selector, and login or update prompts. It also cannot recall bytes the
 terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
 must write no terminal input at all.
 
+## Dialog guard (Codex approvals)
+
+A doorbell at a Codex approval prompt cancels the pending command and runs
+as a new prompt. The same marker and hold guard that prompt through Codex
+hooks:
+
+```bash
+amq wake install-dialog-hook --harness codex   # or --harness all
+```
+
+The installer writes `AMQ_DIALOG_HOOK=1` entries into `$CODEX_HOME/hooks.json`
+(default `~/.codex/hooks.json`), after the entries already there, so the
+trust of the person's own hooks stays where it is. Codex runs a new or
+changed hook only after the person trusts it: open `/hooks` in Codex and
+trust the AMQ entries, or choose "Trust all" when Codex asks at start. Each
+change of an entry's command costs that once.
+
+- **Open and close.** `PermissionRequest`, with no matcher, opens the marker.
+  Only a turn or session event closes it: `Stop`, `Interrupt`,
+  `UserPromptSubmit`, `SessionStart` (`startup|resume|clear`) or
+  `SessionEnd`. A tool call's `PostToolUse` does not: Codex gives a prompt
+  no call token, and a parallel call that Codex allowed without asking can
+  finish with the same tool and input as the call whose prompt still shows.
+  A doorbell due mid-turn after an approval waits for the turn's end.
+  `Interrupt` and `SessionEnd` have a 1 second timeout, the rest 5 seconds.
+- **Identity.** Codex hooks run in the Codex process environment under the
+  user's `$SHELL`. With `AM_ME` set (an embedded Codex started by
+  `amq coop exec` or `amq launch`) the receiver uses it. Without it, the
+  receiver takes the seat that `amq coop exec` recorded for the hook's
+  `session_id`, the thread id, in `~/.amq/codex-threads`. With neither
+  `AM_ME` nor that store the hook starts nothing; on a machine that has the
+  store, a Codex session without `AM_ME` starts amq once per event.
+- **Exit status.** The entries keep the shell as the parent and end in
+  `|| true`, so an older amq that exits 2 never blocks a Codex prompt or
+  continues a turn.
+
+`amq doctor` reports, when the Codex home exists, Codex settings that run no
+user hooks (`features.hooks = false`, `codex_hooks = false`, or
+`allow_managed_hooks_only` in `/etc/codex/requirements.toml`), missing or
+partial entries, a missing binary or an older form (command, matcher,
+timeout, or an `async` entry, which would let a prompt show before the
+marker), entries disabled in `/hooks`, and entries whose stored
+`trusted_hash` is not Codex's hash of the entry as it is now. It reads the
+user `config.toml` only; a project or profile layer that turns hooks off is
+not seen.
+
 ## Live settings
 
 A running wake has two kinds of input.
