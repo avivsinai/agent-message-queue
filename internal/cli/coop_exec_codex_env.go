@@ -40,29 +40,7 @@ func refuseCodexSeatArgs(binaryPath string, args []string) error {
 	if codexArgsHaveRemote(args) {
 		return ActionRequiredError("this Codex seat would run on an app-server AMQ does not see (--remote), where its amq commands get no AMQ identity; drop --remote, or pass --me and --root in each amq command. Codex was not started")
 	}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		flag, value, inline := strings.Cut(arg, "=")
-		switch {
-		case flag == "-c" || flag == "--config":
-			if !inline {
-				if i+1 >= len(args) {
-					return nil
-				}
-				i++
-				value = args[i]
-			}
-		case strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--"):
-			value = arg[2:]
-		default:
-			if codexValueOptions[flag] && !inline {
-				i++
-			}
-			continue
-		}
+	for _, value := range codexConfigOverrides(args) {
 		key, _, _ := strings.Cut(value, "=")
 		if codexOverrideSetsIdentity(key) {
 			return UsageError("-c %s would replace the AMQ identity coop exec gives this Codex seat; drop that override. Codex was not started", strings.TrimSpace(key))

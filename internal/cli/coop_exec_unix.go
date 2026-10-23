@@ -349,6 +349,9 @@ func (c *coopExecRun) validateFlags() error {
 			return err
 		}
 	}
+	if err := refuseCodexIncludePolicy(c.cmdName, c.agentArgs); err != nil {
+		return err
+	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
 	}
