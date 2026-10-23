@@ -180,6 +180,30 @@ def clear_bulletin(bulletin_path: str) -> None:
         pass
 
 
+def observe(amq_bin: str, root: str, me: str, bulletin_path: str) -> Optional[dict]:
+    """Read the mailbox and update the bulletin. Returns the listing to notify
+    about, or None: no unread mail, an error, or the set the last bulletin
+    recorded. Run under bulletin_lock."""
+    # Fast path: if inbox/new is empty or missing, clear bulletin.
+    if not inbox_has_messages(root, me):
+        clear_bulletin(bulletin_path)
+        return None
+    result = check_amq_messages(amq_bin, root, me)
+    if result.get("error"):
+        # Preserve bulletin on errors to avoid hiding prior messages/state.
+        print(f"[AMQ] notify hook error: {result['error']}", file=sys.stderr)
+        return None
+    if result["count"] == 0:
+        clear_bulletin(bulletin_path)
+        return None
+    # One notification per set of unread messages: the same set as the last
+    # bulletin writes nothing and notifies nobody.
+    if read_bulletin_ids(bulletin_path) == message_ids(result):
+        return None
+    write_bulletin(bulletin_path, result)
+    return result
+
+
 def main():
     # Parse Codex notification event (passed as JSON in argv[1] or stdin)
     event = {}
@@ -217,31 +241,16 @@ def main():
         "AMQ_BULLETIN", os.path.join(root, "meta", f"amq-bulletin-{me}.json")
     )
 
-    # Fast path: if inbox/new is empty or missing, clear bulletin and exit quickly.
-    if not inbox_has_messages(root, me):
-        clear_bulletin(bulletin_path)
-        return
-
     amq_bin = find_amq_binary()
     if not amq_bin:
         return
-
-    result = check_amq_messages(amq_bin, root, me)
-    if result.get("error"):
-        # Preserve bulletin on errors to avoid hiding prior messages/state.
-        print(f"[AMQ] notify hook error: {result['error']}", file=sys.stderr)
-        return
-    if result["count"] == 0:
-        clear_bulletin(bulletin_path)
-        return
-
-    # One notification per set of unread messages: the same set as the last
-    # bulletin writes nothing and notifies nobody.
+    # One critical section from the mailbox read to the bulletin update: a
+    # turn that saw an empty inbox must not clear the state of a turn that
+    # has since notified.
     with bulletin_lock(bulletin_path):
-        if read_bulletin_ids(bulletin_path) == message_ids(result):
-            return
-        write_bulletin(bulletin_path, result)
-
+        result = observe(amq_bin, root, me, bulletin_path)
+    if result is None:
+        return
     urgent = sum(1 for m in result["messages"] if m.get("priority") == "urgent")
     normal = sum(1 for m in result["messages"] if m.get("priority") == "normal")
     low = result["count"] - urgent - normal

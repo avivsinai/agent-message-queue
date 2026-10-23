@@ -7,7 +7,10 @@ Each row reproduces an observed defect:
 - one bulletin per root: a broadcast's second handle never notified, and an
   empty inbox of one handle cleared the other's state (#1198 review);
 - an unlocked compare-and-write with a fixed temp name: two turns at once
-  both notified, or one failed its rename (#1198 review).
+  both notified, or one failed its rename (#1198 review);
+- the mailbox read outside the lock: a turn that saw an empty inbox cleared
+  the state of a turn that notified meanwhile, so the next turn notified
+  again (#1198 review).
 """
 
 from __future__ import annotations
@@ -66,7 +69,6 @@ class Fixture:
 
 def run(test) -> None:
     saved_env, saved_argv = dict(os.environ), sys.argv
-    read = notify.read_bulletin_ids
     try:
         for key in ("AMQ_BULLETIN", "AMQ_NOTIFY_LOG", "AM_SESSION"):
             os.environ.pop(key, None)
@@ -74,7 +76,6 @@ def run(test) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             test(Fixture(tmp))
     finally:
-        notify.read_bulletin_ids = read
         os.environ.clear()
         os.environ.update(saved_env)
         sys.argv = saved_argv
@@ -99,39 +100,72 @@ def test_each_handle_keeps_its_own_state(f: Fixture) -> None:
     assert len(f.sent) == 2, f.sent
 
 
-def test_two_turns_at_once_notify_once(f: Fixture) -> None:
-    f.deliver("codex", "m1")
-    # Both turns try to read the bulletin before either writes it; under the
-    # lock the second waits, the meeting times out, and it reads the first's.
-    meet = threading.Barrier(2, timeout=0.5)
-    read = notify.read_bulletin_ids
+def held_race(f: Fixture, name: str, first_result=None) -> None:
+    """Run turn A until it returns from notify.<name> and hold it there, then
+    run turn B; release A once B finished its turn or blocked on the lock.
+    first_result, when set, replaces A's result of <name>."""
+    real = getattr(notify, name)
+    a_in, b_in, release = threading.Event(), threading.Event(), threading.Event()
+    calls = []
 
-    def racing_read(path: str):
-        try:
-            meet.wait()
-        except threading.BrokenBarrierError:
-            pass
-        return read(path)
+    def held(*args):
+        calls.append(None)
+        if len(calls) == 1:  # turn A
+            out = real(*args) if first_result is None else first_result
+            a_in.set()
+            release.wait(5)
+            return out
+        b_in.set()
+        return real(*args)
 
     errors: list[BaseException] = []
 
     def turn() -> None:
         try:
             notify.main()
-        except BaseException as e:  # a shared temp file name failed the rename
+        except BaseException as e:
             errors.append(e)
 
-    notify.read_bulletin_ids = racing_read
-    os.environ.update({"AM_ROOT": str(f.root), "AM_ME": "codex"})
-    turns = [threading.Thread(target=turn) for _ in range(2)]
-    for t in turns:
-        t.start()
-    for t in turns:
-        t.join()
-    assert not errors and len(f.sent) == 1, (errors, f.sent)
+    setattr(notify, name, held)
+    try:
+        os.environ.update({"AM_ROOT": str(f.root), "AM_ME": "codex"})
+        a = threading.Thread(target=turn)
+        a.start()
+        assert a_in.wait(5), "turn A never reached " + name
+        b = threading.Thread(target=turn)
+        b.start()
+        # Under the lock B blocks before <name> and this times out; without
+        # it B reaches <name> and finishes its turn before A goes on.
+        if b_in.wait(0.5):
+            b.join(5)
+        release.set()
+        a.join()
+        b.join()
+    finally:
+        setattr(notify, name, real)
+    assert not errors, errors
+
+
+def test_two_turns_at_once_notify_once(f: Fixture) -> None:
+    f.deliver("codex", "m1")
+    held_race(f, "read_bulletin_ids")  # A holds after its read, before its write
+    assert len(f.sent) == 1, f.sent
+
+
+def test_an_empty_snapshot_does_not_clear_a_later_notice(f: Fixture) -> None:
+    f.deliver("codex", "m1")
+    # A saw an empty inbox and holds before it clears; B lists m1 and notifies.
+    held_race(f, "inbox_has_messages", first_result=False)
+    f.turn("codex")  # m1 is still the unread set: no second notice
+    assert len(f.sent) == 1, f.sent
 
 
 if __name__ == "__main__":
-    for test in (test_notifies_once_per_set_of_unread_messages, test_each_handle_keeps_its_own_state, test_two_turns_at_once_notify_once):
+    for test in (
+        test_notifies_once_per_set_of_unread_messages,
+        test_each_handle_keeps_its_own_state,
+        test_two_turns_at_once_notify_once,
+        test_an_empty_snapshot_does_not_clear_a_later_notice,
+    ):
         run(test)
     print("codex notify tests ok")
