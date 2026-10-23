@@ -340,7 +340,7 @@ func (c *coopExecRun) validateFlags() error {
 			return err
 		}
 	}
-	if err := refuseCodexIncludePolicy(c.cmdName, c.agentArgs); err != nil {
+	if err := refuseCodexIncludePolicy(c.cmdName); err != nil {
 		return err
 	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
