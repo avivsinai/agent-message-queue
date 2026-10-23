@@ -26,9 +26,6 @@ func killWakeHelperProcessWithHandle(proc *os.Process) error { return killWakePr
 
 var coopExecProcess = syscall.Exec
 
-// startCoopWake starts the coop wake helper process.
-var startCoopWake = (*exec.Cmd).Start
-
 func openCoopWakeTTY() (*os.File, error) {
 	return os.OpenFile("/dev/tty", os.O_WRONLY|unix.O_CLOEXEC, 0)
 }
@@ -102,6 +99,9 @@ type coopExecRun struct {
 	// wakeOwned is true once this launch's wake is ready and its claim is
 	// validated as this process's.
 	wakeOwned bool
+	// wakeStartupHold is the parent end of the wake's startup hold; closing
+	// it lets the wake admit input.
+	wakeStartupHold *os.File
 }
 
 func runCoopExec(args []string) error {
@@ -208,11 +208,6 @@ func runCoopExec(args []string) error {
 			return fmt.Errorf("capture exact coop wake owner: %w", ownerErr)
 		}
 		c.earlyOwner = &captured
-		// Before the wake can admit any input: a doorbell typed before the
-		// harness starts waits in the terminal and answers its trust dialog.
-		// prepareCoopWakeLock has refused a live other owner; a launch that
-		// then loses the race leaves a marker that only holds.
-		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 		readyPath, cleanupReady, readyErr := newWakeReadyFile()
 		if readyErr != nil {
 			inspection := inspectWakeLock(c.root, c.agentHandle)
@@ -252,7 +247,15 @@ func runCoopExec(args []string) error {
 			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
 				return fmt.Errorf("attach isolated coop wake attention: %w", err)
 			}
-			if err := c.superviseWakeHelper(wakeCmd, readyPath); err != nil {
+			hold, childEnd, err := attachWakeStartupHold(wakeCmd)
+			if err != nil {
+				return fmt.Errorf("attach coop wake startup hold: %w", err)
+			}
+			c.wakeStartupHold = hold
+			defer func() { _ = hold.Close() }()
+			err = c.superviseWakeHelper(wakeCmd, readyPath)
+			_ = childEnd.Close()
+			if err != nil {
 				return err
 			}
 		}
@@ -262,10 +265,17 @@ func runCoopExec(args []string) error {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
 	}
-	// Removing a leftover Startup marker could shorten another launch's
-	// hold, so only a launch that owns the agent's wake does it.
+	// The marker changes only once this launch's wake holds the agent's wake
+	// lock, so a launch that loses the race touches no other owner's hold.
+	// That wake admits no input until the startup hold is released below,
+	// so no doorbell is typed before the marker exists: one typed before the
+	// harness starts would wait in the terminal and answer its trust dialog.
 	if c.wakeOwned {
+		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+	}
+	if c.wakeStartupHold != nil {
+		_ = c.wakeStartupHold.Close()
 	}
 
 	return c.execAgent()
@@ -356,7 +366,7 @@ func (c *coopExecRun) validateFlags() error {
 			return err
 		}
 	}
-	if err := refuseCodexIncludePolicy(c.cmdName, c.agentArgs); err != nil {
+	if err := refuseCodexIncludePolicy(c.cmdName); err != nil {
 		return err
 	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
@@ -729,7 +739,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 		); setupErr != nil {
 			return setupErr
 		}
-	} else if err := startCoopWake(wakeCmd); err != nil {
+	} else if err := wakeCmd.Start(); err != nil {
 		var closeErr error
 		if c.wakeChildCapability != nil {
 			closeErr = c.wakeChildCapability.Close()

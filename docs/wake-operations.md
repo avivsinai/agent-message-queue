@@ -161,12 +161,14 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   or the home directory) for the directory or an ancestor inside its Git
   checkout, and Codex's `config.toml` `[projects]` for the directory or its
   Git trust root (a directory outside any checkout asks nothing in Codex).
-  After the wake lock check passes and before the wake process starts, coop
-  exec writes a `Startup` marker that names the harness and directory when
-  the harness has not recorded that it trusts the directory, including a
-  Codex directory saved as untrusted, which opens on a restricted dialog. A
-  launch that owns the wake and shows no dialog removes a `Startup` marker
-  an earlier launch left. A trust file AMQ cannot read writes no marker. The `SessionStart` close removes the marker when the
+  Once its wake holds the agent's wake lock, coop exec writes a `Startup`
+  marker that names the harness and directory when the harness has not
+  recorded that it trusts the directory, including a Codex directory saved
+  as untrusted, which opens on a restricted dialog. When the harness shows
+  no dialog, it removes a `Startup` marker an earlier launch left. A trust
+  file AMQ cannot read writes no marker. Until coop exec has done this, its
+  wake types nothing: coop exec passes the wake a startup-hold pipe and
+  closes it afterwards, and exec or exit closes it too. The `SessionStart` close removes the marker when the
   hook is installed. Without the hook, the wake reads the trust file again
   on each recheck while the marker exists and treats the marker as closed
   only once the harness records that it trusts the directory, so the

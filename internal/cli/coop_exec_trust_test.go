@@ -3,14 +3,14 @@
 package cli
 
 import (
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"golang.org/x/sys/unix"
 )
 
 // Bead agent-message-queue-vd4.3 (surface audit, codex-cli 0.163.0): a
@@ -145,36 +145,42 @@ func TestRefusedCoopLaunchKeepsTheLiveOwnersStartupMarker(t *testing.T) {
 // #1180 review: coop exec wrote the Startup marker only after its wake was
 // ready, so a message that arrived in between was typed into the terminal,
 // waited there, and answered the trust dialog when the harness started.
-// The marker now exists before the wake process starts.
-func TestStartupMarkerExistsBeforeTheWakeStarts(t *testing.T) {
-	clearSendMailboxTestEnv(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"projects":{}}`), 0o600); err != nil {
+// The wake now admits no input until coop exec releases its startup hold,
+// which it does after the marker is in place.
+func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	childEnd, hold, err := os.Pipe()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(secureTempDirForTest(t))
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+	t.Cleanup(func() { _ = hold.Close() })
+	fd, err := unix.Dup(int(childEnd.Fd()))
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	root := secureTempDirForTest(t)
-	marker := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
-	atStart := errors.New("wake never started")
-	old := startCoopWake
-	startCoopWake = func(*exec.Cmd) error {
-		_, atStart = os.Lstat(marker)
-		return errors.New("stub: no wake")
+	_ = childEnd.Close()
+	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
+	released, err := wakeStartupHoldFromEnv()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { startCoopWake = old })
-	sentinel := stubCoopExecSentinel(t)
+	agentDir, err := openWakeAgentDir(h.root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir), released)
 
-	if err := runCoopExec([]string{"--root", root, "--me", "claude", "claude"}); !errors.Is(err, sentinel) {
-		t.Fatalf("coop exec = %v, want the exec sentinel", err)
+	h.send("a", format.PriorityUrgent)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q before coop exec released the startup hold", h.injected)
 	}
-	if atStart != nil {
-		t.Fatalf("Startup marker when the wake started: %v", atStart)
+	_ = hold.Close()
+	<-released
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("full doorbells after the startup hold was released = %d, want 1", got)
 	}
 }
