@@ -14,22 +14,26 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type wakeConfig struct {
-	me                        string
-	root                      string
-	session                   string
-	injectCmd                 string
-	injectVia                 string // external command for injection (replaces TIOCSTI)
-	injectArgs                []string
-	wakeOwner                 *wakeOwner
-	settings                  wakeSettings                                    // live policy; replaced only by reloadSettings on the loop goroutine
-	injectViaHook             func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
-	strict                    bool
-	fallbackWarn              bool
-	injectMode                string // auto, raw, paste
+	me            string
+	root          string
+	session       string
+	injectCmd     string
+	injectVia     string // external command for injection (replaces TIOCSTI)
+	injectArgs    []string
+	wakeOwner     *wakeOwner
+	settings      wakeSettings                                    // live policy; replaced only by reloadSettings on the loop goroutine
+	injectViaHook func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
+	strict        bool
+	fallbackWarn  bool
+	injectMode    string // auto, raw, paste
+	// harness is the program the wake types into, as coop exec named it
+	// (--harness). Empty for a bare amq wake, which guesses from the handle.
+	harness                   string
 	requestedInjectMode       string
 	retryUntil                string
 	legacyTIOCSTIDemoted      bool
@@ -1591,7 +1595,7 @@ func effectiveInjectMode(cfg *wakeConfig) string {
 		// Enter swallowing in some CLIs. Paste mode remains available via flag.
 		// Claude Code's Ink framework has buggy bracketed paste handling where CR gets
 		// coalesced with the paste-end sequence and swallowed by the input parser.
-		if wakeUsesAlternateScreenTUI(cfg.me) {
+		if wakeUsesAlternateScreenTUI(cfg) {
 			mode = wakeInjectModeRaw
 		} else {
 			mode = wakeInjectModePaste
@@ -1600,9 +1604,20 @@ func effectiveInjectMode(cfg *wakeConfig) string {
 	return mode
 }
 
-func wakeUsesAlternateScreenTUI(me string) bool {
-	meLower := strings.ToLower(me)
-	return strings.Contains(meLower, "claude") || strings.Contains(meLower, "codex")
+// wakeUsesAlternateScreenTUI reports whether the wake types into Claude Code
+// or Codex, whose Ink composer drops a pasted Enter and owns the screen.
+func wakeUsesAlternateScreenTUI(cfg *wakeConfig) bool {
+	return wakeTypesInto(cfg, launch.ClaudeProvider) || wakeTypesInto(cfg, launch.CodexProvider)
+}
+
+// wakeTypesInto reports whether the wake types into harness: the one coop
+// exec named, or, for a bare amq wake with no --harness, a handle that
+// contains the harness name.
+func wakeTypesInto(cfg *wakeConfig, harness string) bool {
+	if cfg.harness != "" {
+		return cfg.harness == harness
+	}
+	return strings.Contains(strings.ToLower(cfg.me), harness)
 }
 
 func normalizeWakeInjectMode(raw string) (string, error) {
@@ -2131,8 +2146,8 @@ func writePendingWakeInputChunk(
 // CSI-u Enter ESC[13u) can be split by reader scheduling — and a reader that
 // sees a lone ESC parses the Escape key, which cancels an active codex turn
 // and leaves the sequence tail as literal composer text.
-func rawSubmitPrelude(me string) string {
-	if strings.Contains(strings.ToLower(me), "codex") {
+func rawSubmitPrelude(cfg *wakeConfig) string {
+	if wakeTypesInto(cfg, launch.CodexProvider) {
 		return "\n"
 	}
 	return ""
@@ -2307,14 +2322,14 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain timeout after %s; injecting submit key anyway\n", waited)
 				}
 			}
-			if rawSubmitPrelude(cfg.me) != "" {
+			if rawSubmitPrelude(cfg) != "" {
 				state.phase = wakeInputRawPreludePending
 			} else {
 				state.phase = wakeInputPrimarySubmitPending
 			}
 
 		case wakeInputRawPreludePending:
-			prelude := rawSubmitPrelude(cfg.me)
+			prelude := rawSubmitPrelude(cfg)
 			if prelude == "" {
 				state.phase = wakeInputPrimarySubmitPending
 				continue

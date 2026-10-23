@@ -48,7 +48,7 @@ func (err *wakeAttentionDeliveryError) Unwrap() error {
 func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
 	if cfg != nil &&
 		wakeDiagnosticIsTerminal(cfg) &&
-		wakeUsesAlternateScreenTUI(cfg.me) {
+		wakeUsesAlternateScreenTUI(cfg) {
 		return nil
 	}
 	return writeStderr(format, args...)
@@ -66,7 +66,7 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // terminal rendered them or that a person observed them.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	isTerminal := wakeAttentionIsTerminal(cfg)
-	writePlainOutput := !isTerminal || cfg == nil || !wakeUsesAlternateScreenTUI(cfg.me)
+	writePlainOutput := !isTerminal || cfg == nil || !wakeUsesAlternateScreenTUI(cfg)
 	var effects []string
 	if writePlainOutput {
 		effects = append(effects, wakeAttentionEffectOutput)

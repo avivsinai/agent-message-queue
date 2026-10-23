@@ -181,6 +181,7 @@ var wakeSettingDefs = []wakeSettingDef{
 // identity or transport. amq wake config refuses them.
 var wakeRestartOnlyFlags = []string{
 	"inject-mode",
+	"harness",
 	"inject-via",
 	"inject-arg",
 	"inject-cmd",
