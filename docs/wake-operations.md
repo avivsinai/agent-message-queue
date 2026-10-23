@@ -31,12 +31,12 @@ executable action or a safe operator diagnostic. Missing evidence is JSON
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
-The co-op Stop hook (`scripts/amq-stop-hook.sh`) blocks a stop only for mail
-no wake will ring for. With no live wake, every pending message counts. Under a
+The co-op Stop hook (`amq coop hook stop`, installed by `amq coop install-hooks`)
+blocks a stop only for mail no wake will ring for. With no live wake, every pending message counts. Under a
 live wake, only mail created at or before `baseline_at` counts, because a wake
 started with `--baseline-existing` never rings for that cohort. Every message
 counts when a live wake has no `baseline_at` yet (its baseline is not done) or
-when the probe fails or takes more than 2 seconds. A live wake that is demoted
+when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
 
@@ -161,19 +161,21 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   or the home directory) for the directory or an ancestor inside its Git
   checkout, and Codex's `config.toml` `[projects]` for the directory or its
   Git trust root (a directory outside any checkout asks nothing in Codex).
-  Once the launch owns the agent's wake, coop exec writes a `Startup` marker
-  that names the harness and directory when the harness has not recorded
-  that it trusts the directory, including a Codex directory saved as
-  untrusted, which opens on a restricted dialog. Otherwise it removes a
-  `Startup` marker an earlier launch left. A trust file AMQ cannot read
-  writes no marker. The `SessionStart` close removes the marker when the
+  After the wake lock check passes and before the wake process starts, coop
+  exec writes a `Startup` marker that names the harness and directory when
+  the harness has not recorded that it trusts the directory, including a
+  Codex directory saved as untrusted, which opens on a restricted dialog. A
+  launch that owns the wake and shows no dialog removes a `Startup` marker
+  an earlier launch left. A trust file AMQ cannot read writes no marker. The `SessionStart` close removes the marker when the
   hook is installed. Without the hook, the wake reads the trust file again
   on each recheck while the marker exists and treats the marker as closed
   only once the harness records that it trusts the directory, so the
   doorbell rings within 2 seconds of acceptance. A trust file that becomes
-  unreadable keeps the hold. A Codex directory that stays untrusted holds
-  the doorbell until a `SessionStart` close, with attention output after 10
-  minutes.
+  unreadable keeps the hold. Codex records no decision for a directory the
+  person keeps untrusted, so that hold stays until the Codex `SessionStart`
+  close of `amq wake install-dialog-hook --harness codex`; without that hook
+  the marker ages as above (input held, attention output after 10 minutes),
+  and `amq doctor --ops` names the remedy.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the

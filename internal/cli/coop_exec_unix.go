@@ -26,6 +26,9 @@ func killWakeHelperProcessWithHandle(proc *os.Process) error { return killWakePr
 
 var coopExecProcess = syscall.Exec
 
+// startCoopWake starts the coop wake helper process.
+var startCoopWake = (*exec.Cmd).Start
+
 func openCoopWakeTTY() (*os.File, error) {
 	return os.OpenFile("/dev/tty", os.O_WRONLY|unix.O_CLOEXEC, 0)
 }
@@ -205,6 +208,11 @@ func runCoopExec(args []string) error {
 			return fmt.Errorf("capture exact coop wake owner: %w", ownerErr)
 		}
 		c.earlyOwner = &captured
+		// Before the wake can admit any input: a doorbell typed before the
+		// harness starts waits in the terminal and answers its trust dialog.
+		// prepareCoopWakeLock has refused a live other owner; a launch that
+		// then loses the race leaves a marker that only holds.
+		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 		readyPath, cleanupReady, readyErr := newWakeReadyFile()
 		if readyErr != nil {
 			inspection := inspectWakeLock(c.root, c.agentHandle)
@@ -254,11 +262,10 @@ func runCoopExec(args []string) error {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
 	}
-	// Only once this launch owns the agent's wake: a launch refused for
-	// another live owner must not touch that owner's marker. The harness may
-	// open on its trust dialog.
+	// Removing a leftover Startup marker could shorten another launch's
+	// hold, so only a launch that owns the agent's wake does it.
 	if c.wakeOwned {
-		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 	}
 
 	return c.execAgent()
@@ -348,6 +355,9 @@ func (c *coopExecRun) validateFlags() error {
 		if err := refuseCodexSeatArgs(c.cmdName, c.agentArgs); err != nil {
 			return err
 		}
+	}
+	if err := refuseCodexIncludePolicy(c.cmdName, c.agentArgs); err != nil {
+		return err
 	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
@@ -719,7 +729,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 		); setupErr != nil {
 			return setupErr
 		}
-	} else if err := wakeCmd.Start(); err != nil {
+	} else if err := startCoopWake(wakeCmd); err != nil {
 		var closeErr error
 		if c.wakeChildCapability != nil {
 			closeErr = c.wakeChildCapability.Close()

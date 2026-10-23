@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -50,6 +51,15 @@ func TestCodexSeatRefusesArgsThatDropItsIdentity(t *testing.T) {
 	other := []string{"-m", "gpt", "-c", `shell_environment_policy.set.AM_ME="other"`}
 	if err := refuseCodexSeatArgs("codex", other); GetExitCode(err) != ExitUsage {
 		t.Fatalf("identity override error = %v, want usage", err)
+	}
+	// #1176 review: include_only runs after set and dropped the identity.
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("[shell_environment_policy]\ninclude_only = [\"PATH\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseCodexIncludePolicy("codex", nil); GetExitCode(err) != ExitUsage {
+		t.Fatalf("include_only without AM_* error = %v, want usage", err)
 	}
 }
 

@@ -3,7 +3,9 @@
 package cli
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -74,9 +76,27 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 		t.Fatalf("full doorbells after trust was recorded = %d, want 1", got)
 	}
 	// The next launch in the trusted checkout removes the leftover marker.
-	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
+	clearStaleStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
 		t.Fatalf("Startup marker left after a launch with no dialog: %v", err)
+	}
+
+	// #1180 ruling: a directory that stays untrusted has no readiness
+	// signal without the Codex SessionStart hook; after 10 minutes the
+	// existing aging applies: input still held, attention output instead.
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
+	if err := os.Chtimes(marker, h.now, h.now); err != nil {
+		t.Fatal(err)
+	}
+	rang := len(h.injected)
+	h.send("b", format.PriorityUrgent)
+	h.advance(wakeDialogQuietHold)
+	h.scan(h.cfg)
+	if len(h.injected) != rang || h.cfg.dialogHold != wakeDialogUnknown {
+		t.Fatalf("aged untrusted hold: injected %q, dialog state %v; want held with attention", h.injected[rang:], h.cfg.dialogHold)
 	}
 }
 
@@ -119,5 +139,42 @@ func TestRefusedCoopLaunchKeepsTheLiveOwnersStartupMarker(t *testing.T) {
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != string(owners) {
 		t.Fatalf("live owner's Startup marker = %q, %v; want it unchanged", got, err)
+	}
+}
+
+// #1180 review: coop exec wrote the Startup marker only after its wake was
+// ready, so a message that arrived in between was typed into the terminal,
+// waited there, and answered the trust dialog when the harness started.
+// The marker now exists before the wake process starts.
+func TestStartupMarkerExistsBeforeTheWakeStarts(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"projects":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(secureTempDirForTest(t))
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root := secureTempDirForTest(t)
+	marker := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
+	atStart := errors.New("wake never started")
+	old := startCoopWake
+	startCoopWake = func(*exec.Cmd) error {
+		_, atStart = os.Lstat(marker)
+		return errors.New("stub: no wake")
+	}
+	t.Cleanup(func() { startCoopWake = old })
+	sentinel := stubCoopExecSentinel(t)
+
+	if err := runCoopExec([]string{"--root", root, "--me", "claude", "claude"}); !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec = %v, want the exec sentinel", err)
+	}
+	if atStart != nil {
+		t.Fatalf("Startup marker when the wake started: %v", atStart)
 	}
 }
