@@ -227,6 +227,30 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 		!strings.Contains(hold.Release, "install-dialog-hook --harness codex") {
 		t.Fatalf("startup hold = %#v", hold)
 	}
+
+	// #1180 review: wake check reported a marker as held after Codex had
+	// recorded trust and the wake had released input.
+	project := secureTempDirForTest(t)
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(trusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accepted := `{"schema":1,"event":"Startup","harness":"codex","cwd":"` + real + `","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(marker, []byte(accepted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hold := inspectWakeStartupHold(root, "codex", time.Now()); hold != nil {
+		t.Fatalf("startup hold after trust was recorded = %#v, want none", hold)
+	}
 }
 
 // #1180 review: a wake restart or self-upgrade during the trust dialog
@@ -276,4 +300,49 @@ func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
 	}
 	_ = hold.Close()
 	<-released
+}
+
+// #1190 review: a remover read the marker, compared it, then unlinked
+// whatever was there, so a writer that replaced the marker in between lost
+// its hold. Replacement and conditional removal now share one lock.
+func TestMarkerReplacedDuringARemovalSurvives(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "agy"); err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, "agy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	marker := filepath.Join(fsq.AgentBase(root, "agy"), wakeDialogFileName)
+	if err := os.WriteFile(marker, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newer := []byte(`{"schema":1,"event":"PermissionRequest","opened_at":"x"}` + "\n")
+	replaced := make(chan struct{})
+	err = agentDir.withFD(func(dirfd int) error {
+		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+			// Another writer replaces the marker between the compare and
+			// the unlink.
+			go func() {
+				defer close(replaced)
+				_ = agentDir.withFD(func(dirfd int) error {
+					return replaceWakeDialogMarkerAt(dirfd, agentDir, newer)
+				})
+			}()
+			select {
+			case <-replaced:
+			case <-time.After(200 * time.Millisecond):
+			}
+			return string(current) == "mine\n"
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-replaced
+	if got, err := os.ReadFile(marker); err != nil || string(got) != string(newer) {
+		t.Fatalf("marker after a replacement during removal = %q, %v; want the newer marker", got, err)
+	}
 }
