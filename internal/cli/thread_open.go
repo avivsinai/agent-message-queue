@@ -325,7 +325,7 @@ type record struct {
 // order, then id.
 //
 // Every header is classified from headers alone before the pass: its direct
-// parent, and the recipients it opens an obligation for. Openers open at
+// parent and whether its lineage reaches a root. Openers open at
 // their own created time, so no opener waits for its parent. A message
 // without refs that opens nothing is matched against the obligations open
 // at that moment (rule 5). A message with refs acts on its parent's lineage
@@ -398,7 +398,6 @@ func (red *obligationReducer) run() {
 	}
 	for _, rec := range red.order {
 		red.classifyLineage(rec, map[*record]bool{})
-		rec.opens = opensFor(rec)
 	}
 
 	for _, rec := range red.order {
@@ -412,6 +411,7 @@ func (red *obligationReducer) run() {
 			red.unresolved = append(red.unresolved, *rec.unresolved)
 			continue
 		}
+		rec.opens = opensFor(rec)
 		if len(msg.Refs) == 0 {
 			if len(rec.opens) > 0 {
 				red.settle(rec, red.open(rec))
@@ -526,13 +526,11 @@ func (red *obligationReducer) lookup(id string, from *record) *record {
 	return rec
 }
 
-// opensFor lists the recipients a message opens an obligation for, from
-// headers alone. Only an opener kind without a closing label opens. A
-// message in the kind reply would default to continues the parent's
-// obligation for a recipient only when the sender and that recipient are
-// the two parties of one pair of the parent: its sender and one of its
-// recipients, by exact participant. Any other recipient gets an
-// obligation of their own.
+// opensFor lists the recipients a message opens an obligation for. Only an
+// opener kind without a closing label opens. A message in the kind reply
+// would default to continues an obligation in its parent's lineage for a
+// recipient when the sender and that recipient are that obligation's two
+// parties; any other recipient gets an obligation of their own.
 func opensFor(rec *record) []string {
 	msg := rec.entry
 	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
@@ -540,26 +538,40 @@ func opensFor(rec *record) []string {
 	}
 	p := rec.parent
 	continuation := p != nil && msg.Kind == defaultReplyKind(p.entry.Kind)
-	var parentRecipients []participant
-	if continuation {
-		for _, handle := range p.entry.To {
-			if r, ok := recipientOf(p, handle); ok {
-				parentRecipients = append(parentRecipients, r)
-			}
-		}
-	}
 	opens := []string{}
 	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
 		if continuation {
-			if r, ok := recipientOf(rec, handle); ok &&
-				((rec.sender == p.sender && slices.Contains(parentRecipients, r)) ||
-					(r == p.sender && slices.Contains(parentRecipients, rec.sender))) {
+			if r, ok := recipientOf(rec, handle); ok && continuesPair(rec, r) {
 				continue
 			}
 		}
 		opens = append(opens, handle)
 	}
 	return opens
+}
+
+// continuesPair reports whether rec, sent to recipient r, continues an
+// obligation of its parent's lineage between the same two parties. While
+// the parent's lineage is not settled yet (its timestamp is later), the
+// parent header's pairs stand in for it: its sender and each recipient.
+func continuesPair(rec *record, r participant) bool {
+	p := rec.parent
+	if p.ready {
+		for _, ob := range p.lineage {
+			owner, requester := roleOf(ob, rec.sender, true)
+			if (owner || requester) && otherParty(ob, owner) == r {
+				return true
+			}
+		}
+		return false
+	}
+	for _, handle := range p.entry.To {
+		if pr, ok := recipientOf(p, handle); ok &&
+			((rec.sender == p.sender && r == pr) || (r == p.sender && rec.sender == pr)) {
+			return true
+		}
+	}
+	return false
 }
 
 // actWithoutRefs links a message without refs to the one obligation open at

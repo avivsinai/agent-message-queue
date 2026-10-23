@@ -351,6 +351,29 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
+			// #1166 code review: continuation was matched against the parent
+			// header, so alpha, a recipient of r but not a party of r's own
+			// obligation (gamma owes beta), could not ask beta for new work.
+			name: "continuation follows the parent's lineage, not its header",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "r", from: "beta@s1", to: "alpha@s1,gamma@s1", kind: format.KindTodo, refs: []string{"m"}},
+				{name: "s", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"r"}},
+			},
+			want: []string{"s1/m/beta acknowledged agent", "s1/r/gamma pending agent", "s1/s/beta pending agent"},
+		},
+		{
+			// #1166 code review: a terminal delegation has an empty lineage,
+			// so a same-kind reply to it is a new request, not a continuation.
+			name: "reply to an empty-lineage delegation opens new work",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "r", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, labels: []string{"done"}, refs: []string{"m"}},
+				{name: "s", from: "gamma@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"r"}},
+			},
+			want: []string{"s1/m/beta acknowledged agent", "s1/s/beta pending agent"},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
