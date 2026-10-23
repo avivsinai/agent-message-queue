@@ -150,6 +150,22 @@ test("an open extension prompt holds the wake doorbell until it ends", async () 
 	await h.done();
 });
 
+// #1199 review: pi awaits each extension's handler separately, so the end
+// of prompt A can reach this extension after prompt B started; it must not
+// remove B's marker.
+test("a late end of one prompt keeps the next prompt's hold", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "select" });
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm" });
+	assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).kind, "select");
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "select" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
 // Bead agent-message-queue-vd4.6: pi's own "Trust project folder?" prompt
 // opens before the session starts; the marker holds the doorbell until the
 // answer lets the session start.

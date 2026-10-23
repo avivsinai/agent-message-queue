@@ -89,14 +89,27 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	// question is answered, so session_start closes it. A session boundary
 	// also clears the marker, so one left by a crash does not hold the next
 	// session.
+	// pi awaits each extension's handler separately, so this extension can
+	// see a prompt's end after the next prompt's start. Each prompt's marker
+	// carries its own token; an end, matched to the oldest open start,
+	// removes the marker only while it still holds that prompt's token.
+	const promptTokens: string[] = [];
 	pi.on("project_trust", () => {
-		openWakeDialog(WAKE_DIALOG_TRUST, "select");
+		openWakeDialog(WAKE_DIALOG_TRUST, "select", randomUUID());
 		return { trusted: "undecided" };
 	});
-	pi.on("ui_prompt_start", (event) => openWakeDialog(WAKE_DIALOG_PROMPT, event.kind));
-	pi.on("ui_prompt_end", () => closeWakeDialog());
+	pi.on("ui_prompt_start", (event) => {
+		const token = randomUUID();
+		promptTokens.push(token);
+		openWakeDialog(WAKE_DIALOG_PROMPT, event.kind, token);
+	});
+	pi.on("ui_prompt_end", () => {
+		const token = promptTokens.shift();
+		if (token) closeWakeDialog(token);
+	});
 
 	pi.on("session_start", (_event, ctx) => {
+		promptTokens.length = 0;
 		closeWakeDialog();
 		stop(bridge, "restart");
 		bridge = start(pi, ctx);
@@ -104,6 +117,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (event) => {
+		promptTokens.length = 0;
 		closeWakeDialog();
 		stop(bridge, event.reason);
 		bridge = null;
@@ -706,7 +720,7 @@ function wakeAgentDir(): string {
 
 // openWakeDialog installs the marker by an exclusive temp file and a rename,
 // without fsync: the marker is advisory, and the prompt is rendering.
-function openWakeDialog(event: string, kind: string): void {
+function openWakeDialog(event: string, kind: string, token: string): void {
 	const dir = wakeAgentDir();
 	if (!dir) return;
 	const marker = {
@@ -714,6 +728,7 @@ function openWakeDialog(event: string, kind: string): void {
 		event,
 		harness: "pi",
 		kind,
+		token,
 		opened_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
 	};
 	const temp = path.join(dir, `.wake.dialog.tmp.${process.pid}.${randomUUID()}`);
@@ -729,15 +744,16 @@ function openWakeDialog(event: string, kind: string): void {
 	}
 }
 
-// closeWakeDialog removes the marker only when this extension wrote it, so
-// a marker another writer installed keeps holding.
-function closeWakeDialog(): void {
+// closeWakeDialog removes the marker only when this extension wrote it, and
+// with token only when the marker still holds that prompt's token.
+function closeWakeDialog(token?: string): void {
 	const dir = wakeAgentDir();
 	if (!dir) return;
 	const file = path.join(dir, WAKE_DIALOG);
 	try {
-		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string };
-		if ((marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi") fs.unlinkSync(file);
+		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string; token?: string };
+		const ours = (marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi";
+		if (ours && (token === undefined || marker.token === token)) fs.unlinkSync(file);
 	} catch {
 		// No marker, or one this extension did not write.
 	}
