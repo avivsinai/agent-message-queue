@@ -96,6 +96,12 @@ type coopExecRun struct {
 	cleanupWakeReady             func()
 	retainWakeHelperClaim        func()
 	cleanupWakeHelper            func(preservePersistedClaim bool) error
+	// wakeOwned is true once this launch's wake is ready and its claim is
+	// validated as this process's.
+	wakeOwned bool
+	// wakeStartupHold is the parent end of the wake's startup hold; closing
+	// it lets the wake admit input.
+	wakeStartupHold *os.File
 }
 
 func runCoopExec(args []string) error {
@@ -241,7 +247,15 @@ func runCoopExec(args []string) error {
 			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
 				return fmt.Errorf("attach isolated coop wake attention: %w", err)
 			}
-			if err := c.superviseWakeHelper(wakeCmd, readyPath); err != nil {
+			hold, childEnd, err := attachWakeStartupHold(wakeCmd)
+			if err != nil {
+				return fmt.Errorf("attach coop wake startup hold: %w", err)
+			}
+			c.wakeStartupHold = hold
+			defer func() { _ = hold.Close() }()
+			err = c.superviseWakeHelper(wakeCmd, readyPath)
+			_ = childEnd.Close()
+			if err != nil {
 				return err
 			}
 		}
@@ -250,6 +264,18 @@ func runCoopExec(args []string) error {
 		if err := c.managedGuard.Close(); err != nil {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
+	}
+	// The marker changes only once this launch's wake holds the agent's wake
+	// lock, so a launch that loses the race touches no other owner's hold.
+	// That wake admits no input until the startup hold is released below,
+	// so no doorbell is typed before the marker exists: one typed before the
+	// harness starts would wait in the terminal and answer its trust dialog.
+	if c.wakeOwned {
+		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+	}
+	if c.wakeStartupHold != nil {
+		_ = c.wakeStartupHold.Close()
 	}
 
 	return c.execAgent()
@@ -811,6 +837,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 			} else {
 				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, c.wakeProc.Pid))
 			}
+			c.wakeOwned = true
 		}
 	}
 	return nil

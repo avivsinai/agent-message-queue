@@ -57,13 +57,15 @@ type wakeDialogHookInput struct {
 	TurnID string `json:"turn_id"`
 }
 
-// wakeDialogMarker is the .wake.dialog content. The wake uses only the
-// file's presence and mtime; tool_use_id scopes a PostToolUse close and the
+// wakeDialogMarker is the .wake.dialog content. The wake uses the file's
+// presence and mtime, and for a Startup marker its harness and cwd
+// (startupDialogClosed); tool_use_id scopes a PostToolUse close and the
 // rest is for diagnosis.
 type wakeDialogMarker struct {
 	Schema    int    `json:"schema"`
 	Event     string `json:"event,omitempty"`
 	Harness   string `json:"harness,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
@@ -74,17 +76,21 @@ type wakeDialogMarker struct {
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
 // through the canonical agent directory; a detached directory cannot show
-// the hook's marker, so it reads as unknown, never as closed.
+// the hook's marker, so it reads as unknown, never as closed. A Startup
+// marker reads as closed once the harness has recorded its trust decision,
+// so the doorbell rings without a SessionStart hook.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
+	var startup startupDialogCache
 	return func(now time.Time) (wakeDialogState, error) {
 		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
 			return wakeDialogUnknown, err
 		}
+		var raw []byte
 		var info os.FileInfo
 		var exists bool
 		var readErr error
 		if err := agentDir.withFD(func(dirfd int) error {
-			_, info, exists, readErr = readWakeRepairMetadataAt(
+			raw, info, exists, readErr = readWakeRepairMetadataAt(
 				dirfd,
 				wakeDialogFileName,
 				"wake dialog marker",
@@ -94,6 +100,9 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 			return nil
 		}); err != nil {
 			return wakeDialogUnknown, err
+		}
+		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
+			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
 		if info != nil {
@@ -251,21 +260,50 @@ func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) e
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close %s temp: %w", label, err)
 	}
-	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
+	if err := withWakeDialogMarkerLock(dirfd, func() error {
+		if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
+			return err
+		}
+		if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
+			return fmt.Errorf("install %s: %w", label, err)
+		}
+		tempPresent = false
+		return nil
+	}); err != nil {
 		return err
 	}
-	if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
-		return fmt.Errorf("install %s: %w", label, err)
-	}
-	tempPresent = false
 	return nil
 }
 
-// clearWakeDialogMarker removes the marker. With toolUseID (PostToolUse) it
-// removes only the marker that tool call opened; a permission marker carries
-// no tool_use_id and waits for a turn-level clear.
-func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) error {
-	if toolUseID != "" {
+// wakeDialogLockFileName serializes every change of the dialog marker.
+const wakeDialogLockFileName = ".wake.dialog.lock"
+
+// withWakeDialogMarkerLock runs fn holding the marker lock, so a
+// replacement and a conditional removal never interleave: a writer cannot
+// replace the marker between a remover's read and its unlink. The wake
+// only reads the marker and takes no lock.
+func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
+	fd, err := unix.Openat(dirfd, wakeDialogLockFileName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open wake dialog marker lock: %w", err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("lock wake dialog marker: %w", err)
+	}
+	return fn()
+}
+
+// removeWakeDialogMarkerIf removes the marker when remove accepts its
+// current bytes, under the marker lock.
+func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(current []byte) bool) error {
+	return withWakeDialogMarkerLock(dirfd, func() error {
 		raw, _, exists, err := readWakeRepairMetadataAt(
 			dirfd,
 			wakeDialogFileName,
@@ -273,18 +311,27 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) 
 			filepath.Join(agentDir.path, wakeDialogFileName),
 			maxWakeMetadataFileBytes,
 		)
-		if err != nil || !exists {
+		if err != nil || !exists || !remove(raw) {
 			return err
 		}
-		var marker wakeDialogMarker
-		if json.Unmarshal(raw, &marker) != nil || marker.ToolUseID != toolUseID {
-			return nil
+		if err := wakeUnlinkAt(dirfd, wakeDialogFileName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return err
 		}
-	}
-	if err := wakeUnlinkAt(dirfd, wakeDialogFileName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-		return err
-	}
-	return nil
+		return nil
+	})
+}
+
+// clearWakeDialogMarker removes the marker. With toolUseID (PostToolUse) it
+// removes only the marker that tool call opened; a permission marker carries
+// no tool_use_id and waits for a turn-level clear.
+func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) error {
+	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
+		if toolUseID == "" {
+			return true
+		}
+		var marker wakeDialogMarker
+		return json.Unmarshal(raw, &marker) == nil && marker.ToolUseID == toolUseID
+	})
 }
 
 // wakeDialogHookCommand is the shell command one hook runs: the marker, a

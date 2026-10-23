@@ -154,8 +154,34 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   it blocks a delivery attempt, the wake adds attention output (title, bell,
   desktop notice) on the attention cadence instead of waiting silently.
 
-The guard does not cover dialogs without a hook: the workspace trust dialog,
-MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
+- **Startup trust dialog.** Claude Code and Codex ask whether to trust a
+  new directory before the session starts, and Enter at that dialog ends the
+  session. Before it execs either harness, `amq coop exec` reads where the
+  harness records trust: Claude Code's `.claude.json` (in `CLAUDE_CONFIG_DIR`
+  or the home directory) for the directory or an ancestor inside its Git
+  checkout, and Codex's `config.toml` `[projects]` for the directory or its
+  Git trust root (a directory outside any checkout asks nothing in Codex).
+  Once its wake holds the agent's wake lock, coop exec writes a `Startup`
+  marker that names the harness and directory when the harness has not
+  recorded that it trusts the directory, including a Codex directory saved
+  as untrusted, which opens on a restricted dialog. When the harness shows
+  no dialog, it removes a `Startup` marker an earlier launch left. A trust
+  file AMQ cannot read writes no marker. Until coop exec has done this, its
+  wake types nothing: coop exec passes the wake a startup-hold pipe and
+  closes it afterwards, and exec or exit closes it too. The `SessionStart` close removes the marker when the
+  hook is installed. Without the hook, the wake reads the trust file again
+  on each recheck while the marker exists and treats the marker as closed
+  only once the harness records that it trusts the directory, so the
+  doorbell rings within 2 seconds of acceptance. A trust file that becomes
+  unreadable keeps the hold. Codex records no decision for a directory the
+  person keeps untrusted, so that hold stays until the Codex `SessionStart`
+  close of `amq wake install-dialog-hook --harness codex`; without that hook
+  the marker ages as above (input held, attention output after 10 minutes),
+  and `amq doctor --ops` names the remedy. `amq wake check` reports an open
+  `Startup` marker as `startup_hold`: the harness, the directory, how long it
+  has been open, and what releases it.
+
+The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the
 terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
 must write no terminal input at all.

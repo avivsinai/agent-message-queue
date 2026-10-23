@@ -1860,6 +1860,7 @@ type wakeStart struct {
 	restartSignals       chan os.Signal
 	privateStop          <-chan struct{}
 	attention            *os.File
+	startupHold          <-chan struct{}
 	repairHandoff        *wakeRepairChildHandoff
 	repairHandoffPresent bool
 
@@ -2083,6 +2084,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}
 	defer cleanupPrivateStop()
 	s.attention, err = wakeAttentionFromEnv()
+	if err != nil {
+		return err
+	}
+	s.startupHold, err = wakeStartupHoldFromEnv()
 	if err != nil {
 		return err
 	}
@@ -2857,7 +2862,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		dialogSource:            wakeDialogSourceInDir(activeAgentDir),
+		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir), s.startupHold),
 		settingsObserved:        startupSettings.observed,
 		machineSettingsSource:   readMachineWakeSettings,
 		machineSettingsObserved: startupSettings.machineObserved,
