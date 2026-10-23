@@ -377,8 +377,26 @@ func TestPiPlansMintAndResumeExactSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fresh.Argv, []string{executable, "--session-id", testLaunchNonce}) || fresh.ConversationID != testLaunchNonce {
+	if !reflect.DeepEqual(fresh.Argv, []string{executable, "--session-id", fresh.ConversationID}) || !validUUID(fresh.ConversationID) {
 		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	// #1188 review: two pi seats of one launch in one cwd got the same
+	// --session-id (the shared launch nonce), so they shared a pi session.
+	other := request
+	other.Handle = "pi-two"
+	second, err := adapter.PlanFresh(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ConversationID == fresh.ConversationID || second.ConversationID == testLaunchNonce {
+		t.Fatalf("seats share session id %s", second.ConversationID)
+	}
+	// #1188 review: pi reads an argument that begins with @ as a file to
+	// attach, so such initial input is refused.
+	attach := request
+	attach.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: "@secret.txt", SHA256: initialInputDigest("@secret.txt")}
+	if _, err := adapter.PlanFresh(attach); err == nil {
+		t.Fatal("initial input @secret.txt was planned as a pi attachment")
 	}
 	resume, err := adapter.PlanResume(ResumeRequest{
 		PlanRequest:  request,

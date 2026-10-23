@@ -2,6 +2,8 @@ package launch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -64,20 +66,27 @@ func (adapter *PiAdapter) Capabilities(ctx context.Context) AdapterCapabilities 
 	return result
 }
 
-// PlanFresh mints the session ID from the launch nonce. pi persists the
+// PlanFresh mints a session ID for this seat from the launch nonce and the
+// handle, so seats of one launch never share a pi session. pi persists the
 // session only after its first turn.
 func (adapter *PiAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	executable, err := validatePlanRequest(request, adapter.executable, PiProvider, piEnvRules(), piArgRules(), piBypassArgs())
 	if err != nil {
 		return AgentPlan{}, err
 	}
+	// pi reads an argument that begins with @ as a file to attach, so such
+	// initial input would not be the approved text.
+	if request.InitialInput != nil && strings.HasPrefix(request.InitialInput.Value, "@") {
+		return AgentPlan{}, fmt.Errorf("pi initial input must not begin with '@'")
+	}
+	sessionID := piSessionID(request.LaunchNonce, request.Handle)
 	argv := append([]string{executable}, request.CommittedArgs...)
-	argv = append(argv, "--session-id", request.LaunchNonce)
+	argv = append(argv, "--session-id", sessionID)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
 		AdapterMode: AdapterModeMint, ResumePolicy: request.ResumePolicy,
-		LaunchNonce: request.LaunchNonce, ConversationID: request.LaunchNonce,
-		DynamicArgv: []DynamicArg{{Index: len(argv) - 1, Kind: DynamicArgLaunchNonce}},
+		LaunchNonce: request.LaunchNonce, ConversationID: sessionID,
+		DynamicArgv: []DynamicArg{{Index: len(argv) - 1, Kind: DynamicArgConversationID}},
 	}
 	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
 		return AgentPlan{}, err
@@ -118,6 +127,17 @@ func (adapter *PiAdapter) PlanResume(request ResumeRequest) (AgentPlan, error) {
 
 func (adapter *PiAdapter) CaptureIdentity(CaptureRequest) CaptureResult {
 	return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonAdapterMintsIdentity}
+}
+
+// piSessionID derives a seat's session ID from the launch nonce and its
+// handle as an RFC 9562 version 8 UUID. It is stable for one launch
+// generation, so a recovered launch plans the same ID.
+func piSessionID(nonce, handle string) string {
+	sum := sha256.Sum256([]byte("amq-pi-session\x00" + nonce + "\x00" + handle))
+	sum[6] = sum[6]&0x0f | 0x80
+	sum[8] = sum[8]&0x3f | 0x80
+	id := hex.EncodeToString(sum[:16])
+	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
 }
 
 func piEnvRules() map[string]valueRule { return commonCommittedEnvRules() }

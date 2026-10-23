@@ -244,8 +244,8 @@ keeps one written by hand. A public intent cannot select `acp`.
 Each provider owns its conversation identity:
 
 - Claude Code and Grok Build mint session IDs from the launch nonce.
-- pi mints its session ID from the launch nonce with `--session-id <nonce>`
-  and resumes with `--session-id <id>` in the same cwd. pi treats that flag as
+- pi mints a session ID per seat, a UUID derived from the launch nonce and
+  the handle, passed as `--session-id <id>`, and resumes with `--session-id <id>` in the same cwd. pi treats that flag as
   an exact session ID: it reopens the session when it exists and creates it
   under the same ID when it does not, which is the case for a seat that never
   took a turn, because pi writes the session file only after the first turn.
@@ -254,7 +254,8 @@ Each provider owns its conversation identity:
   `internal/launch/adapter_pi.go`) or a non-release version is refused with
   `provider_version_unsupported`, and a pi whose `--help` does not list
   `--session-id` with `identity_flags_unsupported`. pi admits no provider
-  arguments.
+  arguments, and initial input that begins with `@` is refused, because pi
+  reads such an argument as a file to attach.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
   hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
   newer, verified through `codexCaptureVerifiedVersion`
