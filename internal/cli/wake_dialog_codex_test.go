@@ -228,6 +228,11 @@ func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
 	if err := os.WriteFile(path, []byte(async), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Trust the async definition as it is, so only the async check can refuse it.
+	if entries, err = readCodexHookEntries(path); err != nil {
+		t.Fatal(err)
+	}
+	writeState(current, "")
 	if check, _ := checkCodexDialogHook(); check.Status == "ok" || !strings.Contains(check.Message, "PermissionRequest") {
 		t.Errorf("async open: doctor = %+v, want a stale PermissionRequest", check)
 	}
