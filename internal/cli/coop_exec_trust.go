@@ -189,13 +189,10 @@ func clearStaleStartupDialogMarker(root, handle, binaryPath string, args []strin
 		if trust == startupTrustPending {
 			return nil
 		}
-		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
-			filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
-		var marker wakeDialogMarker
-		if err != nil || !exists || json.Unmarshal(current, &marker) != nil || marker.Event != wakeDialogStartupEvent {
-			return nil
-		}
-		return clearWakeDialogMarker(dirfd, agentDir, "")
+		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+			var marker wakeDialogMarker
+			return json.Unmarshal(current, &marker) == nil && marker.Event == wakeDialogStartupEvent
+		})
 	})
 }
 
@@ -267,14 +264,16 @@ func startupTrustFileStamp(harness string) string {
 	return fmt.Sprintf("%s\x00%d\x00%d", path, info.ModTime().UnixNano(), info.Size())
 }
 
-// codexStartupHoldHint reports an open Codex Startup marker for handle. Codex
+// codexStartupHoldHint reports a Codex Startup marker for handle that still
+// holds input (startupDialogClosed, as the wake decides). Codex
 // records no decision for a directory the person keeps untrusted, so
 // without the Codex dialog hook's SessionStart close that hold releases
 // only by aging: input held, attention output after wakeDialogQuietHold.
 func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName), maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
-	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Harness != launch.CodexProvider {
+	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Harness != launch.CodexProvider ||
+		startupDialogClosed(raw, &startupDialogCache{}) {
 		return opsHint{}, false
 	}
 	return opsHint{
@@ -373,8 +372,8 @@ func withWakeStartupHold(source func(time.Time) (wakeDialogState, error), releas
 	}
 }
 
-// inspectWakeStartupHold reads the agent's dialog marker, or nil when it is
-// not a Startup marker.
+// inspectWakeStartupHold reports the agent's Startup marker while it holds
+// input, or nil.
 func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHoldStatus {
 	path := filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName)
 	info, err := os.Lstat(path)
@@ -383,7 +382,9 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 	}
 	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
-	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent {
+	// The wake's own decision: a marker whose trust is recorded holds nothing.
+	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent ||
+		startupDialogClosed(raw, &startupDialogCache{}) {
 		return nil
 	}
 	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; input stays held, with attention output after %s",
