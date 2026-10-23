@@ -12,12 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/sys/unix"
 )
 
 // The Codex approval guard. Codex runs PermissionRequest just before it
@@ -145,15 +147,34 @@ func codexCallKey(tool string, input json.RawMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// writeCodexDialogMarker opens the hold for one approval prompt. A second
-// prompt replaces the key, so the first call's PostToolUse no longer
-// matches.
+// writeCodexDialogMarker opens the hold for one approval prompt. Codex can
+// ask for two parallel calls of one turn whose inputs hash the same (the
+// same command in two working directories: the hook input carries no
+// working directory), and each closes with its own PostToolUse. So a second
+// open in the same turn makes the marker ambiguous: no PostToolUse removes
+// it, and a turn or session event does. Opens and PostToolUse closes run
+// under the marker lock, so neither loses the other's update. Without the
+// lock the open writes an ambiguous marker, which only holds longer.
 func writeCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
-	raw, err := json.Marshal(wakeDialogMarker{
+	marker := wakeDialogMarker{
 		Schema: 1, Event: in.Event, Harness: "codex", Tool: in.Tool,
 		TurnID: in.TurnID, ToolInputSHA256: codexCallKey(in.Tool, in.ToolInput),
 		SessionID: in.SessionID, OpenedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	unlock, err := lockCodexDialogMarker(dirfd)
+	if err == nil {
+		defer unlock()
+		if current, exists, readErr := readCodexDialogMarker(dirfd, agentDir); readErr != nil ||
+			exists && (current.Harness != "codex" || current.TurnID == "" || current.TurnID == in.TurnID) {
+			marker.Ambiguous = true
+		}
+	} else {
+		marker.Ambiguous = true
+	}
+	if marker.Ambiguous {
+		marker.Tool, marker.ToolInputSHA256 = "", ""
+	}
+	raw, err := json.Marshal(marker)
 	if err != nil {
 		return err
 	}
@@ -161,27 +182,56 @@ func writeCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHook
 }
 
 // clearCodexDialogMarker removes the marker. A PostToolUse removes only the
-// marker of its own call; an unreadable marker or another key stays until a
-// turn or session event.
+// marker of its own call, under the marker lock; an ambiguous or unreadable
+// marker, or another call's, stays until a turn or session event.
 func clearCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	if in.Event == "PostToolUse" {
-		raw, _, exists, err := readWakeRepairMetadataAt(
-			dirfd,
-			wakeDialogFileName,
-			"wake dialog marker",
-			filepath.Join(agentDir.path, wakeDialogFileName),
-			maxWakeMetadataFileBytes,
-		)
-		if err != nil || !exists {
+		unlock, err := lockCodexDialogMarker(dirfd)
+		if err != nil {
 			return err
 		}
-		var marker wakeDialogMarker
-		if json.Unmarshal(raw, &marker) != nil || marker.Harness != "codex" || marker.TurnID == "" ||
+		defer unlock()
+		marker, exists, err := readCodexDialogMarker(dirfd, agentDir)
+		if err != nil || !exists || marker.Ambiguous || marker.Harness != "codex" || marker.TurnID == "" ||
 			marker.TurnID != in.TurnID || marker.Tool != in.Tool || marker.ToolInputSHA256 != codexCallKey(in.Tool, in.ToolInput) {
-			return nil
+			return err
 		}
 	}
 	return clearWakeDialogMarker(dirfd, agentDir, "")
+}
+
+// readCodexDialogMarker reads the marker; a marker that does not parse is an
+// error, which keeps the hold.
+func readCodexDialogMarker(dirfd int, agentDir *wakeAgentDir) (wakeDialogMarker, bool, error) {
+	var marker wakeDialogMarker
+	raw, _, exists, err := readWakeRepairMetadataAt(
+		dirfd,
+		wakeDialogFileName,
+		"wake dialog marker",
+		filepath.Join(agentDir.path, wakeDialogFileName),
+		maxWakeMetadataFileBytes,
+	)
+	if err != nil || !exists {
+		return marker, exists, err
+	}
+	return marker, true, json.Unmarshal(raw, &marker)
+}
+
+// codexDialogLockName is the marker lock in the agent directory. It is
+// never removed; the wake never takes it.
+const codexDialogLockName = ".wake.dialog.lock"
+
+// lockCodexDialogMarker takes the marker lock and returns its release.
+func lockCodexDialogMarker(dirfd int) (func(), error) {
+	fd, err := unix.Openat(dirfd, codexDialogLockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return func() { _ = unix.Close(fd) }, nil
 }
 
 // codexHooksPath is the user hooks file Codex reads: $CODEX_HOME/hooks.json.
@@ -235,8 +285,9 @@ var codexRequirementsPath = "/etc/codex/requirements.toml"
 
 // checkCodexDialogHook reports, read only, why the Codex approval guard
 // would not run: user hooks turned off, entries missing, a missing binary or
-// stale form, or entries Codex does not trust yet. It reads the user layer
-// and the system requirements only.
+// a stale form (command, matcher or timeout), or entries Codex skips: not
+// trusted as they are now, or disabled in /hooks. It reads the user layer and
+// the system requirements only.
 func checkCodexDialogHook() (doctorCheck, bool) {
 	path, err := codexHooksPath()
 	if err != nil {
@@ -252,6 +303,7 @@ func checkCodexDialogHook() (doctorCheck, bool) {
 		Hooks    struct {
 			State map[string]struct {
 				TrustedHash string `toml:"trusted_hash"`
+				Enabled     *bool  `toml:"enabled"`
 			} `toml:"state"`
 		} `toml:"hooks"`
 	}
@@ -273,56 +325,53 @@ func checkCodexDialogHook() (doctorCheck, bool) {
 	if err != nil {
 		return doctorCheck{}, false
 	}
-	var missing []string
-	installed := 0
-	for _, event := range codexDialogHookEvents {
-		found, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
-		if err != nil {
-			check.Message = fmt.Sprintf("read %s: %v", path, err)
-			return check, true
-		}
-		if len(found) == 0 {
-			missing = append(missing, event)
-		}
-		for _, command := range found {
-			installed++
-			match := codexDialogHookBinRe.FindStringSubmatch(command)
-			if match == nil {
-				check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook --harness codex", event)
-				return check, true
-			}
-			bin := strings.ReplaceAll(match[1], `'\''`, `'`)
-			if _, err := os.Stat(bin); err != nil {
-				check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook --harness codex", bin)
-				return check, true
-			}
-			verb := "close"
-			if event == "PermissionRequest" {
-				verb = "open"
-			}
-			if command != codexDialogHookCommand(bin, store, verb) {
-				check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook --harness codex", event)
-				return check, true
-			}
-		}
-	}
-	switch {
-	case installed == 0:
-		check.Message = "not installed: a wake doorbell can answer a Codex approval prompt; remedy: amq wake install-dialog-hook --harness codex"
-		return check, true
-	case len(missing) > 0:
-		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook --harness codex", strings.Join(missing, ", "))
-		return check, true
-	}
-	keys, err := codexDialogTrustKeys(path)
+	entries, err := readCodexHookEntries(path)
 	if err != nil {
 		check.Message = fmt.Sprintf("read %s: %v", path, err)
 		return check, true
 	}
-	for _, key := range keys {
-		if config.Hooks.State[key].TrustedHash == "" {
-			check.Message = "installed, not trusted, so Codex skips it; open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries"
-			return check, true
+	remedy := "remedy: amq wake install-dialog-hook --harness codex"
+	var missing []string
+	for _, event := range codexDialogHookEvents {
+		if len(entries[event]) == 0 {
+			missing = append(missing, event)
+		}
+	}
+	switch {
+	case len(missing) == len(codexDialogHookEvents):
+		check.Message = "not installed: a wake doorbell can answer a Codex approval prompt; " + remedy
+		return check, true
+	case len(missing) > 0:
+		check.Message = fmt.Sprintf("partly installed, missing %s; %s", strings.Join(missing, ", "), remedy)
+		return check, true
+	}
+	for _, event := range codexDialogHookEvents {
+		for _, entry := range entries[event] {
+			match := codexDialogHookBinRe.FindStringSubmatch(entry.Command)
+			if match == nil {
+				check.Message = fmt.Sprintf("stale form on %s; %s", event, remedy)
+				return check, true
+			}
+			bin := strings.ReplaceAll(match[1], `'\''`, `'`)
+			if _, err := os.Stat(bin); err != nil {
+				check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; %s", bin, remedy)
+				return check, true
+			}
+			want := codexDialogHooks(bin, store)
+			current := want[slices.IndexFunc(want, func(h claude.CommandHook) bool { return h.Event == event })]
+			if entry.Command != current.Command || entry.Matcher != current.Matcher || entry.Timeout != current.Timeout {
+				check.Message = fmt.Sprintf("stale form on %s (command, matcher or timeout); %s", event, remedy)
+				return check, true
+			}
+			state := config.Hooks.State[entry.key(path, event)]
+			switch {
+			case state.Enabled != nil && !*state.Enabled:
+				check.Message = fmt.Sprintf("the %s entry is disabled in Codex /hooks, so Codex skips it; enable it in /hooks", event)
+				return check, true
+			case state.TrustedHash != entry.hash(event):
+				check.Message = "installed, not trusted as it is now, so Codex skips it; open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries"
+				return check, true
+			}
 		}
 	}
 	check.Status = "ok"
@@ -330,37 +379,107 @@ func checkCodexDialogHook() (doctorCheck, bool) {
 	return check, true
 }
 
-// codexDialogTrustKeys are the hooks.state keys Codex stores trust under for
-// the marked entries of path: <file>:<snake_event>:<group>:<handler>.
-func codexDialogTrustKeys(path string) ([]string, error) {
+// codexHookEntry is one marked handler of the Codex hooks file, with the
+// fields Codex hashes for trust. Timeout is -1 when the file sets none.
+type codexHookEntry struct {
+	group, handler    int
+	matcherSet        bool
+	Matcher           string
+	Command           string
+	Timeout           int
+	Async             bool
+	StatusMessage     *string
+	AdditionalContext *int
+}
+
+// readCodexHookEntries reads the AMQ_DIALOG_HOOK handlers of path by event.
+func readCodexHookEntries(path string) (map[string][]codexHookEntry, error) {
 	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	var file struct {
 		Hooks map[string][]struct {
-			Hooks []struct {
-				Command string `json:"command"`
+			Matcher *string `json:"matcher"`
+			Hooks   []struct {
+				Command           string  `json:"command"`
+				Timeout           *int    `json:"timeout"`
+				Async             bool    `json:"async"`
+				StatusMessage     *string `json:"statusMessage"`
+				AdditionalContext *int    `json:"additionalContextLimit"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	var keys []string
-	for _, event := range codexDialogHookEvents {
-		for g, group := range file.Hooks[event] {
+	out := map[string][]codexHookEntry{}
+	for event, groups := range file.Hooks {
+		for g, group := range groups {
 			for h, hook := range group.Hooks {
-				if strings.HasPrefix(hook.Command, wakeDialogHookMarker) {
-					keys = append(keys, fmt.Sprintf("%s:%s:%d:%d", path, snakeEvent(event), g, h))
+				if !strings.HasPrefix(hook.Command, wakeDialogHookMarker) {
+					continue
 				}
+				e := codexHookEntry{group: g, handler: h, Command: hook.Command, Async: hook.Async,
+					StatusMessage: hook.StatusMessage, AdditionalContext: hook.AdditionalContext, Timeout: -1}
+				if group.Matcher != nil {
+					e.matcherSet, e.Matcher = true, *group.Matcher
+				}
+				if hook.Timeout != nil {
+					e.Timeout = *hook.Timeout
+				}
+				out[event] = append(out[event], e)
 			}
 		}
 	}
-	if len(keys) == 0 {
-		return nil, errors.New("no AMQ_DIALOG_HOOK entries")
+	return out, nil
+}
+
+// key is the hooks.state key Codex stores this handler's trust under.
+func (e codexHookEntry) key(path, event string) string {
+	return fmt.Sprintf("%s:%s:%d:%d", path, snakeEvent(event), e.group, e.handler)
+}
+
+// hash is the trust hash Codex computes for this handler (codex-rs
+// hooks/src/engine/discovery.rs hook_hash, config/src/fingerprint.rs): the
+// SHA-256 of the sorted, compact JSON of the event label, the matcher where
+// the event honors one, and the normalized command handler.
+func (e codexHookEntry) hash(event string) string {
+	timeout := e.Timeout
+	switch {
+	case event == "SessionEnd" || event == "Interrupt":
+		if timeout < 0 {
+			timeout = 1
+		}
+		timeout = min(max(timeout, 1), 3)
+	case timeout < 0:
+		timeout = 600
+	default:
+		timeout = max(timeout, 1)
 	}
-	return keys, nil
+	handler := map[string]any{"type": "command", "command": e.Command, "async": e.Async, "timeout": timeout}
+	if e.StatusMessage != nil {
+		handler["statusMessage"] = *e.StatusMessage
+	}
+	switch event {
+	case "PreToolUse", "PostToolUse", "SessionStart", "UserPromptSubmit", "SubagentStart":
+		if e.AdditionalContext != nil && *e.AdditionalContext != 2500 {
+			handler["additionalContextLimit"] = *e.AdditionalContext
+		}
+	}
+	identity := map[string]any{"event_name": snakeEvent(event), "hooks": []any{handler}}
+	if e.matcherSet && event != "Stop" && event != "UserPromptSubmit" && event != "Interrupt" {
+		identity["matcher"] = e.Matcher
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(identity)
+	sum := sha256.Sum256(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // snakeEvent is Codex's spelling of an event in a trust key.

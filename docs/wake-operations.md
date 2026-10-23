@@ -184,6 +184,11 @@ change of an entry's command costs that once.
   `PostToolUse` of that call (matcher `^(Bash|apply_patch|mcp__.*)$`) closes
   it: approve runs the tool, so the doorbell rings right after the command,
   before the turn ends. A `PostToolUse` of another call keeps the hold. A
+  second approval in the same turn makes the hold last until the turn ends:
+  two parallel calls can ask with the same command in different working
+  directories, and the hook input does not tell them apart. Opens and
+  `PostToolUse` closes take `<root>/agents/<me>/.wake.dialog.lock`, so
+  neither loses the other's change. A
   deny, Esc, or a crash is closed by `Stop`, `Interrupt`, `UserPromptSubmit`,
   `SessionStart` (`startup|resume|clear`) or `SessionEnd`. `Interrupt` and
   `SessionEnd` have a 1 second timeout, the rest 5 seconds.
@@ -201,9 +206,11 @@ change of an entry's command costs that once.
 `amq doctor` reports, when the Codex home exists, Codex settings that run no
 user hooks (`features.hooks = false`, `codex_hooks = false`, or
 `allow_managed_hooks_only` in `/etc/codex/requirements.toml`), missing or
-partial entries, a missing binary or an older form, and entries Codex does
-not trust yet. It reads the user `config.toml` only; a project or profile
-layer that turns hooks off is not seen.
+partial entries, a missing binary or an older form (command, matcher, or
+timeout), entries disabled in `/hooks`, and entries whose stored
+`trusted_hash` is not Codex's hash of the entry as it is now. It reads the
+user `config.toml` only; a project or profile layer that turns hooks off is
+not seen.
 
 ## Live settings
 

@@ -68,9 +68,11 @@ type wakeDialogMarker struct {
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	// TurnID and ToolInputSHA256 are a Codex approval's call key; only the
-	// PostToolUse of that call removes its marker.
+	// PostToolUse of that call removes its marker. Ambiguous marks two or
+	// more approvals open in one turn: no PostToolUse removes it.
 	TurnID          string `json:"turn_id,omitempty"`
 	ToolInputSHA256 string `json:"tool_input_sha256,omitempty"`
+	Ambiguous       bool   `json:"ambiguous,omitempty"`
 	SessionID       string `json:"session_id,omitempty"`
 	OpenedAt        string `json:"opened_at"`
 }
