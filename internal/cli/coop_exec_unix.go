@@ -96,6 +96,9 @@ type coopExecRun struct {
 	cleanupWakeReady             func()
 	retainWakeHelperClaim        func()
 	cleanupWakeHelper            func(preservePersistedClaim bool) error
+	// wakeOwned is true once this launch's wake is ready and its claim is
+	// validated as this process's.
+	wakeOwned bool
 }
 
 func runCoopExec(args []string) error {
@@ -135,8 +138,6 @@ func runCoopExec(args []string) error {
 	if err := c.provisionRoot(); err != nil {
 		return err
 	}
-	// Before the wake can ring: the harness may open on its trust dialog.
-	writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 	if !*c.noWakeFlag {
 		if err := prepareCoopWakeLock(
 			c.root,
@@ -252,6 +253,12 @@ func runCoopExec(args []string) error {
 		if err := c.managedGuard.Close(); err != nil {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
+	}
+	// Only once this launch owns the agent's wake: a launch refused for
+	// another live owner must not touch that owner's marker. The harness may
+	// open on its trust dialog.
+	if c.wakeOwned {
+		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
 	}
 
 	return c.execAgent()
@@ -802,6 +809,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 			} else {
 				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, c.wakeProc.Pid))
 			}
+			c.wakeOwned = true
 		}
 	}
 	return nil

@@ -161,16 +161,19 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   or the home directory) for the directory or an ancestor inside its Git
   checkout, and Codex's `config.toml` `[projects]` for the directory or its
   Git trust root (a directory outside any checkout asks nothing in Codex).
-  When no decision is recorded, coop exec writes a `Startup` marker that
-  names the harness and directory; when one is, it removes a `Startup`
-  marker an earlier launch left. The `SessionStart` close removes the marker
-  when the hook is installed. Without the hook, the wake reads the trust file
-  again on each recheck while the marker exists and treats the marker as
-  closed once the harness has recorded the decision, so the doorbell rings
-  within 2 seconds of the answer. A file AMQ cannot read counts as trusted,
-  which leaves the doorbell as it is without the guard. A Codex directory
-  saved as untrusted still shows a restricted dialog that the guard does not
-  hold.
+  Once the launch owns the agent's wake, coop exec writes a `Startup` marker
+  that names the harness and directory when the harness has not recorded
+  that it trusts the directory, including a Codex directory saved as
+  untrusted, which opens on a restricted dialog. Otherwise it removes a
+  `Startup` marker an earlier launch left. A trust file AMQ cannot read
+  writes no marker. The `SessionStart` close removes the marker when the
+  hook is installed. Without the hook, the wake reads the trust file again
+  on each recheck while the marker exists and treats the marker as closed
+  only once the harness records that it trusts the directory, so the
+  doorbell rings within 2 seconds of acceptance. A trust file that becomes
+  unreadable keeps the hold. A Codex directory that stays untrusted holds
+  the doorbell until a `SessionStart` close, with attention output after 10
+  minutes.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the
