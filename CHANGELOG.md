@@ -8,6 +8,34 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.107.0](https://github.com/avivsinai/agent-message-queue/compare/v0.106.2...v0.107.0) (2026-10-23)
+
+
+### Features
+
+* **acp:** allow a Claude tool call with the owner's ✅ in Desktop ([#1179](https://github.com/avivsinai/agent-message-queue/issues/1179)) ([a843c19](https://github.com/avivsinai/agent-message-queue/commit/a843c1985950dfdbfed345712320c7ad358773b1))
+* **wake:** hold the doorbell while Codex shows an approval prompt ([#1181](https://github.com/avivsinai/agent-message-queue/issues/1181)) ([c62069d](https://github.com/avivsinai/agent-message-queue/commit/c62069d58ea9bc6adc18542f09480fb7b213076f))
+
+
+### Bug Fixes
+
+* **coop:** choose the wake typing mode from the harness, not the handle ([#1187](https://github.com/avivsinai/agent-message-queue/issues/1187)) ([d3a5531](https://github.com/avivsinai/agent-message-queue/commit/d3a5531f48eb3a2448034508f2ffce502d45f148))
+* **coop:** give every Codex seat its AMQ identity in shell commands ([#1176](https://github.com/avivsinai/agent-message-queue/issues/1176)) ([3983ded](https://github.com/avivsinai/agent-message-queue/commit/3983ded112d544cf65f7c523a65ce00f733317ae))
+* **coop:** hold the doorbell while agy asks for permission or sign-in ([#1190](https://github.com/avivsinai/agent-message-queue/issues/1190)) ([f388b92](https://github.com/avivsinai/agent-message-queue/commit/f388b92da92400967467cab0f44c5f3afab57b42))
+* **coop:** hold the doorbell while Claude or Codex asks to trust the folder ([#1180](https://github.com/avivsinai/agent-message-queue/issues/1180)) ([370d17c](https://github.com/avivsinai/agent-message-queue/commit/370d17ce89b09b8f2015f0574bf7ad4df8fda4c7))
+
+## [0.106.2](https://github.com/avivsinai/agent-message-queue/compare/v0.106.1...v0.106.2) (2026-10-23)
+
+
+### Bug Fixes
+
+* **launch:** advertise every argument form that validation admits ([#1175](https://github.com/avivsinai/agent-message-queue/issues/1175)) ([38ded9e](https://github.com/avivsinai/agent-message-queue/commit/38ded9e04e5cabdda2f93b6bfc3ecc520fe94f03))
+
+
+### Dependencies
+
+* bump goreleaser/goreleaser-action from 7.2.3 to 7.3.0 ([#1183](https://github.com/avivsinai/agent-message-queue/issues/1183)) ([332c159](https://github.com/avivsinai/agent-message-queue/commit/332c159ba08ebaf112b69de6e8b0044531986b25))
+
 ## [0.106.1](https://github.com/avivsinai/agent-message-queue/compare/v0.106.0...v0.106.1) (2026-10-22)
 
 

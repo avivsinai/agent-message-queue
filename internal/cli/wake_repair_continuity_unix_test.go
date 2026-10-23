@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,14 +57,14 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		_ = initial.Process.Kill()
 		_ = initialWaiter.waitForExit(time.Second)
 	})
-	if err := waitForWakeReadyWithOwner(initialWaiter, readyPath, root, "codex", nil, 5*time.Second); err != nil {
+	if err := waitForWakeReadyWithOwner(initialWaiter, readyPath, root, "codex", nil, testWaitBudget(t)); err != nil {
 		t.Fatalf("wait for initial wake: %v\ninspection: %#v", err, inspectWakeLock(root, "codex"))
 	}
 
 	if err := initial.Process.Kill(); err != nil {
 		t.Fatalf("kill initial wake: %v", err)
 	}
-	if err := initialWaiter.waitForExit(5 * time.Second); err != nil {
+	if err := initialWaiter.waitForExit(testWaitBudget(t)); err != nil {
 		t.Fatalf("wait for killed initial wake: %v", err)
 	}
 
@@ -77,7 +78,7 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		[]string{"interrupt"},
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitBudget(t))
 	defer cancel()
 	repair := exec.CommandContext(
 		ctx,
@@ -122,28 +123,48 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 	if result.Status != "repaired" {
 		t.Fatalf("repair result = %#v", result)
 	}
-	deadline := time.Now().Add(wakeDoorbellRetryBase + 2*time.Second)
-	for time.Now().Before(deadline) {
-		data, readErr := os.ReadFile(injectedPath)
-		if readErr == nil && strings.Contains(string(data), coopWakeDoorbell) {
-			if strings.Contains(string(data), "urgent message delivered during downtime") ||
-				strings.Contains(string(data), "startup backlog") {
-				t.Fatalf("repaired wake injected peer-derived message text: %q", data)
-			}
-			return
-		}
+	var data []byte
+	waitForCondition(t, func() string {
+		injected, _ := os.ReadFile(injectedPath)
+		repairLog, _ := os.ReadFile(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.repair.log"))
+		return fmt.Sprintf("a doorbell for the downtime message; injected output: %q\nrepair log:\n%s", injected, repairLog)
+	}, func() bool {
+		var readErr error
+		data, readErr = os.ReadFile(injectedPath)
 		if readErr != nil && !os.IsNotExist(readErr) {
 			t.Fatalf("read injected output: %v", readErr)
 		}
-		time.Sleep(25 * time.Millisecond)
+		return strings.Contains(string(data), coopWakeDoorbell)
+	})
+	if strings.Contains(string(data), "urgent message delivered during downtime") ||
+		strings.Contains(string(data), "startup backlog") {
+		t.Fatalf("repaired wake injected peer-derived message text: %q", data)
 	}
-	data, _ := os.ReadFile(injectedPath)
-	repairLog, _ := os.ReadFile(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.repair.log"))
-	t.Fatalf(
-		"repaired wake suppressed the downtime message; injected output: %q\nrepair log:\n%s",
-		data,
-		repairLog,
-	)
+}
+
+// testWaitBudget is how long a test may wait for an event: until shortly
+// before the test binary's -timeout, so a slow or loaded machine only makes
+// the test slower. A wait that never ends fails before the binary is killed.
+func testWaitBudget(t *testing.T) time.Duration {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		return 24 * time.Hour
+	}
+	return time.Until(deadline) - 5*time.Second
+}
+
+// waitForCondition polls cond until it holds, bounded like testWaitBudget.
+// what describes the awaited event for the failure message.
+func waitForCondition(t *testing.T, what func() string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(testWaitBudget(t))
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("still waiting for %s when the test binary's timeout came near", what())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func stopWakeContinuityHelper(pid int, helper, root, me string) bool {

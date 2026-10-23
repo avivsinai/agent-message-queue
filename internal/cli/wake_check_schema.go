@@ -192,6 +192,8 @@ type wakeCheckResultV2 struct {
 	SelfUpgrade       wakeCheckSelfUpgradeV2 `json:"self_upgrade"`
 	RestartCapability string                 `json:"restart_capability"`
 	Action            wakeCheckActionV2      `json:"action"`
+	// StartupHold is an open trust-dialog hold coop exec placed.
+	StartupHold *wakeStartupHoldStatus `json:"startup_hold,omitempty"`
 }
 
 type wakeCheckPlatformV2 struct {
@@ -423,4 +425,14 @@ func wakeCheckOptionalInt(value int) *int {
 		return nil
 	}
 	return &value
+}
+
+// wakeStartupHoldStatus is how amq wake check reports an open Startup
+// marker: which harness's trust dialog it holds for, how long it has been
+// open, and what releases it.
+type wakeStartupHoldStatus struct {
+	Harness    string `json:"harness"`
+	Dir        string `json:"dir"`
+	AgeSeconds int64  `json:"age_seconds"`
+	Release    string `json:"release"`
 }

@@ -550,9 +550,25 @@ func resolveDiscoveredBaseRootForBootstrap() (string, bool, error) {
 
 func noEligibleRootInGitError(top string) error {
 	return ContextMismatchError(
-		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly",
-		top,
+		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly%s",
+		top, codexLostIdentityHint(),
 	)
+}
+
+// codexLostIdentityHint is added to a no-root refusal inside a Codex thread
+// that has no identity variables: the seat may be one coop exec started
+// whose identity did not reach this command, and a model that reads a bare
+// refusal goes looking in other projects and sessions.
+func codexLostIdentityHint() string {
+	if thread, ok := os.LookupEnv("CODEX_THREAD_ID"); !ok || strings.TrimSpace(thread) == "" {
+		return ""
+	}
+	for _, key := range identityEnvKeys {
+		if _, present := os.LookupEnv(key); present {
+			return ""
+		}
+	}
+	return ". If this Codex session was started by amq coop exec, its AMQ identity did not reach this command: do not search other projects or sessions; ask the operator to restart it with amq coop exec"
 }
 
 func gitWorktreeTopFromCWD() (string, bool) {
