@@ -171,7 +171,7 @@ Usage:
   amq setup [options]
 
 Configure this project after previewing every change.
-Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.
+Detects Claude, Codex, Cursor, Grok, and pi through their adapter capability probes.
 Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
