@@ -33,7 +33,7 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	registerImplicitRootFlag(fs, &flags.Root, "Root directory for the queue")
 	fs.StringVar(&flags.Me, "me", defaultMe(), "Agent handle (or AM_ME)")
 	fs.BoolVar(&flags.JSON, "json", false, "Emit JSON output")
-	fs.BoolVar(&flags.Strict, "strict", false, "Error on unknown handles (default: warn)")
+	fs.BoolVar(&flags.Strict, "strict", false, "Error on unknown handles (default: send and reply warn)")
 	return flags
 }
 
@@ -552,21 +552,28 @@ func loadKnownAgentSetDeliveryRoot(root *fsq.DeliveryRoot, strict bool) (map[str
 	return known, nil
 }
 
-// validateKnownHandles validates handles against config.json.
-// Accepts variadic handles for convenience (single or multiple).
-// Returns nil if config doesn't exist or all handles are known.
-// If strict=true, returns an error for unknown handles or unreadable/corrupt config; otherwise warns to stderr.
+// validateKnownHandles is the --strict roster check for commands that act on
+// the caller's own mailbox. Only send and reply warn about registration, so
+// without strict it checks nothing. With strict it returns an error for a
+// handle missing from root's config.json or for an unreadable/corrupt config;
+// a root without config.json is not checked.
 func validateKnownHandles(root string, strict bool, handles ...string) error {
+	if !strict {
+		return nil
+	}
 	agents, err := loadKnownAgents(root, strict)
-	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+	return validateKnownHandlesFromAgents(agents, err, handles...)
 }
 
 func validateKnownHandlesDeliveryRoot(root *fsq.DeliveryRoot, strict bool, handles ...string) error {
+	if !strict {
+		return nil
+	}
 	agents, err := loadKnownAgentsDeliveryRoot(root, strict)
-	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+	return validateKnownHandlesFromAgents(agents, err, handles...)
 }
 
-func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool, handles ...string) error {
+func validateKnownHandlesFromAgents(agents []string, loadErr error, handles ...string) error {
 	if loadErr != nil {
 		return loadErr
 	}
@@ -596,11 +603,7 @@ func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool,
 	} else {
 		msg = fmt.Sprintf("unknown handles %v (known: %v)", unknown, agents)
 	}
-	if strict {
-		return errors.New(msg)
-	}
-	_ = writeStderr("warning: %s; verify the handle with 'amq who --json' because the message may not be read\n", msg)
-	return nil
+	return errors.New(msg)
 }
 
 func normalizeHandle(raw string) (string, error) {

@@ -213,15 +213,12 @@ func runReply(args []string) error {
 			return err
 		}
 		defer sourceConfigSelection.Close()
-		sourceAgents, configPresent, sourceAgentsErr := loadPeerAgentsForSend(
-			sourceConfigSelection.ConfigFS,
-			common.Strict,
-		)
-		if err := validateKnownHandlesFromAgents(sourceAgents, sourceAgentsErr, common.Strict, me); err != nil {
+		sourceConfigFS = sourceConfigSelection.ConfigFS
+		senderQueue := endpointQueueFor(sourceFS, sourceConfigFS)
+		if err := checkEndpointRegistration(senderQueue, endpointSender, common.Strict, true, me); err != nil {
 			return err
 		}
-		sourceConfigFS = sourceConfigSelection.ConfigFS
-		sourceConfigPresent = configPresent
+		sourceConfigPresent = senderQueue.decls[0].Present
 
 		peerConfigSelection, err := openMailboxConfigSelection(
 			deliveryFS,
@@ -242,15 +239,12 @@ func runReply(args []string) error {
 		if layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient); layoutErr != nil {
 			return layoutErr
 		}
-		peerAgents, configPresent, peerAgentsErr := loadPeerAgentsForSend(
-			peerConfigSelection.ConfigFS,
-			common.Strict,
-		)
-		if err := validateKnownHandlesFromAgents(peerAgents, peerAgentsErr, common.Strict, recipient); err != nil {
+		peerConfigFS = peerConfigSelection.ConfigFS
+		peerQueue := endpointQueueFor(deliveryFS, peerConfigFS)
+		if err := checkEndpointRegistration(peerQueue, endpointRecipient, common.Strict, true, recipient); err != nil {
 			return err
 		}
-		peerConfigFS = peerConfigSelection.ConfigFS
-		peerConfigPresent = configPresent
+		peerConfigPresent = peerQueue.decls[0].Present
 	} else {
 		layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient)
 		authorization, cleanup, err := openLocalMailboxAuthorization(
@@ -268,18 +262,27 @@ func runReply(args []string) error {
 			if layoutErr != nil {
 				return layoutErr
 			}
-			if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipient); err != nil {
-				return err
-			}
 		} else {
 			if err := validateAuthorizedLocalMailbox(deliveryFS, authorization, recipient); err != nil {
 				return err
 			}
-			targetAgents := withReservedHumanHandle(authorization.ConfiguredAgents())
-			if err := validateKnownHandlesFromAgents(targetAgents, nil, common.Strict, recipient); err != nil {
-				return err
-			}
 			localMailboxAuthorization = authorization
+		}
+		senderQueue, closeSenderQueue, err := openLocalEndpointQueue(sourceFS, root, pin, *ignoreSessionPinFlag)
+		if err != nil {
+			return err
+		}
+		defer closeSenderQueue()
+		if err := checkEndpointRegistration(senderQueue, endpointSender, common.Strict, true, me); err != nil {
+			return err
+		}
+		recipientQueue, closeRecipientQueue, err := openLocalEndpointQueue(deliveryFS, deliveryRoot, pin, *ignoreSessionPinFlag)
+		if err != nil {
+			return err
+		}
+		defer closeRecipientQueue()
+		if err := checkEndpointRegistration(recipientQueue, endpointRecipient, common.Strict, true, recipient); err != nil {
+			return err
 		}
 	}
 

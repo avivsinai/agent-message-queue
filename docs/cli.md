@@ -237,7 +237,7 @@ Options:
   -session string
         Named session to launch or resume
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq send
@@ -291,7 +291,7 @@ Options:
   -session string
         Target session (delivers to a different session's inbox)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -subject string
         Message subject
   -thread string
@@ -337,7 +337,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq read
@@ -371,7 +371,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq thread
@@ -397,7 +397,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq trace
@@ -479,7 +479,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -tmp-older-than string
         Duration (e.g. 36h)
   -wake-quarantine-older-than string
@@ -509,7 +509,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time to wait for messages (0 = wait forever) (default 1m0s)
 ```
@@ -540,7 +540,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq monitor
@@ -574,7 +574,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Max time to wait for messages (0 = wait forever) (default 1m0s)
 ```
@@ -621,7 +621,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -subject string
         Override subject (default: Re: <original>)
   -wait-for string
@@ -800,7 +800,7 @@ Options:
   -self-upgrade
         Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq upgrade
@@ -1009,7 +1009,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq route
@@ -1170,7 +1170,7 @@ Options:
   -status string
         Status string
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq presence list
@@ -1188,7 +1188,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq list
@@ -1214,7 +1214,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq read
@@ -1238,7 +1238,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq retry
@@ -1268,7 +1268,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq purge
@@ -1294,7 +1294,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -yes
         Skip confirmation prompt
 ```
@@ -1324,7 +1324,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake config
@@ -1403,7 +1403,7 @@ Options:
   -self-upgrade
         Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time for --wait (0 = wait forever) (default 1m0s)
   -unset value
@@ -1433,7 +1433,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake restart
@@ -1456,7 +1456,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake recover-owner
@@ -1479,7 +1479,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake retire
@@ -1512,7 +1512,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -takeover
         Retire a wake another surface started (a take): match the saved target's injector instead of --inject-via; requires --if-generation
 ```
@@ -1947,7 +1947,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -team string
         Team name (required)
 ```
@@ -2009,7 +2009,7 @@ Options:
   -stage string
         Filter by stage (drained, dlq)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq receipts wait
@@ -2033,7 +2033,7 @@ Options:
   -stage string
         Stage to wait for (drained, dlq) (default "drained")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time to wait (0 = wait forever) (default 1m0s)
 ```
@@ -2056,7 +2056,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq session list
@@ -2077,7 +2077,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq session resume
@@ -2120,7 +2120,7 @@ Options:
   -session string
         Named session to launch or resume
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq peer pair
@@ -2147,7 +2147,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq route explain

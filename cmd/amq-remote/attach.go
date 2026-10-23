@@ -339,7 +339,7 @@ func emitJSON(w io.Writer, v any) {
 }
 
 // listBuzzInRoster adds the Buzz agent's handle to the root's config.json
-// agents list, so a reply to a Buzz DM routes without a "may not be read"
+// agents list, so a reply to a Buzz DM routes without an "unregistered"
 // warning or a --strict refusal. A root with no config.json is left as it is,
 // and a handle already listed is a no-op.
 // Only the mailbox attach calls it. The root is opened once as a capability,

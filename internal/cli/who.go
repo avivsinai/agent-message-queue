@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 func runWho(args []string) error {
@@ -36,9 +34,11 @@ func runWho(args []string) error {
 			baseRoot = filepath.Dir(root)
 		}
 	}
+	// Only a resolved base lends its roster to the sessions below it; a
+	// display guess picks the tree to list, never declarations.
+	_, baseKnown := classifyRootWithEvidence(root)
 
-	// Enumerate sessions by scanning subdirectories.
-	entries, err := os.ReadDir(baseRoot)
+	scopes, err := inventoryProject(baseRoot, baseKnown)
 	if err != nil {
 		return err
 	}
@@ -53,46 +53,38 @@ func runWho(args []string) error {
 		NotifierMode       string `json:"notifier_mode,omitempty"`
 		NotifierReason     string `json:"notifier_reason,omitempty"`
 		Note               string `json:"note,omitempty"`
+		agentRegistrationJSON
+		MailboxStatus string   `json:"mailbox_status"`
+		MailboxIssues []string `json:"mailbox_issues,omitempty"`
 	}
 	type sessionInfo struct {
+		// Name is the session name, or "" for the base queue's own agents
+		// (scope "base"), which has no session name to route by.
 		Name   string      `json:"name"`
+		Scope  string      `json:"scope"`
+		Root   string      `json:"root"`
 		Agents []agentInfo `json:"agents"`
 	}
 
 	var sessions []sessionInfo
 	currentSession := sessionName(root)
+	currentRoot := absPath(root)
 
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		sessDir := filepath.Join(baseRoot, e.Name())
-		agentsDir := filepath.Join(sessDir, "agents")
-		agentEntries, err := os.ReadDir(agentsDir)
-		if err != nil {
-			continue // not a session
-		}
-
+	for _, scope := range scopes {
 		var agents []agentInfo
-		for _, ae := range agentEntries {
-			if !ae.IsDir() {
-				continue
-			}
-			inbox := filepath.Join(agentsDir, ae.Name(), "inbox")
-			if _, err := os.Stat(inbox); err != nil {
-				continue
-			}
-
+		for _, row := range scope.Agents {
 			ai := agentInfo{
-				Handle:             ae.Name(),
-				Kind:               "agent",
-				PresenceApplicable: true,
+				Handle:                row.Handle,
+				Kind:                  row.Registration.Kind,
+				PresenceApplicable:    true,
+				agentRegistrationJSON: row.Registration.json(),
+				MailboxStatus:         inventoryMailboxStatus(row),
+				MailboxIssues:         row.MailboxIssues,
 			}
-			if ai.Handle == reservedHumanHandle {
-				ai.Kind = "human"
+			if ai.Kind == "human" {
 				ai.PresenceApplicable = false
-				if p, err := presence.Read(sessDir, ae.Name()); err == nil {
-					ai.Note = p.Note
+				if row.Presence != nil {
+					ai.Note = row.Presence.Note
 				}
 				agents = append(agents, ai)
 				continue
@@ -101,7 +93,7 @@ func runWho(args []string) error {
 			// Recent presence proves activity only; a verified wake lock separately
 			// proves that a prompt notifier is currently attached.
 			recentActivity := false
-			if p, err := presence.Read(sessDir, ae.Name()); err == nil {
+			if p := row.Presence; p != nil {
 				if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
 					recentActivity = time.Since(t) < 10*time.Minute
 				}
@@ -110,16 +102,17 @@ func runWho(args []string) error {
 				ai.NotifierMode = p.NotifierMode
 				ai.NotifierReason = p.NotifierReason
 			}
-			ai.PresenceSource = resolvePresenceSource(sessDir, ae.Name(), recentActivity)
+			ai.PresenceSource = resolvePresenceSource(scope.Root, row.Handle, recentActivity)
 			ai.Active = recentActivity || ai.PresenceSource == presenceSourceNotifierLive
 			agents = append(agents, ai)
 		}
 
 		if len(agents) > 0 {
-			sessions = append(sessions, sessionInfo{
-				Name:   e.Name(),
-				Agents: agents,
-			})
+			info := sessionInfo{Name: scope.Session, Scope: "session", Root: absPath(scope.Root), Agents: agents}
+			if scope.Kind == inventoryScopeBase {
+				info.Scope = inventoryScopeBase
+			}
+			sessions = append(sessions, info)
 		}
 	}
 
@@ -144,10 +137,14 @@ func runWho(args []string) error {
 
 	for _, s := range sessions {
 		marker := ""
-		if s.Name == currentSession {
+		if s.Root == currentRoot || (s.Scope != inventoryScopeBase && s.Name == currentSession) {
 			marker = " (current)"
 		}
-		if err := writeStdout("  %s%s\n", s.Name, marker); err != nil {
+		name := s.Name
+		if s.Scope == inventoryScopeBase {
+			name = "(base root)"
+		}
+		if err := writeStdout("  %s%s\n", name, marker); err != nil {
 			return err
 		}
 		for _, a := range s.Agents {
@@ -164,6 +161,12 @@ func runWho(args []string) error {
 						" mode=" + a.NotifierMode +
 						" reason=" + a.NotifierReason
 				}
+			}
+			if a.RegistrationStatus != registrationDeclared {
+				status += " [" + string(a.RegistrationStatus) + "]"
+			}
+			if a.MailboxStatus != mailboxStatusComplete {
+				status += " [mailbox " + a.MailboxStatus + "]"
 			}
 			note := ""
 			if a.Note != "" {

@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -17,6 +16,10 @@ type presenceListItem struct {
 	Note               string `json:"note,omitempty"`
 	Kind               string `json:"kind"`
 	PresenceApplicable bool   `json:"presence_applicable"`
+	// PresenceError is set when presence.json exists but cannot be read;
+	// Status is then "unknown".
+	PresenceError string `json:"presence_error,omitempty"`
+	agentRegistrationJSON
 }
 
 func runPresence(args []string) error {
@@ -87,54 +90,44 @@ func runPresenceList(args []string) error {
 	}
 	root := resolveRoot(common.Root)
 
-	agents, err := loadKnownAgents(root, false)
-	if err != nil {
-		return err
+	// One delivery root: every mailbox there, whether or not it has
+	// presence, plus the reserved human handle.
+	scope := inventoryDeliveryRoot(root, classifyRoot(root))
+	if scope.Err != nil {
+		return scope.Err
 	}
-	if agents == nil {
-		var listErr error
-		agents, listErr = fsq.ListAgents(root)
-		if listErr != nil && !os.IsNotExist(listErr) {
-			return listErr
-		}
-	}
-
-	items := make([]presenceListItem, 0, len(agents))
-	for _, raw := range agents {
-		agent, err := normalizeHandle(raw)
-		if err != nil {
-			if err := writeStderr("warning: skipping invalid handle %s: %v\n", raw, err); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if agent == reservedHumanHandle {
-			p, err := presence.Read(root, agent)
-			if err != nil {
-				if os.IsNotExist(err) {
-					items = append(items, presenceListItem{
-						Handle:             reservedHumanHandle,
-						Status:             "human",
-						Kind:               "human",
-						PresenceApplicable: false,
-					})
-					continue
-				}
-				return err
-			}
-			items = append(items, presenceListItemFromPresence(p, "human", false))
-			continue
-		}
-
-		p, err := presence.Read(root, agent)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
+	for _, skipped := range scope.Skipped {
+		if err := writeStderr("warning: skipping invalid handle %s: %s\n", skipped.Name, skipped.Reason); err != nil {
 			return err
 		}
-		items = append(items, presenceListItemFromPresence(p, "agent", true))
+	}
+	rows := scope.Agents
+	if !inventoryHasHandle(rows, reservedHumanHandle) && scope.Declarations.anyPresent() {
+		rows = append(rows, inventoryAgent{
+			Handle:       reservedHumanHandle,
+			Registration: classifyAgentAt(scope.Declarations, root, reservedHumanHandle),
+		})
+	}
+
+	items := make([]presenceListItem, 0, len(rows))
+	for _, row := range rows {
+		human := row.Registration.Kind == "human"
+		item := presenceListItem{
+			Handle:             row.Handle,
+			Status:             "unknown",
+			Kind:               row.Registration.Kind,
+			PresenceApplicable: !human,
+		}
+		if row.Presence != nil {
+			item = presenceListItemFromPresence(*row.Presence, row.Registration.Kind, !human)
+		} else if human {
+			item.Status = "human"
+		}
+		if row.PresenceErr != nil {
+			item.PresenceError = row.PresenceErr.Error()
+		}
+		item.agentRegistrationJSON = row.Registration.json()
+		items = append(items, item)
 	}
 
 	if common.JSON {
@@ -158,7 +151,14 @@ func runPresenceList(args []string) error {
 			}
 			continue
 		}
-		if err := writeStdout("%s  %s  %s\n", item.Handle, item.Status, item.LastSeen); err != nil {
+		line := item.Handle + "  " + item.Status
+		if item.LastSeen != "" {
+			line += "  " + item.LastSeen
+		}
+		if item.RegistrationStatus != registrationDeclared {
+			line += "  [" + string(item.RegistrationStatus) + "]"
+		}
+		if err := writeStdoutLine(line); err != nil {
 			return err
 		}
 		if item.Note != "" {

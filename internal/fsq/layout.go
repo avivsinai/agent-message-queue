@@ -308,6 +308,9 @@ type MailboxInspection struct {
 	RepairEligible bool                    `json:"repair_eligible"`
 	Remedy         string                  `json:"remedy,omitempty"`
 	CreatedPaths   []string                `json:"created_paths,omitempty"`
+	// RegistrationStatus is filled by doctor from the registration
+	// classifier; layout inspection itself never sets it.
+	RegistrationStatus string `json:"registration_status,omitempty"`
 }
 
 type MailboxInventory struct {
