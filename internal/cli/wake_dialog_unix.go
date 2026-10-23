@@ -65,6 +65,7 @@ type wakeDialogMarker struct {
 	Schema    int    `json:"schema"`
 	Event     string `json:"event,omitempty"`
 	Harness   string `json:"harness,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
