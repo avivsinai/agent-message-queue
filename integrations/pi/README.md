@@ -36,13 +36,13 @@ it is active it creates
 
 ## Doorbell guard
 
-While an extension prompt (`confirm`, `select`, `input`, `editor`, or a
-custom prompt) is open, the extension writes
-`<AM_ROOT>/agents/<handle>/.wake.dialog`, and the AMQ wake holds its
-doorbell instead of typing into pi. It removes the marker when pi stops
-waiting, and at every session start and shutdown. The guard runs only when
-this extension is loaded; prompts from other extensions in a pi without it
-are not guarded.
+While pi asks "Trust project folder?" at startup, and while an extension
+prompt (`confirm`, `select`, `input`, `editor`, or a custom prompt) is open,
+the extension writes `<AM_ROOT>/agents/<handle>/.wake.dialog`, and the AMQ
+wake holds its doorbell instead of typing into pi. It removes the marker
+when the session starts after the trust answer, when pi stops waiting on a
+prompt, and at every session shutdown. The guard runs only when this
+extension is loaded.
 
 ## Declare the target
 

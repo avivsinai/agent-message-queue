@@ -150,6 +150,21 @@ test("an open extension prompt holds the wake doorbell until it ends", async () 
 	await h.done();
 });
 
+// Bead agent-message-queue-vd4.6: pi's own "Trust project folder?" prompt
+// opens before the session starts; the marker holds the doorbell until the
+// answer lets the session start.
+test("the startup trust prompt holds the wake doorbell until the session starts", async () => {
+	const h = harness();
+	const agent = path.join(h.dir, "..", "..");
+	fs.mkdirSync(agent, { recursive: true, mode: 0o700 });
+	const marker = path.join(agent, ".wake.dialog");
+	await h.emit("project_trust", { cwd: "/work" });
+	assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).event, "project_trust");
+	await h.start();
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
 // Bead agent-message-queue-611.60: a relay share pins pi's session id, so the
 // reference bridge publishes it in liveness.
 test("the liveness record carries pi's session id", async () => {

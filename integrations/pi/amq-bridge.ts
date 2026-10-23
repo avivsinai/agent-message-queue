@@ -82,11 +82,18 @@ let inactiveNoticeShown = false;
 export default function amqPiBridge(pi: ExtensionAPI): void {
 	let bridge: Bridge | null = null;
 
-	// The doorbell must never answer an extension prompt. pi counts nested
-	// prompts itself: ui_prompt_start fires when it starts waiting and
-	// ui_prompt_end when it no longer waits. A session boundary also clears
-	// the marker, so one left by a crash does not hold the next session.
-	pi.on("ui_prompt_start", (event) => openWakeDialog(event.kind));
+	// The doorbell must never answer a pi prompt. pi counts nested
+	// extension prompts itself: ui_prompt_start fires when it starts waiting
+	// and ui_prompt_end when it no longer waits. project_trust fires before
+	// pi may ask "Trust project folder?"; the session starts only after that
+	// question is answered, so session_start closes it. A session boundary
+	// also clears the marker, so one left by a crash does not hold the next
+	// session.
+	pi.on("project_trust", () => {
+		openWakeDialog(WAKE_DIALOG_TRUST, "select");
+		return { trusted: "undecided" };
+	});
+	pi.on("ui_prompt_start", (event) => openWakeDialog(WAKE_DIALOG_PROMPT, event.kind));
 	pi.on("ui_prompt_end", () => closeWakeDialog());
 
 	pi.on("session_start", (_event, ctx) => {
@@ -675,8 +682,13 @@ function exists(p: string): boolean {
 
 // WAKE_DIALOG is the marker the AMQ wake reads (docs/wake-operations.md):
 // while it exists the wake holds its doorbell instead of typing into pi.
+// This extension is the only writer of a pi agent's marker, and it removes
+// only a marker it wrote; no AMQ Go path writes or conditionally removes a
+// pi agent's marker. That is why it needs no .wake.dialog.lock, which Node
+// cannot take (it has no flock).
 const WAKE_DIALOG = ".wake.dialog";
-const WAKE_DIALOG_EVENT = "ui_prompt";
+const WAKE_DIALOG_PROMPT = "ui_prompt";
+const WAKE_DIALOG_TRUST = "project_trust";
 
 // wakeAgentDir is this pi's AMQ agent directory, or "" without a valid
 // identity or an existing mailbox.
@@ -693,15 +705,13 @@ function wakeAgentDir(): string {
 }
 
 // openWakeDialog installs the marker by an exclusive temp file and a rename,
-// without fsync: the marker is advisory, and the prompt is rendering. This
-// extension is the only marker writer for a pi agent; Node has no flock, so
-// it does not take the Go writers' .wake.dialog.lock.
-function openWakeDialog(kind: string): void {
+// without fsync: the marker is advisory, and the prompt is rendering.
+function openWakeDialog(event: string, kind: string): void {
 	const dir = wakeAgentDir();
 	if (!dir) return;
 	const marker = {
 		schema: 1,
-		event: WAKE_DIALOG_EVENT,
+		event,
 		harness: "pi",
 		kind,
 		opened_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
@@ -727,7 +737,7 @@ function closeWakeDialog(): void {
 	const file = path.join(dir, WAKE_DIALOG);
 	try {
 		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string };
-		if (marker.event === WAKE_DIALOG_EVENT && marker.harness === "pi") fs.unlinkSync(file);
+		if ((marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi") fs.unlinkSync(file);
 	} catch {
 		// No marker, or one this extension did not write.
 	}
