@@ -100,6 +100,7 @@ func captureBuzzIdentity() {
 		}
 	}
 	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
+	buzzRelay = agentRelay(os.Getenv("BUZZ_RELAY_URL"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
 }
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
