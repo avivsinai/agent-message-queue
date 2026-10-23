@@ -3,10 +3,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -182,5 +185,45 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells after the startup hold was released = %d, want 1", got)
+	}
+}
+
+// Lead ruling on #1180: a trust hold that never closes (for example a Codex
+// directory kept untrusted, without the Codex hook) must be visible:
+// amq wake check reports it, its age, and what releases it.
+func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(fsq.AgentBase(root, "codex"), wakeDialogFileName)
+	raw := `{"schema":1,"event":"Startup","harness":"codex","cwd":"/work","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(marker, opened, opened); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error {
+		return runWake([]string{"check", "--me", "codex", "--root", root, "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		StartupHold *wakeStartupHoldStatus `json:"startup_hold"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("wake check JSON %q: %v", out, err)
+	}
+	hold := result.StartupHold
+	if hold == nil || hold.Harness != "codex" || hold.Dir != "/work" || hold.AgeSeconds < 600 ||
+		!strings.Contains(hold.Release, "install-dialog-hook --harness codex") {
+		t.Fatalf("startup hold = %#v", hold)
 	}
 }

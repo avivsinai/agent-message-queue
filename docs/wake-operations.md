@@ -177,7 +177,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   person keeps untrusted, so that hold stays until the Codex `SessionStart`
   close of `amq wake install-dialog-hook --harness codex`; without that hook
   the marker ages as above (input held, attention output after 10 minutes),
-  and `amq doctor --ops` names the remedy.
+  and `amq doctor --ops` names the remedy. `amq wake check` reports an open
+  `Startup` marker as `startup_hold`: the harness, the directory, how long it
+  has been open, and what releases it.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the
