@@ -293,7 +293,7 @@ func policyEvent(sk [32]byte, body, name string) (nostr.Event, error) {
 		return nostr.Event{}, err
 	}
 	evt := nostr.Event{Kind: 30177, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", body}}, Content: string(content)}
-	if err := evt.Sign(sk); err != nil {
+	if err := relay.Sign(&evt, sk); err != nil {
 		return nostr.Event{}, err
 	}
 	return evt, nil
@@ -308,7 +308,7 @@ func publishPolicy(ctx context.Context, url string, evt nostr.Event, sk [32]byte
 	defer func() { _ = r.Close() }()
 	// Wait for the relay's AUTH challenge; a late challenge fails loudly in r.Auth.
 	time.Sleep(time.Second)
-	if err := r.Auth(ctx, func(_ context.Context, e *nostr.Event) error { return e.Sign(sk) }); err != nil {
+	if err := r.Auth(ctx, func(_ context.Context, e *nostr.Event) error { return relay.Sign(e, sk) }); err != nil {
 		return fmt.Errorf("auth as owner: %w", err)
 	}
 	return r.Publish(ctx, evt)

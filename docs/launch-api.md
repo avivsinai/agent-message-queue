@@ -240,7 +240,15 @@ Each provider owns its conversation identity:
   refusal does not block other seats. AMQ adds one static hook override bound to
   the session root, handle, launch nonce, and AMQ executable. The private hook
   validates the exact ticket and payload, persists immutable evidence, and only
-  then publishes the conversation identity. It then forwards the identical
+  then publishes the conversation identity. Apply leaves the seat `pending`
+  with Code 0, because no backend observes the thread at create. Codex also
+  sends notify for side threads, such as title generation, in any order, so a
+  notify binds only a thread whose own rollout
+  (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl`, found by the
+  exact thread ID) starts with a `session_meta` for the seat's cwd with
+  `source` `cli` and, when present, `thread_source` `user`. Any other notify binds nothing
+  and leaves the seat as it is. A resumed seat's notify for its captured
+  thread is already captured. The hook then forwards the identical
   payload to the operator's configured Codex notify command; a missing command
   is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
   unused Codex launch stays pending and cannot be resumed.

@@ -18,10 +18,7 @@ func TestCodexSeatCarriesItsIdentityIntoTheShellTool(t *testing.T) {
 		"AM_ROOT_ID=a\"b", "AM_BASE_ROOT_ID=c\\d"}
 	args := []string{"-s", "read-only", "--", "fix it"}
 
-	pinned, err := pinCodexShellIdentity("/usr/local/bin/codex", args, env, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pinned := pinCodexShellIdentity("/usr/local/bin/codex", args, env, false)
 	want := []string{
 		"-c", `shell_environment_policy.set.AM_ROOT="/q/s1"`,
 		"-c", `shell_environment_policy.set.AM_BASE_ROOT="/q"`,
@@ -36,12 +33,34 @@ func TestCodexSeatCarriesItsIdentityIntoTheShellTool(t *testing.T) {
 	}
 
 	resume := []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"}
-	if kept, err := pinCodexShellIdentity("codex", resume, env, true); err != nil || !slices.Equal(kept, resume) {
-		t.Fatalf("recorded daemon thread args = %q, %v; want them unchanged", kept, err)
+	if kept := pinCodexShellIdentity("codex", resume, env, true); !slices.Equal(kept, resume) {
+		t.Fatalf("recorded daemon thread args = %q; want them unchanged", kept)
 	}
+}
 
-	if _, err := pinCodexShellIdentity("codex", []string{"--remote", "ws://h:1"}, env, false); GetExitCode(err) != ExitActionRequired {
-		t.Fatalf("--remote seat error = %v, want action required", err)
+// #1176 review: a resume by id with --remote recorded a local identity and
+// then started an app-server AMQ does not see, and a caller's
+// -c shell_environment_policy.set.AM_ME won over the selected handle. coop
+// exec refuses both before it names, records or starts anything.
+func TestCodexSeatRefusesArgsThatDropItsIdentity(t *testing.T) {
+	remote := []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "--remote", "ws://h:1"}
+	if err := refuseCodexSeatArgs("codex", remote); GetExitCode(err) != ExitActionRequired {
+		t.Fatalf("--remote resume error = %v, want action required", err)
+	}
+	other := []string{"-m", "gpt", "-c", `shell_environment_policy.set.AM_ME="other"`}
+	if err := refuseCodexSeatArgs("codex", other); GetExitCode(err) != ExitUsage {
+		t.Fatalf("identity override error = %v, want usage", err)
+	}
+}
+
+// #1176 review (live G2 run): a recorded seat's TUI started the shared
+// Codex daemon with its own AM_ME and AM_ROOT, so every later seat on that
+// daemon ran tool commands and hooks as the first seat.
+func TestCodexDaemonSeatStartsWithoutAMQVariables(t *testing.T) {
+	env := []string{"PATH=/bin", "AM_ROOT=/q/s1", "AM_ME=codex", "AM_ROOT_ID=x", "AMQ_WAKE_OWNER={}", "HOME=/h"}
+	got := codexDaemonSeatEnv("/usr/local/bin/codex", env, true)
+	if want := []string{"PATH=/bin", "HOME=/h"}; !slices.Equal(got, want) {
+		t.Fatalf("daemon seat env = %q, want %q", got, want)
 	}
 }
 
