@@ -85,13 +85,16 @@ func TestDarwinWakeRepairChildCleanupInterruptsBlockingControlRead(t *testing.T)
 		close(finished)
 	}()
 
-	select {
-	case <-finished:
-	case <-time.After(250 * time.Millisecond):
-		_ = writer.Close()
-		<-finished
-		t.Fatal("child control cleanup did not interrupt its blocked read")
-	}
+	// Cleanup closes the control fd, which must interrupt the watcher's
+	// blocked read; with a blocking fd it would wait forever.
+	waitForCondition(t, func() string { return "child control cleanup to interrupt its blocked read" }, func() bool {
+		select {
+		case <-finished:
+			return true
+		default:
+			return false
+		}
+	})
 	select {
 	case <-stop:
 	default:

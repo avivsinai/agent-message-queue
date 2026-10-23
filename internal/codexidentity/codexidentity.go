@@ -217,6 +217,15 @@ func currentKey(r Record) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// CurrentDir is the current/ directory of the store below home's AMQ home.
+// It exists once any coop exec published a thread; a hook gate tests it
+// before it starts amq.
+func CurrentDir(home string) string {
+	return filepath.Join(amqhome.Under(home), storeName, "current")
+}
+
+const storeName = "codex-threads"
+
 // storeDir is $HOME/.amq/codex-threads with its threads/ and current/
 // directories. Every directory below the home must be a plain directory,
 // not a symlink. With create, the AMQ home is made and checked by amqhome
@@ -230,7 +239,7 @@ func storeDir(create bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	store := filepath.Join(amqDir, "codex-threads")
+	store := filepath.Join(amqDir, storeName)
 	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {

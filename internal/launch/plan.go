@@ -41,6 +41,9 @@ type DynamicArgKind string
 const (
 	DynamicArgLaunchNonce    DynamicArgKind = "launch_nonce"
 	DynamicArgConversationID DynamicArgKind = "conversation_id"
+	// DynamicArgCodexIdentity is one AMQ identity variable in a Codex
+	// shell_environment_policy.set override; the slot names the variable.
+	DynamicArgCodexIdentity DynamicArgKind = "codex_identity"
 )
 
 type InitialInputKind string
@@ -139,6 +142,9 @@ func (a AgentPlan) validate() error {
 		return fmt.Errorf("pre-spawn acquisition requires capture mode without a planned identity")
 	}
 	seenDynamic := make(map[int]struct{}, len(a.DynamicArgv))
+	// The digest names only a slot's kind, so each identity slot must name
+	// its own variable for the digest to bind which variables are set.
+	identityKeys := make(map[string]bool)
 	conversationSlots := 0
 	for i, dynamic := range a.DynamicArgv {
 		if dynamic.Index < 0 || dynamic.Index >= len(a.Argv) {
@@ -158,6 +164,13 @@ func (a AgentPlan) validate() error {
 		case DynamicArgConversationID:
 			conversationSlots++
 			expected = a.ConversationID
+		case DynamicArgCodexIdentity:
+			key, ok := codexIdentitySlotKey(a.Argv, dynamic.Index)
+			if !ok || identityKeys[key] {
+				return fmt.Errorf("dynamic_argv[%d]: argv value is not a distinct codex identity slot", i)
+			}
+			identityKeys[key] = true
+			continue
 		default:
 			return fmt.Errorf("dynamic_argv[%d]: invalid kind %q", i, dynamic.Kind)
 		}

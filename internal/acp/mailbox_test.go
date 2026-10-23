@@ -243,13 +243,33 @@ func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
 
 // Regression: bead agent-message-queue-611.36, a redelivered event published a second
 // message. It must reuse the first delivery's message.
+//
+// Each turn ends when the client leaves at the delivery update, rather than
+// on a 50 ms budget: under parallel load that budget expired before the
+// first delivery and nothing was published (seen on #1179's load runs). A
+// client that leaves records no event outcome, so the second attempt is a
+// real redelivery and must reach delivery too.
 func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
 	eventID := strings.Repeat("2", 64)
-	for range 2 {
-		if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+	for attempt := range 2 {
+		turn := newTurn()
+		result, rpcErr := s.runRemote("s", "say hi", eventID, turn, func(v any) error {
+			if !strings.HasPrefix(v.(sessionUpdateNotification).Params.Update.Content.Text, "Delivered to") {
+				return nil
+			}
+			s.mu.Lock()
+			if turn.settleLocked("client_disconnected") {
+				close(turn.done)
+			}
+			s.mu.Unlock()
+			return nil
+		})
+		if rpcErr != nil {
 			t.Fatal(rpcErr)
+		}
+		if got := result.(remotePromptResult).Meta.Remote; got.State != DeliveryStateQueued || got.Reason != "client_disconnected" {
+			t.Fatalf("attempt %d ended %+v; want delivered, then the client left", attempt+1, got)
 		}
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {

@@ -53,19 +53,20 @@ func runLaunchExec(args []string) error {
 	if err != nil {
 		return ActionRequiredError("resolve launch wrapper executable: %v", err)
 	}
+	environment := os.Environ()
 	prepared, err := launch.PrepareExecution(root, *handleFlag, *nonceFlag, launch.ExecutionEnvelope{
 		Cwd: cwd, AMQExecutable: amqExecutable, ProviderExecutable: *targetFlag,
-		TargetArgv: targetArgv, Environment: os.Environ(), Execution: executionOptions,
+		TargetArgv: targetArgv, Environment: environment, Execution: executionOptions,
 	})
 	if err != nil {
 		return ActionRequiredError("refusing managed launch execution: %v", err)
 	}
-	resolvedArgv, err := launch.ResolveExecutionArgv(prepared)
+	resolvedArgv, err := launch.ResolveExecutionArgv(prepared, environment)
 	if err != nil {
 		revertErr := launch.RevertExecution(root, *handleFlag, *nonceFlag)
 		return errors.Join(ActionRequiredError("refusing unresolved managed launch execution: %v", err), revertErr)
 	}
-	execErr := launchExecProcess(*targetFlag, resolvedArgv, os.Environ())
+	execErr := launchExecProcess(*targetFlag, resolvedArgv, environment)
 	if execErr == nil {
 		execErr = fmt.Errorf("provider exec returned without replacing process")
 	}
