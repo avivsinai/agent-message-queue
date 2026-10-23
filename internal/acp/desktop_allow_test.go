@@ -149,13 +149,37 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool) desktopRun {
 	turn := newTurn()
 	turn.channel = channel
 	done := make(chan struct{})
+	var rpcErr *rpcError
+	// Registered before the turn starts, so a failed wait still ends the
+	// turn and joins it.
+	t.Cleanup(func() {
+		s.mu.Lock()
+		if turn.settleLocked("client_disconnected") {
+			close(turn.done)
+		}
+		s.mu.Unlock()
+		<-done
+	})
 	go func() {
 		defer close(done)
-		_, _ = s.runRemote("s", "run the tests", eventID, turn, func(any) error { return nil })
+		_, rpcErr = s.runRemote("s", "run the tests", eventID, turn, func(any) error { return nil })
 	}()
-	waitFor(t, "the request to run", func() bool { return rt.HasRun(id) })
+	// ended reports that the turn returned early, and fails with its error.
+	ended := func() bool {
+		select {
+		case <-done:
+			t.Fatalf("the turn ended before the approval was answered: %v", rpcErr)
+			return true
+		default:
+			return false
+		}
+	}
+	waitFor(t, "the request to run", func() bool { return ended() || rt.HasRun(id) })
 	rt.Question(id, "i_1", []string{"allow", "deny"})
 	waitFor(t, "an answer, or the owner told ✅ cannot allow", func() bool {
+		if ended() {
+			return true
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		return len(rt.Snapshot().Answers) > 0 || slices.Contains(run.posts, allowRefusedText)
