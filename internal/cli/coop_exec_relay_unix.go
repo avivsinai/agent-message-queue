@@ -87,13 +87,10 @@ func newAgyDialogSink(root, handle string, log io.Writer) (*agyDialogSink, error
 	// hold this session; this launch owns the agent's wake, so no other
 	// relay of it runs. Any other marker stays.
 	_ = agentDir.withFD(func(dirfd int) error {
-		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
-			filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
-		var marker wakeDialogMarker
-		if err != nil || !exists || json.Unmarshal(current, &marker) != nil || marker.Event != agyDialogEvent || marker.Harness != "agy" {
-			return nil
-		}
-		return clearWakeDialogMarker(dirfd, agentDir, "")
+		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+			var marker wakeDialogMarker
+			return json.Unmarshal(current, &marker) == nil && marker.Event == agyDialogEvent && marker.Harness == "agy"
+		})
 	})
 	return sink, nil
 }
@@ -137,13 +134,11 @@ func (s *agyDialogSink) clear() {
 	if s.written == nil {
 		return
 	}
+	written := s.written
 	_ = s.agentDir.withFD(func(dirfd int) error {
-		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
-			filepath.Join(s.agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
-		if err != nil || !exists || !bytes.Equal(current, s.written) {
-			return nil
-		}
-		return clearWakeDialogMarker(dirfd, s.agentDir, "")
+		return removeWakeDialogMarkerIf(dirfd, s.agentDir, func(current []byte) bool {
+			return bytes.Equal(current, written)
+		})
 	})
 	s.open, s.written = "", nil
 }
