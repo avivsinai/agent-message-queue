@@ -31,12 +31,12 @@ executable action or a safe operator diagnostic. Missing evidence is JSON
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
-The co-op Stop hook (`scripts/amq-stop-hook.sh`) blocks a stop only for mail
-no wake will ring for. With no live wake, every pending message counts. Under a
+The co-op Stop hook (`amq coop hook stop`, installed by `amq coop install-hooks`)
+blocks a stop only for mail no wake will ring for. With no live wake, every pending message counts. Under a
 live wake, only mail created at or before `baseline_at` counts, because a wake
 started with `--baseline-existing` never rings for that cohort. Every message
 counts when a live wake has no `baseline_at` yet (its baseline is not done) or
-when the probe fails or takes more than 2 seconds. A live wake that is demoted
+when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
 

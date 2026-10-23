@@ -15,6 +15,7 @@ import (
 // install-hooks now installs; an entry that still runs one runs it twice.
 var legacyCoopHookScripts = []string{
 	"claude-session-start.sh",
+	"amq-stop-hook.sh",
 }
 
 // legacyCoopHookEntries lists, as "<settings file>: <event>: <command>", the
