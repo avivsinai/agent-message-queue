@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -47,9 +48,12 @@ const maxSettingsBytes = 4 << 20
 // promise. The decoder is used only to LOCATE byte ranges; the ranges are
 // cut from the raw file.
 //
-// Install always inserts at the FIRST position of the target container,
-// with a tight trailing comma when the container is non-empty; uninstall
-// removes exactly our hook plus that comma. Uninstall never removes a
+// Install appends our group AFTER the operator's groups in the event
+// array, with a tight leading comma when the array is non-empty, so the
+// position of every operator group stays the same (Codex keys a hook's
+// trust by that position). A missing event array or hooks object is
+// inserted first in its parent object. Uninstall removes exactly our group
+// plus its comma. Uninstall never removes a
 // container: formatting cannot prove who created an empty "Stop" array or
 // "hooks" object, so an operator's containers are preserved and ours may be
 // left behind empty, which Claude Code treats as no hooks. A file that
@@ -71,14 +75,18 @@ const maxSettingsBytes = 4 << 20
 // names it. That limits who writes, not how many bytes a session's marker
 // may hold: the file is one appended line per turn, and it is removed when
 // the attachment unsubscribes. User off removes only the Buzz binding.
+//
+// The command starts amq-remote only when a state the receiver reads
+// exists: AMQ_REMOTE_BINDING, a binding file, the bindings directory, or
+// the attachment sentinels. Everywhere else the hook costs one sh.
 func InstallStopHook(home, bin string) error {
-	return replaceHook(home, stopHook, stopHookCommand(bin), stopHookEntry(bin))
+	return replaceHook(settingsPath(home), stopHook, stopHookEntry(home, bin))
 }
 
 // UninstallStopHook removes marked entries from the Stop chain. When no
 // marked entry exists the file is untouched (no rewrite, no mtime churn).
 func UninstallStopHook(home string) error {
-	return removeHook(home, stopHook)
+	return removeHook(settingsPath(home), stopHook)
 }
 
 // hookSpec names one hook event chain in settings.json and the marker that
@@ -97,7 +105,8 @@ var (
 // approvals: one entry with no matcher (every tool, so a reject can reach
 // any call), marked AMQ_APPROVAL_HOOK=1, whose own deadline is wait and
 // whose installed timeout is wait plus PermissionHookGrace. It is inert in
-// a session no relay share with approve is serving.
+// a session no relay share with approve is serving, and its command starts
+// amq-remote only when some session has a pin file.
 //
 // pin.Owner, 64 lowercase hex, pins the owner pubkey on the hook's command
 // line: the only key whose signed reaction can allow a call;
@@ -106,24 +115,28 @@ var (
 // change the pin on its own. An empty owner installs a reject-only hook.
 // A marked entry with another command is replaced; the same one is kept.
 func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
-	if pin != (HookPin{}) && !pin.Complete() {
+	switch {
+	case pin.Surface == SurfaceDesktop && !pin.DesktopComplete():
+		return fmt.Errorf("a Desktop pin needs the owner, the agent pubkey and its DM channel, and nothing else: %+v", pin)
+	case pin.Surface != SurfaceDesktop && pin != (HookPin{}) && !pin.Complete():
 		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
 	}
-	return replaceHook(home, permissionSpec, permissionHookCommand(bin, wait, pin), permissionHookEntry(bin, wait, pin))
+	return replaceHook(settingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait, pin))
 }
 
-// replaceHook makes entry, whose hook runs command, the only marked entry
-// of spec's chain. The same single entry is kept untouched; any other marked
-// entry (an older binary path, other flags) is replaced in one write.
-func replaceHook(home string, spec hookSpec, command string, entry []byte) error {
-	cmds, err := installedCommands(home, spec)
+// replaceHook makes entry the only marked entry of spec's chain in the
+// settings file at path. A single marked group equal to entry, field for
+// field, is kept untouched; anything else marked (an older binary path,
+// other flags, another timeout or matcher) is replaced in one write.
+func replaceHook(path string, spec hookSpec, entry []byte) error {
+	groups, err := markedGroups(path, spec)
 	if err != nil {
 		return err
 	}
-	if len(cmds) == 1 && cmds[0] == command {
+	if len(groups) == 1 && sameJSON(groups[0], entry) {
 		return nil // already installed as asked
 	}
-	return editSettings(home, true, func(raw []byte) ([]byte, error) {
+	return editSettings(path, true, func(raw []byte) ([]byte, error) {
 		if cut, err := rawRemoveEntries(raw, spec); err != nil {
 			return nil, err
 		} else if cut != nil {
@@ -133,10 +146,24 @@ func replaceHook(home string, spec hookSpec, command string, entry []byte) error
 	})
 }
 
-// installedCommands lists the commands of spec's marked hooks in the user
-// settings file.
-func installedCommands(home string, spec hookSpec) ([]string, error) {
-	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+// sameJSON reports whether two JSON values hold the same members and
+// values, whatever their whitespace and key order.
+func sameJSON(a, b []byte) bool {
+	decode := func(raw []byte) (any, bool) {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var v any
+		return v, dec.Decode(&v) == nil
+	}
+	va, oka := decode(a)
+	vb, okb := decode(b)
+	return oka && okb && reflect.DeepEqual(va, vb)
+}
+
+// markedGroups returns the raw matcher groups of spec's chain in the
+// settings file at path that hold a marked hook. A missing file has none.
+func markedGroups(path string, spec hookSpec) ([][]byte, error) {
+	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -151,6 +178,22 @@ func installedCommands(home string, spec hookSpec) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	var out [][]byte
+	for _, g := range groups {
+		if groupHasOurHook(raw[g[0]:g[1]], spec.marker) {
+			out = append(out, raw[g[0]:g[1]])
+		}
+	}
+	return out, nil
+}
+
+// installedCommands lists the commands of spec's marked hooks in the
+// settings file at path.
+func installedCommands(path string, spec hookSpec) ([]string, error) {
+	groups, err := markedGroups(path, spec)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
 	for _, g := range groups {
 		var group struct {
@@ -158,7 +201,7 @@ func installedCommands(home string, spec hookSpec) ([]string, error) {
 				Command string `json:"command"`
 			} `json:"hooks"`
 		}
-		if json.Unmarshal(raw[g[0]:g[1]], &group) != nil {
+		if json.Unmarshal(g, &group) != nil {
 			continue
 		}
 		for _, h := range group.Hooks {
@@ -177,21 +220,25 @@ var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
 // PermissionHookPin is the pin of the installed PermissionRequest hook,
 // empty when there is no hook, no pin, or more than one hook.
 func PermissionHookPin(home string) HookPin {
-	cmds, err := installedCommands(home, permissionSpec)
+	cmds, err := installedCommands(settingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 {
 		return HookPin{}
 	}
 	var pin HookPin
 	for _, m := range pinFlagRe.FindAllStringSubmatch(cmds[0], -1) {
 		if f := pin.field(m[1]); f != nil {
-			*f = strings.ReplaceAll(m[2], `'\''`, `'`)
+			*f = shellUnquote(m[2])
 		}
 	}
 	return pin
 }
 
-// pinFlags are the pin's command line flags, in the order written.
-var pinFlags = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+// pinFlags are the pin's command line flags, in the order written;
+// desktopPinFlags are a Desktop pin's.
+var (
+	pinFlags        = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+	desktopPinFlags = []string{"surface", "owner", "body", "channel"}
+)
 
 func (p *HookPin) field(name string) *string {
 	switch name {
@@ -209,6 +256,8 @@ func (p *HookPin) field(name string) *string {
 		return &p.Channel
 	case "target":
 		return &p.Target
+	case "surface":
+		return &p.Surface
 	}
 	return nil
 }
@@ -262,12 +311,18 @@ type CommandHook struct {
 }
 
 // InstallCommandHooks makes each hook the only entry marked with its marker
-// in its event chain, with replaceHook's rules: the same entry is kept and
-// any other marked entry is replaced.
+// in its event chain of the user settings file, with replaceHook's rules:
+// the same entry is kept and any other marked entry is replaced.
 func InstallCommandHooks(home string, hooks []CommandHook) error {
+	return InstallCommandHooksAt(settingsPath(home), hooks)
+}
+
+// InstallCommandHooksAt is InstallCommandHooks for the hooks file at path,
+// any file with the {"hooks":{event:[group...]}} shape.
+func InstallCommandHooksAt(path string, hooks []CommandHook) error {
 	for _, h := range hooks {
 		spec := hookSpec{event: h.Event, marker: h.Marker}
-		if err := replaceHook(home, spec, h.Command, commandHookEntry(h.Command, h.Matcher, h.Timeout)); err != nil {
+		if err := replaceHook(path, spec, commandHookEntry(h.Command, h.Matcher, h.Timeout)); err != nil {
 			return err
 		}
 	}
@@ -275,10 +330,16 @@ func InstallCommandHooks(home string, hooks []CommandHook) error {
 }
 
 // UninstallCommandHooks removes the entries marked with marker from each
-// event chain.
+// event chain of the user settings file.
 func UninstallCommandHooks(home, marker string, events []string) error {
+	return UninstallCommandHooksAt(settingsPath(home), marker, events)
+}
+
+// UninstallCommandHooksAt is UninstallCommandHooks for the hooks file at
+// path.
+func UninstallCommandHooksAt(path, marker string, events []string) error {
 	for _, event := range events {
-		if err := removeHook(home, hookSpec{event: event, marker: marker}); err != nil {
+		if err := removeHook(path, hookSpec{event: event, marker: marker}); err != nil {
 			return err
 		}
 	}
@@ -288,18 +349,92 @@ func UninstallCommandHooks(home, marker string, events []string) error {
 // MarkedHookCommands lists the commands marked with marker in the event
 // chain of the user settings file. A missing file lists none.
 func MarkedHookCommands(home, event, marker string) ([]string, error) {
-	return installedCommands(home, hookSpec{event: event, marker: marker})
+	return MarkedHookCommandsAt(settingsPath(home), event, marker)
+}
+
+// MarkedHookCommandsAt is MarkedHookCommands for the hooks file at path.
+func MarkedHookCommandsAt(path, event, marker string) ([]string, error) {
+	return installedCommands(path, hookSpec{event: event, marker: marker})
 }
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
 func UninstallPermissionHook(home string) error {
-	return removeHook(home, permissionSpec)
+	return removeHook(settingsPath(home), permissionSpec)
 }
 
 // PermissionHookState is StopHookState for the PermissionRequest entry.
 func PermissionHookState(home string) (string, error) {
 	return hookState(home, permissionSpec)
 }
+
+// Forms of an installed hook command (StopHookForm, PermissionHookForm).
+const (
+	// HookFormCurrent is what the installer writes now for that binary.
+	HookFormCurrent = "current"
+	// HookFormUngated starts amq-remote on every event in every session.
+	HookFormUngated = "ungated"
+	// HookFormStale is gated but differs from what the installer writes
+	// now: its gate names paths this home no longer resolves, or its
+	// timeout or form is older. The gate may skip a state the receiver
+	// reads.
+	HookFormStale = "stale"
+)
+
+var (
+	stopHookBinRe       = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude stop-hook$`)
+	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook --wait ([0-9]+)`)
+)
+
+// StopHookForm reports the form of the one installed Stop hook, "" when
+// the user settings file does not hold exactly one.
+func StopHookForm(home string) (string, error) {
+	return hookForm(home, stopHook, func(cmd string) []byte {
+		m := stopHookBinRe.FindStringSubmatch(cmd)
+		if m == nil {
+			return nil
+		}
+		return stopHookEntry(home, shellUnquote(m[1]))
+	})
+}
+
+// PermissionHookForm is StopHookForm for the PermissionRequest hook; the
+// current form keeps the installed wait and pin.
+func PermissionHookForm(home string) (string, error) {
+	return hookForm(home, permissionSpec, func(cmd string) []byte {
+		m := permissionHookBinRe.FindStringSubmatch(cmd)
+		if m == nil {
+			return nil
+		}
+		wait, err := strconv.Atoi(m[2])
+		if err != nil {
+			return nil
+		}
+		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second, PermissionHookPin(home))
+	})
+}
+
+// hookForm compares the one marked group of spec's chain with the group
+// render builds from its command, nil when the command does not parse.
+func hookForm(home string, spec hookSpec, render func(cmd string) []byte) (string, error) {
+	path := settingsPath(home)
+	groups, err := markedGroups(path, spec)
+	if err != nil || len(groups) != 1 {
+		return "", err
+	}
+	cmds, err := installedCommands(path, spec)
+	if err != nil || len(cmds) != 1 {
+		return "", err
+	}
+	switch {
+	case !strings.Contains(cmds[0], " || exec "):
+		return HookFormUngated, nil
+	case sameJSON(groups[0], render(cmds[0])):
+		return HookFormCurrent, nil
+	}
+	return HookFormStale, nil
+}
+
+func shellUnquote(s string) string { return strings.ReplaceAll(s, `'\''`, `'`) }
 
 // Stop hook states in the user settings file (StopHookState).
 const (
@@ -358,18 +493,17 @@ func settingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
 
-// removeHook removes spec's marked entries.
-func removeHook(home string, spec hookSpec) error {
-	return editSettings(home, false, func(raw []byte) ([]byte, error) {
+// removeHook removes spec's marked entries from the settings file at path.
+func removeHook(path string, spec hookSpec) error {
+	return editSettings(path, false, func(raw []byte) ([]byte, error) {
 		return rawRemoveEntries(raw, spec)
 	})
 }
 
-// editSettings applies edit to the user settings file's bytes and writes
-// the result atomically; a nil result writes nothing. A missing file is
-// started as {} when create is set, and is left alone otherwise.
-func editSettings(home string, create bool, edit func([]byte) ([]byte, error)) error {
-	path := settingsPath(home)
+// editSettings applies edit to the bytes of the settings file at path and
+// writes the result atomically; a nil result writes nothing. A missing file
+// is started as {} when create is set, and is left alone otherwise.
+func editSettings(path string, create bool, edit func([]byte) ([]byte, error)) error {
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -399,9 +533,18 @@ func editSettings(home string, create bool, edit func([]byte) ([]byte, error)) e
 }
 
 // stopHookCommand is the shell command the hook runs: the ownership marker
-// assignment, then the single-quoted binary as the command word.
-func stopHookCommand(bin string) string {
-	return stopHookMarker + shellQuote(bin) + " claude stop-hook"
+// assignment, then a gate of shell tests, then the single-quoted binary,
+// exec'd so Claude's signals reach it. The gate repeats what the receiver
+// reads before it writes (stopSessionAllowed): the binding env path, the
+// binding file and bindings directory under the AMQ home that home
+// resolves now, and the attachment sentinels under $HOME, the home the
+// receiver resolves. With none of them present the receiver writes
+// nothing, so the hook starts nothing.
+func stopHookCommand(home, bin string) string {
+	remote := filepath.Join(amqhome.Under(home), "remote")
+	return stopHookMarker + `[ -z "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
+		` ] && [ ! -e ` + shellQuote(filepath.Join(remote, "bindings")) +
+		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] || exec ` + shellQuote(bin) + " claude stop-hook"
 }
 
 // shellQuote single-quotes s for POSIX sh (Claude Code runs hook commands
@@ -411,11 +554,20 @@ func shellQuote(s string) string {
 }
 
 // permissionHookCommand runs the PermissionRequest receiver with its wait
-// and the pin.
-func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
-	cmd := permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+// and the pin, exec'd so Claude's TERM reaches it, and only when some
+// session under home's amq-approve directory has a pin file: the receiver
+// decides nothing without a live pin. The glob runs inside sh; with no
+// match "$1" is the pattern itself, which does not exist.
+func permissionHookCommand(home, bin string, wait time.Duration, pin HookPin) string {
+	approve := filepath.Join(claudeSessionsDir(home), "amq-approve")
+	cmd := permissionHookMarker + "set -- " + shellQuote(approve) + `/*/pin-*; [ ! -e "$1" ] || exec ` +
+		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
 	if pin != (HookPin{}) {
-		for _, name := range pinFlags {
+		flags := pinFlags
+		if pin.Surface == SurfaceDesktop {
+			flags = desktopPinFlags
+		}
+		for _, name := range flags {
 			cmd += " --" + name + " " + shellQuote(*pin.field(name))
 		}
 	}
@@ -425,17 +577,18 @@ func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
 // permissionHookEntry is the PermissionRequest group: no matcher, and a
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
-func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
-	return commandHookEntry(permissionHookCommand(bin, wait, pin), "", int((wait+PermissionHookGrace)/time.Second))
+func permissionHookEntry(home, bin string, wait time.Duration, pin HookPin) []byte {
+	return commandHookEntry(permissionHookCommand(home, bin, wait, pin), "", int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
 // schema: an OUTER object whose "hooks" array holds the command hook
 // (https://code.claude.com/docs/en/hooks#configuration and
 // internal/keepalive/hookinstall's SessionStart entry use the same shape).
-// Stop takes no matcher.
-func stopHookEntry(bin string) []byte {
-	return commandHookEntry(stopHookCommand(bin), "", 10)
+// Stop takes no matcher. The receiver appends one line, so 5 seconds bounds
+// a stuck file system without holding a stop longer.
+func stopHookEntry(home, bin string) []byte {
+	return commandHookEntry(stopHookCommand(home, bin), "", 5)
 }
 
 // commandHookEntry renders one matcher group holding one command hook. An
@@ -446,11 +599,15 @@ func commandHookEntry(command, matcher string, timeout int) []byte {
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
 	}
-	b, _ := json.Marshal(struct {
+	// No HTML escaping: a gate's && stays readable in the settings file.
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(struct {
 		Matcher string `json:"matcher,omitempty"`
 		Hooks   []hook `json:"hooks"`
 	}{Matcher: matcher, Hooks: []hook{{Type: "command", Command: command, Timeout: timeout}}})
-	return b
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
 }
 
 // jsonSpan is one container value in the raw bytes: open is the index of
@@ -678,6 +835,24 @@ func groupHasOurHook(el []byte, marker string) bool {
 
 func isJSONSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
 
+// insertLast inserts item right after the array's last element, with a
+// tight leading comma, or as its only element when it is empty.
+func insertLast(raw []byte, c jsonSpan, item []byte) []byte {
+	if c.empty {
+		return insertFirst(raw, c, item)
+	}
+	at := c.close
+	for at > c.open && isJSONSpace(raw[at-1]) {
+		at--
+	}
+	var b bytes.Buffer
+	b.Write(raw[:at])
+	b.WriteByte(',')
+	b.Write(item)
+	b.Write(raw[at:])
+	return b.Bytes()
+}
+
 // insertFirst inserts item right after the container's opening delimiter,
 // with a tight trailing comma when the container already has members.
 func insertFirst(raw []byte, c jsonSpan, item []byte) []byte {
@@ -719,9 +894,9 @@ func cutItem(raw []byte, start, end int) []byte {
 	return append(out, raw[end:]...)
 }
 
-// rawInsertStopEntry inserts the matcher group into the Stop chain by byte
-// surgery, creating "Stop" (and "hooks") when absent. Returns nil,nil when
-// an owned group already exists.
+// rawInsertEntry appends the matcher group to spec's event chain by byte
+// surgery, creating the event array (and "hooks") when absent. Returns
+// nil,nil when an owned group already exists.
 func rawInsertEntry(raw []byte, spec hookSpec, entry []byte) ([]byte, error) {
 	loc, err := locateSettings(raw, spec.event)
 	if err != nil {
@@ -738,7 +913,7 @@ func rawInsertEntry(raw []byte, spec hookSpec, entry []byte) ([]byte, error) {
 				return nil, nil // already installed
 			}
 		}
-		return insertFirst(raw, *loc.stop, entry), nil
+		return insertLast(raw, *loc.stop, entry), nil
 	case loc.hooks != nil:
 		member := append([]byte(`"`+spec.event+`":[`), entry...)
 		return insertFirst(raw, *loc.hooks, append(member, ']')), nil
@@ -923,15 +1098,26 @@ func bindStopSession(home, sessionID string) (string, error) {
 		return "", errUnsupportedPlatform
 	}
 	dir := stopBoundDir(home, sessionID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("stop bound dir %s is not a plain directory", dir)
-	}
-	f, err := os.CreateTemp(dir, "owner-")
-	if err != nil {
-		return "", err
+	var f *os.File
+	// Another attachment's unbind removes an empty directory, so a create
+	// that loses that race makes the directory again, once.
+	for attempt := 0; ; attempt++ {
+		err := os.MkdirAll(dir, 0o700)
+		if err == nil {
+			var fi os.FileInfo
+			if fi, err = os.Lstat(dir); err == nil && !fi.IsDir() {
+				return "", fmt.Errorf("stop bound dir %s is not a plain directory", dir)
+			}
+		}
+		if err == nil {
+			f, err = os.CreateTemp(dir, "owner-")
+		}
+		if err == nil {
+			break
+		}
+		if attempt > 0 || !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
 	}
 	token := filepath.Base(f.Name())
 	if err := f.Close(); err != nil {
@@ -952,6 +1138,18 @@ func unbindStopSession(home, sessionID, token string) {
 		return
 	}
 	removeRegular(stopMarkerPath(home, sessionID))
+	// The installed gate tests amq-bound itself, so the empty directories
+	// go too: with nothing attached the Stop hook starts nothing.
+	removeEmptyDir(stopBoundDir(home, sessionID))
+	removeEmptyDir(filepath.Dir(stopBoundDir(home, sessionID)))
+}
+
+// removeEmptyDir removes path when it is a plain empty directory; a
+// directory that holds anything stays.
+func removeEmptyDir(path string) {
+	if fi, err := os.Lstat(path); err == nil && fi.IsDir() {
+		_ = os.Remove(path)
+	}
 }
 
 func removeRegular(path string) {

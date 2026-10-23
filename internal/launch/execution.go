@@ -233,7 +233,8 @@ func (ticket ExecutionTicket) Validate() error {
 		return fmt.Errorf("execution backend identity is incomplete")
 	} else if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && codexCaptureVersionSupported(ticket.ProviderVersion) && ticket.Backend == "" {
 		return fmt.Errorf("codex notify capture requires execution backend identity")
-	} else if ticket.Backend != "" && (ticket.Mode != AdapterModeCapture || ticket.Provider != CodexProvider || !codexCaptureVersionSupported(ticket.ProviderVersion)) {
+	} else if ticket.Backend != "" && ticket.Mode != AdapterModeMint &&
+		(ticket.Mode != AdapterModeCapture || ticket.Provider != CodexProvider || !codexCaptureVersionSupported(ticket.ProviderVersion)) {
 		return fmt.Errorf("execution backend identity is unsupported without pre-spawn acquisition")
 	}
 	for name, value := range map[string]string{"project root": ticket.ProjectRoot, "project identity": ticket.ProjectIdentity, "session root": ticket.SessionRoot, "session identity": ticket.SessionIdentity, "cwd": ticket.Cwd, "cwd identity": ticket.CwdIdentity, "provider executable": ticket.ProviderExecutable, "provider executable identity": ticket.ProviderExecutableIdentity, "amq executable": ticket.AMQExecutable, "amq executable identity": ticket.AMQExecutableIdentity, "environment digest": ticket.EnvDigest} {
@@ -688,10 +689,16 @@ func prepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 			if record.LaunchNonce != nonce || !validUUID(ticket.ConversationID) {
 				return ticket, fmt.Errorf("pending conversation does not match execution generation")
 			}
+			// A mint ticket without a backend identity keeps the commands
+			// identity.
+			backend, profile := ticket.Backend, ticket.Profile
+			if backend == "" {
+				backend, profile = CommandsBackendName, CommandsProfile().Identity()
+			}
 			record.State = CaptureReady
 			record.Identity = ConversationIdentity{Provider: ticket.Provider, ID: ticket.ConversationID}
 			record.ExecutionEvidence = &ConversationExecutionEvidence{
-				Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), Outcome: OutcomeCreated,
+				Backend: backend, Profile: profile, Outcome: OutcomeCreated,
 				LaunchNonce: nonce, ConversationID: ticket.ConversationID,
 			}
 			record.Reason = ""
@@ -851,16 +858,20 @@ type CodexNotifyResult struct {
 	ConversationID string
 	EvidenceRef    string
 	AlreadyReady   bool
+	// NotTopLevel reports a notify for a thread that is not the session's
+	// top-level interactive thread; it binds nothing.
+	NotTopLevel bool
 }
 
 // RecordCodexNotify binds one provider-owned turn-complete notification to
 // the exact managed launch, persists immutable evidence, and only then makes
-// the provider identity resumable.
-func RecordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable string, raw []byte) (CodexNotifyResult, error) {
-	return recordCodexNotify(root, handle, amqExecutable, raw, nil)
+// the provider identity resumable. codexHome is the provider's CODEX_HOME;
+// only a thread whose rollout there proves it top-level can bind.
+func RecordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable, codexHome string, raw []byte) (CodexNotifyResult, error) {
+	return recordCodexNotify(root, handle, amqExecutable, codexHome, raw, nil)
 }
 
-func recordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
+func recordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable, codexHome string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
 	lease, ticket, err := acquireCaptureTicket(root, handle, CodexProvider)
 	if err != nil {
 		return result, err
@@ -882,15 +893,24 @@ func recordCodexNotify(root *fsq.DeliveryRoot, handle, amqExecutable string, raw
 	if err != nil {
 		return result, err
 	}
-	if record.State == CaptureReady {
-		if record.LaunchNonce != nonce || record.ProviderVersion != ticket.ProviderVersion ||
-			record.Identity.Provider != CodexProvider || record.Identity.ID != evidence.conversationID {
-			return result, &CodexNotifyConflictError{Existing: record.Identity.ID, Observed: evidence.conversationID}
-		}
+	// A resumed seat runs the captured thread under a new launch nonce.
+	resumed := ticket.ConversationID != "" && ticket.ConversationID == record.Identity.ID
+	if record.State == CaptureReady && record.Identity.Provider == CodexProvider && record.Identity.ID == evidence.conversationID &&
+		(resumed || (record.LaunchNonce == nonce && record.ProviderVersion == ticket.ProviderVersion)) {
 		if len(record.EvidenceRefs) != 1 {
 			return result, fmt.Errorf("ready codex conversation does not have one evidence ref")
 		}
 		return CodexNotifyResult{ConversationID: record.Identity.ID, EvidenceRef: record.EvidenceRefs[0], AlreadyReady: true}, nil
+	}
+	topLevel, err := codexTopLevelThread(codexHome, evidence.conversationID, ticket.Cwd)
+	if err != nil {
+		return result, err
+	}
+	if !topLevel {
+		return CodexNotifyResult{NotTopLevel: true}, nil
+	}
+	if record.State == CaptureReady {
+		return result, &CodexNotifyConflictError{Existing: record.Identity.ID, Observed: evidence.conversationID}
 	}
 	if record.State != CapturePending || record.LaunchNonce != nonce || record.ProviderVersion != ticket.ProviderVersion {
 		return result, fmt.Errorf("pending codex conversation does not match notify generation")

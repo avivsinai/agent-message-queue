@@ -1,8 +1,14 @@
 package launch
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,6 +177,74 @@ func decodeCodexNotifyPayload(raw []byte) (codexNotifyPayload, error) {
 		return payload, fmt.Errorf("codex notify evidence identity is invalid")
 	}
 	return payload, nil
+}
+
+// codexRolloutMetaLimit bounds the first rollout line, which carries the
+// session's base instructions.
+const codexRolloutMetaLimit = 1 << 20
+
+// codexTopLevelThread reports whether threadID is the top-level interactive
+// thread of a Codex session in cwd. Codex also sends notify for side threads
+// (title generation writes no rollout) and subagent threads (their
+// session_meta source is an object), so arrival order never identifies the
+// seat's conversation. Older releases may omit thread_source. The check reads
+// only the first line of the rollout named by the exact thread id, in the day
+// directories around the UUIDv7 creation time; it never selects a newest
+// file. A missing rollout is not proof and reports false.
+func codexTopLevelThread(codexHome, threadID, cwd string) (bool, error) {
+	if !validUUIDv7(threadID) {
+		return false, nil
+	}
+	millis, err := strconv.ParseInt(strings.ReplaceAll(threadID[:13], "-", ""), 16, 64)
+	if err != nil {
+		return false, nil
+	}
+	created := time.UnixMilli(millis).Local()
+	var matches []string
+	for _, offset := range []int{-1, 0, 1} {
+		dir := filepath.Join(codexHome, "sessions", created.AddDate(0, 0, offset).Format("2006/01/02"))
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("read codex sessions: %w", err)
+		}
+		for _, entry := range entries {
+			if name := entry.Name(); strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, "-"+threadID+".jsonl") {
+				matches = append(matches, filepath.Join(dir, name))
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return false, nil
+	}
+	file, err := os.Open(matches[0])
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open codex rollout: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	line, err := bufio.NewReader(io.LimitReader(file, codexRolloutMetaLimit)).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read codex rollout: %w", err)
+	}
+	var meta struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID           string          `json:"id"`
+			Cwd          string          `json:"cwd"`
+			Source       json.RawMessage `json:"source"`
+			ThreadSource string          `json:"thread_source"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &meta) != nil {
+		return false, nil
+	}
+	return meta.Type == "session_meta" && meta.Payload.ID == threadID && meta.Payload.Cwd == cwd &&
+		string(meta.Payload.Source) == `"cli"` && (meta.Payload.ThreadSource == "" || meta.Payload.ThreadSource == "user"), nil
 }
 
 // ParseCursorCreateChatEvidence validates the exact stdout returned by the

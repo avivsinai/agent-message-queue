@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -22,6 +25,7 @@ const codexNotifyTestID = "019c8a2f-2b13-7000-8000-000000000001"
 func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 	t.Setenv(launch.InternalLaunchNonceEnv, "")
 	session, root, amq := seedCodexNotifyCLI(t, "0.147.0")
+	writeCodexRolloutCLI(t, codexNotifyTestID, filepath.Join(session, "work"))
 	payload := []byte(`{"type":"agent-turn-complete","thread-id":"` + codexNotifyTestID + `","turn-id":"turn-1","cwd":"` + filepath.Join(session, "work") + `","input-messages":["reply with ok"],"last-assistant-message":"ok"}`)
 	original := codexNotifyForward
 	t.Cleanup(func() { codexNotifyForward = original })
@@ -56,6 +60,7 @@ func TestCodexNotifyHonorsVerifiedVersionFloor(t *testing.T) {
 	codexNotifyForward = func(string, []byte) error { return nil }
 	const threadID = "01a15ab3-228d-7003-9961-befa20b739a6"
 	session, root, _ := seedCodexNotifyCLI(t, "0.154.0")
+	writeCodexRolloutCLI(t, threadID, filepath.Join(session, "work"))
 	payload := `{"type":"agent-turn-complete","thread-id":"` + threadID + `","turn-id":"01a15ab3-22e7-7a40-91a6-116eb12eb612","cwd":"` + filepath.Join(session, "work") + `","client":"codex_exec","input-messages":["Reply with exactly the word OK and nothing else."],"last-assistant-message":"OK"}`
 	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", payload}, "test"); err != nil {
 		t.Fatalf("notify at 0.154.0: %v", err)
@@ -98,6 +103,32 @@ func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	}
 	if gotName != hook || !reflect.DeepEqual(gotArgs, []string{string(payload)}) {
 		t.Fatalf("forward = %q %q", gotName, gotArgs)
+	}
+}
+
+// writeCodexRolloutCLI points CODEX_HOME at a temp dir holding the first
+// rollout line codex-cli 0.163.0 writes for a top-level TUI thread.
+func writeCodexRolloutCLI(t *testing.T, threadID, cwd string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	millis, err := strconv.ParseInt(strings.ReplaceAll(threadID[:13], "-", ""), 16, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.UnixMilli(millis).Local()
+	dir := filepath.Join(home, "sessions", created.Format("2006/01/02"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{
+		"id": threadID, "cwd": cwd, "source": "cli", "thread_source": "user", "cli_version": "0.163.0",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rollout-"+created.Format("2006-01-02T15-04-05")+"-"+threadID+".jsonl"), append(meta, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

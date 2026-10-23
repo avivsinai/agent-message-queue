@@ -206,6 +206,9 @@ func runDoctor(args []string) error {
 	if check, ok := checkCodexShellEnvironment(); ok {
 		result.Checks = append(result.Checks, check)
 	}
+	if check, ok := checkLegacyCoopHooks(); ok {
+		result.Checks = append(result.Checks, check)
+	}
 
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {

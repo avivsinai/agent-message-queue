@@ -13,6 +13,7 @@ import (
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip44"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -303,7 +304,7 @@ func (s *Sink) build(obs observation) (nostr.Event, error) {
 		},
 		Content: content,
 	}
-	if err := evt.Sign(s.Body); err != nil {
+	if err := relay.Sign(&evt, s.Body); err != nil {
 		return nostr.Event{}, err
 	}
 	return evt, nil

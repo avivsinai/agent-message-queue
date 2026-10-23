@@ -32,6 +32,9 @@ func init() { claude.RegisterAllowFactory(allowConfig) }
 // The root and session only locate the body secret, whose pubkey must be
 // the pinned body. A pin missing any flag allows nothing.
 func allowConfig(pin claude.HookPin) claude.AllowConfig {
+	if pin.Surface == claude.SurfaceDesktop {
+		return desktopAllowConfig(pin)
+	}
 	cfg := claude.AllowConfig{Owner: pin.Owner}
 	if !pin.Complete() {
 		return cfg
@@ -60,6 +63,27 @@ func allowConfig(pin claude.HookPin) claude.AllowConfig {
 		}
 		defer conn.Close()
 		return historyError(buzzio.CheckHistory(ctx, conn, msg, check))
+	}
+	return cfg
+}
+
+// desktopAllowConfig is what an allow from the Buzz Desktop agent's DM needs
+// for a Desktop pin: the pinned owner, agent key and DM channel, and a
+// verifier that checks the owner's signed ✅, the agent's signed approval
+// message and the agent's grant against them. It reads no relay and no key:
+// the agent read the history before it signed the grant. A pin that is not a
+// whole Desktop pin allows nothing.
+func desktopAllowConfig(pin claude.HookPin) claude.AllowConfig {
+	cfg := claude.AllowConfig{Owner: pin.Owner}
+	if !pin.DesktopComplete() {
+		return cfg
+	}
+	cfg.Share = func(string) (claude.AllowShare, error) {
+		return claude.AllowShare{Owner: pin.Owner, Body: pin.Body, Channel: pin.Channel, Desktop: true}, nil
+	}
+	cfg.Verify = func(_ context.Context, evidence json.RawMessage, want claude.AllowCheck) error {
+		return buzzio.VerifyDesktopEvidence(evidence, buzzio.DesktopCheck{Owner: pin.Owner, Body: pin.Body, Channel: pin.Channel,
+			Prompt: want.Prompt, NotBefore: want.NotBefore, NotAfter: want.NotAfter})
 	}
 	return cfg
 }
@@ -122,8 +146,14 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 	root := fs.String("root", os.Getenv("AM_ROOT"), "AMQ root whose manifest names the share to pin and whose enrolled body key the hook signs in with (default AM_ROOT)")
 	session := fs.String("session", "", "the share session to pin (default: the one relay share of the owner with a DM channel)")
 	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <root>/"+stateDirName+"/manifest.json)")
+	desktop := fs.Bool("desktop", false, "pin the Buzz Desktop agent's DM instead of a relay share: needs --owner, --body and --channel")
+	body := fs.String("body", "", "with --desktop: the Desktop agent's public key (64 hex or npub)")
+	channel := fs.String("channel", "", "with --desktop: the agent's DM channel id with the owner")
 	if fs.Parse(args) != nil {
 		return 2
+	}
+	if *desktop {
+		return installDesktopApprovalHook(home, *ownerFlag, *body, *channel, stdout, stderr)
 	}
 	owner, err := approvalOwner(*ownerFlag, *root, *manifestPath)
 	if err != nil {
@@ -152,6 +182,49 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 	say(stdout, "approval hook installed: the owner %s can allow a Claude tool call of share %s with ✅ in Buzz, or block it with ❌\n", owner, pin.Session)
 	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
 	return 0
+}
+
+// installDesktopApprovalHook writes the PermissionRequest hook with a Desktop
+// pin. The owner runs it in the terminal and confirms the values it prints:
+// nothing is read from a file Claude can write.
+func installDesktopApprovalHook(home, owner, body, channel string, stdout, stderr io.Writer) int {
+	var err error
+	pin := claude.HookPin{Surface: claude.SurfaceDesktop, Channel: strings.TrimSpace(channel)}
+	if pin.Owner, err = pubKeyFlag("--owner", owner); err == nil {
+		pin.Body, err = pubKeyFlag("--body", body)
+	}
+	if err == nil && !pin.DesktopComplete() {
+		err = errors.New("--desktop needs --owner, a different --body and --channel")
+	}
+	if err != nil {
+		say(stderr, "install-approval-hook: %v\n", err)
+		return 1
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		bin = "amq-remote"
+	}
+	if err := claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait, pin); err != nil {
+		say(stderr, "install-approval-hook: %v\n", err)
+		return 1
+	}
+	say(stdout, "approval hook installed for Buzz Desktop: the owner %s can allow a Claude tool call with ✅ on an approval that the agent %s posts in the DM %s, or block it with ❌\n", pin.Owner, pin.Body, pin.Channel)
+	say(stdout, "check these three values against Buzz Desktop; an approval from any other agent or channel can only deny\n")
+	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
+	return 0
+}
+
+// pubKeyFlag is a public key flag given as hex or npub, as 64 lowercase hex.
+func pubKeyFlag(name, value string) (string, error) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	pk, err := approvalOwner(v, "", "")
+	if err != nil {
+		return "", fmt.Errorf("%s %q is not 64 hex characters or an npub", name, value)
+	}
+	return pk, nil
 }
 
 // approvalOwner is the owner pubkey to pin, as 64 lowercase hex: flag as
