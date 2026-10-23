@@ -285,6 +285,7 @@ func (ticket ExecutionTicket) Validate() error {
 		}
 	}
 	seenDynamic := make(map[int]struct{}, len(ticket.DynamicArgv))
+	identityKeys := make(map[string]bool)
 	conversationSlots := 0
 	for i, dynamic := range ticket.DynamicArgv {
 		if dynamic.Index <= 0 || dynamic.Index >= len(ticket.TargetArgv) {
@@ -308,6 +309,12 @@ func (ticket ExecutionTicket) Validate() error {
 			if expected == "" || ticket.TargetArgv[dynamic.Index] != expected {
 				return fmt.Errorf("dynamic conversation slot does not match ticket")
 			}
+		case DynamicArgCodexIdentity:
+			key, ok := codexIdentitySlotKey(ticket.TargetArgv, dynamic.Index)
+			if !ok || identityKeys[key] {
+				return fmt.Errorf("dynamic codex identity slot is invalid")
+			}
+			identityKeys[key] = true
 		default:
 			return fmt.Errorf("dynamic argv[%d] kind is invalid", i)
 		}
@@ -398,6 +405,12 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 	if err != nil {
 		return err
 	}
+	identitySlots := make(map[int]bool)
+	for _, dynamic := range ticket.DynamicArgv {
+		if dynamic.Kind == DynamicArgCodexIdentity {
+			identitySlots[dynamic.Index] = true
+		}
+	}
 	count := 0
 	for i := 1; i < len(ticket.TargetArgv); i++ {
 		arg := ticket.TargetArgv[i]
@@ -413,7 +426,7 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 		value := ticket.TargetArgv[i+1]
 		if value == expected {
 			count++
-		} else if !validCodexConfigOverride(value) {
+		} else if !identitySlots[i+1] && !validCodexConfigOverride(value) {
 			return fmt.Errorf("codex notify execution ticket contains unsupported configuration override")
 		}
 		i++
@@ -993,8 +1006,10 @@ func callPrepareExecutionHook(hook prepareExecutionHook, stage string) error {
 }
 
 // ResolveExecutionArgv replaces only declared dynamic slots after the ticket
-// has durably acquired their values. Static argv remains byte-identical.
-func ResolveExecutionArgv(ticket ExecutionTicket) ([]string, error) {
+// has durably acquired their values; Codex identity slots take their values
+// from env, the environment the provider runs with. Static argv remains
+// byte-identical.
+func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error) {
 	if err := ticket.Validate(); err != nil {
 		return nil, err
 	}
@@ -1011,6 +1026,12 @@ func ResolveExecutionArgv(ticket ExecutionTicket) ([]string, error) {
 				return nil, fmt.Errorf("conversation identity is not acquired")
 			}
 			argv[dynamic.Index] = ticket.ConversationID
+		case DynamicArgCodexIdentity:
+			filled, err := fillCodexIdentitySlot(ticket.TargetArgv, dynamic.Index, env)
+			if err != nil {
+				return nil, err
+			}
+			argv[dynamic.Index] = filled
 		default:
 			return nil, fmt.Errorf("unsupported dynamic argv kind %q", dynamic.Kind)
 		}

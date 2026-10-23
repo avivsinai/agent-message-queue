@@ -83,7 +83,7 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 	base := secureTempDirForTest(t)
 	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a9"
 	// AMQ's own session resume shape: options first, the id last.
-	if err := recordResumedCodexThread("codex", []string{"resume", "--yolo", "-c", "notify=[\"x\"]", thread}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", ""))); err != nil {
+	if _, err := recordResumedCodexThread("codex", []string{"resume", "--yolo", "-c", "notify=[\"x\"]", thread}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", ""))); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range identityEnvKeys {
@@ -99,7 +99,7 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 // Regression: #993, a record that cannot be written stopped nothing;
 // the launch resumed the thread without an identity.
 func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
-	err := recordResumedCodexThread("codex", []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91aa"}, func(string) error { return errors.New("disk full") })
+	_, err := recordResumedCodexThread("codex", []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91aa"}, func(string) error { return errors.New("disk full") })
 	var mismatch *ExitCodeError
 	if !errors.As(err, &mismatch) || mismatch.Code != ExitContextMismatch {
 		t.Fatalf("record failure: err=%v, want the launch stopped with a context mismatch", err)
@@ -126,7 +126,7 @@ func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 	} {
 		launch, err := resolveCodexResumeLaunch("codex", args)
 		if err == nil {
-			err = recordResumedCodexThread("codex", launch, record)
+			_, err = recordResumedCodexThread("codex", launch, record)
 		}
 		var mismatch *ExitCodeError
 		if !errors.As(err, &mismatch) || mismatch.Code != ExitContextMismatch {
@@ -156,7 +156,7 @@ func TestCodexResumeLastCarriesTheSelectedThread(t *testing.T) {
 		}
 		args := rewriteCodexResume(tc.args, r, t1, prompt)
 		var recorded []string
-		err := recordResumedCodexThread("codex", args, func(thread string) error { recorded = append(recorded, thread); return nil })
+		_, err := recordResumedCodexThread("codex", args, func(thread string) error { recorded = append(recorded, thread); return nil })
 		if err != nil || !slices.Equal(args, tc.want) || !slices.Equal(recorded, []string{t1}) {
 			t.Fatalf("%q: argv %q, recorded %q, err %v; want %q bound to %s", tc.args, args, recorded, err, tc.want, t1)
 		}
@@ -177,7 +177,7 @@ func TestResumeByIDTakesTheLaunchingSession(t *testing.T) {
 	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91ad"
 	for _, s := range []string{"s1", "s2"} {
 		env := buildCoopExecEnvironment(nil, filepath.Join(base, s), "codex", s)
-		if err := recordResumedCodexThread("codex", []string{"resume", thread}, codexThreadIdentityRecorder(env)); err != nil {
+		if _, err := recordResumedCodexThread("codex", []string{"resume", thread}, codexThreadIdentityRecorder(env)); err != nil {
 			t.Fatal(err)
 		}
 	}

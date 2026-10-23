@@ -332,6 +332,17 @@ func (c *coopExecRun) validateFlags() error {
 	if len(remaining) > 1 {
 		c.agentArgs = append(remaining[1:], c.agentArgs...)
 	}
+	// Before any root, wake or naming work. A managed plan's arguments
+	// passed the launch grammar, which admits no --remote and no identity
+	// override.
+	if c.managedLaunchNonce == "" {
+		if err := refuseCodexSeatArgs(c.cmdName, c.agentArgs); err != nil {
+			return err
+		}
+	}
+	if err := refuseCodexIncludePolicy(c.cmdName); err != nil {
+		return err
+	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
 	}
@@ -832,8 +843,14 @@ func (c *coopExecRun) execAgent() error {
 	if err != nil {
 		return err
 	}
-	if err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
+	recorded, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity)
+	if err != nil {
 		return err
+	}
+	// A managed plan carries the identity overrides as its own dynamic
+	// slots, which the launch wrapper fills.
+	if c.managedLaunchNonce == "" {
+		c.agentArgs = pinCodexShellIdentity(c.binaryPath, c.agentArgs, env, recorded)
 	}
 
 	// Build argv: command name + agent args.
@@ -866,6 +883,9 @@ func (c *coopExecRun) execAgent() error {
 		return cleanupAfterError(fmt.Errorf("encode final wake owner: %w", ownerErr))
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
+	if c.managedLaunchNonce == "" {
+		env = codexDaemonSeatEnv(c.binaryPath, env, recorded)
+	}
 	var execErr error
 	if c.managedLaunchNonce != "" {
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)

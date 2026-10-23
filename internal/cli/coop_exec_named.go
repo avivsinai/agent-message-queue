@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -365,10 +364,12 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
-		// The TUI may still run on the daemon, whose tool commands carry
-		// no AM_*; amq there then has no handle and refuses until one is
-		// given.
-		_ = writeStderr("warning: amq commands inside this Codex session have no AMQ identity; pass --me %s, or export AM_ROOT and AM_ME in that command\n", strings.TrimPrefix(name, path.Dir(name)+"/"))
+		// coop exec then gives the seat its identity through configuration
+		// overrides, which make the TUI run its own app-server
+		// (pinCodexShellIdentity); a --remote seat is refused there instead.
+		if !codexArgsHaveRemote(agentArgs) {
+			_ = writeStderr("this Codex seat runs off the shared daemon (%s), so amq-remote cannot attach to it\n", reason)
+		}
 		return agentArgs, true
 	}
 	switch backend {

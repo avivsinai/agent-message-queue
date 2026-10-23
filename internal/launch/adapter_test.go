@@ -435,9 +435,15 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	at := slices.Index(fresh.Argv, notify)
 	if fresh.AdapterMode != AdapterModeCapture || fresh.ConversationID != "" || fresh.PreSpawnAcquire ||
-		len(fresh.DynamicArgv) != 0 || !reflect.DeepEqual(fresh.Argv[len(fresh.Argv)-2:], []string{"-c", notify}) {
+		at < 1 || fresh.Argv[at-1] != "-c" || len(fresh.DynamicArgv) != len(IdentityEnvKeys) {
 		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	for _, dynamic := range fresh.DynamicArgv {
+		if dynamic.Kind != DynamicArgCodexIdentity {
+			t.Fatalf("fresh plan dynamic argv = %#v", fresh.DynamicArgv)
+		}
 	}
 	otherRequest := request
 	otherRequest.LaunchNonce = "56565656-5656-4565-8565-565656565656"
@@ -453,7 +459,7 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if freshDigest != otherDigest || fresh.Argv[len(fresh.Argv)-1] != otherFresh.Argv[len(otherFresh.Argv)-1] {
+	if freshDigest != otherDigest || !slices.Contains(otherFresh.Argv, notify) {
 		t.Fatalf("codex notify changed the static trust subject across launch nonces: %s != %s", freshDigest, otherDigest)
 	}
 	resume, err := adapter.PlanResume(ResumeRequest{
