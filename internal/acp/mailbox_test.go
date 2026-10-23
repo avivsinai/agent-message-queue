@@ -243,12 +243,23 @@ func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
 
 // Regression: bead agent-message-queue-611.36, a redelivered event published a second
 // message. It must reuse the first delivery's message.
+//
+// Each turn ends at its first update, which follows delivery, rather than on a
+// 50 ms budget: under parallel load that budget expired before the first
+// delivery and nothing was published (seen on #1179's load runs).
 func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
 	eventID := strings.Repeat("2", 64)
 	for range 2 {
-		if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+		turn := newTurn()
+		if _, rpcErr := s.runRemote("s", "say hi", eventID, turn, func(any) error {
+			s.mu.Lock()
+			if turn.settleLocked("session_cancelled") {
+				close(turn.done)
+			}
+			s.mu.Unlock()
+			return nil
+		}); rpcErr != nil {
 			t.Fatal(rpcErr)
 		}
 	}

@@ -137,9 +137,13 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool) desktopRun {
 	rt := fake.New("fake", "e_1")
 	s := remoteServer(t, claudeAllowApproval{Runtime: rt, mu: &mu, evidence: &run.evidence}, nil)
 	s.cfg.StateDir = canonicalTempDir(t)
-	// Relay sign-in and five reads run inside the turn; a loaded machine
-	// must not end the turn first.
-	s.cfg.TurnTimeout = 4 * time.Second
+	// The turn ends when the test completes the request, not on a clock:
+	// only the test binary's timeout bounds it.
+	if deadline, bounded := t.Deadline(); bounded {
+		s.cfg.TurnTimeout = time.Until(deadline)
+	} else {
+		s.cfg.TurnTimeout = time.Hour
+	}
 	eventID := strings.Repeat("d", 64)
 	id, _ := remoteRequestID(eventID)
 	turn := newTurn()
@@ -149,19 +153,13 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool) desktopRun {
 		defer close(done)
 		_, _ = s.runRemote("s", "run the tests", eventID, turn, func(any) error { return nil })
 	}()
-	deadline := time.Now().Add(4 * time.Second)
-	for !rt.HasRun(id) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, "the request to run", func() bool { return rt.HasRun(id) })
 	rt.Question(id, "i_1", []string{"allow", "deny"})
-	settled := func() bool {
+	waitFor(t, "an answer, or the owner told ✅ cannot allow", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(rt.Snapshot().Answers) > 0 || slices.Contains(run.posts, allowRefusedText)
-	}
-	for !settled() && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	})
 	rt.Complete(id, "ran")
 	<-done
 	run.answers = rt.Snapshot().Answers
@@ -207,5 +205,19 @@ func TestRemoteApprovalWithoutThisDesktopPinStaysDenyOnly(t *testing.T) {
 	if len(run.posts) == 0 || !strings.Contains(run.posts[0], denyOnlyText) || !strings.Contains(run.posts[0], "install-approval-hook --desktop") ||
 		!slices.Contains(run.posts, allowRefusedText) {
 		t.Fatalf("posts = %q; want the deny-only approval with the pin command, then the ✅ refused", run.posts)
+	}
+}
+
+// waitFor polls cond until it holds. Only the test binary's timeout bounds
+// the wait (t.Deadline); a wait that never ends fails with what it waited
+// for, shortly before that timeout.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	for !cond() {
+		if bounded && time.Until(deadline) < 5*time.Second {
+			t.Fatalf("still waiting for %s when the test binary's timeout came near", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

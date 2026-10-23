@@ -93,17 +93,7 @@ func TestRemotePromptSubmitsToTargetAndReturnsResult(t *testing.T) {
 // in remote mode pinned to target "fake" and native session "fake".
 func remoteServer(t *testing.T, att core.Attachment, crash core.CrashPoint) *Server {
 	t.Helper()
-	// The endpoint socket lives under root and macOS caps a socket path at
-	// 104 bytes, so a long TMPDIR falls back to a short base.
-	base := os.TempDir()
-	if len(base) > 48 && runtime.GOOS != "windows" {
-		base = "/tmp"
-	}
-	root, err := os.MkdirTemp(base, "rv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := endpointRoot(t)
 	dir := filepath.Join(root, remoteStateDir)
 	store, err := requests.Open(dir)
 	if err != nil {
@@ -120,6 +110,22 @@ func remoteServer(t *testing.T, att core.Attachment, crash core.CrashPoint) *Ser
 	go func() { defer close(done); _ = srv.Serve(ctx) }()
 	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
 	return NewServer(Config{Root: root, RemoteTarget: "fake", RemoteNative: "fake", HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+}
+
+// endpointRoot is a fresh AMQ root under the caller's TMPDIR, named short so
+// the endpoint socket beneath it fits the Unix socket path limit (104 bytes
+// on macOS). A TMPDIR too long for it fails setup and names the limit.
+func endpointRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if sock := ipc.SocketPath(filepath.Join(root, remoteStateDir)); runtime.GOOS != "windows" && len(sock) >= 104 {
+		t.Fatalf("endpoint socket %s is %d bytes, over the 104-byte Unix socket path limit; set a shorter TMPDIR", sock, len(sock))
+	}
+	return root
 }
 
 func newTurn() *turnState {
@@ -620,17 +626,7 @@ func (b *blockedSubmit) InspectSubmit() (protocol.Session, string) {
 func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	att := &blockedSubmit{Runtime: rt}
-	// The endpoint socket lives under root and macOS caps a socket path at
-	// 104 bytes, so a long TMPDIR falls back to a short base.
-	base := os.TempDir()
-	if len(base) > 48 && runtime.GOOS != "windows" {
-		base = "/tmp"
-	}
-	root, err := os.MkdirTemp(base, "rv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := endpointRoot(t)
 	dir := filepath.Join(root, remoteStateDir)
 	store, err := requests.Open(dir)
 	if err != nil {
