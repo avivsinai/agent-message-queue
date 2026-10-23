@@ -374,6 +374,28 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			want: []string{"s1/m/beta acknowledged agent", "s1/s/beta pending agent"},
 		},
 		{
+			// #1166 code review: a same-kind reply whose parent is created
+			// later cannot be classified at its own time; it was decided from
+			// the parent header instead of its lineage.
+			name: "same-kind reply to a later parent is ambiguous",
+			messages: []threadOpenMessage{
+				{name: "s", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"r"}, at: 10 * time.Second},
+				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindTodo, labels: []string{"done"}, at: 20 * time.Second},
+			},
+			check: checkThreadOpenAmbiguous("s"),
+		},
+		{
+			// #1166 code review: the same holds when the earlier parent itself
+			// still waits for a later ancestor.
+			name: "same-kind reply below an unsettled earlier parent is ambiguous",
+			messages: []threadOpenMessage{
+				{name: "p", from: "beta@s1", to: "alpha@s1", kind: format.KindTodo, labels: []string{"done"}, refs: []string{"l"}, at: 20 * time.Second},
+				{name: "s", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"p"}, at: 30 * time.Second},
+				{name: "l", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, at: 40 * time.Second},
+			},
+			check: checkThreadOpenAmbiguous("s"),
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
@@ -508,6 +530,24 @@ func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
 		got := strings.Join(obligations, "; ") + " | ambiguous: " + strings.Join(ambiguous, ", ") + " | unresolved: " + strings.Join(unresolved, ", ")
 		if got != want {
 			t.Fatalf("seed %d:\n got %s\nwant %s", seed, got, want)
+		}
+	}
+}
+
+// checkThreadOpenAmbiguous asserts that exactly the named messages are
+// reported ambiguous because their parent's lineage was not settled yet.
+func checkThreadOpenAmbiguous(want ...string) func(*testing.T, threadOpenResult, map[string]string) {
+	return func(t *testing.T, result threadOpenResult, names map[string]string) {
+		t.Helper()
+		got := []string{}
+		for _, amb := range result.Coverage.Ambiguous {
+			if amb.Reason == threadOpenUnsettledParent {
+				got = append(got, names[amb.ID])
+			}
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			t.Fatalf("ambiguous with an unsettled parent = %v, want %v (all: %+v)", got, want, result.Coverage.Ambiguous)
 		}
 	}
 }

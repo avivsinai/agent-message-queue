@@ -31,6 +31,10 @@ const (
 // openerKinds are the kinds that open an obligation for each recipient.
 var openerKinds = []string{format.KindReviewRequest, format.KindQuestion, format.KindTodo}
 
+// threadOpenUnsettledParent is the ambiguity reason for a same-kind reply
+// whose parent's lineage is not settled at its created time.
+const threadOpenUnsettledParent = "parent lineage not settled at created time"
+
 // closingLabels make a message terminal: it never opens an obligation.
 var closingLabels = []string{"done", "merged", "closed", "wontfix", "withdrawn"}
 
@@ -411,7 +415,7 @@ func (red *obligationReducer) run() {
 			red.unresolved = append(red.unresolved, *rec.unresolved)
 			continue
 		}
-		rec.opens = opensFor(rec)
+		rec.opens = red.opensFor(rec)
 		if len(msg.Refs) == 0 {
 			if len(rec.opens) > 0 {
 				red.settle(rec, red.open(rec))
@@ -530,14 +534,23 @@ func (red *obligationReducer) lookup(id string, from *record) *record {
 // opener kind without a closing label opens. A message in the kind reply
 // would default to continues an obligation in its parent's lineage for a
 // recipient when the sender and that recipient are that obligation's two
-// parties; any other recipient gets an obligation of their own.
-func opensFor(rec *record) []string {
+// parties; any other recipient gets an obligation of their own. When the
+// parent's lineage is not settled at the message's created time (the
+// parent, or an ancestor it waits for, is created later), that cannot be
+// decided: the message opens nothing and is reported ambiguous.
+func (red *obligationReducer) opensFor(rec *record) []string {
 	msg := rec.entry
 	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
 		return nil
 	}
 	p := rec.parent
 	continuation := p != nil && msg.Kind == defaultReplyKind(p.entry.Kind)
+	if continuation && !p.ready {
+		red.ambiguous = append(red.ambiguous, threadOpenAmbiguous{
+			ID: msg.ID, Session: rec.sender.Session, From: msg.From, Reason: threadOpenUnsettledParent, Candidates: []string{},
+		})
+		return nil
+	}
 	opens := []string{}
 	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
 		if continuation {
@@ -551,23 +564,11 @@ func opensFor(rec *record) []string {
 }
 
 // continuesPair reports whether rec, sent to recipient r, continues an
-// obligation of its parent's lineage between the same two parties. While
-// the parent's lineage is not settled yet (its timestamp is later), the
-// parent header's pairs stand in for it: its sender and each recipient.
+// obligation of its parent's settled lineage between the same two parties.
 func continuesPair(rec *record, r participant) bool {
-	p := rec.parent
-	if p.ready {
-		for _, ob := range p.lineage {
-			owner, requester := roleOf(ob, rec.sender, true)
-			if (owner || requester) && otherParty(ob, owner) == r {
-				return true
-			}
-		}
-		return false
-	}
-	for _, handle := range p.entry.To {
-		if pr, ok := recipientOf(p, handle); ok &&
-			((rec.sender == p.sender && r == pr) || (r == p.sender && rec.sender == pr)) {
+	for _, ob := range rec.parent.lineage {
+		owner, requester := roleOf(ob, rec.sender, true)
+		if (owner || requester) && otherParty(ob, owner) == r {
 			return true
 		}
 	}
