@@ -34,15 +34,33 @@ const (
 type coopNamedHarness struct {
 	mode         coopNamedMode
 	resumeSyntax coopNamedResumeSyntax
+	// wakeInjectMode is how the wake types into this harness when the
+	// person chose no mode. Claude Code's and Codex's Ink input coalesces
+	// the Enter with a bracketed-paste end and drops it, so they get raw;
+	// the others keep paste.
+	wakeInjectMode string
 }
 
 var coopNamedHarnesses = map[string]coopNamedHarness{
-	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
-	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
-	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
-	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags},
+	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModeRaw},
+	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex, wakeInjectMode: wakeInjectModeRaw},
+	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
+	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
+	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+	"agy":                 {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+}
+
+// coopWakeInjectMode is the mode coop exec starts its wake with: the
+// person's choice, else the harness's, else auto, which picks by handle.
+func coopWakeInjectMode(requested, binary string) string {
+	if requested != "" && requested != wakeInjectModeAuto {
+		return requested
+	}
+	if harness, ok := coopNamedHarnessFor(binary); ok && harness.wakeInjectMode != "" {
+		return harness.wakeInjectMode
+	}
+	return requested
 }
 
 func coopNamedHarnessFor(binary string) (coopNamedHarness, bool) {

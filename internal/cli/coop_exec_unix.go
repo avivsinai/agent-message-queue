@@ -213,7 +213,7 @@ func runCoopExec(args []string) error {
 		} else {
 			c.cleanupWakeReady = cleanupReady
 			defer cleanupReady()
-			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, c.wakeInjectMode, c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
+			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, c.binaryPath), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
 			if wakeLaunchLocator != "" {
 				// Execute the already-running image, but preserve the absolute,
 				// unresolved invocation locator as argv[0] so the child can safely
