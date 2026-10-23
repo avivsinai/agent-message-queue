@@ -107,6 +107,35 @@ func TestWhoAndSessionListShowEveryMailbox(t *testing.T) {
 	}
 }
 
+// who lists a sessionless queue's agents as its base scope, not as a session
+// of the parent directory (bead agent-message-queue-t97.2; research 1d:
+// a sessionless root showed "No sessions found").
+func TestWhoListsSessionlessQueueAsBase(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "claude")
+	if err := fsq.EnsureAgentDirs(root, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureEnvStdout(t, func() error { return runWho([]string{"--root", root, "--json"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessions []struct {
+		Name   string `json:"name"`
+		Scope  string `json:"scope"`
+		Agents []struct {
+			Handle             string `json:"handle"`
+			RegistrationStatus string `json:"registration_status"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(out), &sessions); err != nil {
+		t.Fatalf("who json: %v: %s", err, out)
+	}
+	if len(sessions) != 1 || sessions[0].Scope != "base" || sessions[0].Name != "" || len(sessions[0].Agents) != 2 ||
+		sessions[0].Agents[0].RegistrationStatus != "declared" || sessions[0].Agents[1].RegistrationStatus != "unregistered" {
+		t.Fatalf("who = %s, want one base scope with declared claude and unregistered reviewer", out)
+	}
+}
+
 // presence list shows a mailbox that has no presence file, and presence set
 // no longer warns about the caller's own handle; --strict still refuses
 // (bead agent-message-queue-t97.2, Pro findings 2 and 5; research 1d).

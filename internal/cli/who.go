@@ -28,7 +28,9 @@ func runWho(args []string) error {
 	if baseRoot == "" {
 		// classifyRoot couldn't determine from env or sibling sessions.
 		// Check if root IS the base root (contains session subdirs).
-		if hasSessionSubdirs(root) {
+		// A sessionless queue (its own agents/, no session subdirs, and a
+		// parent that is no initialized queue) is listed as its own base.
+		if hasSessionSubdirs(root) || isSessionlessQueue(root) {
 			baseRoot = root
 		} else {
 			baseRoot = filepath.Dir(root)
@@ -196,4 +198,9 @@ func hasSessionSubdirs(dir string) bool {
 		}
 	}
 	return false
+}
+
+func isSessionlessQueue(root string) bool {
+	return dirExists(filepath.Join(root, "agents")) &&
+		!fileExists(filepath.Join(filepath.Dir(root), "meta", "config.json"))
 }
