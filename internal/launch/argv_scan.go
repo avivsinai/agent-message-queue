@@ -1,13 +1,18 @@
 package launch
 
-import "strings"
+import (
+	"strings"
 
-type ResumeSyntax uint8
+	"github.com/avivsinai/agent-message-queue/internal/harness"
+)
+
+// ResumeSyntax lives in the harness table; launch keeps its names.
+type ResumeSyntax = harness.ResumeSyntax
 
 const (
-	ResumeSyntaxFlags ResumeSyntax = iota
-	ResumeSyntaxCodex
-	ResumeSyntaxCursor
+	ResumeSyntaxFlags  = harness.ResumeSyntaxFlags
+	ResumeSyntaxCodex  = harness.ResumeSyntaxCodex
+	ResumeSyntaxCursor = harness.ResumeSyntaxCursor
 )
 
 func ArgsHaveNameFlag(args []string) bool {

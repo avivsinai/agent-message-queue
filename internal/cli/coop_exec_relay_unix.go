@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +17,8 @@ import (
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 const (
@@ -37,7 +38,7 @@ const (
 // says so. strip is true when AMQ turned the status on, so the sequences it
 // consumes never reach the outer terminal.
 func agyRelayPlan(binaryPath string, env []string, stdinIsTerminal bool) (relayEnv []string, relay, strip bool, notice string) {
-	if strings.ToLower(filepath.Base(binaryPath)) != "agy" || !stdinIsTerminal {
+	if facts, _ := harness.ForExecutable(binaryPath); facts.Name != harness.Agy || !stdinIsTerminal {
 		return env, false, false, ""
 	}
 	value, set := lookupEnv(env, agyStatusEnv)
