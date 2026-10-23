@@ -231,6 +231,110 @@ func TestSessionListShowsRecordedHarnessSessions(t *testing.T) {
 	}
 }
 
+// #1192 review: two repeat-publish cases of the Codex thread store.
+func TestSessionListKeepsCodexBindingHistory(t *testing.T) {
+	const threadA, threadB = "55555555-5555-7555-8555-555555555555", "66666666-6666-7666-8666-666666666666"
+	setup := func(t *testing.T) (string, func(thread, me string)) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		base := makeSessionBase(t)
+		session, err := provisionCoopSession(base, "collab", []string{"alpha", "beta"}, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootID, baseID := treeIdentityTokens(session, base)
+		publish := func(thread, me string) {
+			if err := codexidentity.Publish(codexidentity.Record{
+				Thread: thread, CodexHome: filepath.Join(home, ".codex"), Root: session, BaseRoot: base, Session: "collab",
+				Me: me, RootID: rootID, BaseRootID: baseID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return base, publish
+	}
+	list := func(t *testing.T, base string) []sessionConversation {
+		output, err := captureEnvStdout(t, func() error { return runSessionList([]string{"--root", base, "--json"}) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result sessionListResult
+		if err := json.Unmarshal([]byte(output), &result); err != nil || len(result.Sessions) != 1 {
+			t.Fatalf("decode: %v (%s)", err, output)
+		}
+		return result.Sessions[0].Conversations
+	}
+
+	t.Run("resuming the successor does not revive an expired binding", func(t *testing.T) {
+		base, publish := setup(t)
+		publish(threadA, "beta")
+		publish(threadB, "beta")
+		ageCodexStore(t, 10*24*time.Hour)
+		publish(threadB, "beta")
+		want := []sessionConversation{{Handle: "beta", Provider: "codex", ID: threadB, State: "ready", Source: "codex-thread"}}
+		if got := list(t, base); !reflect.DeepEqual(got, want) {
+			t.Fatalf("conversations = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("giving a thread to another handle keeps the earlier binding", func(t *testing.T) {
+		base, publish := setup(t)
+		publish(threadA, "alpha")
+		publish(threadA, "beta")
+		want := []sessionConversation{
+			{Handle: "alpha", Provider: "codex", ID: threadA, State: "revoked", Source: "codex-thread"},
+			{Handle: "beta", Provider: "codex", ID: threadA, State: "ready", Source: "codex-thread"},
+		}
+		if got := list(t, base); !reflect.DeepEqual(got, want) {
+			t.Fatalf("conversations = %#v, want %#v", got, want)
+		}
+	})
+}
+
+// ageCodexStore moves every write in the Codex thread store age into the
+// past: file times, and the binding time inside each binding event.
+func ageCodexStore(t *testing.T, age time.Duration) {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.WalkDir(filepath.Join(home, ".amq", "codex-threads"), func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return err
+		}
+		if filepath.Base(filepath.Dir(path)) == "bindings" {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var event map[string]any
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return err
+			}
+			bound, err := time.Parse(time.RFC3339Nano, event["bound"].(string))
+			if err != nil {
+				return err
+			}
+			event["bound"] = bound.Add(-age).Format(time.RFC3339Nano)
+			if raw, err = json.Marshal(event); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				return err
+			}
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, info.ModTime().Add(-age), info.ModTime().Add(-age))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func makeSessionBase(t *testing.T) string {
 	t.Helper()
 	base := filepath.Join(t.TempDir(), defaultCoopRoot)

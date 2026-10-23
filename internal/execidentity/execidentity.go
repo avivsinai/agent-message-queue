@@ -46,16 +46,12 @@ type Record struct {
 	BaseRootID string `json:"base_root_id"`
 }
 
-// Entry is one recorded process with the times its record and its handle's
-// current marker were last written.
+// Entry is one recorded process with the time its record was written.
 type Entry struct {
 	Record     Record
 	RecordedAt time.Time
 	// Current is true when the handle's current marker names this process.
-	// CurrentKnown is false when the marker is missing or damaged.
-	Current      bool
-	CurrentKnown bool
-	MarkerAt     time.Time
+	Current bool
 }
 
 const (
@@ -126,8 +122,8 @@ func List() ([]Entry, error) {
 		}
 		entry := Entry{Record: r, RecordedAt: info.ModTime()}
 		var cur currentRecord
-		if curInfo, err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err == nil && cur.Process != "" {
-			entry.Current, entry.CurrentKnown, entry.MarkerAt = cur.Process == key, true, curInfo.ModTime()
+		if _, err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err == nil {
+			entry.Current = cur.Process == key
 		}
 		entries = append(entries, entry)
 	}

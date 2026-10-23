@@ -52,7 +52,7 @@ var claudeSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-
 // conversationSources holds the per-user stores read once per listing.
 type conversationSources struct {
 	now       time.Time
-	codex     []codexidentity.Entry
+	codex     []codexidentity.Binding
 	execs     []execidentity.Entry
 	bindings  []binding.Binding
 	claudeDir string
@@ -62,7 +62,7 @@ type conversationSources struct {
 // store that is missing or unreadable contributes nothing.
 func loadConversationSources(now time.Time) conversationSources {
 	sources := conversationSources{now: now}
-	sources.codex, _ = codexidentity.List()
+	sources.codex, _ = codexidentity.Bindings()
 	sources.execs, _ = execidentity.List()
 	sources.bindings, _ = binding.List()
 	sources.claudeDir = claudeConfigDir()
@@ -130,69 +130,55 @@ func launchConversations(sessionRoot string, agents []string) []sessionConversat
 	return out
 }
 
-// lineageState is the state of one record of a handle's lineage. A revoked
-// record's revocation time is when the next record of the lineage was
-// written, or, for the newest one, when the current marker was; records and
-// markers are written once per coop exec, so their file times are those
-// events. A revoked record older than the retention is dropped (ok false).
-func lineageState(current, known bool, revokedAt, now time.Time) (string, bool) {
+// bindingState is the state of a binding that was revoked at revoked (zero
+// while it holds). A revoked binding older than the retention is dropped
+// (ok false).
+func bindingState(revoked time.Time, uncertain bool, now time.Time) (string, bool) {
 	switch {
-	case !known:
+	case revoked.IsZero() && uncertain:
 		return conversationUncertain, true
-	case current:
+	case revoked.IsZero():
 		return conversationReady, true
-	case now.Sub(revokedAt) > revokedConversationRetention:
+	case now.Sub(revoked) > revokedConversationRetention:
 		return "", false
 	default:
 		return conversationRevoked, true
 	}
 }
 
-// revocationTimes returns, per record index, when the record was revoked,
-// given each record's lineage key, write time, and current marker time.
-func revocationTimes(keys []string, recorded, marker []time.Time) []time.Time {
-	order := make([]int, len(keys))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(a, b int) bool { return recorded[order[a]].Before(recorded[order[b]]) })
-	revoked := make([]time.Time, len(keys))
-	next := map[string]time.Time{}
-	for i := len(order) - 1; i >= 0; i-- {
-		idx := order[i]
-		if t, ok := next[keys[idx]]; ok {
-			revoked[idx] = t
-		} else {
-			revoked[idx] = marker[idx]
-		}
-		next[keys[idx]] = recorded[idx]
-	}
-	return revoked
-}
-
 func (sources conversationSources) codexConversations(rootID string) []sessionConversation {
-	var entries []codexidentity.Entry
-	for _, entry := range sources.codex {
-		if entry.Record.RootID == rootID {
-			entries = append(entries, entry)
-		}
-	}
-	keys, recorded, marker := make([]string, len(entries)), make([]time.Time, len(entries)), make([]time.Time, len(entries))
-	for i, entry := range entries {
-		keys[i], recorded[i], marker[i] = entry.Record.Me, entry.RecordedAt, entry.MarkerAt
-	}
-	revoked := revocationTimes(keys, recorded, marker)
 	var out []sessionConversation
-	for i, entry := range entries {
-		state, ok := lineageState(entry.Current, entry.CurrentKnown, revoked[i], sources.now)
+	for _, b := range sources.codex {
+		if b.RootID != rootID {
+			continue
+		}
+		state, ok := bindingState(b.Revoked, b.Uncertain, sources.now)
 		if !ok {
 			continue
 		}
-		out = append(out, sessionConversation{
-			Handle: entry.Record.Me, Provider: launch.CodexProvider, ID: entry.Record.Thread, State: state, Source: "codex-thread",
-		})
+		out = append(out, sessionConversation{Handle: b.Me, Provider: launch.CodexProvider, ID: b.Thread, State: state, Source: "codex-thread"})
 	}
 	return out
+}
+
+// execRevocations returns, per entry, when a later coop exec for the same
+// handle replaced it: the write time of the next record of that handle.
+// Exec records are written once, when coop exec becomes the harness, so
+// their file times are those events. The newest record has none.
+func execRevocations(entries []execidentity.Entry) []time.Time {
+	order := make([]int, len(entries))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return entries[order[a]].RecordedAt.Before(entries[order[b]].RecordedAt) })
+	revoked := make([]time.Time, len(entries))
+	next := map[string]time.Time{}
+	for i := len(order) - 1; i >= 0; i-- {
+		idx := order[i]
+		revoked[idx] = next[entries[idx].Record.Me]
+		next[entries[idx].Record.Me] = entries[idx].RecordedAt
+	}
+	return revoked
 }
 
 func (sources conversationSources) execConversations(rootID string) []sessionConversation {
@@ -202,14 +188,10 @@ func (sources conversationSources) execConversations(rootID string) []sessionCon
 			entries = append(entries, entry)
 		}
 	}
-	keys, recorded, marker := make([]string, len(entries)), make([]time.Time, len(entries)), make([]time.Time, len(entries))
-	for i, entry := range entries {
-		keys[i], recorded[i], marker[i] = entry.Record.Me, entry.RecordedAt, entry.MarkerAt
-	}
-	revoked := revocationTimes(keys, recorded, marker)
+	revoked := execRevocations(entries)
 	var out []sessionConversation
 	for i, entry := range entries {
-		state, ok := lineageState(entry.Current, entry.CurrentKnown, revoked[i], sources.now)
+		state, ok := bindingState(revoked[i], !entry.Current, sources.now)
 		if !ok {
 			continue
 		}

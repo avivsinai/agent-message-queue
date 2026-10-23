@@ -8,8 +8,11 @@
 // per thread under threads/, and under current/ the thread that the newest
 // coop exec gave each (root identity, handle). A record whose thread is no
 // longer current for its handle is revoked: a later coop exec for the same
-// handle replaced it. Records are never deleted by AMQ, so a revoked or
-// damaged record stays distinguishable from a thread AMQ never managed.
+// handle replaced it. Under bindings/ each publication also leaves one
+// event with its time, so the history of which handle carried which thread,
+// and when that changed, survives a later publication of the same thread.
+// Records are never deleted by AMQ, so a revoked or damaged record stays
+// distinguishable from a thread AMQ never managed.
 // The store keeps the owner user's trust boundary; it is no defense against
 // another process running as the same user.
 package codexidentity
@@ -24,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,6 +102,14 @@ func Publish(r Record) error {
 		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the current Codex thread: %w", err)
 		}
+		now := time.Now().UTC()
+		event, err := json.Marshal(bindingEvent{Schema: schema, Thread: r.Thread, Me: r.Me, RootID: r.RootID, Bound: now.Format(time.RFC3339Nano)})
+		if err != nil {
+			return err
+		}
+		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", now.UnixNano(), r.Thread), append(event, '\n'), 0o600); err != nil {
+			return fmt.Errorf("record the Codex thread binding: %w", err)
+		}
 		return nil
 	})
 }
@@ -143,52 +155,133 @@ func Lookup(thread, codexHome string) (Record, error) {
 	return r, nil
 }
 
-// Entry is one recorded thread with the times its record and its handle's
-// current marker were last written.
-type Entry struct {
-	Record     Record
-	RecordedAt time.Time
-	// Current is true when the handle's current marker names this thread.
-	// CurrentKnown is false when the marker is missing or damaged.
-	Current      bool
-	CurrentKnown bool
-	// MarkerAt is when the handle's current marker was last written.
-	MarkerAt time.Time
+// Binding is one interval during which a handle of a root carried a Codex
+// thread. Bound is when coop exec gave the handle the thread; Revoked is
+// when a later publication gave the handle another thread or gave the
+// thread to another handle, and is zero while the binding holds. Uncertain
+// marks an open binding that the thread record or the handle's current
+// marker does not confirm.
+type Binding struct {
+	Thread    string
+	Me        string
+	RootID    string
+	Bound     time.Time
+	Revoked   time.Time
+	Uncertain bool
 }
 
-// List returns every valid thread record in the store. It never creates the
-// store; a missing store lists nothing, and a damaged record is skipped.
-func List() ([]Entry, error) {
+// bindingEvent is one publication, kept under bindings/ apart from the
+// thread's identity record so that a later publication of the same thread
+// never rewrites an earlier binding or its time.
+type bindingEvent struct {
+	Schema int    `json:"schema"`
+	Thread string `json:"thread"`
+	Me     string `json:"me"`
+	RootID string `json:"root_id"`
+	Bound  string `json:"bound"`
+}
+
+// Bindings replays the publication history into bindings. It never creates
+// the store; a missing store lists nothing, and a damaged event is skipped.
+// A thread recorded before the history existed is listed only while its
+// handle's current marker still names it, since its binding time is unknown.
+func Bindings() ([]Binding, error) {
 	dir, err := storeDir(false)
 	if err != nil || dir == "" {
 		return nil, err
 	}
-	names, err := os.ReadDir(filepath.Join(dir, "threads"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	names, err := os.ReadDir(filepath.Join(dir, "bindings"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	var entries []Entry
+	type event struct {
+		bindingEvent
+		at time.Time
+	}
+	var events []event
 	for _, name := range names {
+		var e bindingEvent
+		if !strings.HasSuffix(name.Name(), ".json") || readStrict(filepath.Join(dir, "bindings", name.Name()), &e) != nil ||
+			e.Schema != schema || !ValidThread(e.Thread) || strings.TrimSpace(e.Me) == "" || strings.TrimSpace(e.RootID) == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, e.Bound)
+		if err != nil {
+			continue
+		}
+		events = append(events, event{bindingEvent: e, at: at})
+	}
+	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+	key := func(rootID, me string) string { return rootID + "\x00" + me }
+	var out []Binding
+	open := map[string]int{}     // handle key -> index of its open binding
+	owner := map[string]string{} // thread -> handle key of its open binding
+	closeOpen := func(k string, at time.Time) {
+		if i, ok := open[k]; ok {
+			out[i].Revoked = at
+			delete(owner, out[i].Thread)
+			delete(open, k)
+		}
+	}
+	for _, e := range events {
+		k := key(e.RootID, e.Me)
+		if i, ok := open[k]; ok && out[i].Thread == e.Thread {
+			continue
+		}
+		closeOpen(k, e.at)
+		if other, ok := owner[e.Thread]; ok {
+			closeOpen(other, e.at)
+		}
+		open[k] = len(out)
+		owner[e.Thread] = k
+		out = append(out, Binding{Thread: e.Thread, Me: e.Me, RootID: e.RootID, Bound: e.at})
+	}
+	for _, i := range open {
+		out[i].Uncertain = !confirmed(dir, out[i].Thread, out[i].RootID, out[i].Me)
+	}
+	threads, err := os.ReadDir(filepath.Join(dir, "threads"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for _, name := range threads {
 		thread, ok := strings.CutSuffix(name.Name(), ".json")
 		if !ok || !ValidThread(thread) {
 			continue
 		}
-		var r Record
-		info, err := readStrictInfo(filepath.Join(dir, "threads", name.Name()), &r)
-		if err != nil || r.check() != nil || r.Thread != thread {
+		if _, known := owner[thread]; known || historyNames(out, thread) {
 			continue
 		}
-		entry := Entry{Record: r, RecordedAt: info.ModTime()}
-		var cur currentRecord
-		if curInfo, err := readStrictInfo(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err == nil && ValidThread(cur.Thread) {
-			entry.Current, entry.CurrentKnown, entry.MarkerAt = cur.Thread == thread, true, curInfo.ModTime()
+		var r Record
+		if readStrict(filepath.Join(dir, "threads", name.Name()), &r) != nil || r.check() != nil || r.Thread != thread {
+			continue
 		}
-		entries = append(entries, entry)
+		if confirmed(dir, thread, r.RootID, r.Me) {
+			out = append(out, Binding{Thread: thread, Me: r.Me, RootID: r.RootID})
+		}
 	}
-	return entries, nil
+	return out, nil
+}
+
+// historyNames reports whether the history has any binding of thread.
+func historyNames(bindings []Binding, thread string) bool {
+	for _, b := range bindings {
+		if b.Thread == thread {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmed reports whether the thread's identity record names this handle
+// of this root and the handle's current marker names the thread.
+func confirmed(dir, thread, rootID, me string) bool {
+	var r Record
+	if readStrict(filepath.Join(dir, "threads", thread+".json"), &r) != nil || r.check() != nil ||
+		r.Thread != thread || r.RootID != rootID || r.Me != me {
+		return false
+	}
+	var cur currentRecord
+	return readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur) == nil && cur.Thread == thread
 }
 
 type currentRecord struct {
@@ -240,7 +333,7 @@ func storeDir(create bool) (string, error) {
 		return "", err
 	}
 	store := filepath.Join(amqDir, storeName)
-	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current")} {
+	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current"), filepath.Join(store, "bindings")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {
 			if !create {
@@ -267,30 +360,25 @@ func storeDir(create bool) (string, error) {
 // readStrict decodes a small regular 0600 file at path into v, opened
 // without following a symlink; the opened file must be regular and 0600.
 func readStrict(path string, v any) error {
-	_, err := readStrictInfo(path, v)
-	return err
-}
-
-func readStrictInfo(path string, v any) (os.FileInfo, error) {
 	f, fi, err := fsq.OpenRegularNoFollowBounded(path, maxBytes)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNone
+		return ErrNone
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	if fi.Mode().Perm() != 0o600 {
-		return nil, fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
+		return fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
-	return fi, nil
+	return nil
 }
