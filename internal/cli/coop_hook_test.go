@@ -2,14 +2,18 @@ package cli
 
 // Purpose: guards the co-op hooks that amq coop install-hooks writes. The
 // preamble test breaks if a participant's SessionStart misses its handle,
-// session or unread count, or prints anything but the hook JSON. The
-// installer test breaks if the entry loses its AM_ME gate or matcher, or if
-// old project entries that run the co-op scripts go unreported.
+// session or unread count, or prints anything but the hook JSON. The stop
+// tests break if new mail does not block once, a repeat in the chain blocks
+// again, or a live wake's doorbell mail blocks. The installer test breaks if
+// an entry loses its AM_ME gate or matcher, or if old project entries that
+// run the co-op scripts go unreported.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -120,5 +124,82 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	if len(groups) != 1 || groups[0].Matcher != coopSessionStartSources || len(groups[0].Hooks) != 1 ||
 		!strings.HasPrefix(groups[0].Hooks[0].Command, coopHookMarker+`[ -z "${AM_ME-}" ] || exec `) {
 		t.Fatalf("SessionStart = %+v, want one gated co-op entry", groups)
+	}
+	stops := settings.Hooks["Stop"]
+	if len(stops) != 1 || len(stops[0].Hooks) != 1 ||
+		stops[0].Hooks[0].Command != coopHookMarker+`[ -z "${AM_ME-}" ] || `+"'"+mustExecutable(t)+"' --no-update-check coop hook stop || true" {
+		t.Fatalf("Stop = %+v, want one gated co-op entry", stops)
+	}
+}
+
+func mustExecutable(t *testing.T) string {
+	t.Helper()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+func TestCoopHookStopBlocksOnceForNewMail(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "collab")
+
+	stop := func(active string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":`+active+`}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if got := stop("false"); !strings.Contains(got, `"decision":"block"`) || !strings.Contains(got, "session=collab") {
+		t.Fatalf("first stop = %q, want a block naming the session", got)
+	}
+	if got := stop("true"); got != "" {
+		t.Fatalf("repeat stop = %q, want no output", got)
+	}
+	info, err := os.Stat(filepath.Join(root, "agents", "claude", coopStopStateFile))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("state file = %v, %v; want mode 0600", info, err)
+	}
+}
+
+// Regression (#1152): under a live wake every turn end blocked for mail the
+// doorbell was about to deliver. Only mail created at or before the wake's
+// baseline_at, the cohort it never rings for, may block.
+func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
+	baseline := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	before := coopStopMessage{ID: "before", Created: baseline.Add(-time.Second).Format(time.RFC3339Nano)}
+	after := coopStopMessage{ID: "after", Created: baseline.Add(time.Second).Format(time.RFC3339Nano)}
+	fresh := coopStopState{Schema: 1, BlockedIDs: []string{}}
+
+	if _, out := decideCoopStop([]coopStopMessage{after}, &baseline, fresh, false, "root=r session=s"); out != nil {
+		t.Fatalf("mail after the baseline: %v, want no block", out)
+	}
+	next, out := decideCoopStop([]coopStopMessage{before, after}, &baseline, fresh, false, "root=r session=s")
+	if out["decision"] != "block" || !slices.Equal(next.BlockedIDs, []string{"before"}) {
+		t.Fatalf("mail at the baseline: %v blocked %v, want a block for before only", out, next.BlockedIDs)
+	}
+}
+
+func TestCoopStopAllowsTheStopAfterFiveBlocksInAChain(t *testing.T) {
+	old := coopStopState{Schema: 1, BlockedIDs: []string{"a"}, ChainBlocks: coopStopBlockLimit}
+	next, out := decideCoopStop([]coopStopMessage{{ID: "a"}, {ID: "b"}}, nil, old, true, "root=r session=s")
+	if !strings.Contains(out["systemMessage"], "budget exhausted") || next.ChainBlocks != 0 {
+		t.Fatalf("sixth block: %v chain %d, want a notice and a reset chain", out, next.ChainBlocks)
 	}
 }
