@@ -315,10 +315,10 @@ type record struct {
 	parent     *record // direct target (last ref); nil without refs or when missing
 	opens      []string
 	lineage    []*obligation
-	ready      bool      // lineage is settled
-	deferred   bool      // waits for its parent's lineage
-	waiters    []*record // messages whose acting waits for this lineage
-	unresolved *threadOpenUnresolved
+	ready      bool                  // lineage is settled
+	waiters    []*record             // messages whose acting waits for this lineage
+	unresolved *threadOpenUnresolved // set when the lineage reaches no root
+	classified bool
 }
 
 // obligationReducer applies the thread open rules in one pass in created
@@ -389,11 +389,15 @@ func (red *obligationReducer) run() {
 		return a.ID < b.ID
 	})
 
-	// Classify from headers alone.
+	// Classify from headers alone: the direct parent, whether the lineage
+	// reaches a root, and the recipients each message opens for.
 	for _, rec := range red.order {
 		if refs := rec.entry.Refs; len(refs) > 0 {
 			rec.parent = red.records[refs[len(refs)-1]]
 		}
+	}
+	for _, rec := range red.order {
+		red.classifyLineage(rec, map[*record]bool{})
 		rec.opens = opensFor(rec)
 	}
 
@@ -401,6 +405,11 @@ func (red *obligationReducer) run() {
 		msg := rec.entry
 		if msg.RawTime.IsZero() {
 			red.skipped = append(red.skipped, threadOpenSkipped{Path: msg.Occurrences[0].Path, Error: fmt.Sprintf("invalid created timestamp %q", msg.Created)})
+			continue
+		}
+		if rec.unresolved != nil {
+			// Unresolved lineage is reported and never becomes work.
+			red.unresolved = append(red.unresolved, *rec.unresolved)
 			continue
 		}
 		if len(msg.Refs) == 0 {
@@ -413,46 +422,58 @@ func (red *obligationReducer) run() {
 			}
 			continue
 		}
-		parentID := msg.Refs[len(msg.Refs)-1]
-		switch {
-		case rec.parent == nil:
-			red.markUnresolved(rec, parentID, "missing")
-			continue
-		case rec.parent.entry.RawTime.IsZero():
-			red.markUnresolved(rec, parentID, "skipped")
-			continue
-		}
 		if opened := red.open(rec); len(opened) > 0 {
 			red.settle(rec, opened)
 		}
 		if rec.parent.ready {
 			red.actOnParent(rec)
 		} else {
-			rec.deferred = true
 			rec.parent.waiters = append(rec.parent.waiters, rec)
 			red.deferred[rec.sender.Session]++
 		}
 	}
+}
 
-	// A message still waiting never reached a settled lineage: it is on a
-	// reference cycle.
-	for _, rec := range red.order {
-		if rec.deferred {
-			red.markUnresolved(rec, rec.entry.Refs[len(rec.entry.Refs)-1], "cycle")
+// classifyLineage marks rec unresolved when following direct parents does
+// not reach a root: a parent that is missing, a parent whose created does
+// not parse, or a reference cycle. A message below an unresolved parent
+// inherits the root's missing ref and reason.
+func (red *obligationReducer) classifyLineage(rec *record, visiting map[*record]bool) *threadOpenUnresolved {
+	if rec.classified || len(rec.entry.Refs) == 0 {
+		rec.classified = true
+		return rec.unresolved
+	}
+	parentID := rec.entry.Refs[len(rec.entry.Refs)-1]
+	reason := ""
+	missing := parentID
+	switch {
+	case rec.parent == nil:
+		reason = "missing"
+	case rec.parent.entry.RawTime.IsZero():
+		reason = "skipped"
+	case visiting[rec.parent]:
+		reason = "cycle"
+	default:
+		visiting[rec] = true
+		if up := red.classifyLineage(rec.parent, visiting); up != nil {
+			reason, missing = up.Reason, up.MissingRef
+		}
+		delete(visiting, rec)
+	}
+	rec.classified = true
+	if reason != "" {
+		rec.unresolved = &threadOpenUnresolved{
+			ID: rec.entry.ID, Session: rec.sender.Session, From: rec.entry.From, Kind: rec.entry.Kind, MissingRef: missing, Reason: reason,
 		}
 	}
+	return rec.unresolved
 }
 
 // actOnParent applies a message with refs to its parent's settled lineage:
 // close, then acknowledge, for the owner or the requester addressed to the
 // other party; a message from the owner to someone else acknowledges.
 func (red *obligationReducer) actOnParent(rec *record) {
-	rec.deferred = false
 	msg := rec.entry
-	if rec.parent.unresolved != nil && !rec.ready {
-		red.markUnresolved(rec, rec.parent.unresolved.MissingRef, rec.parent.unresolved.Reason)
-		return
-	}
 	var acted []*obligation
 	for _, ob := range rec.parent.lineage {
 		owner, requester := roleOf(ob, rec.sender, true)
@@ -484,22 +505,6 @@ func (red *obligationReducer) settle(rec *record, lineage []*obligation) {
 	}
 }
 
-func (red *obligationReducer) markUnresolved(rec *record, missing, reason string) {
-	rec.deferred = false
-	if rec.unresolved != nil {
-		return
-	}
-	rec.unresolved = &threadOpenUnresolved{
-		ID: rec.entry.ID, Session: rec.sender.Session, From: rec.entry.From, Kind: rec.entry.Kind, MissingRef: missing, Reason: reason,
-	}
-	red.unresolved = append(red.unresolved, *rec.unresolved)
-	waiters := rec.waiters
-	rec.waiters = nil
-	for _, waiter := range waiters {
-		red.actOnParent(waiter)
-	}
-}
-
 // lookup reads the header of a direct target the scan did not collect, by
 // name, and returns the new record; nil when it is collected already or not
 // found. A chain of records read by name is at most threadOpenMaxHops long.
@@ -524,28 +529,31 @@ func (red *obligationReducer) lookup(id string, from *record) *record {
 // opensFor lists the recipients a message opens an obligation for, from
 // headers alone. Only an opener kind without a closing label opens. A
 // message in the kind reply would default to continues the parent's
-// obligation for a recipient only when both its sender and that recipient
-// are exact participants of the parent; any other recipient gets an
+// obligation for a recipient only when the sender and that recipient are
+// the two parties of one pair of the parent: its sender and one of its
+// recipients, by exact participant. Any other recipient gets an
 // obligation of their own.
 func opensFor(rec *record) []string {
 	msg := rec.entry
 	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
 		return nil
 	}
-	var parentParts []participant
-	if p := rec.parent; p != nil && msg.Kind == defaultReplyKind(p.entry.Kind) {
-		parentParts = append(parentParts, p.sender)
+	p := rec.parent
+	continuation := p != nil && msg.Kind == defaultReplyKind(p.entry.Kind)
+	var parentRecipients []participant
+	if continuation {
 		for _, handle := range p.entry.To {
 			if r, ok := recipientOf(p, handle); ok {
-				parentParts = append(parentParts, r)
+				parentRecipients = append(parentRecipients, r)
 			}
 		}
 	}
-	continues := slices.Contains(parentParts, rec.sender)
 	opens := []string{}
 	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
-		if continues {
-			if r, ok := recipientOf(rec, handle); ok && slices.Contains(parentParts, r) {
+		if continuation {
+			if r, ok := recipientOf(rec, handle); ok &&
+				((rec.sender == p.sender && slices.Contains(parentRecipients, r)) ||
+					(r == p.sender && slices.Contains(parentRecipients, rec.sender))) {
 				continue
 			}
 		}

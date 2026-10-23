@@ -321,6 +321,36 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			want: []string{"s1/m/beta acknowledged agent"},
 		},
 		{
+			// #1166 code review: continuation pooled every participant of the
+			// parent, so B delegating to C, a co-recipient of A's todo, was
+			// taken for a continuation and C owed B nothing.
+			name: "delegation to a co-recipient opens its own obligation",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1,gamma@s1", kind: format.KindTodo},
+				{name: "r", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, thread: "p2p/alpha__beta", refs: []string{"m"}},
+			},
+			want: []string{"s1/m/beta acknowledged agent", "s1/m/gamma pending agent", "s1/r/gamma pending agent"},
+		},
+		{
+			// #1166 code review: a reply to an opener with a missing parent
+			// opened actionable work and was reported as a cycle.
+			name: "reply below a missing parent opens nothing and names the root",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"gone"}},
+				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}},
+			},
+			check: func(t *testing.T, result threadOpenResult, names map[string]string) {
+				got := []string{}
+				for _, un := range result.Coverage.UnresolvedLineage {
+					got = append(got, names[un.ID]+" "+names[un.MissingRef]+" "+un.Reason)
+				}
+				slices.Sort(got)
+				if want := []string{"m gone missing", "q gone missing"}; !slices.Equal(got, want) {
+					t.Fatalf("unresolved_lineage = %v, want %v", got, want)
+				}
+			},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
@@ -459,8 +489,8 @@ func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
 	}
 }
 
-// threadOpenMessage is one message of a thread open fixture. from and to are
-// handle@session. The sender's outbox copy lands in its session and the
+// threadOpenMessage is one message of a thread open fixture. from is
+// handle@session and to is a comma-separated list of handle@session. The sender's outbox copy lands in its session and the
 // recipient's inbox copy in the recipient's session, unless noInbox marks a
 // send routed outside the scan.
 type threadOpenMessage struct {
@@ -493,7 +523,11 @@ func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMes
 	sessions := []string{}
 	for i, m := range messages {
 		from, fromSession, _ := strings.Cut(m.from, "@")
-		to, toSession, _ := strings.Cut(m.to, "@")
+		var to []string
+		for _, recipient := range strings.Split(m.to, ",") {
+			handle, _, _ := strings.Cut(recipient, "@")
+			to = append(to, handle)
+		}
 		refs := []string{}
 		for _, ref := range m.refs {
 			if _, ok := ids[ref]; !ok {
@@ -503,7 +537,7 @@ func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMes
 		}
 		threadID := m.thread
 		if threadID == "" {
-			threadID = canonicalP2P(from, to)
+			threadID = canonicalP2P(from, to[0])
 		}
 		id := ids[m.name]
 		createdField := times[i].Format(time.RFC3339Nano)
@@ -511,7 +545,7 @@ func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMes
 			createdField = "yesterday"
 		}
 		data, err := format.Message{Header: format.Header{
-			Schema: format.CurrentSchema, ID: id, From: from, To: []string{to},
+			Schema: format.CurrentSchema, ID: id, From: from, To: to,
 			Thread: threadID, Created: createdField,
 			Refs: refs, Kind: m.kind, Labels: m.labels, Priority: format.PriorityNormal,
 			ReplyTo: m.replyTo, ReplyProject: m.replyProject, FromProject: m.replyProject,
@@ -527,12 +561,16 @@ func writeThreadOpenMessages(t *testing.T, base string, messages []threadOpenMes
 			t.Fatal(err)
 		}
 		sessions = append(sessions, fromSession)
-		if !m.noInbox {
+		for _, recipient := range strings.Split(m.to, ",") {
+			if m.noInbox {
+				break
+			}
+			handle, toSession, _ := strings.Cut(recipient, "@")
 			toRoot := filepath.Join(base, toSession)
-			if err := fsq.EnsureAgentDirs(toRoot, to); err != nil {
+			if err := fsq.EnsureAgentDirs(toRoot, handle); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(toRoot, to), id+".md"), data, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(toRoot, handle), id+".md"), data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			sessions = append(sessions, toSession)
