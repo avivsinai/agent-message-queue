@@ -41,6 +41,8 @@ type wakeCheckResult struct {
 	RestartCapability        string `json:"restart_capability"`
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action"`
+	// StartupHold is an open trust-dialog hold coop exec placed.
+	StartupHold *wakeStartupHoldStatus `json:"startup_hold,omitempty"`
 }
 
 type wakeStartCapability struct {
@@ -121,13 +123,20 @@ func runWakeCheck(args []string) error {
 	}
 
 	decision := inspectWakeCheckDecision(root, me)
+	hold := inspectWakeStartupHold(root, me, time.Now())
 	if common.JSON {
 		if *jsonSchema == wakeCheckSchemaV2 {
-			return writeJSON(os.Stdout, renderWakeCheckV2(decision))
+			result := renderWakeCheckV2(decision)
+			result.StartupHold = hold
+			return writeJSON(os.Stdout, result)
 		}
-		return writeJSON(os.Stdout, renderWakeCheckV1(decision))
+		result := renderWakeCheckV1(decision)
+		result.StartupHold = hold
+		return writeJSON(os.Stdout, result)
 	}
-	return writeWakeCheckText(renderWakeCheckV1(decision))
+	result := renderWakeCheckV1(decision)
+	result.StartupHold = hold
+	return writeWakeCheckText(result)
 }
 
 func inspectWakeCheckDecision(root, me string) wakeCheckDecision {
@@ -1073,8 +1082,11 @@ func writeWakeCheckText(result wakeCheckResult) error {
 			wakeCheckTextValue(result.RepairReason),
 		),
 		fmt.Sprintf("  Restart capability: %s", result.RestartCapability),
-		fmt.Sprintf("  Next action: %s", result.NextAction),
 	}
+	if hold := result.StartupHold; hold != nil {
+		lines = append(lines, fmt.Sprintf("  Startup hold: %s trust dialog for %s, open %ds; %s", hold.Harness, hold.Dir, hold.AgeSeconds, hold.Release))
+	}
+	lines = append(lines, fmt.Sprintf("  Next action: %s", result.NextAction))
 	for _, line := range lines {
 		if err := writeStdoutLine(line); err != nil {
 			return err

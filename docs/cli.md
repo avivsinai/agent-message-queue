@@ -753,6 +753,8 @@ Options:
         Log injection diagnostics to stderr
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -harness string
+        Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
@@ -1522,7 +1524,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog open|close [--me <agent>] [--root <path>]
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex] open|close
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1530,9 +1532,13 @@ installs it. Reads the hook input JSON on stdin.
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
 of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. Always exits 0 once the arguments parse and prints nothing.
+stdin removes it. With --harness codex only a turn or session event removes it;
+without AM_* the seat is the one amq coop exec recorded for the hook's session_id.
+Always exits 0 once the arguments parse and prints nothing.
 
 Options:
+  -harness string
+        Hook input of claude or codex (default "claude")
   -me string
         Agent handle (or AM_ME)
   -root string
@@ -1544,9 +1550,10 @@ Options:
 ```text
 $ amq wake install-dialog-hook --help
 Usage:
-  amq wake install-dialog-hook [--dry-run]
+  amq wake install-dialog-hook [--dry-run] [--harness claude|codex|all]
 
-Install the wake dialog guard hooks in ~/.claude/settings.json.
+Install the wake dialog guard hooks in ~/.claude/settings.json, or with --harness
+codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks).
 
 While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
 the hooks keep a marker in the agent's mailbox and every wake of that agent
@@ -1562,6 +1569,8 @@ list the AMQ_DIALOG_HOOK entries, restart the session.
 Options:
   -dry-run
         Print the hooks without changing the settings file
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq wake uninstall-dialog-hook
@@ -1569,10 +1578,15 @@ Options:
 ```text
 $ amq wake uninstall-dialog-hook --help
 Usage:
-  amq wake uninstall-dialog-hook
+  amq wake uninstall-dialog-hook [--harness claude|codex|all]
 
 Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
-~/.claude/settings.json. Other settings and hooks are not changed.
+~/.claude/settings.json, or $CODEX_HOME/hooks.json with --harness codex.
+Other settings and hooks are not changed.
+
+Options:
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq coop init

@@ -208,6 +208,9 @@ func runDoctor(args []string) error {
 	if check, ok := checkClaudeDialogHook(); ok {
 		result.Checks = append(result.Checks, check)
 	}
+	if check, ok := checkCodexDialogHook(); ok {
+		result.Checks = append(result.Checks, check)
+	}
 	if check, ok := checkCodexShellEnvironment(); ok {
 		result.Checks = append(result.Checks, check)
 	}

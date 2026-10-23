@@ -248,6 +248,9 @@ func runOpsChecksWithSchema(
 	for _, row := range opsAgentRows(root, scope) {
 		handle := row.Handle
 		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.json()}
+		if hint, ok := codexStartupHoldHint(root, handle); ok {
+			result.Hints = append(result.Hints, hint)
+		}
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
 		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)

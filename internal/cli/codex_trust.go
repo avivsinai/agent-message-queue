@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -17,17 +19,28 @@ import (
 // Only the user config.toml is read; trust that Codex finds in another layer
 // reads as untrusted, which keeps the original launch path.
 func codexTrustsDir(codexHome, dir string) bool {
+	level, recorded, err := codexProjectTrust(codexHome, dir)
+	return err == nil && recorded && level == "trusted"
+}
+
+// codexProjectTrust returns the trust_level of the [projects] entry that
+// selects dir (see codexTrustsDir), and whether one does. err reports a
+// config.toml that cannot be read or parsed; a missing file selects none.
+func codexProjectTrust(codexHome, dir string) (level string, recorded bool, err error) {
 	raw, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
 	if err != nil {
-		return false
+		return "", false, err
 	}
 	var config struct {
 		Projects map[string]struct {
 			TrustLevel string `toml:"trust_level"`
 		} `toml:"projects"`
 	}
-	if toml.Unmarshal(raw, &config) != nil {
-		return false
+	if err := toml.Unmarshal(raw, &config); err != nil {
+		return "", false, err
 	}
 	keys := codexTrustKeys(dir)
 	if root := codexGitTrustRoot(dir); root != "" {
@@ -35,10 +48,10 @@ func codexTrustsDir(codexHome, dir string) bool {
 	}
 	for _, key := range keys {
 		if project, ok := config.Projects[key]; ok {
-			return project.TrustLevel == "trusted"
+			return project.TrustLevel, true, nil
 		}
 	}
-	return false
+	return "", false, nil
 }
 
 func codexTrustKeys(path string) []string {
