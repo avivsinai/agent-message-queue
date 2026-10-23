@@ -18,17 +18,28 @@ Environment variables:
 - AM_ROOT, AM_ME: the agent's queue root and handle (required)
 - AM_SESSION: shown in the notification title when set
 - AMQ_BIN: Path to amq binary (default: searches PATH)
-- AMQ_BULLETIN: Path to bulletin file (default: <AM_ROOT>/meta/amq-bulletin.json)
+- AMQ_BULLETIN: Path to bulletin file (default: <AM_ROOT>/meta/amq-bulletin-<AM_ME>.json)
 - AMQ_NOTIFY_LOG: Optional path to append raw notify JSON (one line per event)
 """
 
+import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
+
+# HANDLE_RE is an AMQ handle; AM_ME becomes part of a file name.
+HANDLE_RE = re.compile(r"[a-z0-9_][a-z0-9_-]*")
+
+try:
+    import fcntl
+except ImportError:  # no advisory locks on this platform
+    fcntl = None
 
 
 def find_amq_binary() -> str:
@@ -130,10 +141,11 @@ def read_bulletin_ids(bulletin_path: str) -> Optional[List[str]]:
 
 
 def write_bulletin(bulletin_path: str, data: dict) -> None:
-    """Write the message summary atomically, mode 0600."""
-    Path(bulletin_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp_path = bulletin_path + ".tmp"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write the message summary atomically, mode 0600, through a temp file
+    of its own name."""
+    parent = Path(bulletin_path).parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".amq-bulletin.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
@@ -142,6 +154,22 @@ def write_bulletin(bulletin_path: str, data: dict) -> None:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
+
+
+@contextlib.contextmanager
+def bulletin_lock(bulletin_path: str) -> Iterator[None]:
+    """Hold <bulletin>.lock, so two turns' compare-and-write of one bulletin
+    run one after the other. The lock file is never removed."""
+    if fcntl is None:
+        yield
+        return
+    Path(bulletin_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(bulletin_path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def clear_bulletin(bulletin_path: str) -> None:
@@ -178,13 +206,15 @@ def main():
     # hook has no mailbox and does nothing.
     root = os.environ.get("AM_ROOT", "").strip()
     me = os.environ.get("AM_ME", "").strip()
-    if not root or not me:
+    if not root or not me or not HANDLE_RE.fullmatch(me):
         return
     if event:
         log_event(event)
 
+    # One bulletin per handle: a broadcast reaches several handles of one
+    # root with the same message id, and each must notify once.
     bulletin_path = os.environ.get(
-        "AMQ_BULLETIN", os.path.join(root, "meta", "amq-bulletin.json")
+        "AMQ_BULLETIN", os.path.join(root, "meta", f"amq-bulletin-{me}.json")
     )
 
     # Fast path: if inbox/new is empty or missing, clear bulletin and exit quickly.
@@ -207,9 +237,10 @@ def main():
 
     # One notification per set of unread messages: the same set as the last
     # bulletin writes nothing and notifies nobody.
-    if read_bulletin_ids(bulletin_path) == message_ids(result):
-        return
-    write_bulletin(bulletin_path, result)
+    with bulletin_lock(bulletin_path):
+        if read_bulletin_ids(bulletin_path) == message_ids(result):
+            return
+        write_bulletin(bulletin_path, result)
 
     urgent = sum(1 for m in result["messages"] if m.get("priority") == "urgent")
     normal = sum(1 for m in result["messages"] if m.get("priority") == "normal")
