@@ -277,6 +277,27 @@ func TestSessionListKeepsCodexBindingHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("a binding recorded before the history stays listed when replaced", func(t *testing.T) {
+		base, publish := setup(t)
+		publish(threadA, "beta")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A store written before binding events existed has none.
+		if err := os.RemoveAll(filepath.Join(home, ".amq", "codex-threads", "bindings")); err != nil {
+			t.Fatal(err)
+		}
+		publish(threadB, "beta")
+		want := []sessionConversation{
+			{Handle: "beta", Provider: "codex", ID: threadA, State: "revoked", Source: "codex-thread"},
+			{Handle: "beta", Provider: "codex", ID: threadB, State: "ready", Source: "codex-thread"},
+		}
+		if got := list(t, base); !reflect.DeepEqual(got, want) {
+			t.Fatalf("conversations = %#v, want %#v", got, want)
+		}
+	})
+
 	t.Run("giving a thread to another handle keeps the earlier binding", func(t *testing.T) {
 		base, publish := setup(t)
 		publish(threadA, "alpha")

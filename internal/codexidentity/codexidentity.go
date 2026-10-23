@@ -96,6 +96,19 @@ func Publish(r Record) error {
 				return fmt.Errorf("sync %s: %w", d, err)
 			}
 		}
+		// A binding recorded before the history existed has no event. Save
+		// the ones this publication replaces first: the handle's current
+		// thread and the thread's current handle, so both stay listed as
+		// revoked at this publication's time.
+		var prior currentRecord
+		if readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &prior) == nil && ValidThread(prior.Thread) {
+			if err := captureLegacyBinding(dir, prior.Thread); err != nil {
+				return err
+			}
+		}
+		if err := captureLegacyBinding(dir, r.Thread); err != nil {
+			return err
+		}
 		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the Codex thread identity: %w", err)
 		}
@@ -260,6 +273,40 @@ func Bindings() ([]Binding, error) {
 		}
 	}
 	return out, nil
+}
+
+// captureLegacyBinding writes a binding event for thread when its identity
+// record and its handle's current marker still bind it and the history has
+// no event for it. The record's write time is when that binding began. The
+// caller holds the store lock.
+func captureLegacyBinding(dir, thread string) error {
+	names, err := os.ReadDir(filepath.Join(dir, "bindings"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, name := range names {
+		if strings.HasSuffix(name.Name(), "-"+thread+".json") {
+			return nil
+		}
+	}
+	path := filepath.Join(dir, "threads", thread+".json")
+	var r Record
+	if readStrict(path, &r) != nil || r.check() != nil || r.Thread != thread || !confirmed(dir, thread, r.RootID, r.Me) {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil
+	}
+	bound := info.ModTime().UTC()
+	event, err := json.Marshal(bindingEvent{Schema: schema, Thread: thread, Me: r.Me, RootID: r.RootID, Bound: bound.Format(time.RFC3339Nano)})
+	if err != nil {
+		return err
+	}
+	if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", bound.UnixNano(), thread), append(event, '\n'), 0o600); err != nil {
+		return fmt.Errorf("record the earlier Codex thread binding: %w", err)
+	}
+	return nil
 }
 
 // historyNames reports whether the history has any binding of thread.
