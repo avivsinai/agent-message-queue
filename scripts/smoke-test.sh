@@ -342,7 +342,6 @@ printf '%s' "$kanban_help_out" | grep -q "bridge  Run websocket bridge"
 echo "integration: kanban needs a live websocket workspace, skipping invocation (offline smoke test)"
 
 bash scripts/test_install_checksum.sh
-AMQ_TEST_BIN="$BIN" bash scripts/test_stop_hook.sh
 bash scripts/test_version_embed.sh
 bash scripts/amq-bot-envelope-hop-probe_test.sh
 echo "smoke test ok"

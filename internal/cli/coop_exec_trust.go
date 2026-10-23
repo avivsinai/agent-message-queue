@@ -5,13 +5,18 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"golang.org/x/sys/unix"
 )
 
 // wakeDialogStartupEvent marks a .wake.dialog that coop exec writes before
@@ -155,14 +160,46 @@ func claudeStartupTrust(dir string) startupTrust {
 	return startupTrustPending
 }
 
-// writeStartupDialogMarker writes the Startup marker for the trust dialog
-// the harness about to start will show, so the wake holds the doorbell
-// until the dialog is answered. Otherwise it removes a Startup marker an
-// earlier launch left (one declined, or one that never started), which
-// would hold this session's doorbell. The caller owns this agent's wake,
-// so no other live launch's marker is touched. A failed write leaves the
-// behavior without a guard.
+// writeStartupDialogMarker writes the Startup marker when the harness about
+// to start will show its trust dialog, so the wake holds the doorbell until
+// the dialog is answered. A failed write leaves the behavior without a
+// guard.
 func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
+	withStartupDialog(root, handle, binaryPath, args, func(dirfd int, agentDir *wakeAgentDir, harness, dir string, trust startupTrust) error {
+		if trust != startupTrustPending {
+			return nil
+		}
+		raw, err := json.Marshal(wakeDialogMarker{
+			Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir,
+			OpenedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			return err
+		}
+		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	})
+}
+
+// clearStaleStartupDialogMarker removes a Startup marker an earlier launch
+// left (one declined, or one that never started) when this launch's harness
+// shows no trust dialog; it would otherwise hold this session's doorbell.
+// The caller owns the agent's wake.
+func clearStaleStartupDialogMarker(root, handle, binaryPath string, args []string) {
+	withStartupDialog(root, handle, binaryPath, args, func(dirfd int, agentDir *wakeAgentDir, _, _ string, trust startupTrust) error {
+		if trust == startupTrustPending {
+			return nil
+		}
+		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
+			filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
+		var marker wakeDialogMarker
+		if err != nil || !exists || json.Unmarshal(current, &marker) != nil || marker.Event != wakeDialogStartupEvent {
+			return nil
+		}
+		return clearWakeDialogMarker(dirfd, agentDir, "")
+	})
+}
+
+func withStartupDialog(root, handle, binaryPath string, args []string, fn func(dirfd int, agentDir *wakeAgentDir, harness, dir string, trust startupTrust) error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return
@@ -174,23 +211,7 @@ func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
 	}
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
-		if trust != startupTrustPending {
-			current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
-				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
-			var marker wakeDialogMarker
-			if err != nil || !exists || json.Unmarshal(current, &marker) != nil || marker.Event != wakeDialogStartupEvent {
-				return nil
-			}
-			return clearWakeDialogMarker(dirfd, agentDir, "")
-		}
-		raw, err := json.Marshal(wakeDialogMarker{
-			Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir,
-			OpenedAt: time.Now().UTC().Format(time.RFC3339),
-		})
-		if err != nil {
-			return err
-		}
-		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+		return fn(dirfd, agentDir, harness, dir, trust)
 	})
 }
 
@@ -244,4 +265,85 @@ func startupTrustFileStamp(harness string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s\x00%d\x00%d", path, info.ModTime().UnixNano(), info.Size())
+}
+
+// codexStartupHoldHint reports an open Codex Startup marker for handle. Codex
+// records no decision for a directory the person keeps untrusted, so
+// without the Codex dialog hook's SessionStart close that hold releases
+// only by aging: input held, attention output after wakeDialogQuietHold.
+func codexStartupHoldHint(root, handle string) (opsHint, bool) {
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName), maxWakeMetadataFileBytes)
+	var marker wakeDialogMarker
+	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Harness != launch.CodexProvider {
+		return opsHint{}, false
+	}
+	return opsHint{
+		Code:   "codex_trust_hold",
+		Status: "warn",
+		Message: fmt.Sprintf("%s's doorbell is held while Codex asks whether to trust %s; it rings once Codex records trust, or with the Codex dialog hook when the session starts; remedy: amq wake install-dialog-hook --harness codex",
+			handle, marker.Cwd),
+	}, true
+}
+
+// envWakeStartupHold names the descriptor of a coop wake's startup hold:
+// the read end of a pipe whose write end coop exec keeps until it has
+// installed or cleared the Startup marker. Until the pipe reports EOF the
+// wake treats a dialog as open and types nothing. coop exec's exit or exec
+// closes the write end too (close-on-exec), so the hold never outlives it.
+const envWakeStartupHold = "AMQ_WAKE_STARTUP_HOLD_FD"
+
+// attachWakeStartupHold passes a startup hold pipe to cmd. hold is the end
+// coop exec closes to release it; childEnd is closed once cmd started.
+func attachWakeStartupHold(cmd *exec.Cmd) (hold, childEnd *os.File, err error) {
+	childEnd, hold, err = os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	childFD := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, childEnd)
+	cmd.Env = setEnvVar(unsetEnvVar(cmd.Env, envWakeStartupHold), envWakeStartupHold, strconv.Itoa(childFD))
+	return hold, childEnd, nil
+}
+
+// wakeStartupHoldFromEnv adopts the startup hold coop exec passed, if any.
+// released is closed once coop exec releases it.
+func wakeStartupHoldFromEnv() (released <-chan struct{}, err error) {
+	raw, present := os.LookupEnv(envWakeStartupHold)
+	if !present {
+		return nil, nil
+	}
+	if err := os.Unsetenv(envWakeStartupHold); err != nil {
+		return nil, fmt.Errorf("clear %s after ingestion: %w", envWakeStartupHold, err)
+	}
+	fd, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || fd < 3 {
+		return nil, fmt.Errorf("%s is invalid", envWakeStartupHold)
+	}
+	unix.CloseOnExec(fd)
+	file := os.NewFile(uintptr(fd), "amq-wake-startup-hold")
+	if file == nil {
+		return nil, fmt.Errorf("%s fd is unavailable", envWakeStartupHold)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(io.Discard, file)
+		_ = file.Close()
+	}()
+	return done, nil
+}
+
+// withWakeStartupHold reads every dialog as open until released is closed.
+func withWakeStartupHold(source func(time.Time) (wakeDialogState, error), released <-chan struct{}) func(time.Time) (wakeDialogState, error) {
+	if released == nil {
+		return source
+	}
+	return func(now time.Time) (wakeDialogState, error) {
+		select {
+		case <-released:
+			return source(now)
+		default:
+			return wakeDialogOpen, nil
+		}
+	}
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -47,9 +48,24 @@ func TestCodexSeatRefusesArgsThatDropItsIdentity(t *testing.T) {
 	if err := refuseCodexSeatArgs("codex", remote); GetExitCode(err) != ExitActionRequired {
 		t.Fatalf("--remote resume error = %v, want action required", err)
 	}
-	other := []string{"-m", "gpt", "-c", `shell_environment_policy.set.AM_ME="other"`}
-	if err := refuseCodexSeatArgs("codex", other); GetExitCode(err) != ExitUsage {
-		t.Fatalf("identity override error = %v, want usage", err)
+	for _, override := range []string{
+		`shell_environment_policy.set.AM_ME="other"`,
+		// #1176 review: two filters tables on the command line replace one
+		// another in Codex, so the second dropped AM_* that AMQ still counted.
+		`shell_environment_policy.filters={PATH="include"}`,
+	} {
+		if err := refuseCodexSeatArgs("codex", []string{"-m", "gpt", "-c", override}); GetExitCode(err) != ExitUsage {
+			t.Fatalf("-c %s error = %v, want usage", override, err)
+		}
+	}
+	// #1176 review: include_only runs after set and dropped the identity.
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("[shell_environment_policy]\ninclude_only = [\"PATH\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseCodexIncludePolicy("codex"); GetExitCode(err) != ExitUsage {
+		t.Fatalf("include_only without AM_* error = %v, want usage", err)
 	}
 }
 

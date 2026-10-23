@@ -39,22 +39,31 @@ Disable wake when the environment has no usable terminal:
 amq coop exec --no-wake claude
 ```
 
-### Claude Code session-start preamble
+### Claude Code hooks
 
 ```sh
 amq coop install-hooks
 ```
 
-This adds one SessionStart hook to `~/.claude/settings.json`. On startup,
-resume, `/clear`, and compaction it gives the agent a short preamble: its
-handle, session and peers, its unread count, and whether a wake rings the
-terminal (so it must not run `watch`, `monitor`, or a polling loop). The hook
-runs `amq` only in sessions with `AM_ME` set, which `amq coop exec` and
-`amq launch` do; a plain `claude` without `AM_ME` gets no preamble, and other
-Claude Code sessions start no `amq`. Running it again replaces the entry in
-place; `amq coop uninstall-hooks` removes it. Remove a project hook entry that
-runs `scripts/claude-session-start.sh`, or the preamble arrives twice; the
-install command and `amq doctor` list such entries.
+This adds two hooks to `~/.claude/settings.json`:
+
+- **SessionStart.** On startup, resume, `/clear`, and compaction it gives the
+  agent a short preamble: its handle, session and peers, its unread count, and
+  whether a wake rings the terminal (so it must not run `watch`, `monitor`, or
+  a polling loop).
+- **Stop.** It blocks a stop once for unread mail it has not reported yet, so
+  the agent drains before it ends its turn. Under a live wake it counts only
+  mail that the wake will not ring for (see
+  [Wake operations](docs/wake-operations.md)). After 5 blocks in one chain it
+  allows the stop with a notice.
+
+The hooks run `amq` only in sessions with `AM_ME` set, which `amq coop exec`
+and `amq launch` do. A plain `claude` without `AM_ME` gets no preamble and no
+Stop guard, and other Claude Code sessions start no `amq`. Running the command
+again replaces the entries in place; `amq coop uninstall-hooks` removes them.
+Remove project hook entries that run `scripts/claude-session-start.sh` or
+`scripts/amq-stop-hook.sh`, or each hook runs twice; the install command and
+`amq doctor` list such entries.
 
 ### Multiple pairs (isolated sessions)
 

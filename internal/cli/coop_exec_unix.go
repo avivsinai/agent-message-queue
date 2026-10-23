@@ -100,6 +100,9 @@ type coopExecRun struct {
 	// wakeOwned is true once this launch's wake is ready and its claim is
 	// validated as this process's.
 	wakeOwned bool
+	// wakeStartupHold is the parent end of the wake's startup hold; closing
+	// it lets the wake admit input.
+	wakeStartupHold *os.File
 }
 
 func runCoopExec(args []string) error {
@@ -245,7 +248,15 @@ func runCoopExec(args []string) error {
 			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
 				return fmt.Errorf("attach isolated coop wake attention: %w", err)
 			}
-			if err := c.superviseWakeHelper(wakeCmd, readyPath); err != nil {
+			hold, childEnd, err := attachWakeStartupHold(wakeCmd)
+			if err != nil {
+				return fmt.Errorf("attach coop wake startup hold: %w", err)
+			}
+			c.wakeStartupHold = hold
+			defer func() { _ = hold.Close() }()
+			err = c.superviseWakeHelper(wakeCmd, readyPath)
+			_ = childEnd.Close()
+			if err != nil {
 				return err
 			}
 		}
@@ -255,11 +266,17 @@ func runCoopExec(args []string) error {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
 	}
-	// Only once this launch owns the agent's wake: a launch refused for
-	// another live owner must not touch that owner's marker. The harness may
-	// open on its trust dialog.
+	// The marker changes only once this launch's wake holds the agent's wake
+	// lock, so a launch that loses the race touches no other owner's hold.
+	// That wake admits no input until the startup hold is released below,
+	// so no doorbell is typed before the marker exists: one typed before the
+	// harness starts would wait in the terminal and answer its trust dialog.
 	if c.wakeOwned {
 		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+	}
+	if c.wakeStartupHold != nil {
+		_ = c.wakeStartupHold.Close()
 	}
 
 	return c.execAgent()
@@ -349,6 +366,9 @@ func (c *coopExecRun) validateFlags() error {
 		if err := refuseCodexSeatArgs(c.cmdName, c.agentArgs); err != nil {
 			return err
 		}
+	}
+	if err := refuseCodexIncludePolicy(c.cmdName); err != nil {
+		return err
 	}
 	if c.managedLaunchNonce != "" && flagWasVisited(c.fs, "named") && *c.namedFlag && !launch.ArgsHaveNameFlag(c.agentArgs) {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")

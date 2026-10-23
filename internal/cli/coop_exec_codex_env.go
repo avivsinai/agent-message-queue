@@ -40,29 +40,7 @@ func refuseCodexSeatArgs(binaryPath string, args []string) error {
 	if codexArgsHaveRemote(args) {
 		return ActionRequiredError("this Codex seat would run on an app-server AMQ does not see (--remote), where its amq commands get no AMQ identity; drop --remote, or pass --me and --root in each amq command. Codex was not started")
 	}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		flag, value, inline := strings.Cut(arg, "=")
-		switch {
-		case flag == "-c" || flag == "--config":
-			if !inline {
-				if i+1 >= len(args) {
-					return nil
-				}
-				i++
-				value = args[i]
-			}
-		case strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--"):
-			value = arg[2:]
-		default:
-			if codexValueOptions[flag] && !inline {
-				i++
-			}
-			continue
-		}
+	for _, value := range codexConfigOverrides(args) {
 		key, _, _ := strings.Cut(value, "=")
 		if codexOverrideSetsIdentity(key) {
 			return UsageError("-c %s would replace the AMQ identity coop exec gives this Codex seat; drop that override. Codex was not started", strings.TrimSpace(key))
@@ -72,11 +50,17 @@ func refuseCodexSeatArgs(binaryPath string, args []string) error {
 }
 
 // codexOverrideSetsIdentity reports whether a Codex configuration key
-// replaces the shell environment table or sets an AMQ identity variable in
-// it. Codex merges these keys without regard to case.
+// replaces the shell environment table, sets an AMQ identity variable in it,
+// or overrides the include policy (include_only or filters), which Codex
+// applies after set. AMQ does not reproduce how Codex merges an include
+// override with the config layers, so any such override is refused. Codex
+// merges these keys without regard to case.
 func codexOverrideSetsIdentity(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
-	if key == "shell_environment_policy" || key == "shell_environment_policy.set" {
+	switch {
+	case key == "shell_environment_policy", key == "shell_environment_policy.set",
+		key == "shell_environment_policy.include_only", key == "shell_environment_policy.filters",
+		strings.HasPrefix(key, "shell_environment_policy.filters."):
 		return true
 	}
 	name, ok := strings.CutPrefix(key, "shell_environment_policy.set.")
@@ -137,4 +121,36 @@ func codexArgsHaveRemote(args []string) bool {
 		}
 	}
 	return false
+}
+
+// codexConfigOverrides returns the values of the -c and --config options in
+// args, before the prompt.
+func codexConfigOverrides(args []string) []string {
+	var values []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		flag, value, inline := strings.Cut(arg, "=")
+		switch {
+		case flag == "-c" || flag == "--config":
+			if !inline {
+				if i+1 >= len(args) {
+					return values
+				}
+				i++
+				value = args[i]
+			}
+		case strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--"):
+			value = arg[2:]
+		default:
+			if codexValueOptions[flag] && !inline {
+				i++
+			}
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
 }
