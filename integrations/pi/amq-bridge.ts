@@ -82,13 +82,22 @@ let inactiveNoticeShown = false;
 export default function amqPiBridge(pi: ExtensionAPI): void {
 	let bridge: Bridge | null = null;
 
+	// The doorbell must never answer an extension prompt. pi counts nested
+	// prompts itself: ui_prompt_start fires when it starts waiting and
+	// ui_prompt_end when it no longer waits. A session boundary also clears
+	// the marker, so one left by a crash does not hold the next session.
+	pi.on("ui_prompt_start", (event) => openWakeDialog(event.kind));
+	pi.on("ui_prompt_end", () => closeWakeDialog());
+
 	pi.on("session_start", (_event, ctx) => {
+		closeWakeDialog();
 		stop(bridge, "restart");
 		bridge = start(pi, ctx);
 		if (bridge) scan(pi, bridge);
 	});
 
 	pi.on("session_shutdown", (event) => {
+		closeWakeDialog();
 		stop(bridge, event.reason);
 		bridge = null;
 	});
@@ -661,6 +670,66 @@ function exists(p: string): boolean {
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+// WAKE_DIALOG is the marker the AMQ wake reads (docs/wake-operations.md):
+// while it exists the wake holds its doorbell instead of typing into pi.
+const WAKE_DIALOG = ".wake.dialog";
+const WAKE_DIALOG_EVENT = "ui_prompt";
+
+// wakeAgentDir is this pi's AMQ agent directory, or "" without a valid
+// identity or an existing mailbox.
+function wakeAgentDir(): string {
+	const root = process.env.AM_ROOT ?? "";
+	const handle = process.env.AM_ME ?? "";
+	if (!root || !HANDLE.test(handle)) return "";
+	const dir = path.join(root, "agents", handle);
+	try {
+		return fs.lstatSync(dir).isDirectory() ? dir : "";
+	} catch {
+		return "";
+	}
+}
+
+// openWakeDialog installs the marker by an exclusive temp file and a rename,
+// without fsync: the marker is advisory, and the prompt is rendering. This
+// extension is the only marker writer for a pi agent; Node has no flock, so
+// it does not take the Go writers' .wake.dialog.lock.
+function openWakeDialog(kind: string): void {
+	const dir = wakeAgentDir();
+	if (!dir) return;
+	const marker = {
+		schema: 1,
+		event: WAKE_DIALOG_EVENT,
+		harness: "pi",
+		kind,
+		opened_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+	};
+	const temp = path.join(dir, `.wake.dialog.tmp.${process.pid}.${randomUUID()}`);
+	try {
+		fs.writeFileSync(temp, `${JSON.stringify(marker)}\n`, { flag: "wx", mode: 0o600 });
+		fs.renameSync(temp, path.join(dir, WAKE_DIALOG));
+	} catch {
+		try {
+			fs.unlinkSync(temp);
+		} catch {
+			// The temp file was never created or is already gone.
+		}
+	}
+}
+
+// closeWakeDialog removes the marker only when this extension wrote it, so
+// a marker another writer installed keeps holding.
+function closeWakeDialog(): void {
+	const dir = wakeAgentDir();
+	if (!dir) return;
+	const file = path.join(dir, WAKE_DIALOG);
+	try {
+		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string };
+		if (marker.event === WAKE_DIALOG_EVENT && marker.harness === "pi") fs.unlinkSync(file);
+	} catch {
+		// No marker, or one this extension did not write.
 	}
 }
 

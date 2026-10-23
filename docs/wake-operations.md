@@ -232,6 +232,16 @@ marker), entries disabled in `/hooks`, and entries whose stored
 user `config.toml` only; a project or profile layer that turns hooks off is
 not seen.
 
+## Dialog guard (pi extension prompts)
+
+pi has no approval prompts of its own; prompts come from extensions. The AMQ
+pi extension (`integrations/pi/amq-bridge.ts`) writes the `.wake.dialog`
+marker (`event` `ui_prompt`, `harness` `pi`) when pi starts waiting on an
+extension prompt and removes it when pi stops waiting, so the wake holds the
+doorbell with the same hold and age rules as above. A session start or
+shutdown also removes it. The guard runs only when the AMQ pi extension is
+loaded.
+
 ## Live settings
 
 A running wake has two kinds of input.

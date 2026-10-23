@@ -133,6 +133,23 @@ const toolUseMessage = (text: string) => ({
 	},
 });
 
+// Bead agent-message-queue-vd4.6: the wake holds its doorbell while a pi
+// extension prompt is open, so the marker exists exactly while pi waits.
+test("an open extension prompt holds the wake doorbell until it ends", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+	const opened = JSON.parse(fs.readFileSync(marker, "utf8"));
+	assert.equal(opened.event, "ui_prompt");
+	assert.equal(opened.harness, "pi");
+	assert.equal(opened.kind, "confirm");
+	assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
 // Bead agent-message-queue-611.60: a relay share pins pi's session id, so the
 // reference bridge publishes it in liveness.
 test("the liveness record carries pi's session id", async () => {
