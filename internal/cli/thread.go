@@ -13,6 +13,9 @@ import (
 )
 
 func runThread(args []string) error {
+	if len(args) > 0 && args[0] == "open" {
+		return runThreadOpen(args[1:])
+	}
 	fs := flag.NewFlagSet("thread", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Thread id")
