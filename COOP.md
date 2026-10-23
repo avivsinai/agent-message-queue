@@ -221,6 +221,13 @@ agy runs no hooks with Google Cloud sign-in, so the wake cannot see agy's
 permission prompt; a doorbell that arrives while agy asks "Run this command?"
 can answer it (known limitation; a fix is in progress in a follow-up).
 
+Cursor shows no signal AMQ can read when its approval prompt opens or
+closes, so `amq coop exec cursor-agent` keeps the full doorbell, and a
+doorbell that arrives while Cursor asks for approval can answer it (Enter
+selects the highlighted choice). Grok has no hook for its approval prompt, so
+`amq coop exec grok` keeps the full doorbell, and a doorbell that arrives
+while Grok asks for approval can answer it. Both are known limits.
+
 ### Supervisor recipes
 
 AMQ remains daemon-free. Let the operating system supervise the CLI process.

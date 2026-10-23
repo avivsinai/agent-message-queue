@@ -753,6 +753,8 @@ Options:
         Log injection diagnostics to stderr
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -harness string
+        Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration

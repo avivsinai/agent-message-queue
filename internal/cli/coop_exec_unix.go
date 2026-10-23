@@ -217,7 +217,7 @@ func runCoopExec(args []string) error {
 		} else {
 			c.cleanupWakeReady = cleanupReady
 			defer cleanupReady()
-			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, c.binaryPath), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
+			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, c.binaryPath), coopWakeHarness(c.binaryPath), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
 			if wakeLaunchLocator != "" {
 				// Execute the already-running image, but preserve the absolute,
 				// unresolved invocation locator as argv[0] so the child can safely
@@ -1211,7 +1211,7 @@ func handleCoopWakeSetupFailure(requireWake bool, inspection wakeLockInspection,
 	return nil
 }
 
-func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string, readyFile string) []string {
+func buildCoopWakeArgs(agentHandle, root, injectMode, harness, injectVia string, injectArgs []string, readyFile string) []string {
 	args := []string{
 		"--no-update-check",
 		"wake",
@@ -1223,6 +1223,9 @@ func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectAr
 	}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
+	}
+	if harness != "" {
+		args = append(args, "--harness", harness)
 	}
 	if injectVia != "" {
 		args = append(args, "--inject-via", injectVia)

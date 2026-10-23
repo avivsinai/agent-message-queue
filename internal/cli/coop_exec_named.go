@@ -51,6 +51,18 @@ var coopNamedHarnesses = map[string]coopNamedHarness{
 	"agy":                 {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
 }
 
+// coopWakeHarness names the harness binary for the wake's --harness, or ""
+// for a program coop exec does not know.
+func coopWakeHarness(binary string) string {
+	if _, ok := coopNamedHarnessFor(binary); !ok {
+		return ""
+	}
+	if provider := launch.ProviderForExecutable(binary); provider != "" {
+		return provider
+	}
+	return strings.ToLower(filepath.Base(binary))
+}
+
 // coopWakeInjectMode is the mode coop exec starts its wake with: the
 // person's choice, else the harness's, else auto, which picks by handle.
 func coopWakeInjectMode(requested, binary string) string {
