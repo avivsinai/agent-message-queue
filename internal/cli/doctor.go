@@ -183,6 +183,11 @@ func runDoctor(args []string) error {
 	if root != "" {
 		mailboxes, repair, check := inspectDoctorMailboxes(root, baseRoot, *fixMailboxesFlag, *ignoreSessionPinFlag)
 		result.Mailboxes = mailboxes
+		decls := declarationsFor(root, opsDeclarationBase(root, baseRoot))
+		for i := range result.Mailboxes {
+			mailbox := &result.Mailboxes[i]
+			mailbox.RegistrationStatus = string(classifyAgentAt(decls, root, mailbox.Handle).Status)
+		}
 		result.MailboxRepair = repair
 		result.Checks = append(result.Checks, check)
 	}
@@ -201,6 +206,9 @@ func runDoctor(args []string) error {
 	// Hook config health: flag AMQ-owned SessionStart hooks whose script is gone.
 	result.Checks = append(result.Checks, checkHookConfigs())
 	if check, ok := checkClaudeDialogHook(); ok {
+		result.Checks = append(result.Checks, check)
+	}
+	if check, ok := checkCodexDialogHook(); ok {
 		result.Checks = append(result.Checks, check)
 	}
 	if check, ok := checkCodexShellEnvironment(); ok {

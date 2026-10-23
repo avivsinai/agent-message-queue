@@ -64,20 +64,26 @@ type opsRoot struct {
 }
 
 type opsAgent struct {
-	Handle                 string                   `json:"handle"`
-	UnreadCount            int                      `json:"unread_count"`
-	OldestUnreadAgeSeconds float64                  `json:"oldest_unread_age_seconds"`
-	DLQCount               int                      `json:"dlq_count"`
-	OldestDLQAgeSeconds    float64                  `json:"oldest_dlq_age_seconds"`
-	PresenceStatus         string                   `json:"presence_status"`
-	PresenceAgeSeconds     float64                  `json:"presence_age_seconds"`
-	PresenceSource         string                   `json:"presence_source,omitempty"`
-	NotifierStatus         string                   `json:"notifier_status,omitempty"`
-	NotifierMode           string                   `json:"notifier_mode,omitempty"`
-	NotifierReason         string                   `json:"notifier_reason,omitempty"`
-	DoorbellParked         bool                     `json:"doorbell_parked,omitempty"`
-	DoorbellAttempts       uint                     `json:"doorbell_attempts,omitempty"`
-	NotificationAttempts   []opsNotificationAttempt `json:"notification_attempts,omitempty"`
+	Handle                 string  `json:"handle"`
+	UnreadCount            int     `json:"unread_count"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
+	// UnreadCountError is set when the inbox could not be inspected; the
+	// count is then unknown, not zero.
+	UnreadCountError    string  `json:"unread_count_error,omitempty"`
+	DLQCount            int     `json:"dlq_count"`
+	OldestDLQAgeSeconds float64 `json:"oldest_dlq_age_seconds"`
+	// DLQCountError is UnreadCountError for the DLQ.
+	DLQCountError string `json:"dlq_count_error,omitempty"`
+	agentRegistrationJSON
+	PresenceStatus       string                   `json:"presence_status"`
+	PresenceAgeSeconds   float64                  `json:"presence_age_seconds"`
+	PresenceSource       string                   `json:"presence_source,omitempty"`
+	NotifierStatus       string                   `json:"notifier_status,omitempty"`
+	NotifierMode         string                   `json:"notifier_mode,omitempty"`
+	NotifierReason       string                   `json:"notifier_reason,omitempty"`
+	DoorbellParked       bool                     `json:"doorbell_parked,omitempty"`
+	DoorbellAttempts     uint                     `json:"doorbell_attempts,omitempty"`
+	NotificationAttempts []opsNotificationAttempt `json:"notification_attempts,omitempty"`
 }
 
 type opsNotificationAttempt struct {
@@ -205,7 +211,8 @@ func runOpsChecksWithSchema(
 	result.Hints = append(result.Hints, checkMailboxRemovalHints(root)...)
 
 	// Load the active root's config, falling back to the base config for normal
-	// session layouts where coop init owns the single config.json.
+	// session layouts where coop init owns the single config.json. These
+	// configured handles keep their role as the wake-lock inspection set.
 	agents, err := loadOpsAgents(root, fixWakeLocks, explicitBaseRoot...)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
@@ -213,15 +220,7 @@ func runOpsChecksWithSchema(
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
-		var wakeHints []opsHint
-		result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
-			root,
-			discoveredWakeLockAgents(root, nil),
-			fixWakeLocks,
-			jsonSchema,
-		)
-		result.Hints = append(result.Hints, wakeHints...)
-		return result
+		agents = nil
 	}
 
 	validatedAgents := make([]string, 0, len(agents))
@@ -241,39 +240,20 @@ func runOpsChecksWithSchema(
 			continue
 		}
 		validatedAgents = append(validatedAgents, handle)
-		agent := opsAgent{Handle: handle}
+	}
 
-		// Unread count + oldest
-		inboxNew := fsq.AgentInboxNew(root, handle)
-		entries, err := os.ReadDir(inboxNew)
-		if err == nil {
-			agent.UnreadCount = len(entries)
-			for _, e := range entries {
-				info, err := e.Info()
-				if err == nil {
-					age := now.Sub(info.ModTime()).Seconds()
-					if age > agent.OldestUnreadAgeSeconds {
-						agent.OldestUnreadAgeSeconds = age
-					}
-				}
-			}
+	// Agent rows: every declared handle (with or without a mailbox) and every
+	// mailbox of this root, so an unrostered agent's backlog is reported.
+	scope := inventoryDeliveryRoot(root, opsDeclarationBase(root, explicitBaseRoot...))
+	for _, row := range opsAgentRows(root, scope) {
+		handle := row.Handle
+		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.json()}
+		if hint, ok := codexStartupHoldHint(root, handle); ok {
+			result.Hints = append(result.Hints, hint)
 		}
-
-		// DLQ count + oldest
-		dlqNew := fsq.AgentDLQNew(root, handle)
-		dlqEntries, err := os.ReadDir(dlqNew)
-		if err == nil {
-			agent.DLQCount = len(dlqEntries)
-			for _, e := range dlqEntries {
-				info, err := e.Info()
-				if err == nil {
-					age := now.Sub(info.ModTime()).Seconds()
-					if age > agent.OldestDLQAgeSeconds {
-						agent.OldestDLQAgeSeconds = age
-					}
-				}
-			}
-		}
+		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
+		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
+		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
 
 		// Presence
 		recentActivity := false
@@ -352,9 +332,13 @@ func runOpsChecksWithSchema(
 	// Operational and integration hints
 	result.Hints = append(result.Hints, wakeHints...)
 	result.Hints = append(result.Hints, checkUnreadBacklogNoNotifierHints(root, result.Agents, result.WakeLocks)...)
-	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
-	result.Hints = append(result.Hints, checkBaseBacklogHints(root, agents)...)
-	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
+	rowHandles := make([]string, 0, len(result.Agents))
+	for _, agent := range result.Agents {
+		rowHandles = append(rowHandles, agent.Handle)
+	}
+	result.Hints = append(result.Hints, checkSiblingBacklogHints(root)...)
+	result.Hints = append(result.Hints, checkBaseBacklogHints(root)...)
+	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, rowHandles)...)
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
@@ -479,24 +463,98 @@ func loadOpsAgents(root string, fixWakeLocks bool, explicitBaseRoot ...string) (
 	return baseCfg.Agents, nil
 }
 
-func checkSiblingBacklogHints(root string, agents []string) []opsHint {
+// opsDeclarationBase is the resolved base whose roster applies to root: the
+// explicit --base-root, else the classified base, never a display guess.
+func opsDeclarationBase(root string, explicitBaseRoot ...string) string {
+	if len(explicitBaseRoot) > 0 && strings.TrimSpace(explicitBaseRoot[0]) != "" {
+		return explicitBaseRoot[0]
+	}
+	return classifyRoot(root)
+}
+
+// opsAgentRows returns one row per declared handle, in roster order, then
+// one per mailbox that no roster declares. Declared handles that are not
+// valid live handles, or whose mailbox path is unsafe, are left to the
+// config_error hints.
+func opsAgentRows(root string, scope agentInventoryScope) []inventoryAgent {
+	byHandle := make(map[string]inventoryAgent, len(scope.Agents))
+	for _, row := range scope.Agents {
+		byHandle[row.Handle] = row
+	}
+	seen := make(map[string]bool)
+	var rows []inventoryAgent
+	for _, roster := range scope.Declarations {
+		for _, handle := range roster.Agents {
+			if seen[handle] || fsq.ValidateHandle(handle) != nil || validateWakeLockAgent(root, handle) != nil {
+				continue
+			}
+			seen[handle] = true
+			row, ok := byHandle[handle]
+			if !ok {
+				row = inventoryAgent{Handle: handle, Registration: classifyAgentAt(scope.Declarations, root, handle)}
+			}
+			rows = append(rows, row)
+		}
+	}
+	for _, row := range scope.Agents {
+		if !seen[row.Handle] {
+			seen[row.Handle] = true
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// opsMailboxCount counts the entries of one mailbox directory and the age of
+// the oldest. A missing directory of a missing mailbox counts zero; any other
+// failure returns an error string, so the zero is never mistaken for empty.
+func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float64, string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) && !mailboxPresent {
+			return 0, 0, ""
+		}
+		return 0, 0, err.Error()
+	}
+	oldest := 0.0
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil {
+			if age := now.Sub(info.ModTime()).Seconds(); age > oldest {
+				oldest = age
+			}
+		}
+	}
+	return len(entries), oldest, ""
+}
+
+// checkSiblingBacklogHints reports pending messages in every sibling
+// session's mailboxes, including handles that have no mailbox here.
+func checkSiblingBacklogHints(root string) []opsHint {
 	current := siblingContext(root)
 	var hints []opsHint
-	for _, agent := range agents {
-		for _, backlog := range findSiblingBacklogs(root, agent) {
-			hints = append(hints, opsHint{
-				Code:    "sibling_backlog",
-				Status:  "warn",
-				Message: formatSiblingBacklogHint(backlog, agent, current),
-			})
-		}
+	for _, backlog := range findAllSiblingBacklogs(root) {
+		hints = append(hints, opsHint{
+			Code:    "sibling_backlog",
+			Status:  "warn",
+			Message: formatSiblingBacklogHint(backlog.siblingBacklog, backlog.Agent, current),
+		})
 	}
 	return hints
 }
 
-func checkBaseBacklogHints(root string, agents []string) []opsHint {
+// checkBaseBacklogHints reports pending messages in every healthy mailbox
+// of the base queue.
+func checkBaseBacklogHints(root string) []opsHint {
+	base := classifyRoot(absPath(resolveRoot(root)))
+	if base == "" {
+		return nil
+	}
+	handles, err := fsq.ListAgents(base)
+	if err != nil {
+		return nil
+	}
 	var hints []opsHint
-	for _, backlog := range findBaseBacklogs(root, agents) {
+	for _, backlog := range findBaseBacklogs(root, handles) {
 		hints = append(hints, opsHint{
 			Code:    "base_backlog",
 			Status:  "warn",

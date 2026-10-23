@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const wakeReadyTimeout = 25 * time.Second
@@ -96,6 +97,12 @@ type coopExecRun struct {
 	cleanupWakeReady             func()
 	retainWakeHelperClaim        func()
 	cleanupWakeHelper            func(preservePersistedClaim bool) error
+	// wakeOwned is true once this launch's wake is ready and its claim is
+	// validated as this process's.
+	wakeOwned bool
+	// wakeStartupHold is the parent end of the wake's startup hold; closing
+	// it lets the wake admit input.
+	wakeStartupHold *os.File
 }
 
 func runCoopExec(args []string) error {
@@ -211,7 +218,7 @@ func runCoopExec(args []string) error {
 		} else {
 			c.cleanupWakeReady = cleanupReady
 			defer cleanupReady()
-			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, c.wakeInjectMode, c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
+			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, c.binaryPath), coopWakeHarness(c.binaryPath), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
 			if wakeLaunchLocator != "" {
 				// Execute the already-running image, but preserve the absolute,
 				// unresolved invocation locator as argv[0] so the child can safely
@@ -241,7 +248,15 @@ func runCoopExec(args []string) error {
 			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
 				return fmt.Errorf("attach isolated coop wake attention: %w", err)
 			}
-			if err := c.superviseWakeHelper(wakeCmd, readyPath); err != nil {
+			hold, childEnd, err := attachWakeStartupHold(wakeCmd)
+			if err != nil {
+				return fmt.Errorf("attach coop wake startup hold: %w", err)
+			}
+			c.wakeStartupHold = hold
+			defer func() { _ = hold.Close() }()
+			err = c.superviseWakeHelper(wakeCmd, readyPath)
+			_ = childEnd.Close()
+			if err != nil {
 				return err
 			}
 		}
@@ -250,6 +265,18 @@ func runCoopExec(args []string) error {
 		if err := c.managedGuard.Close(); err != nil {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
+	}
+	// The marker changes only once this launch's wake holds the agent's wake
+	// lock, so a launch that loses the race touches no other owner's hold.
+	// That wake admits no input until the startup hold is released below,
+	// so no doorbell is typed before the marker exists: one typed before the
+	// harness starts would wait in the terminal and answer its trust dialog.
+	if c.wakeOwned {
+		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
+	}
+	if c.wakeStartupHold != nil {
+		_ = c.wakeStartupHold.Close()
 	}
 
 	return c.execAgent()
@@ -811,6 +838,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 			} else {
 				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, c.wakeProc.Pid))
 			}
+			c.wakeOwned = true
 		}
 	}
 	return nil
@@ -886,10 +914,29 @@ func (c *coopExecRun) execAgent() error {
 	if c.managedLaunchNonce == "" {
 		env = codexDaemonSeatEnv(c.binaryPath, env, recorded)
 	}
+	relayEnv, relay, strip, notice := agyRelayPlan(c.binaryPath, env, term.IsTerminal(int(os.Stdin.Fd())))
+	if notice != "" {
+		_ = writeStderr("%s\n", notice)
+	}
 	var execErr error
-	if c.managedLaunchNonce != "" {
+	switch {
+	case c.managedLaunchNonce != "":
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)
-	} else {
+	case relay && c.wakeOwned:
+		// agy's prompts show only in its terminal output, so coop exec stays
+		// as its terminal instead of exec'ing it. Only a launch whose wake
+		// owns the agent's wake keeps the marker: with --no-wake, or beside
+		// another owner's wake, the marker is not this launch's to change.
+		log, _ := openCoopWakeOutput(c.root, c.agentHandle)
+		sink, sinkErr := newAgyDialogSink(c.root, c.agentHandle, log)
+		if sinkErr != nil {
+			_ = writeStderr("warning: cannot watch agy's prompts (%v); a doorbell can answer agy's permission prompt\n", sinkErr)
+			execErr = coopExecProcess(c.binaryPath, argv, env)
+			break
+		}
+		execErr = runAgyRelay(c.binaryPath, argv, relayEnv, sink, strip)
+		_ = sink.Close()
+	default:
 		execErr = coopExecProcess(c.binaryPath, argv, env)
 	}
 	if execErr == nil {
@@ -1184,7 +1231,7 @@ func handleCoopWakeSetupFailure(requireWake bool, inspection wakeLockInspection,
 	return nil
 }
 
-func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string, readyFile string) []string {
+func buildCoopWakeArgs(agentHandle, root, injectMode, harness, injectVia string, injectArgs []string, readyFile string) []string {
 	args := []string{
 		"--no-update-check",
 		"wake",
@@ -1196,6 +1243,9 @@ func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectAr
 	}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
+	}
+	if harness != "" {
+		args = append(args, "--harness", harness)
 	}
 	if injectVia != "" {
 		args = append(args, "--inject-via", injectVia)

@@ -78,7 +78,7 @@ func init() {
 				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim", Handler: runWake},
 				{Name: "retire", Summary: "Retire an exact managed wake and its matching retained state", Handler: runWake},
 				{Name: "dialog", Summary: "Claude Code hook receiver: mark a dialog open or closed", Handler: runWake},
-				{Name: "install-dialog-hook", Summary: "Hold the doorbell while a Claude Code dialog is open", Handler: runWake},
+				{Name: "install-dialog-hook", Summary: "Hold the doorbell while a Claude Code or Codex dialog is open", Handler: runWake},
 				{Name: "uninstall-dialog-hook", Summary: "Remove the Claude Code dialog guard hooks", Handler: runWake},
 			},
 		},

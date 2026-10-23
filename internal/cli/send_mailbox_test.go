@@ -66,13 +66,19 @@ func TestSendCompletesUnknownDestinationMailboxInInitializedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if !strings.Contains(stderr, `warning: handle "clade" not in config.json`) {
-		t.Fatalf("unknown-handle warning changed: %q", stderr)
-	}
-	if !strings.Contains(stderr, "amq who --json") || !strings.Contains(stderr, "message may not be read") {
-		t.Fatalf("unknown-handle warning missing verification remedy: %q", stderr)
+	if !strings.Contains(stderr, `warning: unregistered recipient "clade"`) || !strings.Contains(stderr, "amq who") {
+		t.Fatalf("unregistered-recipient warning changed: %q", stderr)
 	}
 	assertCompleteSendMailbox(t, root, "clade")
+
+	// The mailbox the typo created never registers the handle: a repeated
+	// send warns again (bead agent-message-queue-t97.2, Pro finding 11).
+	_, stderr, err = captureEnvOutput(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "clade", "--body", "again"})
+	})
+	if err != nil || !strings.Contains(stderr, `warning: unregistered recipient "clade"`) {
+		t.Fatalf("repeated typo send: err=%v stderr=%q, want the unregistered warning again", err, stderr)
+	}
 
 	listed, _, err := captureEnvOutput(t, func() error {
 		return runList([]string{"--root", root, "--me", "clade", "--new"})
@@ -103,7 +109,7 @@ func TestSendStrictUnknownDestinationDoesNotCreateMailbox(t *testing.T) {
 			"--body", "hello",
 		})
 	})
-	if err == nil || !strings.Contains(err.Error(), `handle "clade" not in config.json`) {
+	if err == nil || !strings.Contains(err.Error(), `unregistered recipient "clade"`) {
 		t.Fatalf("strict send error = %v", err)
 	}
 	if _, statErr := os.Lstat(filepath.Join(root, "agents", "clade")); !os.IsNotExist(statErr) {

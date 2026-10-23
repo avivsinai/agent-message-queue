@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/config"
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
@@ -383,23 +383,20 @@ func failDamagedRows(fail func(boundary, subject, detail, remedy string), stateD
 	}
 }
 
-// amqRouteDetail reports why other agents cannot route to the endpoint
-// handle. serve registers that handle in config.json; an empty result means
-// the handle is listed.
+// amqRouteDetail reports why senders see the endpoint handle as
+// unregistered. serve registers that handle in config.json; an empty result
+// means a roster of the root or of its base declares it, or an agent left an
+// identity record under it.
 func amqRouteDetail(root, handle string) string {
-	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "config.json does not exist, so no agent can route to " + handle
-		}
-		return "cannot read config.json: " + err.Error()
+	status, diagnostics := amqcli.AgentRegistration(root, handle)
+	if status != "unregistered" {
+		return ""
 	}
-	for _, agent := range cfg.Agents {
-		if agent == handle {
-			return ""
-		}
+	detail := fmt.Sprintf("handle %q is unregistered: no roster of this root or its base lists it and its mailbox has no identity record, so senders are warned and --strict sends refuse", handle)
+	if len(diagnostics) > 0 {
+		detail += " (" + strings.Join(diagnostics, "; ") + ")"
 	}
-	return fmt.Sprintf("handle %q is not in config.json agents", handle)
+	return detail
 }
 
 // boundaryFailure is one broken boundary doctor names, with what to do.

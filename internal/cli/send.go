@@ -338,12 +338,12 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	peerRecipientConfigured := false
 	peerConfigPresent := false
 	if targetProject != "" {
-		peerAgents, configPresent, peerAgentsErr := loadPeerAgentsForSend(configFS, common.Strict)
-		if err := validateKnownHandlesFromAgents(peerAgents, peerAgentsErr, common.Strict, recipients...); err != nil {
+		peerQueue := endpointQueueFor(deliveryFS, configFS)
+		if err := checkEndpointRegistration(peerQueue, endpointRecipient, common.Strict, true, recipients...); err != nil {
 			return err
 		}
-		peerConfigPresent = configPresent
-		peerRecipientConfigured = handleConfigured(peerAgents, recipients[0])
+		peerConfigPresent = peerQueue.decls[0].Present
+		peerRecipientConfigured = handleConfigured(withReservedHumanHandle(peerQueue.decls[0].Agents), recipients[0])
 		for _, recipient := range recipients {
 			layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient)
 			if layoutErr == nil {
@@ -361,52 +361,41 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 	}
 
-	// Validate sender in source root and recipients in target root through the
-	// same capabilities that will perform delivery.
+	// Classify the sender in its source queue and recipients in their
+	// destination queue through the same capabilities that will perform
+	// delivery.
 	var sourceConfigFS *fsq.DeliveryRoot
 	var sourceConfigPresent bool
-	if targetProject != "" || targetSession != "" {
-		var sourceAgents []string
-		var sourceAgentsErr error
-		if targetProject == "" && sharedConfig {
-			sourceAgents = withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
-		} else if targetProject == "" {
-			sourceAgents, sourceAgentsErr = loadKnownAgentsDeliveryRoot(sourceFS, common.Strict)
-		} else {
-			sourceConfigBase, expectedSourceBaseRootID := localMailboxConfigAuthority(
-				sourceRoot,
-				pin,
-				*ignoreSessionPinFlag,
-			)
-			sourceConfigSelection, sourceConfigErr := openMailboxConfigSelection(
-				sourceFS,
-				sourceRoot,
-				sourceConfigBase,
-				expectedSourceBaseRootID,
-			)
-			if sourceConfigErr != nil {
-				return sourceConfigErr
-			}
-			defer sourceConfigSelection.Close()
-			sourceAgents, sourceConfigPresent, sourceAgentsErr = loadPeerAgentsForSend(
-				sourceConfigSelection.ConfigFS,
-				common.Strict,
-			)
-			sourceConfigFS = sourceConfigSelection.ConfigFS
+	senderQueue := endpointQueueFor(sourceFS, configFS)
+	switch {
+	case targetProject != "":
+		sourceConfigBase, expectedSourceBaseRootID := localMailboxConfigAuthority(
+			sourceRoot,
+			pin,
+			*ignoreSessionPinFlag,
+		)
+		sourceConfigSelection, sourceConfigErr := openMailboxConfigSelection(
+			sourceFS,
+			sourceRoot,
+			sourceConfigBase,
+			expectedSourceBaseRootID,
+		)
+		if sourceConfigErr != nil {
+			return sourceConfigErr
 		}
-		if err := validateKnownHandlesFromAgents(sourceAgents, sourceAgentsErr, common.Strict, me); err != nil {
-			return err
-		}
-		if targetProject == "" {
-			targetAgents := withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
-			if err := validateKnownHandlesFromAgents(targetAgents, nil, common.Strict, recipients...); err != nil {
-				return err
-			}
-		}
-	} else {
-		allHandles := append([]string{me}, recipients...)
-		agents := withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
-		if err := validateKnownHandlesFromAgents(agents, nil, common.Strict, allHandles...); err != nil {
+		defer sourceConfigSelection.Close()
+		sourceConfigFS = sourceConfigSelection.ConfigFS
+		senderQueue = endpointQueueFor(sourceFS, sourceConfigFS)
+		sourceConfigPresent = senderQueue.decls[0].Present
+	case targetSession != "" && !sharedConfig:
+		senderQueue = endpointQueueFor(sourceFS, sourceFS)
+	}
+	if err := checkEndpointRegistration(senderQueue, endpointSender, common.Strict, true, me); err != nil {
+		return err
+	}
+	if targetProject == "" {
+		recipientQueue := endpointQueueFor(deliveryFS, configFS)
+		if err := checkEndpointRegistration(recipientQueue, endpointRecipient, common.Strict, true, recipients...); err != nil {
 			return err
 		}
 	}
@@ -479,7 +468,10 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 				return nil
 			}
 			currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(configFS, peerConfigPresent, common.Strict)
-			if rosterErr := validateKnownHandlesFromAgents(currentPeerAgents, currentPeerAgentsErr, common.Strict, recipient); rosterErr != nil {
+			if currentPeerAgentsErr != nil {
+				return currentPeerAgentsErr
+			}
+			if rosterErr := checkEndpointRegistration(endpointQueueFor(deliveryFS, configFS), endpointRecipient, common.Strict, false, recipient); rosterErr != nil {
 				return rosterErr
 			}
 			return peerMailboxIncompleteError(

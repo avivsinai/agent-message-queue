@@ -237,7 +237,7 @@ Options:
   -session string
         Named session to launch or resume
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq send
@@ -291,7 +291,7 @@ Options:
   -session string
         Target session (delivers to a different session's inbox)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -subject string
         Message subject
   -thread string
@@ -337,7 +337,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq read
@@ -371,7 +371,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq thread
@@ -397,7 +397,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq trace
@@ -479,7 +479,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -tmp-older-than string
         Duration (e.g. 36h)
   -wake-quarantine-older-than string
@@ -509,7 +509,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time to wait for messages (0 = wait forever) (default 1m0s)
 ```
@@ -540,7 +540,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq monitor
@@ -574,7 +574,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Max time to wait for messages (0 = wait forever) (default 1m0s)
 ```
@@ -621,7 +621,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -subject string
         Override subject (default: Re: <original>)
   -wait-for string
@@ -753,6 +753,8 @@ Options:
         Log injection diagnostics to stderr
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -harness string
+        Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
@@ -800,7 +802,7 @@ Options:
   -self-upgrade
         Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq upgrade
@@ -1009,7 +1011,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq route
@@ -1170,7 +1172,7 @@ Options:
   -status string
         Status string
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq presence list
@@ -1188,7 +1190,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq list
@@ -1214,7 +1216,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq read
@@ -1238,7 +1240,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq retry
@@ -1268,7 +1270,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq dlq purge
@@ -1294,7 +1296,7 @@ Options:
   -session string
         Target session under the resolved base root
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -yes
         Skip confirmation prompt
 ```
@@ -1324,7 +1326,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake config
@@ -1403,7 +1405,7 @@ Options:
   -self-upgrade
         Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time for --wait (0 = wait forever) (default 1m0s)
   -unset value
@@ -1433,7 +1435,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake restart
@@ -1456,7 +1458,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake recover-owner
@@ -1479,7 +1481,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq wake retire
@@ -1512,7 +1514,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -takeover
         Retire a wake another surface started (a take): match the saved target's injector instead of --inject-via; requires --if-generation
 ```
@@ -1522,7 +1524,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog open|close [--me <agent>] [--root <path>]
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex] open|close
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1530,9 +1532,13 @@ installs it. Reads the hook input JSON on stdin.
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
 of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. Always exits 0 once the arguments parse and prints nothing.
+stdin removes it. With --harness codex only a turn or session event removes it;
+without AM_* the seat is the one amq coop exec recorded for the hook's session_id.
+Always exits 0 once the arguments parse and prints nothing.
 
 Options:
+  -harness string
+        Hook input of claude or codex (default "claude")
   -me string
         Agent handle (or AM_ME)
   -root string
@@ -1544,9 +1550,10 @@ Options:
 ```text
 $ amq wake install-dialog-hook --help
 Usage:
-  amq wake install-dialog-hook [--dry-run]
+  amq wake install-dialog-hook [--dry-run] [--harness claude|codex|all]
 
-Install the wake dialog guard hooks in ~/.claude/settings.json.
+Install the wake dialog guard hooks in ~/.claude/settings.json, or with --harness
+codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks).
 
 While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
 the hooks keep a marker in the agent's mailbox and every wake of that agent
@@ -1562,6 +1569,8 @@ list the AMQ_DIALOG_HOOK entries, restart the session.
 Options:
   -dry-run
         Print the hooks without changing the settings file
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq wake uninstall-dialog-hook
@@ -1569,10 +1578,15 @@ Options:
 ```text
 $ amq wake uninstall-dialog-hook --help
 Usage:
-  amq wake uninstall-dialog-hook
+  amq wake uninstall-dialog-hook [--harness claude|codex|all]
 
 Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
-~/.claude/settings.json. Other settings and hooks are not changed.
+~/.claude/settings.json, or $CODEX_HOME/hooks.json with --harness codex.
+Other settings and hooks are not changed.
+
+Options:
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq coop init
@@ -1947,7 +1961,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -team string
         Team name (required)
 ```
@@ -2009,7 +2023,7 @@ Options:
   -stage string
         Filter by stage (drained, dlq)
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq receipts wait
@@ -2033,7 +2047,7 @@ Options:
   -stage string
         Stage to wait for (drained, dlq) (default "drained")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
   -timeout duration
         Maximum time to wait (0 = wait forever) (default 1m0s)
 ```
@@ -2056,7 +2070,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq session list
@@ -2077,7 +2091,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq session resume
@@ -2120,7 +2134,7 @@ Options:
   -session string
         Named session to launch or resume
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq peer pair
@@ -2147,7 +2161,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq route explain
