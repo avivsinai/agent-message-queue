@@ -866,6 +866,7 @@ func (c *coopExecRun) execAgent() error {
 		return cleanupAfterError(fmt.Errorf("encode final wake owner: %w", ownerErr))
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
+	recordExecIdentity(c.binaryPath, env)
 	var execErr error
 	if c.managedLaunchNonce != "" {
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)

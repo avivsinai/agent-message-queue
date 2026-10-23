@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -142,6 +143,54 @@ func Lookup(thread, codexHome string) (Record, error) {
 	return r, nil
 }
 
+// Entry is one recorded thread with the times its record and its handle's
+// current marker were last written.
+type Entry struct {
+	Record     Record
+	RecordedAt time.Time
+	// Current is true when the handle's current marker names this thread.
+	// CurrentKnown is false when the marker is missing or damaged.
+	Current      bool
+	CurrentKnown bool
+	// MarkerAt is when the handle's current marker was last written.
+	MarkerAt time.Time
+}
+
+// List returns every valid thread record in the store. It never creates the
+// store; a missing store lists nothing, and a damaged record is skipped.
+func List() ([]Entry, error) {
+	dir, err := storeDir(false)
+	if err != nil || dir == "" {
+		return nil, err
+	}
+	names, err := os.ReadDir(filepath.Join(dir, "threads"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var entries []Entry
+	for _, name := range names {
+		thread, ok := strings.CutSuffix(name.Name(), ".json")
+		if !ok || !ValidThread(thread) {
+			continue
+		}
+		var r Record
+		info, err := readStrictInfo(filepath.Join(dir, "threads", name.Name()), &r)
+		if err != nil || r.check() != nil || r.Thread != thread {
+			continue
+		}
+		entry := Entry{Record: r, RecordedAt: info.ModTime()}
+		var cur currentRecord
+		if curInfo, err := readStrictInfo(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err == nil && ValidThread(cur.Thread) {
+			entry.Current, entry.CurrentKnown, entry.MarkerAt = cur.Thread == thread, true, curInfo.ModTime()
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
 type currentRecord struct {
 	Schema int    `json:"schema"`
 	Thread string `json:"thread"`
@@ -209,25 +258,30 @@ func storeDir(create bool) (string, error) {
 // readStrict decodes a small regular 0600 file at path into v, opened
 // without following a symlink; the opened file must be regular and 0600.
 func readStrict(path string, v any) error {
+	_, err := readStrictInfo(path, v)
+	return err
+}
+
+func readStrictInfo(path string, v any) (os.FileInfo, error) {
 	f, fi, err := fsq.OpenRegularNoFollowBounded(path, maxBytes)
 	if errors.Is(err, os.ErrNotExist) {
-		return ErrNone
+		return nil, ErrNone
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 	if fi.Mode().Perm() != 0o600 {
-		return fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
+		return nil, fmt.Errorf("%s is not a small regular 0600 file; refusing", path)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return nil
+	return fi, nil
 }
