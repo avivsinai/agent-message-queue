@@ -8,6 +8,22 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.108.0](https://github.com/avivsinai/agent-message-queue/compare/v0.107.0...v0.108.0) (2026-10-23)
+
+
+### Features
+
+* **cli:** list open review requests, questions and todos per thread ([#1166](https://github.com/avivsinai/agent-message-queue/issues/1166)) ([fb36ddb](https://github.com/avivsinai/agent-message-queue/commit/fb36ddb23f1c71b0779115e1dbd46e917bed0064))
+* **cli:** record and list which harness session belongs to each agent ([#1192](https://github.com/avivsinai/agent-message-queue/issues/1192)) ([1bbdac3](https://github.com/avivsinai/agent-message-queue/commit/1bbdac3108e453e6cba580ff651491124fc8a92d))
+* **launch:** start and resume pi seats with amq launch ([#1188](https://github.com/avivsinai/agent-message-queue/issues/1188)) ([575934f](https://github.com/avivsinai/agent-message-queue/commit/575934fb0617a40204c00df49e4b54473c247008))
+* **pi:** hold the wake doorbell while a pi extension prompt is open ([#1199](https://github.com/avivsinai/agent-message-queue/issues/1199)) ([e5b79b4](https://github.com/avivsinai/agent-message-queue/commit/e5b79b4796163c2c1b6d9a1badd1dd7842503ba4))
+
+
+### Bug Fixes
+
+* **coop:** remove legacy hook scripts and notify only on new Codex mail ([#1198](https://github.com/avivsinai/agent-message-queue/issues/1198)) ([2ce39dc](https://github.com/avivsinai/agent-message-queue/commit/2ce39dc95e414784884858c84ece6a77d08d3b6a))
+* **wake:** survive concurrent self-upgrades on macOS ([#1193](https://github.com/avivsinai/agent-message-queue/issues/1193)) ([46577ec](https://github.com/avivsinai/agent-message-queue/commit/46577ec98fd7aa61de89d6e3f6019d94542cd0df))
+
 ## [0.107.0](https://github.com/avivsinai/agent-message-queue/compare/v0.106.2...v0.107.0) (2026-10-23)
 
 
