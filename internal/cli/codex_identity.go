@@ -18,7 +18,7 @@ import (
 
 // identityEnvKeys are the variables that make up an AMQ participant
 // identity. Presence of any one, even empty, is an explicit context.
-var identityEnvKeys = []string{envRoot, envBaseRoot, envSession, envMe, envRootID, envBaseRootID}
+var identityEnvKeys = launch.IdentityEnvKeys
 
 // adoptCodexThreadIdentity gives an amq command run inside a Codex thread the
 // identity amq coop exec recorded for that thread. On Codex 0.160 tool
@@ -401,26 +401,26 @@ func rewriteCodexResume(args []string, r codexResume, thread string, prompt *cod
 // user resumes (codex resume <id>, or AMQ session resume's
 // codex resume [options] <id>). Its tool commands may run on the daemon. If
 // the identity cannot be recorded the launch stops: a thread is never
-// resumed without it.
-func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) error {
+// resumed without it. recorded reports whether a record was published.
+func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) (recorded bool, err error) {
 	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
-		return nil
+		return false, nil
 	}
 	thread, selected, unresolved := codexResumeSelection(args)
 	if !selected {
-		return nil
+		return false, nil
 	}
 	// Codex would choose the thread itself (--last, a name, the picker), and
 	// that thread may carry another session's or handle's identity: AMQ
 	// starts nothing it cannot bind first.
 	if unresolved {
-		return ContextMismatchError("cannot bind the requested AMQ identity before this Codex resume launch: the selection (--last, a session name, the picker, or an option AMQ does not parse) could resume a thread recorded for another session or handle. Pass a concrete thread id: amq coop exec ... codex -- resume <thread-id>, or use amq session resume. Codex was not started")
+		return false, ContextMismatchError("cannot bind the requested AMQ identity before this Codex resume launch: the selection (--last, a session name, the picker, or an option AMQ does not parse) could resume a thread recorded for another session or handle. Pass a concrete thread id: amq coop exec ... codex -- resume <thread-id>, or use amq session resume. Codex was not started")
 	}
 	if record == nil {
-		return ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", thread)
+		return false, ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", thread)
 	}
 	if err := record(thread); err != nil {
-		return ContextMismatchError("AMQ could not record this session's identity for Codex thread %s: %v", thread, err)
+		return false, ContextMismatchError("AMQ could not record this session's identity for Codex thread %s: %v", thread, err)
 	}
-	return nil
+	return true, nil
 }

@@ -1697,7 +1697,8 @@ Install the co-op hooks in ~/.claude/settings.json.
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and whether a wake rings the
-terminal. The hooks run only in sessions with AM_ME set, which amq coop exec
+terminal. Stop blocks a stop once for unread mail that no wake doorbell will
+announce. The hooks run only in sessions with AM_ME set, which amq coop exec
 and amq launch set; other Claude Code sessions start no amq.
 
 Running again keeps the same entries and replaces entries of another amq
@@ -1725,16 +1726,23 @@ Other settings and hooks are not changed.
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start
+  amq coop hook session-start|stop
 
-Claude Code hook receiver for the co-op hooks; amq coop install-hooks installs it.
+Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
+They read AM_ME, AM_ROOT and the session pin from the environment, never read
+.amqrc, and always exit 0 once the arguments parse.
 
 session-start prints the co-op preamble as SessionStart additionalContext:
 the agent's handle, session and peers, its unread count, and whether a wake
-rings this terminal. It reads AM_ME, AM_ROOT and the session pin from the
-environment and never reads .amqrc. Without AM_ME or an absolute AM_ROOT,
-with a session pin that does not match AM_ROOT, or when the mailbox does not
-exist, it prints nothing. Always exits 0 once the arguments parse.
+rings this terminal. Without AM_ME or an absolute AM_ROOT, with a session pin
+that does not match AM_ROOT, or when the mailbox does not exist, it prints
+nothing.
+
+stop blocks the stop once for unread mail it has not reported yet. Under a
+live wake it counts only mail created at or before the wake's startup
+baseline, because the wake rings for later mail. It allows the stop after
+5 blocks in one chain, and prints a systemMessage when the context conflicts
+or the mailbox cannot be read.
 ```
 
 ## amq swarm list

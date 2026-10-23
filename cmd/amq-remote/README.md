@@ -801,8 +801,8 @@ relay share), pin that agent's DM instead:
 amq-remote claude install-approval-hook --desktop --owner <hex|npub> --body <agent hex|npub> --channel <DM channel id>
 ```
 
-Use the agent's public key and its DM channel id with the owner, and check
-the values the installer prints. The hook then allows a call on
+The agent shows this command with its values under each deny-only approval
+in the DM; check the values the installer prints against it. The hook then allows a call on
 the owner's ✅ only with the agent's signed grant; an approval from another
 agent or channel can only deny. See
 [Claude Code approvals from Buzz](../../docs/amq-remote-approvals.md#buzz-desktop).

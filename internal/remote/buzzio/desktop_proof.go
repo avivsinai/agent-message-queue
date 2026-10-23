@@ -1,6 +1,7 @@
 package buzzio
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -160,6 +162,78 @@ func VerifyDesktopEvidence(raw json.RawMessage, want DesktopCheck) error {
 		return errors.New("reaction is outside the approval's window")
 	case checked.Before(want.NotBefore) || checked.After(want.NotAfter):
 		return errors.New("the agent's grant is outside the approval's window")
+	}
+	return nil
+}
+
+// ReadEvent reads the stored event with id from the relay, up to the end of
+// stored events. found is false when the relay holds none.
+func ReadEvent(ctx context.Context, conn *relay.Conn, id string) (evt nostr.Event, found bool, err error) {
+	eid, err := nostr.IDFromHex(id)
+	if err != nil {
+		return nostr.Event{}, false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	got, err := readStored(ctx, conn, nostr.Filter{IDs: []nostr.ID{eid}})
+	if err != nil || len(got) == 0 {
+		return nostr.Event{}, false, err
+	}
+	return got[0], true, nil
+}
+
+// OwnerReactions reads the owner's stored reactions whose last e tag is the
+// message, oldest first as the relay returns them.
+func OwnerReactions(ctx context.Context, conn *relay.Conn, messageID, owner string) ([]nostr.Event, error) {
+	pk, err := nostr.PubKeyFromHex(owner)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	got, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindReaction}, Authors: []nostr.PubKey{pk}, Tags: nostr.TagMap{"e": {messageID}}})
+	if err != nil {
+		return nil, err
+	}
+	out := got[:0]
+	for _, r := range got {
+		if lastETag(r) == messageID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// CheckDesktopHistory reads a Desktop approval message's history from the
+// relay, within historyTimeout. The Desktop agent never edits or deletes an
+// approval message, so any edit naming it, any deletion naming it, any
+// deletion by the agent, and any deletion by the owner since the message is
+// ErrAltered. A read that errors or times out is another error.
+func CheckDesktopHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, owner string) error {
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	pk, err := nostr.PubKeyFromHex(owner)
+	if err != nil {
+		return fmt.Errorf("owner pubkey: %w", err)
+	}
+	deletionKinds := []nostr.Kind{KindDeletion, KindGroupDeletion}
+	reads := []struct {
+		what   string
+		filter nostr.Filter
+	}{
+		{"an edit of the message", nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}, Limit: 1}},
+		{"a deletion of the message", nostr.Filter{Kinds: deletionKinds, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}, Limit: 1}},
+		{"a deletion by the agent", nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{msg.PubKey}, Limit: 1}},
+		{"a deletion by the owner since the message", nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{pk}, Since: msg.CreatedAt, Limit: 1}},
+	}
+	for _, r := range reads {
+		got, err := readStored(ctx, conn, r.filter)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", r.what, err)
+		}
+		if len(got) > 0 {
+			return fmt.Errorf("%w: %s", ErrAltered, r.what)
+		}
 	}
 	return nil
 }

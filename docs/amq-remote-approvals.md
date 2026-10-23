@@ -125,7 +125,9 @@ names the owner, the agent's public key and the agent's DM channel with the
 owner: `... claude permission-hook --wait 600 --surface 'desktop' --owner
 '<64 hex>' --body '<agent pubkey>' --channel '<DM channel>'`, written by
 `install-approval-hook --desktop`, which the owner runs in the terminal with
-the agent's public key and its DM channel id. A hook holds one pin: a
+the agent's public key and its DM channel id. Until the hook pins its DM,
+the agent shows that command, with these three values, under each
+deny-only approval. A hook holds one pin: a
 Desktop pin or a relay-share pin, never both. The agent key never leaves
 `amq-acp`. The hook prints allow only when all of these hold:
 
@@ -140,8 +142,10 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
 - the answer carries the agent's grant: a BIP-340 signature by the pinned
   agent key over the message id, the reaction id and the time the agent
   checked, dated in the approval's window. The
-  agent signs it only after its own read of the relay finds no edit that
-  changes the call, no deletion of the message, and no owner ❌ on it.
+  agent signs it only after its own read of the relay finds the message
+  stored exactly as it was posted, no edit of it at all (the agent never
+  edits an approval message), no deletion of it, no deletion by the agent,
+  no deletion by the owner since the message, and no owner ❌ on it.
 
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only
