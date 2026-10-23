@@ -53,9 +53,8 @@ type wakeDialogHookInput struct {
 	Tool      string `json:"tool_name"`
 	ToolUseID string `json:"tool_use_id"`
 	Cwd       string `json:"cwd"`
-	// TurnID and ToolInput key a Codex approval (wake_dialog_codex_unix.go).
-	TurnID    string          `json:"turn_id"`
-	ToolInput json.RawMessage `json:"tool_input"`
+	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
+	TurnID string `json:"turn_id"`
 }
 
 // wakeDialogMarker is the .wake.dialog content. The wake uses only the
@@ -67,14 +66,10 @@ type wakeDialogMarker struct {
 	Harness   string `json:"harness,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
-	// TurnID and ToolInputSHA256 are a Codex approval's call key; only the
-	// PostToolUse of that call removes its marker. Ambiguous marks two or
-	// more approvals open in one turn: no PostToolUse removes it.
-	TurnID          string `json:"turn_id,omitempty"`
-	ToolInputSHA256 string `json:"tool_input_sha256,omitempty"`
-	Ambiguous       bool   `json:"ambiguous,omitempty"`
-	SessionID       string `json:"session_id,omitempty"`
-	OpenedAt        string `json:"opened_at"`
+	// TurnID is the Codex turn that asked, for diagnosis.
+	TurnID    string `json:"turn_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	OpenedAt  string `json:"opened_at"`
 }
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
@@ -124,9 +119,8 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		"open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while",
 		"it is present. close removes it; a close with a tool_use_id removes only the marker",
 		"of that tool call, and a close with unreadable input keeps it. A close with empty",
-		"stdin removes it. With --harness codex, open keys the marker by the call and only",
-		"that call's PostToolUse, or a turn or session event, removes it; without AM_*",
-		"the seat is the one amq coop exec recorded for the hook's session_id.",
+		"stdin removes it. With --harness codex only a turn or session event removes it;",
+		"without AM_* the seat is the one amq coop exec recorded for the hook's session_id.",
 		"Always exits 0 once the arguments parse and prints nothing.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err

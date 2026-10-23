@@ -1530,9 +1530,8 @@ installs it. Reads the hook input JSON on stdin.
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
 of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. With --harness codex, open keys the marker by the call and only
-that call's PostToolUse, or a turn or session event, removes it; without AM_*
-the seat is the one amq coop exec recorded for the hook's session_id.
+stdin removes it. With --harness codex only a turn or session event removes it;
+without AM_* the seat is the one amq coop exec recorded for the hook's session_id.
 Always exits 0 once the arguments parse and prints nothing.
 
 Options:

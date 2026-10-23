@@ -177,21 +177,14 @@ changed hook only after the person trusts it: open `/hooks` in Codex and
 trust the AMQ entries, or choose "Trust all" when Codex asks at start. Each
 change of an entry's command costs that once.
 
-- **Open and close.** `PermissionRequest`, with no matcher, opens the marker
-  with the call's key: the turn id, the tool name, and a hash of the tool
-  input (for `Bash` and `apply_patch` the command only, because Codex adds the
-  approval reason to the request's input and not to the call's). The
-  `PostToolUse` of that call (matcher `^(Bash|apply_patch|mcp__.*)$`) closes
-  it: approve runs the tool, so the doorbell rings right after the command,
-  before the turn ends. A `PostToolUse` of another call keeps the hold. A
-  second approval in the same turn makes the hold last until the turn ends:
-  two parallel calls can ask with the same command in different working
-  directories, and the hook input does not tell them apart. Opens and
-  `PostToolUse` closes take `<root>/agents/<me>/.wake.dialog.lock`, so
-  neither loses the other's change. A
-  deny, Esc, or a crash is closed by `Stop`, `Interrupt`, `UserPromptSubmit`,
-  `SessionStart` (`startup|resume|clear`) or `SessionEnd`. `Interrupt` and
-  `SessionEnd` have a 1 second timeout, the rest 5 seconds.
+- **Open and close.** `PermissionRequest`, with no matcher, opens the marker.
+  Only a turn or session event closes it: `Stop`, `Interrupt`,
+  `UserPromptSubmit`, `SessionStart` (`startup|resume|clear`) or
+  `SessionEnd`. A tool call's `PostToolUse` does not: Codex gives a prompt
+  no call token, and a parallel call that Codex allowed without asking can
+  finish with the same tool and input as the call whose prompt still shows.
+  A doorbell due mid-turn after an approval waits for the turn's end.
+  `Interrupt` and `SessionEnd` have a 1 second timeout, the rest 5 seconds.
 - **Identity.** Codex hooks run in the Codex process environment under the
   user's `$SHELL`. With `AM_ME` set (an embedded Codex started by
   `amq coop exec` or `amq launch`) the receiver uses it. Without it, the
@@ -206,8 +199,9 @@ change of an entry's command costs that once.
 `amq doctor` reports, when the Codex home exists, Codex settings that run no
 user hooks (`features.hooks = false`, `codex_hooks = false`, or
 `allow_managed_hooks_only` in `/etc/codex/requirements.toml`), missing or
-partial entries, a missing binary or an older form (command, matcher, or
-timeout), entries disabled in `/hooks`, and entries whose stored
+partial entries, a missing binary or an older form (command, matcher,
+timeout, or an `async` entry, which would let a prompt show before the
+marker), entries disabled in `/hooks`, and entries whose stored
 `trusted_hash` is not Codex's hash of the entry as it is now. It reads the
 user `config.toml` only; a project or profile layer that turns hooks off is
 not seen.
