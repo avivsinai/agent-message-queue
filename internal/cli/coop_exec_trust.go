@@ -18,16 +18,30 @@ import (
 // it execs a harness that will ask whether to trust its directory. A
 // doorbell at that dialog ends the session: Claude Code's Enter picks the
 // default "No, exit", and Codex quits. The marker closes when the harness's
-// SessionStart hook removes it, or when the harness records the trust
-// decision (startupTrustDialogShows turns false), whichever comes first.
+// SessionStart hook removes it, or when the harness records that it trusts
+// the directory, whichever comes first.
 const wakeDialogStartupEvent = "Startup"
 
-// startupTrustDialog returns the harness and directory of the trust dialog
-// a harness started as binaryPath with args in wd will show, if AMQ can
-// tell that it will. Every doubt reads as no dialog, which is the behavior
-// without a guard; it never holds the doorbell for a dialog that does not
-// show.
-func startupTrustDialog(binaryPath string, args []string, wd string) (harness, dir string, ok bool) {
+// startupTrust is what the harness's own trust record says about a
+// directory.
+type startupTrust uint8
+
+const (
+	// startupTrustUnknown: the record cannot be read or does not decide.
+	// coop exec writes no marker for it, and an open marker stays open.
+	startupTrustUnknown startupTrust = iota
+	// startupTrustPending: the harness will show (or still shows) its
+	// trust dialog for the directory.
+	startupTrustPending
+	// startupTrustAccepted: the harness records that it trusts the
+	// directory, the only evidence that releases a Startup marker.
+	startupTrustAccepted
+)
+
+// startupTrustDialog returns the harness and directory a harness started
+// as binaryPath with args in wd checks trust for, and what its record says
+// now. A launch that shows no trust dialog reads as unknown.
+func startupTrustDialog(binaryPath string, args []string, wd string) (harness, dir string, trust startupTrust) {
 	switch launch.ProviderForExecutable(binaryPath) {
 	case launch.ClaudeProvider:
 		// Print mode runs no interactive session and asks nothing.
@@ -36,7 +50,7 @@ func startupTrustDialog(binaryPath string, args []string, wd string) (harness, d
 				break
 			}
 			if arg == "-p" || arg == "--print" {
-				return "", "", false
+				return "", "", startupTrustUnknown
 			}
 		}
 		harness, dir = launch.ClaudeProvider, wd
@@ -47,7 +61,7 @@ func startupTrustDialog(binaryPath string, args []string, wd string) (harness, d
 			arg := args[i]
 			if arg == "--" || !strings.HasPrefix(arg, "-") {
 				if arg != "--" && codexSubcommands[arg] && arg != "resume" && arg != "fork" {
-					return "", "", false
+					return "", "", startupTrustUnknown
 				}
 				break
 			}
@@ -56,65 +70,68 @@ func startupTrustDialog(binaryPath string, args []string, wd string) (harness, d
 			}
 		}
 		if codexArgsHaveRemote(args) {
-			return "", "", false
+			return "", "", startupTrustUnknown
 		}
 		harness, dir = launch.CodexProvider, codexLaunchDir(args, wd)
 	default:
-		return "", "", false
+		return "", "", startupTrustUnknown
 	}
-	return harness, dir, startupTrustDialogShows(harness, dir)
+	return harness, dir, readStartupTrust(harness, dir)
 }
 
-// startupTrustDialogShows reports whether harness still asks to trust dir:
-// the harness's own record of the decision has no entry for it.
-func startupTrustDialogShows(harness, dir string) bool {
+func readStartupTrust(harness, dir string) startupTrust {
 	switch harness {
 	case launch.ClaudeProvider:
-		return claudeTrustDialogShows(dir)
+		return claudeStartupTrust(dir)
 	case launch.CodexProvider:
-		return codexTrustDialogShows(dir)
+		return codexStartupTrust(dir)
 	}
-	return false
+	return startupTrustUnknown
 }
 
-// codexTrustDialogShows reads the user config.toml the way the Codex TUI
+// codexStartupTrust reads the user config.toml the way the Codex TUI
 // decides its startup trust screen (codex-cli 0.163
 // tui/src/config_update.rs read_remote_project_trust): a directory in no
-// git checkout is projectless and asks nothing, and a [projects] entry for
-// the directory or its git trust root records a decision. A saved
-// "untrusted" entry still shows a restricted dialog in Codex; it reads as
-// no dialog here, because AMQ cannot see when that one closes.
-func codexTrustDialogShows(dir string) bool {
+// git checkout is projectless and asks nothing; a [projects] entry for the
+// directory or its git trust root with trust_level "trusted" asks nothing;
+// no entry, or a saved "untrusted" one (a restricted dialog), asks.
+func codexStartupTrust(dir string) startupTrust {
 	if codexNearestGitAncestor(dir) == "" {
-		return false
+		return startupTrustUnknown
 	}
 	codexHome, err := codexHomeDir()
 	if err != nil {
-		return false
+		return startupTrustUnknown
 	}
-	level, recorded, err := codexProjectTrust(codexHome, dir)
-	return err == nil && (!recorded || level == "")
+	level, _, err := codexProjectTrust(codexHome, dir)
+	switch {
+	case err != nil:
+		return startupTrustUnknown
+	case level == "trusted":
+		return startupTrustAccepted
+	}
+	return startupTrustPending
 }
 
-// claudeTrustDialogShows reads Claude Code's global config
-// ($CLAUDE_CONFIG_DIR or the home directory, .claude.json): the dialog
-// shows until projects["<dir>"].hasTrustDialogAccepted is true for dir or
-// an ancestor inside its git checkout. Seen live on Claude Code 2.1.308: a
+// claudeStartupTrust reads Claude Code's global config ($CLAUDE_CONFIG_DIR
+// or the home directory, .claude.json): the dialog shows until
+// projects["<dir>"].hasTrustDialogAccepted is true for dir or an ancestor
+// inside its git checkout. Seen live on Claude Code 2.1.308: a
 // subdirectory of a trusted checkout asks nothing, while a new checkout
-// below a trusted non-git directory asks. Outside a checkout every ancestor
-// counts, which reads as no dialog where in doubt.
-func claudeTrustDialogShows(dir string) bool {
+// below a trusted non-git directory asks. Outside a checkout every
+// ancestor counts, which reads as accepted where in doubt.
+func claudeStartupTrust(dir string) startupTrust {
 	configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
 	if configDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return false
+			return startupTrustUnknown
 		}
 		configDir = home
 	}
 	raw, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
 	if err != nil {
-		return false
+		return startupTrustUnknown
 	}
 	var config struct {
 		Projects map[string]struct {
@@ -122,41 +139,42 @@ func claudeTrustDialogShows(dir string) bool {
 		} `json:"projects"`
 	}
 	if json.Unmarshal(raw, &config) != nil {
-		return false
+		return startupTrustUnknown
 	}
 	top := codexNearestGitAncestor(dir)
 	for _, start := range codexTrustKeys(dir) {
 		for d := start; ; d = filepath.Dir(d) {
 			if config.Projects[d].HasTrustDialogAccepted {
-				return false
+				return startupTrustAccepted
 			}
 			if d == top || filepath.Dir(d) == d {
 				break
 			}
 		}
 	}
-	return true
+	return startupTrustPending
 }
 
 // writeStartupDialogMarker writes the Startup marker for the trust dialog
 // the harness about to start will show, so the wake holds the doorbell
-// until the dialog is answered. With no dialog it removes a Startup marker
-// an earlier launch left (one declined, or one that never started), which
-// would otherwise hold this session's doorbell. A failed write leaves the
+// until the dialog is answered. Otherwise it removes a Startup marker an
+// earlier launch left (one declined, or one that never started), which
+// would hold this session's doorbell. The caller owns this agent's wake,
+// so no other live launch's marker is touched. A failed write leaves the
 // behavior without a guard.
 func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return
 	}
-	harness, dir, shows := startupTrustDialog(binaryPath, args, wd)
+	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
 	agentDir, err := openExistingWakeAgentDir(root, handle)
 	if err != nil {
 		return
 	}
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
-		if !shows {
+		if trust != startupTrustPending {
 			current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
 				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
 			var marker wakeDialogMarker
@@ -177,9 +195,10 @@ func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
 }
 
 // startupDialogClosed reports whether marker is a Startup marker whose
-// trust dialog the harness has since recorded an answer for. cache keeps
-// the last answer while the harness's trust file is unchanged, so a held
-// wake does not reparse it on every recheck.
+// harness now records that it trusts the directory. A record that cannot be
+// read or does not decide keeps the marker open. cache keeps the last
+// answer while the harness's trust file is unchanged, so a held wake does
+// not reparse it on every recheck.
 func startupDialogClosed(raw []byte, cache *startupDialogCache) bool {
 	var marker wakeDialogMarker
 	if json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent ||
@@ -190,7 +209,7 @@ func startupDialogClosed(raw []byte, cache *startupDialogCache) bool {
 	if cache.valid && cache.harness == marker.Harness && cache.cwd == marker.Cwd && cache.stamp == stamp {
 		return cache.closed
 	}
-	closed := !startupTrustDialogShows(marker.Harness, marker.Cwd)
+	closed := readStartupTrust(marker.Harness, marker.Cwd) == startupTrustAccepted
 	*cache = startupDialogCache{valid: true, harness: marker.Harness, cwd: marker.Cwd, stamp: stamp, closed: closed}
 	return closed
 }

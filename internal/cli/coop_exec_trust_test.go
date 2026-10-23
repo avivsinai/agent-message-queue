@@ -24,6 +24,17 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(project)
+	real, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(codexHome, "config.toml")
+	// #1180 review: a directory saved as untrusted still opens on Codex's
+	// restricted trust dialog, so it gets the marker too.
+	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", []string{"-s", "read-only"})
 	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
@@ -42,12 +53,19 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 		t.Fatalf("typed %q into the trust dialog", h.injected)
 	}
 
-	real, err := filepath.EvalSymlinks(project)
-	if err != nil {
+	// #1180 review: a half-written config.toml proves nothing, so the hold
+	// stays.
+	if err := os.WriteFile(config, []byte("[projects.\""), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q after the trust file became unreadable", h.injected)
+	}
+
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(trusted), 0o600); err != nil {
+	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h.advance(wakeDialogRecheck)
@@ -59,5 +77,47 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
 		t.Fatalf("Startup marker left after a launch with no dialog: %v", err)
+	}
+}
+
+// #1180 review: coop exec wrote or removed the Startup marker before
+// prepareCoopWakeLock refused a launch for another live owner, so a refused
+// launch from a trusted directory cleared the running owner's trust hold.
+func TestRefusedCoopLaunchKeepsTheLiveOwnersStartupMarker(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	project := secureTempDirForTest(t)
+	real, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := `{"projects":{"` + real + `":{"hasTrustDialogAccepted":true}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(trusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root := secureTempDirForTest(t)
+	// The test process is running and is no amq wake: a live owner coop
+	// exec must not touch.
+	writeWakeLockExactForTest(t, root, "claude", wakeLock{PID: os.Getpid(), Root: canonicalWakeRoot(root), Agent: "claude"})
+	marker := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
+	owners := []byte(`{"schema":1,"event":"Startup","harness":"claude","cwd":"/elsewhere","opened_at":"x"}` + "\n")
+	if err := os.WriteFile(marker, owners, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = stubCoopExecSentinel(t)
+
+	if err := runCoopExec([]string{"--root", root, "--me", "claude", "-y", "claude"}); err == nil {
+		t.Fatal("coop exec started beside a live wake owner")
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != string(owners) {
+		t.Fatalf("live owner's Startup marker = %q, %v; want it unchanged", got, err)
 	}
 }
