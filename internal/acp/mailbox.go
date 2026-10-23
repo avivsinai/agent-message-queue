@@ -485,7 +485,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
-		err = publishOnce(b, c.Thread, c.MessageID, created, text)
+		err = publishOnce(b, c.Thread, c.MessageID, r.eventID, created, text)
 		var refused *notDeliveredError
 		if !errors.As(err, &refused) {
 			return err
@@ -552,8 +552,9 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 // is already in its inbox (new or cur), so a redelivery never duplicates it.
 // It never creates the handle's mailbox or inbox. Once the message is known
 // absent, a refusal by the handle's mailbox is a *notDeliveredError; any
-// other error leaves the outcome unknown.
-func publishOnce(b binding.Binding, threadID, id string, created time.Time, text string) error {
+// other error leaves the outcome unknown. A non-empty eventID labels the
+// message nostr:<eventID>, so the handle can fetch the DM event from the relay.
+func publishOnce(b binding.Binding, threadID, id, eventID string, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
 		return err
@@ -582,6 +583,10 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	body := strings.TrimRight(text, "\n") + "\n\n" +
 		"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
 		"A reply with `--kind status` shows as progress; any other reply is the final answer."
+	labels := []string{"acp", "buzz"}
+	if eventID != "" {
+		labels = append(labels, "nostr:"+eventID)
+	}
 	message := format.Message{
 		Header: format.Header{
 			Schema:   format.CurrentSchema,
@@ -592,7 +597,7 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 			Subject:  mailboxSubject,
 			Created:  created.UTC().Format(time.RFC3339Nano),
 			Priority: format.PriorityNormal,
-			Labels:   []string{"acp", "buzz"},
+			Labels:   labels,
 		},
 		Body: body,
 	}

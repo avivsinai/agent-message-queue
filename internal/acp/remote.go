@@ -988,7 +988,13 @@ func (r *remoteTurn) get() (protocol.Reply, error) {
 }
 
 func (r *remoteTurn) call(cmd *protocol.Command) (protocol.Reply, error) {
-	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native})
+	return r.callEvidence(cmd, nil)
+}
+
+// callEvidence is call with an answer's evidence, which the local socket
+// carries beside the command.
+func (r *remoteTurn) callEvidence(cmd *protocol.Command, evidence json.RawMessage) (protocol.Reply, error) {
+	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native, Evidence: evidence})
 	if err != nil {
 		return protocol.Reply{}, err
 	}

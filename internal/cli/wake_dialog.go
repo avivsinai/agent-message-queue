@@ -79,7 +79,7 @@ func holdWakeForDialog(
 		case readErr != nil:
 			_ = writeWakeDiagnostic(cfg, "amq wake: holding input: cannot read the dialog marker: %v\n", readErr)
 		case state == wakeDialogOpen:
-			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a Claude Code dialog is open\n")
+			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open\n")
 		default:
 			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only\n", wakeDialogQuietHold)
 		}

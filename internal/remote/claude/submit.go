@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -85,6 +86,12 @@ type runRecord struct {
 	open      []*approval
 	outcomes  map[string]protocol.Resolution
 	calls     []*toolCall
+	// inflightSID is the session whose inflight/ holds this run's record
+	// until its prompt is claimed; "" when none was written.
+	inflightSID string
+	// marked: runs/<prompt_id> is written and the inflight record removed.
+	// Set by the poller's op outside a.mu.
+	marked atomic.Bool
 }
 
 // Submit implements core.Attachment over the pinned wire: the
@@ -159,7 +166,25 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	fromOff := transcriptSize(transcriptPath(a.home, reg.Cwd, reg.SessionID))
+	// A session with DM approvals learns of the run before the frame can
+	// reach it: a prompt with no run marker waits for one only while an
+	// inflight record is live, so the record exists before the write, and
+	// a run with none is not sent.
+	inflightSID := ""
+	if a.cfg.approvals() {
+		inflightSID = reg.SessionID
+		rec := inflightRecord{Owner: a.inflightOwner, PID: os.Getpid(), SessionID: inflightSID, MsgID: frame.MsgID,
+			ExpiresAt: protocol.FormatTime(a.now().Add(inflightClaimWindow))}
+		if err := writeInflight(a.home, rec); err != nil {
+			return refusal(fmt.Errorf("%w: record the run for DM approvals: %v", ErrNotSent, err)), nil
+		}
+	}
 	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter, req.NativeSession); err != nil {
+		if !errors.Is(err, errPartialWrite) {
+			// Definitively not sent. A partial write keeps the record: the
+			// run may still arrive, and the record expires on its own.
+			removeInflight(a.home, inflightSID, a.inflightOwner, frame.MsgID)
+		}
 		switch {
 		case errors.Is(err, errPartialWrite):
 			return core.Admission{}, err // delivery unknown: never a refusal
@@ -172,12 +197,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	rec := &runRecord{
-		key:       req.Key,
-		epoch:     req.Epoch,
-		msgID:     frame.MsgID,
-		state:     protocol.StateRunning,
-		fromOff:   fromOff,
-		createdAt: a.now(),
+		key:         req.Key,
+		epoch:       req.Epoch,
+		msgID:       frame.MsgID,
+		state:       protocol.StateRunning,
+		fromOff:     fromOff,
+		createdAt:   a.now(),
+		inflightSID: inflightSID,
 	}
 	a.mu.Lock()
 	a.runs[req.Key] = rec
@@ -506,6 +532,7 @@ func (a *Attachment) pollConfirmations() {
 		a.activityNext = rd.next
 	}
 	events = a.applyApprovalsLocked(reg.SessionID, disk, caughtUp, seq, events)
+	a.queueRunMarkersLocked()
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}

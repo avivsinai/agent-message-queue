@@ -231,6 +231,22 @@ can pin it; the identity is not part of the session schema.
   posts to the DM but is not sent to the activity view a second time.
   Activity in the moment between admission and the start of the stream can
   be missing, and an endpoint without the stream leaves the turn as before.
+- A pending Claude tool approval of the request is posted to the DM once.
+  The owner's ❌ denies the call. ✅ allows it only when the Claude
+  approval hook carries a Desktop pin for this agent and its DM
+  ([Buzz Desktop approvals](../../docs/amq-remote-approvals.md#buzz-desktop)):
+  amq-acp then signs in to `BUZZ_RELAY_URL` with the agent key and
+  `BUZZ_AUTH_TAG`, reads the stored approval message, the owner's signed
+  reactions and the message's edits and deletions, and hands the endpoint the
+  ✅, the message and a grant signed with the agent key. A ❌ beats a ✅ up
+  to the observation cutoff: amq-acp reads the reactions again after the
+  history checks and signs the grant only when that read finds no ❌ and the
+  same ✅; a ❌ stored after it races the allow, and the first answer wins.
+  An edited or deleted approval message never allows. An approval that
+  offers allow for any other pin (a relay share or another Desktop DM) stays
+  deny-only here. Without the pin the
+  approval says Buzz can deny only and shows the `install-approval-hook
+  --desktop` command with this agent's owner, key and DM channel.
 - A submit whose outcome is unknown is reconciled by its exact request
   reference. When the record cannot be read, `_meta.remote.state` is
   `uncertain` and the message says not to resend.
@@ -271,6 +287,18 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   reply's post fails before the Buzz CLI starts (for example, no CLI is
   found), the same sweep posts it once the CLI works; a post that started
   and then failed is uncertain and is not repeated.
+- When Buzz names the event, the prompt and each follow-up carry the label
+  `nostr:<eventID>`: the id of the owner's Buzz DM event that caused the
+  message, the same on every redelivery. The label is a pointer, not proof.
+  amq-acp never holds the signed event on this path, and any local process
+  can write an AMQ message with any label. A layer that must know the owner
+  wrote the DM, for example to accept a gate answer, fetches that event from
+  the relay and checks it itself, as the
+  [Claude Code approval hook](../../docs/amq-remote-approvals.md#when-the-hook-answers)
+  does: the pinned owner key and signature, the DM channel, the gate message
+  in its `e` tags or thread, the gate's nonce in the content, the time window,
+  the edit and deletion history, and single use. AMQ verifies nothing for
+  the layer.
 - Follow-up DMs: a second `session/prompt` while a turn is open is still
   refused, but `initialize` advertises `_meta.steering.supported: true` in
   binding mode, so Buzz sends a follow-up as `_session/steering`. Once the

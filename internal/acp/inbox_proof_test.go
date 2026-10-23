@@ -27,7 +27,7 @@ func TestANonMessageInboxEntryIsNoDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "cockpit/session/s", id, time.Now(), "hello"); err == nil {
+	if err := publishOnce(b, "cockpit/session/s", id, "", time.Now(), "hello"); err == nil {
 		t.Fatal("prompt: a directory at the message name was reported delivered")
 	}
 	claim := steerClaim{MessageID: id, Created: time.Now().UTC().Format(time.RFC3339Nano), Root: root, Handle: "agent", Thread: "cockpit/session/s", Prompt: "p"}

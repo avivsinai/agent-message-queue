@@ -136,9 +136,11 @@ func (adapter *CodexAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	argv := append([]string{executable}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
 	argv = append(argv, "-c", notify)
+	argv, identity := codexIdentitySlots(argv)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
 		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
+		DynamicArgv: identity,
 	}
 	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
 		return AgentPlan{}, err
@@ -167,12 +169,13 @@ func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error
 	argv := append([]string{executable, "resume"}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
 	argv = append(argv, "-c", notify)
+	argv, identity := codexIdentitySlots(argv)
 	argv = append(argv, request.Conversation.ID)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
 		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy,
 		LaunchNonce: request.LaunchNonce, ConversationID: request.Conversation.ID,
-		DynamicArgv: []DynamicArg{{Index: len(argv) - 1, Kind: DynamicArgConversationID}},
+		DynamicArgv: append(identity, DynamicArg{Index: len(argv) - 1, Kind: DynamicArgConversationID}),
 	}
 	if err := ValidateAdapterPlan(adapter, plan); err != nil {
 		return AgentPlan{}, err

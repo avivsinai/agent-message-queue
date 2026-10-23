@@ -668,3 +668,164 @@ func TestApprovalRunEndBeforeDeliveryRecordsDeliveryUnknown(t *testing.T) {
 		t.Fatalf("kept = %+v (%v), want delivery_unknown", res, ok)
 	}
 }
+
+// startHook runs the hook for a Bash call of prompt p-1 in approvalSession
+// and returns a channel closed when it exits; closing done ends it.
+func startHook(t *testing.T, h permissionHook, done chan struct{}, stdout io.Writer) chan struct{} {
+	t.Helper()
+	in, _ := json.Marshal(map[string]any{
+		"session_id": approvalSession, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"},
+	})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		h.run(bytes.NewReader(in), stdout, done)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		<-exited
+	})
+	return exited
+}
+
+// awaitRequest waits, bounded, for the hook's request file.
+func awaitRequest(t *testing.T, home string) {
+	t.Helper()
+	dir := filepath.Join(approveDir(home, approvalSession), "requests")
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
+		if entries, _ := os.ReadDir(dir); len(entries) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the hook raised no request")
+		}
+	}
+}
+
+// Regression: hook-audit S2 (bead agent-message-queue-ccl.1), observed on
+// every tool dialog of a pinned session: a prompt typed in the terminal
+// waited the full 2 s markerGrace for a run marker no AMQ run would write.
+// With no run in flight the hook returns at once, on a clock that never
+// moves.
+func TestApprovalHookDoesNotWaitForATerminalPrompt(t *testing.T) {
+	home := t.TempDir()
+	if _, err := PinApprovals(home, approvalSession, "share-1", "", os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	frozen := time.Now()
+	h := permissionHook{home: home, now: func() time.Time { return frozen }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second}
+	var out bytes.Buffer
+	select {
+	case <-startHook(t, h, make(chan struct{}), &out):
+	case <-time.After(time.Second):
+		t.Fatal("the hook waited for a run marker with no run in flight")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("hook printed %q, want no decision", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(approveDir(home, approvalSession), "requests")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the hook raised a request for a terminal prompt (%v)", err)
+	}
+}
+
+// Regression: hook-audit S2 review finding (Codex), the reader order. The
+// attachment writes the run marker and then removes the run's inflight
+// record, both between the hook's missed marker read and its inflight
+// read. The hook reads the marker again and raises the request. The hand-off
+// runs at the hook's clock read, which comes between those two file reads.
+func TestApprovalHookRaisesForARunThatLeftInflightBetweenReads(t *testing.T) {
+	home := t.TempDir()
+	if _, err := PinApprovals(home, approvalSession, "share-1", "", os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	const owner, msgID = "00112233445566ff", "00000000-0000-5000-8000-000000000001"
+	if err := writeInflight(home, inflightRecord{Owner: owner, PID: os.Getpid(), SessionID: approvalSession, MsgID: msgID,
+		ExpiresAt: protocol.FormatTime(time.Now().Add(time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	frozen := time.Now()
+	reads := 0
+	h := permissionHook{home: home, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
+		now: func() time.Time {
+			// Read 1 starts the grace; read 2 follows the first missed
+			// marker read and precedes the inflight read.
+			if reads++; reads == 2 {
+				if err := writeRunMarker(home, approvalSession, "p-1", runMarker{MsgID: msgID, Owner: owner, PID: os.Getpid()}); err != nil {
+					t.Error(err)
+				}
+				removeInflight(home, approvalSession, owner, msgID)
+			}
+			return frozen
+		}}
+	startHook(t, h, make(chan struct{}), io.Discard)
+	awaitRequest(t, home)
+}
+
+// A run's tool call that asks for permission before the poller claimed the
+// run's prompt waits for the claim: Submit records the run in flight
+// before its frame, the poll writes runs/p-1 and only then drops the
+// inflight record, and the hook raises the request.
+func TestApprovalHookWaitsForAnInflightRunsMarker(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att, err := Attach(config{Pid: 4242, Home: ft.home, Target: "cc-1", Approve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(att.Subscribe(func(core.NativeEvent) {}))
+	if _, err := PinApprovals(ft.home, approvalSession, "share-1", "", os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	adm, err := att.Submit(pr2BoundRequest("run the tests"))
+	if err != nil || !adm.Admitted {
+		t.Fatalf("submit = %+v, %v", adm, err)
+	}
+	waitRecv(t, ft)
+	if !inflightLive(ft.home, approvalSession, time.Now()) {
+		t.Fatal("the submitted run has no live inflight record")
+	}
+	// The hook's second clock read follows its first missed marker read.
+	missed := make(chan struct{}, 1)
+	var reads atomic.Int32
+	h := permissionHook{home: ft.home, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 2 * time.Second,
+		now: func() time.Time {
+			if reads.Add(1) == 2 {
+				missed <- struct{}{}
+			}
+			return time.Now()
+		}}
+	exited := startHook(t, h, make(chan struct{}), io.Discard)
+	select {
+	case <-missed: // the hook is waiting for the marker
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook never looked for the run marker")
+	}
+	appendTranscript(t, ft.home, mustJSON(t, map[string]any{
+		"type": "user", "promptId": "p-1", "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "user", "content": harnessUserText("<cross-session-message>run the tests</cross-session-message>")},
+		"origin":  map[string]any{"kind": "peer", "msg_id": adm.RunID},
+	}))
+	att.pollConfirmations()
+	select {
+	case <-exited:
+		t.Fatal("the hook returned before the run's marker was written")
+	default:
+	}
+	awaitRequest(t, ft.home)
+	if inflightLive(ft.home, approvalSession, time.Now()) {
+		t.Fatal("the claimed run's inflight record is still live")
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
