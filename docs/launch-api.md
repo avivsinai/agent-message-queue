@@ -249,9 +249,12 @@ Each provider owns its conversation identity:
   an exact session ID: it reopens the session when it exists and creates it
   under the same ID when it does not, which is the case for a seat that never
   took a turn, because pi writes the session file only after the first turn.
-  It never matches a prefix. A pi below `piMinimumVersion` (`1.2.0`,
+  It never matches a prefix. A session file that was deleted also starts
+  fresh under the same ID; AMQ does not scan pi's session store. A pi below `piMinimumVersion` (`1.2.0`,
   `internal/launch/adapter_pi.go`) or a non-release version is refused with
-  `provider_version_unsupported`. pi admits no provider arguments.
+  `provider_version_unsupported`, and a pi whose `--help` does not list
+  `--session-id` with `identity_flags_unsupported`. pi admits no provider
+  arguments.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
   hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
   newer, verified through `codexCaptureVerifiedVersion`
