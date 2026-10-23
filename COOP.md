@@ -208,9 +208,12 @@ submitted after the quiet window. Urgent interrupts bypass input deferral;
 when input remains active through `--input-max-hold`, wake emits an out-of-band
 notice instead of injecting. Unavailable input sampling remains best-effort.
 
-agy runs no hooks with Google Cloud sign-in, so the wake cannot see agy's
-permission prompt; a doorbell that arrives while agy asks "Run this command?"
-can answer it (known limitation; a fix is in progress in a follow-up).
+agy runs no hooks with Google Cloud sign-in, so `amq coop exec agy` runs agy
+on a pseudo-terminal and stays as its terminal. It turns on agy's terminal
+status (`AGY_CLI_OSC7501=on`, `AGY_CLI_OSC7501_MESSAGES=brief`) and holds the
+doorbell while agy reports a permission or sign-in prompt. When you set
+`AGY_CLI_OSC7501` to anything but `on`, agy runs as before and a doorbell can
+answer its permission prompt.
 
 ### Supervisor recipes
 

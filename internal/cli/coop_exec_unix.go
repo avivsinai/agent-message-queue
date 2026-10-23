@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const wakeReadyTimeout = 25 * time.Second
@@ -893,10 +894,27 @@ func (c *coopExecRun) execAgent() error {
 	if c.managedLaunchNonce == "" {
 		env = codexDaemonSeatEnv(c.binaryPath, env, recorded)
 	}
+	relayEnv, relay, strip, notice := agyRelayPlan(c.binaryPath, env, term.IsTerminal(int(os.Stdin.Fd())))
+	if notice != "" {
+		_ = writeStderr("%s\n", notice)
+	}
 	var execErr error
-	if c.managedLaunchNonce != "" {
+	switch {
+	case c.managedLaunchNonce != "":
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)
-	} else {
+	case relay:
+		// agy's prompts show only in its terminal output, so coop exec stays
+		// as its terminal instead of exec'ing it.
+		log, _ := openCoopWakeOutput(c.root, c.agentHandle)
+		sink, sinkErr := newAgyDialogSink(c.root, c.agentHandle, log)
+		if sinkErr != nil {
+			_ = writeStderr("warning: cannot watch agy's prompts (%v); a doorbell can answer agy's permission prompt\n", sinkErr)
+			execErr = coopExecProcess(c.binaryPath, argv, env)
+			break
+		}
+		execErr = runAgyRelay(c.binaryPath, argv, relayEnv, sink, strip)
+		_ = sink.Close()
+	default:
 		execErr = coopExecProcess(c.binaryPath, argv, env)
 	}
 	if execErr == nil {
