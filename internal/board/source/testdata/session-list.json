@@ -1,0 +1,9 @@
+{
+  "sessions": [
+    {"name": "s1", "path": "/fixture/.agent-mail/s1", "kind": "canonical", "agents": ["alpha", "beta", "user"], "hint": ""},
+    {"name": "s2", "path": "/fixture/.agent-mail/s2", "kind": "canonical", "agents": ["alpha", "user"], "hint": ""}
+  ],
+  "skipped": [
+    {"name": "agents", "path": "/fixture/.agent-mail/agents", "reason": "not_a_session"}
+  ]
+}

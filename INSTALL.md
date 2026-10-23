@@ -13,7 +13,7 @@ brew install avivsinai/tap/amq
 ```
 
 The formula installs `amq` and the companions `amq-acp`, `amq-remote`,
-`amq-owner-sign`, and `amq-bridge`.
+`amq-owner-sign`, `amq-bridge`, and `amq-board`.
 
 ### Installer script (macOS and Linux)
 
@@ -288,8 +288,8 @@ Restart the agent after installing a skill.
 
 ## Companion binaries
 
-Homebrew installs `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-bridge`
-with `amq`. Each is also a release asset for `linux` and `darwin` on `amd64`
+Homebrew installs `amq-acp`, `amq-remote`, `amq-owner-sign`, `amq-bridge`,
+and `amq-board` with `amq`. Each is also a release asset for `linux` and `darwin` on `amd64`
 and `arm64`. `amq-keepalive` is only a release asset.
 
 | Companion | Purpose |
@@ -298,6 +298,7 @@ and `arm64`. `amq-keepalive` is only a release asset.
 | `amq-bridge` | Signed cross-host courier. See [amq-bridge](cmd/amq-bridge/README.md). |
 | `amq-acp` | Preview ACP v2 stdio companion. See [amq-acp](cmd/amq-acp/README.md). |
 | `amq-remote` | Remote-session companion. See [amq-remote](cmd/amq-remote/README.md). |
+| `amq-board` | Read-only fleet board: what waits on you, what is in flight, blocked, or unclaimed, and each agent's liveness. See [amq-board](cmd/amq-board/README.md). |
 | `amq-owner-sign` | The owner's signer for a strict relay share; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
 
 To install a companion from its release asset, verify its entry in
@@ -342,8 +343,8 @@ is not run there; the broader suite has known failures
 `amq wake`, `coop exec`, and terminal supervision are not native Windows
 contracts. Direct submitted injection via `amq-keepalive.exe` is the supported
 injection path. Use WSL with a Linux asset for the complete co-op workflow.
-`amq-bridge`, `amq-acp`, `amq-remote`, and `amq-owner-sign` are published for
-Linux and macOS, not Windows.
+`amq-bridge`, `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-board` are
+published for Linux and macOS, not Windows.
 
 ## Verify and upgrade
 
@@ -354,7 +355,7 @@ amq upgrade        # direct installs
 ```
 
 `amq upgrade --all` also upgrades directly installed `amq-keepalive`,
-`amq-bridge`, `amq-acp`, `amq-remote`, and `amq-owner-sign` when their targets
+`amq-bridge`, `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-board` when their targets
 are unambiguous and match the release build identity. A running `amq-remote`
 keeps its old image until restarted. Package-managed installs are delegated
 to their package manager. On Windows, `--all` upgrades only
