@@ -36,7 +36,7 @@ implementation that the build can call:
 
 | Build platform | Advertised launch features |
 | --- | --- |
-| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
+| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, `wrapper`, and `amq_executable`. |
 | Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. Negotiation rejects `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1`. |
 
 WSL uses the Linux binary and gets the Linux row. Negotiation fails closed for
@@ -360,6 +360,18 @@ tmux omitted-placement session. Hostile live resources refuse even with
   never the plan or trust digest.
 - Apply echoes the request map. Inspect, Focus, and Close load it from the
   proven-owned binding; a lifecycle request cannot replace it.
+
+`amq_executable` names the AMQ binary that managed panes run as
+`<amq_executable> coop exec ...` and that the Codex notify hook calls. A
+program that embeds `launchapi` sets it, because its own binary is not `amq`.
+
+- The value is absolute or found on `PATH`. AMQ resolves symlinks and refuses
+  a project-contained binary, as it does for a provider executable.
+- Omission uses the running executable, as before.
+- When present, the resolved path and its file identity enter
+  `subject_digest`. Omission adds nothing, so existing digests do not change.
+- The execution ticket records the path and identity and checks them again
+  when the pane starts.
 
 ### Go example
 

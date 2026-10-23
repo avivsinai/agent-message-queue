@@ -18,5 +18,6 @@ func platformCompatibilityFeaturesV1() []string {
 		FeatureCallerContext,
 		FeatureExecutableIdentity,
 		FeatureWrapper,
+		FeatureAMQExecutable,
 	}
 }

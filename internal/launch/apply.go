@@ -593,6 +593,10 @@ func (err *applyCommittedMutationError) Error() string { return err.Err.Error() 
 func (err *applyCommittedMutationError) Unwrap() error { return err.Err }
 
 func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, runnable []PrepareParticipant, dependencies ApplyDependencies, root *fsq.DeliveryRoot, lease *Lease, decisions map[RequiredActionKind]string, snapshot PrepareResult, authorizedRootIdentity string) (ReconcileRequest, error) {
+	amqPath := dependencies.AMQPath
+	if prepared.AMQExecutable != "" {
+		amqPath = prepared.AMQExecutable
+	}
 	config := ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: prepared.Target.Session, Layout: LayoutIntent{Type: LayoutColumns}}
 	adapters := make(map[string]HarnessAdapter, len(runnable))
 	executionOptions := make(map[string]PrepareExecutionOptions, len(runnable))
@@ -633,7 +637,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 	}
 	request := ReconcileRequest{
 		Context: ctx, ProjectRoot: prepared.Target.ProjectRoot, Session: prepared.Target.Session,
-		AMQPath: dependencies.AMQPath, Root: root, Config: config, Launcher: prepared.Launcher,
+		AMQPath: amqPath, Root: root, Config: config, Launcher: prepared.Launcher,
 		Preferences: slices.Clone(dependencies.Preferences), Backends: dependencies.Backends,
 		Adapters: adapters, TrustStore: dependencies.TrustStore, HeldLease: lease,
 		CrashHook:            dependencies.CrashHook,
