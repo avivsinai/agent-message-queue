@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 
+	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -811,5 +812,31 @@ func TestLiveRegisterAppliesAnApproveUpgrade(t *testing.T) {
 				t.Errorf("after the approve upgrade: attachment replaced = %v, pin ran %d times", att != built[0].Attachment, pinned)
 			}
 		})
+	}
+}
+
+// Bead agent-message-queue-t97.4 (Pro finding 7): an attached session's
+// handle stayed unregistered. A mailbox attach records the harness it found
+// in the handle's existing mailbox, and never creates a missing one.
+func TestMailboxAttachRecordsTheHarness(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	withMailbox := filepath.Join(dir, "p", ".agent-mail", "session1")
+	without := filepath.Join(dir, "p", ".agent-mail", "session2")
+	if err := fsq.EnsureAgentDirs(withMailbox, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(without, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attachMailboxAs(t, withMailbox)
+	rec, err := agentidentity.Read(withMailbox, "claude")
+	if err != nil || rec.Harness != "other" {
+		t.Fatalf("record = %+v err=%v, want harness other (no harness detected)", rec, err)
+	}
+	attachMailboxAs(t, without)
+	if _, err := os.Lstat(filepath.Join(without, "agents", "claude")); !os.IsNotExist(err) {
+		t.Fatalf("attach created a mailbox: %v", err)
 	}
 }

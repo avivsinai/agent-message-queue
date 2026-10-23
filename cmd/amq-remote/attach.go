@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -73,7 +75,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		*nativeMode = true // a linked server reaches a native session only
 	}
 	if !*nativeMode {
-		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
+		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout, stderr)
 	}
 	// A linked share runs in the endpoint of the link's root, known once the
 	// session is; discovery reads only the session's root (pi), no state dir.
@@ -88,6 +90,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	// The handle's mailbox is in the session's own root, which a link
+	// share replaces below with the link's root.
+	sessionRoot := c.root
 	hookWarning := ""
 	if cand.Kind == "claude" {
 		if hookWarning, err = requireStopHook(); err != nil {
@@ -193,6 +198,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
+	if err := acp.VerifySessionPin(filepath.Clean(sessionRoot)); err == nil {
+		recordAttachIdentity(stderr, sessionRoot, strings.TrimSpace(*me), cand.Kind)
+	}
 	if *linkName != "" {
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitActionRequired, err
@@ -285,7 +293,7 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 // Each DM becomes an AMQ message to the handle; no endpoint, hook, or wake is
 // required, because noticing the message is
 // the handle owner's business.
-func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (int, error) {
+func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
 	if root == "" || handle == "" {
 		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -320,6 +328,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
+	recordAttachIdentity(stderr, root, handle, h.Kind)
 	now := time.Now()
 	agent, helper := agentOf(name, now), helperOf(now)
 	draft := helperDrafts(b, helper)
@@ -1287,4 +1296,29 @@ func nonEmpty(s, fallback string) string {
 		return s
 	}
 	return fallback
+}
+
+// recordAttachIdentity marks handle as observed in root, with the harness
+// attach found (other when it found none), in the handle's existing
+// mailbox. It is discovery metadata only: a failure warns and the attach
+// stands, and a missing mailbox is never created.
+func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
+	if root == "" || handle == "" {
+		return
+	}
+	err := func() error {
+		identity, err := fsq.SnapshotDeliveryRoot(root)
+		if err != nil {
+			return err
+		}
+		deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = deliveryRoot.Close() }()
+		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, harness.Lookup(kind).Name, "", time.Now()))
+	}()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: cannot record which harness runs as %s: %v\n", handle, err)
+	}
 }

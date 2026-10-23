@@ -89,7 +89,7 @@ var aliases = map[string]string{"agent": Cursor}
 // case and a trailing .exe ignored. ok is false for a program not in the
 // table, which gets the generic Other facts.
 func ForExecutable(executable string) (Facts, bool) {
-	base := strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
+	base := executableName(executable)
 	if name, ok := aliases[base]; ok {
 		base = name
 	}
@@ -107,4 +107,64 @@ func Lookup(name string) Facts {
 		return facts
 	}
 	return generic
+}
+
+// acpHost is the amq-acp companion, whose host subcommand serves another
+// harness over ACP: amq-acp host [--cwd dir] [--check] [--protocol p] [--] agent ...
+const acpHost = "amq-acp"
+
+// Invocation is what one argv runs: the harness that does the work and the
+// wrapper executable in front of it, if any.
+type Invocation struct {
+	Harness string
+	Wrapper string
+}
+
+// ResolveInvocation names the harness behind executable and its arguments.
+// It understands only the supported wrapper grammars (amq-acp host); any
+// other wrapper form names the harness Other rather than searching argument
+// text for a recognizable name. The terminal behavior of a wrapped
+// invocation is the wrapper's, which ForExecutable reports.
+func ResolveInvocation(executable string, args []string) Invocation {
+	if executableName(executable) != acpHost {
+		facts, _ := ForExecutable(executable)
+		return Invocation{Harness: facts.Name}
+	}
+	inv := Invocation{Harness: Other, Wrapper: acpHost}
+	if len(args) == 0 || args[0] != "host" {
+		return inv
+	}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			if i+1 < len(args) {
+				facts, _ := ForExecutable(args[i+1])
+				inv.Harness = facts.Name
+			}
+			return inv
+		case arg == "--cwd" || arg == "-cwd" || arg == "--protocol" || arg == "-protocol":
+			i++
+		case strings.HasPrefix(arg, "-"):
+		default:
+			facts, _ := ForExecutable(arg)
+			inv.Harness = facts.Name
+			return inv
+		}
+	}
+	return inv
+}
+
+// WrapperName is the recorded name of a wrapper executable: its basename
+// with case and .exe ignored, or Other when that is not a plain name.
+func WrapperName(executable string) string {
+	name := executableName(executable)
+	if name == "" || strings.HasPrefix(name, "-") || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+		return Other
+	}
+	return name
+}
+
+func executableName(executable string) string {
+	return strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
 }

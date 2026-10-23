@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -106,6 +108,9 @@ type coopExecRun struct {
 	// managedProvider is the managed launch ticket's provider: the harness
 	// a wrapped seat runs behind its wrapper executable.
 	managedProvider string
+	// managedInvocation is the ticket's provider executable and wrapper, for
+	// the identity record.
+	managedInvocation harness.Invocation
 }
 
 func runCoopExec(args []string) error {
@@ -139,6 +144,11 @@ func runCoopExec(args []string) error {
 		defer func() { _ = c.managedGuard.Close() }()
 		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
 			c.managedProvider = ticket.Provider
+			facts, _ := harness.ForExecutable(ticket.ProviderExecutable)
+			c.managedInvocation = harness.Invocation{Harness: facts.Name}
+			if ticket.Wrapper != nil {
+				c.managedInvocation.Wrapper = harness.WrapperName(ticket.Wrapper.Executable)
+			}
 		}
 	}
 
@@ -886,6 +896,12 @@ func (c *coopExecRun) execAgent() error {
 	if c.managedLaunchNonce == "" {
 		c.agentArgs = pinCodexShellIdentity(c.binaryPath, c.agentArgs, env, recorded)
 	}
+
+	invocation := c.managedInvocation
+	if invocation.Harness == "" {
+		invocation = harness.ResolveInvocation(c.binaryPath, c.agentArgs)
+	}
+	publishExecIdentity(c.root, c.agentHandle, invocation)
 
 	// Build argv: command name + agent args.
 	argv := append([]string{c.cmdName}, c.agentArgs...)
@@ -1653,4 +1669,26 @@ func splitDashDash(args []string) ([]string, []string) {
 		}
 	}
 	return args, nil
+}
+
+// publishExecIdentity records which harness is about to run as handle in the
+// handle's existing mailbox below root, so other agents see the handle as
+// observed. It is discovery metadata only; a failure warns and never stops
+// the start.
+func publishExecIdentity(root, handle string, invocation harness.Invocation) {
+	err := func() error {
+		identity, err := fsq.SnapshotDeliveryRoot(root)
+		if err != nil {
+			return err
+		}
+		deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = deliveryRoot.Close() }()
+		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, invocation.Harness, invocation.Wrapper, time.Now()))
+	}()
+	if err != nil {
+		_ = writeStderr("warning: cannot record that %s runs as %s: %v\n", invocation.Harness, handle, err)
+	}
 }
