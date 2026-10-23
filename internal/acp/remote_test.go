@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -92,7 +93,13 @@ func TestRemotePromptSubmitsToTargetAndReturnsResult(t *testing.T) {
 // in remote mode pinned to target "fake" and native session "fake".
 func remoteServer(t *testing.T, att core.Attachment, crash core.CrashPoint) *Server {
 	t.Helper()
-	root, err := os.MkdirTemp("", "rv")
+	// The endpoint socket lives under root and macOS caps a socket path at
+	// 104 bytes, so a long TMPDIR falls back to a short base.
+	base := os.TempDir()
+	if len(base) > 48 && runtime.GOOS != "windows" {
+		base = "/tmp"
+	}
+	root, err := os.MkdirTemp(base, "rv")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,7 +620,13 @@ func (b *blockedSubmit) InspectSubmit() (protocol.Session, string) {
 func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	att := &blockedSubmit{Runtime: rt}
-	root, err := os.MkdirTemp("", "rv")
+	// The endpoint socket lives under root and macOS caps a socket path at
+	// 104 bytes, so a long TMPDIR falls back to a short base.
+	base := os.TempDir()
+	if len(base) > 48 && runtime.GOOS != "windows" {
+		base = "/tmp"
+	}
+	root, err := os.MkdirTemp(base, "rv")
 	if err != nil {
 		t.Fatal(err)
 	}

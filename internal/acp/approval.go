@@ -187,22 +187,22 @@ func approvalText(prompt, hint string) string {
 }
 
 // desktopPinned reports whether the installed Claude approval hook pins this
-// agent's DM: a Desktop pin with body and channel. A variable so tests can
-// answer without a settings file.
-var desktopPinned = func(body, channel string) bool {
+// agent's DM: a whole Desktop pin with this owner, this agent key and this
+// channel. A variable so tests can answer without a settings file.
+var desktopPinned = func(owner, body, channel string) bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
 	pin := claude.PermissionHookPin(home)
-	return pin.DesktopComplete() && pin.Body == body && pin.Channel == channel
+	return pin.DesktopComplete() && pin.Owner == owner && pin.Body == body && pin.Channel == channel
 }
 
 // desktopHint is the command that lets the owner allow from this DM, shown
 // under a deny-only approval while the hook does not pin this agent's DM;
 // "" when the agent cannot read its relay or the hook pins it already.
 func desktopHint(channel string) string {
-	if buzzRelay == nil || buzzOwner == "" || buzzSelf == "" || channel == "" || desktopPinned(buzzSelf, channel) {
+	if buzzRelay == nil || buzzOwner == "" || buzzSelf == "" || channel == "" || desktopPinned(buzzOwner, buzzSelf, channel) {
 		return ""
 	}
 	return "To allow from Buzz here, run in Claude's terminal: amq-remote claude install-approval-hook --desktop --owner " +
@@ -215,12 +215,16 @@ func denyApproval(in *protocol.Interaction) bool {
 	return in != nil && in.Kind == "approval" && in.RemoteAnswer && in.RejectOption != ""
 }
 
-// allowable reports whether this path can relay a ✅ for in: it offers allow
-// with proof, the agent can read its relay, and the prompt is shown whole.
-func allowable(in protocol.Interaction) bool {
+// allowable reports whether this path can relay a ✅ for in on channel: it
+// offers allow with proof, the agent can read its relay, the prompt is shown
+// whole, and the installed hook pins exactly this owner, agent and DM. An
+// approval that offers allow for any other pin (a relay share, another
+// Desktop DM) stays deny-only here: the hook would refuse this agent's proof.
+func allowable(in protocol.Interaction, channel string) bool {
 	return in.ApproveOption != "" && in.ApproveProof && in.ApproveOption != in.RejectOption &&
-		buzzRelay != nil && buzzOwner != "" && buzzSelf != "" &&
-		protocol.BoundPreview(in.Prompt) == in.Prompt && !secretscan.MayHold(in.Prompt)
+		buzzRelay != nil && buzzOwner != "" && buzzSelf != "" && channel != "" &&
+		protocol.BoundPreview(in.Prompt) == in.Prompt && !secretscan.MayHold(in.Prompt) &&
+		desktopPinned(buzzOwner, buzzSelf, channel)
 }
 
 // sentAnswer is an answer this turn handed over and the line that reports it
@@ -318,7 +322,7 @@ func (a *approvals) close() {
 // pending (observe closes stop).
 func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, stop chan struct{}) {
 	defer a.wg.Done()
-	if allowable(in) {
+	if allowable(in, a.channel) {
 		w := &allowWatch{a: a, snap: snap, in: in, text: buzzio.DesktopApprovalText(in.Prompt), tried: map[string]bool{}}
 		defer w.drop()
 		a.poll(stop, w.post, w.poll)
@@ -450,6 +454,12 @@ func (w *allowWatch) drop() {
 // poll reads the posted message once, then the owner's reactions on it, and
 // reports whether an answer was handed over. A relay error drops the
 // connection and waits for the next poll.
+//
+// Deny beats allow up to the observation cutoff: the owner's reactions are
+// read again after the history checks, and the grant's checked_at is taken
+// after that final read finds no ❌ and the same ✅. A ❌ the relay stores
+// before that read denies; one stored after it races the allow, and the
+// endpoint's first answer wins.
 func (w *allowWatch) poll(budget time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -500,6 +510,24 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 		} else {
 			w.drop()
 		}
+		return false
+	}
+	// The observation cutoff: the final read before the grant.
+	rs, err = buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
+	if err != nil {
+		w.drop()
+		return false
+	}
+	still := false
+	for _, r := range rs {
+		switch {
+		case strings.TrimSpace(r.Content) == "❌":
+			return w.a.denyOnce(w.snap, w.in, &w.denyFailed)
+		case r.ID == approve.ID:
+			still = true
+		}
+	}
+	if !still {
 		return false
 	}
 	grant, err := buzzio.SignDesktopGrant(buzzRelay.Secret, w.msg.ID.Hex(), approve.ID.Hex(), time.Now())

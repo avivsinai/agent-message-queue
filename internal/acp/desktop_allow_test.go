@@ -3,6 +3,7 @@ package acp
 import (
 	"crypto/rand"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -58,10 +59,21 @@ func (c claudeAllowApproval) RespondWithEvidence(key requests.Key, epoch, intera
 	return c.Respond(key, epoch, interactionID, option)
 }
 
-// On Buzz Desktop with a Desktop pin, the agent posts the approval, reads the
-// owner's signed ✅ and the message's history from its relay, and hands the
-// endpoint an allow whose evidence the hook's Desktop verifier accepts.
-func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
+// desktopRun is what one Desktop approval left behind: the runtime's
+// answers, every post, and the evidence of each answer.
+type desktopRun struct {
+	answers  []fake.Answer
+	posts    []string
+	evidence []json.RawMessage
+}
+
+// runDesktopApproval drives one native turn whose Claude approval offers
+// allow with proof. The owner reacts ✅ on the posted approval. With pinned
+// false the hook pins another DM. With denyMidway the owner's ❌ is stored
+// while the agent reads the message's edits. It returns once the runtime got
+// an answer, or the owner was told ✅ cannot allow.
+func runDesktopApproval(t *testing.T, pinned, denyMidway bool) desktopRun {
+	t.Helper()
 	const channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	var owner, agent [32]byte
 	_, _ = rand.Read(owner[:])
@@ -75,38 +87,59 @@ func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
 	fakeRelay, srv, url := relaytest.Start(agentHex, wire)
 	t.Cleanup(srv.Close)
 
-	savedOwner, savedSelf, savedRelay, savedPost, savedPoll := buzzOwner, buzzSelf, buzzRelay, postAnswer, reactionPollInterval
+	savedOwner, savedSelf, savedRelay, savedPost, savedRead, savedPinned, savedPoll := buzzOwner, buzzSelf, buzzRelay, postAnswer, readReactions, desktopPinned, reactionPollInterval
 	t.Cleanup(func() {
-		buzzOwner, buzzSelf, buzzRelay, postAnswer, reactionPollInterval = savedOwner, savedSelf, savedRelay, savedPost, savedPoll
+		buzzOwner, buzzSelf, buzzRelay, postAnswer, readReactions, desktopPinned, reactionPollInterval = savedOwner, savedSelf, savedRelay, savedPost, savedRead, savedPinned, savedPoll
 	})
 	reactionPollInterval = 20 * time.Millisecond
 	buzzOwner, buzzSelf = ownerHex, agentHex
 	buzzRelay = &relay.Config{URL: url, Secret: agent, AuthTag: wire}
-	var mu sync.Mutex
-	var posts []string
-	postAnswer = func(ch, content string, _ time.Duration) (string, error) {
-		mu.Lock()
-		posts = append(posts, content)
-		mu.Unlock()
-		msg := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Tags: nostr.Tags{{"h", ch}}, Content: content}
-		if err := msg.Sign(agent); err != nil {
-			return "", err
+	desktopPinned = func(o, b, c string) bool { return pinned && o == ownerHex && b == agentHex && c == channel }
+	readReactions = func(string, time.Duration) ([]reaction, error) {
+		return []reaction{{Emoji: "✅", PubKeys: []string{ownerHex}}}, nil
+	}
+	sign := func(evt nostr.Event, key [32]byte) nostr.Event {
+		if err := evt.Sign(key); err != nil {
+			t.Error(err)
 		}
+		return evt
+	}
+	var mu sync.Mutex
+	var run desktopRun
+	approval := ""
+	postAnswer = func(ch, content string, _ time.Duration) (string, error) {
+		msg := sign(nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Tags: nostr.Tags{{"h", ch}}, Content: content}, agent)
 		fakeRelay.Inject(msg)
+		mu.Lock()
+		run.posts = append(run.posts, content)
+		if strings.Contains(content, "Approval needed") {
+			approval = msg.ID.Hex()
+		}
+		mu.Unlock()
 		if content == buzzio.DesktopApprovalText(desktopAllowPrompt) {
-			react := nostr.Event{CreatedAt: nostr.Now(), Kind: 7, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
-			if err := react.Sign(owner); err != nil {
-				return "", err
-			}
-			fakeRelay.Inject(react)
+			fakeRelay.Inject(sign(nostr.Event{CreatedAt: nostr.Now(), Kind: 7, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}, owner))
 		}
 		return msg.ID.Hex(), nil
 	}
+	var once sync.Once
+	fakeRelay.BeforeReq = func(filters []nostr.Filter) {
+		if !denyMidway || len(filters) != 1 || !slices.Contains(filters[0].Kinds, nostr.Kind(buzzio.KindEdit)) {
+			return
+		}
+		once.Do(func() {
+			mu.Lock()
+			id := approval
+			mu.Unlock()
+			fakeRelay.Inject(sign(nostr.Event{CreatedAt: nostr.Now(), Kind: 7, Content: "❌", Tags: nostr.Tags{{"e", id}}}, owner))
+		})
+	}
 
 	rt := fake.New("fake", "e_1")
-	var evidence []json.RawMessage
-	s := remoteServer(t, claudeAllowApproval{Runtime: rt, mu: &mu, evidence: &evidence}, nil)
+	s := remoteServer(t, claudeAllowApproval{Runtime: rt, mu: &mu, evidence: &run.evidence}, nil)
 	s.cfg.StateDir = canonicalTempDir(t)
+	// Relay sign-in and five reads run inside the turn; a loaded machine
+	// must not end the turn first.
+	s.cfg.TurnTimeout = 4 * time.Second
 	eventID := strings.Repeat("d", 64)
 	id, _ := remoteRequestID(eventID)
 	turn := newTurn()
@@ -121,23 +154,58 @@ func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	rt.Question(id, "i_1", []string{"allow", "deny"})
-	for len(rt.Snapshot().Answers) == 0 && time.Now().Before(deadline) {
+	settled := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(rt.Snapshot().Answers) > 0 || slices.Contains(run.posts, allowRefusedText)
+	}
+	for !settled() && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	rt.Complete(id, "ran")
 	<-done
+	run.answers = rt.Snapshot().Answers
+	return run
+}
 
-	if answers := rt.Snapshot().Answers; len(answers) != 1 || answers[0].InteractionID != "i_1" || answers[0].Option != "allow" {
-		t.Fatalf("answers = %v, posts = %q; want one allow of i_1", answers, posts)
+// On Buzz Desktop with a Desktop pin, the agent posts the approval, reads the
+// owner's signed ✅ and the message's history from its relay, and hands the
+// endpoint an allow whose evidence the hook's Desktop verifier accepts.
+func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
+	run := runDesktopApproval(t, true, false)
+	if len(run.answers) != 1 || run.answers[0].InteractionID != "i_1" || run.answers[0].Option != "allow" {
+		t.Fatalf("answers = %v, posts = %q; want one allow of i_1", run.answers, run.posts)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(evidence) != 1 {
-		t.Fatalf("evidence = %d answers, want 1", len(evidence))
+	if len(run.evidence) != 1 {
+		t.Fatalf("evidence = %d answers, want 1", len(run.evidence))
 	}
-	want := buzzio.DesktopCheck{Owner: ownerHex, Body: agentHex, Channel: channel, Prompt: desktopAllowPrompt,
+	want := buzzio.DesktopCheck{Owner: buzzOwner, Body: buzzSelf, Channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370", Prompt: desktopAllowPrompt,
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Minute)}
-	if err := buzzio.VerifyDesktopEvidence(evidence[0], want); err != nil {
+	if err := buzzio.VerifyDesktopEvidence(run.evidence[0], want); err != nil {
 		t.Fatalf("the hook's Desktop verifier refuses the evidence: %v", err)
+	}
+}
+
+// Review of #1179 (P1): the owner's ❌ stored while the agent read the
+// message's history was missed and the ✅ was allowed. Deny beats allow up
+// to the final reaction read before the grant.
+func TestRemoteApprovalOwnerDenyDuringHistoryBeatsAllow(t *testing.T) {
+	run := runDesktopApproval(t, true, true)
+	if len(run.answers) != 1 || run.answers[0].Option != "deny" {
+		t.Fatalf("answers = %v; want the ❌ stored mid-check to deny", run.answers)
+	}
+}
+
+// Review of #1179 (P2): an approval that offers allow for another pin (a
+// relay share, another Desktop DM) was posted with ✅, which the hook then
+// refused. It stays deny-only and shows the command that pins this DM.
+func TestRemoteApprovalWithoutThisDesktopPinStaysDenyOnly(t *testing.T) {
+	run := runDesktopApproval(t, false, false)
+	if len(run.answers) != 0 {
+		t.Fatalf("answers = %v; want no allow without this DM's pin", run.answers)
+	}
+	if len(run.posts) == 0 || !strings.Contains(run.posts[0], denyOnlyText) || !strings.Contains(run.posts[0], "install-approval-hook --desktop") ||
+		!slices.Contains(run.posts, allowRefusedText) {
+		t.Fatalf("posts = %q; want the deny-only approval with the pin command, then the ✅ refused", run.posts)
 	}
 }

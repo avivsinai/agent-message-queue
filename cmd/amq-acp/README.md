@@ -238,8 +238,13 @@ can pin it; the identity is not part of the session schema.
   amq-acp then signs in to `BUZZ_RELAY_URL` with the agent key and
   `BUZZ_AUTH_TAG`, reads the stored approval message, the owner's signed
   reactions and the message's edits and deletions, and hands the endpoint the
-  ✅, the message and a grant signed with the agent key. A ❌ beats a ✅. An
-  edited or deleted approval message never allows. Without the pin the
+  ✅, the message and a grant signed with the agent key. A ❌ beats a ✅ up
+  to the observation cutoff: amq-acp reads the reactions again after the
+  history checks and signs the grant only when that read finds no ❌ and the
+  same ✅; a ❌ stored after it races the allow, and the first answer wins.
+  An edited or deleted approval message never allows. An approval that
+  offers allow for any other pin (a relay share or another Desktop DM) stays
+  deny-only here. Without the pin the
   approval says Buzz can deny only and shows the `install-approval-hook
   --desktop` command with this agent's owner, key and DM channel.
 - A submit whose outcome is unknown is reconciled by its exact request

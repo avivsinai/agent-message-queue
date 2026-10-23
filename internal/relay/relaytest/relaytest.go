@@ -36,6 +36,10 @@ type Relay struct {
 	// DropOnce closes the first authenticated connection, to exercise
 	// reconnect.
 	DropOnce atomic.Bool
+	// BeforeReq, when set before the first connection, runs on each REQ
+	// before its stored events are sent, so a test can store an event
+	// between two reads.
+	BeforeReq func(filters []nostr.Filter)
 
 	mu     sync.Mutex
 	stored []nostr.Event
@@ -133,6 +137,9 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				r.store(e.Event)
 			}
 		case *nostr.ReqEnvelope:
+			if r.BeforeReq != nil {
+				r.BeforeReq(e.Filters)
+			}
 			sub := &liveSub{id: e.SubscriptionID, filters: e.Filters, send: send}
 			r.mu.Lock()
 			stored := append([]nostr.Event(nil), r.stored...)
