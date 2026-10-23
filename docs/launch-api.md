@@ -96,7 +96,7 @@ two `/`-separated parts, each matching `[a-z0-9_][a-z0-9_-]*`.
 | Codex | `--model` | safe value |
 | Codex | `--sandbox` | `read-only` or `workspace-write` |
 | Codex | `--no-alt-screen`, `--search` | none |
-| Grok Build | `--tools`, `--disallowed-tools` | opaque Grok tool names, 1 to 256 characters, no control characters, no surrounding spaces, not starting with `-`; the Claude `--allowedTools` validator does not check them |
+| Grok Build | `--tools`, `--disallowed-tools` | opaque Grok tool names, 1 to 256 UTF-8 bytes, no C0 control characters or DEL, no surrounding whitespace, not starting with `-`; the Claude `--allowedTools` validator does not check them |
 | Grok Build | `--effort` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | Grok Build | `--model`, `--sandbox` | safe value |
 | Grok Build | `--no-alt-screen`, `--no-auto-update` | none |
