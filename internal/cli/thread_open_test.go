@@ -242,6 +242,85 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			},
 		},
 		{
+			// #1166 algorithm review (C1): the closer table is exact; an
+			// owner's withdrawn label does not close a question.
+			name: "owner withdrawn acknowledges a question without closing it",
+			messages: []threadOpenMessage{
+				{name: "q", from: "alpha@s1", to: "beta@s1", kind: format.KindQuestion},
+				{name: "w", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, labels: []string{"withdrawn"}, refs: []string{"q"}},
+			},
+			want: []string{"s1/q/beta acknowledged agent"},
+		},
+		{
+			// #1166 algorithm review (C1): a requester's merged label does not
+			// close a todo.
+			name: "requester merged leaves a todo pending",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "mg", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, labels: []string{"merged"}, refs: []string{"m"}},
+			},
+			want: []string{"s1/m/beta pending agent"},
+		},
+		{
+			// #1166 algorithm review (C1): a delegation only acknowledges the
+			// old obligation, even with a closing label.
+			name: "delegation with a closing label only acknowledges",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "d", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, labels: []string{"done"}, refs: []string{"m"}},
+			},
+			want: []string{"s1/m/beta acknowledged agent"},
+		},
+		{
+			// #1166 algorithm review (C3): a reply to a message whose lineage
+			// is empty is a settled no-op, never a wait or a cycle, even when
+			// the reply is created first.
+			name: "reply to an empty lineage is a no-op",
+			messages: []threadOpenMessage{
+				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, refs: []string{"st"}},
+				{name: "st", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus},
+			},
+			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
+				if un := result.Coverage.UnresolvedLineage; len(un) != 0 {
+					t.Fatalf("unresolved_lineage = %+v, want none", un)
+				}
+			},
+		},
+		{
+			// #1166 algorithm review (C4): a same-kind reply continues only
+			// when its sender and recipient both took part in the parent;
+			// gamma did not, so alpha owes gamma.
+			name: "same-kind reply from an outsider opens a new obligation",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+				{name: "c", from: "gamma@s1", to: "alpha@s1", kind: format.KindTodo, thread: "p2p/alpha__beta", refs: []string{"m"}},
+			},
+			want: []string{"s1/m/beta pending agent", "s1/c/alpha pending agent"},
+		},
+		{
+			// #1166 algorithm review (C5): an unreferenced decision created
+			// before the todo and its question closes nothing.
+			name: "decision before the opener closes nothing",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, at: 10 * time.Second},
+				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}, at: 11 * time.Second},
+				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, at: 9500 * time.Millisecond},
+			},
+			want: []string{"s1/m/beta acknowledged agent", "s1/q/alpha pending agent"},
+		},
+		{
+			// #1166 algorithm review (C5): moving the question before the
+			// decision opens it first, so the decision closes it; the
+			// question still acknowledges the todo once the todo opens.
+			name: "question opened before the decision is closed by it",
+			messages: []threadOpenMessage{
+				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, at: 10 * time.Second},
+				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}, at: 9 * time.Second},
+				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, at: 9500 * time.Millisecond},
+			},
+			want: []string{"s1/m/beta acknowledged agent"},
+		},
+		{
 			// Pro review finding 15: --limit must cut after reduction, or the
 			// closed older obligation would take the only slot.
 			name: "limit applies after reduction",
@@ -267,6 +346,9 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			ids, sessions := writeThreadOpenMessages(t, base, tc.messages, func(i int, m threadOpenMessage) time.Time {
 				if m.age > 0 {
 					return time.Now().UTC().Add(-m.age)
+				}
+				if m.at > 0 {
+					return start.Add(m.at)
 				}
 				return start.Add(time.Duration(i+1) * time.Second)
 			})
@@ -299,10 +381,11 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 }
 
 // A reply acts on its parent's lineage once that lineage is settled, so
-// moving a reply to any time before its parent changes nothing: the result
-// equals the run where each reply directly follows its parent. File order
-// changes nothing either. Openers and unreferenced messages keep their
-// created order, because rule 5 is defined on it. The set holds the #1166
+// moving a reply that opens nothing to any time before its parent changes
+// nothing: the result equals the run where each reply directly follows its
+// parent. File order changes nothing either. Only such effect-preserving
+// moves are claimed; a clock change that moves an opening or a rule 5 match
+// changes the result and has its own table rows. The set holds the #1166
 // review cases: a skewed decision that visited its unreferenced parent
 // early, two skewed children of one unreferenced parent, an opener whose
 // parent is created later, and a reply closure an unreferenced decision
@@ -385,7 +468,8 @@ type threadOpenMessage struct {
 	refs, labels                 []string // refs name other messages; an unknown name is a missing id
 	replyTo, replyProject        string
 	noInbox, badCreated          bool
-	age                          time.Duration
+	age                          time.Duration // created this long before now
+	at                           time.Duration // created this long after the table's start
 }
 
 // writeThreadOpenMessages writes messages under base with the created time

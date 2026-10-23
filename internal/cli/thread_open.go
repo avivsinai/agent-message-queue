@@ -523,19 +523,31 @@ func (red *obligationReducer) lookup(id string, from *record) *record {
 
 // opensFor lists the recipients a message opens an obligation for, from
 // headers alone. Only an opener kind without a closing label opens. A
-// recipient who already took part in the parent continues the parent's
-// obligation when the message has the kind reply would default to; any
-// other recipient gets an obligation of their own.
+// message in the kind reply would default to continues the parent's
+// obligation for a recipient only when both its sender and that recipient
+// are exact participants of the parent; any other recipient gets an
+// obligation of their own.
 func opensFor(rec *record) []string {
 	msg := rec.entry
 	if !slices.Contains(openerKinds, msg.Kind) || isTerminal(msg) {
 		return nil
 	}
+	var parentParts []participant
+	if p := rec.parent; p != nil && msg.Kind == defaultReplyKind(p.entry.Kind) {
+		parentParts = append(parentParts, p.sender)
+		for _, handle := range p.entry.To {
+			if r, ok := recipientOf(p, handle); ok {
+				parentParts = append(parentParts, r)
+			}
+		}
+	}
+	continues := slices.Contains(parentParts, rec.sender)
 	opens := []string{}
 	for _, handle := range slices.Compact(slices.Sorted(slices.Values(msg.To))) {
-		if p := rec.parent; p != nil && msg.Kind == defaultReplyKind(p.entry.Kind) &&
-			(handle == p.entry.From || slices.Contains(p.entry.To, handle)) {
-			continue
+		if continues {
+			if r, ok := recipientOf(rec, handle); ok && slices.Contains(parentParts, r) {
+				continue
+			}
 		}
 		opens = append(opens, handle)
 	}
