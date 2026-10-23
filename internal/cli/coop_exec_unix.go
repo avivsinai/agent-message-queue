@@ -922,9 +922,11 @@ func (c *coopExecRun) execAgent() error {
 	switch {
 	case c.managedLaunchNonce != "":
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)
-	case relay:
+	case relay && c.wakeOwned:
 		// agy's prompts show only in its terminal output, so coop exec stays
-		// as its terminal instead of exec'ing it.
+		// as its terminal instead of exec'ing it. Only a launch whose wake
+		// owns the agent's wake keeps the marker: with --no-wake, or beside
+		// another owner's wake, the marker is not this launch's to change.
 		log, _ := openCoopWakeOutput(c.root, c.agentHandle)
 		sink, sinkErr := newAgyDialogSink(c.root, c.agentHandle, log)
 		if sinkErr != nil {

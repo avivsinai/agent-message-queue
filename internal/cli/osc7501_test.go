@@ -40,3 +40,37 @@ func TestAgyStatusHoldsTheDoorbellWhilePermissionIsOpen(t *testing.T) {
 		t.Fatalf("shown %q, want %q", shown, want)
 	}
 }
+
+// #1190 review: the relay deleted .wake.dialog unconditionally when it
+// started, on idle and on exit, so it could remove a live owner's
+// permission hold or a marker that replaced its own. It removes only the
+// exact marker it wrote.
+func TestAgyRelayKeepsMarkersItDidNotWrite(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "agy"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(fsq.AgentBase(root, "agy"), wakeDialogFileName)
+	foreign := []byte(`{"schema":1,"event":"PermissionRequest","opened_at":"x"}` + "\n")
+	if err := os.WriteFile(marker, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := newAgyDialogSink(root, "agy", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.onState("idle", "")
+	if got, _ := os.ReadFile(marker); string(got) != string(foreign) {
+		t.Fatalf("marker after relay start and idle = %q, want the foreign one", got)
+	}
+	sink.onState("blocked", "permission")
+	if err := os.WriteFile(marker, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(marker); string(got) != string(foreign) {
+		t.Fatalf("marker after relay exit = %q, want the one that replaced the relay's", got)
+	}
+}

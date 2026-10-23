@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,12 +65,15 @@ func lookupEnv(env []string, key string) (string, bool) {
 
 // agyDialogSink keeps the wake dialog marker in step with agy's status:
 // blocked:kind=permission and blocked:kind=auth write it, idle, working and
-// done remove one it wrote. Another blocked kind changes nothing and is
-// logged once, so a new kind is seen, never guessed.
+// done remove it. Another blocked kind changes nothing and is logged once,
+// so a new kind is seen, never guessed. The sink removes only the exact
+// marker it wrote: a marker another writer put in its place stays. coop
+// exec creates a sink only when this launch's wake owns the agent's wake.
 type agyDialogSink struct {
 	agentDir *wakeAgentDir
 	log      io.Writer
 	open     string
+	written  []byte
 	logged   map[string]bool
 }
 
@@ -79,10 +83,23 @@ func newAgyDialogSink(root, handle string, log io.Writer) (*agyDialogSink, error
 		return nil, err
 	}
 	sink := &agyDialogSink{agentDir: agentDir, log: log, logged: map[string]bool{}}
-	// A marker a crashed relay left would hold this session.
-	sink.clear()
+	// An agy marker left by an earlier relay of this seat (a crash) would
+	// hold this session; this launch owns the agent's wake, so no other
+	// relay of it runs. Any other marker stays.
+	_ = agentDir.withFD(func(dirfd int) error {
+		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
+			filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
+		var marker wakeDialogMarker
+		if err != nil || !exists || json.Unmarshal(current, &marker) != nil || marker.Event != agyDialogEvent || marker.Harness != "agy" {
+			return nil
+		}
+		return clearWakeDialogMarker(dirfd, agentDir, "")
+	})
 	return sink, nil
 }
+
+// agyDialogEvent marks a dialog marker an agy relay wrote.
+const agyDialogEvent = "OSC7501"
 
 func (s *agyDialogSink) onState(state, kind string) {
 	switch state {
@@ -98,29 +115,37 @@ func (s *agyDialogSink) onState(state, kind string) {
 			return
 		}
 		raw, err := json.Marshal(wakeDialogMarker{
-			Schema: 1, Event: "OSC7501", Harness: "agy", Kind: kind,
-			OpenedAt: time.Now().UTC().Format(time.RFC3339),
+			Schema: 1, Event: agyDialogEvent, Harness: "agy", Kind: kind,
+			OpenedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		if err != nil {
 			return
 		}
+		raw = append(raw, '\n')
 		if s.agentDir.withFD(func(dirfd int) error {
-			return replaceWakeDialogMarkerAt(dirfd, s.agentDir, append(raw, '\n'))
+			return replaceWakeDialogMarkerAt(dirfd, s.agentDir, raw)
 		}) == nil {
-			s.open = kind
+			s.open, s.written = kind, raw
 		}
 	case "idle", "working", "done":
-		if s.open != "" {
-			s.clear()
-		}
+		s.clear()
 	}
 }
 
+// clear removes the marker only while it is still the one this sink wrote.
 func (s *agyDialogSink) clear() {
+	if s.written == nil {
+		return
+	}
 	_ = s.agentDir.withFD(func(dirfd int) error {
+		current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, "wake dialog marker",
+			filepath.Join(s.agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
+		if err != nil || !exists || !bytes.Equal(current, s.written) {
+			return nil
+		}
 		return clearWakeDialogMarker(dirfd, s.agentDir, "")
 	})
-	s.open = ""
+	s.open, s.written = "", nil
 }
 
 func (s *agyDialogSink) Close() error {
