@@ -111,8 +111,8 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
-	if !owner && (e.targets[targetID] != t || !localDeny(src, rec, t, cmd)) {
-		// A local deny is rechecked on this read: the attachment or the
+	if !owner && (e.targets[targetID] != t || !localAnswer(src, rec, t, cmd)) {
+		// A local answer is rechecked on this read: the attachment or the
 		// interaction may have been replaced since the first.
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")

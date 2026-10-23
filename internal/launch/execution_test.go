@@ -347,8 +347,10 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	fixture := newExecutionFixture(t)
 	nonce := "96969696-9696-4969-8969-969696969696"
 	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	codexHome := t.TempDir()
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
 	raw := codexNotifyTestPayload(testConversationID, ticket.Cwd)
-	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
+	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, raw)
 	if err != nil || result.ConversationID != testConversationID || result.EvidenceRef == "" || result.AlreadyReady {
 		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
 	}
@@ -361,9 +363,23 @@ func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing
 	if _, _, err := ReadEvidence(fixture.root, result.EvidenceRef); err != nil {
 		t.Fatal(err)
 	}
-	second, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, raw)
+	second, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, raw)
 	if err != nil || !second.AlreadyReady || second.EvidenceRef != result.EvidenceRef {
 		t.Fatalf("idempotent notify = %#v, %v", second, err)
+	}
+}
+
+// #1174 review: a CODEX_HOME whose path holds glob syntax, such as
+// "[codex]", must still find the seat's rollout.
+func TestRecordCodexNotifyFindsRolloutUnderGlobSyntaxHome(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "98989898-9898-4989-8989-989898989898"
+	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	codexHome := filepath.Join(t.TempDir(), "[codex]")
+	writeCodexRollout(t, codexHome, testConversationID, ticket.Cwd)
+	result, err := RecordCodexNotify(fixture.root, "codex", fixture.amq, codexHome, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || result.NotTopLevel || result.ConversationID != testConversationID {
+		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
 	}
 }
 

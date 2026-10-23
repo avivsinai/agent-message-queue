@@ -115,7 +115,10 @@ var (
 // change the pin on its own. An empty owner installs a reject-only hook.
 // A marked entry with another command is replaced; the same one is kept.
 func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
-	if pin != (HookPin{}) && !pin.Complete() {
+	switch {
+	case pin.Surface == SurfaceDesktop && !pin.DesktopComplete():
+		return fmt.Errorf("a Desktop pin needs the owner, the agent pubkey and its DM channel, and nothing else: %+v", pin)
+	case pin.Surface != SurfaceDesktop && pin != (HookPin{}) && !pin.Complete():
 		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
 	}
 	return replaceHook(settingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait, pin))
@@ -230,8 +233,12 @@ func PermissionHookPin(home string) HookPin {
 	return pin
 }
 
-// pinFlags are the pin's command line flags, in the order written.
-var pinFlags = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+// pinFlags are the pin's command line flags, in the order written;
+// desktopPinFlags are a Desktop pin's.
+var (
+	pinFlags        = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+	desktopPinFlags = []string{"surface", "owner", "body", "channel"}
+)
 
 func (p *HookPin) field(name string) *string {
 	switch name {
@@ -249,6 +256,8 @@ func (p *HookPin) field(name string) *string {
 		return &p.Channel
 	case "target":
 		return &p.Target
+	case "surface":
+		return &p.Surface
 	}
 	return nil
 }
@@ -554,7 +563,11 @@ func permissionHookCommand(home, bin string, wait time.Duration, pin HookPin) st
 	cmd := permissionHookMarker + "set -- " + shellQuote(approve) + `/*/pin-*; [ ! -e "$1" ] || exec ` +
 		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
 	if pin != (HookPin{}) {
-		for _, name := range pinFlags {
+		flags := pinFlags
+		if pin.Surface == SurfaceDesktop {
+			flags = desktopPinFlags
+		}
+		for _, name := range flags {
 			cmd += " --" + name + " " + shellQuote(*pin.field(name))
 		}
 	}

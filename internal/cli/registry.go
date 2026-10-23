@@ -86,7 +86,7 @@ func init() {
 		{Name: "env", Summary: "Output shell commands to set environment variables", Handler: runEnv},
 		{
 			Name:        "coop",
-			Summary:     "Co-op mode setup (init, exec)",
+			Summary:     "Co-op mode setup (init, exec, hooks)",
 			Description: "Co-op mode for multi-agent collaboration",
 			Examples: []string{
 				"amq coop exec claude",
@@ -97,6 +97,9 @@ func init() {
 			Children: []CommandInfo{
 				{Name: "init", Summary: "Initialize project for co-op mode", Handler: runCoopInit},
 				{Name: "exec", Summary: "Set up co-op mode and exec into an agent", Handler: runCoopExec},
+				{Name: "install-hooks", Summary: "Install the co-op Claude Code hooks for AM_ME sessions", Handler: runCoopInstallHooks},
+				{Name: "uninstall-hooks", Summary: "Remove the co-op Claude Code hooks", Handler: runCoopUninstallHooks},
+				{Name: "hook", Summary: "Claude Code hook receiver: print the co-op preamble", Handler: runCoopHook},
 			},
 		},
 		{

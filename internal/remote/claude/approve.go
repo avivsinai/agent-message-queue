@@ -824,11 +824,14 @@ func livePins(home, sessionID string) []approvalPin {
 // owner and share session. It decides only whether the DM offers allow.
 func allowPinned(home, sessionID string) bool {
 	pin := PermissionHookPin(home)
-	if !pin.Complete() {
+	desktop := pin.DesktopComplete()
+	if !pin.Complete() && !desktop {
 		return false
 	}
 	for _, p := range livePins(home, sessionID) {
-		if p.Owner == pin.Owner && p.Share == pin.Session {
+		// A Desktop pin is served by serve's native pin, which names no
+		// share and no owner: the hook's own pin is the authority.
+		if desktop && !p.Observe && p.Share == "" || !desktop && p.Owner == pin.Owner && p.Share == pin.Session {
 			return true
 		}
 	}
@@ -848,6 +851,9 @@ func ValidOwner(owner string) bool { return ownerHexRe.MatchString(owner) }
 type AllowShare struct {
 	Owner, Body, Channel, Target string
 	Session, RelayURL            string
+	// Desktop is a Buzz Desktop agent's DM: Body is the agent key and
+	// there is no share target.
+	Desktop bool
 }
 
 // AllowCheck is what an allow must prove: the share, the hook's own
@@ -889,7 +895,9 @@ func (c AllowConfig) share(sessionID string) (AllowShare, error) {
 	switch {
 	case err != nil:
 		return sh, err
-	case sh.Owner != c.Owner || !ValidOwner(sh.Body) || sh.Channel == "" || sh.Target == "":
+	case sh.Desktop && (sh.Owner != c.Owner || !ValidOwner(sh.Body) || sh.Channel == "" || sh.Target != ""):
+		return sh, errors.New("the Desktop pin does not name the pinned owner, the agent and its DM channel")
+	case !sh.Desktop && (sh.Owner != c.Owner || !ValidOwner(sh.Body) || sh.Channel == "" || sh.Target == ""):
 		return sh, errors.New("the share does not name the pinned owner, its body, DM channel and target")
 	}
 	return sh, nil
@@ -902,15 +910,31 @@ func (c AllowConfig) share(sessionID string) (AllowShare, error) {
 // match Body. Claude cannot edit the settings file that holds the pin
 // without a prompt, and no file outside the pin changes what an allow must
 // prove.
+//
+// A Desktop pin (Surface SurfaceDesktop) names only the owner, the Buzz
+// Desktop agent's pubkey as Body, and the agent's DM channel with the owner:
+// the agent proves the history and signs a grant, so the hook reads no relay
+// and no key.
 type HookPin struct {
 	Owner, Root, Session         string
 	Relay, Body, Channel, Target string
+	Surface                      string
 }
+
+// SurfaceDesktop marks a pin for the Buzz Desktop agent's DM.
+const SurfaceDesktop = "desktop"
 
 // Complete reports whether the pin names everything an allow needs.
 func (p HookPin) Complete() bool {
 	return ValidOwner(p.Owner) && ValidOwner(p.Body) && filepath.IsAbs(p.Root) &&
 		p.Session != "" && p.Relay != "" && p.Channel != "" && p.Target != ""
+}
+
+// DesktopComplete reports whether the pin is a whole Desktop pin: the owner,
+// a different agent key, the DM channel, and nothing of a relay share.
+func (p HookPin) DesktopComplete() bool {
+	return p.Surface == SurfaceDesktop && ValidOwner(p.Owner) && ValidOwner(p.Body) && p.Owner != p.Body &&
+		p.Channel != "" && p.Root == "" && p.Session == "" && p.Relay == "" && p.Target == ""
 }
 
 // allowFactory builds the AllowConfig for a pin; cmd registers the one

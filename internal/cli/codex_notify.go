@@ -45,7 +45,11 @@ func runCodexNotify(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve codex notify executable: %w", err)
 	}
-	if _, err := launch.RecordCodexNotify(root, handle, amqExecutable, payload); err != nil {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return err
+	}
+	if _, err := launch.RecordCodexNotify(root, handle, amqExecutable, codexHome, payload); err != nil {
 		return err
 	}
 	if err := codexNotifyForward(amqExecutable, payload); err != nil {
