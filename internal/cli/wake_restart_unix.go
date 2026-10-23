@@ -1461,6 +1461,7 @@ func executeWakeRestart(
 		return err
 	}
 	env := setEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumeBootstrap, bootstrap)
+	env = carryWakeStartupHold(env)
 	if err := verifyWakeRestartBoundImagePlatform(bound); err != nil {
 		return fmt.Errorf("%w: verify wake restart image signature: %w", errWakeImageRefused, err)
 	}

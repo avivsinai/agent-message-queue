@@ -162,6 +162,7 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = childEnd.Close()
+	t.Cleanup(func() { wakeStartupHoldFile = nil })
 	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
 	released, err := wakeStartupHoldFromEnv()
 	if err != nil {
@@ -226,4 +227,53 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 		!strings.Contains(hold.Release, "install-dialog-hook --harness codex") {
 		t.Fatalf("startup hold = %#v", hold)
 	}
+}
+
+// #1180 review: a wake restart or self-upgrade during the trust dialog
+// exec'd a successor without the startup hold, which then typed into the
+// dialog. The restart passes the hold on; the successor holds until coop
+// exec releases it.
+func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
+	childEnd, hold, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hold.Close() })
+	fd, err := unix.Dup(int(childEnd.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = childEnd.Close()
+	t.Cleanup(func() { wakeStartupHoldFile = nil })
+	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
+	if _, err := wakeStartupHoldFromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	successorEnv := carryWakeStartupHold(nil)
+	var value string
+	for _, entry := range successorEnv {
+		if v, found := strings.CutPrefix(entry, envWakeStartupHold+"="); found {
+			value = v
+		}
+	}
+	if value == "" {
+		t.Fatalf("restart env %q carries no startup hold", successorEnv)
+	}
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatalf("startup hold fd flags = %#x, %v; it would close at the restart exec", flags, err)
+	}
+	// The successor adopts the same descriptor after exec.
+	t.Setenv(envWakeStartupHold, value)
+	released, err := wakeStartupHoldFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+		t.Fatal("successor released the hold before coop exec did")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = hold.Close()
+	<-released
 }

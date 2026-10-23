@@ -324,13 +324,38 @@ func wakeStartupHoldFromEnv() (released <-chan struct{}, err error) {
 	if file == nil {
 		return nil, fmt.Errorf("%s fd is unavailable", envWakeStartupHold)
 	}
+	// The descriptor stays open for the life of the process, so a restart
+	// can hand it to its successor (carryWakeStartupHold).
+	wakeStartupHoldFile = file
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		_, _ = io.Copy(io.Discard, file)
-		_ = file.Close()
 	}()
 	return done, nil
+}
+
+// wakeStartupHoldFile is the adopted startup hold, kept referenced so its
+// descriptor is never closed or reused while the process runs.
+var wakeStartupHoldFile *os.File
+
+// carryWakeStartupHold passes this wake's startup hold to the successor a
+// wake restart or self-upgrade execs, so a restart during the trust dialog
+// keeps holding input. A hold coop exec already released reads EOF at once
+// in the successor. It returns env unchanged when this wake has no hold.
+func carryWakeStartupHold(env []string) []string {
+	if wakeStartupHoldFile == nil {
+		return env
+	}
+	fd := wakeStartupHoldFile.Fd()
+	flags, err := unix.FcntlInt(fd, unix.F_GETFD, 0)
+	if err != nil {
+		return env
+	}
+	if _, err := unix.FcntlInt(fd, unix.F_SETFD, flags&^unix.FD_CLOEXEC); err != nil {
+		return env
+	}
+	return setEnvVar(unsetEnvVar(env, envWakeStartupHold), envWakeStartupHold, strconv.Itoa(int(fd)))
 }
 
 // withWakeStartupHold reads every dialog as open until released is closed.
