@@ -11,26 +11,27 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 const (
-	ClaudeProvider = "claude"
-	CodexProvider  = "codex"
-	CursorProvider = "cursor-agent"
-	GrokProvider   = "grok"
+	ClaudeProvider = harness.Claude
+	CodexProvider  = harness.Codex
+	CursorProvider = harness.Cursor
+	GrokProvider   = harness.Grok
 )
 
-// ProviderForExecutable maps a configured executable basename to the stable
-// adapter/provider identity. Cursor's current CLI is "agent"; cursor-agent
-// remains a supported legacy executable alias.
+// ProviderForExecutable maps a configured executable to the stable
+// adapter/provider identity, or "" when no built-in adapter serves it. The
+// harness table decides the identity (Cursor's current CLI is "agent";
+// cursor-agent remains a supported legacy alias); harnesses without an
+// adapter, such as pi and agy, stay "".
 func ProviderForExecutable(executable string) string {
-	base := strings.ToLower(filepath.Base(executable))
-	base = strings.TrimSuffix(base, ".exe")
-	switch base {
-	case ClaudeProvider, CodexProvider, GrokProvider:
-		return base
-	case "agent", CursorProvider:
-		return CursorProvider
+	facts, _ := harness.ForExecutable(executable)
+	switch facts.Name {
+	case ClaudeProvider, CodexProvider, CursorProvider, GrokProvider:
+		return facts.Name
 	default:
 		return ""
 	}
