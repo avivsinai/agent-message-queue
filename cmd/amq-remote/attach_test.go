@@ -23,6 +23,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -838,5 +839,65 @@ func TestMailboxAttachRecordsTheHarness(t *testing.T) {
 	attachMailboxAs(t, without)
 	if _, err := os.Lstat(filepath.Join(without, "agents", "claude")); !os.IsNotExist(err) {
 		t.Fatalf("attach created a mailbox: %v", err)
+	}
+}
+
+// Review of the identity-harness branch (P2): the native attach writer had no
+// row. attach --self --native records the attached session's harness in the
+// handle's existing mailbox of the session's root.
+func TestNativeAttachRecordsTheHarness(t *testing.T) {
+	tmp, err := os.MkdirTemp("", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	root, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_ME", "claude")
+	for _, k := range []string{"AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("pi:s1", "e_1"))
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, ep, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
+	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	var stderr bytes.Buffer
+	if code, err := attach([]string{"--self", "--native", "--json"}, io.Discard, &stderr); code != 0 || err != nil {
+		t.Fatalf("attach --native: code=%d err=%v stderr=%q", code, err, stderr.String())
+	}
+	rec, err := agentidentity.Read(root, "claude")
+	if err != nil || rec.Harness != "pi" {
+		t.Fatalf("record = %+v err=%v stderr=%q, want harness pi", rec, err, stderr.String())
 	}
 }
