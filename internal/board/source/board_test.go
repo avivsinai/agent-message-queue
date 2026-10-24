@@ -231,7 +231,7 @@ func TestBoardSourceDefects(t *testing.T) {
 	replace := func(old, new string) func(string) string {
 		return func(s string) string {
 			if !strings.Contains(s, old) {
-				t.Fatalf("fixture lacks %q", old)
+				panic("fixture lacks " + old)
 			}
 			return strings.Replace(s, old, new, 1)
 		}
