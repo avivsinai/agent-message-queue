@@ -11,7 +11,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,27 +168,32 @@ func (r execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte,
 	return r.RunLimited(ctx, dir, argv, maxToolOutput)
 }
 
-// RunLimited reads at most maxOut+1 bytes of stdout; past maxOut it kills
-// the command instead of buffering more.
+// pipeCloseDelay bounds how long a finished or cancelled command may keep
+// its output pipes open through a descendant that outlived the kill.
+const pipeCloseDelay = 200 * time.Millisecond
+
+// RunLimited holds at most maxOut bytes of stdout; past maxOut it kills the
+// command instead of buffering more. On cancellation or overflow the whole
+// process group is killed and the pipes close within pipeCloseDelay, so a
+// descendant that holds stdout cannot carry the call past its deadline.
 func (execRunner) RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	stdout := &limitBuffer{max: maxOut, overflow: cancel}
 	var stderr tailBuffer
-	cmd.Stderr = &stderr
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", argv[0], err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("%s: %w", argv[0], err)
-	}
-	out, readErr := io.ReadAll(io.LimitReader(pipe, int64(maxOut)+1))
-	if len(out) > maxOut {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	killProcessGroupOnCancel(cmd)
+	cmd.WaitDelay = pipeCloseDelay
+	err := cmd.Run()
+	if stdout.over {
 		return nil, fmt.Errorf("%s: output over %d bytes", argv[0], maxOut)
 	}
-	if err := cmd.Wait(); err != nil {
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("%s: %w", argv[0], ctxErr)
+		}
 		// Tools print warnings before the error; the last line is the cause.
 		lines := strings.Split(strings.TrimSpace(string(stderr.buf)), "\n")
 		if msg := strings.TrimSpace(lines[len(lines)-1]); msg != "" {
@@ -197,10 +201,28 @@ func (execRunner) RunLimited(ctx context.Context, dir string, argv []string, max
 		}
 		return nil, fmt.Errorf("%s: %w", argv[0], err)
 	}
-	if readErr != nil {
-		return nil, fmt.Errorf("%s: %w", argv[0], readErr)
+	return stdout.buf, nil
+}
+
+// limitBuffer keeps up to max bytes. The first write past max marks it over
+// and calls overflow; later writes are discarded so the writer never blocks.
+type limitBuffer struct {
+	buf      []byte
+	max      int
+	over     bool
+	overflow func()
+}
+
+func (l *limitBuffer) Write(p []byte) (int, error) {
+	if !l.over && len(l.buf)+len(p) > l.max {
+		l.over = true
+		l.buf = nil
+		l.overflow()
 	}
-	return out, nil
+	if !l.over {
+		l.buf = append(l.buf, p...)
+	}
+	return len(p), nil
 }
 
 // tailBuffer keeps the last stderrTail bytes written to it and never fails a
