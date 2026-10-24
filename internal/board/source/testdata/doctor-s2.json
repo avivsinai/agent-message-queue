@@ -1,0 +1,13 @@
+{
+  "checks": [{"name": "Mailboxes", "status": "ok", "message": "1 mailboxes"}],
+  "summary": {"ok": 1, "warn": 0, "error": 0},
+  "ops": {
+    "root": {"path": "/fixture/.agent-mail/s2", "source": "flag"},
+    "agents": [
+      {"handle": "user", "unread_count": 1, "oldest_unread_age_seconds": 1800, "dlq_count": 0, "oldest_dlq_age_seconds": 0, "presence_status": "unknown", "presence_age_seconds": 0}
+    ],
+    "operator_gate": {"open_count": 1, "oldest_gate_age_seconds": 1800},
+    "wake_quarantine": {"count": 0, "newest_age_seconds": null},
+    "hints": []
+  }
+}

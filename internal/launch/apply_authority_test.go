@@ -117,6 +117,17 @@ func TestApplyRejectsAuthorizedIdentityReplacementBeforeCapabilitiesOrCreate(t *
 			},
 		},
 		{
+			// PR #1186 review: Reconcile re-resolved the requested AMQ
+			// executable and ticketed a file replaced after authorization.
+			name: "amq executable",
+			setup: func(t *testing.T, fixture *internalPrepareFixture) func() {
+				path := filepath.Join(fixture.root, "amq")
+				writeExec(t, path, "#!/bin/sh\necho one\n")
+				fixture.request.AMQExecutable = path
+				return replaceExecutableAfterAuthorization(t, path, "#!/bin/sh\necho replacement\n")
+			},
+		},
+		{
 			name: "working directory",
 			setup: func(t *testing.T, fixture *internalPrepareFixture) func() {
 				path := fixture.cwd

@@ -108,12 +108,29 @@ builds:
       post:
         - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-owner-sign" "{{ .Os }}"'
 
+  - id: amq-board
+    main: ./cmd/amq-board
+    binary: amq-board
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - '{{ envOrDefault "AMQ_CODESIGN_SCRIPT" "./scripts/codesign-macos.sh" }} "{{ .Path }}" "io.github.avivsinai.amq-board" "{{ .Os }}"'
+
 archives:
   - id: amq
-    ids: [amq, amq-acp, amq-remote, amq-owner-sign, amq-bridge]
-    # amq-acp, amq-remote, amq-owner-sign and amq-bridge are not built for
-    # Windows, so the Windows zip holds only amq; the Homebrew formula
-    # (macOS and Linux) gets all five.
+    ids: [amq, amq-acp, amq-remote, amq-owner-sign, amq-bridge, amq-board]
+    # amq-acp, amq-remote, amq-owner-sign, amq-bridge and amq-board are not
+    # built for Windows, so the Windows zip holds only amq; the Homebrew
+    # formula (macOS and Linux) gets all six.
     allow_different_binary_count: true
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -148,6 +165,11 @@ archives:
     ids: [amq-owner-sign]
     formats: [tar.gz]
     name_template: "amq-owner-sign_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: amq-board
+    ids: [amq-board]
+    formats: [tar.gz]
+    name_template: "amq-board_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -197,12 +219,14 @@ brews:
       bin.install "amq-remote"
       bin.install "amq-owner-sign"
       bin.install "amq-bridge"
+      bin.install "amq-board"
     test: |
       system "#{bin}/amq", "--version"
       system "#{bin}/amq-acp", "--version"
       system "#{bin}/amq-remote", "version"
       system "#{bin}/amq-owner-sign", "--version"
       system "#{bin}/amq-bridge", "--version"
+      system "#{bin}/amq-board", "--version"
 
 scoops:
   - name: amq

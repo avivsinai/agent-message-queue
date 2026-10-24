@@ -82,6 +82,11 @@ type ReconcileRequest struct {
 	// identities captured by Apply's authorization Prepare. Reconcile checks
 	// these before any adapter capability probe or ticket creation.
 	AuthorizedIdentities map[string]AuthorizedParticipantIdentity
+	// AuthorizedAMQ is the AMQ executable identity Apply authorized. When set,
+	// Reconcile refuses before companion preparation, ticket creation, or
+	// backend Create unless AMQPath still resolves to it, and every ticket
+	// binds exactly that path and identity.
+	AuthorizedAMQ *PreparedExecutable
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
@@ -156,6 +161,10 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		return result, err
 	}
 	request.AMQPath = amqExecutable
+	if !authorizedAMQUnchanged(request.AuthorizedAMQ, amqExecutable) {
+		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "authorized_identity_changed"
+		return result, nil
+	}
 	journal, hasJournal, err := loadOptionalJournal(request.Root)
 	if err != nil {
 		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_unreadable"
@@ -861,6 +870,9 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 		if err != nil {
 			return errors.Join(fmt.Errorf("build execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
 		}
+		if approved := request.AuthorizedAMQ; approved != nil && (ticket.AMQExecutable != approved.Path || ticket.AMQExecutableIdentity != approved.Identity) {
+			return errors.Join(fmt.Errorf("build execution ticket for %s: authorized amq executable identity changed", agent.plan.Handle), removeExecutionTickets(request.Root, lease, written))
+		}
 		if err := WriteExecutionTicket(request.Root, lease, ticket); err != nil {
 			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, append(written, agent)))
 		}
@@ -889,6 +901,16 @@ func resolveLaunchAMQExecutable(value, projectRoot string) (string, error) {
 		return "", err
 	}
 	return resolved, nil
+}
+
+// authorizedAMQUnchanged reports whether resolved is still the authorized AMQ
+// executable. Without an authorization there is nothing to compare.
+func authorizedAMQUnchanged(authorized *PreparedExecutable, resolved string) bool {
+	if authorized == nil {
+		return true
+	}
+	path, identity, err := canonicalFile(resolved)
+	return err == nil && path == authorized.Path && identity == authorized.Identity
 }
 
 func removeExecutionTickets(root *fsq.DeliveryRoot, lease *Lease, planned []plannedAgent) error {

@@ -366,6 +366,11 @@ func HolderOf(pid int) (HolderIdentity, error) {
 	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID, PIDNamespace: pidNamespace()}, nil
 }
 
+// ProcessStartUnix is the wall-clock second the holder's process started.
+func ProcessStartUnix(h HolderIdentity) (int64, error) {
+	return processStartUnix(h.ProcessStart)
+}
+
 // InspectHolder classifies a recorded holder against the live process:
 // LeaseStale only when the holder is proven gone, LeaseValid when it is
 // confirmed, and LeaseUnverified otherwise. A holder with only a pid is stale
