@@ -132,7 +132,7 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 func TestAdvertisedArgumentFormsEqualValidationTables(t *testing.T) {
 	for provider, rules := range map[string]map[string]argumentRule{
 		ClaudeProvider: claudeArgRules(), CodexProvider: codexArgRules(),
-		GrokProvider: grokArgRules(), CursorProvider: cursorArgRules(),
+		GrokProvider: grokArgRules(), CursorProvider: cursorArgRules(), PiProvider: piArgRules(),
 	} {
 		capabilities := ProviderStaticInputCapabilities(provider)
 		if capabilities.GrammarVersion == 0 || !slices.Equal(capabilities.AllowedArgumentForms, slices.Sorted(maps.Keys(rules))) {
@@ -358,6 +358,59 @@ func TestGrokPlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 	if result := adapter.CaptureIdentity(CaptureRequest{}); result.State != CaptureUnsupported || result.Degraded || result.CanPersist() {
 		t.Fatalf("mint capture result = %#v", result)
+	}
+}
+
+// #1153: a pi seat mints its session ID from the launch nonce and resumes the
+// exact ID; pi below the 1.2.0 floor is refused.
+func TestPiPlansMintAndResumeExactSessionID(t *testing.T) {
+	project, executable := testExecutable(t, PiProvider)
+	adapter := NewPiAdapter(executable)
+	adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{
+		"--version": "1.2.0\n", "--help": "  --session-id <id>   Use exact project session ID, creating it if missing\n",
+	}}
+	if capabilities := adapter.Capabilities(context.Background()); !capabilities.Available || !capabilities.Resume || capabilities.ProviderVersion != "1.2.0" {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+	request := planRequest(project, PiProvider)
+	fresh, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh.Argv, []string{executable, "--session-id", fresh.ConversationID}) || !validUUID(fresh.ConversationID) {
+		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	// #1188 review: two pi seats of one launch in one cwd got the same
+	// --session-id (the shared launch nonce), so they shared a pi session.
+	other := request
+	other.Handle = "pi-two"
+	second, err := adapter.PlanFresh(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ConversationID == fresh.ConversationID || second.ConversationID == testLaunchNonce {
+		t.Fatalf("seats share session id %s", second.ConversationID)
+	}
+	// #1188 review: pi reads an argument that begins with @ as a file to
+	// attach, so such initial input is refused.
+	attach := request
+	attach.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: "@secret.txt", SHA256: initialInputDigest("@secret.txt")}
+	if _, err := adapter.PlanFresh(attach); err == nil {
+		t.Fatal("initial input @secret.txt was planned as a pi attachment")
+	}
+	resume, err := adapter.PlanResume(ResumeRequest{
+		PlanRequest:  request,
+		Conversation: ConversationIdentity{Provider: PiProvider, ID: testConversationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resume.Argv, []string{executable, "--session-id", testConversationID}) || resume.DynamicArgv[0].Kind != DynamicArgConversationID {
+		t.Fatalf("resume plan = %#v", resume)
+	}
+	adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{"--version": "1.1.9\n"}}
+	if capabilities := adapter.Capabilities(context.Background()); capabilities.Available || capabilities.Reason != "provider_version_unsupported" {
+		t.Fatalf("old pi capabilities = %#v", capabilities)
 	}
 }
 

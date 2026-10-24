@@ -165,9 +165,12 @@ type RosterEntry struct {
 	Handle      string `json:"handle"`
 	Human       bool   `json:"human"`
 	ValidHandle bool   `json:"valid_handle"`
-	// Counted is false for a mailbox doctor --ops does not report (not in
-	// the session's config.json): its unread and DLQ counts are unknown.
+	// Counted is false when the unread and DLQ counts are unknown: doctor
+	// --ops does not report the mailbox (not in the session's config.json),
+	// or it reports and could not read it, and CountError says why. An
+	// unknown count is never zero.
 	Counted                bool    `json:"counted"`
+	CountError             string  `json:"count_error,omitempty"`
 	UnreadCount            int     `json:"unread_count"`
 	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
 	DLQCount               int     `json:"dlq_count"`

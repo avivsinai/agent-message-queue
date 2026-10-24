@@ -918,6 +918,7 @@ func (c *coopExecRun) execAgent() error {
 	if notice != "" {
 		_ = writeStderr("%s\n", notice)
 	}
+	recordExecIdentity(c.binaryPath, env)
 	var execErr error
 	switch {
 	case c.managedLaunchNonce != "":

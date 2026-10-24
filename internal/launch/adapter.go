@@ -18,6 +18,7 @@ const (
 	CodexProvider  = "codex"
 	CursorProvider = "cursor-agent"
 	GrokProvider   = "grok"
+	PiProvider     = "pi"
 )
 
 // ProviderForExecutable maps a configured executable basename to the stable
@@ -27,7 +28,7 @@ func ProviderForExecutable(executable string) string {
 	base := strings.ToLower(filepath.Base(executable))
 	base = strings.TrimSuffix(base, ".exe")
 	switch base {
-	case ClaudeProvider, CodexProvider, GrokProvider:
+	case ClaudeProvider, CodexProvider, GrokProvider, PiProvider:
 		return base
 	case "agent", CursorProvider:
 		return CursorProvider
@@ -109,6 +110,12 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 			GrammarVersion: 1, VerifiedProviderVersion: cursorCaptureVersion,
 			AllowedArgumentForms: argumentForms(cursorArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
 			InitialInputKinds: []InitialInputKind{},
+		}
+	case PiProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: piVerifiedVersion,
+			AllowedArgumentForms: argumentForms(piArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	default:
 		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
@@ -238,6 +245,8 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		envRules, argRules, bypassAllowed = cursorEnvRules(), cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		envRules, argRules, bypassAllowed = grokEnvRules(), grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		envRules, argRules, bypassAllowed = piEnvRules(), piArgRules(), piBypassArgs()
 	default:
 		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
 	}
@@ -302,6 +311,8 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 		argRules, bypassAllowed = cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		argRules, bypassAllowed = grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		argRules, bypassAllowed = piArgRules(), piBypassArgs()
 	default:
 		return nil, nil, fmt.Errorf("unknown provider %q", provider)
 	}

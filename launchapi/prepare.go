@@ -100,6 +100,8 @@ func defaultPrepareAdapter(provider, executable string) internallaunch.HarnessAd
 		return internallaunch.NewCursorAdapter(executable)
 	case internallaunch.GrokProvider:
 		return internallaunch.NewGrokAdapter(executable)
+	case internallaunch.PiProvider:
+		return internallaunch.NewPiAdapter(executable)
 	default:
 		return nil
 	}
