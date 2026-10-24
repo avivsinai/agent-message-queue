@@ -416,6 +416,7 @@ func validateStoredWakeRetryUntil(raw string) error {
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
 	waitForRawInputDrained = waitForTTYInputDrain
+	waitForWakeInputQuiet  = waitForTTYInputQuiet
 	rawInjectSleep         = time.Sleep
 )
 
@@ -1692,7 +1693,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
-		if !waitForTTYInputQuiet(cfg) {
+		if !waitForWakeInputQuiet(cfg) {
 			return deliverWakeTransientAttention(cfg, notice.output, nil)
 		}
 	}
@@ -1933,11 +1934,13 @@ func deliverWakeTransientAttention(
 	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
 		return err
 	}
+	// The attempt typed no input whether or not its attention output is
+	// due; the throttle gates only the output.
+	cfg.lastAttemptTransientAttention = true
 	now := cfg.wakeDoorbellNow()
 	if !cfg.doorbell.transientAttentionDue(now) {
 		return cause
 	}
-	cfg.lastAttemptTransientAttention = true
 	cfg.doorbell.recordTransientAttentionAttempt(now)
 	if err := emitWakeAttention(cfg, payload); err != nil {
 		return errors.Join(cause, err)

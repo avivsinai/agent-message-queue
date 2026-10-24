@@ -152,6 +152,32 @@ func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
 				}
 			},
 		},
+		{
+			// A busy-input deferral types nothing, also when its attention
+			// output is throttled.
+			name: "busy-input deferral with attention throttled then a drain",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				old := waitForWakeInputQuiet
+				t.Cleanup(func() { waitForWakeInputQuiet = old })
+				waitForWakeInputQuiet = func(*wakeConfig) bool { return false }
+				h.cfg.settings.deferWhileInput = true
+				h.cfg.doorbell.recordTransientAttentionAttempt(h.now)
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if len(h.injected) != 0 {
+					t.Fatalf("typed %q while the input was busy", h.injected)
+				}
+				waitForWakeInputQuiet = old
+				h.cfg.settings.deferWhileInput = false
+				h.drain()
+				h.scan(h.cfg)
+				h.send("b", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
