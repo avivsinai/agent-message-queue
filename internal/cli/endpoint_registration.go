@@ -84,6 +84,9 @@ func checkEndpointRegistration(q endpointQueue, role endpointRole, strict, warn 
 			continue
 		}
 		msg := fmt.Sprintf("unregistered %s %q: it is in no roster and no agent has run under it", role, handle)
+		if len(reg.Diagnostics) > 0 {
+			msg = fmt.Sprintf("unregistered %s %q: it is in no roster and its identity record cannot be trusted: %v", role, handle, errors.Join(reg.Diagnostics...))
+		}
 		if strict {
 			return errors.New(msg)
 		}

@@ -202,7 +202,7 @@ func TestInventoryRefusesSymlinkedAgentsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scopes, err := inventoryProject(base)
+	scopes, err := inventoryProject(base, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -257,6 +257,32 @@ func TestDoctorOpsReportsEveryMailbox(t *testing.T) {
 	if mailboxes["claude"] != "declared" || mailboxes["reviewer"] != "unregistered" {
 		t.Fatalf("doctor mailboxes = %v", mailboxes)
 	}
+
+	// Codex NO-GO P2 on PR #1196: doctor mailboxes kept only the status and
+	// dropped the classifier's diagnostic for a corrupt identity record.
+	writeTestIdentity(t, collab, "broken", "{")
+	out, err = captureEnvStdout(t, func() error { return runDoctor([]string{"--root", collab, "--json"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain struct {
+		Mailboxes []map[string]any `json:"mailboxes"`
+	}
+	if err := json.Unmarshal([]byte(out), &plain); err != nil {
+		t.Fatalf("doctor json: %v: %s", err, out)
+	}
+	found := false
+	for _, mailbox := range plain.Mailboxes {
+		if mailbox["handle"] != "broken" {
+			continue
+		}
+		diagnostics, _ := mailbox["registration_diagnostics"].([]any)
+		found = mailbox["registration_status"] == "unregistered" && len(diagnostics) == 1 &&
+			strings.Contains(diagnostics[0].(string), "invalid identity.json")
+	}
+	if !found {
+		t.Fatalf("doctor mailboxes = %v, want broken unregistered with its identity diagnostic", plain.Mailboxes)
+	}
 }
 
 // send and reply share one endpoint policy: base and session rosters unite,
@@ -314,5 +340,27 @@ func TestSendReplyEndpointRegistration(t *testing.T) {
 		if !result.Routable || result.Registration != want {
 			t.Fatalf("route explain %s = routable %v registration %q (%s), want routable %q", handle, result.Routable, result.Registration, result.Error, want)
 		}
+	}
+
+	// Codex NO-GO P2 on PR #1196: a corrupt identity record was described
+	// as "no agent has run under it", and route explain dropped the
+	// classifier's diagnostic.
+	writeTestIdentity(t, feat, "broken", `{"schema":1,"handle":"other","harness":"claude","observed_at":"2026-10-23T06:10:12Z"}`)
+	_, stderr = send("claude", "broken")
+	if !strings.Contains(stderr, `unregistered recipient "broken"`) || !strings.Contains(stderr, "does not match mailbox") || strings.Contains(stderr, "no agent has run") {
+		t.Fatalf("send to a handle with a corrupt identity record: stderr %q", stderr)
+	}
+	route, err := json.Marshal(explainRoute(routeExplainOptions{To: "broken", FromRoot: feat, Me: "claude"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var explained map[string]any
+	if err := json.Unmarshal(route, &explained); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, _ := explained["registration_diagnostics"].([]any)
+	if explained["routable"] != true || explained["registration"] != "unregistered" || len(diagnostics) != 1 ||
+		!strings.Contains(diagnostics[0].(string), "does not match mailbox") {
+		t.Fatalf("route explain broken = %s, want routable, unregistered, and the identity diagnostic", route)
 	}
 }

@@ -71,9 +71,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		return finish()
 	}
-	if detail := amqRouteDetail(c.root, *me); detail != "" {
-		fail("amq_route", *me, detail, "run `amq-remote serve` once so it registers this handle in config.json")
-	}
+	doctorAMQRoute(c.root, *me, fail, note)
 	var sessions []protocol.Session
 	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
 	switch {
@@ -383,20 +381,30 @@ func failDamagedRows(fail func(boundary, subject, detail, remedy string), stateD
 	}
 }
 
-// amqRouteDetail reports why senders see the endpoint handle as
-// unregistered. serve registers that handle in config.json; an empty result
-// means a roster of the root or of its base declares it, or an agent left an
-// identity record under it.
-func amqRouteDetail(root, handle string) string {
+// doctorAMQRoute reports how senders see the endpoint handle. serve
+// registers that handle in config.json. A handle no readable roster declares
+// fails: unregistered, or known only from its identity record while a roster
+// cannot be read, senders are warned and --strict sends refuse. A declared
+// handle whose registration still has diagnostics (an invalid identity
+// record) routes, so each diagnostic is a note.
+func doctorAMQRoute(root, handle string, fail, note func(boundary, subject, detail, remedy string)) {
 	status, diagnostics := amqcli.AgentRegistration(root, handle)
-	if status != "unregistered" {
-		return ""
+	const remedy = "run `amq-remote serve` once so it registers this handle in config.json"
+	switch {
+	case status == "unregistered":
+		detail := fmt.Sprintf("handle %q is unregistered: no roster of this root or its base lists it and its mailbox has no valid identity record, so senders are warned and --strict sends refuse", handle)
+		if len(diagnostics) > 0 {
+			detail += " (" + strings.Join(diagnostics, "; ") + ")"
+		}
+		fail("amq_route", handle, detail, remedy)
+	case status != "declared" && len(diagnostics) > 0:
+		fail("amq_route", handle, fmt.Sprintf("handle %q is %s, but no readable roster declares it, so senders cannot classify it and --strict sends refuse (%s)", handle, status, strings.Join(diagnostics, "; ")),
+			"repair the roster named above, then "+remedy)
+	default:
+		for _, diagnostic := range diagnostics {
+			note("amq_route", handle, fmt.Sprintf("handle %q is %s; its registration has a diagnostic: %s", handle, status, diagnostic), "")
+		}
 	}
-	detail := fmt.Sprintf("handle %q is unregistered: no roster of this root or its base lists it and its mailbox has no identity record, so senders are warned and --strict sends refuse", handle)
-	if len(diagnostics) > 0 {
-		detail += " (" + strings.Join(diagnostics, "; ") + ")"
-	}
-	return detail
 }
 
 // boundaryFailure is one broken boundary doctor names, with what to do.
