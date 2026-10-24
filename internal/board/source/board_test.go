@@ -20,6 +20,8 @@ type fakeRunner struct {
 	t       *testing.T
 	outputs map[string]string // argv joined by spaces -> testdata file
 	failAMQ bool
+	edit    map[string]func(string) string // argv -> rewrite of its payload
+	fail    map[string]error               // argv -> command error
 }
 
 func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, error) {
@@ -27,12 +29,19 @@ func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, err
 		return nil, errors.New("amq: base root not found")
 	}
 	key := strings.Join(argv, " ")
+	if err := f.fail[key]; err != nil {
+		return nil, err
+	}
 	name, ok := f.outputs[key]
 	if !ok {
 		f.t.Errorf("unexpected command: %s", key)
 		return nil, errors.New("unexpected command")
 	}
-	return os.ReadFile(filepath.Join("testdata", name))
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if edit := f.edit[key]; edit != nil && err == nil {
+		data = []byte(edit(string(data)))
+	}
+	return data, err
 }
 
 func outputs(threadOpen string) map[string]string {
@@ -215,6 +224,94 @@ func TestBoardEmptyWaitingNamesCoverageGap(t *testing.T) {
 			t.Errorf("empty state %q lacks %q", waiting.Empty, want)
 		}
 	}
+}
+
+// Regressions from the Codex review of PR #1172: each row is one P2 finding.
+func TestBoardSourceDefects(t *testing.T) {
+	replace := func(old, new string) func(string) string {
+		return func(s string) string {
+			if !strings.Contains(s, old) {
+				t.Fatalf("fixture lacks %q", old)
+			}
+			return strings.Replace(s, old, new, 1)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		edit  map[string]func(string) string
+		fail  map[string]error
+		check func(t *testing.T, m board.Model)
+	}{
+		{
+			// P2 1: an inbox doctor could not read looked empty and counted.
+			name: "unreadable inbox is not counted",
+			edit: map[string]func(string) string{"amq doctor --ops --json --root /fixture/.agent-mail/s1": replace(
+				`{"handle": "alpha", "unread_count": 0,`,
+				`{"handle": "alpha", "unread_count": 0, "unread_count_error": "open inbox/new: permission denied",`)},
+			check: func(t *testing.T, m board.Model) {
+				if s := source_(m, "amq"); s.Status != board.StatusDegraded || !strings.Contains(s.Detail, "permission denied") {
+					t.Errorf("amq source = %s %q", s.Status, s.Detail)
+				}
+				if a, ok := rosterAgent(m, "s1", "alpha"); !ok || a.Counted {
+					t.Errorf("s1/alpha found=%v counted=%v", ok, a.Counted)
+				}
+				var b strings.Builder
+				if err := board.WriteText(&b, m); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(b.String(), "alpha · live · not counted: open inbox/new: permission denied") {
+					t.Errorf("roster text lacks the count error:\n%s", b.String())
+				}
+			},
+		},
+		{
+			// P2 2: a failed amq env left the source healthy with no peers.
+			name: "failed env degrades the source and keeps its data",
+			fail: map[string]error{"amq env --json": errors.New("amq env: config unreadable")},
+			check: func(t *testing.T, m board.Model) {
+				if s := source_(m, "amq"); s.Status != board.StatusDegraded || !strings.Contains(s.Detail, "config unreadable") {
+					t.Errorf("amq source = %s %q", s.Status, s.Detail)
+				}
+				if _, ok := cardsByRef(m)[refT5]; !ok {
+					t.Error("obligation card dropped")
+				}
+			},
+		},
+		{
+			// P2 3: a thread named "$USER" was rendered for shell expansion.
+			name: "source value equal to the user placeholder is quoted",
+			edit: map[string]func(string) string{"amq thread open --all-sessions --json": replace(
+				`"thread": "p2p/alpha__user"`, `"thread": "\"$USER\""`)},
+			check: func(t *testing.T, m board.Model) {
+				cards := cardsByRef(m)
+				if got := actionCommand(cards[refT5], "complete"); !strings.Contains(got, `--thread '"$USER"'`) {
+					t.Errorf("T5 complete = %q", got)
+				}
+				if got := actionCommand(cards["bead:demo-b5"], "claim"); !strings.HasSuffix(got, `--assignee "$USER"`) {
+					t.Errorf("demo-b5 claim = %q", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := runBoard(t, fakeRunner{t: t, outputs: outputs("thread-open.json"), edit: tc.edit, fail: tc.fail}, true)
+			tc.check(t, m)
+		})
+	}
+}
+
+func rosterAgent(m board.Model, session, handle string) (board.RosterAgent, bool) {
+	for _, rs := range m.Roster {
+		if rs.Session != session {
+			continue
+		}
+		for _, a := range append(append([]board.RosterAgent{}, rs.Agents...), rs.Quiet...) {
+			if a.Handle == handle {
+				return a, true
+			}
+		}
+	}
+	return board.RosterAgent{}, false
 }
 
 func hasToken(c board.Card, ref, basis string) bool {
