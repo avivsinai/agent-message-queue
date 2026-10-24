@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,19 +22,7 @@ import (
 // writes a Startup marker before exec, and the wake holds until Codex
 // records the decision in config.toml, with no hook installed.
 func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
-	h := newWakeHoldHarness(t, wakeHoldPolicy{})
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	project := secureTempDirForTest(t)
-	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(project)
-	real, err := filepath.EvalSymlinks(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(codexHome, "config.toml")
+	h, config, real, marker := newCodexTrustDialogHarness(t)
 	// #1180 review: a directory saved as untrusted still opens on Codex's
 	// restricted trust dialog, so it gets the marker too.
 	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
@@ -41,16 +30,9 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", []string{"-s", "read-only"})
-	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatalf("no Startup marker for an untrusted checkout: %v", err)
 	}
-	agentDir, err := openWakeAgentDir(h.root, "codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
 
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)
@@ -68,6 +50,16 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	if len(h.injected) != 0 {
 		t.Fatalf("typed %q after the trust file became unreadable", h.injected)
 	}
+	// PR #1204 Codex review: another terminal drains during the dialog.
+	// That drain follows no doorbell typed after the release, so it does
+	// not prove that Codex accepts input.
+	h.drain()
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q into the trust dialog after another terminal drained", h.injected)
+	}
+	h.send("late", format.PriorityUrgent)
 
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
 	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
@@ -77,6 +69,15 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells after trust was recorded = %d, want 1", got)
+	}
+	// Bead agent-message-queue-vd4.3, live on 0.107.0 without the Codex
+	// hook: the doorbell typed on the trust release reached a Codex whose
+	// composer was not ready yet and was lost; the retries were a bare
+	// Enter into an empty composer. The retry rings the full doorbell.
+	h.advance(wakeDoorbellRetryBase)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("full doorbells on the retry after a trust release = %d, want 1", got)
 	}
 	// The next launch in the trusted checkout removes the leftover marker.
 	clearStaleStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
@@ -101,6 +102,131 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	if len(h.injected) != rang || h.cfg.dialogHold != wakeDialogUnknown {
 		t.Fatalf("aged untrusted hold: injected %q, dialog state %v; want held with attention", h.injected[rang:], h.cfg.dialogHold)
 	}
+}
+
+// PR #1204 Codex review: after a trust release, only a drain that follows
+// a doorbell actually typed into Codex proves that Codex accepts input.
+// Each row ends at a retry that must still type the full doorbell.
+func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, h *wakeHoldHarness)
+	}{
+		{
+			// An inbox file replaced in place is a new message, not a drain.
+			name: "replacement after the release",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells on the trust release = %d, want 1", got)
+				}
+				h.drain()
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for the replaced message = %d, want 1", got)
+				}
+			},
+		},
+		{
+			// A deferred attempt types nothing, so a drain after it proves
+			// nothing.
+			name: "deferred attempt then a drain",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				h.cfg.injectVia = "test-hook"
+				h.cfg.injectViaHook = func(string) (string, error) {
+					return "AMQ_INJECT_PROGRESS=deferred\n", errors.New("exit status 1")
+				}
+				h.send("a", format.PriorityUrgent)
+				if err := notifyNewMessages(h.cfg); !isWakeInjectorDeferred(err) {
+					t.Fatalf("release attempt error = %v, want deferred", err)
+				}
+				h.cfg.injectVia, h.cfg.injectViaHook = "", nil
+				h.drain()
+				h.scan(h.cfg)
+				h.send("b", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
+				}
+			},
+		},
+		{
+			// A busy-input deferral types nothing, also when its attention
+			// output is throttled.
+			name: "busy-input deferral with attention throttled then a drain",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				old := waitForWakeInputQuiet
+				t.Cleanup(func() { waitForWakeInputQuiet = old })
+				waitForWakeInputQuiet = func(*wakeConfig) bool { return false }
+				h.cfg.settings.deferWhileInput = true
+				h.cfg.doorbell.recordTransientAttentionAttempt(h.now)
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if len(h.injected) != 0 {
+					t.Fatalf("typed %q while the input was busy", h.injected)
+				}
+				waitForWakeInputQuiet = old
+				h.cfg.settings.deferWhileInput = false
+				h.drain()
+				h.scan(h.cfg)
+				h.send("b", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, config, real, marker := newCodexTrustDialogHarness(t)
+			writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
+			if _, err := os.Lstat(marker); err != nil {
+				t.Fatalf("no Startup marker for an unrecorded checkout: %v", err)
+			}
+			// Codex records trust, but no SessionStart hook removes the
+			// marker: a trust release.
+			trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
+			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tc.run(t, h)
+			h.advance(wakeDoorbellRetryBase)
+			h.scan(h.cfg)
+			if got := h.rings(); got != 1 {
+				t.Fatalf("full doorbells on the retry = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// newCodexTrustDialogHarness returns a wake harness for a Codex agent in a
+// fresh git checkout, with the dialog sources reading the agent's marker,
+// plus the Codex config.toml path, the checkout's real path, and the
+// marker path.
+func newCodexTrustDialogHarness(t *testing.T) (h *wakeHoldHarness, config, real, marker string) {
+	t.Helper()
+	h = newWakeHoldHarness(t, wakeHoldPolicy{})
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	project := secureTempDirForTest(t)
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	real, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(h.root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir)
+	return h, filepath.Join(codexHome, "config.toml"), real, filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 }
 
 // #1180 review: coop exec wrote or removed the Startup marker before

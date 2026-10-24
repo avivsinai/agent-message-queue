@@ -1,0 +1,19 @@
+[
+  {
+    "id": "demo-g1",
+    "title": "Parser core",
+    "status": "in_progress",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "started_at": "2026-10-21T10:00:00Z",
+    "assignee": "alpha",
+    "external_ref": "gh-15",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

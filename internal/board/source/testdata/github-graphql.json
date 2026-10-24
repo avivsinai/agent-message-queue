@@ -1,0 +1,283 @@
+{
+  "data": {
+    "viewer": {
+      "login": "octo-owner"
+    },
+    "r0": {
+      "pullRequests": {
+        "totalCount": 26,
+        "pageInfo": {
+          "hasNextPage": true
+        },
+        "nodes": [
+          {
+            "number": 11,
+            "title": "Add the relay port flag",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/11",
+            "headRefName": "feat/pr-11",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": []
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 12,
+            "title": "Draft: rework the parser",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/12",
+            "headRefName": "feat/pr-12",
+            "isDraft": true,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": []
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 13,
+            "title": "Rename the cache key",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/13",
+            "headRefName": "feat/pr-13",
+            "isDraft": false,
+            "mergeable": "CONFLICTING",
+            "reviewDecision": "APPROVED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": []
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 14,
+            "title": "Docs for the board",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/14",
+            "headRefName": "feat/pr-14",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 1,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": [
+                {
+                  "requestedReviewer": {
+                    "login": "octo-owner"
+                  }
+                }
+              ]
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 15,
+            "title": "Parser core (demo-g1)",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/15",
+            "headRefName": "feat/demo-g1-parser",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 1,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": [
+                {
+                  "requestedReviewer": {
+                    "login": "octo-reviewer"
+                  }
+                }
+              ]
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 16,
+            "title": "Fix the flaky clock",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/16",
+            "headRefName": "fix/demo-g1-clock",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "updatedAt": "2026-10-22T10:00:00Z",
+            "author": {
+              "login": "octo-agent"
+            },
+            "reviewRequests": {
+              "totalCount": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": []
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "issues": {
+        "totalCount": 2,
+        "pageInfo": {
+          "hasNextPage": false
+        },
+        "nodes": [
+          {
+            "number": 20,
+            "title": "Board ignores deferred beads",
+            "url": "https://github.com/octo-org/demo/issues/20",
+            "updatedAt": "2026-10-21T09:00:00Z",
+            "assignees": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 21,
+            "title": "Windows path quoting",
+            "url": "https://github.com/octo-org/demo/issues/21",
+            "updatedAt": "2026-10-21T09:00:00Z",
+            "assignees": {
+              "nodes": [
+                {
+                  "login": "octo-agent"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "attention": {
+      "issueCount": 2,
+      "pageInfo": {
+        "hasNextPage": false
+      },
+      "nodes": [
+        {
+          "number": 14,
+          "title": "Docs for the board",
+          "url": "https://github.com/octo-org/demo/pull/14",
+          "updatedAt": "2026-10-22T10:00:00Z",
+          "author": {
+            "login": "octo-agent"
+          },
+          "repository": {
+            "nameWithOwner": "octo-org/demo"
+          }
+        },
+        {
+          "number": 40,
+          "title": "Old migration cleanup",
+          "url": "https://github.com/octo-org/demo/pull/40",
+          "updatedAt": "2026-09-01T10:00:00Z",
+          "author": {
+            "login": "octo-agent"
+          },
+          "repository": {
+            "nameWithOwner": "octo-org/demo"
+          }
+        }
+      ]
+    }
+  }
+}

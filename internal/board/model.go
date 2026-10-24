@@ -328,6 +328,11 @@ func cardActions(items []Item, col Column, known map[string]string, sessionPaths
 		}
 	}
 	for _, it := range items {
+		if it.Ref.Kind == RefForge && ForgeType(it) == ForgePullRequest {
+			add(OpenPR(it.Ref))
+		}
+	}
+	for _, it := range items {
 		if it.Ref.Kind != RefBead {
 			continue
 		}

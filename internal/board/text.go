@@ -107,7 +107,7 @@ func WriteText(w io.Writer, m Model) error {
 }
 
 func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]string) {
-	fmt.Fprintf(b, "  * %s\n", clean(c.Title))
+	fmt.Fprintf(b, "  * %s\n", cleanTitle(c.Title))
 	var refs []string
 	for _, it := range c.Items {
 		refs = append(refs, refLabel(it))
@@ -153,6 +153,14 @@ func refLabel(it Item) string {
 	switch it.Ref.Kind {
 	case RefBead:
 		return "bead " + it.Ref.ID
+	case RefForge:
+		for _, e := range it.Evidence {
+			if e.Field == "type" && e.Text != "" {
+				return e.Text
+			}
+		}
+	case RefExternal:
+		return it.Source + " " + strings.TrimPrefix(it.Ref.ID, strings.TrimPrefix(it.Source, "ext:")+":")
 	case RefObligation:
 		kind := ""
 		for _, e := range it.Evidence {
@@ -172,6 +180,10 @@ func tokenLabel(t Token) string {
 		label = "bead " + t.Ref.ID
 	case RefAMQThread:
 		return t.Basis
+	case RefBranch:
+		if i := strings.LastIndexByte(t.Ref.ID, ':'); i >= 0 {
+			label = "branch " + t.Ref.ID[i+1:]
+		}
 	case RefForge:
 		if _, n, ok := strings.Cut(t.Ref.ID, "#"); ok {
 			label = "#" + n
@@ -239,6 +251,23 @@ func chip(a RosterAgent) string {
 		parts = append(parts, fmt.Sprintf("owes %d", a.Obligations))
 	}
 	return strings.Join(parts, " · ")
+}
+
+// cleanTitle bounds source display text without changing the stored title.
+// Every title shares this terminal boundary, regardless of its source.
+func cleanTitle(s string) string {
+	const limit = 160
+	runes := make([]rune, 0, limit)
+	for _, r := range s {
+		if len(runes) == limit {
+			return string(runes[:limit-1]) + "…"
+		}
+		if isControl(r) {
+			r = '?'
+		}
+		runes = append(runes, r)
+	}
+	return string(runes)
 }
 
 // clean makes one data value safe for a terminal line: control characters,

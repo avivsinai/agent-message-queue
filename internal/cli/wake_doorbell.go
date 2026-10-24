@@ -57,6 +57,9 @@ type wakeDoorbellPlan struct {
 	submitOnly    bool
 	contentChange bool
 	progress      bool
+	// drained reports progress in which a cohort member left the inbox; an
+	// in-place replacement alone is progress but not a drain.
+	drained bool
 }
 
 // planHeld is plan with hold-by-priority. holds maps an inbox file name to
@@ -85,6 +88,7 @@ func (state *wakeDoorbellState) planHeld(
 	}
 
 	progress := state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current)
+	drained := progress && wakeCohortDrained(state.cohort, current)
 	contentChange := false
 	if progress {
 		state.reset()
@@ -153,6 +157,7 @@ func (state *wakeDoorbellState) planHeld(
 		submitOnly:    state.presentationConfirmed,
 		contentChange: contentChange,
 		progress:      progress,
+		drained:       drained,
 	}
 }
 
@@ -504,6 +509,19 @@ func wakeCohortExpanded(
 ) bool {
 	for name := range current {
 		if _, exists := cohort[name]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
+// wakeCohortDrained reports whether a cohort member's name left the inbox.
+func wakeCohortDrained(
+	cohort map[string]*wakeFileIdentity,
+	current map[string]os.FileInfo,
+) bool {
+	for name := range cohort {
+		if _, ok := current[name]; !ok {
 			return true
 		}
 	}
