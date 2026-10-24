@@ -17,11 +17,13 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 
+	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -811,5 +813,124 @@ func TestLiveRegisterAppliesAnApproveUpgrade(t *testing.T) {
 				t.Errorf("after the approve upgrade: attachment replaced = %v, pin ran %d times", att != built[0].Attachment, pinned)
 			}
 		})
+	}
+}
+
+// Bead agent-message-queue-t97.4 (Pro finding 7): an attached session's
+// handle stayed unregistered. A mailbox attach records the harness it found
+// in the handle's existing mailbox, and never creates a missing one.
+func TestMailboxAttachRecordsTheHarness(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	withMailbox := filepath.Join(dir, "p", ".agent-mail", "session1")
+	without := filepath.Join(dir, "p", ".agent-mail", "session2")
+	if err := fsq.EnsureAgentDirs(withMailbox, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(without, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attachMailboxAs(t, withMailbox)
+	rec, err := agentidentity.Read(withMailbox, "claude")
+	if err != nil || rec.Harness != "other" {
+		t.Fatalf("record = %+v err=%v, want harness other (no harness detected)", rec, err)
+	}
+	attachMailboxAs(t, without)
+	if _, err := os.Lstat(filepath.Join(without, "agents", "claude")); !os.IsNotExist(err) {
+		t.Fatalf("attach created a mailbox: %v", err)
+	}
+}
+
+// PR #1201 review (Codex P2): the attach writer opened the current root path
+// and wrote identity.json without authenticating that directory against the
+// session pin, so a root replaced after the pin check received the record.
+func TestAttachIdentitySkipsARootReplacedAfterThePinCheck(t *testing.T) {
+	base := filepath.Join(canonicalTempDir(t), ".agent-mail")
+	root := filepath.Join(base, "session1")
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := fsq.StableTreeIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_BASE_ROOT", base)
+	t.Setenv("AM_SESSION", "session1")
+	t.Setenv("AM_ROOT_ID", rootID)
+	t.Setenv("AM_BASE_ROOT_ID", baseID)
+	if err := os.Rename(root, root+".selected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	recordAttachIdentity(io.Discard, root, "claude", "pi")
+	if _, err := os.Lstat(filepath.Join(root, "agents", "claude", "identity.json")); !os.IsNotExist(err) {
+		t.Fatalf("identity.json in the replacement root: %v", err)
+	}
+}
+
+// Review of the identity-harness branch (P2): the native attach writer had no
+// row. attach --self --native records the attached session's harness in the
+// handle's existing mailbox of the session's root.
+func TestNativeAttachRecordsTheHarness(t *testing.T) {
+	tmp, err := os.MkdirTemp("", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	root, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_ME", "claude")
+	for _, k := range []string{"AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("pi:s1", "e_1"))
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, ep, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
+	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	var stderr bytes.Buffer
+	if code, err := attach([]string{"--self", "--native", "--json"}, io.Discard, &stderr); code != 0 || err != nil {
+		t.Fatalf("attach --native: code=%d err=%v stderr=%q", code, err, stderr.String())
+	}
+	rec, err := agentidentity.Read(root, "claude")
+	if err != nil || rec.Harness != "pi" {
+		t.Fatalf("record = %+v err=%v stderr=%q, want harness pi", rec, err, stderr.String())
 	}
 }

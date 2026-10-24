@@ -32,6 +32,41 @@ type Record struct {
 	ObservedAt string `json:"observed_at"`
 }
 
+// New builds the record for one start or attach observed at now.
+func New(handle, harness, wrapper string, now time.Time) Record {
+	return Record{Schema: Schema, Handle: handle, Harness: harness, Wrapper: wrapper, ObservedAt: now.UTC().Format(time.RFC3339Nano)}
+}
+
+// Publish replaces the record in the existing mailbox of rec.Handle below
+// root; the last publication wins. It never creates the mailbox: a missing
+// agents/ or mailbox directory is an error, so a cleaned mailbox stays
+// cleaned. The mailbox directory is pinned before the write, so a mailbox
+// removed or replaced meanwhile never receives it.
+func Publish(root *fsq.DeliveryRoot, rec Record) error {
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	if _, err := Parse(data, rec.Handle); err != nil {
+		return err
+	}
+	if err := fsq.ValidateHandle(rec.Handle); err != nil {
+		return err
+	}
+	agents, err := root.OpenDirectChild("agents")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agents.Close() }()
+	mailbox, err := agents.OpenDirectChild(rec.Handle)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mailbox.Close() }()
+	_, err = mailbox.WriteFileAtomic(".", FileName, append(data, '\n'), 0o600)
+	return err
+}
+
 // Path returns the record path for handle below a delivery root.
 func Path(root, handle string) string {
 	return filepath.Join(root, "agents", handle, FileName)

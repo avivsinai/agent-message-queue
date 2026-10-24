@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -106,6 +108,14 @@ type coopExecRun struct {
 	// managedProvider is the managed launch ticket's provider: the harness
 	// a wrapped seat runs behind its wrapper executable.
 	managedProvider string
+	// managedInvocation is the harness and wrapper the managed launch ticket
+	// runs, for the identity record.
+	managedInvocation harness.Invocation
+	// rootID is the identity token of the directory whose mailbox
+	// provisionRoot proved, read from that opened directory, never from a
+	// later lookup of the path; "" (unreadable) matches no directory. The
+	// identity record is written only into that directory.
+	rootID string
 }
 
 func runCoopExec(args []string) error {
@@ -139,6 +149,7 @@ func runCoopExec(args []string) error {
 		defer func() { _ = c.managedGuard.Close() }()
 		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
 			c.managedProvider = ticket.Provider
+			c.managedInvocation = managedInvocation(ticket)
 		}
 	}
 
@@ -575,7 +586,7 @@ func (c *coopExecRun) provisionRoot() error {
 		if !dirExists(requestedRoot) {
 			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		c.root, err = provisionCoopSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
+		c.root, c.rootID, err = provisionCoopExecSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
@@ -656,7 +667,7 @@ func (c *coopExecRun) provisionRoot() error {
 		if !dirExists(requestedRoot) {
 			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		c.root, err = provisionCoopSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
+		c.root, c.rootID, err = provisionCoopExecSession(base, *c.sessionFlag, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
@@ -671,7 +682,7 @@ func (c *coopExecRun) provisionRoot() error {
 		if c.creationDeprecated && !dirExists(requestedRoot) {
 			warnCoopExecCreationDeprecated(&c.warnedCreation)
 		}
-		c.root, err = provisionCoopSession(base, c.defaultSession, []string{c.agentHandle}, c.agentHandle, c.cmdName)
+		c.root, c.rootID, err = provisionCoopExecSession(base, c.defaultSession, []string{c.agentHandle}, c.agentHandle, c.cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
@@ -697,8 +708,9 @@ func (c *coopExecRun) provisionRoot() error {
 			if err := fsq.ValidateExistingMailboxLayout(c.managedGuard.root, c.agentHandle); err != nil {
 				return ActionRequiredError("refusing managed mailbox provisioning: %v", err)
 			}
+			c.rootID = deliveryRootIdentityToken(c.managedGuard.root)
 		} else {
-			if err := provisionSelfMailboxInExistingRoot(c.root, c.agentHandle); err != nil {
+			if c.rootID, err = provisionSelfMailboxInExistingRoot(c.root, c.agentHandle); err != nil {
 				return err
 			}
 		}
@@ -887,6 +899,12 @@ func (c *coopExecRun) execAgent() error {
 		c.agentArgs = pinCodexShellIdentity(c.binaryPath, c.agentArgs, env, recorded)
 	}
 
+	invocation := c.managedInvocation
+	if invocation.Harness == "" {
+		invocation = harness.ResolveInvocation(c.binaryPath, c.agentArgs)
+	}
+	publishAgentIdentity(c.root, c.rootID, c.agentHandle, invocation)
+
 	// Build argv: command name + agent args.
 	argv := append([]string{c.cmdName}, c.agentArgs...)
 
@@ -1027,24 +1045,24 @@ func (guard *managedExecutionGuard) Close() error {
 // pre-existing root, refusing trees that are not queues. The pinned
 // capability opened for classification is retained through the writes, so the
 // lexical root cannot be aliased between validation and provisioning.
-func provisionSelfMailboxInExistingRoot(root, agentHandle string) error {
+func provisionSelfMailboxInExistingRoot(root, agentHandle string) (string, error) {
 	identity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
-		return fmt.Errorf("inspect root %q: %w", root, err)
+		return "", fmt.Errorf("inspect root %q: %w", root, err)
 	}
 	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
 	if err != nil {
-		return fmt.Errorf("open root %q: %w", root, err)
+		return "", fmt.Errorf("open root %q: %w", root, err)
 	}
 	defer func() { _ = deliveryRoot.Close() }()
 
 	state, err := deliveryRoot.ClassifyLayout()
 	if err != nil {
-		return fmt.Errorf("refusing to provision in %q: %w", root, err)
+		return "", fmt.Errorf("refusing to provision in %q: %w", root, err)
 	}
 	switch state {
 	case fsq.LayoutForeign:
-		return NotFoundError(
+		return "", NotFoundError(
 			"root %q exists but is not an initialized AMQ queue root (no agents/ directory); "+
 				"point --root at an existing queue, or create one with: amq init --root %s --agents %s",
 			root, shellQuoteArg(root), shellQuoteArg(agentHandle),
@@ -1054,13 +1072,13 @@ func provisionSelfMailboxInExistingRoot(root, agentHandle string) error {
 		// root gets today; initialized roots idempotently gain any missing
 		// top-level directories so a partial tree converges to a valid one.
 		if err := deliveryRoot.EnsureRootDirs(); err != nil {
-			return fmt.Errorf("failed to ensure root layout at %q: %w", root, err)
+			return "", fmt.Errorf("failed to ensure root layout at %q: %w", root, err)
 		}
 	}
 	if err := deliveryRoot.EnsureAgentDirs(agentHandle); err != nil {
-		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+		return "", fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
 	}
-	return nil
+	return deliveryRootIdentityToken(deliveryRoot), nil
 }
 
 func exactCoopWakeHelperClaim(
@@ -1654,4 +1672,32 @@ func splitDashDash(args []string) ([]string, []string) {
 		}
 	}
 	return args, nil
+}
+
+// publishAgentIdentity records which harness is about to run as handle in the
+// handle's existing mailbox below root, so other agents see the handle as
+// observed. rootID is the root's identity token captured when the root was
+// selected; the record is written only through a capability whose directory
+// still has that identity, so a root replaced after selection never receives
+// it. It is discovery metadata only; a failure warns and never stops the
+// start.
+func publishAgentIdentity(root, rootID, handle string, invocation harness.Invocation) {
+	err := func() error {
+		identity, err := fsq.SnapshotDeliveryRoot(root)
+		if err != nil {
+			return err
+		}
+		deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = deliveryRoot.Close() }()
+		if verifyTreeIdentityInfo(deliveryRoot.FileInfo(), rootID) != TreeRelationSame {
+			return fmt.Errorf("root %s is not the directory selected for this agent", root)
+		}
+		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, invocation.Harness, invocation.Wrapper, time.Now()))
+	}()
+	if err != nil {
+		_ = writeStderr("warning: cannot record that %s runs as %s: %v\n", invocation.Harness, handle, err)
+	}
 }
