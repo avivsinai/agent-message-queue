@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 // Schema names the JSON face.
@@ -51,6 +53,10 @@ type Model struct {
 	Gates       []Gate          `json:"operator_gates"`
 	Roster      []RosterSession `json:"roster"`
 	RosterNote  string          `json:"roster_note,omitempty"`
+	Usage       *UsageView      `json:"usage,omitempty"`
+	// Conversations are the harness sessions AMQ records tie to agents; they
+	// attribute usage to workers.
+	Conversations []Conversation `json:"-"`
 }
 
 // SourceView is one token of the sources strip.
@@ -105,6 +111,10 @@ type RosterAgent struct {
 	Liveness    string  `json:"liveness,omitempty"`
 	Obligations int     `json:"obligations"`
 	Action      *Action `json:"action,omitempty"`
+	Usage       []Usage `json:"usage,omitempty"`
+	// LimitReached is set while the worker's harness account reports a
+	// reached limit. It is a roster flag, never a column.
+	LimitReached *usage.Limit `json:"limit_reached,omitempty"`
 }
 
 var titlePriority = map[string]int{"beads": 0, "github": 1, "amq": 2}
@@ -158,6 +168,7 @@ func Build(in Input) Model {
 			peers[p] = true
 		}
 		m.Gates = append(m.Gates, amqCtx.Gates...)
+		m.Conversations = amqCtx.Conversations
 	}
 	if amqStatus != StatusOK && len(roster) == 0 {
 		m.RosterNote = "AMQ unavailable: roster, liveness, and agent mapping not shown"
@@ -314,6 +325,11 @@ func cardActions(items []Item, col Column, known map[string]string, sessionPaths
 		add(ShowThread(sessionPaths[o.OwnerSession], o.Thread))
 		if it.Owner.Kind == OwnerAgent && it.Owner.Session != "" {
 			add(MessageAgent(it.Owner.Session, it.Owner.Handle))
+		}
+	}
+	for _, it := range items {
+		if it.Ref.Kind == RefForge && ForgeType(it) == ForgePullRequest {
+			add(OpenPR(it.Ref))
 		}
 	}
 	for _, it := range items {

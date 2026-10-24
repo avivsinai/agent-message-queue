@@ -20,7 +20,10 @@ const ThreadOpenSchema = "amq/thread-open/v1"
 
 // AMQ reads the project's queue through the amq CLI only. It never opens a
 // file under an AMQ root.
-type AMQ struct{}
+type AMQ struct {
+	// MaxAge is passed to `amq thread open --max-age` when set.
+	MaxAge string
+}
 
 func (AMQ) Name() string { return "amq" }
 
@@ -57,7 +60,11 @@ func (a AMQ) Read(ctx context.Context, env board.Env) board.Result {
 				c.Doctor[s.Name], c.DoctorErr[s.Name] = env.Run.Run(ctx, env.Dir, []string{"amq", "doctor", "--ops", "--json", "--root", s.Path})
 			}
 		}
-		c.ThreadOpen, c.ThreadErr = env.Run.Run(ctx, env.Dir, []string{"amq", "thread", "open", "--all-sessions", "--json"})
+		argv := []string{"amq", "thread", "open", "--all-sessions", "--json"}
+		if a.MaxAge != "" {
+			argv = append(argv, "--max-age", a.MaxAge)
+		}
+		c.ThreadOpen, c.ThreadErr = env.Run.Run(ctx, env.Dir, argv)
 	}
 	c.ObservedAt = env.Now()
 	return BuildAMQ(c)
@@ -105,6 +112,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 	}
 	for _, s := range sessions {
 		res.AMQ.Sessions = append(res.AMQ.Sessions, s.SessionInfo)
+		res.AMQ.Conversations = append(res.AMQ.Conversations, s.conversations...)
 	}
 
 	who := map[[2]string]whoAgent{}
@@ -172,16 +180,24 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 
 type sessionRow struct {
 	board.SessionInfo
-	agents []string
+	agents        []string
+	conversations []board.Conversation
 }
 
 func parseSessionList(data []byte) ([]sessionRow, error) {
 	var out struct {
 		Sessions []struct {
-			Name   string   `json:"name"`
-			Path   string   `json:"path"`
-			Kind   string   `json:"kind"`
-			Agents []string `json:"agents"`
+			Name          string   `json:"name"`
+			Path          string   `json:"path"`
+			Kind          string   `json:"kind"`
+			Agents        []string `json:"agents"`
+			Conversations []struct {
+				Handle   string `json:"handle"`
+				Provider string `json:"provider"`
+				ID       string `json:"id"`
+				State    string `json:"state"`
+				Source   string `json:"source"`
+			} `json:"conversations"`
 		} `json:"sessions"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -192,7 +208,16 @@ func parseSessionList(data []byte) ([]sessionRow, error) {
 		if s.Kind != "canonical" || fsq.ValidateHandle(s.Name) != nil || s.Path == "" {
 			continue
 		}
-		sessions = append(sessions, sessionRow{SessionInfo: board.SessionInfo{Name: s.Name, Path: s.Path}, agents: s.Agents})
+		row := sessionRow{SessionInfo: board.SessionInfo{Name: s.Name, Path: s.Path}, agents: s.Agents}
+		for _, c := range s.Conversations {
+			if fsq.ValidateHandle(c.Handle) != nil || c.ID == "" {
+				continue
+			}
+			row.conversations = append(row.conversations, board.Conversation{
+				Session: s.Name, Handle: c.Handle, Provider: c.Provider, ID: c.ID, State: c.State, Source: c.Source,
+			})
+		}
+		sessions = append(sessions, row)
 	}
 	return sessions, nil
 }

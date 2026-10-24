@@ -46,6 +46,7 @@ func WriteText(w io.Writer, m Model) error {
 			fmt.Fprintf(&b, "  %s not assessed: %s\n", s.Name, clean(s.Coverage.Detail))
 		}
 	}
+	writeUsage(&b, m)
 
 	live := map[[2]string]string{}
 	for _, rs := range m.Roster {
@@ -81,6 +82,9 @@ func WriteText(w io.Writer, m Model) error {
 		b.WriteString("\n")
 		for _, a := range rs.Agents {
 			fmt.Fprintf(&b, "    %s\n", clean(chip(a)))
+			if u := usageLine(a, now); u != "" {
+				fmt.Fprintf(&b, "      %s\n", u)
+			}
 		}
 		if len(rs.Quiet) > 0 {
 			uncounted := 0
@@ -149,6 +153,14 @@ func refLabel(it Item) string {
 	switch it.Ref.Kind {
 	case RefBead:
 		return "bead " + it.Ref.ID
+	case RefForge:
+		for _, e := range it.Evidence {
+			if e.Field == "type" && e.Text != "" {
+				return e.Text
+			}
+		}
+	case RefExternal:
+		return it.Source + " " + strings.TrimPrefix(it.Ref.ID, strings.TrimPrefix(it.Source, "ext:")+":")
 	case RefObligation:
 		kind := ""
 		for _, e := range it.Evidence {
@@ -168,6 +180,10 @@ func tokenLabel(t Token) string {
 		label = "bead " + t.Ref.ID
 	case RefAMQThread:
 		return t.Basis
+	case RefBranch:
+		if i := strings.LastIndexByte(t.Ref.ID, ':'); i >= 0 {
+			label = "branch " + t.Ref.ID[i+1:]
+		}
 	case RefForge:
 		if _, n, ok := strings.Cut(t.Ref.ID, "#"); ok {
 			label = "#" + n

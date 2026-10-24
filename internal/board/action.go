@@ -135,6 +135,21 @@ func ShowThread(sessionRoot, thread string) (Action, bool) {
 	return newAction("show thread", "amq", "thread", "--root", sessionRoot, "--id", thread, "--include-body"), true
 }
 
+var repoSlugActionRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// OpenPR builds `gh pr view` for a GitHub pull request ref.
+func OpenPR(ref Ref) (Action, bool) {
+	rest, ok := strings.CutPrefix(ref.ID, "github.com/")
+	if ref.Kind != RefForge || !ok {
+		return Action{}, false
+	}
+	repo, n, ok := strings.Cut(rest, "#")
+	if !ok || !repoSlugActionRe.MatchString(repo) || strings.Trim(n, "0123456789") != "" || n == "" {
+		return Action{}, false
+	}
+	return newAction("open PR", "gh", "pr", "view", n, "--repo", repo, "--web"), true
+}
+
 // ShowBead builds `bd show` for an exact member of the bead vocabulary.
 func ShowBead(id string, known map[string]string) (Action, bool) {
 	if _, ok := known[id]; !ok || !beadShapeRe.MatchString(id) {

@@ -1,0 +1,81 @@
+{
+  "schema": "amq/board-provider/v1",
+  "source": "amq",
+  "version": "0.35.2",
+  "status": "ok",
+  "detail": "",
+  "items": [
+    {
+      "ref": {
+        "kind": "pr",
+        "id": "demo/repo#2411"
+      },
+      "title": "Tracker PR",
+      "state": "active",
+      "owner": {
+        "kind": "agent",
+        "handle": "alpha",
+        "display": "alpha"
+      },
+      "waits_on": [],
+      "link_keys": [
+        "bead:demo-g1",
+        "branch:git.example.com/demo/repo:feat/x"
+      ],
+      "evidence": [
+        {
+          "field": "state",
+          "value": "OPEN",
+          "text": "open",
+          "at": "2026-10-22T10:00:00Z",
+          "url": "https://git.example.com/demo/repo/pull/2411"
+        }
+      ],
+      "updated_at": "2026-10-22T10:00:00Z",
+      "structural": true
+    },
+    {
+      "ref": {
+        "kind": "pr",
+        "id": "demo/repo#2412"
+      },
+      "title": "Hostile handle",
+      "state": "active",
+      "owner": {
+        "kind": "agent",
+        "handle": "alpha; touch /tmp/x",
+        "display": "x"
+      },
+      "waits_on": [],
+      "link_keys": [],
+      "evidence": [],
+      "updated_at": "2026-10-22T10:00:00Z",
+      "structural": true
+    },
+    {
+      "ref": {
+        "kind": "pr",
+        "id": "demo/repo#2413"
+      },
+      "title": "Hostile link",
+      "state": "needs_human",
+      "owner": {
+        "kind": "human",
+        "display": "owner"
+      },
+      "waits_on": [],
+      "link_keys": [],
+      "evidence": [
+        {
+          "field": "state",
+          "value": "OPEN",
+          "text": "x",
+          "at": "2026-10-22T10:00:00Z",
+          "url": "javascript:alert(1)"
+        }
+      ],
+      "updated_at": "2026-10-22T10:00:00Z",
+      "structural": true
+    }
+  ]
+}
