@@ -10,81 +10,44 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
-type coopNamedMode int
+type coopNamedMode = harness.NamingMode
 
 const (
-	coopNamedModeOff coopNamedMode = iota
-	coopNamedModeArgv
-	coopNamedModeTUI
-	coopNamedModeUnknown
+	coopNamedModeOff     = harness.NamingOff
+	coopNamedModeArgv    = harness.NamingArgv
+	coopNamedModeTUI     = harness.NamingTUI
+	coopNamedModeUnknown = harness.NamingUnknown
 )
 
-type coopNamedResumeSyntax = launch.ResumeSyntax
-
-const (
-	coopNamedResumeFlags  = launch.ResumeSyntaxFlags
-	coopNamedResumeCodex  = launch.ResumeSyntaxCodex
-	coopNamedResumeCursor = launch.ResumeSyntaxCursor
-)
-
-type coopNamedHarness struct {
-	mode         coopNamedMode
-	resumeSyntax coopNamedResumeSyntax
-	// wakeInjectMode is how the wake types into this harness when the
-	// person chose no mode. Claude Code's and Codex's Ink input coalesces
-	// the Enter with a bracketed-paste end and drops it, so they get raw;
-	// the others keep paste.
-	wakeInjectMode string
-}
-
-var coopNamedHarnesses = map[string]coopNamedHarness{
-	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModeRaw},
-	launch.PiProvider:     {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
-	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex, wakeInjectMode: wakeInjectModeRaw},
-	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
-	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
-	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
-	"agy":                 {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
-}
-
-// coopWakeHarness names the harness binary for the wake's --harness, or ""
-// for a program coop exec does not know.
-func coopWakeHarness(binary string) string {
-	if _, ok := coopNamedHarnessFor(binary); !ok {
-		return ""
+// coopWakeHarness names the harness the wake types into, for its --harness:
+// the harness of the managed launch's provider when there is one, else the
+// binary's harness, or "other" for a program the table does not know, which
+// gets generic wake behavior instead of a guess from the handle.
+func coopWakeHarness(binary, managedProvider string) string {
+	if managedProvider != "" {
+		return launch.HarnessForProvider(managedProvider)
 	}
-	if provider := launch.ProviderForExecutable(binary); provider != "" {
-		return provider
-	}
-	return strings.ToLower(filepath.Base(binary))
+	facts, _ := harness.ForExecutable(binary)
+	return facts.Name
 }
 
 // coopWakeInjectMode is the mode coop exec starts its wake with: the
-// person's choice, else the harness's, else auto, which picks by handle.
-func coopWakeInjectMode(requested, binary string) string {
+// person's choice, else the harness's.
+func coopWakeInjectMode(requested, wakeHarness string) string {
 	if requested != "" && requested != wakeInjectModeAuto {
 		return requested
 	}
-	if harness, ok := coopNamedHarnessFor(binary); ok && harness.wakeInjectMode != "" {
-		return harness.wakeInjectMode
-	}
-	return requested
-}
-
-func coopNamedHarnessFor(binary string) (coopNamedHarness, bool) {
-	harness, ok := coopNamedHarnesses[strings.ToLower(filepath.Base(binary))]
-	return harness, ok
+	return harness.Lookup(wakeHarness).WakeInjectMode
 }
 
 func coopNamedModeFor(binary string) coopNamedMode {
-	if harness, ok := coopNamedHarnessFor(binary); ok {
-		return harness.mode
-	}
-	return coopNamedModeUnknown
+	facts, _ := harness.ForExecutable(binary)
+	return facts.Naming
 }
 
 func agentArgsHasNameFlag(args []string) bool {
@@ -92,14 +55,11 @@ func agentArgsHasNameFlag(args []string) bool {
 }
 
 func agentArgsPreventAutoNameFor(cmdName string, args []string) bool {
-	resumeSyntax := coopNamedResumeFlags
-	if harness, ok := coopNamedHarnessFor(cmdName); ok {
-		resumeSyntax = harness.resumeSyntax
-	}
-	return agentArgsHasNameFlag(args) || agentArgsHaveResume(args, resumeSyntax)
+	facts, _ := harness.ForExecutable(cmdName)
+	return agentArgsHasNameFlag(args) || agentArgsHaveResume(args, facts.Resume)
 }
 
-func agentArgsHaveResume(args []string, syntax coopNamedResumeSyntax) bool {
+func agentArgsHaveResume(args []string, syntax harness.ResumeSyntax) bool {
 	return launch.ArgsHaveResume(args, syntax)
 }
 
@@ -148,8 +108,8 @@ func resolveCoopNamedEnabled(fsFlagVisited bool, flagValue bool) (coopNamedChoic
 }
 
 func coopNamedTUICommand(binaryBase, me string) string {
-	switch strings.ToLower(filepath.Base(binaryBase)) {
-	case "pi":
+	switch facts, _ := harness.ForExecutable(binaryBase); facts.Name {
+	case harness.Pi:
 		return "/name " + me
 	default:
 		return "/rename " + me

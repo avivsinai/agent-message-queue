@@ -103,6 +103,9 @@ type coopExecRun struct {
 	// wakeStartupHold is the parent end of the wake's startup hold; closing
 	// it lets the wake admit input.
 	wakeStartupHold *os.File
+	// managedProvider is the managed launch ticket's provider: the harness
+	// a wrapped seat runs behind its wrapper executable.
+	managedProvider string
 }
 
 func runCoopExec(args []string) error {
@@ -134,6 +137,9 @@ func runCoopExec(args []string) error {
 			return ActionRequiredError("refusing managed execution options before root mutation: %v", err)
 		}
 		defer func() { _ = c.managedGuard.Close() }()
+		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
+			c.managedProvider = ticket.Provider
+		}
 	}
 
 	if err := c.selectRoot(); err != nil {
@@ -218,7 +224,7 @@ func runCoopExec(args []string) error {
 		} else {
 			c.cleanupWakeReady = cleanupReady
 			defer cleanupReady()
-			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, c.binaryPath), coopWakeHarness(c.binaryPath), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
+			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(c.agentHandle, c.root, coopWakeInjectMode(c.wakeInjectMode, coopWakeHarness(c.binaryPath, c.managedProvider)), coopWakeHarness(c.binaryPath, c.managedProvider), c.wakeInjectVia, []string(c.wakeInjectArgFlags), readyPath)...)
 			if wakeLaunchLocator != "" {
 				// Execute the already-running image, but preserve the absolute,
 				// unresolved invocation locator as argv[0] so the child can safely

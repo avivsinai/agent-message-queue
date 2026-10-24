@@ -10,28 +10,41 @@ import (
 // Bead agent-message-queue-vd4.5 (surface audit defect 4): the wake picked
 // raw typing only when the handle contained "claude" or "codex", so
 // `amq coop exec --me reviewer claude` got paste, whose Enter Claude Code
-// drops. coop exec now picks the mode from the harness binary.
+// drops. coop exec now picks the mode from the harness binary. #1187 review:
+// the LF that submits in Codex also keyed on the handle. Bead
+// agent-message-queue-t97.3 (Pro finding 8): an unknown binary still fell
+// back to the handle, so `--me codex-reviewer unknown-cli` was typed into as
+// Codex; and a wrapped managed seat was judged by its wrapper executable.
+// PR #1197 review (Codex P2): the harness name for Cursor was its launch
+// provider name "cursor-agent"; the harness is "cursor" and the stored
+// provider name stays "cursor-agent".
 func TestCoopWakeTypesByHarnessNotHandle(t *testing.T) {
-	for _, tc := range []struct{ binary, requested, want string }{
-		{"/usr/local/bin/claude", wakeInjectModeAuto, wakeInjectModeRaw},
-		{"codex", wakeInjectModeAuto, wakeInjectModeRaw},
-		{"grok", wakeInjectModeAuto, wakeInjectModePaste},
-		{"claude", wakeInjectModePaste, wakeInjectModePaste},
+	for _, tc := range []struct {
+		me, binary, managedProvider, requested string
+		mode, harness, prelude                 string
+		alternateScreen                        bool
+	}{
+		{"reviewer", "/usr/local/bin/claude", "", wakeInjectModeAuto, wakeInjectModeRaw, "claude", "", true},
+		{"x", "/opt/homebrew/bin/codex", "", wakeInjectModeAuto, wakeInjectModeRaw, "codex", "\n", true},
+		{"reviewer", "grok", "", wakeInjectModeAuto, wakeInjectModePaste, "grok", "", false},
+		{"reviewer", "claude", "", wakeInjectModePaste, wakeInjectModePaste, "claude", "", true},
+		{"reviewer", "/opt/bin/AGENT.exe", "", wakeInjectModeAuto, wakeInjectModePaste, "cursor", "", false},
+		{"codex-reviewer", "/usr/local/bin/unknown-cli", "", wakeInjectModeAuto, wakeInjectModePaste, "other", "", false},
+		{"reviewer", "/usr/bin/sandbox-wrapper", "claude", wakeInjectModeAuto, wakeInjectModeRaw, "claude", "", true},
+		{"reviewer", "/usr/bin/sandbox-wrapper", "cursor-agent", wakeInjectModeAuto, wakeInjectModePaste, "cursor", "", false},
 	} {
-		args := buildCoopWakeArgs("reviewer", "/q", coopWakeInjectMode(tc.requested, tc.binary), coopWakeHarness(tc.binary), "", nil, "")
-		at := slices.Index(args, "--inject-mode")
-		if at < 0 || at+1 >= len(args) || args[at+1] != tc.want {
-			t.Fatalf("%s with --wake-inject-mode %s: wake args %q, want --inject-mode %s", tc.binary, tc.requested, args, tc.want)
+		wakeHarness := coopWakeHarness(tc.binary, tc.managedProvider)
+		args := buildCoopWakeArgs(tc.me, "/q", coopWakeInjectMode(tc.requested, wakeHarness), wakeHarness, "", nil, "")
+		mode, harnessFlag := slices.Index(args, "--inject-mode"), slices.Index(args, "--harness")
+		if mode < 0 || harnessFlag < 0 || args[mode+1] != tc.mode || args[harnessFlag+1] != tc.harness {
+			t.Fatalf("%s as %s: wake args %q, want --inject-mode %s --harness %s", tc.binary, tc.me, args, tc.mode, tc.harness)
 		}
-	}
-	// #1187 review: the LF that submits in Codex also keyed on the handle,
-	// so `--me x codex` typed the doorbell without it.
-	args := buildCoopWakeArgs("x", "/q", wakeInjectModeRaw, coopWakeHarness("/opt/homebrew/bin/codex"), "", nil, "")
-	at := slices.Index(args, "--harness")
-	if at < 0 || at+1 >= len(args) {
-		t.Fatalf("codex wake args %q carry no --harness", args)
-	}
-	if got := rawSubmitPrelude(&wakeConfig{me: "x", harness: args[at+1]}); got != "\n" {
-		t.Fatalf("Codex submit prelude for handle x = %q, want LF", got)
+		cfg := &wakeConfig{me: tc.me, harness: args[harnessFlag+1]}
+		if got := rawSubmitPrelude(cfg); got != tc.prelude {
+			t.Fatalf("%s as %s: submit prelude %q, want %q", tc.binary, tc.me, got, tc.prelude)
+		}
+		if got := wakeUsesAlternateScreenTUI(cfg); got != tc.alternateScreen {
+			t.Fatalf("%s as %s: alternate screen %v, want %v", tc.binary, tc.me, got, tc.alternateScreen)
+		}
 	}
 }

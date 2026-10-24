@@ -1946,7 +1946,7 @@ func newWakeStartFlags() *wakeStartFlags {
 	fs.Var(&f.injectArgs, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
 	f.retryUntil = fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
 	f.injectMode = fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
-	f.harness = fs.String("harness", "", "Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing")
+	f.harness = fs.String("harness", "", "Program the wake types into (claude, codex, agy, pi, cursor, grok, or other for generic behavior); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing")
 	f.interruptCmd = fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
 	f.readyFile = fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	f.debug = fs.Bool("debug", false, "Log injection diagnostics to stderr")

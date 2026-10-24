@@ -14,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
@@ -1628,20 +1629,20 @@ func effectiveInjectMode(cfg *wakeConfig) string {
 	return mode
 }
 
-// wakeUsesAlternateScreenTUI reports whether the wake types into Claude Code
-// or Codex, whose Ink composer drops a pasted Enter and owns the screen.
+// wakeUsesAlternateScreenTUI reports whether the wake types into a harness
+// that owns the screen (Claude Code, Codex), whose Ink composer also drops a
+// pasted Enter.
 func wakeUsesAlternateScreenTUI(cfg *wakeConfig) bool {
-	return wakeTypesInto(cfg, launch.ClaudeProvider) || wakeTypesInto(cfg, launch.CodexProvider)
+	if cfg.harness != "" {
+		return harness.Lookup(cfg.harness).AlternateScreen
+	}
+	return wakeHandleNames(cfg, launch.ClaudeProvider) || wakeHandleNames(cfg, launch.CodexProvider)
 }
 
-// wakeTypesInto reports whether the wake types into harness: the one coop
-// exec named, or, for a bare amq wake with no --harness, a handle that
-// contains the harness name.
-func wakeTypesInto(cfg *wakeConfig, harness string) bool {
-	if cfg.harness != "" {
-		return cfg.harness == harness
-	}
-	return strings.Contains(strings.ToLower(cfg.me), harness)
+// wakeHandleNames is the bare amq wake heuristic, used only without
+// --harness: a handle that contains the harness name.
+func wakeHandleNames(cfg *wakeConfig, name string) bool {
+	return strings.Contains(strings.ToLower(cfg.me), name)
 }
 
 func normalizeWakeInjectMode(raw string) (string, error) {
@@ -2173,8 +2174,11 @@ func writePendingWakeInputChunk(
 // sees a lone ESC parses the Escape key, which cancels an active codex turn
 // and leaves the sequence tail as literal composer text.
 func rawSubmitPrelude(cfg *wakeConfig) string {
-	if wakeTypesInto(cfg, launch.CodexProvider) {
-		return "\n"
+	if cfg.harness != "" {
+		return harness.Lookup(cfg.harness).SubmitPrelude
+	}
+	if wakeHandleNames(cfg, launch.CodexProvider) {
+		return harness.Lookup(harness.Codex).SubmitPrelude
 	}
 	return ""
 }
