@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -26,14 +27,15 @@ type agentInventoryScope struct {
 	Declarations agentDeclarations
 	Agents       []inventoryAgent
 	Skipped      []inventorySkip
-	Err          error // agents/ exists but cannot be listed
+	Err          error // agents/ exists but is not a listable local directory
 }
 
 type inventoryAgent struct {
 	Handle       string
 	Registration agentRegistration
-	// MailboxIssues names each required mailbox leaf that is missing or not
-	// a directory; empty means the layout is complete.
+	// MailboxIssues names each mailbox component, parent first, that is
+	// missing, unreadable, a symlink or not a directory; components below one
+	// are not inspected. Empty means the local layout is complete.
 	MailboxIssues []string
 	Presence      *presence.Presence
 	PresenceErr   error // presence.json exists but cannot be read
@@ -59,11 +61,24 @@ func inventoryDeliveryRoot(root, base string) agentInventoryScope {
 			scope.Kind = sessionKindLegacy
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "agents"))
+	agentsDir := filepath.Join(root, "agents")
+	info, err := os.Lstat(agentsDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return scope
+	case err != nil:
+		scope.Err = err
+		return scope
+	case info.Mode()&os.ModeSymlink != 0:
+		scope.Err = fmt.Errorf("%s is a symlink", agentsDir)
+		return scope
+	case !info.IsDir():
+		scope.Err = fmt.Errorf("%s is not a directory", agentsDir)
+		return scope
+	}
+	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			scope.Err = err
-		}
+		scope.Err = err
 		return scope
 	}
 	for _, entry := range entries {
@@ -92,15 +107,31 @@ func inventoryDeliveryRoot(root, base string) agentInventoryScope {
 
 func inventoryMailboxIssues(root, handle string) []string {
 	var issues []string
+	broken := map[string]bool{}
 	for _, leaf := range fsq.RequiredMailboxLeaves() {
-		info, err := os.Lstat(fsq.AgentMailboxPath(root, handle, leaf))
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			issues = append(issues, fmt.Sprintf("%s missing", leaf))
-		case err != nil:
-			issues = append(issues, fmt.Sprintf("%s unreadable: %v", leaf, err))
-		case !info.IsDir():
-			issues = append(issues, fmt.Sprintf("%s is not a directory", leaf))
+		parts := strings.Split(string(leaf), "/")
+		for i := range parts {
+			component := strings.Join(parts[:i+1], "/")
+			if broken[component] {
+				break
+			}
+			info, err := os.Lstat(filepath.Join(fsq.AgentBase(root, handle), filepath.FromSlash(component)))
+			issue := ""
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				issue = fmt.Sprintf("%s missing", component)
+			case err != nil:
+				issue = fmt.Sprintf("%s unreadable: %v", component, err)
+			case info.Mode()&os.ModeSymlink != 0:
+				issue = fmt.Sprintf("%s is a symlink", component)
+			case !info.IsDir():
+				issue = fmt.Sprintf("%s is not a directory", component)
+			}
+			if issue != "" {
+				broken[component] = true
+				issues = append(issues, issue)
+				break
+			}
 		}
 	}
 	return issues
@@ -115,7 +146,7 @@ func inventoryProject(base string) ([]agentInventoryScope, error) {
 		return nil, err
 	}
 	var scopes []agentInventoryScope
-	if dirExists(filepath.Join(base, "agents")) {
+	if _, err := os.Lstat(filepath.Join(base, "agents")); err == nil {
 		scopes = append(scopes, inventoryDeliveryRoot(base, ""))
 	}
 	names := make([]string, 0, len(entries))
