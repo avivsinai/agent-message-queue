@@ -74,25 +74,38 @@ func TestManagedLaunchRecordsTheHarnessOfASymlinkedInstall(t *testing.T) {
 	}
 }
 
-// PR #1201 review (Codex P2): coop exec opened the current root path and
-// wrote identity.json without comparing it with the root it selected, so a
-// root replaced after selection received the record.
+// PR #1201 review (Codex P2, twice): coop exec took the expected root
+// identity from a lookup of the root path, not from the directory it had
+// opened and proven, so a root replaced while its mailbox was provisioned
+// received identity.json.
 func TestCoopExecIdentitySkipsARootReplacedAfterSelection(t *testing.T) {
 	root := filepath.Join(secureTempDirForTest(t), "queue")
-	if err := fsq.EnsureAgentDirs(root, "reviewer"); err != nil {
+	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
-	rootID, err := resolveTreeIdentityToken(root)
-	if err != nil {
-		t.Fatal(err)
+	sentinel := errors.New("exec sentinel")
+	oldExec := coopExecProcess
+	coopExecProcess = func(string, []string, []string) error { return sentinel }
+	t.Cleanup(func() { coopExecProcess = oldExec })
+	// The first directory sync is the mailbox creation inside the opened
+	// root: swap a queue with that mailbox in at the root path there.
+	swapped := false
+	fsq.SetPackageSyncDirFaultForTest(func(string) error {
+		if swapped {
+			return nil
+		}
+		swapped = true
+		if err := os.Rename(root, root+".selected"); err != nil {
+			return err
+		}
+		return fsq.EnsureAgentDirs(root, "reviewer")
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+
+	err := runCoopExec([]string{"--root", root, "--me", "reviewer", "--no-wake", "--named=false", "-y", "sh"})
+	if !errors.Is(err, sentinel) || !swapped {
+		t.Fatalf("coop exec: %v (swapped %v), want exec sentinel after the swap", err, swapped)
 	}
-	if err := os.Rename(root, root+".selected"); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "reviewer"); err != nil {
-		t.Fatal(err)
-	}
-	publishAgentIdentity(root, rootID, "reviewer", harness.Invocation{Harness: harness.Pi})
 	if _, err := os.Lstat(filepath.Join(root, "agents", "reviewer", "identity.json")); !os.IsNotExist(err) {
 		t.Fatalf("identity.json in the replacement root: %v", err)
 	}
