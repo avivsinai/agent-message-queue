@@ -614,13 +614,10 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 	}
 	agents := make([]launch.ProjectAgentConfig, 0, len(selected))
 	for _, selection := range selected {
-		adapterName := selection.Adapter
-		if launch.ProviderForExecutable(adapterName) == launch.CursorProvider {
-			adapterName = launch.CursorProvider
-		}
+		adapterName := setupAdapterIdentity(selection.Adapter)
 		// An existing entry is kept byte-for-byte unless the selection names
 		// a different adapter for its handle.
-		if agent, ok := existingByHandle[selection.Handle]; ok && (!selection.Explicit || agent.Adapter == adapterName) {
+		if agent, ok := existingByHandle[selection.Handle]; ok && (!selection.Explicit || setupAdapterIdentity(agent.Adapter) == adapterName) {
 			agents = append(agents, agent)
 			continue
 		}
@@ -637,6 +634,15 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Handle < agents[j].Handle })
 	return agents, nil
+}
+
+// setupAdapterIdentity returns the adapter that serves an adapter name, as
+// stored or selected: every Cursor executable alias is the Cursor adapter.
+func setupAdapterIdentity(adapter string) string {
+	if launch.ProviderForExecutable(adapter) == launch.CursorProvider {
+		return launch.CursorProvider
+	}
+	return adapter
 }
 
 // setupAgentSelection is one --agents entry. A bare name is both the handle
