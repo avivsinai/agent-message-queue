@@ -308,6 +308,14 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 // mailbox through the pinned child capability. No provisioning write reopens
 // the session through its ambient lexical path.
 func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
+	root, _, err := provisionCoopSessionChild(base, session, agents, nil, execAgent, execCommand, false)
+	return root, err
+}
+
+// provisionCoopExecSession is provisionCoopSession that also returns the
+// identity token of the session directory it provisioned, read from the
+// opened directory itself rather than a later lookup of its path.
+func provisionCoopExecSession(base, session string, agents []string, execAgent, execCommand string) (string, string, error) {
 	return provisionCoopSessionChild(base, session, agents, nil, execAgent, execCommand, false)
 }
 
@@ -334,31 +342,32 @@ func provisionCoopBaseAndSession(base, session string, agents []string) error {
 // becomes the new session's own meta/config.json, so those handles are
 // declared in the session even when the base roster does not list them.
 func provisionNewNamedSession(base, session string, agents, roster []string) (string, error) {
-	return provisionCoopSessionChild(base, session, agents, roster, "", "", true)
+	root, _, err := provisionCoopSessionChild(base, session, agents, roster, "", "", true)
+	return root, err
 }
 
-func provisionCoopSessionChild(base, session string, agents, roster []string, execAgent, execCommand string, exclusive bool) (string, error) {
+func provisionCoopSessionChild(base, session string, agents, roster []string, execAgent, execCommand string, exclusive bool) (string, string, error) {
 	if err := validateSessionName(session); err != nil {
-		return "", err
+		return "", "", err
 	}
 	base, err := absoluteSessionRoot(base)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !dirExists(base) {
-		return "", NotFoundError("base root not found at %s", base)
+		return "", "", NotFoundError("base root not found at %s", base)
 	}
 	identity, err := fsq.SnapshotDeliveryRoot(base)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	baseRoot, err := fsq.OpenDeliveryRoot(base, identity)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = baseRoot.Close() }()
 
-	var result string
+	var result, resultID string
 	provision := func() error {
 		var sessionRoot *fsq.DeliveryRoot
 		if exclusive {
@@ -416,6 +425,7 @@ func provisionCoopSessionChild(base, session string, agents, roster []string, ex
 			}
 		}
 		result = sessionRoot.Base()
+		resultID = deliveryRootIdentityToken(sessionRoot)
 		return nil
 	}
 	if exclusive {
@@ -423,7 +433,7 @@ func provisionCoopSessionChild(base, session string, agents, roster []string, ex
 	} else {
 		err = provision()
 	}
-	return result, err
+	return result, resultID, err
 }
 
 func parseCoopInitAgents(raw string) ([]string, error) {

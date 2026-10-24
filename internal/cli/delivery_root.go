@@ -21,3 +21,13 @@ func snapshotMailboxDeliveryRoot(root string, routed, ignorePin bool) (fsq.Deliv
 	}
 	return identity, nil
 }
+
+// deliveryRootIdentityToken is the identity token of the directory an open
+// capability holds, or "" when it cannot be read; "" matches no directory.
+func deliveryRootIdentityToken(root *fsq.DeliveryRoot) string {
+	token, err := platformTreeIdentityToken("", root.FileInfo())
+	if err != nil {
+		return ""
+	}
+	return token
+}
