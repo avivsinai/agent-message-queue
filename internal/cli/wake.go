@@ -70,7 +70,8 @@ type wakeConfig struct {
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
-	startupInputProven            bool                                         // a doorbell cohort drained, so the harness accepts input
+	startupReleaseAttempted       bool                                         // an input attempt was made after a trust release
+	startupInputProven            bool                                         // a drain followed a post-release attempt, so the harness accepts input
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
@@ -693,7 +694,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				currentPending,
 			)
 		}
-		if cfg.doorbell.phase != wakeDoorbellIdle {
+		if cfg.doorbell.phase != wakeDoorbellIdle && cfg.startupReleaseAttempted {
 			cfg.startupInputProven = true
 		}
 		cfg.doorbell.reset()
@@ -1122,7 +1123,7 @@ func deliverNewMessageNotification(
 	}
 	now := cfg.wakeDoorbellNow()
 	plan := cfg.doorbell.planHeld(now, currentPending, cfg.holds)
-	if plan.progress {
+	if plan.drained && cfg.startupReleaseAttempted {
 		cfg.startupInputProven = true
 	}
 	persistWakeDoorbellStatusBestEffort(cfg)
@@ -1149,7 +1150,9 @@ func deliverNewMessageNotification(
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare
-	// Enter, until a drain proves the harness accepts input.
+	// Enter, until a drain that follows such an attempt proves the harness
+	// accepts input. A drain before the release, such as one from another
+	// terminal, or an inbox file replaced in place proves nothing.
 	startupUnconfirmed := cfg.injectMode != wakeInjectModeNone && !cfg.startupInputProven &&
 		cfg.startupTrustRelease != nil && cfg.startupTrustRelease()
 	if cfg.onNotificationAttemptStart != nil {
@@ -1182,6 +1185,9 @@ func deliverNewMessageNotification(
 			return deliveryErr
 		}
 		if shouldRecordWakeAttempt(deliveryErr) {
+			if startupUnconfirmed {
+				cfg.startupReleaseAttempted = true
+			}
 			if !plan.submitOnly && !startupUnconfirmed &&
 				(!plan.contentChange || !retainedInputPending) &&
 				wakeInputAttemptConfirmed(cfg, deliveryErr) {
