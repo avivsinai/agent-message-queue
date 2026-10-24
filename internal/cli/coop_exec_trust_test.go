@@ -51,6 +51,7 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
 	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir)
 
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)
@@ -77,6 +78,15 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells after trust was recorded = %d, want 1", got)
+	}
+	// Bead agent-message-queue-vd4.3, live on 0.107.0 without the Codex
+	// hook: the doorbell typed on the trust release reached a Codex whose
+	// composer was not ready yet and was lost; the retries were a bare
+	// Enter into an empty composer. The retry rings the full doorbell.
+	h.advance(wakeDoorbellRetryBase)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("full doorbells on the retry after a trust release = %d, want 1", got)
 	}
 	// The next launch in the trusted checkout removes the leftover marker.
 	clearStaleStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)

@@ -69,6 +69,7 @@ type wakeConfig struct {
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
+	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
@@ -1138,6 +1139,12 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold = wakeDialogClosed
 	}
+	// A harness released from its trust dialog by its trust record alone
+	// may not accept input yet, so a write then does not confirm the
+	// doorbell: the retry ladder types the full doorbell again, not a bare
+	// Enter, until the cohort drains.
+	startupUnconfirmed := cfg.injectMode != wakeInjectModeNone &&
+		cfg.startupTrustRelease != nil && cfg.startupTrustRelease()
 	if cfg.onNotificationAttemptStart != nil {
 		cfg.onNotificationAttemptStart()
 	}
@@ -1168,7 +1175,7 @@ func deliverNewMessageNotification(
 			return deliveryErr
 		}
 		if shouldRecordWakeAttempt(deliveryErr) {
-			if !plan.submitOnly &&
+			if !plan.submitOnly && !startupUnconfirmed &&
 				(!plan.contentChange || !retainedInputPending) &&
 				wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.doorbell.confirmPresentation()
