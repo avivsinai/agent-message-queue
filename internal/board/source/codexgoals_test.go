@@ -3,8 +3,10 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,10 +15,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 )
 
-type codexGoalsRunner func([]string) ([]byte, error)
+type codexGoalsRunner func(context.Context, []string) ([]byte, error)
 
-func (r codexGoalsRunner) Run(_ context.Context, _ string, argv []string) ([]byte, error) {
-	return r(argv)
+func (r codexGoalsRunner) Run(ctx context.Context, _ string, argv []string) ([]byte, error) {
+	return r(ctx, argv)
 }
 
 // Slice 5b: one scrubbed store protects state mapping and project payload
@@ -24,10 +26,6 @@ func (r codexGoalsRunner) Run(_ context.Context, _ string, argv []string) ([]byt
 // unknown file versions must not be interpreted as the supported schema.
 func TestCodexGoalsReadVersionedStore(t *testing.T) {
 	db, err := os.ReadFile("testdata/codex-goals_1.sqlite")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := os.ReadFile("testdata/codex-goals.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +59,7 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 			}
 			listing, _ := json.Marshal(map[string]any{"sessions": []any{map[string]any{"name": "s1", "conversations": conversations}}})
 			queries := 0
-			runner := codexGoalsRunner(func(argv []string) ([]byte, error) {
+			runner := codexGoalsRunner(func(ctx context.Context, argv []string) ([]byte, error) {
 				switch argv[0] {
 				case "amq":
 					if argv[1] == "session" {
@@ -86,7 +84,20 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 					if !strings.Contains(query, "SELECT thread_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (") {
 						t.Fatal("query must project named fields for eligible threads")
 					}
-					return rows, nil
+					sqlite, err := exec.LookPath("sqlite3")
+					if err != nil {
+						if errors.Is(err, exec.ErrNotFound) {
+							t.Skip("sqlite3 not found")
+						}
+						t.Fatal(err)
+					}
+					// PR #1202 review: the happy path must execute the actual query,
+					// so a wrong table or column fails against the fixture schema.
+					output, err := exec.CommandContext(ctx, sqlite, argv[1:]...).CombinedOutput()
+					if err != nil {
+						return nil, fmt.Errorf("sqlite3 fixture query: %w: %s", err, output)
+					}
+					return output, nil
 				}
 				return nil, fmt.Errorf("unexpected command %v", argv)
 			})
