@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -69,22 +70,24 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		res := board.Result{Status: board.StatusDegraded, Detail: fmt.Sprintf("%d repos configured; at most %d", len(repos), maxGitHubRepos)}
 		return res
 	}
-	account := ""
-	if out, err := env.Run.Run(ctx, env.Dir, []string{"gh", "config", "get", "user", "-h", "github.com"}); err == nil {
-		account = strings.ToLower(strings.TrimSpace(string(out)))
-	}
-	key := CacheKey{Host: "github.com", Repos: repos, Account: account, Schema: GitHubQuerySchema}
+	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
 	now := env.Now()
-	if g.Cache != nil && !g.Refresh && account != "" {
-		if resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL); ok {
-			return g.Build(resp, repos, fetchedAt, nil)
+	if g.Cache != nil && !g.Refresh {
+		if key.Account = githubAccount(ctx, env); key.Account != "" {
+			if resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL); ok {
+				return g.Build(resp, repos, fetchedAt, nil)
+			}
 		}
 	}
 	out, err := env.Run.Run(ctx, env.Dir, GitHubQueryArgv(repos))
 	if err != nil {
 		return g.Build(nil, repos, now, err)
 	}
+	out, pageErr := githubAttentionPages(ctx, env, repos, out)
 	res := g.Build(out, repos, now, nil)
+	if pageErr != nil && res.Status == board.StatusOK {
+		res.Status, res.Detail = board.StatusDegraded, "review request search: "+errLine(pageErr)
+	}
 	if res.Status == board.StatusOK && g.Cache != nil {
 		key.Account = githubViewer(out)
 		if err := g.Cache.Put(key, now, out); err != nil {
@@ -92,6 +95,23 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		}
 	}
 	return res
+}
+
+// githubAccount is the account a gh call runs as, or "" when it is not
+// known. GH_TOKEN and GITHUB_TOKEN take precedence over the stored login, so
+// with either set the configured user says nothing about whose data a cached
+// entry holds.
+func githubAccount(ctx context.Context, env board.Env) string {
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
+		if os.Getenv(name) != "" {
+			return ""
+		}
+	}
+	out, err := env.Run.Run(ctx, env.Dir, []string{"gh", "config", "get", "user", "-h", "github.com"})
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(string(out)))
 }
 
 var githubRemoteRe = regexp.MustCompile(`^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
@@ -116,8 +136,7 @@ const githubPRFields = `number title body url headRefName isDraft mergeable revi
 // query only as variables.
 func GitHubQueryArgv(repos []string) []string {
 	var vars, aliases strings.Builder
-	argv := []string{"gh", "api", "graphql"}
-	var search []string
+	argv := []string{"gh", "api", "graphql", "--hostname", "github.com"}
 	for i, r := range repos {
 		owner, name, _ := strings.Cut(r, "/")
 		fmt.Fprintf(&vars, ", $owner%d: String!, $name%d: String!", i, i)
@@ -135,18 +154,111 @@ func GitHubQueryArgv(repos []string) []string {
     }
   }`, i, i, i, githubPRFields)
 		argv = append(argv, "-f", fmt.Sprintf("owner%d=%s", i, owner), "-f", fmt.Sprintf("name%d=%s", i, name))
-		search = append(search, "repo:"+r)
 	}
 	query := fmt.Sprintf(`query Board($attention: String!%s) {
   viewer { login }%s
-  attention: search(type: ISSUE, first: 50, query: $attention) {
-    issueCount
-    pageInfo { hasNextPage }
-    nodes { ... on PullRequest { number title url updatedAt author { login } repository { nameWithOwner } } }
+  attention: search(type: ISSUE, first: 50, query: $attention) {%s
   }
-}`, vars.String(), aliases.String())
-	argv = append(argv, "-f", "attention=is:pr is:open review-requested:@me "+strings.Join(search, " "), "-f", "query="+query)
-	return argv
+}`, vars.String(), aliases.String(), githubAttentionFields)
+	return append(argv, "-f", "attention="+githubAttentionQuery(repos), "-f", "query="+query)
+}
+
+const githubAttentionFields = `
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { number title url updatedAt author { login } repository { nameWithOwner } } }`
+
+// maxAttentionPages bounds the review-request search per read, the first
+// page included; what is left over is counted as not fetched.
+const maxAttentionPages = 5
+
+func githubAttentionQuery(repos []string) string {
+	q := "is:pr is:open review-requested:@me"
+	for _, r := range repos {
+		q += " repo:" + r
+	}
+	return q
+}
+
+func githubAttentionPageArgv(repos []string, after string) []string {
+	query := `query BoardAttention($attention: String!, $after: String!) {
+  attention: search(type: ISSUE, first: 50, after: $after, query: $attention) {` + githubAttentionFields + `
+  }
+}`
+	return []string{"gh", "api", "graphql", "--hostname", "github.com",
+		"-f", "attention=" + githubAttentionQuery(repos), "-f", "after=" + after, "-f", "query=" + query}
+}
+
+type ghAttention struct {
+	IssueCount int `json:"issueCount"`
+	PageInfo   struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []json.RawMessage `json:"nodes"`
+}
+
+// githubAttentionPages follows the review-request search of the first
+// response for up to maxAttentionPages pages and returns that response with
+// the nodes of every fetched page and the last page's pageInfo, so the
+// result and its cache entry stay one document. A response it cannot read is
+// returned unchanged for Build to judge. A failed page stops the paging; the
+// pages fetched so far are kept and the error is returned.
+func githubAttentionPages(ctx context.Context, env board.Env, repos []string, resp []byte) ([]byte, error) {
+	var top, data map[string]json.RawMessage
+	if json.Unmarshal(resp, &top) != nil || top["errors"] != nil || json.Unmarshal(top["data"], &data) != nil || data == nil {
+		return resp, nil
+	}
+	var att ghAttention
+	if raw, ok := data["attention"]; !ok || json.Unmarshal(raw, &att) != nil {
+		return resp, nil
+	}
+	if !att.PageInfo.HasNextPage {
+		return resp, nil
+	}
+	var pageErr error
+	for page := 1; page < maxAttentionPages && att.PageInfo.HasNextPage && att.PageInfo.EndCursor != ""; page++ {
+		out, err := env.Run.Run(ctx, env.Dir, githubAttentionPageArgv(repos, att.PageInfo.EndCursor))
+		if err != nil {
+			pageErr = err
+			break
+		}
+		var next struct {
+			Data struct {
+				Attention *ghAttention `json:"attention"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(out, &next); err != nil {
+			pageErr = fmt.Errorf("page %d unreadable: %w", page+1, err)
+			break
+		}
+		if len(next.Errors) > 0 || next.Data.Attention == nil {
+			msg := "no answer"
+			if len(next.Errors) > 0 {
+				msg = next.Errors[0].Message
+			}
+			pageErr = fmt.Errorf("page %d: %s", page+1, msg)
+			break
+		}
+		att.Nodes = append(att.Nodes, next.Data.Attention.Nodes...)
+		att.PageInfo = next.Data.Attention.PageInfo
+		att.IssueCount = next.Data.Attention.IssueCount
+	}
+	var err error
+	if data["attention"], err = json.Marshal(att); err != nil {
+		return resp, err
+	}
+	if top["data"], err = json.Marshal(data); err != nil {
+		return resp, err
+	}
+	merged, err := json.Marshal(top)
+	if err != nil {
+		return resp, err
+	}
+	return merged, pageErr
 }
 
 type ghLogin struct {

@@ -34,7 +34,7 @@ func (e External) Discover(board.Env) (bool, string) { return true, "" }
 
 func (e External) Read(ctx context.Context, env board.Env) board.Result {
 	argv := append([]string{e.Provider.Exec}, e.Provider.Args...)
-	out, err := env.Run.Run(ctx, env.Dir, argv)
+	out, err := env.Run.RunLimited(ctx, env.Dir, argv, maxProviderBytes)
 	return e.Build(out, err, env.Now())
 }
 

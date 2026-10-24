@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,24 +117,89 @@ func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
 }
 
 func TestGitHubCachedReadMakesOneCall(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
 	cache := source.DirCache{Dir: t.TempDir()}
 	calls := map[string]int{}
 	r := fakeRunner{t: t, outputs: githubOutputs(), calls: calls}
 	g := demoGitHub()
 	g.Cache = cache
-
-	// Two runs within the TTL make one GraphQL call; --refresh makes one more.
-	for range 2 {
+	read := func() {
+		t.Helper()
 		if res := g.Read(context.Background(), githubEnv(r)); res.Status != board.StatusOK {
 			t.Fatalf("read: %s %s", res.Status, res.Detail)
 		}
 	}
+
+	// Two runs within the TTL make one GraphQL call; --refresh makes one more.
+	read()
+	read()
 	g.Refresh = true
-	g.Read(context.Background(), githubEnv(r))
+	read()
 	if calls["gh api graphql"] != 2 {
 		t.Errorf("graphql calls = %d, want 2", calls["gh api graphql"])
 	}
 
+	// Codex review of PR #1200: a token in the environment overrides the
+	// configured user, so the configured user's entry must not be served.
+	g.Refresh = false
+	t.Setenv("GH_TOKEN", "fake-token-of-another-account")
+	read()
+	if calls["gh api graphql"] != 3 {
+		t.Errorf("graphql calls with GH_TOKEN set = %d, want 3 (cache not read)", calls["gh api graphql"])
+	}
+}
+
+// Codex review of PR #1200: refs and the cache assume github.com, so the
+// call must not follow GH_HOST or another default host.
+func TestGitHubQueryNamesTheHost(t *testing.T) {
+	argv := source.GitHubQueryArgv([]string{"octo-org/demo"})
+	if got := strings.Join(argv[:5], " "); got != "gh api graphql --hostname github.com" {
+		t.Errorf("argv starts %q", got)
+	}
+}
+
+// Codex review of PR #1200: the review-request search stopped at its first
+// 50 results; it pages up to five times and counts the rest.
+func TestGitHubReviewRequestsPageFiveTimes(t *testing.T) {
+	calls := map[string]int{}
+	out := githubOutputs()
+	edit := map[string]func(string) string{
+		"gh api graphql": func(s string) string {
+			return strings.Replace(s, `"hasNextPage": false
+      },
+      "nodes": [
+        {
+          "number": 14,`, `"hasNextPage": true, "endCursor": "c1"
+      },
+      "nodes": [
+        {
+          "number": 14,`, 1)
+		},
+	}
+	for i := 1; i <= 4; i++ {
+		key := "gh api graphql after=c" + strconv.Itoa(i)
+		out[key] = "github-attention-page.json"
+		edit[key] = func(s string) string {
+			return strings.NewReplacer("NEXT", "c"+strconv.Itoa(i+1), "41", strconv.Itoa(40+i)).Replace(s)
+		}
+	}
+	r := fakeRunner{t: t, outputs: out, edit: edit, calls: calls}
+	m := board.Run(context.Background(), githubEnv(r), []board.Source{demoGitHub()}, board.DefaultConfig(), "test")
+
+	cards := cardsByRef(m)
+	for n := 41; n <= 44; n++ {
+		if c := cards["forge:github.com/octo-org/demo#"+strconv.Itoa(n)]; c.Column != board.ColumnWaiting {
+			t.Errorf("#%d from search page %d = %q, want Waiting on you", n, n-39, c.Column)
+		}
+	}
+	if calls["gh api graphql after=c4"] != 1 || calls["gh api graphql after=c5"] != 0 {
+		t.Errorf("graphql calls = %v, want pages c1..c4 once each and no sixth", calls)
+	}
+	gh := source_(m, "github")
+	if gh.Status != board.StatusOK || !strings.Contains(gh.Coverage.Detail, "254 more review requests not fetched") {
+		t.Errorf("github = %s, coverage %+v", gh.Status, gh.Coverage)
+	}
 }
 
 // Merge review of the board core and GitHub source: a gh response that

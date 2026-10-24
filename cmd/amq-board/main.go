@@ -6,12 +6,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,22 +151,71 @@ func run(args []string) int {
 	return 0
 }
 
+// maxToolOutput bounds the stdout of any one source command. Forge responses
+// are not truncated on the server, so the bound is generous; providers get
+// their own, smaller bound through RunLimited.
+const maxToolOutput = 64 << 20
+
+// stderrTail is how much of a command's stderr is kept: the cause is on the
+// last line.
+const stderrTail = 4 << 10
+
 // execRunner runs argv directly (no shell) with no stdin and returns stdout.
 // A failed command's error carries its stderr.
 type execRunner struct{}
 
-func (execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
+func (r execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
+	return r.RunLimited(ctx, dir, argv, maxToolOutput)
+}
+
+// RunLimited reads at most maxOut+1 bytes of stdout; past maxOut it kills
+// the command instead of buffering more.
+func (execRunner) RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	var stderr tailBuffer
+	cmd.Stderr = &stderr
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", argv[0], err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("%s: %w", argv[0], err)
+	}
+	out, readErr := io.ReadAll(io.LimitReader(pipe, int64(maxOut)+1))
+	if len(out) > maxOut {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("%s: output over %d bytes", argv[0], maxOut)
+	}
+	if err := cmd.Wait(); err != nil {
 		// Tools print warnings before the error; the last line is the cause.
-		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		lines := strings.Split(strings.TrimSpace(string(stderr.buf)), "\n")
 		if msg := strings.TrimSpace(lines[len(lines)-1]); msg != "" {
 			return nil, fmt.Errorf("%s: %s", argv[0], strings.TrimPrefix(msg, argv[0]+": "))
 		}
 		return nil, fmt.Errorf("%s: %w", argv[0], err)
 	}
-	return stdout.Bytes(), nil
+	if readErr != nil {
+		return nil, fmt.Errorf("%s: %w", argv[0], readErr)
+	}
+	return out, nil
+}
+
+// tailBuffer keeps the last stderrTail bytes written to it and never fails a
+// write, so a noisy command neither grows memory nor blocks.
+type tailBuffer struct {
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) > stderrTail {
+		p = p[len(p)-stderrTail:]
+	}
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - stderrTail; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+	}
+	return n, nil
 }

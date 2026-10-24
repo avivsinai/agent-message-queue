@@ -25,13 +25,25 @@ type fakeRunner struct {
 	fail    map[string]error               // argv -> command error
 }
 
+func (f fakeRunner) RunLimited(ctx context.Context, dir string, argv []string, _ int) ([]byte, error) {
+	return f.Run(ctx, dir, argv)
+}
+
 func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, error) {
 	if f.failAMQ && argv[0] == "amq" {
 		return nil, errors.New("amq: base root not found")
 	}
 	key := strings.Join(argv, " ")
-	if strings.HasPrefix(key, "gh api graphql ") {
-		key = "gh api graphql" // the query text is long; one key stands for it
+	// The query text is long; one key stands for it, plus the search cursor
+	// of a follow-up page. Every call must name the host (Codex review of
+	// PR #1200: GH_HOST could redirect the call).
+	if strings.HasPrefix(key, "gh api graphql --hostname github.com ") {
+		key = "gh api graphql"
+		for _, a := range argv {
+			if after, ok := strings.CutPrefix(a, "after="); ok {
+				key += " after=" + after
+			}
+		}
 	}
 	if f.calls != nil {
 		f.calls[key]++
