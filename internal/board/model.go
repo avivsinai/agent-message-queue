@@ -434,7 +434,7 @@ func buildRoster(ctx *AMQContext, roster []RosterEntry, items []Item, cfg Config
 					}
 				}
 			}
-			if live || e.UnreadCount > 0 || e.DLQCount > 0 || a.Obligations > 0 || !e.ValidHandle {
+			if live || e.UnreadCount > 0 || e.DLQCount > 0 || e.CountError != "" || a.Obligations > 0 || !e.ValidHandle {
 				rs.Agents = append(rs.Agents, a)
 			} else {
 				rs.Quiet = append(rs.Quiet, a)

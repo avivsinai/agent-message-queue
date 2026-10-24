@@ -76,18 +76,22 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 	}
 	defer func() { res.Detail = strings.Join(problems, "; ") }()
 
-	if c.EnvErr == nil {
-		var env struct {
-			Project string            `json:"project"`
-			Peers   map[string]string `json:"peers"`
+	// Project and peers only enrich the rest; without them the read goes on,
+	// degraded, because cross-project answer actions need the peer set.
+	var env struct {
+		Project string            `json:"project"`
+		Peers   map[string]string `json:"peers"`
+	}
+	if c.EnvErr != nil {
+		fail("env failed: %s", errLine(c.EnvErr))
+	} else if err := json.Unmarshal(c.Env, &env); err != nil {
+		fail("env output unreadable: %v", err)
+	} else {
+		res.AMQ.Project = env.Project
+		for p := range env.Peers {
+			res.AMQ.Peers = append(res.AMQ.Peers, p)
 		}
-		if err := json.Unmarshal(c.Env, &env); err == nil {
-			res.AMQ.Project = env.Project
-			for p := range env.Peers {
-				res.AMQ.Peers = append(res.AMQ.Peers, p)
-			}
-			sort.Strings(res.AMQ.Peers)
-		}
+		sort.Strings(res.AMQ.Peers)
 	}
 
 	if c.SessionErr != nil {
@@ -120,6 +124,9 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 			fail("doctor output unreadable for session %s: %v", s.Name, err)
 		} else {
 			for _, e := range entries {
+				if e.CountError != "" {
+					fail("doctor could not count %s/%s: %s", s.Name, e.Handle, e.CountError)
+				}
 				counted[e.Handle] = e
 			}
 			if gate != nil && gate.OpenCount > 0 {
@@ -240,8 +247,10 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 			Agents []struct {
 				Handle                 string  `json:"handle"`
 				UnreadCount            int     `json:"unread_count"`
+				UnreadCountError       string  `json:"unread_count_error"`
 				OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
 				DLQCount               int     `json:"dlq_count"`
+				DLQCountError          string  `json:"dlq_count_error"`
 				PresenceStatus         string  `json:"presence_status"`
 				PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 				PresenceSource         string  `json:"presence_source"`
@@ -261,12 +270,21 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 	}
 	var entries []board.RosterEntry
 	for _, a := range out.Ops.Agents {
+		var countErrs []string
+		if a.UnreadCountError != "" {
+			countErrs = append(countErrs, a.UnreadCountError)
+		}
+		if a.DLQCountError != "" {
+			countErrs = append(countErrs, "dlq: "+a.DLQCountError)
+		}
+		countErr := strings.Join(countErrs, "; ")
 		entries = append(entries, board.RosterEntry{
 			Session:                session,
 			Handle:                 a.Handle,
 			Human:                  a.Handle == reservedHuman,
 			ValidHandle:            fsq.ValidateHandle(a.Handle) == nil,
-			Counted:                true,
+			Counted:                countErr == "",
+			CountError:             countErr,
 			UnreadCount:            a.UnreadCount,
 			OldestUnreadAgeSeconds: a.OldestUnreadAgeSeconds,
 			DLQCount:               a.DLQCount,

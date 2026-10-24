@@ -17,8 +17,8 @@ type Action struct {
 	Command string   `json:"command"`
 }
 
-// userLiteral is the one argv element rendered unquoted: a fixed shell
-// expansion, never data.
+// userLiteral is the fixed shell expansion ClaimBead appends unquoted. It is
+// never data: Quote renders every argv element, this string included, literally.
 const userLiteral = `"$USER"`
 
 const reservedHuman = "user"
@@ -40,12 +40,9 @@ func newAction(label string, argv ...string) Action {
 func Quote(argv []string) string {
 	parts := make([]string, len(argv))
 	for i, a := range argv {
-		switch {
-		case a == userLiteral:
+		if shellSafeRe.MatchString(a) {
 			parts[i] = a
-		case shellSafeRe.MatchString(a):
-			parts[i] = a
-		default:
+		} else {
 			parts[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
 	}
@@ -151,5 +148,6 @@ func ClaimBead(id string, known map[string]string) (Action, bool) {
 	if _, ok := known[id]; !ok || !beadShapeRe.MatchString(id) {
 		return Action{}, false
 	}
-	return newAction("claim bead", "bd", "update", id, "--assignee", userLiteral), true
+	argv := []string{"bd", "update", id, "--assignee"}
+	return Action{Label: "claim bead", Argv: append(argv, userLiteral), Command: Quote(argv) + " " + userLiteral}, true
 }

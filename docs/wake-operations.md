@@ -232,6 +232,20 @@ marker), entries disabled in `/hooks`, and entries whose stored
 user `config.toml` only; a project or profile layer that turns hooks off is
 not seen.
 
+## Dialog guard (pi prompts)
+
+pi asks "Trust project folder?" before a session starts in a folder with
+project resources, and extensions open prompts (`confirm`, `select`,
+`input`, `editor`, custom). The AMQ pi extension
+(`integrations/pi/amq-bridge.ts`) writes the `.wake.dialog` marker
+(`harness` `pi`) while either is open: `event` `project_trust` from pi's
+`project_trust` event until the session starts, and `event` `ui_prompt`
+while pi waits on an extension prompt. The wake holds the doorbell with the
+same hold and age rules as above. A session start or shutdown also removes
+the marker. The extension is the only writer of a pi agent's marker and
+removes only a marker it wrote. The guard runs only when the AMQ pi
+extension is loaded.
+
 ## Live settings
 
 A running wake has two kinds of input.

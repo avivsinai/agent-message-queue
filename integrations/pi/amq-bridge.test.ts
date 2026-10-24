@@ -133,6 +133,66 @@ const toolUseMessage = (text: string) => ({
 	},
 });
 
+// Bead agent-message-queue-vd4.6: the wake holds its doorbell while a pi
+// extension prompt is open, so the marker exists exactly while pi waits.
+test("an open extension prompt holds the wake doorbell until it ends", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+	const opened = JSON.parse(fs.readFileSync(marker, "utf8"));
+	assert.equal(opened.event, "ui_prompt");
+	assert.equal(opened.harness, "pi");
+	assert.equal(opened.kind, "confirm");
+	assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
+// #1199 review: pi awaits each extension's handler separately, so the end
+// of prompt A can reach this extension after prompt B started; it must not
+// remove B's marker.
+test("a late end of one prompt keeps the next prompt's hold", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "select" });
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm" });
+	assert.equal(fs.existsSync(marker), true);
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "select" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
+// #1199 review: pi 1.3.0 can deliver a prompt's end to this extension
+// before its start; the late start must not leave a hold nothing clears.
+test("an end delivered before its start leaves no hold", async () => {
+	const h = harness();
+	await h.start();
+	const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+	await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm" });
+	await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
+// Bead agent-message-queue-vd4.6: pi's own "Trust project folder?" prompt
+// opens before the session starts; the marker holds the doorbell until the
+// answer lets the session start.
+test("the startup trust prompt holds the wake doorbell until the session starts", async () => {
+	const h = harness();
+	const agent = path.join(h.dir, "..", "..");
+	fs.mkdirSync(agent, { recursive: true, mode: 0o700 });
+	const marker = path.join(agent, ".wake.dialog");
+	await h.emit("project_trust", { cwd: "/work" });
+	assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).event, "project_trust");
+	await h.start();
+	assert.equal(fs.existsSync(marker), false);
+	await h.done();
+});
+
 // Bead agent-message-queue-611.60: a relay share pins pi's session id, so the
 // reference bridge publishes it in liveness.
 test("the liveness record carries pi's session id", async () => {

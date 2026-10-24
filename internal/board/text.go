@@ -89,7 +89,7 @@ func WriteText(w io.Writer, m Model) error {
 		if len(rs.Quiet) > 0 {
 			uncounted := 0
 			for _, a := range rs.Quiet {
-				if !a.Counted {
+				if !a.Counted && a.CountError == "" {
 					uncounted++
 				}
 			}
@@ -223,7 +223,10 @@ func chip(a RosterAgent) string {
 	} else if a.Liveness != "" {
 		parts = append(parts, a.Liveness)
 	}
-	if !a.Counted {
+	switch {
+	case a.CountError != "":
+		parts = append(parts, "not counted: "+a.CountError)
+	case !a.Counted:
 		parts = append(parts, "unread not counted")
 	}
 	if a.UnreadCount > 0 {
