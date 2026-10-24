@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,27 +28,52 @@ func claudeLineJSON(version, msgID string) string {
 
 func demoEligible(cwd string) bool { return cwd == "/work/demo" }
 
-// An unreadable session file and a skipped over-long line both leave the
-// totals incomplete, so the account must say "at least", never show a
-// complete figure. Regression for Codex review of PR #1203 (P2: unreadable
-// files and skipped lines counted as complete reads).
+// Each way a read can miss data leaves the totals incomplete, so the
+// account must say "at least", never show a complete figure. Regression for
+// Codex review of PR #1203 (P2: unreadable files, unsearchable directories
+// and skipped lines counted as complete reads).
 func TestIncompleteReadsKeepTheAccountPartial(t *testing.T) {
-	home := t.TempDir()
-	dir := filepath.Join(home, "projects", "-work-demo")
-	long := `{"type":"assistant","usage":"` + strings.Repeat("x", maxLine) + `"}`
-	writeFile(t, filepath.Join(dir, "aaaaaaaa-0000-4000-8000-000000000001.jsonl"),
-		claudeLineJSON("2.1.300", "msg_a"), long, claudeLineJSON("2.1.300", "msg_b"))
-	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
-		locked := filepath.Join(dir, "bbbbbbbb-0000-4000-8000-000000000002.jsonl")
-		writeFile(t, locked, claudeLineJSON("2.1.300", "msg_c"))
-		if err := os.Chmod(locked, 0); err != nil {
-			t.Fatal(err)
+	session := func(home string) string {
+		return filepath.Join(home, "projects", "-work-demo", "aaaaaaaa-0000-4000-8000-000000000001.jsonl")
+	}
+	unixOnly := func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs Unix permissions that bind the test user")
 		}
 	}
-	rep := Read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoEligible, nil)
-	if a := rep.Accounts[0]; !a.Partial() {
-		t.Fatalf("account with an unread file and a skipped line is complete: %+v", a)
+	partial := func(t *testing.T, home string) {
+		t.Helper()
+		rep := Read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoEligible, nil)
+		if a := rep.Accounts[0]; !a.Partial() {
+			t.Fatalf("account is complete: %+v", a)
+		}
 	}
+	t.Run("line over the limit", func(t *testing.T) {
+		home := t.TempDir()
+		long := `{"type":"assistant","usage":"` + strings.Repeat("x", maxLine) + `"}`
+		writeFile(t, session(home), claudeLineJSON("2.1.300", "msg_a"), long, claudeLineJSON("2.1.300", "msg_b"))
+		partial(t, home)
+	})
+	t.Run("unreadable file", func(t *testing.T) {
+		unixOnly(t)
+		home := t.TempDir()
+		writeFile(t, session(home), claudeLineJSON("2.1.300", "msg_a"))
+		if err := os.Chmod(session(home), 0); err != nil {
+			t.Fatal(err)
+		}
+		partial(t, home)
+	})
+	t.Run("unsearchable directory", func(t *testing.T) {
+		unixOnly(t)
+		home := t.TempDir()
+		writeFile(t, session(home), claudeLineJSON("2.1.300", "msg_a"))
+		dir := filepath.Dir(session(home))
+		if err := os.Chmod(dir, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		partial(t, home)
+	})
 }
 
 // Records of a format version the readers were not checked against are not
@@ -103,6 +129,28 @@ func TestReaderStaysInsideItsBudget(t *testing.T) {
 		rep := Read(Config{Homes: map[string][]string{Claude: {first, second}}, BudgetBytes: 1}, testNow, demoEligible, nil)
 		if a := rep.Accounts[0]; a.Files != 0 || !a.Partial() {
 			t.Fatalf("spent budget still listed %d files (partial %v)", a.Files, a.Partial())
+		}
+	})
+	t.Run("large directory", func(t *testing.T) {
+		// The clock runs out after the second check: on the listing of a
+		// directory with three batches of entries, that is before the third
+		// batch, so no session below it is listed.
+		root := t.TempDir()
+		for i := 0; i < 3*listBatch; i++ {
+			writeFile(t, filepath.Join(root, fmt.Sprintf("d%04d", i), "s.jsonl"), "{}")
+		}
+		t0 := time.Now()
+		calls := 0
+		b := &budget{deadline: t0.Add(time.Second), bytes: 1 << 30, clock: func() time.Time {
+			calls++
+			if calls > 2 {
+				return t0.Add(time.Hour)
+			}
+			return t0
+		}}
+		files, cut := listPattern(root, []string{"*", "s.jsonl"}, testNow.Add(-span), b)
+		if len(files) != 0 || !cut {
+			t.Fatalf("listed %d sessions (cut %v) after the budget ran out inside a directory", len(files), cut)
 		}
 	})
 	t.Run("long line", func(t *testing.T) {

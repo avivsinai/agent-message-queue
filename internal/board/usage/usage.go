@@ -9,6 +9,7 @@ package usage
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -252,7 +253,7 @@ func withDetail(acct Account) Account {
 // sessionFiles lists the account's session files written inside the span,
 // by explicit pattern only: a literal segment is joined, never listed, so
 // only the session directories are read. It reports unlisted when the
-// budget or a directory error stopped the listing.
+// budget stopped the listing or a directory or file could not be read.
 func sessionFiles(harness, home string, since time.Time, b *budget) (out []file, unlisted bool) {
 	var patterns [][]string
 	switch harness {
@@ -264,19 +265,36 @@ func sessionFiles(harness, home string, since time.Time, b *budget) (out []file,
 		patterns = [][]string{{"agent", "sessions", "*", "*.jsonl"}}
 	}
 	for _, segs := range patterns {
-		files, cut := listPattern(home, segs, since, b)
+		files, incomplete := listPattern(home, segs, since, b)
 		out = append(out, files...)
-		if cut {
+		unlisted = unlisted || incomplete
+		if b.spent() {
 			return out, true
 		}
 	}
-	return out, false
+	return out, unlisted
 }
 
+// listBatch bounds how many directory entries are read between two budget
+// checks, so one large directory cannot outrun the budget.
+const listBatch = 256
+
 // listPattern expands segs below root one directory level at a time,
-// checking the budget before each directory and each file.
+// checking the budget before each directory, between batches of its
+// entries, and before each file. A directory or file that exists but cannot
+// be read or stat'ed leaves the listing incomplete.
 func listPattern(root string, segs []string, since time.Time, b *budget) ([]file, bool) {
 	var out []file
+	incomplete := false
+	addFile := func(p string) {
+		f, ok, err := spanFile(p, since)
+		switch {
+		case err != nil:
+			incomplete = true
+		case ok:
+			out = append(out, f)
+		}
+	}
 	dirs := []string{root}
 	for i, seg := range segs {
 		last := i == len(segs)-1
@@ -288,52 +306,70 @@ func listPattern(root string, segs []string, since time.Time, b *budget) ([]file
 			if !strings.ContainsAny(seg, "*?[") {
 				p := filepath.Join(d, seg)
 				if last {
-					if f, ok := spanFile(p, since); ok {
-						out = append(out, f)
-					}
+					addFile(p)
 				} else {
 					next = append(next, p)
 				}
 				continue
 			}
-			entries, err := os.ReadDir(d)
+			dir, err := os.Open(d)
 			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					continue
+				if !errors.Is(err, fs.ErrNotExist) {
+					incomplete = true
 				}
-				return out, true
+				continue
 			}
-			for _, e := range entries {
-				if ok, _ := filepath.Match(seg, e.Name()); !ok {
-					continue
-				}
-				p := filepath.Join(d, e.Name())
-				if !last {
-					if e.IsDir() {
-						next = append(next, p)
+			for {
+				entries, err := dir.ReadDir(listBatch)
+				for _, e := range entries {
+					if ok, _ := filepath.Match(seg, e.Name()); !ok {
+						continue
 					}
-					continue
+					p := filepath.Join(d, e.Name())
+					if !last {
+						if e.IsDir() {
+							next = append(next, p)
+						}
+						continue
+					}
+					if b.spent() {
+						_ = dir.Close()
+						return out, true
+					}
+					addFile(p)
+				}
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						incomplete = true
+					}
+					break
 				}
 				if b.spent() {
+					_ = dir.Close()
 					return out, true
 				}
-				if f, ok := spanFile(p, since); ok {
-					out = append(out, f)
-				}
 			}
+			_ = dir.Close()
 		}
 		dirs = next
 	}
-	return out, false
+	return out, incomplete
 }
 
-// spanFile is p when it is a regular file written inside the span.
-func spanFile(p string, since time.Time) (file, bool) {
+// spanFile is p when it is a regular file written inside the span. A file
+// that vanished is not an error; one that cannot be stat'ed is.
+func spanFile(p string, since time.Time) (file, bool, error) {
 	info, err := os.Lstat(p)
-	if err != nil || !info.Mode().IsRegular() || info.ModTime().Before(since) {
-		return file{}, false
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return file{}, false, nil
+		}
+		return file{}, false, err
 	}
-	return file{path: p, mtime: info.ModTime()}, true
+	if !info.Mode().IsRegular() || info.ModTime().Before(since) {
+		return file{}, false, nil
+	}
+	return file{path: p, mtime: info.ModTime()}, true, nil
 }
 
 // mappedPath reports whether a file name carries a mapped session id, so
