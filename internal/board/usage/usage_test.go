@@ -93,11 +93,14 @@ func TestUnverifiedVersionsAreNotCounted(t *testing.T) {
 // PR #1203 (P2: discovery outside the budget; a long line read whole).
 func TestReaderStaysInsideItsBudget(t *testing.T) {
 	t.Run("listing", func(t *testing.T) {
-		home := t.TempDir()
-		for _, slug := range []string{"-work-demo", "-work-other"} {
-			writeFile(t, filepath.Join(home, "projects", slug, "aaaaaaaa-0000-4000-8000-000000000001.jsonl"), claudeLineJSON("2.1.300", "msg_a"))
+		// Two accounts share a 1 byte budget, so the first gets none.
+		first, second := t.TempDir(), t.TempDir()
+		for _, home := range []string{first, second} {
+			for _, slug := range []string{"-work-demo", "-work-other"} {
+				writeFile(t, filepath.Join(home, "projects", slug, "aaaaaaaa-0000-4000-8000-000000000001.jsonl"), claudeLineJSON("2.1.300", "msg_a"))
+			}
 		}
-		rep := Read(Config{Homes: map[string][]string{Claude: {home}}, BudgetWall: time.Nanosecond}, testNow, demoEligible, nil)
+		rep := Read(Config{Homes: map[string][]string{Claude: {first, second}}, BudgetBytes: 1}, testNow, demoEligible, nil)
 		if a := rep.Accounts[0]; a.Files != 0 || !a.Partial() {
 			t.Fatalf("spent budget still listed %d files (partial %v)", a.Files, a.Partial())
 		}

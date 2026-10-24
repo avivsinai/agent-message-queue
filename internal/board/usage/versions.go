@@ -6,9 +6,9 @@ import (
 )
 
 // The record formats the readers were checked against. Each range starts at
-// the oldest version whose records were summed on a real machine and matched
-// the harness's own totals, and ends before the next major version, which
-// may change the format. A record outside its range, or without a version,
+// the oldest version seen in the real records the readers were run on (for
+// Codex, rollout sums also matched the harness's own per-thread totals) and
+// ends before the next major version, which may change the format. A record outside its range, or without a version,
 // is not counted: its spend is unknown, never a number read from a format
 // nobody checked. The Codex guard covers rollouts only; the readers do not
 // open state_5.sqlite.
