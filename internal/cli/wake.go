@@ -70,6 +70,7 @@ type wakeConfig struct {
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
+	startupInputProven            bool                                         // a doorbell cohort drained, so the harness accepts input
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
@@ -692,6 +693,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				currentPending,
 			)
 		}
+		if cfg.doorbell.phase != wakeDoorbellIdle {
+			cfg.startupInputProven = true
+		}
 		cfg.doorbell.reset()
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return reconcileWakeInputAfterInboxDrain(cfg)
@@ -1118,6 +1122,9 @@ func deliverNewMessageNotification(
 	}
 	now := cfg.wakeDoorbellNow()
 	plan := cfg.doorbell.planHeld(now, currentPending, cfg.holds)
+	if plan.progress {
+		cfg.startupInputProven = true
+	}
 	persistWakeDoorbellStatusBestEffort(cfg)
 	if !plan.attempt {
 		return nil
@@ -1142,8 +1149,8 @@ func deliverNewMessageNotification(
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare
-	// Enter, until the cohort drains.
-	startupUnconfirmed := cfg.injectMode != wakeInjectModeNone &&
+	// Enter, until a drain proves the harness accepts input.
+	startupUnconfirmed := cfg.injectMode != wakeInjectModeNone && !cfg.startupInputProven &&
 		cfg.startupTrustRelease != nil && cfg.startupTrustRelease()
 	if cfg.onNotificationAttemptStart != nil {
 		cfg.onNotificationAttemptStart()

@@ -175,7 +175,8 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   doorbell rings within 2 seconds of acceptance. The trust record does not
   prove that the harness accepts input yet, so while the marker stays, a
   written doorbell does not count as presented: each retry types the full
-  doorbell again, not only Enter, until the agent drains. A trust file that
+  doorbell again, not only Enter, until the agent first drains, which
+  proves that the harness accepts input. A trust file that
   becomes unreadable keeps the hold. Codex records no decision for a directory the
   person keeps untrusted, so that hold stays until the Codex `SessionStart`
   close of `amq wake install-dialog-hook --harness codex`; without that hook
