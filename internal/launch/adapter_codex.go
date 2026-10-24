@@ -26,11 +26,11 @@ const codexCaptureVerifiedVersion = "0.163.0"
 // form, including a "v" prefix, a pre-release or build suffix, or surrounding
 // whitespace, fails closed.
 func codexCaptureVersionSupported(version string) bool {
-	got, ok := parseCodexReleaseVersion(version)
+	got, ok := parseReleaseVersion(version)
 	if !ok {
 		return false
 	}
-	floor, ok := parseCodexReleaseVersion(codexCaptureMinimumVersion)
+	floor, ok := parseReleaseVersion(codexCaptureMinimumVersion)
 	if !ok {
 		return false
 	}
@@ -42,7 +42,7 @@ func codexCaptureVersionSupported(version string) bool {
 	return true
 }
 
-func parseCodexReleaseVersion(version string) ([3]uint64, bool) {
+func parseReleaseVersion(version string) ([3]uint64, bool) {
 	var result [3]uint64
 	parts := strings.Split(version, ".")
 	if len(parts) != len(result) {

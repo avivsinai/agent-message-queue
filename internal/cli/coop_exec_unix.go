@@ -897,7 +897,7 @@ func (c *coopExecRun) execAgent() error {
 	if invocation.Harness == "" {
 		invocation = harness.ResolveInvocation(c.binaryPath, c.agentArgs)
 	}
-	publishExecIdentity(c.root, c.agentHandle, invocation)
+	publishAgentIdentity(c.root, c.agentHandle, invocation)
 
 	// Build argv: command name + agent args.
 	argv := append([]string{c.cmdName}, c.agentArgs...)
@@ -936,6 +936,7 @@ func (c *coopExecRun) execAgent() error {
 	if notice != "" {
 		_ = writeStderr("%s\n", notice)
 	}
+	recordExecIdentity(c.binaryPath, env)
 	var execErr error
 	switch {
 	case c.managedLaunchNonce != "":
@@ -1667,11 +1668,11 @@ func splitDashDash(args []string) ([]string, []string) {
 	return args, nil
 }
 
-// publishExecIdentity records which harness is about to run as handle in the
+// publishAgentIdentity records which harness is about to run as handle in the
 // handle's existing mailbox below root, so other agents see the handle as
 // observed. It is discovery metadata only; a failure warns and never stops
 // the start.
-func publishExecIdentity(root, handle string, invocation harness.Invocation) {
+func publishAgentIdentity(root, handle string, invocation harness.Invocation) {
 	err := func() error {
 		identity, err := fsq.SnapshotDeliveryRoot(root)
 		if err != nil {

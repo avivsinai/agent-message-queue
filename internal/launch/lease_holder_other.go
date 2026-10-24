@@ -18,3 +18,7 @@ func parentProcessID(int) (int, error) {
 
 // pidNamespace is empty: this platform has no pid namespaces.
 func pidNamespace() string { return "" }
+
+func processStartUnix(string) (int64, error) {
+	return 0, fmt.Errorf("process start time unavailable on this platform")
+}

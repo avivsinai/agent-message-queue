@@ -1,0 +1,189 @@
+[
+  {
+    "id": "demo-b1",
+    "title": "Decide the cache format",
+    "status": "blocked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "demo-b2",
+    "title": "Wire the parser",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 1,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "alpha",
+    "dependencies": [
+      {
+        "issue_id": "demo-b2",
+        "depends_on_id": "demo-b3",
+        "type": "blocks",
+        "created_at": "2026-10-01T12:00:00Z",
+        "created_by": "Demo",
+        "metadata": "{}"
+      }
+    ]
+  },
+  {
+    "id": "demo-b3",
+    "title": "Parser core",
+    "status": "in_progress",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "beta",
+    "started_at": "2026-10-21T10:00:00Z"
+  },
+  {
+    "id": "demo-b4",
+    "title": "Port the importer",
+    "status": "in_progress",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "Jane Doe",
+    "started_at": "2026-10-21T10:00:00Z"
+  },
+  {
+    "id": "demo-b5",
+    "title": "Write the manual",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "demo-b6",
+    "title": "Sign the release",
+    "status": "blocked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "user"
+  },
+  {
+    "id": "demo-b7",
+    "title": "Ship the relay",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 1,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "alpha",
+    "dependencies": [
+      {
+        "issue_id": "demo-b7",
+        "depends_on_id": "demo-b8",
+        "type": "blocks",
+        "created_at": "2026-10-01T12:00:00Z",
+        "created_by": "Demo",
+        "metadata": "{}"
+      }
+    ]
+  },
+  {
+    "id": "demo-b8",
+    "title": "Choose the relay host",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "user"
+  },
+  {
+    "id": "demo-b9",
+    "title": "Old migration",
+    "status": "deferred",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "demo-b10",
+    "title": "Drop the legacy table",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-01T12:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T12:00:00Z",
+    "dependency_count": 2,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "assignee": "beta",
+    "dependencies": [
+      {
+        "issue_id": "demo-b10",
+        "depends_on_id": "demo-b9",
+        "type": "blocks",
+        "created_at": "2026-10-01T12:00:00Z",
+        "created_by": "Demo",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "demo-b10",
+        "depends_on_id": "demo-b1",
+        "type": "relates-to",
+        "created_at": "2026-10-01T12:00:00Z",
+        "created_by": "Demo",
+        "metadata": "{}"
+      }
+    ]
+  }
+]
