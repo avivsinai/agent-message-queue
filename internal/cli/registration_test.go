@@ -159,3 +159,54 @@ func TestInventoryProjectKeepsEveryMailbox(t *testing.T) {
 		t.Fatalf("corrupt = %+v, want an unregistered row with an identity diagnostic", corrupt)
 	}
 }
+
+// A mailbox whose inbox is a symlink keeps its local row and reports the
+// link instead of reading through it as complete (Codex review of PR #1195).
+func TestInventoryReportsSymlinkedInbox(t *testing.T) {
+	base := t.TempDir()
+	if err := fsq.EnsureAgentDirs(base, "lead"); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(t.TempDir(), "inbox")
+	for _, leaf := range []string{"tmp", "new", "cur"} {
+		if err := os.MkdirAll(filepath.Join(foreign, leaf), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inbox := filepath.Join(base, "agents", "lead", "inbox")
+	if err := os.RemoveAll(inbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreign, inbox); err != nil {
+		t.Fatal(err)
+	}
+
+	scope := inventoryDeliveryRoot(base, "")
+	if len(scope.Agents) != 1 || scope.Agents[0].Handle != "lead" {
+		t.Fatalf("agents = %+v, want the local lead row", scope.Agents)
+	}
+	if issues := scope.Agents[0].MailboxIssues; len(issues) != 1 || issues[0] != "inbox is a symlink" {
+		t.Fatalf("mailbox issues = %q, want [inbox is a symlink]", issues)
+	}
+}
+
+// A symlinked agents/ directory must not list the mailboxes it points at as
+// local; the scope carries the problem instead (Codex review of PR #1195).
+func TestInventoryRefusesSymlinkedAgentsDir(t *testing.T) {
+	base := t.TempDir()
+	foreign := t.TempDir()
+	if err := fsq.EnsureAgentDirs(foreign, "ghost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(foreign, "agents"), filepath.Join(base, "agents")); err != nil {
+		t.Fatal(err)
+	}
+
+	scopes, err := inventoryProject(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 1 || len(scopes[0].Agents) != 0 || scopes[0].Err == nil {
+		t.Fatalf("scopes = %+v, want one base scope with no agents and an error", scopes)
+	}
+}
