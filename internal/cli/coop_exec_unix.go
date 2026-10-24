@@ -108,8 +108,8 @@ type coopExecRun struct {
 	// managedProvider is the managed launch ticket's provider: the harness
 	// a wrapped seat runs behind its wrapper executable.
 	managedProvider string
-	// managedInvocation is the ticket's provider executable and wrapper, for
-	// the identity record.
+	// managedInvocation is the harness and wrapper the managed launch ticket
+	// runs, for the identity record.
 	managedInvocation harness.Invocation
 }
 
@@ -144,11 +144,7 @@ func runCoopExec(args []string) error {
 		defer func() { _ = c.managedGuard.Close() }()
 		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
 			c.managedProvider = ticket.Provider
-			facts, _ := harness.ForExecutable(ticket.ProviderExecutable)
-			c.managedInvocation = harness.Invocation{Harness: facts.Name}
-			if ticket.Wrapper != nil {
-				c.managedInvocation.Wrapper = harness.WrapperName(ticket.Wrapper.Executable)
-			}
+			c.managedInvocation = managedInvocation(ticket)
 		}
 	}
 
