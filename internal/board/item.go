@@ -107,6 +107,8 @@ type Evidence struct {
 	Value  string    `json:"value"`
 	Text   string    `json:"text,omitempty"`
 	At     time.Time `json:"at"`
+	// URL is an https link from a forge or provider; empty otherwise.
+	URL string `json:"url,omitempty"`
 }
 
 // Mention is a candidate token found in free text.
@@ -219,8 +221,12 @@ type Result struct {
 }
 
 // Runner runs one argv in dir and returns stdout. It never uses a shell.
+// RunLimited holds at most maxOut bytes of stdout: a command that writes more
+// is stopped and its run is an error, so output is never buffered past the
+// limit.
 type Runner interface {
 	Run(ctx context.Context, dir string, argv []string) ([]byte, error)
+	RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error)
 }
 
 // Env is what a source may use.

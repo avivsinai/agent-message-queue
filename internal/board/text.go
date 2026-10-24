@@ -149,6 +149,14 @@ func refLabel(it Item) string {
 	switch it.Ref.Kind {
 	case RefBead:
 		return "bead " + it.Ref.ID
+	case RefForge:
+		for _, e := range it.Evidence {
+			if e.Field == "type" && e.Text != "" {
+				return e.Text
+			}
+		}
+	case RefExternal:
+		return it.Source + " " + strings.TrimPrefix(it.Ref.ID, strings.TrimPrefix(it.Source, "ext:")+":")
 	case RefObligation:
 		kind := ""
 		for _, e := range it.Evidence {
@@ -168,6 +176,10 @@ func tokenLabel(t Token) string {
 		label = "bead " + t.Ref.ID
 	case RefAMQThread:
 		return t.Basis
+	case RefBranch:
+		if i := strings.LastIndexByte(t.Ref.ID, ':'); i >= 0 {
+			label = "branch " + t.Ref.ID[i+1:]
+		}
 	case RefForge:
 		if _, n, ok := strings.Cut(t.Ref.ID, "#"); ok {
 			label = "#" + n

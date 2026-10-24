@@ -20,7 +20,10 @@ const ThreadOpenSchema = "amq/thread-open/v1"
 
 // AMQ reads the project's queue through the amq CLI only. It never opens a
 // file under an AMQ root.
-type AMQ struct{}
+type AMQ struct {
+	// MaxAge is passed to `amq thread open --max-age` when set.
+	MaxAge string
+}
 
 func (AMQ) Name() string { return "amq" }
 
@@ -57,7 +60,11 @@ func (a AMQ) Read(ctx context.Context, env board.Env) board.Result {
 				c.Doctor[s.Name], c.DoctorErr[s.Name] = env.Run.Run(ctx, env.Dir, []string{"amq", "doctor", "--ops", "--json", "--root", s.Path})
 			}
 		}
-		c.ThreadOpen, c.ThreadErr = env.Run.Run(ctx, env.Dir, []string{"amq", "thread", "open", "--all-sessions", "--json"})
+		argv := []string{"amq", "thread", "open", "--all-sessions", "--json"}
+		if a.MaxAge != "" {
+			argv = append(argv, "--max-age", a.MaxAge)
+		}
+		c.ThreadOpen, c.ThreadErr = env.Run.Run(ctx, env.Dir, argv)
 	}
 	c.ObservedAt = env.Now()
 	return BuildAMQ(c)

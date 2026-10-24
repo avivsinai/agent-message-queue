@@ -4,8 +4,9 @@
 that has an AMQ queue:
 
 ```sh
-amq-board          # text
-amq-board --json   # the board model (schema amq/board/v1)
+amq-board            # text
+amq-board --json     # the board model (schema amq/board/v1)
+amq-board --refresh  # ignore the GitHub cache and fetch once
 ```
 
 It prints four columns, in this order:
@@ -37,9 +38,46 @@ a subject is shown as a related reference and never moves or merges a card.
 | AMQ | `amq env --json`, `amq session list --json`, `amq who --json`, per session `amq doctor --ops --json --root <session>`, `amq thread open --all-sessions --json` | Always on. AMQ resolves the root from the current directory. `doctor --ops` counts unread mail only for agents in a session's `config.json`; other mailboxes show "unread not counted", and a mailbox doctor could not read shows "not counted" with the reason and degrades the source. A failed `amq env` also degrades the source: the rest still shows, without cross-project answer actions. |
 | beads | `bd --readonly --sandbox list --json --brief --status open,in_progress,blocked,deferred --limit 0` | When `bd` is on `PATH` and the project has `.beads/`. `--limit 0` reads every row (bd stops at 50 otherwise). Deferred beads are read so that a deferred blocker still blocks; they are not shown. A bead id mentioned elsewhere and not open is looked up with one `bd --readonly --sandbox list --all --id ...` call, at most 200 ids per run. |
 
+| GitHub | `git remote get-url origin`, `gh config get user -h github.com`, and one `gh api graphql --hostname github.com` call for every repository in scope | When `gh` is on `PATH` and the `origin` remote is on github.com, or `forges.github.repos` names repositories. One call per refresh because a gh call that reads the token can prompt the keychain; the response is cached for the TTL (default 10 min) under `~/.amq/board/cache/`, keyed by host, repo set, account, and query version, with no token in it. A second run within the TTL makes no `gh api` call. With `GH_TOKEN` or `GITHUB_TOKEN` set, the account is the token's, which the configured user does not name, so the cache is not read. The first 50 open PRs and issues per repository are read; more are reported as "N more PRs not fetched". PRs that request your review are found by a search even past that page; the search reads up to 5 pages of 50, each page after the first one more `gh api graphql` call, and reports the rest as "N more review requests not fetched". |
+| External providers | The executable and fixed arguments registered in `~/.amq/board.json` | Data only: the board validates every field, names the source `ext:<name>`, and drops invalid items, counting them as skipped. A provider cannot add a command to a card. |
+
+On GitHub, a PR that requests your review, or one an agent authored that is
+approved, mergeable, not a draft, and passing checks ("ready to merge"),
+waits on you. An approved PR that is a draft or conflicting stays in flight
+and shows those facts. A PR you authored is yours and waits on you. A bead
+whose `external_ref` is `gh-<n>` and PR `<n>` are one card when exactly one
+GitHub repository is in scope.
+
 Each source runs under its own deadline. When AMQ fails, beads cards still
 show and the roster says why it is missing; when `bd` is missing, beads shows
 as unavailable and AMQ cards remain.
+
+## Configuration
+
+`~/.amq/board.json` (all keys optional):
+
+```json
+{
+  "humans": {"beads_assignees": ["<name>"], "github_logins": []},
+  "identities": {"github": {"<login>": "<amq handle>"}},
+  "liveness_window": "30m",
+  "stale_after": "36h",
+  "obligation_max_age": "14d",
+  "sources": {"beads": true, "github": true},
+  "forges": {"github": {"repos": [], "ttl": "10m",
+                        "ready_to_merge_waits_on_human": true}},
+  "providers": [{"name": "tracker", "exec": "/abs/path", "args": [], "ttl": "10m"}]
+}
+```
+
+A project may override `liveness_window`, `stale_after`,
+`obligation_max_age`, `sources`, `forges.github.repos`, and
+`forges.github.ready_to_merge_waits_on_human` in `.amq/board.json`, and turn
+a registered provider on or off with `{"name": "tracker", "enabled": false}`.
+Executables, arguments, humans, and identities come only from the user file;
+the board refuses them in a project file with a warning. The reserved AMQ
+`user` and your GitHub login are always you; a GitHub author maps to an
+agent only through `identities`.
 
 ## Read-only
 

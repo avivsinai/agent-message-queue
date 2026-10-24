@@ -28,10 +28,14 @@ func ResolveMentions(items []Item, known map[string]string) []Item {
 			seen[r.To] = true
 		}
 		for _, m := range it.Mentions {
-			if _, ok := known[m.Token]; !ok {
-				continue
+			id := ""
+			for _, c := range BeadCandidates(m.Token) {
+				if _, ok := known[c]; ok {
+					id = c
+					break
+				}
 			}
-			ref, ok := Bead(m.Token)
+			ref, ok := Bead(id)
 			if !ok || seen[ref] {
 				continue
 			}
