@@ -171,7 +171,7 @@ Usage:
   amq setup [options]
 
 Configure this project after previewing every change.
-Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.
+Detects Claude, Codex, Cursor, Grok, and pi through their adapter capability probes.
 Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
@@ -2119,6 +2119,7 @@ Usage:
 
 List named sessions under the base root.
 Canonical sessions are listed normally. Safe legacy roots are marked legacy_name with an exact --root hint.
+--json adds conversations[] per session: {handle, provider, id, state, source}, the harness sessions that exact AMQ records tie to an agent. source is launch (managed launch record), codex-thread (the Codex thread coop exec created), exec-pid (the Claude Code process coop exec became, joined with Claude's sessions/<pid>.json), or remote (an amq-remote binding of that process). state is ready, revoked (a later coop exec replaced it; listed for 7 days), or uncertain. Nothing is inferred from a cwd.
 
 Options:
   -json

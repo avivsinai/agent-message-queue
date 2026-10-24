@@ -11,11 +11,13 @@ import (
 	"strings"
 )
 
-// legacyCoopHookScripts are the project hook scripts whose work amq coop
-// install-hooks now installs; an entry that still runs one runs it twice.
+// legacyCoopHookScripts are the co-op hook scripts AMQ no longer ships. A
+// project entry that still names one runs a missing file, or an old copy
+// that duplicates the hooks amq coop install-hooks installs.
 var legacyCoopHookScripts = []string{
 	"claude-session-start.sh",
 	"amq-stop-hook.sh",
+	"claude-amq-user-prompt-submit.py",
 }
 
 // legacyCoopHookEntries lists, as "<settings file>: <event>: <command>", the
@@ -70,9 +72,8 @@ func runsLegacyCoopScript(command string) bool {
 }
 
 // checkLegacyCoopHooks reports project hook entries under the current
-// directory that run the old co-op scripts. With the co-op hooks installed
-// they run a second time. It is read-only and reports nothing when none
-// exist.
+// directory that run the old co-op scripts, which AMQ no longer ships. It is
+// read-only and reports nothing when none exist.
 func checkLegacyCoopHooks() (doctorCheck, bool) {
 	check := doctorCheck{Name: "Co-op project hooks", Status: "warn"}
 	entries, err := legacyCoopHookEntries(".")
@@ -83,7 +84,7 @@ func checkLegacyCoopHooks() (doctorCheck, bool) {
 	if len(entries) == 0 {
 		return doctorCheck{}, false
 	}
-	check.Message = fmt.Sprintf("old co-op script entries: %s; remedy: remove these entries, then run amq coop install-hooks",
+	check.Message = fmt.Sprintf("entries run co-op scripts AMQ no longer ships: %s; remedy: remove these entries, then run amq coop install-hooks",
 		strings.Join(entries, "; "))
 	return check, true
 }
