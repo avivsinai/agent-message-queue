@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/secretscan"
 )
@@ -25,9 +26,11 @@ import (
 // attachment meet in files, because the hook process has only
 // the Claude home:
 //
+//	~/.claude/sessions/amq-approve/lifecycle.lock  never removed
 //	~/.claude/sessions/amq-approve/<sid>/
 //	  pin-<token>          DM edge: a relay share with approve is serving
 //	  runs/<prompt_id>     attachment: an AMQ run owns this prompt
+//	  inflight/<owner>-<msg_id>  attachment: a run sent, not yet claimed
 //	  requests/<iid>.json  hook: one open PermissionRequest
 //	  answers/<iid>.json   attachment (Respond): the Buzz answer
 //	  resolved/<iid>.json  whoever closed it first: hook or attachment
@@ -37,6 +40,15 @@ import (
 // Every directory is 0700 and every file 0600. Every read is no-follow and
 // bounded; every write is create-new with its whole content, so the first
 // writer of a resolved file decides how the interaction ended.
+//
+// The lifecycle lock serializes a pin's creation with the last unpin's
+// check for live pins and its cleanup, so a cleanup never runs between a
+// new owner's pin and its records. The attachment's record writers (run
+// markers, inflight records) and the bind sweep take it too. The hook does
+// not: its writes are on the dialog's path in a process that lives up to
+// its timeout, so a cleanup keeps every record a live hook can still use
+// instead. A cleanup removes only dead records, and is skipped where the
+// platform has no advisory lock.
 
 // approvalProtocol names the request file schema.
 const approvalProtocol = "amq-claude-approval/v1"
@@ -311,20 +323,23 @@ func ensurePlainDir(dir string) error {
 }
 
 // ensureApproveSubdir creates amq-approve/<sid>/<sub> one plain level at a
-// time. sub "" is the session directory itself.
+// time. sub "" is the session directory itself; sessionID "" is amq-approve.
 func ensureApproveSubdir(home, sessionID, sub string) (string, error) {
 	if !noFollowSupported {
 		return "", errUnsupportedPlatform
 	}
-	if !sessionIDRe.MatchString(sessionID) {
+	if sessionID != "" && !sessionIDRe.MatchString(sessionID) {
 		return "", fmt.Errorf("session %q is not a file-safe id", sessionID)
 	}
 	sessions := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessions, 0o700); err != nil {
 		return "", err
 	}
-	dirs := []string{filepath.Join(sessions, "amq-approve"), approveDir(home, sessionID)}
-	if sub != "" {
+	dirs := []string{filepath.Join(sessions, "amq-approve")}
+	if sessionID != "" {
+		dirs = append(dirs, approveDir(home, sessionID))
+	}
+	if sessionID != "" && sub != "" {
 		dirs = append(dirs, filepath.Join(approveDir(home, sessionID), sub))
 	}
 	for _, d := range dirs {
@@ -534,6 +549,11 @@ func ObserveApprovals(home, sessionID string, pid int) (string, error) {
 }
 
 func writePin(home, sessionID string, pin approvalPin) (string, error) {
+	release, err := lockLifecycle(home)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	dir, err := ensureApproveSubdir(home, sessionID, "")
 	if err != nil {
 		return "", err
@@ -549,12 +569,212 @@ func writePin(home, sessionID string, pin approvalPin) (string, error) {
 	return token, nil
 }
 
-// UnpinApprovals removes one pin. Other pins for the session stay.
+// UnpinApprovals removes one pin. Other pins for the session stay. When no
+// live pin is left it removes the session's dead records, under the
+// lifecycle lock; without that lock it only removes the pin.
 func UnpinApprovals(home, sessionID, token string) {
 	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported || token == "" || strings.ContainsAny(token, `/\`) {
 		return
 	}
-	removeRegular(filepath.Join(approveDir(home, sessionID), "pin-"+token))
+	pin := filepath.Join(approveDir(home, sessionID), "pin-"+token)
+	release, err := lockLifecycle(home)
+	if err != nil {
+		removeRegular(pin)
+		return
+	}
+	defer release()
+	removeRegular(pin)
+	if !lock.AdvisoryLockAvailable() || pinLive(home, sessionID) {
+		return
+	}
+	for _, path := range deadRecords(home, sessionID, time.Now(), true) {
+		removeRegular(path)
+	}
+	dir := approveDir(home, sessionID)
+	for _, sub := range approvalSubdirs {
+		removeEmptyDir(filepath.Join(dir, sub))
+	}
+	removeEmptyDir(dir)
+}
+
+// approvalSubdirs are the record directories of one session.
+var approvalSubdirs = []string{"requests", "answers", "resolved", "delivery", "rejected", "verdicts", "runs", "inflight"}
+
+// lifecycleLockName is the lock file under amq-approve. One file serves
+// every session: pin and unpin are rare, and a per-session file could not
+// outlive its session directory's cleanup.
+const lifecycleLockName = "lifecycle.lock"
+
+// lockLifecycle takes the lifecycle lock and returns its release. The file
+// is created 0600, opened no-follow, and never removed. On a platform with
+// no advisory lock it takes nothing and the release does nothing.
+func lockLifecycle(home string) (func(), error) {
+	dir, err := ensureApproveSubdir(home, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if !lock.AdvisoryLockAvailable() {
+		return func() {}, nil
+	}
+	f, err := os.OpenFile(filepath.Join(dir, lifecycleLockName), os.O_CREATE|os.O_RDWR|openNoFollowFlag, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", f.Name())
+	}
+	if err := lock.Lock(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = lock.Unlock(f)
+		_ = f.Close()
+	}, nil
+}
+
+// recordAge is the hook's registered timeout: no hook process outlives it,
+// so a record no live process names is dead once it is this old.
+const recordAge = DefaultPermissionWait + PermissionHookGrace
+
+// deadRecords lists the session's records that no running process can
+// still use: pins and inflight records whose process is gone (or that are
+// expired or unreadable), and with all, also interaction records of a
+// dead hook and run markers of a dead owner. A pid that cannot be decided
+// counts as alive. Only regular files are listed.
+func deadRecords(home, sessionID string, now time.Time, all bool) []string {
+	dir := approveDir(home, sessionID)
+	var out []string
+	each := func(sub string, fn func(path, name string, fi os.FileInfo)) {
+		entries, err := os.ReadDir(filepath.Join(dir, sub))
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.Type().IsRegular() {
+				continue
+			}
+			fi, err := e.Info()
+			if err != nil {
+				continue
+			}
+			fn(filepath.Join(dir, sub, e.Name()), e.Name(), fi)
+		}
+	}
+	each("", func(path, name string, _ os.FileInfo) {
+		var p approvalPin
+		if strings.HasPrefix(name, "pin-") && (readApprovalJSON(path, &p) != nil || hookDead(p.PID)) {
+			out = append(out, path)
+		}
+	})
+	each("inflight", func(path, name string, _ os.FileInfo) {
+		if _, live := readInflight(path, name, now); !live {
+			out = append(out, path)
+		}
+	})
+	if !all {
+		return out
+	}
+	old := func(fi os.FileInfo) bool { return now.Sub(fi.ModTime()) > recordAge }
+	requested := map[string]bool{}
+	each("requests", func(path, name string, fi os.FileInfo) {
+		id, ok := strings.CutSuffix(name, ".json")
+		if !ok || !interactionIDRe.MatchString(id) {
+			return
+		}
+		requested[id] = true
+		var r approvalRequest
+		deadline, err := time.Time{}, readApprovalJSON(path, &r)
+		if err == nil {
+			deadline, err = time.Parse(time.RFC3339Nano, r.Deadline)
+		}
+		if err != nil || hookDead(r.HookPID) || now.After(deadline.Add(PermissionHookGrace)) {
+			out = append(out, interactionFiles(dir, id)...)
+		}
+	})
+	// Files of an interaction with no request: a hook may be between its pin
+	// check and its request write, so only old ones go.
+	for _, sub := range []string{"answers", "resolved", "delivery", "rejected", "verdicts"} {
+		each(sub, func(path, name string, fi os.FileInfo) {
+			if len(name) >= 35 && interactionIDRe.MatchString(name[:35]) && !requested[name[:35]] && old(fi) {
+				out = append(out, path)
+			}
+		})
+	}
+	each("runs", func(path, name string, fi os.FileInfo) {
+		var m runMarker
+		switch err := readApprovalJSON(path, &m); {
+		case err == nil && m.PID > 0:
+			if hookDead(m.PID) {
+				out = append(out, path)
+			}
+		case old(fi): // an older marker names no process
+			out = append(out, path)
+		}
+	})
+	return out
+}
+
+// interactionFiles lists the existing regular files of one interaction in
+// the session directory dir.
+func interactionFiles(dir, id string) []string {
+	var out []string
+	for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
+		path := filepath.Join(dir, sub, id+".json")
+		if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+			out = append(out, path)
+		}
+	}
+	for _, sub := range []string{"rejected", "verdicts"} {
+		if entries, err := os.ReadDir(filepath.Join(dir, sub)); err == nil {
+			for _, e := range entries {
+				if e.Type().IsRegular() && strings.HasPrefix(e.Name(), id+"-") {
+					out = append(out, filepath.Join(dir, sub, e.Name()))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// sweepApprovals removes, under the lifecycle lock, the dead pins and
+// inflight records of every session, so a crashed owner neither holds the
+// installed gate open nor makes a terminal prompt wait. It creates nothing
+// when no session was ever pinned.
+func sweepApprovals(home string) {
+	if !noFollowSupported || !lock.AdvisoryLockAvailable() {
+		return
+	}
+	if fi, err := os.Lstat(filepath.Join(claudeSessionsDir(home), "amq-approve")); err != nil || !fi.IsDir() {
+		return
+	}
+	release, err := lockLifecycle(home)
+	if err != nil {
+		return
+	}
+	defer release()
+	for _, path := range StaleApprovalRecords(home) {
+		removeRegular(path)
+	}
+}
+
+// StaleApprovalRecords lists what the bind sweep removes: every session's
+// pins whose serving process is gone, and inflight records that are
+// expired, unreadable, or whose process is gone.
+func StaleApprovalRecords(home string) []string {
+	entries, err := os.ReadDir(filepath.Join(claudeSessionsDir(home), "amq-approve"))
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && sessionIDRe.MatchString(e.Name()) {
+			out = append(out, deadRecords(home, e.Name(), now, false)...)
+		}
+	}
+	return out
 }
 
 // pinLive reports whether the session has a pin whose serving pid is alive.
@@ -737,17 +957,31 @@ func runMarkerPath(home, sessionID, promptID string) string {
 	return filepath.Join(approveDir(home, sessionID), "runs", promptID)
 }
 
-// writeRunMarker records that an AMQ run owns promptID. An existing marker
-// is kept.
-func writeRunMarker(home, sessionID, promptID, msgID string) error {
+// runMarker is runs/<prompt_id>: the run's frame and the attachment owner
+// and process that wrote it, so a cleanup can tell a live owner's marker
+// from a dead one.
+type runMarker struct {
+	MsgID string `json:"msg_id"`
+	Owner string `json:"owner,omitempty"`
+	PID   int    `json:"pid,omitempty"`
+}
+
+// writeRunMarker records, under the lifecycle lock, that an AMQ run owns
+// promptID. An existing marker is kept.
+func writeRunMarker(home, sessionID, promptID string, m runMarker) error {
 	if !promptIDRe.MatchString(promptID) {
 		return fmt.Errorf("prompt id %q is not a file-safe id", promptID)
 	}
+	release, err := lockLifecycle(home)
+	if err != nil {
+		return err
+	}
+	defer release()
 	dir, err := ensureApproveSubdir(home, sessionID, "runs")
 	if err != nil {
 		return err
 	}
-	err = createNewJSON(dir, promptID, map[string]string{"msg_id": msgID})
+	err = createNewJSON(dir, promptID, m)
 	if errors.Is(err, errFileExists) {
 		return nil
 	}

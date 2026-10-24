@@ -3,6 +3,7 @@ package launch
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ const (
 	CodexProvider  = "codex"
 	CursorProvider = "cursor-agent"
 	GrokProvider   = "grok"
+	PiProvider     = "pi"
 )
 
 // ProviderForExecutable maps a configured executable basename to the stable
@@ -26,7 +28,7 @@ func ProviderForExecutable(executable string) string {
 	base := strings.ToLower(filepath.Base(executable))
 	base = strings.TrimSuffix(base, ".exe")
 	switch base {
-	case ClaudeProvider, CodexProvider, GrokProvider:
+	case ClaudeProvider, CodexProvider, GrokProvider, PiProvider:
 		return base
 	case "agent", CursorProvider:
 		return CursorProvider
@@ -74,20 +76,23 @@ type StaticInputCapabilities struct {
 }
 
 // ProviderStaticInputCapabilities is the single public-compiler projection of
-// the same deny-by-default tables used by validation.
+// the same deny-by-default tables used by validation. The advertised argument
+// forms are the keys of the provider's validation table, so they change only
+// when validation changes, and GrammarVersion changes with them.
 func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 	switch provider {
 	case ClaudeProvider:
 		return StaticInputCapabilities{
-			GrammarVersion: 2, VerifiedProviderVersion: "2.1.233",
-			AllowedArgumentForms: []string{"--allowedTools", "-n", "--name"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+			GrammarVersion: 3, VerifiedProviderVersion: "2.1.233",
+			AllowedArgumentForms: argumentForms(claudeArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	case CodexProvider:
 		reasoningValues := slices.Clone(codexReasoningEffortValues)
 		reviewerValues := slices.Clone(codexApprovalsReviewerValues)
 		return StaticInputCapabilities{
-			GrammarVersion: 2, VerifiedProviderVersion: codexCaptureVerifiedVersion,
-			AllowedArgumentForms: []string{"-c"},
+			GrammarVersion: 3, VerifiedProviderVersion: codexCaptureVerifiedVersion,
+			AllowedArgumentForms: argumentForms(codexArgRules()),
 			ConfigOverrides: []ConfigOverrideCapability{
 				{Key: "model_reasoning_effort", AllowedValues: reasoningValues},
 				{Key: "approvals_reviewer", AllowedValues: reviewerValues},
@@ -96,12 +101,30 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 		}
 	case GrokProvider:
 		return StaticInputCapabilities{
-			GrammarVersion: 1, VerifiedProviderVersion: grokBuildVersion,
-			AllowedArgumentForms: []string{"--tools", "--disallowed-tools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+			GrammarVersion: 2, VerifiedProviderVersion: grokBuildVersion,
+			AllowedArgumentForms: argumentForms(grokArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
+		}
+	case CursorProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: cursorCaptureVersion,
+			AllowedArgumentForms: argumentForms(cursorArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{},
+		}
+	case PiProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: piVerifiedVersion,
+			AllowedArgumentForms: argumentForms(piArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	default:
 		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
 	}
+}
+
+// argumentForms lists a validation table's argument forms in sorted order.
+func argumentForms(rules map[string]argumentRule) []string {
+	return slices.Sorted(maps.Keys(rules))
 }
 
 type PlanRequest struct {
@@ -222,6 +245,8 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		envRules, argRules, bypassAllowed = cursorEnvRules(), cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		envRules, argRules, bypassAllowed = grokEnvRules(), grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		envRules, argRules, bypassAllowed = piEnvRules(), piArgRules(), piBypassArgs()
 	default:
 		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
 	}
@@ -286,6 +311,8 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 		argRules, bypassAllowed = cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		argRules, bypassAllowed = grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		argRules, bypassAllowed = piArgRules(), piBypassArgs()
 	default:
 		return nil, nil, fmt.Errorf("unknown provider %q", provider)
 	}

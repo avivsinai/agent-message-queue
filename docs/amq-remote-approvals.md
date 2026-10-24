@@ -22,13 +22,43 @@ pinned body. A pin that misses any flag is reject-only.
 
 ## When the hook answers
 
-The hook has no matcher, a 600 second wait, and a 630 second timeout. It
-exits at once with no output, so the terminal dialog decides, unless every
-check passes: the session has a pin that a live `amq-remote serve` wrote for
-that share, and the call belongs to a prompt that an AMQ request delivered
-as its own turn. A request that Claude absorbed into a running turn gets no
-DM approval. The hook never exits 2. It denies for the owner's ❌ on that
-exact call, and the turn goes on.
+The hook has no matcher, a 600 second wait, and a 630 second timeout. Its
+command starts `amq-remote` only when some session under
+`~/.claude/sessions/amq-approve` has a pin file, a test that runs inside
+`sh`; on any other machine a tool dialog costs one shell. The installer
+writes that path for the home it runs in, and `amq-remote doctor` fails a
+hook whose path or timeout differs from what the installer writes now. The
+hook exits at once with no output, so the terminal dialog decides, unless
+every check passes: the session has a pin that a live `amq-remote serve`
+wrote for that share, and the call belongs to a prompt that an AMQ request
+delivered as its own turn. A request that Claude absorbed into a running
+turn gets no DM approval. The hook never exits 2. It denies for the owner's
+❌ on that exact call, and the turn goes on.
+
+The endpoint records each request it sends to a session with approvals as
+in flight before it writes the frame; when it cannot, it refuses the
+request and sends nothing. When its poller sees the delivery line it
+writes the prompt's run marker, and only then drops the in-flight record.
+A tool call whose prompt has no run marker waits up to 2 seconds for one
+only while a live in-flight record exists for that session, so a prompt
+typed in the terminal gets its dialog at once, except within 2 minutes of
+a request sent to that session. Known limitation: if Claude takes a
+request's prompt more than 2 minutes after it was sent (for example,
+queued behind a long turn), a tool call of that run that asks for
+permission before the poller writes the run marker gets no Buzz approval
+and the terminal decides it; later calls in the run see the marker.
+
+Pin creation, the last unpin's check for live pins, and its cleanup run
+under `~/.claude/sessions/amq-approve/lifecycle.lock`, so an old owner's
+cleanup never removes a new pin or its records. When the last live pin of
+a session goes, the cleanup removes only records no running process can
+use: an approval whose hook process is gone or whose deadline passed 30
+seconds ago, files of an approval with no request that are older than the
+hook's timeout, pins, run markers and in-flight records of a process that
+is gone, and expired in-flight records. A hook that is still running keeps
+every record of its approval. When an attachment with approvals binds a
+session, it removes the pins and in-flight records of processes that are
+gone; `amq-remote doctor` lists them.
 
 Any same-user process can write the answer file, so an allow in it proves
 nothing by itself. The hook prints allow only when all of these hold:
@@ -95,7 +125,9 @@ names the owner, the agent's public key and the agent's DM channel with the
 owner: `... claude permission-hook --wait 600 --surface 'desktop' --owner
 '<64 hex>' --body '<agent pubkey>' --channel '<DM channel>'`, written by
 `install-approval-hook --desktop`, which the owner runs in the terminal with
-the agent's public key and its DM channel id. A hook holds one pin: a
+the agent's public key and its DM channel id. Until the hook pins its DM,
+the agent shows that command, with these three values, under each
+deny-only approval. A hook holds one pin: a
 Desktop pin or a relay-share pin, never both. The agent key never leaves
 `amq-acp`. The hook prints allow only when all of these hold:
 
@@ -110,8 +142,10 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
 - the answer carries the agent's grant: a BIP-340 signature by the pinned
   agent key over the message id, the reaction id and the time the agent
   checked, dated in the approval's window. The
-  agent signs it only after its own read of the relay finds no edit that
-  changes the call, no deletion of the message, and no owner ❌ on it.
+  agent signs it only after its own read of the relay finds the message
+  stored exactly as it was posted, no edit of it at all (the agent never
+  edits an approval message), no deletion of it, no deletion by the agent,
+  no deletion by the owner since the message, and no owner ❌ on it.
 
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only

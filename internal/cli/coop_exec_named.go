@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -35,15 +34,45 @@ const (
 type coopNamedHarness struct {
 	mode         coopNamedMode
 	resumeSyntax coopNamedResumeSyntax
+	// wakeInjectMode is how the wake types into this harness when the
+	// person chose no mode. Claude Code's and Codex's Ink input coalesces
+	// the Enter with a bracketed-paste end and drops it, so they get raw;
+	// the others keep paste.
+	wakeInjectMode string
 }
 
 var coopNamedHarnesses = map[string]coopNamedHarness{
-	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
-	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
-	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
-	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags},
+	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModeRaw},
+	launch.PiProvider:     {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex, wakeInjectMode: wakeInjectModeRaw},
+	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
+	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
+	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+	"agy":                 {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+}
+
+// coopWakeHarness names the harness binary for the wake's --harness, or ""
+// for a program coop exec does not know.
+func coopWakeHarness(binary string) string {
+	if _, ok := coopNamedHarnessFor(binary); !ok {
+		return ""
+	}
+	if provider := launch.ProviderForExecutable(binary); provider != "" {
+		return provider
+	}
+	return strings.ToLower(filepath.Base(binary))
+}
+
+// coopWakeInjectMode is the mode coop exec starts its wake with: the
+// person's choice, else the harness's, else auto, which picks by handle.
+func coopWakeInjectMode(requested, binary string) string {
+	if requested != "" && requested != wakeInjectModeAuto {
+		return requested
+	}
+	if harness, ok := coopNamedHarnessFor(binary); ok && harness.wakeInjectMode != "" {
+		return harness.wakeInjectMode
+	}
+	return requested
 }
 
 func coopNamedHarnessFor(binary string) (coopNamedHarness, bool) {
@@ -365,10 +394,12 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
-		// The TUI may still run on the daemon, whose tool commands carry
-		// no AM_*; amq there then has no handle and refuses until one is
-		// given.
-		_ = writeStderr("warning: amq commands inside this Codex session have no AMQ identity; pass --me %s, or export AM_ROOT and AM_ME in that command\n", strings.TrimPrefix(name, path.Dir(name)+"/"))
+		// coop exec then gives the seat its identity through configuration
+		// overrides, which make the TUI run its own app-server
+		// (pinCodexShellIdentity); a --remote seat is refused there instead.
+		if !codexArgsHaveRemote(agentArgs) {
+			_ = writeStderr("this Codex seat runs off the shared daemon (%s), so amq-remote cannot attach to it\n", reason)
+		}
 		return agentArgs, true
 	}
 	switch backend {

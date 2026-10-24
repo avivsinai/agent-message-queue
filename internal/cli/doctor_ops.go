@@ -242,6 +242,9 @@ func runOpsChecksWithSchema(
 		}
 		validatedAgents = append(validatedAgents, handle)
 		agent := opsAgent{Handle: handle}
+		if hint, ok := codexStartupHoldHint(root, handle); ok {
+			result.Hints = append(result.Hints, hint)
+		}
 
 		// Unread count + oldest
 		inboxNew := fsq.AgentInboxNew(root, handle)

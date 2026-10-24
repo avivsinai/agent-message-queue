@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -111,11 +112,12 @@ func runSessionCreate(args []string) error {
 }
 
 type sessionListEntry struct {
-	Name   string   `json:"name"`
-	Path   string   `json:"path"`
-	Kind   string   `json:"kind"`
-	Agents []string `json:"agents"`
-	Hint   string   `json:"hint"`
+	Name          string                `json:"name"`
+	Path          string                `json:"path"`
+	Kind          string                `json:"kind"`
+	Agents        []string              `json:"agents"`
+	Hint          string                `json:"hint"`
+	Conversations []sessionConversation `json:"conversations"`
 }
 
 type sessionSkipEntry struct {
@@ -134,7 +136,8 @@ func runSessionList(args []string) error {
 	common := addCommonFlags(fs)
 	usage := usageWithFlags(fs, "amq session list [options]",
 		"List named sessions under the base root.",
-		"Canonical sessions are listed normally. Safe legacy roots are marked legacy_name with an exact --root hint.")
+		"Canonical sessions are listed normally. Safe legacy roots are marked legacy_name with an exact --root hint.",
+		"--json adds conversations[] per session: {handle, provider, id, state, source}, the harness sessions that exact AMQ records tie to an agent. source is launch (managed launch record), codex-thread (the Codex thread coop exec created), exec-pid (the Claude Code process coop exec became, joined with Claude's sessions/<pid>.json), or remote (an amq-remote binding of that process). state is ready, revoked (a later coop exec replaced it; listed for 7 days), or uncertain. Nothing is inferred from a cwd.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -151,12 +154,14 @@ func runSessionList(args []string) error {
 	}
 
 	result := sessionListResult{Sessions: []sessionListEntry{}}
+	sources := loadConversationSources(time.Now())
 	for _, entry := range entries {
 		item, skipped, skip := classifySessionChild(base, entry.Name())
 		if skip {
 			result.Skipped = append(result.Skipped, skipped)
 			continue
 		}
+		item.Conversations = sources.forSession(item.Path, item.Agents)
 		result.Sessions = append(result.Sessions, item)
 	}
 	sort.Slice(result.Sessions, func(i, j int) bool {

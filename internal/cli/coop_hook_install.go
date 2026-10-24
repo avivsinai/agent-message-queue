@@ -19,27 +19,39 @@ const (
 )
 
 // coopHookEvents are the events amq coop install-hooks wires.
-var coopHookEvents = []string{"SessionStart"}
+var coopHookEvents = []string{"SessionStart", "Stop"}
 
 // coopHookCommand is the shell command one co-op hook runs. The AM_ME test
 // runs in the harness shell, so a session that does not take part starts
-// no amq. exec replaces that shell with amq. There is no || true: on
-// SessionStart, exit 2 from an older amq only shows a notice and the session
-// goes on.
+// no amq. On SessionStart exec replaces that shell with amq: exit 2 from an
+// older amq there only shows a notice. On Stop exit 2 blocks the stop, and
+// an older amq at this path would exit 2 on the unknown subcommand, so the
+// shell stays to turn that into exit 0 with || true.
 func coopHookCommand(bin, verb string) string {
-	return coopHookMarker + `[ -z "${AM_ME-}" ] || exec ` +
-		"'" + strings.ReplaceAll(bin, "'", `'\''`) + "'" +
-		" --no-update-check coop hook " + verb
+	quoted := "'" + strings.ReplaceAll(bin, "'", `'\''`) + "'"
+	gate := coopHookMarker + `[ -z "${AM_ME-}" ] || `
+	if verb == "stop" {
+		return gate + quoted + " --no-update-check coop hook stop || true"
+	}
+	return gate + "exec " + quoted + " --no-update-check coop hook " + verb
 }
 
 func coopHooks(bin string) []claude.CommandHook {
-	return []claude.CommandHook{{
-		Event:   "SessionStart",
-		Matcher: coopSessionStartSources,
-		Marker:  coopHookMarker,
-		Command: coopHookCommand(bin, "session-start"),
-		Timeout: 2,
-	}}
+	return []claude.CommandHook{
+		{
+			Event:   "SessionStart",
+			Matcher: coopSessionStartSources,
+			Marker:  coopHookMarker,
+			Command: coopHookCommand(bin, "session-start"),
+			Timeout: 2,
+		},
+		{
+			Event:   "Stop",
+			Marker:  coopHookMarker,
+			Command: coopHookCommand(bin, "stop"),
+			Timeout: 2,
+		},
+	}
 }
 
 func runCoopInstallHooks(args []string) error {
@@ -50,7 +62,8 @@ func runCoopInstallHooks(args []string) error {
 		"",
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and whether a wake rings the",
-		"terminal. The hooks run only in sessions with AM_ME set, which amq coop exec",
+		"terminal. Stop blocks a stop once for unread mail that no wake doorbell will",
+		"announce. The hooks run only in sessions with AM_ME set, which amq coop exec",
 		"and amq launch set; other Claude Code sessions start no amq.",
 		"",
 		"Running again keeps the same entries and replaces entries of another amq",
@@ -68,7 +81,11 @@ func runCoopInstallHooks(args []string) error {
 	hooks := coopHooks(bin)
 	if *dryRun {
 		for _, hook := range hooks {
-			if err := writeStdout("%s\t%s\t%s\n", hook.Event, hook.Matcher, hook.Command); err != nil {
+			matcher := hook.Matcher
+			if matcher == "" {
+				matcher = "(all)"
+			}
+			if err := writeStdout("%s\t%s\t%s\n", hook.Event, matcher, hook.Command); err != nil {
 				return err
 			}
 		}
@@ -108,7 +125,7 @@ func runCoopUninstallHooks(args []string) error {
 }
 
 // writeLegacyCoopHookEntries lists the project hook entries under the
-// current directory that still run the co-op scripts.
+// current directory that still run the old co-op scripts.
 func writeLegacyCoopHookEntries() error {
 	entries, err := legacyCoopHookEntries(".")
 	if err != nil {
@@ -117,7 +134,7 @@ func writeLegacyCoopHookEntries() error {
 	if len(entries) == 0 {
 		return nil
 	}
-	if err := writeStdout("Remove these project hook entries; they run the co-op scripts a second time:\n"); err != nil {
+	if err := writeStdout("Remove these project hook entries; they run co-op scripts AMQ no longer ships:\n"); err != nil {
 		return err
 	}
 	for _, entry := range entries {

@@ -1860,10 +1860,12 @@ type wakeStart struct {
 	restartSignals       chan os.Signal
 	privateStop          <-chan struct{}
 	attention            *os.File
+	startupHold          <-chan struct{}
 	repairHandoff        *wakeRepairChildHandoff
 	repairHandoffPresent bool
 
 	injectMode          string
+	harness             string
 	requestedInjectMode string
 	retryUntil          string
 	flagSettings        wakeSettings
@@ -1921,6 +1923,7 @@ type wakeStartFlags struct {
 	injectArgs           multiStringFlag
 	retryUntil           *string
 	injectMode           *string
+	harness              *string
 	interruptCmd         *string
 	readyFile            *string
 	debug                *bool
@@ -1943,6 +1946,7 @@ func newWakeStartFlags() *wakeStartFlags {
 	fs.Var(&f.injectArgs, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
 	f.retryUntil = fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
 	f.injectMode = fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
+	f.harness = fs.String("harness", "", "Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing")
 	f.interruptCmd = fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
 	f.readyFile = fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	f.debug = fs.Bool("debug", false, "Log injection diagnostics to stderr")
@@ -2083,6 +2087,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}
 	defer cleanupPrivateStop()
 	s.attention, err = wakeAttentionFromEnv()
+	if err != nil {
+		return err
+	}
+	s.startupHold, err = wakeStartupHoldFromEnv()
 	if err != nil {
 		return err
 	}
@@ -2256,6 +2264,11 @@ func (s *wakeStart) validateFlags() error {
 	}
 	s.injectMode = injectMode
 	s.requestedInjectMode = injectMode
+	if s.harness = strings.TrimSpace(*f.harness); s.harness != "" {
+		if err := fsq.ValidateHandle(s.harness); err != nil {
+			return UsageError("--harness: %v", err)
+		}
+	}
 	s.retryUntil, err = normalizeWakeRetryUntil(*f.retryUntil)
 	if err != nil {
 		return UsageError("%v", err)
@@ -2390,7 +2403,7 @@ func (s *wakeStart) checkTerminalInjection() error {
 
 	if tiocstiLegacyDisabledHint() {
 		s.initialNotifierStatus = wakeInjectorUnsupportedStatus
-		s.initialNotifierMode = effectiveInjectMode(&wakeConfig{me: s.me, injectMode: s.injectMode})
+		s.initialNotifierMode = effectiveInjectMode(&wakeConfig{me: s.me, harness: s.harness, injectMode: s.injectMode})
 		s.initialNotifierReason = wakeInjectorUnsupportedReason(
 			s.initialNotifierMode,
 			fmt.Errorf("%s is 0", tiocstiLegacySysctlPath),
@@ -2533,7 +2546,7 @@ func (s *wakeStart) acquireLock() (bool, error) {
 	if s.target != nil {
 		lockWakeMode = wakeTargetInjectVia
 	} else if lockWakeMode != wakeInjectModeNone {
-		lockWakeMode = effectiveInjectMode(&wakeConfig{me: s.me, injectMode: lockWakeMode})
+		lockWakeMode = effectiveInjectMode(&wakeConfig{me: s.me, harness: s.harness, injectMode: lockWakeMode})
 	}
 	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
 	s.resumeEligible = s.target == nil && wakeResumeStartupEligible(
@@ -2804,7 +2817,7 @@ func (s *wakeStart) prepareNotifier() error {
 // bindTerminalAuthority sets terminalAuthority only on success;
 // runWakeWithLoop defers its release.
 func (s *wakeStart) bindTerminalAuthority() error {
-	effectiveMode := effectiveInjectMode(&wakeConfig{me: s.me, injectMode: s.injectMode})
+	effectiveMode := effectiveInjectMode(&wakeConfig{me: s.me, harness: s.harness, injectMode: s.injectMode})
 	if s.requestedOwner != nil &&
 		s.injectVia == "" &&
 		(effectiveMode == wakeInjectModeRaw || effectiveMode == wakeInjectModePaste) {
@@ -2834,6 +2847,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		strict:              s.flags.common.Strict,
 		fallbackWarn:        true,
 		injectMode:          s.injectMode,
+		harness:             s.harness,
 		requestedInjectMode: s.requestedInjectMode,
 		retryUntil:          s.retryUntil,
 		debug:               *s.flags.debug,
@@ -2857,7 +2871,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		dialogSource:            wakeDialogSourceInDir(activeAgentDir),
+		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir), s.startupHold),
 		settingsObserved:        startupSettings.observed,
 		machineSettingsSource:   readMachineWakeSettings,
 		machineSettingsObserved: startupSettings.machineObserved,

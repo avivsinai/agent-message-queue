@@ -70,25 +70,38 @@ providers without executing a caller-supplied provider.
 
 - `grammar_version` is the adapter-owned version that consumers compare. It
   changes when the allowed argument forms, configuration overrides, or carrier
-  support change. The adapter table in `internal/launch/adapter.go` owns the
-  values.
+  support change. `allowed_argument_forms` is derived from the same table that
+  validates committed arguments, so the advertised list changes only when what
+  validation admits changes, and each such change bumps `grammar_version`
+  once. The adapter table in `internal/launch/adapter.go` owns the values.
 - `verified_provider_version` is informational. It names the newest provider
   release on which AMQ verified the grammar. It is neither an exact pin nor
   the installed version.
 
-Provider argument grammar:
+Provider argument grammar. Each form is one argument, followed by one value
+when the form takes one. A "safe value" is 1 to 128 characters from
+`[A-Za-z0-9_.@+:-]` and does not start with `-`. A "session label" is one or
+two `/`-separated parts, each matching `[a-z0-9_][a-z0-9_-]*`.
 
-- Claude admits one `--allowedTools <comma-separated-list>` pair, scoped as
-  `entry := name["("spec")"]`, and the `-n`, `--name`, and `--name=` session
-  labels.
-- Grok Build uses `--tools <list>` and `--disallowed-tools <list>`. Their
-  values are opaque Grok tool names; the Claude `--allowedTools` validator
-  does not check them.
-- Codex admits ordered `-c model_reasoning_effort=<value>` pairs with the
-  values `minimal`, `low`, `medium`, `high`, or `xhigh`. Duplicate keys and
-  unknown keys or values are rejected.
-- Codex `--ask-for-approval` admits only `on-request`. codex-cli refuses
-  `untrusted` at start, and `never` is not admitted.
+| Provider | Form | Value |
+| --- | --- | --- |
+| Claude | `--allowedTools` | comma-separated list, at most 512 bytes, of `name["("spec")"]` entries |
+| Claude | `--effort` | `low`, `medium`, `high`, `xhigh`, or `max` |
+| Claude | `--model` | safe value |
+| Claude | `-n`, `--name` | session label; `--name=<label>` is also accepted |
+| Claude | `--no-chrome`, `--safe-mode`, `--verbose` | none |
+| Claude | `--permission-mode` | `acceptEdits`, `auto`, `manual`, `dontAsk`, or `plan` |
+| Codex | `-c` | `model_reasoning_effort=<value>` with `minimal`, `low`, `medium`, `high`, or `xhigh`, or `approvals_reviewer=<value>` with `user`, `auto_review`, or `guardian_subagent`; the value may carry one surrounding pair of double quotes; duplicate or unknown keys are rejected |
+| Codex | `--ask-for-approval` | `on-request` only; codex-cli refuses `untrusted` at start, and `never` is not admitted |
+| Codex | `--model` | safe value |
+| Codex | `--sandbox` | `read-only` or `workspace-write` |
+| Codex | `--no-alt-screen`, `--search` | none |
+| Grok Build | `--tools`, `--disallowed-tools` | opaque Grok tool names, 1 to 256 UTF-8 bytes, no C0 control characters or DEL, no surrounding whitespace, not starting with `-`; the Claude `--allowedTools` validator does not check them |
+| Grok Build | `--effort` | `low`, `medium`, `high`, `xhigh`, or `max` |
+| Grok Build | `--model`, `--sandbox` | safe value |
+| Grok Build | `--no-alt-screen`, `--no-auto-update` | none |
+| Cursor CLI | `--model` | safe value |
+
 - Every `env_overlay` key matches the POSIX environment grammar
   `[A-Za-z_][A-Za-z0-9_]*`. A key with shell syntax, such as `a;b c`, is
   refused.
@@ -209,8 +222,8 @@ Without the flag:
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build,
-plus adapter `acp` for any Agent Client Protocol agent. Pi stays direct-only.
+The adapter set supports Claude Code, Codex CLI, Cursor CLI, Grok Build, and
+pi, plus adapter `acp` for any Agent Client Protocol agent.
 
 An `acp` seat in committed `.amq/launch.json` names the agent's ACP command,
 for example `{"handle": "grok", "adapter": "acp", "resume_policy": "fresh",
@@ -231,6 +244,18 @@ keeps one written by hand. A public intent cannot select `acp`.
 Each provider owns its conversation identity:
 
 - Claude Code and Grok Build mint session IDs from the launch nonce.
+- pi mints a session ID per seat, a UUID derived from the launch nonce and
+  the handle, passed as `--session-id <id>`, and resumes with `--session-id <id>` in the same cwd. pi treats that flag as
+  an exact session ID: it reopens the session when it exists and creates it
+  under the same ID when it does not, which is the case for a seat that never
+  took a turn, because pi writes the session file only after the first turn.
+  It never matches a prefix. A session file that was deleted also starts
+  fresh under the same ID; AMQ does not scan pi's session store. A pi below `piMinimumVersion` (`1.2.0`,
+  `internal/launch/adapter_pi.go`) or a non-release version is refused with
+  `provider_version_unsupported`, and a pi whose `--help` does not list
+  `--session-id` with `identity_flags_unsupported`. pi admits no provider
+  arguments, and initial input that begins with `@` is refused, because pi
+  reads such an argument as a file to attach.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
   hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
   newer, verified through `codexCaptureVerifiedVersion`
@@ -240,7 +265,15 @@ Each provider owns its conversation identity:
   refusal does not block other seats. AMQ adds one static hook override bound to
   the session root, handle, launch nonce, and AMQ executable. The private hook
   validates the exact ticket and payload, persists immutable evidence, and only
-  then publishes the conversation identity. It then forwards the identical
+  then publishes the conversation identity. Apply leaves the seat `pending`
+  with Code 0, because no backend observes the thread at create. Codex also
+  sends notify for side threads, such as title generation, in any order, so a
+  notify binds only a thread whose own rollout
+  (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl`, found by the
+  exact thread ID) starts with a `session_meta` for the seat's cwd with
+  `source` `cli` and, when present, `thread_source` `user`. Any other notify binds nothing
+  and leaves the seat as it is. A resumed seat's notify for its captured
+  thread is already captured. The hook then forwards the identical
   payload to the operator's configured Codex notify command; a missing command
   is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
   unused Codex launch stays pending and cannot be resumed.
@@ -253,7 +286,7 @@ Each provider owns its conversation identity:
 In committed `.amq/launch.json`, `agents[].named` overrides the top-level
 `named` setting, and naming is on by default. A managed Claude fresh plan
 carries `--name <session>/<handle>` in the ticket and trust digest. A resume
-plan never adds or renames a session. Codex, Cursor, and Grok are unnamed
+plan never adds or renames a session. Codex, Cursor, Grok, and pi are unnamed
 under managed launch.
 
 ### Launchers

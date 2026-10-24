@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,20 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 // accepts strict releases at or above 0.147.0, including newer unverified
 // releases, and refuses older ones by numeric (not string) comparison while
 // resume stays available.
+// #1154: the advertised forms drifted from what validation admits (Claude
+// --model, Codex --sandbox, all of Cursor), so callers could not rely on them.
+func TestAdvertisedArgumentFormsEqualValidationTables(t *testing.T) {
+	for provider, rules := range map[string]map[string]argumentRule{
+		ClaudeProvider: claudeArgRules(), CodexProvider: codexArgRules(),
+		GrokProvider: grokArgRules(), CursorProvider: cursorArgRules(), PiProvider: piArgRules(),
+	} {
+		capabilities := ProviderStaticInputCapabilities(provider)
+		if capabilities.GrammarVersion == 0 || !slices.Equal(capabilities.AllowedArgumentForms, slices.Sorted(maps.Keys(rules))) {
+			t.Errorf("%s capabilities = %#v, validation keys %v", provider, capabilities, slices.Sorted(maps.Keys(rules)))
+		}
+	}
+}
+
 func TestCodexCaptureVersionFloor(t *testing.T) {
 	for _, tc := range []struct {
 		version string
@@ -346,6 +361,59 @@ func TestGrokPlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 }
 
+// #1153: a pi seat mints its session ID from the launch nonce and resumes the
+// exact ID; pi below the 1.2.0 floor is refused.
+func TestPiPlansMintAndResumeExactSessionID(t *testing.T) {
+	project, executable := testExecutable(t, PiProvider)
+	adapter := NewPiAdapter(executable)
+	adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{
+		"--version": "1.2.0\n", "--help": "  --session-id <id>   Use exact project session ID, creating it if missing\n",
+	}}
+	if capabilities := adapter.Capabilities(context.Background()); !capabilities.Available || !capabilities.Resume || capabilities.ProviderVersion != "1.2.0" {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+	request := planRequest(project, PiProvider)
+	fresh, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh.Argv, []string{executable, "--session-id", fresh.ConversationID}) || !validUUID(fresh.ConversationID) {
+		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	// #1188 review: two pi seats of one launch in one cwd got the same
+	// --session-id (the shared launch nonce), so they shared a pi session.
+	other := request
+	other.Handle = "pi-two"
+	second, err := adapter.PlanFresh(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ConversationID == fresh.ConversationID || second.ConversationID == testLaunchNonce {
+		t.Fatalf("seats share session id %s", second.ConversationID)
+	}
+	// #1188 review: pi reads an argument that begins with @ as a file to
+	// attach, so such initial input is refused.
+	attach := request
+	attach.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: "@secret.txt", SHA256: initialInputDigest("@secret.txt")}
+	if _, err := adapter.PlanFresh(attach); err == nil {
+		t.Fatal("initial input @secret.txt was planned as a pi attachment")
+	}
+	resume, err := adapter.PlanResume(ResumeRequest{
+		PlanRequest:  request,
+		Conversation: ConversationIdentity{Provider: PiProvider, ID: testConversationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resume.Argv, []string{executable, "--session-id", testConversationID}) || resume.DynamicArgv[0].Kind != DynamicArgConversationID {
+		t.Fatalf("resume plan = %#v", resume)
+	}
+	adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{"--version": "1.1.9\n"}}
+	if capabilities := adapter.Capabilities(context.Background()); capabilities.Available || capabilities.Reason != "provider_version_unsupported" {
+		t.Fatalf("old pi capabilities = %#v", capabilities)
+	}
+}
+
 // TestGrokCommittedConfigRejectsBypassFlagAsToolValue confirms the leading-dash
 // guard in validGrokToolList refuses a flag-looking value smuggled into
 // --tools or --disallowed-tools (e.g. the Grok bypass flag), mirroring the
@@ -420,9 +488,15 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	at := slices.Index(fresh.Argv, notify)
 	if fresh.AdapterMode != AdapterModeCapture || fresh.ConversationID != "" || fresh.PreSpawnAcquire ||
-		len(fresh.DynamicArgv) != 0 || !reflect.DeepEqual(fresh.Argv[len(fresh.Argv)-2:], []string{"-c", notify}) {
+		at < 1 || fresh.Argv[at-1] != "-c" || len(fresh.DynamicArgv) != len(IdentityEnvKeys) {
 		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	for _, dynamic := range fresh.DynamicArgv {
+		if dynamic.Kind != DynamicArgCodexIdentity {
+			t.Fatalf("fresh plan dynamic argv = %#v", fresh.DynamicArgv)
+		}
 	}
 	otherRequest := request
 	otherRequest.LaunchNonce = "56565656-5656-4565-8565-565656565656"
@@ -438,7 +512,7 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if freshDigest != otherDigest || fresh.Argv[len(fresh.Argv)-1] != otherFresh.Argv[len(otherFresh.Argv)-1] {
+	if freshDigest != otherDigest || !slices.Contains(otherFresh.Argv, notify) {
 		t.Fatalf("codex notify changed the static trust subject across launch nonces: %s != %s", freshDigest, otherDigest)
 	}
 	resume, err := adapter.PlanResume(ResumeRequest{

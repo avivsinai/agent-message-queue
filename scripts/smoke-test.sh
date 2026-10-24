@@ -139,12 +139,9 @@ if ! printf '%s' "$iso_out" | grep -q "feature-x"; then
 fi
 echo "coop exec --session isolation ok"
 
-# --- Python hook session-name tests ---
+# --- Python script tests ---
 if command -v python3 >/dev/null 2>&1; then
-  # Clear env to avoid interference with session detection tests
-  unset AM_BASE_ROOT 2>/dev/null || true
-  python3 scripts/test_session_name.py
-  echo "python session-name tests ok"
+  python3 scripts/test_codex_amq_notify.py
   python3 scripts/test_check_pr_title.py
   python3 scripts/test_check_commit_overrides.py
   python3 scripts/test_check_wake_test_changes.py
@@ -342,7 +339,6 @@ printf '%s' "$kanban_help_out" | grep -q "bridge  Run websocket bridge"
 echo "integration: kanban needs a live websocket workspace, skipping invocation (offline smoke test)"
 
 bash scripts/test_install_checksum.sh
-AMQ_TEST_BIN="$BIN" bash scripts/test_stop_hook.sh
 bash scripts/test_version_embed.sh
 bash scripts/amq-bot-envelope-hop-probe_test.sh
 echo "smoke test ok"

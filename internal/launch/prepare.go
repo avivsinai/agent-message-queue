@@ -1357,6 +1357,10 @@ func previewStaticCommand(plan AgentPlan) *PrepareCommand {
 			argv[dynamic.Index] = "${launch_nonce}"
 		case DynamicArgConversationID:
 			argv[dynamic.Index] = "${conversation_id}"
+		case DynamicArgCodexIdentity:
+			if key, ok := codexIdentitySlotKey(plan.Argv, dynamic.Index); ok {
+				argv[dynamic.Index] = codexIdentitySetPrefix + key + "=${" + key + "}"
+			}
 		}
 	}
 	return &PrepareCommand{Argv: argv, Cwd: plan.Cwd, EnvOverlay: cloneEnv(plan.EnvOverlay)}

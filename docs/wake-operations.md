@@ -31,12 +31,12 @@ executable action or a safe operator diagnostic. Missing evidence is JSON
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
-The co-op Stop hook (`scripts/amq-stop-hook.sh`) blocks a stop only for mail
-no wake will ring for. With no live wake, every pending message counts. Under a
+The co-op Stop hook (`amq coop hook stop`, installed by `amq coop install-hooks`)
+blocks a stop only for mail no wake will ring for. With no live wake, every pending message counts. Under a
 live wake, only mail created at or before `baseline_at` counts, because a wake
 started with `--baseline-existing` never rings for that cohort. Every message
 counts when a live wake has no `baseline_at` yet (its baseline is not done) or
-when the probe fails or takes more than 2 seconds. A live wake that is demoted
+when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
 
@@ -154,11 +154,97 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   it blocks a delivery attempt, the wake adds attention output (title, bell,
   desktop notice) on the attention cadence instead of waiting silently.
 
-The guard does not cover dialogs without a hook: the workspace trust dialog,
-MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
+- **Startup trust dialog.** Claude Code and Codex ask whether to trust a
+  new directory before the session starts, and Enter at that dialog ends the
+  session. Before it execs either harness, `amq coop exec` reads where the
+  harness records trust: Claude Code's `.claude.json` (in `CLAUDE_CONFIG_DIR`
+  or the home directory) for the directory or an ancestor inside its Git
+  checkout, and Codex's `config.toml` `[projects]` for the directory or its
+  Git trust root (a directory outside any checkout asks nothing in Codex).
+  Once its wake holds the agent's wake lock, coop exec writes a `Startup`
+  marker that names the harness and directory when the harness has not
+  recorded that it trusts the directory, including a Codex directory saved
+  as untrusted, which opens on a restricted dialog. When the harness shows
+  no dialog, it removes a `Startup` marker an earlier launch left. A trust
+  file AMQ cannot read writes no marker. Until coop exec has done this, its
+  wake types nothing: coop exec passes the wake a startup-hold pipe and
+  closes it afterwards, and exec or exit closes it too. The `SessionStart` close removes the marker when the
+  hook is installed. Without the hook, the wake reads the trust file again
+  on each recheck while the marker exists and treats the marker as closed
+  only once the harness records that it trusts the directory, so the
+  doorbell rings within 2 seconds of acceptance. A trust file that becomes
+  unreadable keeps the hold. Codex records no decision for a directory the
+  person keeps untrusted, so that hold stays until the Codex `SessionStart`
+  close of `amq wake install-dialog-hook --harness codex`; without that hook
+  the marker ages as above (input held, attention output after 10 minutes),
+  and `amq doctor --ops` names the remedy. `amq wake check` reports an open
+  `Startup` marker as `startup_hold`: the harness, the directory, how long it
+  has been open, and what releases it.
+
+The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, and login or update prompts. It also cannot recall bytes the
 terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
 must write no terminal input at all.
+
+## Dialog guard (Codex approvals)
+
+A doorbell at a Codex approval prompt cancels the pending command and runs
+as a new prompt. The same marker and hold guard that prompt through Codex
+hooks:
+
+```bash
+amq wake install-dialog-hook --harness codex   # or --harness all
+```
+
+The installer writes `AMQ_DIALOG_HOOK=1` entries into `$CODEX_HOME/hooks.json`
+(default `~/.codex/hooks.json`), after the entries already there, so the
+trust of the person's own hooks stays where it is. Codex runs a new or
+changed hook only after the person trusts it: open `/hooks` in Codex and
+trust the AMQ entries, or choose "Trust all" when Codex asks at start. Each
+change of an entry's command costs that once.
+
+- **Open and close.** `PermissionRequest`, with no matcher, opens the marker.
+  Only a turn or session event closes it: `Stop`, `Interrupt`,
+  `UserPromptSubmit`, `SessionStart` (`startup|resume|clear`) or
+  `SessionEnd`. A tool call's `PostToolUse` does not: Codex gives a prompt
+  no call token, and a parallel call that Codex allowed without asking can
+  finish with the same tool and input as the call whose prompt still shows.
+  A doorbell due mid-turn after an approval waits for the turn's end.
+  `Interrupt` and `SessionEnd` have a 1 second timeout, the rest 5 seconds.
+- **Identity.** Codex hooks run in the Codex process environment under the
+  user's `$SHELL`. With `AM_ME` set (an embedded Codex started by
+  `amq coop exec` or `amq launch`) the receiver uses it. Without it, the
+  receiver takes the seat that `amq coop exec` recorded for the hook's
+  `session_id`, the thread id, in `~/.amq/codex-threads`. With neither
+  `AM_ME` nor that store the hook starts nothing; on a machine that has the
+  store, a Codex session without `AM_ME` starts amq once per event.
+- **Exit status.** The entries keep the shell as the parent and end in
+  `|| true`, so an older amq that exits 2 never blocks a Codex prompt or
+  continues a turn.
+
+`amq doctor` reports, when the Codex home exists, Codex settings that run no
+user hooks (`features.hooks = false`, `codex_hooks = false`, or
+`allow_managed_hooks_only` in `/etc/codex/requirements.toml`), missing or
+partial entries, a missing binary or an older form (command, matcher,
+timeout, or an `async` entry, which would let a prompt show before the
+marker), entries disabled in `/hooks`, and entries whose stored
+`trusted_hash` is not Codex's hash of the entry as it is now. It reads the
+user `config.toml` only; a project or profile layer that turns hooks off is
+not seen.
+
+## Dialog guard (pi prompts)
+
+pi asks "Trust project folder?" before a session starts in a folder with
+project resources, and extensions open prompts (`confirm`, `select`,
+`input`, `editor`, custom). The AMQ pi extension
+(`integrations/pi/amq-bridge.ts`) writes the `.wake.dialog` marker
+(`harness` `pi`) while either is open: `event` `project_trust` from pi's
+`project_trust` event until the session starts, and `event` `ui_prompt`
+while pi waits on an extension prompt. The wake holds the doorbell with the
+same hold and age rules as above. A session start or shutdown also removes
+the marker. The extension is the only writer of a pi agent's marker and
+removes only a marker it wrote. The guard runs only when the AMQ pi
+extension is loaded.
 
 ## Live settings
 

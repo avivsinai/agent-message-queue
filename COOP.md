@@ -39,22 +39,32 @@ Disable wake when the environment has no usable terminal:
 amq coop exec --no-wake claude
 ```
 
-### Claude Code session-start preamble
+### Claude Code hooks
 
 ```sh
 amq coop install-hooks
 ```
 
-This adds one SessionStart hook to `~/.claude/settings.json`. On startup,
-resume, `/clear`, and compaction it gives the agent a short preamble: its
-handle, session and peers, its unread count, and whether a wake rings the
-terminal (so it must not run `watch`, `monitor`, or a polling loop). The hook
-runs `amq` only in sessions with `AM_ME` set, which `amq coop exec` and
-`amq launch` do; a plain `claude` without `AM_ME` gets no preamble, and other
-Claude Code sessions start no `amq`. Running it again replaces the entry in
-place; `amq coop uninstall-hooks` removes it. Remove a project hook entry that
-runs `scripts/claude-session-start.sh`, or the preamble arrives twice; the
-install command and `amq doctor` list such entries.
+This adds two hooks to `~/.claude/settings.json`:
+
+- **SessionStart.** On startup, resume, `/clear`, and compaction it gives the
+  agent a short preamble: its handle, session and peers, its unread count, and
+  whether a wake rings the terminal (so it must not run `watch`, `monitor`, or
+  a polling loop).
+- **Stop.** It blocks a stop once for unread mail it has not reported yet, so
+  the agent drains before it ends its turn. Under a live wake it counts only
+  mail that the wake will not ring for (see
+  [Wake operations](docs/wake-operations.md)). After 5 blocks in one chain it
+  allows the stop with a notice.
+
+The hooks run `amq` only in sessions with `AM_ME` set, which `amq coop exec`
+and `amq launch` do. A plain `claude` without `AM_ME` gets no preamble and no
+Stop guard, and other Claude Code sessions start no `amq`. Running the command
+again replaces the entries in place; `amq coop uninstall-hooks` removes them.
+AMQ no longer ships the old project hook scripts `scripts/claude-session-start.sh`,
+`scripts/amq-stop-hook.sh` and `scripts/claude-amq-user-prompt-submit.py`.
+Remove project hook entries that run them; the install command and
+`amq doctor` list such entries.
 
 ### Multiple pairs (isolated sessions)
 
@@ -133,6 +143,11 @@ injection is not available:
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
 
+Codex runs it after each turn. It reads the mailbox named by `AM_ROOT` and
+`AM_ME`, which `amq coop exec codex` sets, and does nothing without them. It
+raises one desktop notification for a set of unread messages, and another
+only when that set changes.
+
 ## Roles and phase flow
 
 The initiator starts the task, owns decisions, and receives updates. A leader
@@ -208,9 +223,19 @@ submitted after the quiet window. Urgent interrupts bypass input deferral;
 when input remains active through `--input-max-hold`, wake emits an out-of-band
 notice instead of injecting. Unavailable input sampling remains best-effort.
 
-agy runs no hooks with Google Cloud sign-in, so the wake cannot see agy's
-permission prompt; a doorbell that arrives while agy asks "Run this command?"
-can answer it (known limitation; a fix is in progress in a follow-up).
+agy runs no hooks with Google Cloud sign-in, so `amq coop exec agy` runs agy
+on a pseudo-terminal and stays as its terminal. It turns on agy's terminal
+status (`AGY_CLI_OSC7501=on`, `AGY_CLI_OSC7501_MESSAGES=brief`) and holds the
+doorbell while agy reports a permission or sign-in prompt. When you set
+`AGY_CLI_OSC7501` to anything but `on`, agy runs as before and a doorbell can
+answer its permission prompt.
+
+Cursor shows no signal AMQ can read when its approval prompt opens or
+closes, so `amq coop exec cursor-agent` keeps the full doorbell, and a
+doorbell that arrives while Cursor asks for approval can answer it (Enter
+selects the highlighted choice). Grok has no hook for its approval prompt, so
+`amq coop exec grok` keeps the full doorbell, and a doorbell that arrives
+while Grok asks for approval can answer it. Both are known limits.
 
 ### Supervisor recipes
 

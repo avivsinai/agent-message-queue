@@ -38,6 +38,7 @@ options not repeated here.
 - [amq doctor](#amq-doctor)
 - [amq shell-setup](#amq-shell-setup)
 - [amq completion](#amq-completion)
+- [amq thread open](#amq-thread-open)
 - [amq presence set](#amq-presence-set)
 - [amq presence list](#amq-presence-list)
 - [amq dlq list](#amq-dlq-list)
@@ -170,7 +171,7 @@ Usage:
   amq setup [options]
 
 Configure this project after previewing every change.
-Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.
+Detects Claude, Codex, Cursor, Grok, and pi through their adapter capability probes.
 Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
@@ -753,6 +754,8 @@ Options:
         Log injection diagnostics to stderr
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -harness string
+        Program the wake types into (claude, codex, agy, pi, cursor-agent, grok); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
@@ -1151,6 +1154,42 @@ Examples:
   amq completion fish > ~/.config/fish/completions/amq.fish
 ```
 
+## amq thread open
+
+```text
+$ amq thread open --help
+Usage:
+  amq thread open [--all-sessions] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]
+
+List open review requests, questions, and todos per thread.
+An obligation closes when its owner replies with the expected kind or a closing label.
+Read-only: it never moves a message, writes a receipt, or reads a body.
+
+Options:
+  -all-sessions
+        Scan every canonical session under the base root
+  -json
+        Emit JSON output
+  -json-schema int
+        JSON schema version: 1 (requires --json) (default 1)
+  -kind string
+        Comma-separated opener kinds: review_request, question, todo
+  -limit int
+        List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)
+  -max-age string
+        Ignore openers older than this (e.g. 14d, 36h; 0 = read every file) (default "14d")
+  -me string
+        Agent handle (or AM_ME)
+  -owed-by string
+        Comma-separated handles that owe a reply
+  -owed-to string
+        Comma-separated handles that are owed a reply
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -strict
+        Error on unknown handles (default: warn)
+```
+
 ## amq presence set
 
 ```text
@@ -1522,7 +1561,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog open|close [--me <agent>] [--root <path>]
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex] open|close
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1530,9 +1569,13 @@ installs it. Reads the hook input JSON on stdin.
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
 of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. Always exits 0 once the arguments parse and prints nothing.
+stdin removes it. With --harness codex only a turn or session event removes it;
+without AM_* the seat is the one amq coop exec recorded for the hook's session_id.
+Always exits 0 once the arguments parse and prints nothing.
 
 Options:
+  -harness string
+        Hook input of claude or codex (default "claude")
   -me string
         Agent handle (or AM_ME)
   -root string
@@ -1544,9 +1587,10 @@ Options:
 ```text
 $ amq wake install-dialog-hook --help
 Usage:
-  amq wake install-dialog-hook [--dry-run]
+  amq wake install-dialog-hook [--dry-run] [--harness claude|codex|all]
 
-Install the wake dialog guard hooks in ~/.claude/settings.json.
+Install the wake dialog guard hooks in ~/.claude/settings.json, or with --harness
+codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks).
 
 While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
 the hooks keep a marker in the agent's mailbox and every wake of that agent
@@ -1562,6 +1606,8 @@ list the AMQ_DIALOG_HOOK entries, restart the session.
 Options:
   -dry-run
         Print the hooks without changing the settings file
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq wake uninstall-dialog-hook
@@ -1569,10 +1615,15 @@ Options:
 ```text
 $ amq wake uninstall-dialog-hook --help
 Usage:
-  amq wake uninstall-dialog-hook
+  amq wake uninstall-dialog-hook [--harness claude|codex|all]
 
 Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
-~/.claude/settings.json. Other settings and hooks are not changed.
+~/.claude/settings.json, or $CODEX_HOME/hooks.json with --harness codex.
+Other settings and hooks are not changed.
+
+Options:
+  -harness string
+        claude, codex, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq coop init
@@ -1685,7 +1736,8 @@ Install the co-op hooks in ~/.claude/settings.json.
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and whether a wake rings the
-terminal. The hooks run only in sessions with AM_ME set, which amq coop exec
+terminal. Stop blocks a stop once for unread mail that no wake doorbell will
+announce. The hooks run only in sessions with AM_ME set, which amq coop exec
 and amq launch set; other Claude Code sessions start no amq.
 
 Running again keeps the same entries and replaces entries of another amq
@@ -1713,16 +1765,23 @@ Other settings and hooks are not changed.
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start
+  amq coop hook session-start|stop
 
-Claude Code hook receiver for the co-op hooks; amq coop install-hooks installs it.
+Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
+They read AM_ME, AM_ROOT and the session pin from the environment, never read
+.amqrc, and always exit 0 once the arguments parse.
 
 session-start prints the co-op preamble as SessionStart additionalContext:
 the agent's handle, session and peers, its unread count, and whether a wake
-rings this terminal. It reads AM_ME, AM_ROOT and the session pin from the
-environment and never reads .amqrc. Without AM_ME or an absolute AM_ROOT,
-with a session pin that does not match AM_ROOT, or when the mailbox does not
-exist, it prints nothing. Always exits 0 once the arguments parse.
+rings this terminal. Without AM_ME or an absolute AM_ROOT, with a session pin
+that does not match AM_ROOT, or when the mailbox does not exist, it prints
+nothing.
+
+stop blocks the stop once for unread mail it has not reported yet. Under a
+live wake it counts only mail created at or before the wake's startup
+baseline, because the wake rings for later mail. It allows the stop after
+5 blocks in one chain, and prints a systemMessage when the context conflicts
+or the mailbox cannot be read.
 ```
 
 ## amq swarm list
@@ -2060,6 +2119,7 @@ Usage:
 
 List named sessions under the base root.
 Canonical sessions are listed normally. Safe legacy roots are marked legacy_name with an exact --root hint.
+--json adds conversations[] per session: {handle, provider, id, state, source}, the harness sessions that exact AMQ records tie to an agent. source is launch (managed launch record), codex-thread (the Codex thread coop exec created), exec-pid (the Claude Code process coop exec became, joined with Claude's sessions/<pid>.json), or remote (an amq-remote binding of that process). state is ready, revoked (a later coop exec replaced it; listed for 7 days), or uncertain. Nothing is inferred from a cwd.
 
 Options:
   -json
