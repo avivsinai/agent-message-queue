@@ -594,8 +594,13 @@ func (err *applyCommittedMutationError) Unwrap() error { return err.Err }
 
 func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, runnable []PrepareParticipant, dependencies ApplyDependencies, root *fsq.DeliveryRoot, lease *Lease, decisions map[RequiredActionKind]string, snapshot PrepareResult, authorizedRootIdentity string) (ReconcileRequest, error) {
 	amqPath := dependencies.AMQPath
+	var authorizedAMQ *PreparedExecutable
 	if prepared.AMQExecutable != "" {
-		amqPath = prepared.AMQExecutable
+		if snapshot.AMQExecutable == nil {
+			return ReconcileRequest{}, fmt.Errorf("authorized amq executable identity is missing")
+		}
+		approved := *snapshot.AMQExecutable
+		authorizedAMQ, amqPath = &approved, approved.Path
 	}
 	config := ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: prepared.Target.Session, Layout: LayoutIntent{Type: LayoutColumns}}
 	adapters := make(map[string]HarnessAdapter, len(runnable))
@@ -645,6 +650,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		HostIdentity:         dependencies.HostIdentity, AllowExternalCwd: true,
 		ExecutionOptions:     executionOptions,
 		AuthorizedIdentities: authorizedIdentities,
+		AuthorizedAMQ:        authorizedAMQ,
 		AllowFreshFallback:   decisions[ActionStaleConversation] == "fresh_once",
 		Placement:            prepared.Placement,
 		OnLive:               onLivePolicies(runnable),
@@ -710,7 +716,14 @@ func authorizedIdentitiesEqual(first, second PrepareResult) bool {
 			return false
 		}
 	}
-	return true
+	return preparedExecutableEqual(first.AMQExecutable, second.AMQExecutable)
+}
+
+func preparedExecutableEqual(first, second *PreparedExecutable) bool {
+	if first == nil || second == nil {
+		return first == second
+	}
+	return *first == *second
 }
 
 func consultedExecutableEqual(first, second *ConsultedExecutable) bool {

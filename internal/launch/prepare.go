@@ -373,6 +373,10 @@ type PrepareResult struct {
 	Observations        []PrepareObservation
 	Placement           PlacementPreview
 	CallerContext       map[string]string
+	// AMQExecutable is the canonical path and physical identity of the
+	// requested AMQ executable that entered SubjectDigest. Nil when the
+	// request names none.
+	AMQExecutable *PreparedExecutable
 }
 
 type prepareTargetState struct {
@@ -493,10 +497,12 @@ type prepareSubject struct {
 	Observations    []PrepareObservation      `json:"observations"`
 	Placement       *PlacementPreview         `json:"placement,omitempty"`
 	CallerContext   map[string]string         `json:"caller_context,omitempty"`
-	AMQExecutable   *prepareExecutable        `json:"amq_executable,omitempty"`
+	AMQExecutable   *PreparedExecutable       `json:"amq_executable,omitempty"`
 }
 
-type prepareExecutable struct {
+// PreparedExecutable is a canonical file path and the physical identity that
+// canonicalFile reports for it, the same form an execution ticket binds.
+type PreparedExecutable struct {
 	Path     string `json:"path"`
 	Identity string `json:"identity"`
 }
@@ -762,7 +768,8 @@ func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies P
 		if err != nil {
 			return PrepareResult{}, fmt.Errorf("identify amq executable: %w", err)
 		}
-		subject.AMQExecutable = &prepareExecutable{Path: path, Identity: identity}
+		result.AMQExecutable = &PreparedExecutable{Path: path, Identity: identity}
+		subject.AMQExecutable = result.AMQExecutable
 	}
 	result.SubjectDigest, err = digestCanonical(subject)
 	if err != nil {
