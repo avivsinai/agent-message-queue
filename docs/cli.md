@@ -821,7 +821,7 @@ If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.
 
 Options:
   -all
-        Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign)
+        Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign, amq-board)
   -y    Run the package-manager delegate without an AMQ confirmation; the manager may still prompt
 ```
 

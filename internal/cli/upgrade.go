@@ -95,7 +95,7 @@ var wellKnownHomebrewPrefixes = []string{
 
 func runUpgrade(args []string, currentVersion string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	allFlag := fs.Bool("all", false, "Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign)")
+	allFlag := fs.Bool("all", false, "Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign, amq-board)")
 	yesFlag := fs.Bool("y", false, "Run the package-manager delegate without an AMQ confirmation; the manager may still prompt")
 	usage := usageWithFlags(
 		fs,
@@ -1046,7 +1046,7 @@ func reportUnavailableCompanionsOnWindows(all *bool, goos string) error {
 	if all == nil || !*all || goos != "windows" {
 		return nil
 	}
-	return writeStdoutLine("--all: only amq-keepalive is published for Windows; skipping amq-bridge, amq-acp, amq-remote, and amq-owner-sign")
+	return writeStdoutLine("--all: only amq-keepalive is published for Windows; skipping amq-bridge, amq-acp, amq-remote, amq-owner-sign, and amq-board")
 }
 
 func companionBinariesAvailableOn(names []string, goos string) []string {
