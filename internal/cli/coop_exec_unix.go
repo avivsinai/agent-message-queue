@@ -111,6 +111,10 @@ type coopExecRun struct {
 	// managedInvocation is the harness and wrapper the managed launch ticket
 	// runs, for the identity record.
 	managedInvocation harness.Invocation
+	// rootID is the identity token of root captured once root is selected
+	// and its mailbox proven; the identity record is written only into that
+	// directory.
+	rootID string
 }
 
 func runCoopExec(args []string) error {
@@ -709,6 +713,9 @@ func (c *coopExecRun) provisionRoot() error {
 			}
 		}
 	}
+	// An unreadable identity leaves rootID empty, which no directory
+	// matches, so the identity record is skipped rather than guessed.
+	c.rootID, _ = resolveTreeIdentityToken(c.root)
 	return nil
 }
 
@@ -897,7 +904,7 @@ func (c *coopExecRun) execAgent() error {
 	if invocation.Harness == "" {
 		invocation = harness.ResolveInvocation(c.binaryPath, c.agentArgs)
 	}
-	publishAgentIdentity(c.root, c.agentHandle, invocation)
+	publishAgentIdentity(c.root, c.rootID, c.agentHandle, invocation)
 
 	// Build argv: command name + agent args.
 	argv := append([]string{c.cmdName}, c.agentArgs...)
@@ -1670,9 +1677,12 @@ func splitDashDash(args []string) ([]string, []string) {
 
 // publishAgentIdentity records which harness is about to run as handle in the
 // handle's existing mailbox below root, so other agents see the handle as
-// observed. It is discovery metadata only; a failure warns and never stops
-// the start.
-func publishAgentIdentity(root, handle string, invocation harness.Invocation) {
+// observed. rootID is the root's identity token captured when the root was
+// selected; the record is written only through a capability whose directory
+// still has that identity, so a root replaced after selection never receives
+// it. It is discovery metadata only; a failure warns and never stops the
+// start.
+func publishAgentIdentity(root, rootID, handle string, invocation harness.Invocation) {
 	err := func() error {
 		identity, err := fsq.SnapshotDeliveryRoot(root)
 		if err != nil {
@@ -1683,6 +1693,9 @@ func publishAgentIdentity(root, handle string, invocation harness.Invocation) {
 			return err
 		}
 		defer func() { _ = deliveryRoot.Close() }()
+		if verifyTreeIdentityInfo(deliveryRoot.FileInfo(), rootID) != TreeRelationSame {
+			return fmt.Errorf("root %s is not the directory selected for this agent", root)
+		}
 		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, invocation.Harness, invocation.Wrapper, time.Now()))
 	}()
 	if err != nil {
