@@ -133,6 +133,42 @@ func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
 	}
 }
 
+func TestSetupNamesAgentApartFromItsAdapter(t *testing.T) {
+	project := setupProjectFixture(t, "claude")
+	if _, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"-y", "--agents", "reviewer=claude", "--default-session", "work", "--launcher-preference", "commands", "--json"})
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	projectRaw, err := os.ReadFile(filepath.Join(project, setupConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectConfig, err := launch.ParseProjectConfig(projectRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectConfig.Agents) != 1 {
+		t.Fatalf("agents = %#v", projectConfig.Agents)
+	}
+	agent := projectConfig.Agents[0]
+	if agent.Handle != "reviewer" || agent.Adapter != "claude" || !slices.Equal(agent.Command, []string{"claude"}) {
+		t.Fatalf("agent = %#v, want handle reviewer through adapter claude", agent)
+	}
+	root := filepath.Join(project, defaultCoopRoot)
+	if got := readAgentRoster(root).Agents; !slices.Equal(got, []string{"reviewer"}) {
+		t.Fatalf("roster = %v, want [reviewer]", got)
+	}
+	for _, base := range []string{root, filepath.Join(root, "work")} {
+		if err := validateSetupMailbox(base, "reviewer"); err != nil {
+			t.Fatalf("mailbox %s/reviewer: %v", base, err)
+		}
+		if _, err := os.Stat(filepath.Join(base, "agents", "claude")); !os.IsNotExist(err) {
+			t.Fatalf("adapter name became a mailbox under %s: %v", base, err)
+		}
+	}
+}
+
 func TestSetupPreviewDigestBindsApplyWithoutWrites(t *testing.T) {
 	project := setupProjectFixture(t, "claude", "codex")
 	args := []string{

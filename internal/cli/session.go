@@ -88,11 +88,15 @@ func runSessionCreate(args []string) error {
 		return err
 	}
 
-	agents, err := loadSessionCreateAgents(base)
+	agents, fromLaunch, err := loadSessionCreateAgents(base)
 	if err != nil {
 		return err
 	}
-	created, err := provisionNewNamedSession(base, name, agents)
+	var roster []string
+	if fromLaunch {
+		roster = agents
+	}
+	created, err := provisionNewNamedSession(base, name, agents, roster)
 	if err != nil {
 		var exists *fsq.DirectChildExistsError
 		if errors.As(err, &exists) {
@@ -247,20 +251,24 @@ func sessionCreateBaseRoot(root string) (string, error) {
 	return base, nil
 }
 
-func loadSessionCreateAgents(base string) ([]string, error) {
+// loadSessionCreateAgents returns the handles a new session provisions and
+// whether they came from the project's launch.json. Launch handles are
+// declared in the session itself; base roster handles are already declared
+// by the base.
+func loadSessionCreateAgents(base string) ([]string, bool, error) {
 	if handles, ok, err := loadLaunchRosterHandles(); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if ok {
-		return handles, nil
+		return handles, true, nil
 	}
 	cfg, err := config.LoadConfig(filepath.Join(base, "meta", "config.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
-	return cfg.Agents, nil
+	return cfg.Agents, false, nil
 }
 
 func loadLaunchRosterHandles() ([]string, bool, error) {
