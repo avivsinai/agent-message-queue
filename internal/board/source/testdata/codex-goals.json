@@ -1,0 +1,6 @@
+[{"thread_id":"019f0000-0000-7000-8000-000000000001","objective":"Example active goal","status":"active","updated_at_ms":1781801000000},
+{"thread_id":"019f0000-0000-7000-8000-000000000002","objective":"Example blocked goal","status":"blocked","updated_at_ms":1781801000000},
+{"thread_id":"019f0000-0000-7000-8000-000000000003","objective":"Example paused goal","status":"paused","updated_at_ms":1781801000000},
+{"thread_id":"019f0000-0000-7000-8000-000000000004","objective":"Example usage_limited goal","status":"usage_limited","updated_at_ms":1781801000000},
+{"thread_id":"019f0000-0000-7000-8000-000000000005","objective":"Example budget_limited goal","status":"budget_limited","updated_at_ms":1781801000000},
+{"thread_id":"019f0000-0000-7000-8000-000000000006","objective":"Example complete goal","status":"complete","updated_at_ms":1781801000000}]
