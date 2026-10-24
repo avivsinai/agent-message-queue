@@ -58,6 +58,50 @@ func findSiblingBacklogs(root, me string) []siblingBacklog {
 	return backlogs
 }
 
+type agentSiblingBacklog struct {
+	siblingBacklog
+	Agent string
+}
+
+// findAllSiblingBacklogs is findSiblingBacklogs for every mailbox of every
+// sibling session, so a handle that exists only in a sibling is seen too.
+func findAllSiblingBacklogs(root string) []agentSiblingBacklog {
+	root = absPath(resolveRoot(root))
+	base := baseRootOfForDisplay(root)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var backlogs []agentSiblingBacklog
+	for _, entry := range entries {
+		if !entry.IsDir() || validateSessionName(entry.Name()) != nil {
+			continue
+		}
+		candidate := absPath(filepath.Join(base, entry.Name()))
+		if candidate == root {
+			continue
+		}
+		handles, err := fsq.ListAgents(candidate)
+		if err != nil {
+			continue
+		}
+		for _, handle := range handles {
+			if fsq.ValidateHandle(handle) != nil {
+				continue
+			}
+			pending, err := countPendingMessageFiles(fsq.AgentInboxNew(candidate, handle))
+			if err != nil || pending == 0 {
+				continue
+			}
+			backlogs = append(backlogs, agentSiblingBacklog{
+				siblingBacklog: siblingBacklog{Session: entry.Name(), Pending: pending},
+				Agent:          handle,
+			})
+		}
+	}
+	return backlogs
+}
+
 func findBaseBacklogs(root string, agents []string) []baseBacklog {
 	root = absPath(resolveRoot(root))
 	base := classifyRoot(root)

@@ -97,6 +97,56 @@ func TestDoctorNamesAMQRoute(t *testing.T) {
 	if !doctorHasBoundary(out, "amq_route", "other") {
 		t.Fatalf("--me other not named: %v", out.(map[string]any)["failing"])
 	}
+
+	// Bead agent-message-queue-t97.2 (research 2): a session root without
+	// its own config.json was reported unroutable although its base roster
+	// declares the handle and send delivers there.
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	session := filepath.Join(base, "collab")
+	if err := os.MkdirAll(filepath.Join(session, "extensions", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "meta", "config.json"), cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = doctor([]string{"--root", session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorHasBoundary(out, "amq_route", "remote") {
+		t.Fatalf("base-declared handle failing in a session: %v", out.(map[string]any)["failing"])
+	}
+
+	// Codex NO-GO P2 on PR #1196: an observed handle passed while config.json
+	// was unreadable, although senders cannot classify it and --strict sends
+	// refuse.
+	corrupt := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(corrupt, "extensions", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(corrupt, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "meta", "config.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(corrupt, "agents", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := []byte(`{"schema":1,"handle":"remote","harness":"claude","observed_at":"2026-10-23T06:10:12Z"}`)
+	if err := os.WriteFile(filepath.Join(corrupt, "agents", "remote", "identity.json"), identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = doctor([]string{"--root", corrupt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doctorHasBoundary(out, "amq_route", "remote") {
+		t.Fatalf("observed handle with an unreadable roster not failing: %v", out.(map[string]any)["failing"])
+	}
 }
 
 func doctorHasBoundary(out any, boundary, subject string) bool {

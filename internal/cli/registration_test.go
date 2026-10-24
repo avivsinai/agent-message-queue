@@ -126,7 +126,7 @@ func TestInventoryProjectKeepsEveryMailbox(t *testing.T) {
 	writeTestIdentity(t, hidden, "claude", validTestIdentity("claude"))
 	writeTestIdentity(t, hidden, "corrupt", `not json`)
 
-	scopes, err := inventoryProject(base)
+	scopes, err := inventoryProject(base, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestInventoryRefusesSymlinkedAgentsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scopes, err := inventoryProject(base)
+	scopes, err := inventoryProject(base, false)
 	if err != nil {
 		t.Fatal(err)
 	}

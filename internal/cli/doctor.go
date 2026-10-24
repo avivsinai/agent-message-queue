@@ -183,6 +183,13 @@ func runDoctor(args []string) error {
 	if root != "" {
 		mailboxes, repair, check := inspectDoctorMailboxes(root, baseRoot, *fixMailboxesFlag, *ignoreSessionPinFlag)
 		result.Mailboxes = mailboxes
+		decls := declarationsFor(root, opsDeclarationBase(root, baseRoot))
+		for i := range result.Mailboxes {
+			mailbox := &result.Mailboxes[i]
+			registration := classifyAgentAt(decls, root, mailbox.Handle).json()
+			mailbox.RegistrationStatus = string(registration.RegistrationStatus)
+			mailbox.RegistrationDiagnostics = registration.RegistrationDiagnostics
+		}
 		result.MailboxRepair = repair
 		result.Checks = append(result.Checks, check)
 	}

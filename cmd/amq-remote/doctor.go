@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/config"
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
@@ -71,9 +71,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		return finish()
 	}
-	if detail := amqRouteDetail(c.root, *me); detail != "" {
-		fail("amq_route", *me, detail, "run `amq-remote serve` once so it registers this handle in config.json")
-	}
+	doctorAMQRoute(c.root, *me, fail, note)
 	var sessions []protocol.Session
 	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
 	switch {
@@ -383,23 +381,30 @@ func failDamagedRows(fail func(boundary, subject, detail, remedy string), stateD
 	}
 }
 
-// amqRouteDetail reports why other agents cannot route to the endpoint
-// handle. serve registers that handle in config.json; an empty result means
-// the handle is listed.
-func amqRouteDetail(root, handle string) string {
-	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "config.json does not exist, so no agent can route to " + handle
+// doctorAMQRoute reports how senders see the endpoint handle. serve
+// registers that handle in config.json. A handle no readable roster declares
+// fails: unregistered, or known only from its identity record while a roster
+// cannot be read, senders are warned and --strict sends refuse. A declared
+// handle whose registration still has diagnostics (an invalid identity
+// record) routes, so each diagnostic is a note.
+func doctorAMQRoute(root, handle string, fail, note func(boundary, subject, detail, remedy string)) {
+	status, diagnostics := amqcli.AgentRegistration(root, handle)
+	const remedy = "run `amq-remote serve` once so it registers this handle in config.json"
+	switch {
+	case status == "unregistered":
+		detail := fmt.Sprintf("handle %q is unregistered: no roster of this root or its base lists it and its mailbox has no valid identity record, so senders are warned and --strict sends refuse", handle)
+		if len(diagnostics) > 0 {
+			detail += " (" + strings.Join(diagnostics, "; ") + ")"
 		}
-		return "cannot read config.json: " + err.Error()
-	}
-	for _, agent := range cfg.Agents {
-		if agent == handle {
-			return ""
+		fail("amq_route", handle, detail, remedy)
+	case status != "declared" && len(diagnostics) > 0:
+		fail("amq_route", handle, fmt.Sprintf("handle %q is %s, but no readable roster declares it, so senders cannot classify it and --strict sends refuse (%s)", handle, status, strings.Join(diagnostics, "; ")),
+			"repair the roster named above, then "+remedy)
+	default:
+		for _, diagnostic := range diagnostics {
+			note("amq_route", handle, fmt.Sprintf("handle %q is %s; its registration has a diagnostic: %s", handle, status, diagnostic), "")
 		}
 	}
-	return fmt.Sprintf("handle %q is not in config.json agents", handle)
 }
 
 // boundaryFailure is one broken boundary doctor names, with what to do.

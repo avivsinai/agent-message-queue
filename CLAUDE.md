@@ -316,7 +316,10 @@ test must fail on the pre-fix code; check that privately before it ships.
 
 - Queue directories use mode 0700 and files use mode 0600.
 - Handle and message ID validation prevents path traversal.
-- Unknown handles warn by default; `--strict` changes warnings to errors.
+- `send` and `reply` warn about an unregistered sender or recipient (in no
+  base or session roster and with no identity record); `--strict` makes that
+  an error, and on other commands still refuses a handle missing from the
+  root's config.json.
 - With `--strict`, unreadable or corrupt configuration is also an error.
 - External injectors execute local code. Their executable and ordered fixed
   arguments form the saved identity; message-derived payloads are sanitized.

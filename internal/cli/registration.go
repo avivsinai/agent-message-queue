@@ -46,6 +46,11 @@ func readAgentRoster(root string) agentRoster {
 	return parseAgentRoster(path, data, err)
 }
 
+func readAgentRosterDeliveryRoot(root *fsq.DeliveryRoot) agentRoster {
+	data, err := root.ReadRegularNoFollow(filepath.Join("meta", "config.json"))
+	return parseAgentRoster(filepath.Join(root.Base(), "meta", "config.json"), data, err)
+}
+
 func parseAgentRoster(path string, data []byte, readErr error) agentRoster {
 	roster := agentRoster{Path: path}
 	if readErr != nil {
@@ -109,6 +114,17 @@ func (d agentDeclarations) err() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// anyPresent reports whether at least one roster exists. A queue with no
+// roster at all declares nothing, so send and reply do not judge its handles.
+func (d agentDeclarations) anyPresent() bool {
+	for _, roster := range d {
+		if roster.Present {
+			return true
+		}
+	}
+	return false
 }
 
 // agentRegistration is the classifier's verdict for one (delivery root,
@@ -188,4 +204,13 @@ func (r agentRegistration) json() agentRegistrationJSON {
 		out.RegistrationDiagnostics = append(out.RegistrationDiagnostics, err.Error())
 	}
 	return out
+}
+
+// AgentRegistration classifies handle in the delivery root root against the
+// rosters of root and of its classified base, and the identity record in
+// root. It is discovery only: callers must not treat any status as
+// authority to deliver, repair or attach.
+func AgentRegistration(root, handle string) (status string, diagnostics []string) {
+	reg := classifyAgentAt(declarationsFor(root, classifyRoot(root)), root, handle).json()
+	return string(reg.RegistrationStatus), reg.RegistrationDiagnostics
 }

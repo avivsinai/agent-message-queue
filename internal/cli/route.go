@@ -12,17 +12,24 @@ import (
 )
 
 type routeExplainResult struct {
-	SchemaVersion  int      `json:"schema_version"`
-	Routable       bool     `json:"routable"`
-	Argv           []string `json:"argv"`
-	DisplayCommand string   `json:"display_command"`
-	SourceRoot     string   `json:"source_root"`
-	DeliveryRoot   string   `json:"delivery_root"`
-	SourceProject  string   `json:"source_project"`
-	TargetProject  string   `json:"target_project"`
-	SourceSession  string   `json:"source_session"`
-	TargetSession  string   `json:"target_session"`
-	Error          string   `json:"error,omitempty"`
+	SchemaVersion int  `json:"schema_version"`
+	Routable      bool `json:"routable"`
+	// Registration is the recipient's registration status in the delivery
+	// root. It is independent of Routable: an unregistered handle can still
+	// be routable. RegistrationDiagnostics names what kept that status from
+	// being complete (an unreadable roster, an invalid identity record) and
+	// changes neither Registration nor Routable.
+	Registration            registrationStatus `json:"registration,omitempty"`
+	RegistrationDiagnostics []string           `json:"registration_diagnostics,omitempty"`
+	Argv                    []string           `json:"argv"`
+	DisplayCommand          string             `json:"display_command"`
+	SourceRoot              string             `json:"source_root"`
+	DeliveryRoot            string             `json:"delivery_root"`
+	SourceProject           string             `json:"source_project"`
+	TargetProject           string             `json:"target_project"`
+	SourceSession           string             `json:"source_session"`
+	TargetSession           string             `json:"target_session"`
+	Error                   string             `json:"error,omitempty"`
 }
 
 func runRoute(args []string) error {
@@ -166,6 +173,13 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 
 	result.Routable = true
 	result.DeliveryRoot = plan.DeliveryRoot
+	deliveryBase := plan.PeerBaseRoot
+	if targetProject == "" {
+		deliveryBase = classifyRoot(plan.DeliveryRoot)
+	}
+	registration := classifyAgentAt(declarationsFor(plan.DeliveryRoot, deliveryBase), plan.DeliveryRoot, target).json()
+	result.Registration = registration.RegistrationStatus
+	result.RegistrationDiagnostics = registration.RegistrationDiagnostics
 	if plan.SourceProject != "" {
 		result.SourceProject = plan.SourceProject
 	}

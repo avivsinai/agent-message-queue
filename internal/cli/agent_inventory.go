@@ -105,6 +105,27 @@ func inventoryDeliveryRoot(root, base string) agentInventoryScope {
 	return scope
 }
 
+func inventoryHasHandle(agents []inventoryAgent, handle string) bool {
+	for _, agent := range agents {
+		if agent.Handle == handle {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	mailboxStatusComplete   = "complete"
+	mailboxStatusIncomplete = "incomplete"
+)
+
+func inventoryMailboxStatus(agent inventoryAgent) string {
+	if len(agent.MailboxIssues) == 0 {
+		return mailboxStatusComplete
+	}
+	return mailboxStatusIncomplete
+}
+
 func inventoryMailboxIssues(root, handle string) []string {
 	var issues []string
 	broken := map[string]bool{}
@@ -138,9 +159,10 @@ func inventoryMailboxIssues(root, handle string) []string {
 }
 
 // inventoryProject inventories a whole project: the base queue's own agents/
-// first, then every child that the session validator accepts, each with the
-// base roster in its declarations.
-func inventoryProject(base string) ([]agentInventoryScope, error) {
+// first, then every child that the session validator accepts. With
+// baseDeclares, each session's declarations include the base roster; a
+// caller passes it only when base is a resolved base, never a display guess.
+func inventoryProject(base string, baseDeclares bool) ([]agentInventoryScope, error) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return nil, err
@@ -149,15 +171,22 @@ func inventoryProject(base string) ([]agentInventoryScope, error) {
 	if _, err := os.Lstat(filepath.Join(base, "agents")); err == nil {
 		scopes = append(scopes, inventoryDeliveryRoot(base, ""))
 	}
-	names := make([]string, 0, len(entries))
+	declBase := ""
+	if baseDeclares {
+		declBase = base
+	}
+	var sessions []sessionListEntry
 	for _, entry := range entries {
-		if _, _, skip := classifySessionChild(base, entry.Name()); !skip {
-			names = append(names, entry.Name())
+		if item, _, skip := classifySessionChild(base, entry.Name()); !skip {
+			sessions = append(sessions, item)
 		}
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		scopes = append(scopes, inventoryDeliveryRoot(filepath.Join(base, name), base))
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
+	for _, item := range sessions {
+		scope := inventoryDeliveryRoot(filepath.Join(base, item.Name), declBase)
+		scope.Session = item.Name
+		scope.Kind = item.Kind
+		scopes = append(scopes, scope)
 	}
 	return scopes, nil
 }

@@ -126,16 +126,22 @@ func deliverOutgoing(m outgoingMessage) error {
 
 	filename := id + ".md"
 	if m.targetProject != "" {
-		currentSourceAgents, currentSourceAgentsErr := revalidateSourceAgentsForSend(
+		_, currentSourceAgentsErr := revalidateSourceAgentsForSend(
 			m.sourceConfigFS,
 			m.sourceConfigPresent,
 			m.strict,
 		)
-		if err := validateKnownHandlesFromAgents(currentSourceAgents, currentSourceAgentsErr, m.strict, m.me); err != nil {
+		if currentSourceAgentsErr != nil {
+			return currentSourceAgentsErr
+		}
+		if err := checkEndpointRegistration(endpointQueueFor(m.sourceFS, m.sourceConfigFS), endpointSender, m.strict, false, m.me); err != nil {
 			return err
 		}
-		currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(m.peerConfigFS, m.peerConfigPresent, m.strict)
-		if err := validateKnownHandlesFromAgents(currentPeerAgents, currentPeerAgentsErr, m.strict, m.recipients...); err != nil {
+		_, currentPeerAgentsErr := revalidatePeerAgentsForSend(m.peerConfigFS, m.peerConfigPresent, m.strict)
+		if currentPeerAgentsErr != nil {
+			return currentPeerAgentsErr
+		}
+		if err := checkEndpointRegistration(endpointQueueFor(m.deliveryFS, m.peerConfigFS), endpointRecipient, m.strict, false, m.recipients...); err != nil {
 			return err
 		}
 		if err := m.sourceFS.VerifyBase(); err != nil {

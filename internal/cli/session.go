@@ -116,8 +116,26 @@ type sessionListEntry struct {
 	Path          string                `json:"path"`
 	Kind          string                `json:"kind"`
 	Agents        []string              `json:"agents"`
+	AgentDetails  []sessionAgentInfo    `json:"agent_details"`
 	Hint          string                `json:"hint"`
 	Conversations []sessionConversation `json:"conversations"`
+}
+
+// sessionAgentInfo annotates each mailbox of a session or of the base queue
+// whose name is an inspectable handle with its registration and layout.
+type sessionAgentInfo struct {
+	Handle string `json:"handle"`
+	agentRegistrationJSON
+	MailboxStatus string   `json:"mailbox_status"`
+	MailboxIssues []string `json:"mailbox_issues,omitempty"`
+}
+
+// sessionListBase is the base queue's own mailboxes. It is not a session and
+// has no name to pass to --session.
+type sessionListBase struct {
+	Path         string             `json:"path"`
+	Agents       []string           `json:"agents"`
+	AgentDetails []sessionAgentInfo `json:"agent_details"`
 }
 
 type sessionSkipEntry struct {
@@ -128,6 +146,7 @@ type sessionSkipEntry struct {
 
 type sessionListResult struct {
 	Sessions []sessionListEntry `json:"sessions"`
+	Base     *sessionListBase   `json:"base,omitempty"`
 	Skipped  []sessionSkipEntry `json:"skipped,omitempty"`
 }
 
@@ -161,8 +180,12 @@ func runSessionList(args []string) error {
 			result.Skipped = append(result.Skipped, skipped)
 			continue
 		}
+		item.AgentDetails = sessionAgentDetails(inventoryDeliveryRoot(item.Path, base))
 		item.Conversations = sources.forSession(item.Path, item.Agents)
 		result.Sessions = append(result.Sessions, item)
+	}
+	if baseScope := inventoryDeliveryRoot(base, ""); len(baseScope.Agents) > 0 {
+		result.Base = &sessionListBase{Path: base, Agents: listSessionAgents(base), AgentDetails: sessionAgentDetails(baseScope)}
 	}
 	sort.Slice(result.Sessions, func(i, j int) bool {
 		return result.Sessions[i].Name < result.Sessions[j].Name
@@ -174,7 +197,7 @@ func runSessionList(args []string) error {
 	if common.JSON {
 		return writeJSON(os.Stdout, result)
 	}
-	if len(result.Sessions) == 0 {
+	if len(result.Sessions) == 0 && result.Base == nil {
 		return writeStdoutLine("No sessions found.")
 	}
 	width := 0
@@ -183,8 +206,13 @@ func runSessionList(args []string) error {
 			width = len(item.Name)
 		}
 	}
+	if result.Base != nil {
+		if err := writeStdout("  %-*s  %s\n", width, "(base root)", sessionAgentsText(result.Base.AgentDetails)); err != nil {
+			return err
+		}
+	}
 	for _, item := range result.Sessions {
-		agents := strings.Join(item.Agents, ", ")
+		agents := sessionAgentsText(item.AgentDetails)
 		if item.Kind == sessionKindLegacy {
 			if err := writeStdout("  %-*s  (legacy_name)  use: %s\n", width, item.Name, item.Hint); err != nil {
 				return err
@@ -365,4 +393,29 @@ func listSessionAgents(sessionRoot string) []string {
 		return []string{}
 	}
 	return agents
+}
+
+func sessionAgentDetails(scope agentInventoryScope) []sessionAgentInfo {
+	details := make([]sessionAgentInfo, 0, len(scope.Agents))
+	for _, row := range scope.Agents {
+		details = append(details, sessionAgentInfo{
+			Handle:                row.Handle,
+			agentRegistrationJSON: row.Registration.json(),
+			MailboxStatus:         inventoryMailboxStatus(row),
+			MailboxIssues:         row.MailboxIssues,
+		})
+	}
+	return details
+}
+
+func sessionAgentsText(details []sessionAgentInfo) string {
+	parts := make([]string, 0, len(details))
+	for _, agent := range details {
+		part := agent.Handle
+		if agent.RegistrationStatus != registrationDeclared {
+			part += " [" + string(agent.RegistrationStatus) + "]"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
