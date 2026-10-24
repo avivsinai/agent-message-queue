@@ -21,7 +21,7 @@ import (
 func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner, map[string]bool, map[board.Owner]string, error) {
 	out, err := env.Run.Run(ctx, env.Dir, []string{"amq", "session", "list", "--json"})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Codex goal mapping: %w", err)
+		return nil, nil, nil, fmt.Errorf("codex goal mapping: %w", err)
 	}
 	var listing struct {
 		Sessions []struct {
@@ -30,7 +30,7 @@ func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner
 		} `json:"sessions"`
 	}
 	if err := json.Unmarshal(out, &listing); err != nil {
-		return nil, nil, nil, fmt.Errorf("Codex goal mapping: %w", err)
+		return nil, nil, nil, fmt.Errorf("codex goal mapping: %w", err)
 	}
 	owners, known := map[string]board.Owner{}, map[string]bool{}
 	kinds := map[board.Owner]string{}
@@ -65,7 +65,7 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 	coverage := board.Coverage{}
 	out, err := env.Run.Run(ctx, env.Dir, []string{"git", "worktree", "list", "--porcelain", "-z"})
 	if err != nil {
-		return nil, coverage, fmt.Errorf("Codex goal project worktrees: %w", err)
+		return nil, coverage, fmt.Errorf("codex goal project worktrees: %w", err)
 	}
 	worktrees := map[string]bool{}
 	for _, field := range strings.Split(string(out), "\x00") {
@@ -169,11 +169,11 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 func codexGoalOwnerHint(ctx context.Context, env board.Env, kinds map[board.Owner]string) (board.Owner, bool, error) {
 	out, err := env.Run.Run(ctx, env.Dir, []string{"amq", "who", "--json"})
 	if err != nil {
-		return board.Owner{}, false, fmt.Errorf("Codex goal owner hints: %w", err)
+		return board.Owner{}, false, fmt.Errorf("codex goal owner hints: %w", err)
 	}
 	rows, err := parseWho(out)
 	if err != nil {
-		return board.Owner{}, false, fmt.Errorf("Codex goal owner hints: %w", err)
+		return board.Owner{}, false, fmt.Errorf("codex goal owner hints: %w", err)
 	}
 	var live, codex []board.Owner
 	for key, agent := range rows {
