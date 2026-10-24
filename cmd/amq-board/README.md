@@ -88,11 +88,11 @@ The `usage` key of `~/.amq/board.json` configures this:
 ```
 
 - `enabled: false` reads no harness file.
-- A harness listed under `homes` reads exactly those homes, each its own
-  account (a second Claude config directory, a second `CODEX_HOME`, a
-  pi-format variant's home); an empty list reads none of that harness. A
-  harness not listed keeps its default home. A home is absolute or starts
-  with `~/`.
+- Homes listed under `homes` are read in addition to each harness's default
+  home, each as its own account (a second Claude config directory, a second
+  `CODEX_HOME`, a pi-format variant's home). A home listed twice, or the
+  default listed again, is read once. A home is absolute or starts with
+  `~/`. To read no harness file, set `enabled: false`.
 - `budget.wall` is a Go duration; `budget.bytes` is a size in B, KB, MB, or
   GB, 1024-based.
 - A file amq-board refuses (bad JSON, an unknown harness, a relative home, a

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,12 +47,24 @@ func TestBoardReadsUsageSettings(t *testing.T) {
 	if u := read(t, `{"usage":{"enabled":false}}`); u != nil {
 		t.Errorf("usage disabled still read: %+v", u)
 	}
+	// A listed home is read in addition to the default home.
 	claudeJSON := filepath.ToSlash(claude)
-	u := read(t, `{"usage":{"homes":{"claude":["`+claudeJSON+`"],"codex":[],"pi":[]},"budget":{"wall":"5s","bytes":"1B"}}}`)
-	if u == nil || len(u.Accounts) != 1 || u.Accounts[0].Harness != boardusage.Claude {
-		t.Fatalf("accounts = %+v, want only the configured Claude home", u)
+	u := read(t, `{"usage":{"homes":{"claude":["`+claudeJSON+`"]},"budget":{"wall":"5s","bytes":"1B"}}}`)
+	if u == nil {
+		t.Fatal("usage not read")
 	}
-	if !u.Accounts[0].Partial {
-		t.Errorf("a 1 byte budget read the whole home: %+v", u.Accounts[0])
+	var keys []string
+	partial := false
+	for _, a := range u.Accounts {
+		if a.Harness == boardusage.Claude {
+			keys = append(keys, a.Key)
+			partial = partial || (strings.Contains(a.Key, "testdata") && a.Partial)
+		}
+	}
+	if len(keys) != 2 || !strings.HasSuffix(keys[0], ".claude") || !strings.Contains(keys[1], "testdata") {
+		t.Fatalf("claude accounts = %v, want the default home and the listed one", keys)
+	}
+	if !partial {
+		t.Errorf("a 1 byte budget read the whole listed home: %+v", u.Accounts)
 	}
 }

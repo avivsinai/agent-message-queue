@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,9 +21,10 @@ type Settings struct {
 }
 
 // LoadSettings reads the "usage" key of the board configuration at path.
-// A missing file or key gives the defaults under home. Each harness listed
-// under "homes" replaces that harness's default homes (an empty list reads
-// none of it); a home is absolute or starts with "~/". The budget takes a
+// A missing file or key gives the defaults under home. Homes listed under
+// "homes" are read in addition to the harness's default home, each as its
+// own account; a home listed twice, or the default listed again, is read
+// once. A home is absolute or starts with "~/". The budget takes a
 // Go duration ("1s") and a byte size ("300MB"; KB, MB and GB are 1024-based,
 // so the default 300MB is 300 << 20 bytes).
 func LoadSettings(path, home string) (Settings, error) {
@@ -58,15 +60,15 @@ func LoadSettings(path, home string) (Settings, error) {
 		if harness != Claude && harness != Codex && harness != Pi {
 			return st, fmt.Errorf("%s: usage.homes: unknown harness %q (want claude, codex or pi)", path, harness)
 		}
-		homes := []string{}
 		for _, h := range list {
 			p, err := expandHome(h, home)
 			if err != nil {
 				return st, fmt.Errorf("%s: usage.homes.%s: %w", path, harness, err)
 			}
-			homes = append(homes, p)
+			if !slices.Contains(st.Config.Homes[harness], p) {
+				st.Config.Homes[harness] = append(st.Config.Homes[harness], p)
+			}
 		}
-		st.Config.Homes[harness] = homes
 	}
 	if b := u.Budget; b != nil {
 		if b.Wall != "" {
