@@ -1187,7 +1187,7 @@ Options:
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
-        Error on unknown handles (default: warn)
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq presence set
