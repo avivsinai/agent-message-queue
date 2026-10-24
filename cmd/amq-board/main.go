@@ -81,7 +81,7 @@ func run(args []string) int {
 			return err == nil && info.IsDir()
 		},
 	}
-	sources := []board.Source{source.AMQ{}, source.Beads{}}
+	sources := []board.Source{source.AMQ{}, source.Beads{}, source.CodexGoals{}}
 	model := board.Run(context.Background(), env, sources, board.DefaultConfig(), version)
 
 	if *asJSON {
