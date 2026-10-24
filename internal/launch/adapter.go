@@ -32,12 +32,13 @@ var providerHarness = map[string]string{
 	CodexProvider:  harness.Codex,
 	CursorProvider: harness.Cursor,
 	GrokProvider:   harness.Grok,
+	PiProvider:     harness.Pi,
 }
 
 // ProviderForExecutable maps a configured executable to the stable
 // adapter/provider identity, or "" when no built-in adapter serves it. The
-// harness table recognizes the executable; harnesses without an adapter, such
-// as pi and agy, stay "".
+// harness table recognizes the executable; a harness without an adapter, such
+// as agy, stays "".
 func ProviderForExecutable(executable string) string {
 	facts, _ := harness.ForExecutable(executable)
 	for provider, name := range providerHarness {

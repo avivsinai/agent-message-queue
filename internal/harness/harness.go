@@ -82,23 +82,30 @@ var known = map[string]Facts{
 // generic is the behavior for Other: paste typing, plain output, no prelude.
 var generic = Facts{Name: Other, Naming: NamingUnknown, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectPaste}
 
-// aliases maps executable basenames that differ from the stable name. Cursor's
-// current CLI is "agent"; "cursor-agent" is its legacy executable.
-var aliases = map[string]string{"agent": Cursor, "cursor-agent": Cursor}
+// executables maps each recognized executable basename to its harness name.
+// A harness name is not an executable unless listed: Cursor's CLI is "agent",
+// with "cursor-agent" as its legacy executable, and "cursor" is its desktop
+// app, not a harness binary.
+var executables = map[string]string{
+	"claude":       Claude,
+	"codex":        Codex,
+	"agent":        Cursor,
+	"cursor-agent": Cursor,
+	"grok":         Grok,
+	"pi":           Pi,
+	"agy":          Agy,
+}
 
 // ForExecutable returns the facts for an executable path or basename, with
 // case and a trailing .exe ignored. ok is false for a program not in the
 // table, which gets the generic Other facts.
 func ForExecutable(executable string) (Facts, bool) {
 	base := strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
-	if name, ok := aliases[base]; ok {
-		base = name
-	}
-	facts, ok := known[base]
+	name, ok := executables[base]
 	if !ok {
 		return generic, false
 	}
-	return facts, true
+	return known[name], true
 }
 
 // Lookup returns the facts for a stable harness name, as a wake receives it
