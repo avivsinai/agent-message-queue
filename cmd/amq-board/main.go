@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
@@ -84,7 +86,11 @@ func run(args []string) int {
 	}
 	sources := []board.Source{source.AMQ{}, source.Beads{}}
 	model := board.Run(context.Background(), env, sources, board.DefaultConfig(), version)
-	model = withUsage(model, env)
+	if home, err := os.UserHomeDir(); err == nil {
+		if model, err = withUsage(model, env, home); err != nil {
+			fmt.Fprintln(os.Stderr, "amq-board: usage not read:", err)
+		}
+	}
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -121,15 +127,18 @@ func (execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, e
 }
 
 // withUsage adds what each harness account spent in this project and the
-// limits it reports. A session counts for the project when its recorded
-// working directory is in one of the project's Git worktrees (the directory
-// itself outside Git). Spend goes to the worker an AMQ conversation record
-// ties the harness session to; the rest shows under the account's other
+// limits it reports, as the "usage" key of ~/.amq/board.json under home
+// configures: off, which homes, and the run's budget. A refused file reads
+// nothing, so a mistyped "enabled": false never reads the homes it meant to
+// keep closed. A session counts for the project when its recorded working
+// directory is in one of the project's Git worktrees (the directory itself
+// outside Git). Spend goes to the worker an AMQ conversation record ties
+// the harness session to; the rest shows under the account's other
 // sessions.
-func withUsage(m board.Model, env board.Env) board.Model {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return m
+func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
+	st, err := boardusage.LoadSettings(filepath.Join(amqhome.Under(home), "board.json"), home)
+	if err != nil || !st.Enabled {
+		return m, err
 	}
 	roots := []string{env.Dir}
 	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
@@ -138,6 +147,6 @@ func withUsage(m board.Model, env board.Env) board.Model {
 		}
 	}
 	mapping := board.UsageMapping(m.Conversations)
-	rep := boardusage.Read(boardusage.DefaultConfig(home), env.Now(), boardusage.ProjectEligible(roots), mapping)
-	return board.WithUsage(m, rep, mapping)
+	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
+	return board.WithUsage(m, rep, mapping), nil
 }

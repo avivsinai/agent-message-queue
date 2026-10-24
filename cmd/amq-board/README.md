@@ -64,8 +64,40 @@ of the project's Git worktrees.
   "limit unknown" with the reason (Claude Code writes plan usage only to its
   status line; pi records no plan limits). A worker whose account reached a
   limit shows "limit reached until HH:MM".
-- One run reads at most 300 MB in 1 s. A total that missed files reads "at
-  least" and the account says how many files it read.
+- Each reader counts only records of the harness versions it was checked
+  against: Claude Code 2.1.267 up to 3, Codex 0.114.0 up to 1, and pi
+  session format 3. A record of any other version, or with none, is not
+  counted; a worker whose only records are such shows "spent unknown" with
+  the version, never a number.
+- One run lists and reads at most 300 MB in 1 s, checked per chunk read, so
+  one long line cannot outrun it. A total that missed anything (a file the
+  budget stopped, a file that could not be opened or identified, a line over
+  16 MiB, an unverified version, or part of the file list) reads "at least",
+  and the account says what it missed.
+
+The `usage` key of `~/.amq/board.json` configures this:
+
+```json
+{
+  "usage": {
+    "enabled": true,
+    "homes": {"claude": ["~/.claude"], "codex": ["~/.codex"], "pi": ["~/.pi"]},
+    "budget": {"wall": "1s", "bytes": "300MB"}
+  }
+}
+```
+
+- `enabled: false` reads no harness file.
+- A harness listed under `homes` reads exactly those homes, each its own
+  account (a second Claude config directory, a second `CODEX_HOME`, a
+  pi-format variant's home); an empty list reads none of that harness. A
+  harness not listed keeps its default home. A home is absolute or starts
+  with `~/`.
+- `budget.wall` is a Go duration; `budget.bytes` is a size in B, KB, MB, or
+  GB, 1024-based.
+- A file amq-board refuses (bad JSON, an unknown harness, a relative home, a
+  bad budget) reads no usage at all and says why on stderr, so a mistake
+  never reads homes the file meant to keep closed.
 
 ## Read-only
 

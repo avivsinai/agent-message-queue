@@ -25,6 +25,10 @@ type Usage struct {
 	// Partial means some session files were not read: the figures are
 	// "at least".
 	Partial bool `json:"partial"`
+	// Unknown says why the spend is unknown when every session behind it
+	// has records of an unverified version; the figures are then not a
+	// measurement, not even a lower bound.
+	Unknown string `json:"unknown,omitempty"`
 }
 
 // UsageView is the usage part of the board: the fleet total and, per
@@ -100,6 +104,8 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		workers := map[usage.RosterKey]*WorkerUsage{}
 		other := make([]usage.Counts, len(windows))
 		otherAsOf := make([]time.Time, len(windows))
+		otherSpend := spendState{}
+		workerSpend := map[usage.RosterKey]*spendState{}
 		workerCounts := map[usage.RosterKey][]usage.Counts{}
 		workerAsOf := map[usage.RosterKey][]time.Time{}
 		for _, s := range a.Sessions {
@@ -111,10 +117,13 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 					workers[key] = w
 					workerCounts[key] = make([]usage.Counts, len(windows))
 					workerAsOf[key] = make([]time.Time, len(windows))
+					workerSpend[key] = &spendState{}
 				}
 				w.Sessions = append(w.Sessions, s.ID)
+				workerSpend[key].note(s)
 			} else {
 				au.OtherSessions++
+				otherSpend.note(s)
 			}
 			for i, win := range windows {
 				c, asOf := s.Totals(win.from)
@@ -129,7 +138,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		}
 		for key, w := range workers {
 			for i, win := range windows {
-				w.Usage = append(w.Usage, makeUsage(win, workerCounts[key][i], workerAsOf[key][i], au.Partial))
+				w.Usage = append(w.Usage, makeUsage(win, workerCounts[key][i], workerAsOf[key][i], au.Partial, workerSpend[key].unknown()))
 			}
 			au.Workers = append(au.Workers, *w)
 			perWorker[key] = sumUsage(perWorker[key], w.Usage)
@@ -144,7 +153,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 			return au.Workers[i].Handle < au.Workers[j].Handle
 		})
 		for i, win := range windows {
-			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial))
+			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial, otherSpend.unknown()))
 		}
 		fleet = sumUsage(fleet, au.Other)
 		for _, w := range au.Workers {
@@ -206,11 +215,36 @@ func accountWindows(a usage.Account, now time.Time) []window {
 	return ws
 }
 
-func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool) Usage {
+// spendState tracks whether any session behind a total was counted, and
+// why one was not.
+type spendState struct {
+	counted bool
+	reason  string
+}
+
+func (st *spendState) note(s usage.Session) {
+	if s.Unknown == "" || s.Counted() {
+		st.counted = true
+	}
+	if st.reason == "" {
+		st.reason = s.Unknown
+	}
+}
+
+// unknown is the reason the total is unknown: only when nothing behind it
+// was counted.
+func (st *spendState) unknown() string {
+	if st.counted {
+		return ""
+	}
+	return st.reason
+}
+
+func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown string) Usage {
 	return Usage{
 		Window: w.name, WindowFrom: w.from.UTC(), Label: w.label,
 		In: c.In, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite, Out: c.Out, Fresh: c.Fresh(),
-		CostUSD: c.Cost, CostKind: c.CostKind, AsOf: asOf, Partial: partial,
+		CostUSD: c.Cost, CostKind: c.CostKind, AsOf: asOf, Partial: partial || unknown != "", Unknown: unknown,
 	}
 }
 
@@ -225,6 +259,14 @@ func sumUsage(a, b []Usage) []Usage {
 			break
 		}
 		x, y := a[i], b[i]
+		// An unknown total adds nothing but makes the sum a lower bound;
+		// the sum stays unknown only when both sides are.
+		switch {
+		case x.Unknown != "" && y.Unknown == "":
+			x.Unknown, x.Partial = "", true
+		case y.Unknown != "" && x.Unknown == "":
+			x.Partial = true
+		}
 		x.In += y.In
 		x.CacheRead += y.CacheRead
 		x.CacheWrite += y.CacheWrite

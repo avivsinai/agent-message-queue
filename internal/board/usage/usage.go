@@ -8,6 +8,8 @@
 package usage
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -89,8 +91,12 @@ type Session struct {
 	Harness string
 	// ID is the root session id: a Claude sessionId, the root Codex thread,
 	// or a pi session id. A mapping from it to a worker is structural.
-	ID     string
-	events []event
+	ID string
+	// Unknown is set when a record of this session has a format version
+	// the reader was not checked against: that record is not counted, so
+	// the session's spend is unknown, or at least its counted events.
+	Unknown string
+	events  []event
 }
 
 // Limit is one account fact about what is left. It is never per worker.
@@ -112,15 +118,23 @@ type Account struct {
 	Limits   []Limit
 	Sessions []Session
 	// Files is the number of session files in the read span; Read is how
-	// many were read to the end. Fewer means the totals are "at least".
+	// many were read to the end and counted. Fewer means the totals are "at
+	// least": a file the budget stopped, one that could not be opened or
+	// identified, and one of an unverified version all count as unread.
 	Files, Read int
+	// Unverified counts files with a record of an unverified version.
+	Unverified int
 	// Skipped counts lines over maxLine, which were not counted.
 	Skipped int
-	Detail  string
+	// Unlisted is set when the budget or a directory error stopped the
+	// listing of session files, so Files itself is a lower bound.
+	Unlisted bool
+	Detail   string
 }
 
-// Partial reports whether the account's totals miss files.
-func (a Account) Partial() bool { return a.Read < a.Files }
+// Partial reports whether the account's totals miss anything: a file, a
+// line, or part of the file list.
+func (a Account) Partial() bool { return a.Read < a.Files || a.Skipped > 0 || a.Unlisted }
 
 // Report is one run of every reader.
 type Report struct {
@@ -155,13 +169,13 @@ func (b *budget) spent() bool { return b.bytes <= 0 || !b.clock().Before(b.deadl
 
 // file is one session file in the read span.
 type file struct {
-	path    string
-	mtime   time.Time
-	harness string
+	path  string
+	mtime time.Time
 }
 
 // Read runs every reader over the configured homes. now dates the windows;
-// mapped session files are read first, then the newest.
+// mapped session files are read first, then the newest. Listing the files
+// is part of the run, so it spends the same budget as reading them.
 func Read(cfg Config, now time.Time, eligible Eligible, mapping Mapping) Report {
 	clock := time.Now
 	if cfg.BudgetWall <= 0 {
@@ -170,27 +184,27 @@ func Read(cfg Config, now time.Time, eligible Eligible, mapping Mapping) Report 
 	if cfg.BudgetBytes <= 0 {
 		cfg.BudgetBytes = DefaultBudgetBytes
 	}
-	type home struct {
-		harness, path string
-		files         []file
-	}
+	type home struct{ harness, path string }
 	var homes []home
 	for _, harness := range []string{Claude, Codex, Pi} {
 		for _, h := range cfg.Homes[harness] {
-			homes = append(homes, home{harness, h, sessionFiles(harness, h, now.Add(-span))})
+			homes = append(homes, home{harness, h})
 		}
 	}
 	// Each account gets an equal share of what is left, so a large home
 	// cannot starve a small one; what an account leaves unspent passes on.
 	start := clock()
+	deadline := start.Add(cfg.BudgetWall)
 	bytesLeft := cfg.BudgetBytes
 	rep := Report{Now: now}
 	for i, h := range homes {
 		accounts := int64(len(homes) - i)
-		wallLeft := cfg.BudgetWall - clock().Sub(start)
-		b := &budget{deadline: clock().Add(wallLeft / time.Duration(accounts)), bytes: bytesLeft / accounts, clock: clock}
+		b := &budget{deadline: clock().Add(deadline.Sub(clock()) / time.Duration(accounts)), bytes: bytesLeft / accounts, clock: clock}
 		share := b.bytes
-		rep.Accounts = append(rep.Accounts, readHome(h.harness, h.path, h.files, now, eligible, mapping, b))
+		files, unlisted := sessionFiles(h.harness, h.path, now.Add(-span), b)
+		acct := readHome(h.harness, h.path, files, now, eligible, mapping, b)
+		acct.Unlisted = unlisted
+		rep.Accounts = append(rep.Accounts, withDetail(acct))
 		bytesLeft -= share - max(b.bytes, 0)
 	}
 	return rep
@@ -214,39 +228,112 @@ func readHome(harness, home string, files []file, now time.Time, eligible Eligib
 	case Pi:
 		readPi(&acct, files, now, eligible, b)
 	}
-	if acct.Partial() {
+	return acct
+}
+
+// withDetail says what an account's totals miss.
+func withDetail(acct Account) Account {
+	acct.Detail = ""
+	if acct.Read < acct.Files {
 		acct.Detail = "partial: " + itoa(acct.Read) + " of " + itoa(acct.Files) + " files"
+	}
+	if acct.Unverified > 0 {
+		acct.Detail = joinDetail(acct.Detail, itoa(acct.Unverified)+" files of an unverified version not counted")
 	}
 	if acct.Skipped > 0 {
 		acct.Detail = joinDetail(acct.Detail, itoa(acct.Skipped)+" lines over 16 MiB not counted")
+	}
+	if acct.Unlisted {
+		acct.Detail = joinDetail(acct.Detail, "session files not all listed")
 	}
 	return acct
 }
 
 // sessionFiles lists the account's session files written inside the span,
-// by explicit pattern only.
-func sessionFiles(harness, home string, since time.Time) []file {
-	var patterns []string
+// by explicit pattern only: a literal segment is joined, never listed, so
+// only the session directories are read. It reports unlisted when the
+// budget or a directory error stopped the listing.
+func sessionFiles(harness, home string, since time.Time, b *budget) (out []file, unlisted bool) {
+	var patterns [][]string
 	switch harness {
 	case Claude:
-		patterns = []string{"projects/*/*.jsonl", "projects/*/*/subagents/agent-*.jsonl"}
+		patterns = [][]string{{"projects", "*", "*.jsonl"}, {"projects", "*", "*", "subagents", "agent-*.jsonl"}}
 	case Codex:
-		patterns = []string{"sessions/*/*/*/rollout-*.jsonl"}
+		patterns = [][]string{{"sessions", "*", "*", "*", "rollout-*.jsonl"}}
 	case Pi:
-		patterns = []string{"agent/sessions/*/*.jsonl"}
+		patterns = [][]string{{"agent", "sessions", "*", "*.jsonl"}}
 	}
-	var out []file
-	for _, p := range patterns {
-		matches, _ := filepath.Glob(filepath.Join(home, filepath.FromSlash(p)))
-		for _, m := range matches {
-			info, err := os.Lstat(m)
-			if err != nil || !info.Mode().IsRegular() || info.ModTime().Before(since) {
-				continue
-			}
-			out = append(out, file{path: m, mtime: info.ModTime(), harness: harness})
+	for _, segs := range patterns {
+		files, cut := listPattern(home, segs, since, b)
+		out = append(out, files...)
+		if cut {
+			return out, true
 		}
 	}
-	return out
+	return out, false
+}
+
+// listPattern expands segs below root one directory level at a time,
+// checking the budget before each directory and each file.
+func listPattern(root string, segs []string, since time.Time, b *budget) ([]file, bool) {
+	var out []file
+	dirs := []string{root}
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		var next []string
+		for _, d := range dirs {
+			if b.spent() {
+				return out, true
+			}
+			if !strings.ContainsAny(seg, "*?[") {
+				p := filepath.Join(d, seg)
+				if last {
+					if f, ok := spanFile(p, since); ok {
+						out = append(out, f)
+					}
+				} else {
+					next = append(next, p)
+				}
+				continue
+			}
+			entries, err := os.ReadDir(d)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+				return out, true
+			}
+			for _, e := range entries {
+				if ok, _ := filepath.Match(seg, e.Name()); !ok {
+					continue
+				}
+				p := filepath.Join(d, e.Name())
+				if !last {
+					if e.IsDir() {
+						next = append(next, p)
+					}
+					continue
+				}
+				if b.spent() {
+					return out, true
+				}
+				if f, ok := spanFile(p, since); ok {
+					out = append(out, f)
+				}
+			}
+		}
+		dirs = next
+	}
+	return out, false
+}
+
+// spanFile is p when it is a regular file written inside the span.
+func spanFile(p string, since time.Time) (file, bool) {
+	info, err := os.Lstat(p)
+	if err != nil || !info.Mode().IsRegular() || info.ModTime().Before(since) {
+		return file{}, false
+	}
+	return file{path: p, mtime: info.ModTime()}, true
 }
 
 // mappedPath reports whether a file name carries a mapped session id, so
@@ -273,6 +360,9 @@ func displayHome(home string) string {
 	}
 	return home
 }
+
+// Counted reports whether any record of the session was counted.
+func (s Session) Counted() bool { return len(s.events) > 0 }
 
 // Totals sums events at or after from.
 func (s Session) Totals(from time.Time) (Counts, time.Time) {

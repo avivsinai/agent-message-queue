@@ -3,16 +3,18 @@ package usage
 import (
 	"bufio"
 	"encoding/json"
-	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // piHeader is a pi session file's first line.
 type piHeader struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Cwd  string `json:"cwd"`
+	Type    string          `json:"type"`
+	Version json.RawMessage `json:"version"`
+	ID      string          `json:"id"`
+	Cwd     string          `json:"cwd"`
 }
 
 // piLine is an assistant message entry. Only these entries are counted;
@@ -44,39 +46,56 @@ const piNoLimits = "limit unknown (pi records no plan limits)"
 func readPi(acct *Account, files []file, now time.Time, eligible Eligible, b *budget) {
 	since := now.Add(-span)
 	sessions := map[string]*Session{}
+	var unknown string
 	for _, fl := range files {
 		if b.spent() {
 			break
 		}
 		f, err := os.Open(fl.path)
 		if err != nil {
-			acct.Read++
-			continue
+			continue // unread: the totals say "at least"
 		}
-		done := readPiSession(f, since, eligible, b, &acct.Skipped, sessions)
+		switch readPiSession(f, since, eligible, b, &acct.Skipped, sessions, &unknown) {
+		case readDone:
+			acct.Read++
+		case readUnverified:
+			acct.Unverified++
+		}
 		_ = f.Close()
-		if done {
-			acct.Read++
-		}
 	}
 	acct.Sessions = sortedSessions(sessions)
-	acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Source: "none", Reason: piNoLimits})
+	reason := piNoLimits
+	if unknown != "" {
+		reason = "limit unknown (" + unknown + ")"
+	}
+	acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Source: "none", Reason: reason})
 }
 
-func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, sessions map[string]*Session) bool {
+func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, sessions map[string]*Session, unknown *string) readOutcome {
 	r := bufio.NewReaderSize(f, 1<<16)
-	line, n, err := readLine(r)
-	b.bytes -= n
+	line, _ := readLine(r, b)
 	var h piHeader
 	if line == nil || json.Unmarshal(line, &h) != nil || h.Type != "session" || h.ID == "" || h.Cwd == "" {
-		return err == nil || err == io.EOF
+		return readIncomplete
 	}
 	if !eligible(h.Cwd) {
-		return true
+		return readDone
+	}
+	if v := string(h.Version); v != strconv.Itoa(piFormat) {
+		s := sessions[h.ID]
+		if s == nil {
+			s = &Session{Harness: Pi, ID: h.ID}
+			sessions[h.ID] = s
+		}
+		s.Unknown = unsupported("pi session format", strings.Trim(v, `"`))
+		if *unknown == "" {
+			*unknown = s.Unknown
+		}
+		return readUnverified
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return true
+		return readIncomplete
 	}
 	var evs []event
 	done := scan(f, seekWindow(f, info.Size(), since, b), piKeys, b, skipped, func(raw []byte) bool {
@@ -104,5 +123,8 @@ func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, sk
 		}
 		s.events = append(s.events, evs...)
 	}
-	return done
+	if done {
+		return readDone
+	}
+	return readIncomplete
 }

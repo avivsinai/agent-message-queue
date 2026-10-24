@@ -16,6 +16,7 @@ type claudeLine struct {
 	Timestamp time.Time `json:"timestamp"`
 	SessionID string    `json:"sessionId"`
 	Cwd       string    `json:"cwd"`
+	Version   string    `json:"version"`
 	Message   struct {
 		ID    string `json:"id"`
 		Usage *struct {
@@ -56,35 +57,63 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 	sessions := map[string]*Session{}
 	seen := map[string]map[string]bool{}
 	var reached *Limit
+	var unknown string
 	since := now.Add(-span)
+	session := func(id string) *Session {
+		s := sessions[id]
+		if s == nil {
+			s = &Session{Harness: Claude, ID: id}
+			sessions[id] = s
+		}
+		return s
+	}
 	for _, fl := range files {
 		if b.spent() {
 			break
 		}
+		// A file that cannot be opened or identified stays unread, so the
+		// totals say "at least".
 		f, err := os.Open(fl.path)
 		if err != nil {
-			acct.Read++ // unreadable now: nothing to finish later
 			continue
 		}
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
-			acct.Read++
 			continue
 		}
 		// Another project's session is read no further than its first
 		// working directory.
-		if cwd, found := headField(f, b, claudeCwd); !found || !eligible(cwd) {
+		cwd, found, err := headField(f, b, claudeCwd)
+		if err != nil || !found {
+			_ = f.Close()
+			continue
+		}
+		if !eligible(cwd) {
 			_ = f.Close()
 			acct.Read++
 			continue
 		}
+		verified := true
 		done := scan(f, seekWindow(f, info.Size(), since, b), claudeUsageKeys, b, &acct.Skipped, func(raw []byte) bool {
 			var l claudeLine
 			if json.Unmarshal(raw, &l) != nil {
 				return true
 			}
 			if l.Type != "assistant" || l.SessionID == "" || l.Timestamp.Before(since) {
+				return true
+			}
+			// A line of an unverified version is not counted, neither its
+			// tokens nor its limit.
+			if !claudeVersions.has(l.Version) {
+				verified = false
+				s := session(l.SessionID)
+				if s.Unknown == "" {
+					s.Unknown = unsupported("Claude Code", l.Version)
+				}
+				if unknown == "" {
+					unknown = s.Unknown
+				}
 				return true
 			}
 			if q := l.QuotaLimits; q != nil && q.Status == "rejected" && q.ResetsAt > 0 {
@@ -106,24 +135,26 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 				return true
 			}
 			ids[l.Message.ID] = true
-			s := sessions[l.SessionID]
-			if s == nil {
-				s = &Session{Harness: Claude, ID: l.SessionID}
-				sessions[l.SessionID] = s
-			}
+			s := session(l.SessionID)
 			s.events = append(s.events, event{at: l.Timestamp, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}})
 			return true
 		})
 		_ = f.Close()
-		if done {
+		switch {
+		case !verified:
+			acct.Unverified++
+		case done:
 			acct.Read++
 		}
 	}
 	acct.Sessions = sortedSessions(sessions)
 	// A rejection names a limit only while its reset is ahead.
-	if reached != nil && reached.ResetsAt.After(now) {
+	switch {
+	case reached != nil && reached.ResetsAt.After(now):
 		acct.Limits = append(acct.Limits, *reached)
-	} else {
+	case unknown != "":
+		acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Source: "none", Reason: "limit unknown (" + unknown + ")"})
+	default:
 		acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Source: "none", Reason: claudeRelayOff})
 	}
 }

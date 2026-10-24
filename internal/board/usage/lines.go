@@ -52,15 +52,14 @@ func firstTimeAfter(f *os.File, off int64, b *budget) (time.Time, bool) {
 	r := bufio.NewReaderSize(f, 1<<16)
 	first := off > 0 // the line under off is partial
 	for k := 0; k < 64; k++ {
-		line, n, err := readLine(r)
-		b.bytes -= n
+		line, err := readLine(r, b)
 		if !first && line != nil {
 			if t, ok := lineTime(line); ok {
 				return t, true
 			}
 		}
 		first = false
-		if err != nil {
+		if err != nil && !errors.Is(err, errLineTooLong) {
 			return time.Time{}, false
 		}
 	}
@@ -70,16 +69,23 @@ func firstTimeAfter(f *os.File, off int64, b *budget) (time.Time, bool) {
 // errLineTooLong marks a line over maxLine; it was consumed, not returned.
 var errLineTooLong = errors.New("line over the length limit")
 
-// readLine returns the next line without its newline, the bytes consumed,
-// and io.EOF after the last line. A line over maxLine is consumed and
-// returned as nil with errLineTooLong.
-func readLine(r *bufio.Reader) ([]byte, int64, error) {
+// errBudget marks a read the run's budget stopped; the line under it is
+// not finished.
+var errBudget = errors.New("usage read budget spent")
+
+// readLine returns the next line without its newline, and io.EOF after the
+// last line. Every chunk read is charged to b, and a line still unfinished
+// when b is spent stops with errBudget, so one long line cannot outrun the
+// budget. A line over maxLine is consumed and returned as nil with
+// errLineTooLong.
+func readLine(r *bufio.Reader, b *budget) ([]byte, error) {
 	var buf []byte
 	var n int64
 	tooLong := false
 	for {
 		chunk, err := r.ReadSlice('\n')
 		n += int64(len(chunk))
+		b.bytes -= int64(len(chunk))
 		if !tooLong {
 			if len(buf)+len(chunk) > maxLine {
 				tooLong, buf = true, nil
@@ -89,18 +95,21 @@ func readLine(r *bufio.Reader) ([]byte, int64, error) {
 		}
 		switch {
 		case errors.Is(err, bufio.ErrBufferFull):
+			if b.spent() {
+				return nil, errBudget
+			}
 			continue
 		case err != nil && len(chunk) == 0 && n == 0:
-			return nil, 0, err
+			return nil, err
 		case tooLong:
 			if err == nil {
 				err = errLineTooLong
 			} else {
 				err = errors.Join(errLineTooLong, err)
 			}
-			return nil, n, err
+			return nil, err
 		}
-		return bytes.TrimRight(buf, "\r\n"), n, err
+		return bytes.TrimRight(buf, "\r\n"), err
 	}
 }
 
@@ -116,8 +125,7 @@ func scan(f *os.File, off int64, keys [][]byte, b *budget, skipped *int, fn func
 		if b.spent() {
 			return false
 		}
-		line, n, err := readLine(r)
-		b.bytes -= n
+		line, err := readLine(r, b)
 		if errors.Is(err, errLineTooLong) {
 			*skipped++
 		}
@@ -147,23 +155,26 @@ func hasAny(line []byte, keys [][]byte) bool {
 const headLines = 32
 
 // headField returns the first value field finds among the file's first
-// lines.
-func headField(f *os.File, b *budget, field func([]byte) (string, bool)) (string, bool) {
+// lines. found is false when the lines hold none; err is set when they could
+// not all be read, so the file's identity is unknown rather than absent.
+func headField(f *os.File, b *budget, field func([]byte) (string, bool)) (string, bool, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", false
+		return "", false, err
 	}
 	r := bufio.NewReaderSize(f, 1<<16)
 	for k := 0; k < headLines; k++ {
-		line, n, err := readLine(r)
-		b.bytes -= n
+		line, err := readLine(r, b)
 		if line != nil {
 			if v, ok := field(line); ok {
-				return v, true
+				return v, true, nil
 			}
 		}
-		if err != nil && !errors.Is(err, errLineTooLong) {
-			return "", false
+		switch {
+		case errors.Is(err, io.EOF):
+			return "", false, nil
+		case err != nil && !errors.Is(err, errLineTooLong):
+			return "", false, err
 		}
 	}
-	return "", false
+	return "", false, nil
 }

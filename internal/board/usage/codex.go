@@ -14,9 +14,10 @@ import (
 type codexMeta struct {
 	Type    string `json:"type"`
 	Payload struct {
-		ID     string          `json:"id"`
-		Cwd    string          `json:"cwd"`
-		Source json.RawMessage `json:"source"`
+		ID         string          `json:"id"`
+		Cwd        string          `json:"cwd"`
+		CLIVersion string          `json:"cli_version"`
+		Source     json.RawMessage `json:"source"`
 	} `json:"payload"`
 }
 
@@ -76,6 +77,9 @@ type codexAccount struct {
 	newestAt    time.Time
 	reached     string
 	windowsSeen bool
+	// unknown is set when an eligible rollout has an unverified version;
+	// its events, limits included, were not read.
+	unknown string
 }
 
 func readCodex(acct *Account, files []file, now time.Time, eligible Eligible, b *budget) {
@@ -89,14 +93,15 @@ func readCodex(acct *Account, files []file, now time.Time, eligible Eligible, b 
 		}
 		f, err := os.Open(fl.path)
 		if err != nil {
-			acct.Read++
-			continue
+			continue // unread: the totals say "at least"
 		}
-		done := readRollout(f, since, eligible, b, &acct.Skipped, threads, parents, &facts)
+		switch readRollout(f, since, eligible, b, &acct.Skipped, threads, parents, &facts) {
+		case readDone:
+			acct.Read++
+		case readUnverified:
+			acct.Unverified++
+		}
 		_ = f.Close()
-		if done {
-			acct.Read++
-		}
 	}
 	// A child thread's spend rolls up to its root through recorded parents;
 	// a parent outside the read set still collects it under its own id.
@@ -116,6 +121,9 @@ func readCodex(acct *Account, files []file, now time.Time, eligible Eligible, b 
 			roots[root] = r
 		}
 		r.events = append(r.events, s.events...)
+		if r.Unknown == "" {
+			r.Unknown = s.Unknown
+		}
 	}
 	acct.Sessions = sortedSessions(roots)
 	if facts.reached != "" {
@@ -125,18 +133,35 @@ func readCodex(acct *Account, files []file, now time.Time, eligible Eligible, b 
 		acct.Limits = append(acct.Limits, Limit{Kind: "credits", Name: "credits", Balance: facts.balance, AsOf: facts.balanceAt, Source: "rollout"})
 	}
 	reason := "windows not reported by this plan"
-	if facts.windowsSeen {
+	switch {
+	case facts.unknown != "":
+		reason = "limit unknown (" + facts.unknown + ")"
+	case facts.windowsSeen:
 		reason = "plan windows reported; this version does not read them"
 	}
 	acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Name: "windows", Source: "rollout", Reason: reason})
 }
 
-// readRollout reads one rollout. It reports whether it read to the end (or
-// found the thread ineligible).
-func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, threads map[string]*Session, parents map[string]string, facts *codexAccount) bool {
+// readOutcome is what reading one session file achieved.
+type readOutcome int
+
+const (
+	// readIncomplete: not read to the end, or not identified.
+	readIncomplete readOutcome = iota
+	// readDone: read to the end, or identified as another project's.
+	readDone
+	// readUnverified: an unverified format version; nothing counted.
+	readUnverified
+)
+
+// readRollout reads one rollout.
+func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, threads map[string]*Session, parents map[string]string, facts *codexAccount) readOutcome {
 	meta, ok := rolloutMeta(f, b)
-	if !ok || meta.Payload.ID == "" || meta.Payload.Cwd == "" || !eligible(meta.Payload.Cwd) {
-		return true
+	if !ok || meta.Payload.ID == "" || meta.Payload.Cwd == "" {
+		return readIncomplete
+	}
+	if !eligible(meta.Payload.Cwd) {
+		return readDone
 	}
 	id := meta.Payload.ID
 	var spawn codexSpawn
@@ -145,9 +170,20 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 			parents[id] = p
 		}
 	}
+	if !codexVersions.has(meta.Payload.CLIVersion) {
+		reason := unsupported("Codex", meta.Payload.CLIVersion)
+		if threads[id] == nil {
+			threads[id] = &Session{Harness: Codex, ID: id}
+		}
+		threads[id].Unknown = reason
+		if facts.unknown == "" {
+			facts.unknown = reason
+		}
+		return readUnverified
+	}
 	info, err := f.Stat()
 	if err != nil {
-		return true
+		return readIncomplete
 	}
 	off := seekWindow(f, info.Size(), since, b)
 	for {
@@ -199,7 +235,10 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 			}
 			s.events = append(s.events, evs...)
 		}
-		return done
+		if done {
+			return readDone
+		}
+		return readIncomplete
 	}
 }
 
@@ -210,8 +249,7 @@ func rolloutMeta(f *os.File, b *budget) (codexMeta, bool) {
 	}
 	r := bufio.NewReaderSize(f, 1<<16)
 	for k := 0; k < metaLines; k++ {
-		line, n, err := readLine(r)
-		b.bytes -= n
+		line, err := readLine(r, b)
 		if line != nil {
 			var m codexMeta
 			if json.Unmarshal(line, &m) == nil && m.Type == "session_meta" {

@@ -56,6 +56,10 @@ func spendLine(us []Usage, now time.Time, withCost bool) string {
 	var parts []string
 	var asOf time.Time
 	for _, w := range us {
+		if w.Unknown != "" {
+			parts = append(parts, windowName(w.Window)+" spent unknown ("+clean(w.Unknown)+")")
+			continue
+		}
 		p := windowName(w.Window) + " "
 		if w.Partial {
 			p += "at least "
