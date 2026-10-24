@@ -15,26 +15,45 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
+// Provider names are stored in launch.json, launch records, tickets and trust
+// digests, so they never change. They are a separate namespace from harness
+// discovery names: Cursor's provider is "cursor-agent", its harness "cursor".
 const (
-	ClaudeProvider = harness.Claude
-	CodexProvider  = harness.Codex
-	CursorProvider = harness.Cursor
-	GrokProvider   = harness.Grok
+	ClaudeProvider = "claude"
+	CodexProvider  = "codex"
+	CursorProvider = "cursor-agent"
+	GrokProvider   = "grok"
 )
+
+// providerHarness maps each built-in adapter's provider name to its harness.
+var providerHarness = map[string]string{
+	ClaudeProvider: harness.Claude,
+	CodexProvider:  harness.Codex,
+	CursorProvider: harness.Cursor,
+	GrokProvider:   harness.Grok,
+}
 
 // ProviderForExecutable maps a configured executable to the stable
 // adapter/provider identity, or "" when no built-in adapter serves it. The
-// harness table decides the identity (Cursor's current CLI is "agent";
-// cursor-agent remains a supported legacy alias); harnesses without an
-// adapter, such as pi and agy, stay "".
+// harness table recognizes the executable; harnesses without an adapter, such
+// as pi and agy, stay "".
 func ProviderForExecutable(executable string) string {
 	facts, _ := harness.ForExecutable(executable)
-	switch facts.Name {
-	case ClaudeProvider, CodexProvider, CursorProvider, GrokProvider:
-		return facts.Name
-	default:
-		return ""
+	for provider, name := range providerHarness {
+		if name == facts.Name {
+			return provider
+		}
 	}
+	return ""
+}
+
+// HarnessForProvider returns the harness name of a provider name, or
+// harness.Other for a provider no built-in adapter serves.
+func HarnessForProvider(provider string) string {
+	if name, ok := providerHarness[provider]; ok {
+		return name
+	}
+	return harness.Other
 }
 
 // HarnessAdapter owns conversation identity and produces backend-ready plans.

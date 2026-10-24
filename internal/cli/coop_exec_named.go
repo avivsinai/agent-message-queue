@@ -25,12 +25,12 @@ const (
 )
 
 // coopWakeHarness names the harness the wake types into, for its --harness:
-// the managed launch's provider when there is one, else the binary's
-// harness, or "other" for a program the table does not know, which gets
-// generic wake behavior instead of a guess from the handle.
+// the harness of the managed launch's provider when there is one, else the
+// binary's harness, or "other" for a program the table does not know, which
+// gets generic wake behavior instead of a guess from the handle.
 func coopWakeHarness(binary, managedProvider string) string {
 	if managedProvider != "" {
-		return harness.Lookup(managedProvider).Name
+		return launch.HarnessForProvider(managedProvider)
 	}
 	facts, _ := harness.ForExecutable(binary)
 	return facts.Name
