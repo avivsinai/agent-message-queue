@@ -221,7 +221,8 @@
         "launcher": {"type": "string", "minLength": 1},
         "placement": {"$ref": "#/$defs/PlacementV1"},
         "caller_context": {"$ref": "#/$defs/CallerContextV1"},
-        "intent": {"$ref": "#/$defs/LaunchIntentV1"}
+        "intent": {"$ref": "#/$defs/LaunchIntentV1"},
+        "amq_executable": {"type": "string", "minLength": 1}
       }
     },
     "RequiredActionV1": {

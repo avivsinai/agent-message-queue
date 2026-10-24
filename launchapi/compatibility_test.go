@@ -21,7 +21,7 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if slices.Contains(Compatibility().Features, "prepare_apply_v1") {
 		for _, feature := range []string{
 			FeaturePlacement, FeatureInitialInput, FeatureBaseRoot, FeatureOnLive,
-			FeatureCallerContext, FeatureExecutableIdentity, FeatureWrapper,
+			FeatureCallerContext, FeatureExecutableIdentity, FeatureWrapper, FeatureAMQExecutable,
 		} {
 			if !slices.Contains(Compatibility().Features, feature) {
 				t.Fatalf("Compatibility omitted advertised %s", feature)
