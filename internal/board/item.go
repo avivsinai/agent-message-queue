@@ -189,12 +189,25 @@ type Gate struct {
 	OldestAgeSeconds float64 `json:"oldest_age_seconds"`
 }
 
+// Conversation is one harness session that an exact AMQ record ties to an
+// agent of a session (amq session list --json conversations[]). State is
+// ready, revoked, or uncertain; nothing in it is inferred from a cwd.
+type Conversation struct {
+	Session  string `json:"session"`
+	Handle   string `json:"handle"`
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Source   string `json:"source"`
+}
+
 // AMQContext is what the AMQ source learns about the project itself.
 type AMQContext struct {
-	Project  string        `json:"project,omitempty"`
-	Peers    []string      `json:"peers,omitempty"`
-	Sessions []SessionInfo `json:"sessions"`
-	Gates    []Gate        `json:"gates,omitempty"`
+	Project       string         `json:"project,omitempty"`
+	Peers         []string       `json:"peers,omitempty"`
+	Sessions      []SessionInfo  `json:"sessions"`
+	Gates         []Gate         `json:"gates,omitempty"`
+	Conversations []Conversation `json:"conversations,omitempty"`
 }
 
 // Result is one source read.

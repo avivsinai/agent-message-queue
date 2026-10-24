@@ -19,6 +19,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
+	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 var version = "dev"
@@ -83,6 +84,7 @@ func run(args []string) int {
 	}
 	sources := []board.Source{source.AMQ{}, source.Beads{}}
 	model := board.Run(context.Background(), env, sources, board.DefaultConfig(), version)
+	model = withUsage(model, env)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -116,4 +118,26 @@ func (execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, e
 		return nil, fmt.Errorf("%s: %w", argv[0], err)
 	}
 	return stdout.Bytes(), nil
+}
+
+// withUsage adds what each harness account spent in this project and the
+// limits it reports. A session counts for the project when its recorded
+// working directory is in one of the project's Git worktrees (the directory
+// itself outside Git). Spend goes to the worker an AMQ conversation record
+// ties the harness session to; the rest shows under the account's other
+// sessions.
+func withUsage(m board.Model, env board.Env) board.Model {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return m
+	}
+	roots := []string{env.Dir}
+	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
+		if wts := boardusage.Worktrees(out); len(wts) > 0 {
+			roots = wts
+		}
+	}
+	mapping := board.UsageMapping(m.Conversations)
+	rep := boardusage.Read(boardusage.DefaultConfig(home), env.Now(), boardusage.ProjectEligible(roots), mapping)
+	return board.WithUsage(m, rep, mapping)
 }

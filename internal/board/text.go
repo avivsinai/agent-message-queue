@@ -46,6 +46,7 @@ func WriteText(w io.Writer, m Model) error {
 			fmt.Fprintf(&b, "  %s not assessed: %s\n", s.Name, clean(s.Coverage.Detail))
 		}
 	}
+	writeUsage(&b, m)
 
 	live := map[[2]string]string{}
 	for _, rs := range m.Roster {
@@ -81,6 +82,9 @@ func WriteText(w io.Writer, m Model) error {
 		b.WriteString("\n")
 		for _, a := range rs.Agents {
 			fmt.Fprintf(&b, "    %s\n", clean(chip(a)))
+			if u := usageLine(a, now); u != "" {
+				fmt.Fprintf(&b, "      %s\n", u)
+			}
 		}
 		if len(rs.Quiet) > 0 {
 			uncounted := 0
