@@ -107,6 +107,8 @@ type Evidence struct {
 	Value  string    `json:"value"`
 	Text   string    `json:"text,omitempty"`
 	At     time.Time `json:"at"`
+	// URL is an https link from a forge or provider; empty otherwise.
+	URL string `json:"url,omitempty"`
 }
 
 // Mention is a candidate token found in free text.
@@ -192,12 +194,25 @@ type Gate struct {
 	OldestAgeSeconds float64 `json:"oldest_age_seconds"`
 }
 
+// Conversation is one harness session that an exact AMQ record ties to an
+// agent of a session (amq session list --json conversations[]). State is
+// ready, revoked, or uncertain; nothing in it is inferred from a cwd.
+type Conversation struct {
+	Session  string `json:"session"`
+	Handle   string `json:"handle"`
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Source   string `json:"source"`
+}
+
 // AMQContext is what the AMQ source learns about the project itself.
 type AMQContext struct {
-	Project  string        `json:"project,omitempty"`
-	Peers    []string      `json:"peers,omitempty"`
-	Sessions []SessionInfo `json:"sessions"`
-	Gates    []Gate        `json:"gates,omitempty"`
+	Project       string         `json:"project,omitempty"`
+	Peers         []string       `json:"peers,omitempty"`
+	Sessions      []SessionInfo  `json:"sessions"`
+	Gates         []Gate         `json:"gates,omitempty"`
+	Conversations []Conversation `json:"conversations,omitempty"`
 }
 
 // Result is one source read.
@@ -219,8 +234,12 @@ type Result struct {
 }
 
 // Runner runs one argv in dir and returns stdout. It never uses a shell.
+// RunLimited holds at most maxOut bytes of stdout: a command that writes more
+// is stopped and its run is an error, so output is never buffered past the
+// limit.
 type Runner interface {
 	Run(ctx context.Context, dir string, argv []string) ([]byte, error)
+	RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error)
 }
 
 // Env is what a source may use.

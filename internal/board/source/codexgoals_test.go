@@ -21,6 +21,10 @@ func (r codexGoalsRunner) Run(ctx context.Context, _ string, argv []string) ([]b
 	return r(ctx, argv)
 }
 
+func (r codexGoalsRunner) RunLimited(ctx context.Context, _ string, argv []string, _ int) ([]byte, error) {
+	return r(ctx, argv)
+}
+
 // Slice 5b: one scrubbed store protects state mapping and project payload
 // eligibility. The foreign-project row is the design's finding 6 regression;
 // unknown file versions must not be interpreted as the supported schema.

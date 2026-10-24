@@ -1,7 +1,12 @@
 {
   "sessions": [
-    {"name": "s1", "path": "/fixture/.agent-mail/s1", "kind": "canonical", "agents": ["alpha", "beta", "user"], "hint": ""},
-    {"name": "s2", "path": "/fixture/.agent-mail/s2", "kind": "canonical", "agents": ["alpha", "user"], "hint": ""}
+    {"name": "s1", "path": "/fixture/.agent-mail/s1", "kind": "canonical", "agents": ["alpha", "beta", "user"], "hint": "", "conversations": [
+      {"handle": "alpha", "provider": "claude", "id": "aaaaaaaa-0000-4000-8000-000000000001", "state": "ready", "source": "exec-pid"},
+      {"handle": "beta", "provider": "codex", "id": "cccccccc-0000-4000-8000-000000000003", "state": "revoked", "source": "codex-thread"}
+    ]},
+    {"name": "s2", "path": "/fixture/.agent-mail/s2", "kind": "canonical", "agents": ["alpha", "user"], "hint": "", "conversations": [
+      {"handle": "alpha", "provider": "pi", "id": "eeeeeeee-0000-4000-8000-000000000005", "state": "uncertain", "source": "launch"}
+    ]}
   ],
   "skipped": [
     {"name": "agents", "path": "/fixture/.agent-mail/agents", "reason": "not_a_session"}

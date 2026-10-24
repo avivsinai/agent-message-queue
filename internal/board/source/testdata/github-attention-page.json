@@ -1,0 +1,25 @@
+{
+  "data": {
+    "attention": {
+      "issueCount": 260,
+      "pageInfo": {
+        "hasNextPage": true,
+        "endCursor": "NEXT"
+      },
+      "nodes": [
+        {
+          "number": 41,
+          "title": "Review past the first search page",
+          "url": "https://github.com/octo-org/demo/pull/41",
+          "updatedAt": "2026-10-22T09:00:00Z",
+          "author": {
+            "login": "octo-agent"
+          },
+          "repository": {
+            "nameWithOwner": "octo-org/demo"
+          }
+        }
+      ]
+    }
+  }
+}
