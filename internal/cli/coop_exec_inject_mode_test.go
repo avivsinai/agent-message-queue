@@ -15,6 +15,9 @@ import (
 // agent-message-queue-t97.3 (Pro finding 8): an unknown binary still fell
 // back to the handle, so `--me codex-reviewer unknown-cli` was typed into as
 // Codex; and a wrapped managed seat was judged by its wrapper executable.
+// PR #1197 review (Codex P2): the harness name for Cursor was its launch
+// provider name "cursor-agent"; the harness is "cursor" and the stored
+// provider name stays "cursor-agent".
 func TestCoopWakeTypesByHarnessNotHandle(t *testing.T) {
 	for _, tc := range []struct {
 		me, binary, managedProvider, requested string
@@ -25,9 +28,10 @@ func TestCoopWakeTypesByHarnessNotHandle(t *testing.T) {
 		{"x", "/opt/homebrew/bin/codex", "", wakeInjectModeAuto, wakeInjectModeRaw, "codex", "\n", true},
 		{"reviewer", "grok", "", wakeInjectModeAuto, wakeInjectModePaste, "grok", "", false},
 		{"reviewer", "claude", "", wakeInjectModePaste, wakeInjectModePaste, "claude", "", true},
-		{"reviewer", "/opt/bin/AGENT.exe", "", wakeInjectModeAuto, wakeInjectModePaste, "cursor-agent", "", false},
+		{"reviewer", "/opt/bin/AGENT.exe", "", wakeInjectModeAuto, wakeInjectModePaste, "cursor", "", false},
 		{"codex-reviewer", "/usr/local/bin/unknown-cli", "", wakeInjectModeAuto, wakeInjectModePaste, "other", "", false},
 		{"reviewer", "/usr/bin/sandbox-wrapper", "claude", wakeInjectModeAuto, wakeInjectModeRaw, "claude", "", true},
+		{"reviewer", "/usr/bin/sandbox-wrapper", "cursor-agent", wakeInjectModeAuto, wakeInjectModePaste, "cursor", "", false},
 	} {
 		wakeHarness := coopWakeHarness(tc.binary, tc.managedProvider)
 		args := buildCoopWakeArgs(tc.me, "/q", coopWakeInjectMode(tc.requested, wakeHarness), wakeHarness, "", nil, "")

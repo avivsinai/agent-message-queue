@@ -10,12 +10,12 @@ import (
 	"strings"
 )
 
-// Stable harness names. Cursor's current CLI is "agent"; "cursor-agent"
-// remains its stable name.
+// Stable harness names: the discovery identity of a harness, independent of
+// the provider names launch.json and launch records store.
 const (
 	Claude = "claude"
 	Codex  = "codex"
-	Cursor = "cursor-agent"
+	Cursor = "cursor"
 	Grok   = "grok"
 	Pi     = "pi"
 	Agy    = "agy"
@@ -82,8 +82,9 @@ var known = map[string]Facts{
 // generic is the behavior for Other: paste typing, plain output, no prelude.
 var generic = Facts{Name: Other, Naming: NamingUnknown, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectPaste}
 
-// aliases maps executable basenames that differ from the stable name.
-var aliases = map[string]string{"agent": Cursor}
+// aliases maps executable basenames that differ from the stable name. Cursor's
+// current CLI is "agent"; "cursor-agent" is its legacy executable.
+var aliases = map[string]string{"agent": Cursor, "cursor-agent": Cursor}
 
 // ForExecutable returns the facts for an executable path or basename, with
 // case and a trailing .exe ignored. ok is false for a program not in the

@@ -186,7 +186,9 @@ func runDoctor(args []string) error {
 		decls := declarationsFor(root, opsDeclarationBase(root, baseRoot))
 		for i := range result.Mailboxes {
 			mailbox := &result.Mailboxes[i]
-			mailbox.RegistrationStatus = string(classifyAgentAt(decls, root, mailbox.Handle).Status)
+			registration := classifyAgentAt(decls, root, mailbox.Handle).json()
+			mailbox.RegistrationStatus = string(registration.RegistrationStatus)
+			mailbox.RegistrationDiagnostics = registration.RegistrationDiagnostics
 		}
 		result.MailboxRepair = repair
 		result.Checks = append(result.Checks, check)
