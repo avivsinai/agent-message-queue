@@ -41,6 +41,32 @@ Each source runs under its own deadline. When AMQ fails, beads cards still
 show and the roster says why it is missing; when `bd` is missing, beads shows
 as unavailable and AMQ cards remain.
 
+## Usage and limits
+
+The board shows the tokens spent in the last 5 h and 7 d, and what each
+harness account reports about its limits. It reads the harnesses' own local
+records in place: Claude Code transcripts under `~/.claude/projects/`, Codex
+rollouts under `~/.codex/sessions/`, and pi sessions under
+`~/.pi/agent/sessions/`. It opens only those session files, keeps only their
+numeric usage fields, ids and timestamps, and makes no network call. A
+session counts for the project when its recorded working directory is in one
+of the project's Git worktrees.
+
+- **Spent** is per worker. A harness session's spend goes to the agent that
+  `amq session list --json` `conversations[]` ties it to (records in state
+  `ready` or `revoked`); subagent and child-thread spend rolls up to it.
+  "Fresh" is uncached input plus cache writes plus output; cached reads are
+  shown beside it. Project sessions with no such record show under the
+  account's "other sessions in this project". A working directory alone never
+  attributes spend.
+- **Limits** are per account and never shown as a worker's budget: a Codex
+  credit balance with its age, a Claude limit reached until its reset, or
+  "limit unknown" with the reason (Claude Code writes plan usage only to its
+  status line; pi records no plan limits). A worker whose account reached a
+  limit shows "limit reached until HH:MM".
+- One run reads at most 300 MB in 1 s. A total that missed files reads "at
+  least" and the account says how many files it read.
+
 ## Read-only
 
 The board writes to no source and never runs the commands it prints. It runs
