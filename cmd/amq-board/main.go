@@ -118,6 +118,7 @@ func run(args []string) int {
 	} else {
 		sources = append(sources, board.Disabled{SourceName: "beads"})
 	}
+	sources = append(sources, source.CodexGoals{})
 	if cfg.SourceGitHub {
 		if home, err := amqhome.EnsureDir(); err == nil {
 			gh.Cache = source.DirCache{Dir: filepath.Join(home, "board", "cache")}
