@@ -52,6 +52,65 @@ Each source runs under its own deadline. When AMQ fails, beads cards still
 show and the roster says why it is missing; when `bd` is missing, beads shows
 as unavailable and AMQ cards remain.
 
+## Usage and limits
+
+The board shows the tokens spent in the last 5 h and 7 d, and what each
+harness account reports about its limits. It reads the harnesses' own local
+records in place: Claude Code transcripts under `~/.claude/projects/`, Codex
+rollouts under `~/.codex/sessions/`, and pi sessions under
+`~/.pi/agent/sessions/`. It opens only those session files, keeps only their
+numeric usage fields, ids and timestamps, and makes no network call. A
+session counts for the project when its recorded working directory is in one
+of the project's Git worktrees.
+
+- **Spent** is per worker. A harness session's spend goes to the agent that
+  `amq session list --json` `conversations[]` ties it to (records in state
+  `ready` or `revoked`); subagent and child-thread spend rolls up to it.
+  "Fresh" is uncached input plus cache writes plus output; cached reads are
+  shown beside it. Project sessions with no such record show under the
+  account's "other sessions in this project". A working directory alone never
+  attributes spend.
+- **Limits** are per account and never shown as a worker's budget: a Codex
+  credit balance with its age, a Claude limit reached until its reset, or
+  "limit unknown" with the reason (Claude Code writes plan usage only to its
+  status line; pi records no plan limits). A worker whose account reached a
+  limit shows "limit reached until HH:MM".
+- Each reader counts only records of the harness versions it was checked
+  against: Claude Code 2.1.267 up to 3, Codex 0.114.0 up to 1, and pi
+  session format 3. A record of any other version, or with none, is not
+  counted; a worker whose only records are such shows "spent unknown" with
+  the version, never a number.
+- One run lists and reads at most 300 MB in 1 s, checked per chunk read, so
+  one long line cannot outrun it. A total that missed anything (a file the
+  budget stopped, a file that could not be opened or identified, a line over
+  16 MiB, an unverified version, or part of the file list) reads "at least",
+  and the account says what it missed.
+
+The `usage` key of `~/.amq/board.json` (the user file only) configures
+this:
+
+```json
+{
+  "usage": {
+    "enabled": true,
+    "homes": {"claude": ["~/.claude-work"]},
+    "budget": {"wall": "1s", "bytes": "300MB"}
+  }
+}
+```
+
+- `enabled: false` reads no harness file.
+- Homes listed under `homes` are read in addition to each harness's default
+  home, each as its own account (a second Claude config directory, a second
+  `CODEX_HOME`, a pi-format variant's home). A home listed twice, or the
+  default listed again, is read once. A home is absolute or starts with
+  `~/`.
+- `budget.wall` is a Go duration; `budget.bytes` is a size in B, KB, MB, or
+  GB, 1024-based.
+- A file amq-board refuses (bad JSON, an unknown harness, a relative home, a
+  bad budget) reads no usage at all and says why on stderr, so a mistake
+  never reads homes the file meant to keep closed.
+
 ## Configuration
 
 `~/.amq/board.json` (all keys optional):

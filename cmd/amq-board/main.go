@@ -20,6 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
+	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 var version = "dev"
@@ -136,6 +137,11 @@ func run(args []string) int {
 		}
 	}
 	model := board.Run(ctx, env, sources, cfg.Board, version)
+	if home, err := os.UserHomeDir(); err == nil {
+		if model, err = withUsage(model, env, home); err != nil {
+			fmt.Fprintln(os.Stderr, "amq-board: usage not read:", err)
+		}
+	}
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -149,6 +155,31 @@ func run(args []string) int {
 		return exitGeneral
 	}
 	return 0
+}
+
+// withUsage adds what each harness account spent in this project and the
+// limits it reports, as the "usage" key of ~/.amq/board.json under home
+// configures: off, extra homes, and the run's budget. A refused file reads
+// nothing, so a mistyped "enabled": false never reads the homes it meant to
+// keep closed. A session counts for the project when its recorded working
+// directory is in one of the project's Git worktrees (the directory itself
+// outside Git). Spend goes to the worker an AMQ conversation record ties
+// the harness session to; the rest shows under the account's other
+// sessions.
+func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
+	st, err := boardusage.LoadSettings(filepath.Join(amqhome.Under(home), board.ConfigFile), home)
+	if err != nil || !st.Enabled {
+		return m, err
+	}
+	roots := []string{env.Dir}
+	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
+		if wts := boardusage.Worktrees(out); len(wts) > 0 {
+			roots = wts
+		}
+	}
+	mapping := board.UsageMapping(m.Conversations)
+	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
+	return board.WithUsage(m, rep, mapping), nil
 }
 
 // maxToolOutput bounds the stdout of any one source command. Forge responses

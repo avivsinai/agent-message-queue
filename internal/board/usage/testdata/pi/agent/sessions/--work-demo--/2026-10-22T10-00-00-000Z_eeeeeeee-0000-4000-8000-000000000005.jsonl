@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"eeeeeeee-0000-4000-8000-000000000005","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2026-10-22T10:00:05.000Z","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"reasoning":10,"totalTokens":150,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}}
