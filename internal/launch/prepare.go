@@ -288,6 +288,10 @@ type PrepareRequest struct {
 	SubjectSchema int
 	Placement     *Placement
 	CallerContext map[string]string
+	// AMQExecutable is the caller's AMQ executable for managed panes. Empty
+	// uses PrepareDependencies.AMQPath. When set, its resolved path and
+	// identity enter the subject digest.
+	AMQExecutable string
 }
 
 type AdapterFactory func(provider, executable string) HarnessAdapter
@@ -369,6 +373,10 @@ type PrepareResult struct {
 	Observations        []PrepareObservation
 	Placement           PlacementPreview
 	CallerContext       map[string]string
+	// AMQExecutable is the canonical path and physical identity of the
+	// requested AMQ executable that entered SubjectDigest. Nil when the
+	// request names none.
+	AMQExecutable *PreparedExecutable
 }
 
 type prepareTargetState struct {
@@ -489,6 +497,14 @@ type prepareSubject struct {
 	Observations    []PrepareObservation      `json:"observations"`
 	Placement       *PlacementPreview         `json:"placement,omitempty"`
 	CallerContext   map[string]string         `json:"caller_context,omitempty"`
+	AMQExecutable   *PreparedExecutable       `json:"amq_executable,omitempty"`
+}
+
+// PreparedExecutable is a canonical file path and the physical identity that
+// canonicalFile reports for it, the same form an execution ticket binds.
+type PreparedExecutable struct {
+	Path     string `json:"path"`
+	Identity string `json:"identity"`
 }
 
 // Prepare compiles public caller intent and inspects current launch state. It
@@ -553,7 +569,11 @@ func validatePrepareRequest(ctx context.Context, request PrepareRequest, depende
 	if err := ValidateCallerContext(request.CallerContext); err != nil {
 		return nil, 0, PrepareDependencies{}, err
 	}
-	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath, request.Target.ProjectRoot)
+	amqPath := dependencies.AMQPath
+	if request.AMQExecutable != "" {
+		amqPath = request.AMQExecutable
+	}
+	amqPath, err = resolveLaunchAMQExecutable(amqPath, request.Target.ProjectRoot)
 	if err != nil {
 		return nil, 0, PrepareDependencies{}, err
 	}
@@ -742,6 +762,14 @@ func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies P
 	}
 	if subjectSchema == SubjectSchemaV2 {
 		setPrepareSubjectV2Fields(&subject, result.PlannedWrites, result.Placement, request.CallerContext)
+	}
+	if request.AMQExecutable != "" {
+		path, identity, err := canonicalFile(dependencies.AMQPath)
+		if err != nil {
+			return PrepareResult{}, fmt.Errorf("identify amq executable: %w", err)
+		}
+		result.AMQExecutable = &PreparedExecutable{Path: path, Identity: identity}
+		subject.AMQExecutable = result.AMQExecutable
 	}
 	result.SubjectDigest, err = digestCanonical(subject)
 	if err != nil {

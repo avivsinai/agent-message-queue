@@ -36,7 +36,7 @@ implementation that the build can call:
 
 | Build platform | Advertised launch features |
 | --- | --- |
-| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
+| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, `wrapper`, and `amq_executable`. |
 | Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. Negotiation rejects `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1`. |
 
 WSL uses the Linux binary and gets the Linux row. Negotiation fails closed for
@@ -222,8 +222,8 @@ Without the flag:
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build,
-plus adapter `acp` for any Agent Client Protocol agent. Pi stays direct-only.
+The adapter set supports Claude Code, Codex CLI, Cursor CLI, Grok Build, and
+pi, plus adapter `acp` for any Agent Client Protocol agent.
 
 An `acp` seat in committed `.amq/launch.json` names the agent's ACP command,
 for example `{"handle": "grok", "adapter": "acp", "resume_policy": "fresh",
@@ -244,6 +244,18 @@ keeps one written by hand. A public intent cannot select `acp`.
 Each provider owns its conversation identity:
 
 - Claude Code and Grok Build mint session IDs from the launch nonce.
+- pi mints a session ID per seat, a UUID derived from the launch nonce and
+  the handle, passed as `--session-id <id>`, and resumes with `--session-id <id>` in the same cwd. pi treats that flag as
+  an exact session ID: it reopens the session when it exists and creates it
+  under the same ID when it does not, which is the case for a seat that never
+  took a turn, because pi writes the session file only after the first turn.
+  It never matches a prefix. A session file that was deleted also starts
+  fresh under the same ID; AMQ does not scan pi's session store. A pi below `piMinimumVersion` (`1.2.0`,
+  `internal/launch/adapter_pi.go`) or a non-release version is refused with
+  `provider_version_unsupported`, and a pi whose `--help` does not list
+  `--session-id` with `identity_flags_unsupported`. pi admits no provider
+  arguments, and initial input that begins with `@` is refused, because pi
+  reads such an argument as a file to attach.
 - Codex CLI reports its thread ID after a completed turn through its `notify`
   hook. Capture accepts codex-cli `codexCaptureMinimumVersion` (`0.147.0`) and
   newer, verified through `codexCaptureVerifiedVersion`
@@ -274,7 +286,7 @@ Each provider owns its conversation identity:
 In committed `.amq/launch.json`, `agents[].named` overrides the top-level
 `named` setting, and naming is on by default. A managed Claude fresh plan
 carries `--name <session>/<handle>` in the ticket and trust digest. A resume
-plan never adds or renames a session. Codex, Cursor, and Grok are unnamed
+plan never adds or renames a session. Codex, Cursor, Grok, and pi are unnamed
 under managed launch.
 
 ### Launchers
@@ -360,6 +372,18 @@ tmux omitted-placement session. Hostile live resources refuse even with
   never the plan or trust digest.
 - Apply echoes the request map. Inspect, Focus, and Close load it from the
   proven-owned binding; a lifecycle request cannot replace it.
+
+`amq_executable` names the AMQ binary that managed panes run as
+`<amq_executable> coop exec ...` and that the Codex notify hook calls. A
+program that embeds `launchapi` sets it, because its own binary is not `amq`.
+
+- The value is absolute or found on `PATH`. AMQ resolves symlinks and refuses
+  a project-contained binary, as it does for a provider executable.
+- Omission uses the running executable, as before.
+- When present, the resolved path and its file identity enter
+  `subject_digest`. Omission adds nothing, so existing digests do not change.
+- The execution ticket records the path and identity and checks them again
+  when the pane starts.
 
 ### Go example
 

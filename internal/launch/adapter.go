@@ -23,6 +23,7 @@ const (
 	CodexProvider  = "codex"
 	CursorProvider = "cursor-agent"
 	GrokProvider   = "grok"
+	PiProvider     = "pi"
 )
 
 // providerHarness maps each built-in adapter's provider name to its harness.
@@ -31,12 +32,13 @@ var providerHarness = map[string]string{
 	CodexProvider:  harness.Codex,
 	CursorProvider: harness.Cursor,
 	GrokProvider:   harness.Grok,
+	PiProvider:     harness.Pi,
 }
 
 // ProviderForExecutable maps a configured executable to the stable
 // adapter/provider identity, or "" when no built-in adapter serves it. The
-// harness table recognizes the executable; harnesses without an adapter, such
-// as pi and agy, stay "".
+// harness table recognizes the executable; a harness without an adapter, such
+// as agy, stays "".
 func ProviderForExecutable(executable string) string {
 	facts, _ := harness.ForExecutable(executable)
 	for provider, name := range providerHarness {
@@ -129,6 +131,12 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 			GrammarVersion: 1, VerifiedProviderVersion: cursorCaptureVersion,
 			AllowedArgumentForms: argumentForms(cursorArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
 			InitialInputKinds: []InitialInputKind{},
+		}
+	case PiProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: piVerifiedVersion,
+			AllowedArgumentForms: argumentForms(piArgRules()), ConfigOverrides: []ConfigOverrideCapability{},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	default:
 		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
@@ -258,6 +266,8 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		envRules, argRules, bypassAllowed = cursorEnvRules(), cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		envRules, argRules, bypassAllowed = grokEnvRules(), grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		envRules, argRules, bypassAllowed = piEnvRules(), piArgRules(), piBypassArgs()
 	default:
 		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
 	}
@@ -322,6 +332,8 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 		argRules, bypassAllowed = cursorArgRules(), cursorBypassArgs()
 	case GrokProvider:
 		argRules, bypassAllowed = grokArgRules(), grokBypassArgs()
+	case PiProvider:
+		argRules, bypassAllowed = piArgRules(), piBypassArgs()
 	default:
 		return nil, nil, fmt.Errorf("unknown provider %q", provider)
 	}

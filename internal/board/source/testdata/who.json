@@ -1,0 +1,11 @@
+[
+  {"name": "s1", "agents": [
+    {"handle": "alpha", "kind": "agent", "presence_applicable": true, "active": true, "presence_source": "notifier_live", "notifier_status": "attached"},
+    {"handle": "beta", "kind": "agent", "presence_applicable": true, "active": false},
+    {"handle": "user", "kind": "human", "presence_applicable": false, "active": false}
+  ]},
+  {"name": "s2", "agents": [
+    {"handle": "alpha", "kind": "agent", "presence_applicable": true, "active": false},
+    {"handle": "user", "kind": "human", "presence_applicable": false, "active": false}
+  ]}
+]

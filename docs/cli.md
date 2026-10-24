@@ -38,6 +38,7 @@ options not repeated here.
 - [amq doctor](#amq-doctor)
 - [amq shell-setup](#amq-shell-setup)
 - [amq completion](#amq-completion)
+- [amq thread open](#amq-thread-open)
 - [amq presence set](#amq-presence-set)
 - [amq presence list](#amq-presence-list)
 - [amq dlq list](#amq-dlq-list)
@@ -170,7 +171,7 @@ Usage:
   amq setup [options]
 
 Configure this project after previewing every change.
-Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.
+Detects Claude, Codex, Cursor, Grok, and pi through their adapter capability probes.
 Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
@@ -820,7 +821,7 @@ If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.
 
 Options:
   -all
-        Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign)
+        Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign, amq-board)
   -y    Run the package-manager delegate without an AMQ confirmation; the manager may still prompt
 ```
 
@@ -1151,6 +1152,42 @@ Examples:
   eval "$(amq completion bash)"
   amq completion zsh > "${fpath[1]}/_amq"
   amq completion fish > ~/.config/fish/completions/amq.fish
+```
+
+## amq thread open
+
+```text
+$ amq thread open --help
+Usage:
+  amq thread open [--all-sessions] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]
+
+List open review requests, questions, and todos per thread.
+An obligation closes when its owner replies with the expected kind or a closing label.
+Read-only: it never moves a message, writes a receipt, or reads a body.
+
+Options:
+  -all-sessions
+        Scan every canonical session under the base root
+  -json
+        Emit JSON output
+  -json-schema int
+        JSON schema version: 1 (requires --json) (default 1)
+  -kind string
+        Comma-separated opener kinds: review_request, question, todo
+  -limit int
+        List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)
+  -max-age string
+        Ignore openers older than this (e.g. 14d, 36h; 0 = read every file) (default "14d")
+  -me string
+        Agent handle (or AM_ME)
+  -owed-by string
+        Comma-separated handles that owe a reply
+  -owed-to string
+        Comma-separated handles that are owed a reply
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -strict
+        Error on unknown handles (default: send and reply warn)
 ```
 
 ## amq presence set
@@ -2082,6 +2119,7 @@ Usage:
 
 List named sessions under the base root.
 Canonical sessions are listed normally. Safe legacy roots are marked legacy_name with an exact --root hint.
+--json adds conversations[] per session: {handle, provider, id, state, source}, the harness sessions that exact AMQ records tie to an agent. source is launch (managed launch record), codex-thread (the Codex thread coop exec created), exec-pid (the Claude Code process coop exec became, joined with Claude's sessions/<pid>.json), or remote (an amq-remote binding of that process). state is ready, revoked (a later coop exec replaced it; listed for 7 days), or uncertain. Nothing is inferred from a cwd.
 
 Options:
   -json

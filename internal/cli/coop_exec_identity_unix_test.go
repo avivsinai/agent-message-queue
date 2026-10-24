@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -70,5 +71,29 @@ func TestManagedLaunchRecordsTheHarnessOfASymlinkedInstall(t *testing.T) {
 		if got := managedInvocation(tc.ticket); got != tc.want {
 			t.Fatalf("provider %s: invocation %+v, want %+v", tc.ticket.Provider, got, tc.want)
 		}
+	}
+}
+
+// PR #1201 review (Codex P2): coop exec opened the current root path and
+// wrote identity.json without comparing it with the root it selected, so a
+// root replaced after selection received the record.
+func TestCoopExecIdentitySkipsARootReplacedAfterSelection(t *testing.T) {
+	root := filepath.Join(secureTempDirForTest(t), "queue")
+	if err := fsq.EnsureAgentDirs(root, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := resolveTreeIdentityToken(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(root, root+".selected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	publishAgentIdentity(root, rootID, "reviewer", harness.Invocation{Harness: harness.Pi})
+	if _, err := os.Lstat(filepath.Join(root, "agents", "reviewer", "identity.json")); !os.IsNotExist(err) {
+		t.Fatalf("identity.json in the replacement root: %v", err)
 	}
 }

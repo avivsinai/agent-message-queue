@@ -65,8 +65,9 @@ The hooks run `amq` only in sessions with `AM_ME` set, which `amq coop exec`
 and `amq launch` do. A plain `claude` without `AM_ME` gets no preamble and no
 Stop guard, and other Claude Code sessions start no `amq`. Running the command
 again replaces the entries in place; `amq coop uninstall-hooks` removes them.
-Remove project hook entries that run `scripts/claude-session-start.sh` or
-`scripts/amq-stop-hook.sh`, or each hook runs twice; the install command and
+AMQ no longer ships the old project hook scripts `scripts/claude-session-start.sh`,
+`scripts/amq-stop-hook.sh` and `scripts/claude-amq-user-prompt-submit.py`.
+Remove project hook entries that run them; the install command and
 `amq doctor` list such entries.
 
 ### Multiple pairs (isolated sessions)
@@ -145,6 +146,11 @@ injection is not available:
 ```toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
+
+Codex runs it after each turn. It reads the mailbox named by `AM_ROOT` and
+`AM_ME`, which `amq coop exec codex` sets, and does nothing without them. It
+raises one desktop notification for a set of unread messages, and another
+only when that set changes.
 
 ## Roles and phase flow
 

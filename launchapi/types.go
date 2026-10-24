@@ -176,6 +176,10 @@ type PrepareRequestV1 struct {
 	Placement      *PlacementV1      `json:"placement,omitempty"`
 	CallerContext  map[string]string `json:"caller_context,omitempty"`
 	Intent         LaunchIntentV1    `json:"intent"`
+	// AMQExecutable names the AMQ binary that managed panes run. It is
+	// absolute or found on PATH and must not be project-contained. Empty
+	// means the running executable.
+	AMQExecutable string `json:"amq_executable,omitempty"`
 }
 
 type RequiredActionKindV1 string
@@ -442,4 +446,5 @@ const (
 	FeatureInitialInput       = "initial_input"
 	FeatureCallerContext      = "caller_context"
 	FeatureExecutableIdentity = "executable_identity"
+	FeatureAMQExecutable      = "amq_executable"
 )

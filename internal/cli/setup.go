@@ -90,6 +90,7 @@ var (
 			launch.NewCodexAdapter(launch.CodexProvider),
 			launch.NewCursorAdapter(setupCursorCommand()),
 			launch.NewGrokAdapter(launch.GrokProvider),
+			launch.NewPiAdapter(launch.PiProvider),
 		}
 	}
 	setupLookPath      = exec.LookPath
@@ -138,7 +139,7 @@ func runSetup(args []string) (returnErr error) {
 	projectRootFlag := fs.String("project-root", "", "Directory treated as the project root (writes .amqrc, .amq, and .gitignore there)")
 	usage := usageWithFlags(fs, "amq setup [options]",
 		"Configure this project after previewing every change.",
-		"Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.",
+		"Detects Claude, Codex, Cursor, Grok, and pi through their adapter capability probes.",
 		"Launcher detection is probe-only; setup never calls a launcher backend.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err

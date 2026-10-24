@@ -1300,8 +1300,11 @@ func nonEmpty(s, fallback string) string {
 
 // recordAttachIdentity marks handle as observed in root, with the harness
 // attach found (other when it found none), in the handle's existing
-// mailbox. It is discovery metadata only: a failure warns and the attach
-// stands, and a missing mailbox is never created.
+// mailbox. The root is opened once, authenticated against the inherited
+// session pin, and written through that capability, so a directory swapped
+// in after the check never receives the record. It is discovery metadata
+// only: a failure warns and the attach stands, and a missing mailbox is
+// never created.
 func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 	if root == "" || handle == "" {
 		return
@@ -1316,6 +1319,9 @@ func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 			return err
 		}
 		defer func() { _ = deliveryRoot.Close() }()
+		if err := acp.VerifySessionPinOn(deliveryRoot); err != nil {
+			return err
+		}
 		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, harness.Lookup(kind).Name, "", time.Now()))
 	}()
 	if err != nil {

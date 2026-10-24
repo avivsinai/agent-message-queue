@@ -842,6 +842,39 @@ func TestMailboxAttachRecordsTheHarness(t *testing.T) {
 	}
 }
 
+// PR #1201 review (Codex P2): the attach writer opened the current root path
+// and wrote identity.json without authenticating that directory against the
+// session pin, so a root replaced after the pin check received the record.
+func TestAttachIdentitySkipsARootReplacedAfterThePinCheck(t *testing.T) {
+	base := filepath.Join(canonicalTempDir(t), ".agent-mail")
+	root := filepath.Join(base, "session1")
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := fsq.StableTreeIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_BASE_ROOT", base)
+	t.Setenv("AM_SESSION", "session1")
+	t.Setenv("AM_ROOT_ID", rootID)
+	t.Setenv("AM_BASE_ROOT_ID", baseID)
+	if err := os.Rename(root, root+".selected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	recordAttachIdentity(io.Discard, root, "claude", "pi")
+	if _, err := os.Lstat(filepath.Join(root, "agents", "claude", "identity.json")); !os.IsNotExist(err) {
+		t.Fatalf("identity.json in the replacement root: %v", err)
+	}
+}
+
 // Review of the identity-harness branch (P2): the native attach writer had no
 // row. attach --self --native records the attached session's harness in the
 // handle's existing mailbox of the session's root.
@@ -856,7 +889,7 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	t.Setenv("AM_ROOT", root)
 	t.Setenv("AM_ME", "claude")
 	for _, k := range []string{"AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {

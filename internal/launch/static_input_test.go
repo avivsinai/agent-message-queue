@@ -27,6 +27,9 @@ func TestValidateStaticProviderInput(t *testing.T) {
 		{name: "codex reasoning xhigh", executable: "codex", args: []string{"-c", "model_reasoning_effort=xhigh"}},
 		{name: "unknown provider", executable: "bash", want: "adapter-known"},
 		{name: "provider smuggling", executable: "codex-wrapper", want: "adapter-known"},
+		// PR #1197 review (Codex P2): the harness name "cursor" was matched
+		// as an executable, so Cursor's desktop launcher became a launch binary.
+		{name: "cursor desktop launcher", executable: "cursor", want: "adapter-known"},
 		{name: "unknown argument", executable: "codex", args: []string{"--config", "x=y"}, want: "not allowed"},
 		{name: "grok continue", executable: "grok", args: []string{"--continue"}, want: "not allowed"},
 		{name: "grok always approve", executable: "grok", args: []string{"--always-approve"}, want: "not allowed"},

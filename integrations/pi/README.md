@@ -34,6 +34,16 @@ it is active it creates
 `<AM_ROOT>/agents/<handle>/extensions/pi-bridge/` and keeps
 `bridge.liveness` fresh while the session runs.
 
+## Doorbell guard
+
+While pi asks "Trust project folder?" at startup, and while an extension
+prompt (`confirm`, `select`, `input`, `editor`, or a custom prompt) is open,
+the extension writes `<AM_ROOT>/agents/<handle>/.wake.dialog`, and the AMQ
+wake holds its doorbell instead of typing into pi. It removes the marker
+when the session starts after the trust answer, when pi stops waiting on a
+prompt, and at every session shutdown. The guard runs only when this
+extension is loaded.
+
 ## Declare the target
 
 Add a kind `pi` entry to the `amq-remote` manifest
