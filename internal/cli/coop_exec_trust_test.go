@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -103,36 +104,74 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	}
 }
 
-// PR #1204 Codex review: an inbox file replaced in place after a trust
-// release is a new message, not a drain, so it does not prove that Codex
-// accepts input and the retry still types the full doorbell.
-func TestCodexTrustReleaseReplacementIsNotInputReadiness(t *testing.T) {
-	h, config, real, marker := newCodexTrustDialogHarness(t)
-	writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
-	if _, err := os.Lstat(marker); err != nil {
-		t.Fatalf("no Startup marker for an unrecorded checkout: %v", err)
-	}
-	// Codex records trust, but no SessionStart hook removes the marker: a
-	// trust release.
-	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h.send("a", format.PriorityUrgent)
-	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("full doorbells on the trust release = %d, want 1", got)
-	}
-	h.drain()
-	h.send("a", format.PriorityUrgent)
-	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("full doorbells for the replaced message = %d, want 1", got)
-	}
-	h.advance(wakeDoorbellRetryBase)
-	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("full doorbells on the retry after a replacement = %d, want 1", got)
+// PR #1204 Codex review: after a trust release, only a drain that follows
+// a doorbell actually typed into Codex proves that Codex accepts input.
+// Each row ends at a retry that must still type the full doorbell.
+func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, h *wakeHoldHarness)
+	}{
+		{
+			// An inbox file replaced in place is a new message, not a drain.
+			name: "replacement after the release",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells on the trust release = %d, want 1", got)
+				}
+				h.drain()
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for the replaced message = %d, want 1", got)
+				}
+			},
+		},
+		{
+			// A deferred attempt types nothing, so a drain after it proves
+			// nothing.
+			name: "deferred attempt then a drain",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				h.cfg.injectVia = "test-hook"
+				h.cfg.injectViaHook = func(string) (string, error) {
+					return "AMQ_INJECT_PROGRESS=deferred\n", errors.New("exit status 1")
+				}
+				h.send("a", format.PriorityUrgent)
+				if err := notifyNewMessages(h.cfg); !isWakeInjectorDeferred(err) {
+					t.Fatalf("release attempt error = %v, want deferred", err)
+				}
+				h.cfg.injectVia, h.cfg.injectViaHook = "", nil
+				h.drain()
+				h.scan(h.cfg)
+				h.send("b", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, config, real, marker := newCodexTrustDialogHarness(t)
+			writeStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", nil)
+			if _, err := os.Lstat(marker); err != nil {
+				t.Fatalf("no Startup marker for an unrecorded checkout: %v", err)
+			}
+			// Codex records trust, but no SessionStart hook removes the
+			// marker: a trust release.
+			trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
+			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tc.run(t, h)
+			h.advance(wakeDoorbellRetryBase)
+			h.scan(h.cfg)
+			if got := h.rings(); got != 1 {
+				t.Fatalf("full doorbells on the retry = %d, want 1", got)
+			}
+		})
 	}
 }
 

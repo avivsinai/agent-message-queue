@@ -70,7 +70,7 @@ type wakeConfig struct {
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
-	startupReleaseAttempted       bool                                         // an input attempt was made after a trust release
+	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release
 	startupInputProven            bool                                         // a drain followed a post-release attempt, so the harness accepts input
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
@@ -1185,7 +1185,10 @@ func deliverNewMessageNotification(
 			return deliveryErr
 		}
 		if shouldRecordWakeAttempt(deliveryErr) {
-			if startupUnconfirmed {
+			// Only input that reached the terminal can make a later drain
+			// a readiness proof; a deferral or attention fallback types
+			// nothing.
+			if startupUnconfirmed && wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.startupReleaseAttempted = true
 			}
 			if !plan.submitOnly && !startupUnconfirmed &&
