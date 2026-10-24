@@ -407,8 +407,8 @@ func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
 	// After exec the successor alone owns the carried descriptor. In this one
 	// process it adopts a duplicate, so each adopted file closes its own.
 	carried, err := strconv.Atoi(value)
-	if err != nil {
-		t.Fatalf("restart env carries startup hold %q: %v", value, err)
+	if err != nil || carried != fd {
+		t.Fatalf("restart env carries startup hold %q, want fd %d", value, fd)
 	}
 	successorFD, err := unix.Dup(carried)
 	if err != nil {
