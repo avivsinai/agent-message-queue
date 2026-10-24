@@ -136,6 +136,21 @@ func TestGitHubCachedReadMakesOneCall(t *testing.T) {
 
 }
 
+// Merge review of the board core and GitHub source: a gh response that
+// did not answer the query read as an ok, empty GitHub source.
+func TestGitHubUnansweredQueryIsDegraded(t *testing.T) {
+	for _, body := range []string{
+		`{"data":null}`,
+		`{"message":"Bad credentials"}`,
+		`{"data":{"viewer":{"login":"me"}}}`,
+	} {
+		res := source.GitHub{}.Build([]byte(body), []string{"octo-org/demo"}, githubNow, nil)
+		if res.Status != board.StatusDegraded {
+			t.Errorf("%s: status %s %q, want degraded", body, res.Status, res.Detail)
+		}
+	}
+}
+
 func TestExternalProviderIsDataOnly(t *testing.T) {
 	ext := source.External{Provider: board.Provider{Name: "tracker", Exec: "/opt/tracker/board", Enabled: true}}
 	r := fakeRunner{t: t, outputs: map[string]string{"/opt/tracker/board": "provider.json"}}

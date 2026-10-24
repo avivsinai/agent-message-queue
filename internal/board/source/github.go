@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -340,7 +341,9 @@ type repoResult struct {
 }
 
 // githubRepos reads alias r<i> as repos[i]. A null alias (a repo that does
-// not exist or is not visible) yields nothing.
+// not exist or is not visible) yields nothing. A response without data, or
+// without an alias the query asked for, did not answer the query: it is an
+// error, never an empty repo set.
 func githubRepos(resp []byte, repos []string) ([]repoResult, error) {
 	var raw struct {
 		Data map[string]json.RawMessage `json:"data"`
@@ -348,10 +351,16 @@ func githubRepos(resp []byte, repos []string) ([]repoResult, error) {
 	if err := json.Unmarshal(resp, &raw); err != nil {
 		return nil, err
 	}
+	if raw.Data == nil {
+		return nil, errors.New("no data")
+	}
 	var out []repoResult
 	for i, slug := range repos {
 		msg, ok := raw.Data["r"+strconv.Itoa(i)]
-		if !ok || string(msg) == "null" {
+		if !ok {
+			return nil, fmt.Errorf("no answer for %s", slug)
+		}
+		if string(msg) == "null" {
 			continue
 		}
 		var repo ghRepo
