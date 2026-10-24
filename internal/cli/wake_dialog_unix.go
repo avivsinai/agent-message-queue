@@ -83,23 +83,8 @@ type wakeDialogMarker struct {
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	return func(now time.Time) (wakeDialogState, error) {
-		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
-			return wakeDialogUnknown, err
-		}
-		var raw []byte
-		var info os.FileInfo
-		var exists bool
-		var readErr error
-		if err := agentDir.withFD(func(dirfd int) error {
-			raw, info, exists, readErr = readWakeRepairMetadataAt(
-				dirfd,
-				wakeDialogFileName,
-				"wake dialog marker",
-				filepath.Join(agentDir.path, wakeDialogFileName),
-				maxWakeMetadataFileBytes,
-			)
-			return nil
-		}); err != nil {
+		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
+		if err != nil {
 			return wakeDialogUnknown, err
 		}
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
@@ -111,6 +96,43 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 		}
 		return classifyWakeDialogMarker(modTime, exists, readErr, now)
 	}
+}
+
+// wakeStartupTrustReleaseInDir reports whether the agent's Startup marker
+// is still present and reads closed only because the harness recorded its
+// trust decision. That record proves the trust dialog is gone, not that
+// the harness accepts input yet: the harness's SessionStart hook removes
+// the marker once the session is ready. Any doubt reads as a trust
+// release.
+func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir) func() bool {
+	var startup startupDialogCache
+	return func() bool {
+		raw, _, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
+		if err != nil || readErr != nil {
+			return true
+		}
+		return exists && startupDialogClosed(raw, &startup)
+	}
+}
+
+// readWakeDialogMarkerInDir reads the marker through the canonical agent
+// directory. err reports a directory that is no longer canonical; readErr
+// a marker that cannot be read.
+func readWakeDialogMarkerInDir(agentDir *wakeAgentDir) (raw []byte, info os.FileInfo, exists bool, readErr, err error) {
+	if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+		return nil, nil, false, nil, err
+	}
+	err = agentDir.withFD(func(dirfd int) error {
+		raw, info, exists, readErr = readWakeRepairMetadataAt(
+			dirfd,
+			wakeDialogFileName,
+			"wake dialog marker",
+			filepath.Join(agentDir.path, wakeDialogFileName),
+			maxWakeMetadataFileBytes,
+		)
+		return nil
+	})
+	return raw, info, exists, readErr, err
 }
 
 // runWakeDialog is the hook receiver. Errors after the arguments parse
