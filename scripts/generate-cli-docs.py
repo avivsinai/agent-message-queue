@@ -13,10 +13,11 @@ import tempfile
 
 ENTRY = re.compile(r"^  ([A-Za-z0-9_-]+)\s{2,}(.+?)\s*$")
 
-# `wake` dispatches these children, but its platform-specific help is a
-# long option reference and does not print a Subcommands section. Keep this
+# `wake` and `thread` dispatch these children, but their help is a long
+# option reference and does not print a Subcommands section. Keep this
 # small source-backed supplement so the public operator commands are covered.
 SOURCE_SUBCOMMANDS = {
+    "thread": ("open",),
     "wake": (
         "check",
         "config",

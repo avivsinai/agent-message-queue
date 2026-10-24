@@ -86,6 +86,57 @@ func TestPrepareApplyCreatesAuthorizedProfileBaseRoot(t *testing.T) {
 	}
 }
 
+// #1159: an embedder of launchapi is not amq, so managed panes must run the
+// AMQ executable the request names instead of the embedding binary.
+func TestApplyRunsTheRequestedAMQExecutable(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	prepareWith := func(name string) (string, PrepareResultV1) {
+		t.Helper()
+		amq := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(amq, []byte(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		amq, err := filepath.EvalSymlinks(amq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.request.AMQExecutable = amq
+		prepared, err := Prepare(context.Background(), fixture.request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return amq, prepared
+	}
+	_, other := prepareWith("other-amq")
+	amq, prepared := prepareWith("amq")
+	if prepared.SubjectDigest == other.SubjectDigest {
+		t.Fatalf("amq_executable did not enter the subject digest: %s", prepared.SubjectDigest)
+	}
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1, Prepare: fixture.request,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: decisionsForPreparedActions(prepared),
+	})
+	if err != nil || result.ReasonCode != "commands_emitted" || len(result.Commands) != 1 {
+		t.Fatalf("Apply = %#v, %v", result, err)
+	}
+	if argv := result.Commands[0].Argv; len(argv) < 2 || argv[0] != amq || argv[1] != "coop" {
+		t.Fatalf("pane command does not run the requested amq: %#v", result.Commands[0])
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(fixture.request.Target.SessionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(fixture.request.Target.SessionRoot, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	ticket, err := internallaunch.LoadExecutionTicket(root, "claude")
+	if err != nil || ticket.AMQExecutable != amq {
+		t.Fatalf("ticket amq executable = %q, %v; want %q", ticket.AMQExecutable, err, amq)
+	}
+}
+
 func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, false)
 	fixture.request.CallerContext = map[string]string{

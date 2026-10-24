@@ -125,7 +125,7 @@ func runCoopUninstallHooks(args []string) error {
 }
 
 // writeLegacyCoopHookEntries lists the project hook entries under the
-// current directory that still run the co-op scripts.
+// current directory that still run the old co-op scripts.
 func writeLegacyCoopHookEntries() error {
 	entries, err := legacyCoopHookEntries(".")
 	if err != nil {
@@ -134,7 +134,7 @@ func writeLegacyCoopHookEntries() error {
 	if len(entries) == 0 {
 		return nil
 	}
-	if err := writeStdout("Remove these project hook entries; they run the co-op scripts a second time:\n"); err != nil {
+	if err := writeStdout("Remove these project hook entries; they run co-op scripts AMQ no longer ships:\n"); err != nil {
 		return err
 	}
 	for _, entry := range entries {

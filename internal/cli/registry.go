@@ -30,7 +30,14 @@ func init() {
 		{Name: "send", Summary: "Send a message", Handler: runSend},
 		{Name: "list", Summary: "List inbox messages", Handler: runList},
 		{Name: "read", Summary: "Read a message by id", Handler: runRead},
-		{Name: "thread", Summary: "View a thread", Handler: runThread},
+		{
+			Name:    "thread",
+			Summary: "View a thread",
+			Handler: runThread,
+			Children: []CommandInfo{
+				{Name: "open", Summary: "List open review requests, questions, and todos", Handler: runThreadOpen},
+			},
+		},
 		{Name: "trace", Summary: "Join current evidence for a message", Handler: runTrace},
 		{
 			Name:        "presence",

@@ -43,7 +43,7 @@ type coopNamedHarness struct {
 
 var coopNamedHarnesses = map[string]coopNamedHarness{
 	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModeRaw},
-	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
+	launch.PiProvider:     {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags, wakeInjectMode: wakeInjectModePaste},
 	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex, wakeInjectMode: wakeInjectModeRaw},
 	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
 	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor, wakeInjectMode: wakeInjectModePaste},
