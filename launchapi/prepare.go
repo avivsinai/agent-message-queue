@@ -63,7 +63,8 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 		},
 		Launcher: request.Launcher, IntentDigest: intentDigest, SubjectSchema: internallaunch.SubjectSchemaV2,
 		Placement: toInternalPlacement(request.Placement), CallerContext: cloneStringMap(request.CallerContext),
-		Participants: make([]internallaunch.PrepareParticipant, 0, len(request.Intent.Participants)),
+		AMQExecutable: request.AMQExecutable,
+		Participants:  make([]internallaunch.PrepareParticipant, 0, len(request.Intent.Participants)),
 	}
 	for _, participant := range request.Intent.Participants {
 		provider := ""
