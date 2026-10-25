@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // CacheKey is the exact identity of a forge cache entry. An entry serves a
@@ -28,8 +30,15 @@ func (k CacheKey) equal(o CacheKey) bool {
 
 // Cache stores forge responses. It never stores a token.
 type Cache interface {
+	// Get returns the entry for key when it is younger than ttl.
 	Get(key CacheKey, now time.Time, ttl time.Duration) ([]byte, time.Time, bool)
+	// Last returns the entry for key at any age.
+	Last(key CacheKey) ([]byte, time.Time, bool)
 	Put(key CacheKey, fetchedAt time.Time, response []byte) error
+	// Locked runs fn under an interprocess lock for key, so one process at a
+	// time refreshes the entry. It returns lock.ErrStopped, without running
+	// fn, when stopped reports true before the lock is free.
+	Locked(key CacheKey, stopped func() bool, fn func() error) error
 }
 
 // DirCache keeps one file per key in Dir, named by the key's hash, holding
@@ -53,6 +62,18 @@ func (c DirCache) path(key CacheKey) string {
 // Get returns the response stored for exactly key when it is younger than
 // ttl.
 func (c DirCache) Get(key CacheKey, now time.Time, ttl time.Duration) ([]byte, time.Time, bool) {
+	resp, fetchedAt, ok := c.Last(key)
+	if !ok {
+		return nil, time.Time{}, false
+	}
+	if age := now.Sub(fetchedAt); age < 0 || age >= ttl {
+		return nil, time.Time{}, false
+	}
+	return resp, fetchedAt, true
+}
+
+// Last returns the response stored for exactly key, at any age.
+func (c DirCache) Last(key CacheKey) ([]byte, time.Time, bool) {
 	data, err := os.ReadFile(c.path(key))
 	if err != nil {
 		return nil, time.Time{}, false
@@ -61,15 +82,19 @@ func (c DirCache) Get(key CacheKey, now time.Time, ttl time.Duration) ([]byte, t
 	if err := json.Unmarshal(data, &e); err != nil || !e.Key.equal(key) {
 		return nil, time.Time{}, false
 	}
-	if age := now.Sub(e.FetchedAt); age < 0 || age >= ttl {
-		return nil, time.Time{}, false
-	}
 	return e.Response, e.FetchedAt, true
 }
 
-// Put writes the entry atomically (temp file plus rename), mode 0600 in a
-// 0700 directory that must not be a symlink.
-func (c DirCache) Put(key CacheKey, fetchedAt time.Time, response []byte) error {
+// Locked holds an advisory lock on a file next to key's entry while fn runs.
+func (c DirCache) Locked(key CacheKey, stopped func() bool, fn func() error) error {
+	if err := c.ensureDir(); err != nil {
+		return err
+	}
+	return lock.WithExclusiveFileLockUntil(c.path(key)+".lock", stopped, fn)
+}
+
+// ensureDir makes Dir with mode 0700 and refuses a symlink or a file there.
+func (c DirCache) ensureDir() error {
 	if err := os.MkdirAll(c.Dir, 0o700); err != nil {
 		return err
 	}
@@ -79,6 +104,15 @@ func (c DirCache) Put(key CacheKey, fetchedAt time.Time, response []byte) error 
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("%s is not a plain directory", c.Dir)
+	}
+	return nil
+}
+
+// Put writes the entry atomically (temp file plus rename), mode 0600 in a
+// 0700 directory that must not be a symlink.
+func (c DirCache) Put(key CacheKey, fetchedAt time.Time, response []byte) error {
+	if err := c.ensureDir(); err != nil {
+		return err
 	}
 	data, err := json.Marshal(cacheEntry{Key: key, FetchedAt: fetchedAt.UTC(), Response: response})
 	if err != nil {
