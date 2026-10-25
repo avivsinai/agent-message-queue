@@ -65,7 +65,7 @@ func cursorDialogCloseMatches(marker wakeDialogMarker, in wakeDialogHookInput) b
 const cursorDialogHookFlag = "--harness cursor "
 
 // cursorDialogHookBinRe reads the binary back from a Cursor command.
-var cursorDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog --harness cursor (?:open|close) \|\| true$`)
+var cursorDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog --harness cursor (?:open|close) \|\| true; printf '\{\}'$`)
 
 func cursorDialogHookVerb(event string) string {
 	if event == "preToolUse" {
@@ -74,17 +74,26 @@ func cursorDialogHookVerb(event string) string {
 	return "close"
 }
 
+// cursorDialogHookCommand is wakeDialogHookCommand with --harness cursor,
+// followed by an unconditional printf '{}'. Cursor fails a hook whose stdout
+// is not JSON, and {} is valid for every wired event and carries no
+// permission, follow-up or environment verdict. It prints on the gated path
+// too, where no amq runs.
+func cursorDialogHookCommand(bin, verb string) string {
+	return wakeDialogHookCommand(bin, cursorDialogHookFlag, verb) + "; printf '{}'"
+}
+
 // cursorDialogHooks are the Cursor entries. Cursor runs a command in the
 // agent's environment, so the shell gate and the receiver read AM_ME and
 // AM_ROOT as for Claude Code; exit 2 from an older amq would deny a tool
-// call, so every command ends in || true.
+// call, so the amq call ends in || true before the printf.
 func cursorDialogHooks(bin string) []claude.CommandHook {
 	hooks := make([]claude.CommandHook, 0, len(cursorDialogHookEvents))
 	for _, event := range cursorDialogHookEvents {
 		hooks = append(hooks, claude.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
-			Command: wakeDialogHookCommand(bin, cursorDialogHookFlag, cursorDialogHookVerb(event)),
+			Command: cursorDialogHookCommand(bin, cursorDialogHookVerb(event)),
 			Timeout: 5,
 		})
 	}
@@ -185,7 +194,7 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; %s", bin, remedy)
 			return check, true
 		}
-		if hook.command != wakeDialogHookCommand(bin, cursorDialogHookFlag, cursorDialogHookVerb(hook.event)) {
+		if hook.command != cursorDialogHookCommand(bin, cursorDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; %s", hook.event, remedy)
 			return check, true
 		}

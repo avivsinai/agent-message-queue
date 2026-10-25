@@ -298,7 +298,9 @@ sessions after an install.
   share no prompt token, and Cursor reports a rejected call as a
   `postToolUse` too. The doorbell therefore waits from a turn's first tool
   call to the end of that turn, prompt or not. Every entry has a 5 second
-  timeout.
+  timeout and ends by printing `{}`: Cursor fails a hook whose stdout is not
+  JSON, and the empty object gives no permission, follow-up or environment
+  verdict.
 - **Identity.** Cursor runs hooks in the agent's environment, so `AM_ME` and
   `AM_ROOT` from `amq coop exec` or `amq launch` reach the receiver. The
   commands carry the same shell gate as the Claude Code entries and

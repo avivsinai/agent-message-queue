@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -183,5 +184,30 @@ func TestCursorDialogHookFileSurvivesCursorCommentStripping(t *testing.T) {
 	}
 	if check, _ := checkCursorDialogHook(); check.Status != "warn" || !strings.Contains(check.Message, "numeric positive integer") {
 		t.Fatalf("string version accepted: %+v", check)
+	}
+}
+
+// Regression: observed in the vd4.7 live run on Cursor 2026.10.22. Cursor
+// ran each AMQ hook and then failed it with empty_stdout, because it
+// requires JSON on stdout. Every command must print exactly {}, on the
+// gated path without AM_ME and on the path that runs amq.
+func TestCursorDialogHookCommandsPrintJSON(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.MkdirAll(fsq.AgentBase(root, "cur"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "missing-amq")
+	path := "PATH=" + os.Getenv("PATH")
+	envs := [][]string{{path}, {path, envMe + "=cur", envRoot + "=" + root}}
+	for _, hook := range cursorDialogHooks(bin) {
+		for _, env := range envs {
+			cmd := exec.Command("sh", "-c", hook.Command)
+			cmd.Env = env
+			cmd.Stdin = strings.NewReader(`{"hook_event_name":"` + hook.Event + `"}`)
+			out, _ := cmd.Output()
+			if string(out) != "{}" {
+				t.Errorf("%s with %v printed %q, want {}", hook.Event, env[1:], out)
+			}
+		}
 	}
 }
