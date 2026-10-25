@@ -154,41 +154,72 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   it blocks a delivery attempt, the wake adds attention output (title, bell,
   desktop notice) on the attention cadence instead of waiting silently.
 
-- **Startup trust dialog.** Claude Code and Codex ask whether to trust a
-  new directory before the session starts, and Enter at that dialog ends the
-  session. Before it execs either harness, `amq coop exec` reads where the
-  harness records trust: Claude Code's `.claude.json` (in `CLAUDE_CONFIG_DIR`
-  or the home directory) for the directory or an ancestor inside its Git
-  checkout, and Codex's `config.toml` `[projects]` for the directory or its
-  Git trust root (a directory outside any checkout asks nothing in Codex).
-  Once its wake holds the agent's wake lock, coop exec writes a `Startup`
-  marker that names the harness and directory when the harness has not
-  recorded that it trusts the directory, including a Codex directory saved
-  as untrusted, which opens on a restricted dialog. When the harness shows
-  no dialog, it removes a `Startup` marker an earlier launch left. A trust
-  file AMQ cannot read writes no marker. Until coop exec has done this, its
-  wake types nothing: coop exec passes the wake a startup-hold pipe and
-  closes it afterwards, and exec or exit closes it too. The `SessionStart` close removes the marker when the
-  hook is installed. Without the hook, the wake reads the trust file again
-  on each recheck while the marker exists and treats the marker as closed
-  only once the harness records that it trusts the directory, so the
-  doorbell rings within 2 seconds of acceptance. The trust record does not
-  prove that the harness accepts input yet, so while the marker stays, a
-  written doorbell does not count as presented: each retry types the full
-  doorbell again, not only Enter, until the agent drains after such a
-  doorbell, which proves that the harness accepts input. A drain before the
-  release, such as one from another terminal, and an inbox file replaced in
-  place prove nothing. A trust file that
-  becomes unreadable keeps the hold. Codex records no decision for a directory the
-  person keeps untrusted, so that hold stays until the Codex `SessionStart`
-  close of `amq wake install-dialog-hook --harness codex`; without that hook
-  the marker ages as above (input held, attention output after 10 minutes),
-  and `amq doctor --ops` names the remedy. `amq wake check` reports an open
-  `Startup` marker as `startup_hold`: the harness, the directory, how long it
-  has been open, and what releases it.
+- **Startup prompts.** Claude Code and Codex ask whether to trust a new
+  directory before the session starts, and Enter at that dialog ends the
+  session. Codex can also show its update prompt first, whose default choice
+  runs the upgrade. Before it execs either harness, `amq coop exec` reads
+  where the harness records trust: Claude Code's `.claude.json` (in
+  `CLAUDE_CONFIG_DIR` or the home directory) for the directory or an
+  ancestor inside its Git checkout, and Codex's `config.toml` `[projects]`
+  for the directory or its Git trust root. Outside any Git checkout Codex
+  may ask on every start and record no answer, so AMQ treats trust there as
+  pending. Once its
+  wake holds the agent's wake lock, coop exec writes a `Startup` marker that
+  names the harness and directory when the harness has not recorded that it
+  trusts the directory, including a Codex directory saved as untrusted,
+  which opens on a restricted dialog. For Codex it also writes one when the
+  update prompt is not ruled out (see below). Otherwise it removes a
+  `Startup` marker an earlier launch left. A Claude Code trust file AMQ
+  cannot read writes no marker. Until coop exec has done this, its wake
+  types nothing: coop exec passes the wake a startup-hold pipe and closes it
+  afterwards, and exec or exit closes it too.
+
+  Claude Code's `SessionStart` hook close removes the marker when the hook
+  is installed. Codex runs `SessionStart` hooks only when the first turn
+  starts, so for Codex the dialog hook removes the marker at the first prompt
+  typed in that session. Without a hook close, the wake reads the trust file
+  again on each recheck while a trust marker exists and treats the marker as
+  closed only once the harness records that it trusts the directory, so the
+  doorbell rings within 2 seconds of acceptance. A Codex marker for a
+  possible update prompt never closes on the trust record, since another
+  seat's Codex can record trust for the same root first. The trust record does not prove that the harness accepts input yet, so while
+  the marker stays, a written doorbell does not count as presented: each
+  retry types the full doorbell again, not only Enter, until the agent
+  drains after such a doorbell, which proves that the harness accepts input.
+  A drain before the release, such as one from another terminal, and an
+  inbox file replaced in place prove nothing. A trust file that becomes
+  unreadable keeps the hold. AMQ reads no Codex decision for a directory
+  the person keeps untrusted or one outside any Git checkout, so that hold
+  stays until the first-turn close of `amq wake install-dialog-hook
+  --harness codex`; without that hook the marker ages as above (input held,
+  attention output after 10 minutes), and `amq doctor --ops` names the
+  remedy. `amq wake check` reports an open `Startup` marker as
+  `startup_hold`: the harness, the directory, how long it has been open, and
+  what releases it.
+
+  Codex's "Not now" on the update prompt records nothing, so an update
+  prompt marker releases only through the dialog hook's first-turn close.
+  coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
+  identity overrides with `-c check_for_update_on_startup=false`. Managed
+  or cloud requirements can override that setting, so the flag is not
+  evidence that the prompt cannot show. A Codex seat gets no update prompt
+  marker only when `$CODEX_HOME/version.json` was checked less than 19 hours
+  ago and its `latest_version` is not newer than the installed version, or
+  is the dismissed version, for a codex-cli
+  version AMQ has checked. This proof applies only to the verified releases
+  `0.145.0`, `0.161.0`, and `0.163.0`; another release or patch keeps the
+  hold. Anything missing or unreadable keeps the hold until the dialog
+  hook runs at the first turn. Setting `check_for_update_on_startup = false`
+  in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) prevents
+  ordinary update prompts, but does not release this hold by itself. AMQ
+  does not edit that file.
+
+  A raw doorbell's submit keys wait until the terminal reports that its
+  text was read. Queued text or an unavailable queue inspection keeps those
+  keys pending; a timeout never submits text left behind by an exited seat.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
-rewind selector, and login or update prompts. It also cannot recall bytes the
+rewind selector, login prompts, and update prompts other than Codex's startup prompt. It also cannot recall bytes the
 terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
 must write no terminal input at all.
 

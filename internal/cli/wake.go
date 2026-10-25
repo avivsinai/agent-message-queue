@@ -150,6 +150,9 @@ const (
 	wakeInputRawFirstSubmitQueued
 	wakeInputRawRescuePending
 	wakeInputRawRescueQueued
+	// wakeInputRawPayloadQueued: the raw text is written; the submit key
+	// waits until the terminal reader has taken it.
+	wakeInputRawPayloadQueued
 )
 
 type wakeInputDeliveryState struct {
@@ -2336,21 +2339,31 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				return false, fmt.Errorf("unsupported pending wake input mode %q", state.mode)
 			}
 
+			state.phase = wakeInputRawPayloadQueued
+
+		case wakeInputRawPayloadQueued:
 			// The submit key must arrive in its own read() chunk; otherwise the
 			// TUI can treat text+Enter as pasted input instead of a keypress.
+			// Text still queued has no reader: a harness that quit part way
+			// through it leaves the rest for the shell that takes the terminal
+			// back, and a submit key would run that rest as a command there.
 			waited, drained, err := waitForRawInputDrained(
 				rawInjectDrainTimeout,
 				rawInjectDrainPollInterval,
 			)
-			if cfg.debug {
-				switch {
-				case err != nil:
-					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
-				case drained:
-					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input queue drained after %s\n", waited)
-				default:
-					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain timeout after %s; injecting submit key anyway\n", waited)
+			switch {
+			case err != nil:
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain wait unavailable after %s: %v; holding the submit key\n", waited, err)
 				}
+				return false, nil
+			case !drained:
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: text still queued after %s; holding the submit key for the terminal reader\n", waited)
+				}
+				return false, nil
+			case cfg.debug:
+				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input queue drained after %s\n", waited)
 			}
 			if rawSubmitPrelude(cfg) != "" {
 				state.phase = wakeInputRawPreludePending

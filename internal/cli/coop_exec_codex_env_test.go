@@ -27,6 +27,7 @@ func TestCodexSeatCarriesItsIdentityIntoTheShellTool(t *testing.T) {
 		"-c", `shell_environment_policy.set.AM_ME="7"`,
 		"-c", `shell_environment_policy.set.AM_ROOT_ID="a\"b"`,
 		"-c", `shell_environment_policy.set.AM_BASE_ROOT_ID="c\\d"`,
+		"-c", "check_for_update_on_startup=false",
 		"-s", "read-only", "--", "fix it",
 	}
 	if !slices.Equal(pinned, want) {
