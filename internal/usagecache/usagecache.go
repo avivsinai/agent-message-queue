@@ -128,6 +128,12 @@ func complete(a usage.Attempt) error {
 	if t, ok := a.FinishedAt.Get(); ok && t.IsZero() {
 		return errors.New("finished_at is zero")
 	}
+	if t, ok := a.StartedAt.Get(); ok && t.IsZero() {
+		return errors.New("started_at is zero")
+	}
+	// Times out of order are not refused here: a wall clock set back during
+	// a run produces them, and the hold falls back to the reservation's own
+	// bound instead of blocking every later run.
 	return nil
 }
 

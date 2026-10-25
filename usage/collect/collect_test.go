@@ -197,19 +197,42 @@ func TestRunDoesNotDispatchPastTheReservedDeadline(t *testing.T) {
 }
 
 // PR #1235 review: a schema-1 journal attempt without its deadline and
-// interval held nothing back, so the next run dispatched at once.
-func TestRunRefusesAnIncompleteJournal(t *testing.T) {
-	f, fx, req, dir := setup(t, "app-server-windows.jsonl", "0.163.0")
-	journal := `{"schema":1,"attempts":[{"id":"a","operation":"codex.app-server.rate-limits",` +
-		`"key":{"provider":"codex","home":"/codex-home"},"reserved_at":"2026-10-25T11:59:00Z"}]}`
-	if err := os.WriteFile(filepath.Join(dir, "coordination-v1.json"), []byte(journal), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
-	if f.runs != 0 {
-		t.Fatalf("app-server ran %d times past an incomplete journal", f.runs)
-	}
-	if len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailJournal {
-		t.Fatalf("failures = %+v", got.Failures)
+// interval held nothing back, so the next run dispatched at once; and an
+// attempt that finished before it was reserved (a wall clock set back
+// during the run) released its reservation early.
+func TestRunHonorsTheJournal(t *testing.T) {
+	const attempt = `{"schema":1,"attempts":[{"id":"a","operation":"codex.app-server.rate-limits",` +
+		`"key":{"provider":"codex","home":"/codex-home"},`
+	for _, tc := range []struct {
+		name, journal, failure string
+	}{
+		{
+			name:    "incomplete attempt",
+			journal: attempt + `"reserved_at":"2026-10-25T11:59:00Z"}]}`,
+			failure: usage.FailJournal,
+		},
+		{
+			name: "finished before reserved",
+			journal: attempt + `"reserved_at":"2026-10-25T12:10:00Z","deadline_at":"2026-10-25T12:10:03Z",` +
+				`"interval":300000000000,"finished_at":{"presence":"present","value":"2026-10-25T11:54:00Z"}}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fx, req, dir := setup(t, "app-server-windows.jsonl", "0.163.0")
+			if err := os.WriteFile(filepath.Join(dir, "coordination-v1.json"), []byte(tc.journal), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+			if f.runs != 0 {
+				t.Fatalf("app-server ran %d times against the journal", f.runs)
+			}
+			var codes []string
+			for _, x := range got.Failures {
+				codes = append(codes, x.Value.Code)
+			}
+			if want := []string{tc.failure}; tc.failure == "" && len(codes) != 0 || tc.failure != "" && !slices.Equal(codes, want) {
+				t.Fatalf("failures = %v, want %q", codes, tc.failure)
+			}
+		})
 	}
 }

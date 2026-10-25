@@ -48,7 +48,8 @@ func Conflicts(a, b usage.Account) bool {
 // HeldUntil is the earliest time a dispatch keyed k may be reserved. An
 // unfinished attempt holds through its deadline plus its interval, so a
 // crashed or paused dispatch still spends its interval; a finished one holds
-// for its interval after completion, or its failure hold if longer.
+// for its interval after completion, or its failure hold if longer, and
+// never less than the unfinished bound when its times disagree.
 func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time {
 	var conflicting []usage.Attempt
 	for _, a := range attempts {
@@ -61,8 +62,12 @@ func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time
 	streak := 0
 	for _, a := range conflicting {
 		finished, ok := a.FinishedAt.Get()
-		if !ok {
+		if !ok || !ordered(a) {
+			// Unfinished, or its times disagree (a wall clock set back
+			// during the run): the reservation's own bound holds.
 			until = later(until, a.DeadlineAt.Add(a.Interval))
+		}
+		if !ok {
 			continue
 		}
 		t := finished.Add(a.Interval)
@@ -75,6 +80,19 @@ func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time
 		until = later(until, t)
 	}
 	return until
+}
+
+// ordered reports whether a finished attempt's times agree: reserved, then
+// started (when it started), then finished.
+func ordered(a usage.Attempt) bool {
+	finished, _ := a.FinishedAt.Get()
+	if finished.Before(a.ReservedAt) {
+		return false
+	}
+	if started, ok := a.StartedAt.Get(); ok && (started.Before(a.ReservedAt) || started.After(finished)) {
+		return false
+	}
+	return true
 }
 
 func failureHold(code string, streak int, r Rules) time.Duration {
@@ -125,7 +143,7 @@ const (
 
 // Prune is the attempts the journal keeps at now: every unfinished one
 // whose hold has not been over for keepFor, and the newest finished ones per
-// home inside keepFor.
+// home until keepFor after both their finish and their reservation bound.
 func Prune(attempts []usage.Attempt, now time.Time) []usage.Attempt {
 	sorted := append([]usage.Attempt{}, attempts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ReservedAt.After(sorted[j].ReservedAt) })
@@ -137,7 +155,7 @@ func Prune(attempts []usage.Attempt, now time.Time) []usage.Attempt {
 		if !done && now.Sub(a.DeadlineAt.Add(a.Interval)) > keepFor {
 			continue
 		}
-		if done && (count[home] >= keepPerHome || now.Sub(finished) > keepFor) {
+		if done && (count[home] >= keepPerHome || now.Sub(later(finished, a.DeadlineAt.Add(a.Interval))) > keepFor) {
 			continue
 		}
 		count[home]++

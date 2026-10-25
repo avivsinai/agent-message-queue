@@ -186,7 +186,10 @@ Git worktrees.
   decimals and never as money. A window the reply left null reads "windows
   not reported in the app-server reply". Only the Codex CLI versions the
   reader was run against are read (0.163.0); any other version, a
-  pre-release included, starts no app-server and the strip says so. Without
+  pre-release included, starts no app-server and the strip says so. To
+  support a new Codex version, capture its app-server replies, scrub them,
+  check their shape against the reader's fixtures, then add that exact
+  version to the verified list in one small PR. Without
   a reading, the strip keeps the credit balance Codex rollouts record. The
   CLI runs in its own process group, and whatever is left of that group is
   killed when the run ends; on a platform without process groups (Windows)
