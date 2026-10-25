@@ -54,7 +54,10 @@ type wakeDialogHookInput struct {
 	ToolUseID string `json:"tool_use_id"`
 	Cwd       string `json:"cwd"`
 	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
-	TurnID string `json:"turn_id"`
+	TurnID       string `json:"turn_id"`
+	GenerationID string `json:"generation_id"`
+	Status       string `json:"status"`
+	emptyInput   bool
 }
 
 // wakeDialogMarker is the .wake.dialog content. The wake uses the file's
@@ -174,6 +177,7 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	inputErr := json.NewDecoder(io.LimitReader(stdin, maxWakeDialogHookInputBytes)).Decode(&in)
 	if errors.Is(inputErr, io.EOF) {
 		inputErr = nil
+		in.emptyInput = true
 	}
 	if !open && inputErr != nil {
 		return nil
@@ -218,7 +222,7 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		case open:
 			return writeWakeDialogMarker(dirfd, agentDir, in)
 		}
-		return clearWakeDialogMarker(dirfd, agentDir, in.ToolUseID)
+		return clearWakeDialogMarker(dirfd, agentDir, in)
 	})
 	return nil
 }
@@ -346,16 +350,16 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 	})
 }
 
-// clearWakeDialogMarker removes the marker. With toolUseID (PostToolUse) it
-// removes only the marker that tool call opened; a permission marker carries
-// no tool_use_id and waits for a turn-level clear.
-func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) error {
+// clearWakeDialogMarker checks the current marker under its lock. Cursor
+// can queue a prompt during an approval and sends abort/error stop hooks
+// without waiting; neither may release a later turn's hold.
+func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
-		if toolUseID == "" {
-			return true
-		}
 		var marker wakeDialogMarker
-		return json.Unmarshal(raw, &marker) == nil && marker.ToolUseID == toolUseID
+		if json.Unmarshal(raw, &marker) == nil && marker.Harness == "cursor" {
+			return cursorDialogCloseMatches(marker, in)
+		}
+		return in.ToolUseID == "" || marker.ToolUseID == in.ToolUseID
 	})
 }
 

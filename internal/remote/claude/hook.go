@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -347,7 +348,12 @@ func InstallCommandHooks(home string, hooks []CommandHook) error {
 // InstallCommandHooksAt is InstallCommandHooks for the hooks file at path,
 // any file with the {"hooks":{event:[group...]}} shape.
 func InstallCommandHooksAt(path string, hooks []CommandHook) error {
-	return installCommandHooksAt(path, false, hooks)
+	for _, h := range hooks {
+		if err := replaceHook(path, hookSpec{event: h.Event, marker: h.Marker}, commandHookEntry(h.Command, h.Matcher, h.Timeout)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InstallCursorCommandHooksAt is InstallCommandHooksAt for a Cursor hooks
@@ -355,22 +361,53 @@ func InstallCommandHooksAt(path string, hooks []CommandHook) error {
 // array element is one hook script, and a missing file starts with the
 // version Cursor requires.
 func InstallCursorCommandHooksAt(path string, hooks []CommandHook) error {
-	return installCommandHooksAt(path, true, hooks)
+	return editSettings(path, (hookSpec{flat: true}).seed(), func(raw []byte) ([]byte, error) {
+		original := raw
+		for _, h := range hooks {
+			spec := hookSpec{event: h.Event, marker: h.Marker, flat: true}
+			cut, err := rawRemoveEntries(raw, spec)
+			if err != nil {
+				return nil, err
+			}
+			if cut != nil {
+				raw = cut
+			}
+			raw, err = rawInsertEntry(raw, spec, cursorHookEntry(h.Command, h.Matcher, h.Timeout))
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := ValidateCursorHooks(raw); err != nil {
+			return nil, err
+		}
+		if bytes.Equal(original, raw) {
+			return nil, nil
+		}
+		return raw, nil
+	})
 }
 
-func installCommandHooksAt(path string, flat bool, hooks []CommandHook) error {
-	for _, h := range hooks {
-		spec := hookSpec{event: h.Event, marker: h.Marker, flat: flat}
-		entry := commandHookEntry(h.Command, h.Matcher, h.Timeout)
-		if flat {
-			entry = cursorHookEntry(h.Command, h.Matcher, h.Timeout)
-		}
-		if err := replaceHook(path, spec, entry); err != nil {
-			return err
-		}
+// ValidateCursorHooks checks the bytes with Cursor's native comment
+// stripping rules. Unrelated operator content is never rewritten to fix it.
+func ValidateCursorHooks(raw []byte) error {
+	var file struct {
+		Version float64 `json:"version"`
+	}
+	if json.Unmarshal(raw, &file) != nil || file.Version < 1 || math.Trunc(file.Version) != file.Version {
+		return fmt.Errorf("hooks file needs a numeric positive integer \"version\"")
+	}
+	stripped := cursorLineComment.ReplaceAll(raw, nil)
+	stripped = cursorBlockComment.ReplaceAll(stripped, nil)
+	if !json.Valid(stripped) || !bytes.Equal(raw, stripped) {
+		return fmt.Errorf("comment markers inside strings change the hooks file; escape / as \\/ and * as \\u002a")
 	}
 	return nil
 }
+
+var (
+	cursorLineComment  = regexp.MustCompile(`//[^\r\n\x{2028}\x{2029}]*`)
+	cursorBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+)
 
 // UninstallCommandHooks removes the entries marked with marker from each
 // event chain of the user settings file.

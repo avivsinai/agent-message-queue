@@ -117,8 +117,12 @@ func adoptCodexHookIdentity(sessionID string) error {
 // marker only a turn or session event removes. It records no tool_use_id,
 // so no tool call's close can remove it.
 func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput, harness string) error {
+	turnID := in.TurnID
+	if harness == "cursor" {
+		turnID = in.GenerationID
+	}
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema: 1, Event: in.Event, Harness: harness, Tool: in.Tool, TurnID: in.TurnID,
+		Schema: 1, Event: in.Event, Harness: harness, Tool: in.Tool, TurnID: turnID,
 		SessionID: in.SessionID, OpenedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -134,7 +138,8 @@ func clearTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if in.Event == "PostToolUse" || in.Event == "postToolUse" {
 		return nil
 	}
-	return clearWakeDialogMarker(dirfd, agentDir, "")
+	in.ToolUseID = ""
+	return clearWakeDialogMarker(dirfd, agentDir, in)
 }
 
 // codexHooksPath is the user hooks file Codex reads: $CODEX_HOME/hooks.json.

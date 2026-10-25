@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,7 +17,7 @@ import (
 // awaits preToolUse before it decides whether to ask, so the receiver opens
 // the dialog marker on every tool call, and the wake holds its doorbell
 // from that call to the end of the turn. Only a turn or session event
-// closes it: stop (any status), beforeSubmitPrompt, sessionStart or
+// closes it: a matching stop, sessionStart or
 // sessionEnd. A postToolUse cannot: parallel calls share no prompt token,
 // and Cursor reports a rejected call as a postToolUse too. Prompts Cursor
 // shows before any tool call (ask-question, mode switch, web search, image
@@ -29,10 +28,35 @@ import (
 // Cursor refuses its whole hooks file for an event it does not know.
 var cursorDialogHookEvents = []string{
 	"stop",
-	"beforeSubmitPrompt",
 	"sessionStart",
 	"sessionEnd",
+	"beforeSubmitPrompt", // startup only; an in-turn submission can be queued
 	"preToolUse",
+}
+
+// cursorDialogCloseMatches runs inside the marker lock. Completed stops
+// are awaited by Cursor, so their order is usable when no generation ID is
+// supplied. Abort/error stops run in the background and need an exact turn.
+func cursorDialogCloseMatches(marker wakeDialogMarker, in wakeDialogHookInput) bool {
+	if in.emptyInput {
+		return true // explicit operator close
+	}
+	if marker.SessionID != "" && in.SessionID != "" && marker.SessionID != in.SessionID {
+		return false
+	}
+	if marker.Event == wakeDialogStartupEvent {
+		return in.Event == "sessionStart" || in.Event == "beforeSubmitPrompt" || in.Event == "sessionEnd"
+	}
+	switch in.Event {
+	case "sessionStart", "sessionEnd":
+		return true
+	case "stop":
+		if marker.TurnID != "" && in.GenerationID != "" {
+			return marker.TurnID == in.GenerationID
+		}
+		return in.Status == "completed"
+	}
+	return false
 }
 
 // cursorDialogHookFlag puts --harness cursor in every Cursor command. Cursor
@@ -146,8 +170,8 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 	if raw, err := os.ReadFile(path); err != nil {
 		check.Message = fmt.Sprintf("read %s: %v", path, err)
 		return check, true
-	} else if !cursorHooksVersioned(raw) {
-		check.Message = fmt.Sprintf("Cursor ignores %s: it has no positive integer \"version\"; add \"version\": 1", path)
+	} else if err := claude.ValidateCursorHooks(raw); err != nil {
+		check.Message = fmt.Sprintf("Cursor ignores %s: %v; %s", path, err, remedy)
 		return check, true
 	}
 	for _, hook := range commands {
@@ -169,17 +193,4 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 	check.Status = "ok"
 	check.Message = "installed"
 	return check, true
-}
-
-// cursorHooksVersioned reports whether a hooks file has the positive
-// integer version without which Cursor loads none of it.
-func cursorHooksVersioned(raw []byte) bool {
-	var file struct {
-		Version json.Number `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &file); err != nil {
-		return false
-	}
-	v, err := file.Version.Int64()
-	return err == nil && v >= 1
 }

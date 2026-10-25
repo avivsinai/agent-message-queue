@@ -17,7 +17,7 @@ import (
 // Cursor loads (version 1, one entry per event) and doctor reports it
 // installed; the receiver opens the marker from the preToolUse Cursor
 // 2026.10.22 sent before "Run this command?", and the turn's stop removes it.
-func TestCursorDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
+func TestCursorDialogHookHoldsStartupAndTheTurn(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := os.Mkdir(filepath.Join(home, ".cursor"), 0o700); err != nil {
@@ -67,11 +67,45 @@ func TestCursorDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 		_, err := os.Lstat(marker)
 		return err == nil
 	}
+	// PR #1233 review: Cursor can show trust, MCP and sandbox prompts
+	// before sessionStart; resume omits that hook and needs a human turn.
+	for _, ready := range []string{"sessionStart", "beforeSubmitPrompt"} {
+		if err := syncStartupDialogMarker(root, "cur", "/opt/bin/cursor-agent", nil); err != nil {
+			t.Fatal(err)
+		}
+		if !held() {
+			t.Fatal("Cursor launch wrote no startup hold")
+		}
+		hook("close", `{}`)
+		if !held() {
+			t.Fatal("unknown input released startup")
+		}
+		hook("close", `{"hook_event_name":"`+ready+`","session_id":"ready"}`)
+		if held() {
+			t.Fatalf("%s kept startup hold", ready)
+		}
+	}
 	hook("open", `{"conversation_id":"3b3d8b96-c4e1-4179-8039-66951ada578c","generation_id":"7f8505fe-c99f-4299-94c8-4dd6f89a3414",`+
 		`"tool_name":"Shell","tool_input":{"command":"touch guarded.txt","cwd":"","timeout":30000},"tool_use_id":"df9fada2-3518-48d3-9e09-da6f21911f48",`+
 		`"cwd":"","session_id":"3b3d8b96-c4e1-4179-8039-66951ada578c","hook_event_name":"preToolUse"}`)
 	if !held() {
 		t.Fatal("preToolUse wrote no marker")
+	}
+	// PR #1233 review: a submitted follow-up is queued before the active
+	// turn ends, while an abort/error stop can arrive after the next turn.
+	for _, event := range []string{"beforeSubmitPrompt", "UserPromptSubmit"} {
+		if err := runWakeDialog([]string{"close"}, strings.NewReader(`{"hook_event_name":"`+event+`"}`)); err != nil {
+			t.Fatal(err)
+		}
+		if !held() {
+			t.Fatalf("%s released an active approval", event)
+		}
+	}
+	for _, generation := range []string{"old-generation", ""} {
+		hook("close", `{"hook_event_name":"stop","status":"aborted","generation_id":"`+generation+`"}`)
+		if !held() {
+			t.Fatal("unmatched background stop released approval")
+		}
 	}
 	hook("close", `{"conversation_id":"3b3d8b96-c4e1-4179-8039-66951ada578c","status":"completed","loop_count":0,`+
 		`"session_id":"3b3d8b96-c4e1-4179-8039-66951ada578c","hook_event_name":"stop"}`)
@@ -88,7 +122,12 @@ func TestCursorDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 func TestCursorDialogHookFileSurvivesCursorCommentStripping(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if err := installCursorDialogHook("/opt/amq//bin/amq", false); err != nil {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Dir(exe) + "//" + filepath.Base(exe)
+	if err := installCursorDialogHook(bin, false); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(home, ".cursor", "hooks.json"))
@@ -100,9 +139,49 @@ func TestCursorDialogHookFileSurvivesCursorCommentStripping(t *testing.T) {
 			t.Errorf("the Cursor hooks file holds %q, which Cursor strips as a comment", seq)
 		}
 	}
-	// The escaped entries decode to the command written: doctor reads the
-	// binary back.
-	if check, _ := checkCursorDialogHook(); !strings.Contains(check.Message, "missing amq binary /opt/amq//bin/amq") {
-		t.Errorf("doctor = %+v", check)
+	if check, _ := checkCursorDialogHook(); check.Status != "ok" {
+		t.Fatalf("doctor = %+v", check)
+	}
+	// PR #1233 review: decoded equality hid old, unescaped bytes from
+	// reinstall, even though Cursor corrupted them during comment stripping.
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	old, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".cursor", "hooks.json")
+	if err := os.WriteFile(path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if check, _ := checkCursorDialogHook(); check.Status != "warn" {
+		t.Fatalf("unsafe old bytes accepted: %+v", check)
+	}
+	if err := installCursorDialogHook(bin, false); err != nil {
+		t.Fatal(err)
+	}
+	if check, _ := checkCursorDialogHook(); check.Status != "ok" {
+		t.Fatalf("reinstall did not repair bytes: %+v", check)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["version"] = json.RawMessage(`"1"`)
+	raw, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if check, _ := checkCursorDialogHook(); check.Status != "warn" || !strings.Contains(check.Message, "numeric positive integer") {
+		t.Fatalf("string version accepted: %+v", check)
 	}
 }
