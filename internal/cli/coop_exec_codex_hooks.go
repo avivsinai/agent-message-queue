@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/usagetransport/command"
 	"github.com/avivsinai/agent-message-queue/usage/edge"
@@ -25,15 +24,20 @@ const (
 	codexHooksProbeTimeout = 5 * time.Second
 	// codexHooksProbeMaxOut bounds the stdout an embedded probe keeps.
 	codexHooksProbeMaxOut = 1 << 20
-	// codexHooksListID and codexRequirementsReadID are the request ids of
-	// hooks/list and configRequirements/read on the stdio probe.
+	// codexHooksListID, codexRequirementsReadID and codexConfigReadID are
+	// the request ids of hooks/list, configRequirements/read and config/read
+	// on the stdio probe.
 	codexHooksListID        = 2
 	codexRequirementsReadID = 3
+	codexConfigReadID       = 4
 )
 
 // codexStartupProbe is what Codex's own app-server, asked on the backend
 // the seat's TUI will use, says about two startup screens.
 type codexStartupProbe struct {
+	// updateCheckOff: config/read for the launch directory shows the
+	// effective check_for_update_on_startup as false (codexConfigUpdateCheckOff).
+	updateCheckOff bool
 	// hooksClear: hooks/list for the launch directory shows no hook to
 	// review (codexHooksListClear).
 	hooksClear bool
@@ -44,7 +48,8 @@ type codexStartupProbe struct {
 }
 
 // probeCodexStartup asks the app-server the seat's TUI will use for
-// hooks/list for dir and configRequirements/read, in one session. The TUI
+// hooks/list for dir, configRequirements/read and config/read for dir, in
+// one session. The TUI
 // sends the same hooks/list for its cwd before its session starts and
 // reviews every untrusted or modified hook (tui/src/startup_hooks_review.rs:
 // 52-82 and hooks_rpc.rs:23-56 at rust-v0.164.0). A failed, late or
@@ -68,16 +73,16 @@ func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorde
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
 	defer cancel()
-	var hooks, requirements []byte
+	var state codex.StartupState
 	switch backend {
 	case codexOnDaemon:
 		sock, sockErr := codex.ControlSocket(codexHome)
 		if sockErr != nil {
 			return codexStartupProbe{}
 		}
-		hooks, requirements, err = codex.ReadStartupState(ctx, sock, dir)
+		state, err = codex.ReadStartupState(ctx, sock, dir)
 	case codexEmbedded:
-		hooks, requirements, err = codexEmbeddedStartupState(ctx, binaryPath, args, dir, codexHome)
+		state, err = codexEmbeddedStartupState(ctx, binaryPath, args, dir, codexHome)
 	default:
 		return codexStartupProbe{}
 	}
@@ -85,21 +90,22 @@ func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorde
 		return codexStartupProbe{}
 	}
 	return codexStartupProbe{
-		hooksClear:        hooks != nil && codexHooksListClear(hooks, dir),
-		requirementsClear: requirements != nil && codexRequirementsAllowNoUpdateCheck(requirements),
+		updateCheckOff:    state.Config != nil && codexConfigUpdateCheckOff(state.Config),
+		hooksClear:        state.Hooks != nil && codexHooksListClear(state.Hooks, dir),
+		requirementsClear: state.Requirements != nil && codexRequirementsAllowNoUpdateCheck(state.Requirements),
 	}
 }
 
-// codexEmbeddedStartupState asks hooks/list and configRequirements/read of
-// a stdio app-server started the way the seat's TUI starts its own: the
+// codexEmbeddedStartupState asks hooks/list, configRequirements/read and
+// config/read of a stdio app-server started the way the seat's TUI starts its own: the
 // same binary, CODEX_HOME, working directory and configuration overrides,
 // with a read-only sandbox and no approvals. The run is bounded, its
 // process group is killed and reaped, and its stderr is discarded; its
 // stdout stays here. A result is nil when its request got an error reply.
-func codexEmbeddedStartupState(ctx context.Context, binaryPath string, args []string, dir, codexHome string) (hooks, requirements []byte, err error) {
+func codexEmbeddedStartupState(ctx context.Context, binaryPath string, args []string, dir, codexHome string) (codex.StartupState, error) {
 	overrides, ok := codexHookProbeOverrides(args)
 	if !ok {
-		return nil, nil, errors.New("the seat has options a probe app-server does not take")
+		return codex.StartupState{}, errors.New("the seat has options a probe app-server does not take")
 	}
 	reply := command.Run(ctx, edge.Command{
 		Path:   binaryPath,
@@ -107,30 +113,16 @@ func codexEmbeddedStartupState(ctx context.Context, binaryPath string, args []st
 		Env:    []string{"CODEX_HOME=" + codexHome},
 		Stdin:  codexStartupProbeRequests(dir),
 		MaxOut: codexHooksProbeMaxOut,
-		Done:   func(out []byte) bool { _, _, done := codexStartupProbeReplies(out); return done },
+		Done:   func(out []byte) bool { _, done := codexStartupProbeReplies(out); return done },
 	})
 	if reply.Failure != "" {
-		return nil, nil, fmt.Errorf("codex app-server: %s", reply.Failure)
+		return codex.StartupState{}, fmt.Errorf("codex app-server: %s", reply.Failure)
 	}
-	hooks, requirements, done := codexStartupProbeReplies(reply.Stdout)
+	state, done := codexStartupProbeReplies(reply.Stdout)
 	if !done {
-		return nil, nil, errors.New("codex app-server did not answer the startup probe")
+		return codex.StartupState{}, errors.New("codex app-server did not answer the startup probe")
 	}
-	return hooks, requirements, nil
-}
-
-// codexArgsDisableUpdateCheck reports whether args end with AMQ's own
-// override that turns off Codex's startup update check
-// (launch.CodexNoUpdatePromptOverride): the last -c for that key sets it
-// to false exactly as AMQ writes it.
-func codexArgsDisableUpdateCheck(args []string) bool {
-	last := ""
-	for _, value := range codexConfigOverrides(args) {
-		if key, _, _ := strings.Cut(value, "="); strings.TrimSpace(key) == codexUpdateCheckKey {
-			last = value
-		}
-	}
-	return last == launch.CodexNoUpdatePromptOverride
+	return state, nil
 }
 
 // codexHookProbeOverrides returns the seat's -c, --enable and --disable
@@ -172,7 +164,8 @@ func codexHookProbeOverrides(args []string) ([]string, bool) {
 
 // codexStartupProbeRequests is the stdin of one probe: initialize (with
 // the experimental API, as AMQ opens a daemon session), the initialized
-// notification, hooks/list for dir, and configRequirements/read.
+// notification, hooks/list for dir, configRequirements/read, and
+// config/read for dir.
 func codexStartupProbeRequests(dir string) []byte {
 	msgs := []any{
 		map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -182,6 +175,8 @@ func codexStartupProbeRequests(dir string) []byte {
 		map[string]any{"jsonrpc": "2.0", "id": codexHooksListID, "method": "hooks/list",
 			"params": map[string]any{"cwds": []string{dir}}},
 		map[string]any{"jsonrpc": "2.0", "id": codexRequirementsReadID, "method": "configRequirements/read"},
+		map[string]any{"jsonrpc": "2.0", "id": codexConfigReadID, "method": "config/read",
+			"params": map[string]any{"cwd": dir}},
 	}
 	var b bytes.Buffer
 	for _, m := range msgs {
@@ -192,11 +187,11 @@ func codexStartupProbeRequests(dir string) []byte {
 	return b.Bytes()
 }
 
-// codexStartupProbeReplies reads the probe's stdout: done once both replies
+// codexStartupProbeReplies reads the probe's stdout: done once every reply
 // or an initialize error arrived, with each result, or nil for an error
 // reply.
-func codexStartupProbeReplies(out []byte) (hooks, requirements []byte, done bool) {
-	var gotHooks, gotRequirements bool
+func codexStartupProbeReplies(out []byte) (state codex.StartupState, done bool) {
+	var gotHooks, gotRequirements, gotConfig bool
 	for _, line := range bytes.Split(out, []byte("\n")) {
 		var reply struct {
 			ID     *int            `json:"id"`
@@ -214,15 +209,34 @@ func codexStartupProbeReplies(out []byte) (hooks, requirements []byte, done bool
 		switch *reply.ID {
 		case 1:
 			if reply.Error != nil {
-				return nil, nil, true
+				return codex.StartupState{}, true
 			}
 		case codexHooksListID:
-			hooks, gotHooks = result, true
+			state.Hooks, gotHooks = result, true
 		case codexRequirementsReadID:
-			requirements, gotRequirements = result, true
+			state.Requirements, gotRequirements = result, true
+		case codexConfigReadID:
+			state.Config, gotConfig = result, true
 		}
 	}
-	return hooks, requirements, gotHooks && gotRequirements
+	return state, gotHooks && gotRequirements && gotConfig
+}
+
+// codexConfigUpdateCheckOff reports whether a config/read result shows the
+// effective check_for_update_on_startup as exactly false. Codex shows its
+// update prompt only when that setting is in effect (tui/src/updates.rs:28
+// and :153 at rust-v0.164.0). The effective value is read, not the seat's
+// own override, because legacy managed layers rank above session flags
+// (config/src/config_layer_source.rs:22-27). Absent, true, or any other
+// value proves nothing.
+func codexConfigUpdateCheckOff(result []byte) bool {
+	var read struct {
+		Config map[string]json.RawMessage `json:"config"`
+	}
+	if json.Unmarshal(result, &read) != nil {
+		return false
+	}
+	return string(bytes.TrimSpace(read.Config[codexUpdateCheckKey])) == "false"
 }
 
 // codexRequirementsAllowNoUpdateCheck reports whether a

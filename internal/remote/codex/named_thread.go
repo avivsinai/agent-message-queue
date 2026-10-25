@@ -94,19 +94,26 @@ func initializeAMQ(ctx context.Context, client *Client) error {
 	return nil
 }
 
-// ReadStartupState returns, from one session on the daemon at sock, the raw
-// results of hooks/list for cwd (the hooks Codex loads for that directory,
-// each with its trust status) and of configRequirements/read (the managed
-// and cloud requirements). A result is nil when the daemon answered its
-// request with an error. It changes nothing on the daemon.
-func ReadStartupState(ctx context.Context, sock, cwd string) (hooks, requirements json.RawMessage, err error) {
+// StartupState holds the raw results of the app-server requests that show
+// what a TUI starting in a directory meets before its session: hooks/list
+// for the directory (each hook with its trust status),
+// configRequirements/read (the managed and cloud requirements), and
+// config/read for the directory (the effective configuration). A result is
+// nil when the app-server answered its request with an error.
+type StartupState struct {
+	Hooks, Requirements, Config json.RawMessage
+}
+
+// ReadStartupState reads the StartupState for cwd from one session on the
+// daemon at sock. It changes nothing on the daemon.
+func ReadStartupState(ctx context.Context, sock, cwd string) (StartupState, error) {
 	client, err := Dial(sock, Handlers{})
 	if err != nil {
-		return nil, nil, err
+		return StartupState{}, err
 	}
 	defer func() { _ = client.Close() }()
 	if err := initializeAMQ(ctx, client); err != nil {
-		return nil, nil, err
+		return StartupState{}, err
 	}
 	call := func(method string, params any) (json.RawMessage, error) {
 		var result json.RawMessage
@@ -120,11 +127,15 @@ func ReadStartupState(ctx context.Context, sock, cwd string) (hooks, requirement
 		}
 		return result, nil
 	}
-	if hooks, err = call("hooks/list", map[string]any{"cwds": []string{cwd}}); err != nil {
-		return nil, nil, err
+	var state StartupState
+	if state.Hooks, err = call("hooks/list", map[string]any{"cwds": []string{cwd}}); err != nil {
+		return StartupState{}, err
 	}
-	if requirements, err = call("configRequirements/read", nil); err != nil {
-		return nil, nil, err
+	if state.Requirements, err = call("configRequirements/read", nil); err != nil {
+		return StartupState{}, err
 	}
-	return hooks, requirements, nil
+	if state.Config, err = call("config/read", map[string]any{"cwd": cwd}); err != nil {
+		return StartupState{}, err
+	}
+	return state, nil
 }

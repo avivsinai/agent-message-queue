@@ -249,15 +249,11 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	// Any other release may review hooks after its trust screen. It starts
 	// clear only when Codex records that it trusts the directory, its
 	// hooks/list shows no hook to review, and the update prompt is ruled
-	// out: by the version cache of a verified release, or by AMQ's own
-	// override that turns the update check off where no requirement pins it
-	// on (tui/src/updates.rs:28 and :153 at rust-v0.164.0: the prompt needs
-	// an effective check_for_update_on_startup).
+	// out: by the version cache of a verified release, or by an effective
+	// check_for_update_on_startup of false that no requirement pins on
+	// (tui/src/updates.rs:28 and :153 at rust-v0.164.0: the prompt needs
+	// that setting in effect).
 	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindUpdate}
-	flagged := codexArgsDisableUpdateCheck(args)
-	if !cacheRuledOut && !flagged {
-		return marker, true
-	}
 	if trust != startupTrustAccepted {
 		if cacheRuledOut {
 			marker.Kind = wakeStartupKindReview
@@ -265,7 +261,7 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 		return marker, true
 	}
 	probe := probeCodexStartup(binaryPath, args, wd, dir, recorded)
-	if !cacheRuledOut && !probe.requirementsClear {
+	if !cacheRuledOut && (!probe.updateCheckOff || !probe.requirementsClear) {
 		return marker, true
 	}
 	if !probe.hooksClear {
@@ -378,7 +374,7 @@ func codexStartupHoldRelease(marker wakeDialogMarker) string {
 		return fmt.Sprintf("Codex may ask whether to trust %s or to review new or changed hooks, and a trust record does not show that the hook review closed; %s", marker.Cwd, hook)
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
-			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts, but does not release this hold by itself"
+			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts; it does not release this open hold, and a later launch starts without one only when Codex reports the check off and no requirement turns it on"
 	case codexNearestGitAncestor(marker.Cwd) == "":
 		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
 	}

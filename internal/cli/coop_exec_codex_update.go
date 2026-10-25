@@ -37,9 +37,10 @@ var codexHookReviewSince = [3]uint64{0, 164, 0}
 // shows that the prompt closed. coop exec therefore holds the doorbell
 // unless Codex's own state proves the prompt cannot show:
 // codexUpdatePromptRuledOut reads Codex's version cache. The other proof,
-// AMQ's own override with no requirement that pins the check on, needs the
-// app-server probe (startupDialogMarkerFor); a CLI or file setting alone
-// cannot prove the effective value above managed and cloud requirements.
+// an effective check_for_update_on_startup of false with no requirement
+// that pins the check on, needs the app-server probe
+// (startupDialogMarkerFor); a CLI or file setting alone cannot prove the
+// effective value above managed layers and requirements.
 // Unknown state stays held until Codex's first-turn dialog hook closes the
 // marker. installed is the binary's version, known only when its probe
 // succeeded.

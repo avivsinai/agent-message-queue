@@ -204,24 +204,28 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   prompt marker releases only through the dialog hook's first-turn close.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
   identity overrides with `-c check_for_update_on_startup=false`. Codex
-  shows the prompt only when that setting is in effect, and managed or
-  cloud requirements can pin it on, so the flag alone is not evidence. The
-  update prompt is ruled out in either of two ways. On any release, the
-  seat's last `-c` for that key is AMQ's `check_for_update_on_startup=false`
-  and Codex's `configRequirements/read`, asked in the same probe as
-  `hooks/list` (below), returns no requirements, or requirements whose
-  `checkForUpdateOnStartup` is absent, null or false; true, an error, a
-  timeout or an unreadable reply proves nothing. On the verified releases
-  `0.145.0`, `0.161.0`, `0.163.0`, and `0.164.0`, `$CODEX_HOME/version.json`
-  was checked less than 19 hours ago and its `latest_version` is not newer
-  than the installed version, or is the dismissed version. Otherwise the
-  seat gets an update prompt marker, and anything missing or unreadable
-  keeps the hold until the dialog hook runs at the first turn. A seat on
-  the managed daemon carries no `-c` override, so only the version cache
-  can rule the prompt out there. Setting `check_for_update_on_startup =
-  false` in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`)
-  prevents ordinary update prompts, but does not release this hold by
-  itself. AMQ does not edit that file.
+  shows the prompt only when that setting is in effect, a legacy managed
+  configuration layer ranks above `-c`, and managed or cloud requirements
+  can pin the setting on, so the flag alone is not evidence. The update
+  prompt is ruled out in either of two ways. In the probe below, Codex's
+  `config/read` for the launch directory returns an effective
+  `check_for_update_on_startup` of exactly `false`, and its
+  `configRequirements/read` returns no requirements, or requirements whose
+  `checkForUpdateOnStartup` is absent, null or false; an absent or true
+  value, an error, a timeout or an unreadable reply proves nothing. Or, on
+  the verified releases `0.145.0`, `0.161.0`, `0.163.0`, and `0.164.0`,
+  `$CODEX_HOME/version.json` was checked less than 19 hours ago and its
+  `latest_version` is not newer than the installed version, or is the
+  dismissed version. Otherwise the seat gets an update prompt marker, and
+  anything missing or unreadable keeps the hold until the dialog hook runs
+  at the first turn. A seat on the managed daemon carries no `-c` override,
+  so there the effective value comes from the configuration files: setting
+  `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
+  (default `~/.codex/config.toml`) releases a daemon seat too, when no
+  managed layer or requirement turns it on. The probe runs only for
+  releases that review hooks (below), so on `0.145.0`, `0.161.0` and
+  `0.163.0` only the version cache rules the prompt out. AMQ does not edit
+  `config.toml`.
 
   Directory trust and native hook review are separate startup screens.
   Codex `0.164.0` and later reviews new or changed hooks after its trust

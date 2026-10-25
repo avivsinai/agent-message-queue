@@ -282,20 +282,28 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 		version      string
 		hooks        string // the hooks/list reply line, %s the checkout
 		requirements string // the configRequirements/read reply line
+		config       string // the config/read reply line, or "" for the seat's -c false in effect
 		kind         string // the marker kind, or "" for none
 	}{
-		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, ""},
-		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, ""},
-		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, wakeStartupKindReview},
-		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, wakeStartupKindReview},
+		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, "", ""},
+		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, "", ""},
+		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, "", wakeStartupKindReview},
+		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, "", wakeStartupKindReview},
 		// Field: every 0.164 seat held until typed after v0.112.0 (bead
 		// agent-message-queue-uue). The seat carries AMQ's
 		// check_for_update_on_startup=false, which no requirement pins on,
 		// so no update prompt can show on any version.
 		{"unverified release, update check off, requirements clear", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, ""},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, "", ""},
 		{"requirements pin the update check on", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, wakeStartupKindUpdate},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, "", wakeStartupKindUpdate},
+		// Review finding (bead agent-message-queue-uue): legacy managed
+		// layers rank above session flags (config/src/config_layer_source.rs:
+		// 22-27 at rust-v0.164.0), so the seat's -c false can lose; only the
+		// effective value counts.
+		{"a legacy managed layer turns the update check on", "0.165.0", hooks("trusted"), noRequirements,
+			`{"id":4,"result":{"config":{"check_for_update_on_startup":true},"origins":{"check_for_update_on_startup":{"name":{"type":"legacyManagedConfigTomlFromFile","file":"/etc/codex/managed_config.toml"},"version":"sha256:ab"}}}}`,
+			wakeStartupKindUpdate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -303,7 +311,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			bin := fakeCodexForTest(t, filepath.Dir(config), tc.version, fmt.Sprintf(tc.hooks, real), tc.requirements)
+			bin := fakeCodexForTest(t, filepath.Dir(config), tc.version, fmt.Sprintf(tc.hooks, real), tc.requirements, tc.config)
 			if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 				t.Fatal(err)
 			}
@@ -329,7 +337,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
 	h, config, real, marker := newCodexTrustDialogHarness(t)
 	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("trusted"))
-	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", reply, `{"id":3,"result":{"requirements":null}}`)
+	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", reply, `{"id":3,"result":{"requirements":null}}`, "")
 	if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -391,16 +399,25 @@ func TestCodexHoldHintNamesHooksForAnUntrustedDialogHook(t *testing.T) {
 }
 
 // fakeCodexForTest writes a codex that reports version and answers
-// hooks/list and configRequirements/read on a stdio app-server with the
-// given reply lines, plus a version cache in codexHome that names 0.164.0
-// as the latest release, checked now.
-func fakeCodexForTest(t *testing.T, codexHome, version, hooks, requirements string) string {
+// hooks/list, configRequirements/read and config/read on a stdio
+// app-server with the given reply lines, plus a version cache in codexHome
+// that names 0.164.0 as the latest release, checked now. An empty config
+// answers as Codex 0.164 does for a seat whose -c
+// check_for_update_on_startup=false is in effect.
+func fakeCodexForTest(t *testing.T, codexHome, version, hooks, requirements, config string) string {
 	t.Helper()
 	cache := fmt.Sprintf(`{"latest_version":"0.164.0","last_checked_at":%q,"dismissed_version":null}`, time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(filepath.Join(codexHome, codexVersionFile), []byte(cache), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	if config == "" {
+		config = `{"id":4,"result":{"config":{"check_for_update_on_startup":false},"origins":{"check_for_update_on_startup":{"name":{"type":"sessionFlags"},"version":"sha256:ab"}}}}`
+	}
+	configFile := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configFile, []byte(config+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	hooksFile, requirementsFile := filepath.Join(dir, "hooks.json"), filepath.Join(dir, "requirements.json")
 	if err := os.WriteFile(hooksFile, []byte(hooks+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -415,6 +432,7 @@ func fakeCodexForTest(t *testing.T, codexHome, version, hooks, requirements stri
 		"    *'\"method\":\"initialize\"'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"fake\"}}\\n' ;;\n" +
 		"    *'\"method\":\"hooks/list\"'*) cat '" + hooksFile + "' ;;\n" +
 		"    *'\"method\":\"configRequirements/read\"'*) cat '" + requirementsFile + "' ;;\n" +
+		"    *'\"method\":\"config/read\"'*) cat '" + configFile + "' ;;\n" +
 		"  esac\n" +
 		"done\n"
 	bin := filepath.Join(dir, "codex")
