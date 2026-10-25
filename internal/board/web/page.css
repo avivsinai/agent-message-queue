@@ -18,7 +18,7 @@
   --warn: #7a3d8c;
   --error: #a6261c;
   --quiet: #6b6457;
-  --shadow: 0 1px 2px rgb(27 32 38 / 0.16), 0 0 0 1px rgb(27 32 38 / 0.05);
+  --shadow: 0 1px 2px rgb(27 32 38 / 0.24);
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-label: "Avenir Next Condensed", "Roboto Condensed", "Arial Narrow", "Helvetica Neue", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -51,7 +51,7 @@
     --warn: #dcaeea;
     --error: #ff958a;
     --quiet: #aaa28f;
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.04);
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.6);
   }
 }
 
@@ -225,6 +225,8 @@ a:hover { text-decoration-thickness: 2px; }
 }
 
 .lamp-note-k { color: var(--warn); font-weight: 600; }
+.lamp-detail summary { color: var(--rack-muted); }
+.lamp-detail summary:hover { color: var(--rack-ink); }
 
 /* Limits */
 
@@ -232,8 +234,9 @@ a:hover { text-decoration-thickness: 2px; }
   display: flex;
   gap: 0.5rem 1.25rem;
   align-items: baseline;
+  margin-top: 2rem;
   padding: 0.6rem 0;
-  border-bottom: 1px solid var(--rack-rule);
+  border-block: 1px solid var(--rack-rule);
 }
 
 .limits-h { flex: none; }
@@ -297,7 +300,13 @@ a:hover { text-decoration-thickness: 2px; }
   max-width: 75ch;
 }
 
-.bay-waiting .empty { background: var(--accent-wash); color: var(--ink); border-radius: 0 0 3px 3px; }
+.bay-waiting .empty {
+  max-width: none;
+  padding-inline-end: max(0.75rem, 100% - 75ch);
+  background: var(--accent-wash);
+  color: var(--ink);
+  border-radius: 0 0 3px 3px;
+}
 
 .lower {
   display: grid;
@@ -358,7 +367,20 @@ a:hover { text-decoration-thickness: 2px; }
 
 .strip > * { min-width: 0; padding: 0.4rem 0.625rem; }
 
+/* A cocked strip leaves its slot: the empty slot edge stays drawn on the
+   rack where the strip used to sit. */
+.strip { position: relative; }
 .strip.is-cocked { margin-inline-start: var(--cock); }
+.strip.is-cocked::before {
+  content: "";
+  position: absolute;
+  inset-block: 0.25rem;
+  inset-inline-start: calc(-1 * var(--cock));
+  width: calc(var(--cock) - 0.3rem);
+  padding: 0;
+  border: 1px dashed var(--rack-muted);
+  border-inline-end: 0;
+}
 
 .c-ref {
   grid-area: ref;
@@ -501,6 +523,7 @@ details > summary {
 }
 
 details > summary:hover { color: var(--ink); }
+details > summary::marker { color: var(--muted); }
 
 .c-detail { grid-area: detail; border-top: 1px dashed var(--stock-rule); padding-top: 0.25rem; padding-bottom: 0.3rem; }
 
@@ -550,7 +573,7 @@ details > summary:hover { color: var(--ink); }
 @container rack (min-width: 68rem) {
   .bay-waiting .rack-labels,
   .bay-waiting .strip {
-    grid-template-columns: 7rem minmax(11rem, 1.5fr) minmax(10rem, 1.2fr) 5rem minmax(9rem, 1fr) 7.5rem minmax(17rem, 2fr);
+    grid-template-columns: 7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 5rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr);
   }
   .bay-waiting .rack-labels { display: grid; }
   .bay-waiting .strip {
@@ -577,9 +600,10 @@ details > summary:hover { color: var(--ink); }
     "ref since"
     "title title"
     "owner owner"
-    "why why"
-    "detail detail";
+    "why detail";
 }
+.lower .c-detail { border-top: 0; padding-block: 0 0.3rem; justify-self: end; }
+.lower .c-detail[open] { grid-area: auto / 1 / auto / -1; justify-self: stretch; border-top: 1px dashed var(--stock-rule); padding-top: 0.25rem; }
 .lower .c-ref, .lower .c-since { padding-block: 0.25rem; }
 .lower .c-owner, .lower .c-why { font-size: var(--t-xs); }
 .lower .c-owner { padding-block: 0 0.1rem; }

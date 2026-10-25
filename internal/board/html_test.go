@@ -21,8 +21,8 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	agent := Owner{Kind: OwnerAgent, Handle: hostile, Session: hostile, Display: hostile}
 	amq := Result{
 		Status: StatusDegraded, Detail: hostile, ObservedAt: now,
-		Coverage: Coverage{Window: hostile, Detail: hostile},
-		Feeds:    []Column{ColumnWaiting},
+		Coverage: Coverage{Window: hostile, Detail: hostile + " gap"},
+		Feeds:    []Column{ColumnWaiting, ColumnBlocked},
 		AMQ: &AMQContext{
 			Project: hostile, Peers: []string{hostile},
 			Sessions: []SessionInfo{{Name: hostile, Path: hostile}},
@@ -66,6 +66,14 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := page.String()
+
+	// Finish review of this page: a source both degraded and partial named
+	// only its error in the empty state and dropped its coverage gap.
+	for _, c := range m.Columns {
+		if c.ID == ColumnBlocked && !strings.Contains(c.Empty, hostile+" gap") {
+			t.Errorf("empty column hides the coverage gap: %q", c.Empty)
+		}
+	}
 
 	const open = `<script type="application/json" id="model">`
 	start := strings.Index(html, open)

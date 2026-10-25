@@ -44,23 +44,17 @@
         <span class="lamp-note"><span class="lamp-note-k">not assessed:</span> {{.Gap}}</span>
         {{- end}}
         {{- if .Detail}}
+        {{- if gt (len .Detail) 60}}
+        <details class="lamp-note lamp-detail"><summary>why {{.Status}}</summary>{{.Detail}}</details>
+        {{- else}}
         <span class="lamp-note lamp-detail">{{.Detail}}</span>
+        {{- end}}
         {{- end}}
       </li>
       {{- end}}
     </ul>
   </section>
 
-  {{- if .Limits}}
-  <section class="limits" aria-labelledby="limits-h">
-    <h2 class="label limits-h" id="limits-h">Limits</h2>
-    <ul class="limit-list">
-      {{- range .Limits}}
-      <li class="limit{{if .Reached}} is-reached{{end}}"><span class="limit-account">{{.Account}}</span> <span class="limit-value">{{.Limits}}</span>{{if .Other}} <span class="limit-other">{{.Other}}</span>{{end}}</li>
-      {{- end}}
-    </ul>
-  </section>
-  {{- end}}
 
   {{- with .Waiting}}
   <section class="bay bay-waiting" id="bay-{{.ID}}" aria-labelledby="h-{{.ID}}">
@@ -146,6 +140,16 @@
       {{- end}}
     </section>
   </div>
+  {{- if .Limits}}
+  <section class="limits" aria-labelledby="limits-h">
+    <h2 class="label limits-h" id="limits-h">Limits</h2>
+    <ul class="limit-list">
+      {{- range .Limits}}
+      <li class="limit{{if .Reached}} is-reached{{end}}"><span class="limit-account">{{.Account}}</span> <span class="limit-value">{{.Limits}}</span>{{if .Other}} <span class="limit-other">{{.Other}}</span>{{end}}</li>
+      {{- end}}
+    </ul>
+  </section>
+  {{- end}}
 </main>
 
 <footer class="foot">
@@ -181,20 +185,20 @@
     <p class="people">{{.}}</p>
     {{- end}}
   </div>
-  {{- if and .Inline .S.Actions}}
+  {{- if .Shown}}
   <div class="c-cmd">
-    {{- range .S.Actions}}
+    {{- range .Shown}}
     {{template "cmd" .}}
     {{- end}}
   </div>
   {{- end}}
   {{- if .S.HasDetail}}
   <details class="c-detail">
-    <summary>{{if .Inline}}Evidence{{else}}Details{{end}}</summary>
+    <summary>{{if .Shown}}More commands and evidence{{else}}Details{{end}}</summary>
     <div class="detail">
-      {{- if and (not .Inline) .S.Actions}}
+      {{- if .More}}
       <div class="detail-cmds">
-        {{- range .S.Actions}}
+        {{- range .More}}
         {{template "cmd" .}}
         {{- end}}
       </div>

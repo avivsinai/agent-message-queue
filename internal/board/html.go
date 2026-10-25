@@ -27,16 +27,22 @@ var (
 
 var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{"stripArgs": stripArgs}).Parse(pageHTML))
 
-// stripCall is one strip's template input: its unique heading id, and
-// whether its commands sit in the strip (Waiting on you) or in its details.
+// stripCall is one strip's template input: its unique heading id and where
+// its commands sit.
 type stripCall struct {
-	ID     string
-	S      pageStrip
-	Inline bool
+	ID string
+	S  pageStrip
+	// Shown are the commands on the strip itself (the first one in Waiting
+	// on you); More are the rest, under the strip's details.
+	Shown, More []Action
 }
 
 func stripArgs(bay string, i int, s pageStrip, inline bool) stripCall {
-	return stripCall{ID: "s-" + bay + "-" + strconv.Itoa(i), S: s, Inline: inline}
+	c := stripCall{ID: "s-" + bay + "-" + strconv.Itoa(i), S: s, More: s.Actions}
+	if inline && len(s.Actions) > 0 {
+		c.Shown, c.More = s.Actions[:1], s.Actions[1:]
+	}
+	return c
 }
 
 // pageCSP allows only the page's own stylesheet and script, by hash, so no
@@ -252,6 +258,9 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		s.Owner = clean(strings.Join(names, ", "))
 	}
 	for _, o := range c.WaitsOn {
+		if owns(c.Owners, o) {
+			continue
+		}
 		s.People = append(s.People, clean("waits on "+ownerLabel(o, live)))
 	}
 	if c.Requester != nil {
@@ -289,6 +298,17 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.Actions = c.Actions
 	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
+}
+
+// owns reports whether o is one of the card's owners, so "waits on" is
+// shown only when it names someone else.
+func owns(owners []Owner, o Owner) bool {
+	for _, x := range owners {
+		if x == o || (x.Kind == OwnerHuman && o.Kind == OwnerHuman) {
+			return true
+		}
+	}
+	return false
 }
 
 // refCell is the strip's designator: a short kind and the id.
