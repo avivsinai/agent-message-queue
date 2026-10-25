@@ -225,12 +225,14 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   prompt (as above), the directory trust (Codex records that it trusts the
   directory), and the hook review. The hook review is ruled out only when
   Codex's own `hooks/list` for the launch directory, asked on the backend
-  the TUI uses, lists every hook as trusted, or none: the managed daemon for
+  the TUI uses, lists every hook as trusted or managed, or none (Codex
+  reviews only untrusted and modified hooks): the managed daemon for
   a seat on the daemon, or a stdio `codex app-server` started with the
   seat's `CODEX_HOME`, directory, and `-c`, `--enable` and `--disable`
   options for any other seat. The probe is bounded to 5 seconds, and its
   output stays out of AMQ diagnostics. An error, a timeout, an unreadable
-  reply, any other trust status, a `--profile` seat, or a backend AMQ
+  reply, an untrusted, modified, missing or unknown trust status, a
+  `--profile` seat, or a backend AMQ
   cannot tell writes the marker. A marker written for such a release, or
   for a release AMQ has not verified, releases only through the dialog
   hook's first-turn close: the trust record never releases it, and the

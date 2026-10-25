@@ -274,6 +274,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 		hold  bool
 	}{
 		{"every hook trusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `],"warnings":[],"errors":[]}]}}`, false},
+		{"managed hooks only", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("managed") + `],"warnings":[],"errors":[]}]}}`, false},
 		{"one hook untrusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `,` + codexHookForTest("untrusted") + `],"warnings":[],"errors":[]}]}}`, true},
 		{"hooks/list error", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, true},
 	} {
@@ -400,11 +401,16 @@ func fakeCodex164ForTest(t *testing.T, codexHome, reply string) string {
 }
 
 // codexHookForTest is one hooks/list entry in the shape Codex 0.164 sends
-// (app-server-protocol v2 HookMetadata).
+// (app-server-protocol v2 HookMetadata). A managed hook comes from a
+// system requirements layer.
 func codexHookForTest(trust string) string {
+	source, managed := `"sourcePath":"/home/u/.codex/hooks.json","source":"user"`, "false"
+	if trust == "managed" {
+		source, managed = `"sourcePath":"/etc/codex/requirements.toml","source":"system"`, "true"
+	}
 	return `{"key":"/home/u/.codex/hooks.json:user_prompt_submit:0:0","eventName":"userPromptSubmit","matcher":null,"timeoutSec":5,` +
-		`"statusMessage":null,"additionalContextLimit":null,"sourcePath":"/home/u/.codex/hooks.json","source":"user","pluginId":null,` +
-		`"displayOrder":0,"enabled":true,"isManaged":false,"currentHash":"sha256:ab","trustStatus":"` + trust + `","handlerType":"command",` +
+		`"statusMessage":null,"additionalContextLimit":null,` + source + `,"pluginId":null,` +
+		`"displayOrder":0,"enabled":true,"isManaged":` + managed + `,"currentHash":"sha256:ab","trustStatus":"` + trust + `","handlerType":"command",` +
 		`"command":"true","async":false}`
 }
 

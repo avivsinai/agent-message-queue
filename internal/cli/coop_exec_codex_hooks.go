@@ -182,8 +182,11 @@ func codexHooksListReply(out []byte) (result []byte, done bool) {
 
 // codexHooksListClear reports whether a hooks/list result shows no hook to
 // review for dir: its entry for dir, or its only entry, lists every hook as
-// trusted, or none. Codex also reviews no managed hook, but only trusted is
-// taken as evidence here.
+// trusted or managed, or none. Codex reviews a hook only when it is
+// untrusted or modified (tui/src/hooks_rpc.rs:51-55 hook_needs_review at
+// rust-v0.164.0), and the status has only those four values
+// (app-server-protocol/src/protocol/v2/hook.rs:62-64); a missing status or
+// any other value proves nothing.
 func codexHooksListClear(result []byte, dir string) bool {
 	type entry struct {
 		Cwd   string `json:"cwd"`
@@ -205,7 +208,7 @@ func codexHooksListClear(result []byte, dir string) bool {
 		return false
 	}
 	for _, hook := range *list.Data[at].Hooks {
-		if hook.TrustStatus != "trusted" {
+		if hook.TrustStatus != "trusted" && hook.TrustStatus != "managed" {
 			return false
 		}
 	}
