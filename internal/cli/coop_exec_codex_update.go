@@ -5,22 +5,17 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 const (
-	codexVersionFile          = "version.json"
-	codexVersionCacheFresh    = 19 * time.Hour
-	codexVersionProbeTimeout  = 3 * time.Second
-	codexVersionProbeMaxBytes = 4 << 10
+	codexVersionFile         = "version.json"
+	codexVersionCacheFresh   = 19 * time.Hour
+	codexVersionProbeTimeout = 3 * time.Second
 )
 
 // A nearby release or a different patch is not verified evidence.
@@ -125,30 +120,11 @@ func codexVersionNewer(a, b [3]uint64) bool {
 func codexInstalledVersion(binaryPath string) ([3]uint64, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), codexVersionProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binaryPath, "--version")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stopGroup := func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return nil
-	}
-	cmd.Cancel = stopGroup
-	cmd.WaitDelay = time.Second
-	output := boundedOutput{limit: codexVersionProbeMaxBytes}
-	cmd.Stdout, cmd.Stderr = &output, io.Discard
-	if err := cmd.Start(); err != nil {
+	output, ok := probeHarnessVersion(ctx, binaryPath)
+	if !ok {
 		return [3]uint64{}, false
 	}
-	err := cmd.Wait()
-	cleanupErr := stopGroup()
-	if err != nil || cleanupErr != nil {
-		return [3]uint64{}, false
-	}
-	version, ok := strings.CutPrefix(strings.TrimSpace(output.String()), "codex-cli ")
+	version, ok := strings.CutPrefix(output, "codex-cli ")
 	if !ok || len(strings.Split(version, ".")) != 3 {
 		return [3]uint64{}, false
 	}

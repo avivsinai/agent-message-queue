@@ -128,6 +128,7 @@ func runCoopExec(args []string) error {
 		return nil
 	}
 	var err error
+	var managedTicket *launch.ExecutionTicket
 	if err := c.validateFlags(); err != nil {
 		return err
 	}
@@ -150,12 +151,24 @@ func runCoopExec(args []string) error {
 		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
 			c.managedProvider = ticket.Provider
 			c.managedInvocation = managedInvocation(ticket)
+			managedTicket = &ticket
 		}
 	}
 
 	if err := c.selectRoot(); err != nil {
 		return err
 	}
+	command, selected := c.cmdName, c.binaryPath
+	if managedTicket != nil {
+		index := 0
+		if managedTicket.Wrapper != nil {
+			index = len(managedTicket.Wrapper.Args) + 1
+		}
+		if index < len(managedTicket.TargetArgv) {
+			command, selected = managedTicket.TargetArgv[index], managedTicket.ProviderExecutable
+		}
+	}
+	warnShadowedHarness(command, selected)
 	if err := c.provisionRoot(); err != nil {
 		return err
 	}
