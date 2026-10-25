@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const serveUsage = `Usage: amq-board serve
@@ -144,45 +145,51 @@ type serveRecord struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-func serveDir() (string, error) {
+// withServeLock runs fn with ~/.amq/board, holding serve.json.lock beside
+// the record, so a publish and a conditional removal never interleave.
+func withServeLock(fn func(dir string) error) error {
 	home, err := amqhome.EnsureDir()
 	if err != nil {
-		return "", err
+		return err
 	}
-	return filepath.Join(home, "board"), nil
+	dir := filepath.Join(home, "board")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if !lock.AdvisoryLockAvailable() {
+		return fn(dir)
+	}
+	return lock.WithExclusiveFileLock(filepath.Join(dir, serveFile+".lock"), func() error { return fn(dir) })
 }
 
 // writeServeFile replaces ~/.amq/board/serve.json atomically, mode 0600:
 // the token in it opens every route of the server.
 func writeServeFile(r serveRecord) error {
-	dir, err := serveDir()
-	if err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(dir, serveFile, append(data, '\n'), 0o600)
-	return err
+	return withServeLock(func(dir string) error {
+		_, err := fsq.WriteFileAtomic(dir, serveFile, append(data, '\n'), 0o600)
+		return err
+	})
 }
 
 // removeServeFile removes serve.json only while it still names pid: a later
 // serve that replaced the record keeps it when this one exits.
 func removeServeFile(pid int) {
-	home, err := amqhome.Dir()
-	if err != nil {
-		return
-	}
-	path := filepath.Join(home, "board", serveFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var r serveRecord
-	if json.Unmarshal(data, &r) == nil && r.PID == pid {
-		_ = os.Remove(path)
-	}
+	_ = withServeLock(func(dir string) error {
+		path := filepath.Join(dir, serveFile)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var r serveRecord
+		if json.Unmarshal(data, &r) == nil && r.PID == pid {
+			return os.Remove(path)
+		}
+		return nil
+	})
 }
 
 // randomToken is 128 random bits, hex encoded.
