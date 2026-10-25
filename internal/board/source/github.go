@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // GitHubQuerySchema versions the query and its cache entries: a cache entry
@@ -71,14 +72,69 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		return res
 	}
 	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
-	now := env.Now()
-	if g.Cache != nil && !g.Refresh {
-		if key.Account = githubAccount(ctx, env); key.Account != "" {
-			if resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL); ok {
-				return g.Build(resp, repos, fetchedAt, nil)
-			}
-		}
+	if g.Cache == nil {
+		return g.fetch(ctx, env, repos, key)
 	}
+	if key.Account = githubAccount(ctx, env); key.Account == "" {
+		return g.fetch(ctx, env, repos, key)
+	}
+	if res, ok := g.cached(key, repos, env.Now()); ok {
+		return res
+	}
+	// Each gh call can prompt the keychain, so board runs refresh one entry
+	// one at a time: a run that waited reads the entry the other run wrote
+	// instead of calling gh again.
+	var res board.Result
+	err := g.Cache.Locked(key, func() bool { return ctx.Err() != nil }, func() error {
+		var ok bool
+		if res, ok = g.cached(key, repos, env.Now()); !ok {
+			res = g.fetch(ctx, env, repos, key)
+		}
+		return nil
+	})
+	switch {
+	case err == nil:
+		return res
+	case errors.Is(err, lock.ErrStopped):
+		return g.stale(key, repos, env.Now())
+	default:
+		// No lock to take (a platform without advisory locks, an unusable
+		// cache directory): refresh unlocked, as a read without a cache does.
+		return g.fetch(ctx, env, repos, key)
+	}
+}
+
+// cached is the read a fresh entry for key serves, unless Refresh is set.
+func (g GitHub) cached(key CacheKey, repos []string, now time.Time) (board.Result, bool) {
+	if g.Refresh {
+		return board.Result{}, false
+	}
+	resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL)
+	if !ok {
+		return board.Result{}, false
+	}
+	return g.Build(resp, repos, fetchedAt, nil), true
+}
+
+// stale is the read when another board run held the refresh lock until the
+// deadline: the last entry at any age, degraded, and never a gh call.
+func (g GitHub) stale(key CacheKey, repos []string, now time.Time) board.Result {
+	const busy = "another board run is refreshing GitHub"
+	resp, fetchedAt, ok := g.Cache.Last(key)
+	if !ok {
+		return board.Result{Status: board.StatusDegraded, Detail: busy + "; no cached data", ObservedAt: now, Feeds: githubFeeds, Version: GitHubQuerySchema}
+	}
+	res := g.Build(resp, repos, fetchedAt, nil)
+	if res.Status == board.StatusOK {
+		res.Status, res.Detail = board.StatusDegraded, busy+"; showing data from "+fetchedAt.UTC().Format(time.RFC3339)
+	}
+	return res
+}
+
+// fetch runs the query and its review-request pages, and stores an OK
+// result under the account the response names.
+func (g GitHub) fetch(ctx context.Context, env board.Env, repos []string, key CacheKey) board.Result {
+	now := env.Now()
 	out, err := env.Run.Run(ctx, env.Dir, GitHubQueryArgv(repos))
 	if err != nil {
 		return g.Build(nil, repos, now, err)

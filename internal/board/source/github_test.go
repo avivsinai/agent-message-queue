@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 
 var githubNow = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 
-func githubEnv(r fakeRunner) board.Env {
+func githubEnv(r board.Runner) board.Env {
 	return board.Env{
 		Dir:      "/fixture",
 		Now:      func() time.Time { return githubNow },
@@ -148,6 +149,99 @@ func TestGitHubCachedReadMakesOneCall(t *testing.T) {
 	if calls["gh api graphql"] != 3 {
 		t.Errorf("graphql calls with GH_TOKEN set = %d, want 3 (cache not read)", calls["gh api graphql"])
 	}
+}
+
+// Each gh call can open a keychain dialog on the owner's screen, and every
+// board run that found the cache expired called gh. Two runs that find the
+// entry expired make one call, and both show the refreshed data.
+func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	resp, err := os.ReadFile(filepath.Join("testdata", "github-graphql.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	race := &refreshRace{other: make(chan struct{})}
+	cache := probeCache{DirCache: source.DirCache{Dir: t.TempDir()}, race: race}
+	key := source.CacheKey{Host: "github.com", Repos: []string{"octo-org/demo"}, Account: "octo-owner", Schema: source.GitHubQuerySchema}
+	if err := cache.Put(key, githubNow.Add(-time.Hour), resp); err != nil {
+		t.Fatal(err)
+	}
+	r := gatedRunner{fakeRunner: fakeRunner{t: t, outputs: githubOutputs()}, race: race}
+	g := demoGitHub()
+	g.Cache = cache
+
+	results := make([]board.Result, 2)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = g.Read(context.Background(), githubEnv(r))
+		}()
+	}
+	wg.Wait()
+	if race.refreshes != 1 {
+		t.Errorf("graphql calls = %d, want 1", race.refreshes)
+	}
+	for i, res := range results {
+		if res.Status != board.StatusOK || !res.ObservedAt.Equal(githubNow) {
+			t.Errorf("run %d: %s %q observed %s, want the refreshed data", i, res.Status, res.Detail, res.ObservedAt)
+		}
+	}
+}
+
+// refreshRace holds the first refresh until the other run has read the
+// cache too, so a run that does not wait for that refresh calls gh itself.
+type refreshRace struct {
+	mu              sync.Mutex
+	gets, refreshes int
+	once            sync.Once
+	other           chan struct{}
+}
+
+func (p *refreshRace) note(refresh bool) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := &p.gets
+	if refresh {
+		n = &p.refreshes
+	}
+	*n++
+	// The refreshing run reads the cache at most twice before it calls gh
+	// (before and under the lock), so a third read or a second refresh is
+	// the other run.
+	if p.gets >= 3 || p.refreshes >= 2 {
+		p.once.Do(func() { close(p.other) })
+	}
+	return *n
+}
+
+type probeCache struct {
+	source.DirCache
+	race *refreshRace
+}
+
+func (c probeCache) Get(key source.CacheKey, now time.Time, ttl time.Duration) ([]byte, time.Time, bool) {
+	resp, at, ok := c.DirCache.Get(key, now, ttl)
+	c.race.note(false)
+	return resp, at, ok
+}
+
+type gatedRunner struct {
+	fakeRunner
+	race *refreshRace
+}
+
+func (r gatedRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
+	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" && r.race.note(true) == 1 {
+		<-r.race.other
+	}
+	return r.fakeRunner.Run(ctx, dir, argv)
+}
+
+func (r gatedRunner) RunLimited(ctx context.Context, dir string, argv []string, _ int) ([]byte, error) {
+	return r.Run(ctx, dir, argv)
 }
 
 // Codex review of PR #1200: refs and the cache assume github.com, so the
