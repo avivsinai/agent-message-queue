@@ -238,9 +238,29 @@ var codexReasoningEffortValues = []string{"minimal", "low", "medium", "high", "x
 // strips one surrounding quote pair before the allowlist lookup.
 var codexApprovalsReviewerValues = []string{"user", "auto_review", "guardian_subagent"}
 
-var codexConfigOverrideValues = map[string]map[string]struct{}{
-	"model_reasoning_effort": valueSet(codexReasoningEffortValues),
-	"approvals_reviewer":     valueSet(codexApprovalsReviewerValues),
+// Codex applies -c overrides above config.toml, so these pins keep a project
+// or user config from widening a --sandbox workspace-write seat. Writable
+// roots admit only the empty array: a path list would widen the sandbox
+// through argv. Both network values are admitted; the digest binds either.
+var (
+	codexWritableRootsValues = []string{"[]"}
+	codexNetworkAccessValues = []string{"true", "false"}
+)
+
+// codexConfigOverrideRule is the fixed value set of one admitted -c key.
+// Codex parses each value as TOML. A quoted value is a TOML string, so only a
+// string-typed key admits one surrounding quote pair; for an array or boolean
+// key the quoted form would be admitted here and then refused by Codex.
+type codexConfigOverrideRule struct {
+	values      map[string]struct{}
+	stringTyped bool
+}
+
+var codexConfigOverrideValues = map[string]codexConfigOverrideRule{
+	"model_reasoning_effort":                 {values: valueSet(codexReasoningEffortValues), stringTyped: true},
+	"approvals_reviewer":                     {values: valueSet(codexApprovalsReviewerValues), stringTyped: true},
+	"sandbox_workspace_write.writable_roots": {values: valueSet(codexWritableRootsValues)},
+	"sandbox_workspace_write.network_access": {values: valueSet(codexNetworkAccessValues)},
 }
 
 func valueSet(values []string) map[string]struct{} {
@@ -256,17 +276,18 @@ func validCodexConfigOverride(value string) bool {
 	if !ok || key == "" || configured == "" {
 		return false
 	}
-	values, ok := codexConfigOverrideValues[key]
+	rule, ok := codexConfigOverrideValues[key]
 	if !ok {
 		return false
 	}
-	// codex-cli parses `-c key=value` as TOML, so the squad's live emission
-	// carries a literal surrounding quote pair
+	// A string-typed value may carry one literal surrounding quote pair
 	// (`approvals_reviewer="auto_review"`). Normalize exactly one pair: a
 	// value with unbalanced or inner quotes rejects rather than being
-	// silently trimmed.
-	normalized := stripOneSurroundingQuotePair(configured)
-	_, ok = values[normalized]
+	// silently trimmed. Other keys match their exact TOML spelling.
+	if rule.stringTyped {
+		configured = stripOneSurroundingQuotePair(configured)
+	}
+	_, ok = rule.values[configured]
 	return ok
 }
 

@@ -418,3 +418,58 @@ func TestPrepareChecksCaptureContainmentBeforeProbe(t *testing.T) {
 		t.Fatalf("seats = claude %q, codex %q reason %q", claude.PlannedOutcome, codex.PlannedOutcome, result.Observations[1].ReasonCode)
 	}
 }
+
+// TestPrepareAdmitsCodexWorkspaceWriteSandboxPins protects issue #1212: a
+// Codex seat under --sandbox workspace-write takes its writable roots and
+// network access from config.toml unless -c pins them, and those pins must be
+// provider arguments inside the trust digest, not argv an embedder appends
+// after admission.
+func TestPrepareAdmitsCodexWorkspaceWriteSandboxPins(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	if err := fsq.EnsureAgentDirs(fixture.sessionRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	_, executable := testExecutable(t, CodexProvider)
+	fixture.request.Participants = append(fixture.request.Participants, PrepareParticipant{
+		Handle: "codex", Runnable: true, Provider: CodexProvider, Executable: executable,
+		Args: []string{"--sandbox", "workspace-write"}, Cwd: fixture.cwd, ResumePolicy: ResumeEnabled,
+		Execution: PrepareExecutionOptions{WakeMode: "enabled"},
+	})
+	dependencies := fixture.dependencies(&prepareTestBackend{})
+	dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+		if provider != CodexProvider {
+			return prepareTestAdapter{provider: provider}
+		}
+		adapter := NewCodexAdapter(executable)
+		adapter.probe = fakeCommandProbe{path: executable, outputs: map[string]string{
+			"--version": "codex-cli 0.154.0\n", "--help": "commands: resume",
+			"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
+		}}
+		return adapter
+	}
+	unpinned, err := Prepare(context.Background(), fixture.request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins := []string{"sandbox_workspace_write.writable_roots=[]", "sandbox_workspace_write.network_access=false"}
+	fixture.request.Participants[1].Args = append(fixture.request.Participants[1].Args, "-c", pins[0], "-c", pins[1])
+	pinned, err := Prepare(context.Background(), fixture.request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex := pinned.Participants[1]
+	if codex.PlannedOutcome != "fresh" || codex.Command == nil || !slices.Contains(codex.Command.Argv, pins[0]) || !slices.Contains(codex.Command.Argv, pins[1]) {
+		t.Fatalf("pinned codex seat = planned %q command %#v", codex.PlannedOutcome, codex.Command)
+	}
+	if pinned.TrustDigest == unpinned.TrustDigest {
+		t.Fatalf("sandbox pins did not change the trust digest %s", pinned.TrustDigest)
+	}
+	advertised := map[string][]string{}
+	for _, override := range ProviderStaticInputCapabilities(CodexProvider).ConfigOverrides {
+		advertised[override.Key] = override.AllowedValues
+	}
+	if !slices.Equal(advertised["sandbox_workspace_write.writable_roots"], []string{"[]"}) ||
+		!slices.Equal(advertised["sandbox_workspace_write.network_access"], []string{"true", "false"}) {
+		t.Fatalf("codex config overrides = %v", advertised)
+	}
+}
