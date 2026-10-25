@@ -143,16 +143,17 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	fs := flag.NewFlagSet("wake dialog", flag.ContinueOnError)
 	meFlag := fs.String("me", defaultMe(), "Agent handle (or AM_ME)")
 	rootFlag := fs.String("root", "", "Root directory for the queue (default: AM_ROOT, else .amqrc discovery from the hook's cwd)")
-	harness := fs.String("harness", "claude", "Hook input of claude or codex")
-	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex] open|close",
+	harness := fs.String("harness", "claude", "Hook input of claude, codex or cursor")
+	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close",
 		"Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook",
 		"installs it. Reads the hook input JSON on stdin.",
 		"",
 		"open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while",
 		"it is present. close removes it; a close with a tool_use_id removes only the marker",
 		"of that tool call, and a close with unreadable input keeps it. A close with empty",
-		"stdin removes it. With --harness codex only a turn or session event removes it;",
-		"without AM_* the seat is the one amq coop exec recorded for the hook's session_id.",
+		"stdin removes it. With --harness codex or cursor only a turn or session event",
+		"removes it; for codex without AM_* the seat is the one amq coop exec recorded for",
+		"the hook's session_id.",
 		"Always exits 0 once the arguments parse and prints nothing.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
@@ -164,8 +165,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	}
 	open := fs.Arg(0) == "open"
 	codex := *harness == "codex"
-	if !codex && *harness != "claude" {
-		return UsageError("wake dialog --harness must be claude or codex")
+	turn := codex || *harness == "cursor"
+	if !turn && *harness != "claude" {
+		return UsageError("wake dialog --harness must be claude, codex or cursor")
 	}
 
 	var in wakeDialogHookInput
@@ -209,10 +211,10 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
 		switch {
-		case codex && open:
-			return writeCodexDialogMarker(dirfd, agentDir, in)
-		case codex:
-			return clearCodexDialogMarker(dirfd, agentDir, in)
+		case turn && open:
+			return writeTurnDialogMarker(dirfd, agentDir, in, *harness)
+		case turn:
+			return clearTurnDialogMarker(dirfd, agentDir, in)
 		case open:
 			return writeWakeDialogMarker(dirfd, agentDir, in)
 		}
@@ -370,14 +372,14 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, toolUseID string) 
 // directory) runs the receiver, which resolves the root itself. Claude Code
 // reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and Stop,
 // and an older amq at this path would exit 2 on the unknown subcommand.
-func wakeDialogHookCommand(bin, verb string) string {
+// harnessFlag is empty for Claude Code, or a --harness flag and a space.
+func wakeDialogHookCommand(bin, harnessFlag, verb string) string {
 	gate := `[ -z "${AM_ME-}" ] || `
 	if verb == "close" {
 		gate += wakeDialogNoMarkerTest + ` || `
 	}
-	return wakeDialogHookMarker + gate +
-		"'" + strings.ReplaceAll(bin, "'", `'\''`) + "'" +
-		" --no-update-check wake dialog " + verb + " || true"
+	return wakeDialogHookMarker + gate + singleQuote(bin) +
+		" --no-update-check wake dialog " + harnessFlag + verb + " || true"
 }
 
 // wakeDialogNoMarkerTest succeeds only when AM_ROOT and AM_ME name exactly
@@ -406,7 +408,7 @@ func wakeDialogHooks(bin string) []claude.CommandHook {
 		hook := claude.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
-			Command: wakeDialogHookCommand(bin, wakeDialogHookVerb(event)),
+			Command: wakeDialogHookCommand(bin, "", wakeDialogHookVerb(event)),
 			Timeout: 5,
 		}
 		switch event {
@@ -425,10 +427,12 @@ func wakeDialogHooks(bin string) []claude.CommandHook {
 func runWakeInstallDialogHook(args []string) error {
 	fs := flag.NewFlagSet("wake install-dialog-hook", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "Print the hooks without changing the settings file")
-	harness := fs.String("harness", "claude", "claude, codex, or all (each harness whose home exists)")
-	usage := usageWithFlags(fs, "amq wake install-dialog-hook [--dry-run] [--harness claude|codex|all]",
-		"Install the wake dialog guard hooks in ~/.claude/settings.json, or with --harness",
-		"codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks).",
+	harness := fs.String("harness", "claude", "claude, codex, cursor, or all (each harness whose home exists)")
+	usage := usageWithFlags(fs, "amq wake install-dialog-hook [--dry-run] [--harness claude|codex|cursor|all]",
+		"Install the wake dialog guard hooks in ~/.claude/settings.json, with --harness",
+		"codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks),",
+		"or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session",
+		"starts; it holds the doorbell from a tool call to the end of that turn).",
 		"",
 		"While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,",
 		"the hooks keep a marker in the agent's mailbox and every wake of that agent",
@@ -445,7 +449,7 @@ func runWakeInstallDialogHook(args []string) error {
 	} else if handled {
 		return nil
 	}
-	claudeOn, codexOn, err := dialogHookHarnesses(*harness)
+	claudeOn, codexOn, cursorOn, err := dialogHookHarnesses(*harness)
 	if err != nil {
 		return err
 	}
@@ -455,6 +459,11 @@ func runWakeInstallDialogHook(args []string) error {
 	}
 	if codexOn {
 		if err := installCodexDialogHook(bin, *dryRun); err != nil {
+			return err
+		}
+	}
+	if cursorOn {
+		if err := installCursorDialogHook(bin, *dryRun); err != nil {
 			return err
 		}
 	}
@@ -495,46 +504,59 @@ func printDialogHooks(hooks []claude.CommandHook) error {
 	return nil
 }
 
-// dialogHookHarnesses reads --harness: claude, codex, or all, which picks
-// each harness whose home directory exists.
-func dialogHookHarnesses(harness string) (claudeOn, codexOn bool, err error) {
+// dialogHookHarnesses reads --harness: claude, codex, cursor, or all,
+// which picks each harness whose home directory exists.
+func dialogHookHarnesses(harness string) (claudeOn, codexOn, cursorOn bool, err error) {
 	switch harness {
 	case "claude":
-		return true, false, nil
+		return true, false, false, nil
 	case "codex":
-		return false, true, nil
+		return false, true, false, nil
+	case "cursor":
+		return false, false, true, nil
 	case "all":
+		isDir := func(path string) bool {
+			info, err := os.Stat(path)
+			return err == nil && info.IsDir()
+		}
 		if home, err := os.UserHomeDir(); err == nil {
-			info, err := os.Stat(filepath.Join(home, ".claude"))
-			claudeOn = err == nil && info.IsDir()
+			claudeOn = isDir(filepath.Join(home, ".claude"))
 		}
 		if path, err := codexHooksPath(); err == nil {
-			info, err := os.Stat(filepath.Dir(path))
-			codexOn = err == nil && info.IsDir()
+			codexOn = isDir(filepath.Dir(path))
 		}
-		return claudeOn, codexOn, nil
+		if path, err := cursorHooksPath(); err == nil {
+			cursorOn = isDir(filepath.Dir(path))
+		}
+		return claudeOn, codexOn, cursorOn, nil
 	}
-	return false, false, UsageError("--harness must be claude, codex or all")
+	return false, false, false, UsageError("--harness must be claude, codex, cursor or all")
 }
 
 func runWakeUninstallDialogHook(args []string) error {
 	fs := flag.NewFlagSet("wake uninstall-dialog-hook", flag.ContinueOnError)
-	harness := fs.String("harness", "claude", "claude, codex, or all (each harness whose home exists)")
-	usage := usageWithFlags(fs, "amq wake uninstall-dialog-hook [--harness claude|codex|all]",
+	harness := fs.String("harness", "claude", "claude, codex, cursor, or all (each harness whose home exists)")
+	usage := usageWithFlags(fs, "amq wake uninstall-dialog-hook [--harness claude|codex|cursor|all]",
 		"Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from",
-		"~/.claude/settings.json, or $CODEX_HOME/hooks.json with --harness codex.",
+		"~/.claude/settings.json, $CODEX_HOME/hooks.json with --harness codex, or",
+		"~/.cursor/hooks.json with --harness cursor.",
 		"Other settings and hooks are not changed.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	claudeOn, codexOn, err := dialogHookHarnesses(*harness)
+	claudeOn, codexOn, cursorOn, err := dialogHookHarnesses(*harness)
 	if err != nil {
 		return err
 	}
 	if codexOn {
 		if err := uninstallCodexDialogHook(); err != nil {
+			return err
+		}
+	}
+	if cursorOn {
+		if err := uninstallCursorDialogHook(); err != nil {
 			return err
 		}
 	}
@@ -597,7 +619,7 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)
 			return check, true
 		}
-		if hook.command != wakeDialogHookCommand(bin, wakeDialogHookVerb(hook.event)) {
+		if hook.command != wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
 			return check, true
 		}

@@ -92,7 +92,9 @@ required). Paste each complete command into a separate terminal; do not
 shorten or rebuild it.
 
 Optional, for Claude Code: `amq wake install-dialog-hook` keeps the wake from
-typing into an open AskUserQuestion, plan, or permission dialog.
+typing into an open AskUserQuestion, plan, or permission dialog. Add
+`--harness codex` or `--harness cursor` (or `--harness all`) for their
+approval prompts.
 
 Start both agents before sending the first message. Messages that arrive
 before a recipient's wake starts remain unread but do not trigger that new

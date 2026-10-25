@@ -113,10 +113,12 @@ func adoptCodexHookIdentity(sessionID string) error {
 	return adoptCodexThreadIdentity()
 }
 
-// writeCodexDialogMarker opens the hold for an approval prompt.
-func writeCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
+// writeTurnDialogMarker opens the hold of a Codex or Cursor guard, whose
+// marker only a turn or session event removes. It records no tool_use_id,
+// so no tool call's close can remove it.
+func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput, harness string) error {
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema: 1, Event: in.Event, Harness: "codex", Tool: in.Tool, TurnID: in.TurnID,
+		Schema: 1, Event: in.Event, Harness: harness, Tool: in.Tool, TurnID: in.TurnID,
 		SessionID: in.SessionID, OpenedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -125,10 +127,11 @@ func writeCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHook
 	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
 }
 
-// clearCodexDialogMarker removes the marker at a turn or session event. A
-// PostToolUse from an entry an earlier build installed keeps it.
-func clearCodexDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
-	if in.Event == "PostToolUse" {
+// clearTurnDialogMarker removes the marker at a turn or session event. A
+// tool call's PostToolUse (Codex) or postToolUse (Cursor) keeps it: neither
+// harness ties a prompt to the call that completed.
+func clearTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
+	if in.Event == "PostToolUse" || in.Event == "postToolUse" {
 		return nil
 	}
 	return clearWakeDialogMarker(dirfd, agentDir, "")

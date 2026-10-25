@@ -238,6 +238,52 @@ marker), entries disabled in `/hooks`, and entries whose stored
 user `config.toml` only; a project or profile layer that turns hooks off is
 not seen.
 
+## Dialog guard (Cursor approvals)
+
+Cursor's "Run this command?" prompt selects "Run (once)" by default, so a
+doorbell's Enter approves the command. Cursor runs no hook when the prompt
+opens (it maps Claude Code's `PermissionRequest` and `Notification` to
+nothing), but it runs `preToolUse` and waits for it to end before it decides
+whether to ask. The guard uses that:
+
+```bash
+amq wake install-dialog-hook --harness cursor   # or --harness all
+```
+
+The installer writes `AMQ_DIALOG_HOOK=1` entries into `~/.cursor/hooks.json`
+after the entries already there, and starts a missing file with
+`"version": 1`, without which Cursor loads none of it. Cursor deletes `//`
+to the end of a line and `/*` through the next `*/` before it parses the
+file, inside strings too, so the entries write each `/` as `\/` and each `*`
+as `\u002a`. Cursor reads the file when a session starts; restart running
+sessions after an install.
+
+- **Open and close.** `preToolUse`, with no matcher, opens the marker on
+  every tool call. Only a turn or session event closes it: `stop` (any
+  status, including `aborted` after Ctrl+C), `beforeSubmitPrompt`,
+  `sessionStart`, or `sessionEnd`. A `postToolUse` does not: parallel calls
+  share no prompt token, and Cursor reports a rejected call as a
+  `postToolUse` too. The doorbell therefore waits from a turn's first tool
+  call to the end of that turn, prompt or not. Every entry has a 5 second
+  timeout.
+- **Identity.** Cursor runs hooks in the agent's environment, so `AM_ME` and
+  `AM_ROOT` from `amq coop exec` or `amq launch` reach the receiver. The
+  commands carry the same shell gate as the Claude Code entries and
+  `--harness cursor`. Cursor also runs the hooks of `~/.claude/settings.json`
+  and drops a Claude Code hook whose command equals one of its own, so the
+  flag keeps both. The imported Claude Code dialog closes run on the same
+  turn events and remove the same marker; their `PreToolUse` and
+  `PostToolUse` matchers (`AskUserQuestion|ExitPlanMode`) name no Cursor
+  tool.
+- **Not covered.** Prompts that Cursor shows before any tool call run no
+  hook: ask-question, mode switch, web search, and image approval. Esc on
+  "Run this command?" opens "Tell the agent what to do instead"; that box is
+  inside the same turn, so the hold covers it.
+
+`amq doctor` reports, when `~/.cursor` exists, missing or partial entries, a
+hooks file without a positive integer `version`, a missing binary, or an
+older command.
+
 ## Dialog guard (pi prompts)
 
 pi asks "Trust project folder?" before a session starts in a folder with

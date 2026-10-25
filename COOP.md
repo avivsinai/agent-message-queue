@@ -234,12 +234,16 @@ doorbell while agy reports a permission or sign-in prompt. When you set
 `AGY_CLI_OSC7501` to anything but `on`, agy runs as before and a doorbell can
 answer its permission prompt.
 
-Cursor shows no signal AMQ can read when its approval prompt opens or
-closes, so `amq coop exec cursor-agent` keeps the full doorbell, and a
-doorbell that arrives while Cursor asks for approval can answer it (Enter
-selects the highlighted choice). Grok has no hook for its approval prompt, so
-`amq coop exec grok` keeps the full doorbell, and a doorbell that arrives
-while Grok asks for approval can answer it. Both are known limits.
+For Cursor, `amq wake install-dialog-hook --harness cursor` holds the
+doorbell from each tool call of an `amq coop exec cursor-agent` seat to the
+end of that turn, so a doorbell never answers "Run this command?" (Enter
+selects "Run (once)"). Cursor reads hooks only when a session starts, and it
+runs no hook for prompts it shows before any tool call: ask-question, mode
+switch, web search, and image approval. A doorbell can answer those; see
+[Dialog guard](docs/wake-operations.md#dialog-guard-cursor-approvals). Grok
+has no hook for its approval prompt, so `amq coop exec grok` keeps the full
+doorbell, and a doorbell that arrives while Grok asks for approval can answer
+it. That is a known limit.
 
 ### Supervisor recipes
 

@@ -94,6 +94,27 @@ func UninstallStopHook(home string) error {
 // installer and differ only here.
 type hookSpec struct {
 	event, marker string
+	// flat: each element of the event array is one hook script, as in
+	// Cursor's hooks.json, not a matcher group that holds a "hooks" array.
+	flat bool
+}
+
+// owns reports whether one element of spec's event array is, or holds, a
+// marked hook.
+func (s hookSpec) owns(el []byte) bool {
+	if s.flat {
+		return isOurHook(el, s.marker)
+	}
+	return groupHasOurHook(el, s.marker)
+}
+
+// seed is the content a missing file starts as. Cursor ignores a hooks
+// file without a positive integer "version".
+func (s hookSpec) seed() []byte {
+	if s.flat {
+		return []byte("{\"version\":1}\n")
+	}
+	return []byte("{}\n")
 }
 
 var (
@@ -136,7 +157,7 @@ func replaceHook(path string, spec hookSpec, entry []byte) error {
 	if len(groups) == 1 && sameJSON(groups[0], entry) {
 		return nil // already installed as asked
 	}
-	return editSettings(path, true, func(raw []byte) ([]byte, error) {
+	return editSettings(path, spec.seed(), func(raw []byte) ([]byte, error) {
 		if cut, err := rawRemoveEntries(raw, spec); err != nil {
 			return nil, err
 		} else if cut != nil {
@@ -180,7 +201,7 @@ func markedGroups(path string, spec hookSpec) ([][]byte, error) {
 	}
 	var out [][]byte
 	for _, g := range groups {
-		if groupHasOurHook(raw[g[0]:g[1]], spec.marker) {
+		if spec.owns(raw[g[0]:g[1]]) {
 			out = append(out, raw[g[0]:g[1]])
 		}
 	}
@@ -194,14 +215,20 @@ func installedCommands(path string, spec hookSpec) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	type hook struct {
+		Command string `json:"command"`
+	}
 	var out []string
 	for _, g := range groups {
 		var group struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
+			Hooks []hook `json:"hooks"`
 		}
-		if json.Unmarshal(g, &group) != nil {
+		if spec.flat {
+			group.Hooks = make([]hook, 1)
+			if json.Unmarshal(g, &group.Hooks[0]) != nil {
+				continue
+			}
+		} else if json.Unmarshal(g, &group) != nil {
 			continue
 		}
 		for _, h := range group.Hooks {
@@ -320,9 +347,25 @@ func InstallCommandHooks(home string, hooks []CommandHook) error {
 // InstallCommandHooksAt is InstallCommandHooks for the hooks file at path,
 // any file with the {"hooks":{event:[group...]}} shape.
 func InstallCommandHooksAt(path string, hooks []CommandHook) error {
+	return installCommandHooksAt(path, false, hooks)
+}
+
+// InstallCursorCommandHooksAt is InstallCommandHooksAt for a Cursor hooks
+// file, {"version":1,"hooks":{event:[{command,matcher,timeout}...]}}: each
+// array element is one hook script, and a missing file starts with the
+// version Cursor requires.
+func InstallCursorCommandHooksAt(path string, hooks []CommandHook) error {
+	return installCommandHooksAt(path, true, hooks)
+}
+
+func installCommandHooksAt(path string, flat bool, hooks []CommandHook) error {
 	for _, h := range hooks {
-		spec := hookSpec{event: h.Event, marker: h.Marker}
-		if err := replaceHook(path, spec, commandHookEntry(h.Command, h.Matcher, h.Timeout)); err != nil {
+		spec := hookSpec{event: h.Event, marker: h.Marker, flat: flat}
+		entry := commandHookEntry(h.Command, h.Matcher, h.Timeout)
+		if flat {
+			entry = cursorHookEntry(h.Command, h.Matcher, h.Timeout)
+		}
+		if err := replaceHook(path, spec, entry); err != nil {
 			return err
 		}
 	}
@@ -338,8 +381,18 @@ func UninstallCommandHooks(home, marker string, events []string) error {
 // UninstallCommandHooksAt is UninstallCommandHooks for the hooks file at
 // path.
 func UninstallCommandHooksAt(path, marker string, events []string) error {
+	return uninstallCommandHooksAt(path, marker, false, events)
+}
+
+// UninstallCursorCommandHooksAt is UninstallCommandHooksAt for a Cursor
+// hooks file.
+func UninstallCursorCommandHooksAt(path, marker string, events []string) error {
+	return uninstallCommandHooksAt(path, marker, true, events)
+}
+
+func uninstallCommandHooksAt(path, marker string, flat bool, events []string) error {
 	for _, event := range events {
-		if err := removeHook(path, hookSpec{event: event, marker: marker}); err != nil {
+		if err := removeHook(path, hookSpec{event: event, marker: marker, flat: flat}); err != nil {
 			return err
 		}
 	}
@@ -355,6 +408,12 @@ func MarkedHookCommands(home, event, marker string) ([]string, error) {
 // MarkedHookCommandsAt is MarkedHookCommands for the hooks file at path.
 func MarkedHookCommandsAt(path, event, marker string) ([]string, error) {
 	return installedCommands(path, hookSpec{event: event, marker: marker})
+}
+
+// MarkedCursorHookCommandsAt is MarkedHookCommandsAt for a Cursor hooks
+// file.
+func MarkedCursorHookCommandsAt(path, event, marker string) ([]string, error) {
+	return installedCommands(path, hookSpec{event: event, marker: marker, flat: true})
 }
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
@@ -495,27 +554,27 @@ func settingsPath(home string) string {
 
 // removeHook removes spec's marked entries from the settings file at path.
 func removeHook(path string, spec hookSpec) error {
-	return editSettings(path, false, func(raw []byte) ([]byte, error) {
+	return editSettings(path, nil, func(raw []byte) ([]byte, error) {
 		return rawRemoveEntries(raw, spec)
 	})
 }
 
 // editSettings applies edit to the bytes of the settings file at path and
 // writes the result atomically; a nil result writes nothing. A missing file
-// is started as {} when create is set, and is left alone otherwise.
-func editSettings(path string, create bool, edit func([]byte) ([]byte, error)) error {
+// is started as seed, and is left alone when seed is nil.
+func editSettings(path string, seed []byte, edit func([]byte) ([]byte, error)) error {
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("settings %s: %w", path, err)
 		}
-		if !create {
+		if seed == nil {
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		raw = []byte("{}\n")
+		raw = seed
 	}
 	out, err := edit(raw)
 	if err != nil {
@@ -608,6 +667,26 @@ func commandHookEntry(command, matcher string, timeout int) []byte {
 		Hooks   []hook `json:"hooks"`
 	}{Matcher: matcher, Hooks: []hook{{Type: "command", Command: command, Timeout: timeout}}})
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+}
+
+// cursorHookEntry renders one Cursor hook script: the command itself, with
+// no "type" (Cursor defaults to command) and no matcher when it is empty.
+// Before it parses a hooks file, Cursor deletes every "//" to the end of
+// its line and everything from "/*" to the next "*/", inside strings too,
+// so the entry writes each "/" as \/ and each "*" as \u002a: its bytes
+// hold none of those sequences, and it decodes to the same command.
+func cursorHookEntry(command, matcher string, timeout int) []byte {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(struct {
+		Command string `json:"command"`
+		Matcher string `json:"matcher,omitempty"`
+		Timeout int    `json:"timeout"`
+	}{Command: command, Matcher: matcher, Timeout: timeout})
+	out := bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+	out = bytes.ReplaceAll(out, []byte("/"), []byte(`\/`))
+	return bytes.ReplaceAll(out, []byte("*"), []byte(`\u002a`))
 }
 
 // jsonSpan is one container value in the raw bytes: open is the index of
@@ -909,7 +988,7 @@ func rawInsertEntry(raw []byte, spec hookSpec, entry []byte) ([]byte, error) {
 			return nil, err
 		}
 		for _, e := range els {
-			if groupHasOurHook(raw[e[0]:e[1]], spec.marker) {
+			if spec.owns(raw[e[0]:e[1]]) {
 				return nil, nil // already installed
 			}
 		}
@@ -939,7 +1018,7 @@ func rawRemoveEntries(raw []byte, spec hookSpec) ([]byte, error) {
 		if loc.stop == nil {
 			break
 		}
-		next, cut, err := cutOneMarkedHook(raw, *loc.stop, spec.marker)
+		next, cut, err := cutOneMarkedHook(raw, *loc.stop, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -955,12 +1034,19 @@ func rawRemoveEntries(raw []byte, spec hookSpec) ([]byte, error) {
 }
 
 // cutOneMarkedHook performs the first applicable cut in the Stop array.
-func cutOneMarkedHook(raw []byte, stop jsonSpan, marker string) ([]byte, bool, error) {
+func cutOneMarkedHook(raw []byte, stop jsonSpan, spec hookSpec) ([]byte, bool, error) {
+	marker := spec.marker
 	groups, err := arrayElements(raw, stop)
 	if err != nil {
 		return nil, false, err
 	}
 	for _, g := range groups {
+		if spec.flat {
+			if isOurHook(raw[g[0]:g[1]], marker) {
+				return cutItem(raw, g[0], g[1]), true, nil
+			}
+			continue
+		}
 		arr, ok := groupHooksArray(raw, g)
 		if !ok {
 			continue
