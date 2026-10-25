@@ -77,6 +77,7 @@ func runServe(args []string) int {
 
 	var token ghToken
 	memos := map[string]*providerMemo{}
+	limits := &serveLimits{}
 	live := &board.Live{
 		Load: func() (board.FileConfig, []string) { return loadConfig(dir) },
 		Now:  time.Now,
@@ -84,7 +85,7 @@ func runServe(args []string) int {
 		Ctx:  ctx,
 		Build: func(ctx context.Context, cfg board.FileConfig, force bool) board.Model {
 			runner := execRunner{}
-			opt := sourceOptions{refresh: force}
+			opt := sourceOptions{refresh: force, limits: limits.run}
 			if cfg.SourceGitHub && cfg.TokenOnce {
 				runner.ghToken, opt.ghAccount = token.get(ctx, newEnv(dir, runner), logf)
 			}

@@ -156,9 +156,10 @@ harness account reports about its limits. It reads the harnesses' own local
 records in place: Claude Code transcripts under `~/.claude/projects/`, Codex
 rollouts under `~/.codex/sessions/`, and pi sessions under
 `~/.pi/agent/sessions/`. It opens only those session files, keeps only their
-numeric usage fields, ids and timestamps, and makes no network call. A
-session counts for the project when its recorded working directory is in one
-of the project's Git worktrees.
+numeric usage fields, ids and timestamps, and makes no network call. Codex
+plan limits come from the Codex CLI instead (below). A session counts for
+the project when its recorded working directory is in one of the project's
+Git worktrees.
 
 - **Spent** is per worker. A harness session's spend goes to the agent that
   `amq session list --json` `conversations[]` ties it to (records in state
@@ -167,11 +168,32 @@ of the project's Git worktrees.
   shown beside it. Project sessions with no such record show under the
   account's "other sessions in this project". A working directory alone never
   attributes spend.
-- **Limits** are per account and never shown as a worker's budget: a Codex
-  credit balance with its age, a Claude limit reached until its reset, or
-  "limit unknown" with the reason (Claude Code writes plan usage only to its
-  status line; pi records no plan limits). A worker whose account reached a
-  limit shows "limit reached until HH:MM".
+- **Limits** are per account and never shown as a worker's budget: Codex
+  plan limits, a Claude limit reached until its reset, or "limit unknown"
+  with the reason (Claude Code writes plan usage only to its status line; pi
+  records no plan limits). A worker whose account reached a limit shows
+  "limit reached until HH:MM".
+- **Codex plan limits** come from the installed Codex CLI: amq-board starts
+  `codex -s read-only -a never app-server` with `CODEX_HOME` set to the
+  account's home and asks it, over its documented JSON-RPC interface on
+  stdio, for `account/read` and `account/rateLimits/read`. The Codex process
+  uses its own login and makes its own network call; amq-board reads no
+  credential file, keychain or cookie and passes no credential. Each window
+  shows its percent used and reset time, named by its duration (5 h, weekly),
+  never by its position; credits and a spend cap show as reported, as exact
+  decimals and never as money. A window the reply left null reads "windows
+  not reported in the app-server reply". Only Codex CLI 0.163.0 up to 1 is
+  read; another version shows why. Without a reading, the strip keeps the
+  credit balance Codex rollouts record.
+- One Codex account is read at most once per 5 minutes across every
+  amq-board run and serve. The readings, a journal of reserved runs, and the
+  collector lock are in `~/.amq/usage/` (mode 0700, files 0600); they hold no
+  response body, email, or raw account id. A one-shot run reads the saved
+  readings and starts the CLI only when a reading is due, waiting at most
+  3 s beside the other sources; serve waits at most 15 s. A failed read
+  waits the same 5 minutes, up to 15 minutes after repeated failures, or 1 h
+  for an unverified version or a reply not understood, and the strip names
+  the failure.
 - Each reader counts only records of the harness versions it was checked
   against: Claude Code 2.1.267 up to 3, Codex 0.114.0 up to 1, and pi
   session format 3. A record of any other version, or with none, is not
@@ -196,7 +218,7 @@ this:
 }
 ```
 
-- `enabled: false` reads no harness file.
+- `enabled: false` reads no harness file and starts no Codex CLI.
 - Homes listed under `homes` are read in addition to each harness's default
   home, each as its own account (a second Claude config directory, a second
   `CODEX_HOME`, a pi-format variant's home). A home listed twice, or the
