@@ -113,6 +113,17 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 // capability, so a caller that checked the capability against a session pin
 // updates exactly the directory it checked.
 func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
+	return ensureAgentOn(root, handle, true)
+}
+
+// EnsureAgentIfConfiguredOn registers handle through the root capability only
+// when config.json exists. A rosterless root stays rosterless, so registering
+// a companion does not introduce a partial roster for its existing agents.
+func EnsureAgentIfConfiguredOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
+	return ensureAgentOn(root, handle, false)
+}
+
+func ensureAgentOn(root *fsq.DeliveryRoot, handle string, create bool) (bool, error) {
 	if err := fsq.ValidateHandle(handle); err != nil {
 		return false, fmt.Errorf("invalid handle %q: %w", handle, err)
 	}
@@ -128,7 +139,7 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 		err   error
 	}
 	err := root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
-		result.added, result.err = ensureAgentLocked(r, handle)
+		result.added, result.err = ensureAgentLocked(r, handle, create)
 		return result.err
 	})
 	if err != nil {
@@ -153,12 +164,15 @@ func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
 // the first rewrite — JSON-semantically identical, stable thereafter).
 // The same preservation is shared by ALL config.json writers
 // (EnsureAgent/setup/apply overlay and the initializing writers, through
-// MarshalPreservingUnknowns). Creates the config when absent.
-func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
+// MarshalPreservingUnknowns). Creates an absent config only when create is true.
+func ensureAgentLocked(root *fsq.DeliveryRoot, handle string, create bool) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("read config: %w", err)
+		}
+		if !create {
+			return false, nil
 		}
 		// No config: create one with this handle. The create arm emits the
 		// same sorted layout as every other writer
@@ -180,7 +194,8 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	}
 	for _, a := range cfg.Agents {
 		if a == handle {
-			return false, nil // already present; no-op
+			// A visible registration can follow a failed post-rename sync.
+			return false, root.SyncDir("meta")
 		}
 	}
 	cfg.Agents = append(cfg.Agents, handle)
