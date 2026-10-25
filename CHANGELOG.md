@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.112.0](https://github.com/avivsinai/agent-message-queue/compare/v0.111.0...v0.112.0) (2026-10-25)
+
+
+### Features
+
+* **wake:** hold the doorbell while Cursor shows an approval prompt ([#1233](https://github.com/avivsinai/agent-message-queue/issues/1233)) ([cf991bd](https://github.com/avivsinai/agent-message-queue/commit/cf991bd3c1dc49d8c9d09a598385f572c8e8219c))
+
+
+### Bug Fixes
+
+* **board:** separate recent activity from live seats ([#1231](https://github.com/avivsinai/agent-message-queue/issues/1231)) ([e8ae799](https://github.com/avivsinai/agent-message-queue/commit/e8ae799834fbe37102d941177f196990d2ca23fb))
+* **coop:** hold the doorbell through every Codex startup prompt ([#1232](https://github.com/avivsinai/agent-message-queue/issues/1232)) ([2855817](https://github.com/avivsinai/agent-message-queue/commit/2855817adc3014dd15caf243dbb6d4522c570630))
+* **doctor:** show multiple Codex executables on PATH ([#1229](https://github.com/avivsinai/agent-message-queue/issues/1229)) ([72c37b3](https://github.com/avivsinai/agent-message-queue/commit/72c37b3e59745b93b1a32db988694822f7649a61))
+* **remote:** register mailbox carriers for strict replies ([#1230](https://github.com/avivsinai/agent-message-queue/issues/1230)) ([1325454](https://github.com/avivsinai/agent-message-queue/commit/1325454cf8c4455ae5ff6ae126ac5e60eb2482ee))
+
 ## [0.111.0](https://github.com/avivsinai/agent-message-queue/compare/v0.110.0...v0.111.0) (2026-10-25)
 
 
