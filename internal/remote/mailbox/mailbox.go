@@ -224,6 +224,13 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 		if decided || ent.Acked {
 			return core.Admission{Admitted: true, RunID: ent.MessageID}, nil
 		}
+		present, err := acp.InboxHasMessage(root, a.handle, ent.MessageID)
+		if err != nil {
+			return core.Admission{}, err
+		}
+		if present {
+			return core.Admission{Admitted: true, RunID: ent.MessageID}, nil
+		}
 	}
 	notAfter, err := protocol.ParseTime(req.NotAfter)
 	if err != nil {

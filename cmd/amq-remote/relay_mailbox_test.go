@@ -113,6 +113,7 @@ func TestDMToMailboxTargetDeliversMessageAndPublishesReply(t *testing.T) {
 
 	inbox := filepath.Join(root, "agents", "squad", "inbox", "new")
 	var prompt format.Message
+	deadline = time.Now().Add(5 * time.Second)
 	for {
 		if names, _ := os.ReadDir(inbox); len(names) > 0 {
 			if len(names) != 1 {
@@ -149,6 +150,7 @@ func TestDMToMailboxTargetDeliversMessageAndPublishesReply(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "agents", "buzz", "inbox", "new", replyID+".md"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	deadline = time.Now().Add(5 * time.Second)
 	for {
 		if err := ep.Tick(); err != nil {
 			t.Fatal(err)
