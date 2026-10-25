@@ -424,13 +424,15 @@ func buildRoster(ctx *AMQContext, roster []RosterEntry, items []Item, cfg Config
 				continue
 			}
 			a := RosterAgent{RosterEntry: e, Obligations: owes[[2]string{e.Session, e.Handle}]}
-			live := false
+			notifierLive, recentPresence := false, false
 			if !e.Human {
-				live = e.PresenceSource == "notifier_live" ||
-					(e.PresenceStatus != "" && e.PresenceStatus != "unknown" && e.PresenceAgeSeconds < cfg.LivenessWindow.Seconds())
+				notifierLive = e.PresenceSource == "notifier_live"
+				recentPresence = e.PresenceStatus != "" && e.PresenceStatus != "unknown" && e.PresenceAgeSeconds < cfg.LivenessWindow.Seconds()
 				a.Liveness = "quiet"
-				if live {
+				if notifierLive {
 					a.Liveness = "live"
+				} else if recentPresence {
+					a.Liveness = "recent"
 				}
 				if e.ValidHandle {
 					if act, ok := MessageAgent(e.Session, e.Handle); ok {
@@ -438,16 +440,25 @@ func buildRoster(ctx *AMQContext, roster []RosterEntry, items []Item, cfg Config
 					}
 				}
 			}
-			if live || e.UnreadCount > 0 || e.DLQCount > 0 || e.CountError != "" || a.Obligations > 0 || !e.ValidHandle {
+			if notifierLive || recentPresence || e.UnreadCount > 0 || e.DLQCount > 0 || e.CountError != "" || a.Obligations > 0 || !e.ValidHandle {
 				rs.Agents = append(rs.Agents, a)
 			} else {
 				rs.Quiet = append(rs.Quiet, a)
 			}
 		}
+		rank := func(state string) int {
+			switch state {
+			case "live":
+				return 0
+			case "recent":
+				return 1
+			default:
+				return 2
+			}
+		}
 		sort.SliceStable(rs.Agents, func(i, j int) bool {
-			li, lj := rs.Agents[i].Liveness == "live", rs.Agents[j].Liveness == "live"
-			if li != lj {
-				return li
+			if li, lj := rank(rs.Agents[i].Liveness), rank(rs.Agents[j].Liveness); li != lj {
+				return li < lj
 			}
 			return rs.Agents[i].Handle < rs.Agents[j].Handle
 		})
