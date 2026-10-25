@@ -236,8 +236,11 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   the update prompt (as above), the directory trust (Codex records that it trusts the
   directory), and the hook review. The hook review is ruled out only when
   Codex's own `hooks/list` for the launch directory, spelled as the TUI
-  spells it (the physical working directory with symlinks resolved, or a
-  `-C` directory against it), asked on the backend the TUI uses, lists every hook as trusted or managed, or none (Codex
+  spells it (the physical working directory with symlinks resolved; a
+  `-C` directory resolved against it to its real path, unless it lies below
+  a symlink that is not at the top level, which keeps the given spelling),
+  asked on the backend the TUI uses, lists every hook as trusted or
+  managed, or none (Codex
   reviews only untrusted and modified hooks): the managed daemon for
   a seat on the daemon, or a stdio `codex app-server` started with the
   seat's `CODEX_HOME`, directory, and `-c`, `--enable` and `--disable`

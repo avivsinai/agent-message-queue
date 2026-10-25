@@ -285,34 +285,43 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 		requirements string // the configRequirements/read reply line
 		config       string // the config/read reply line, or "" for the seat's -c false in effect
 		kind         string // the marker kind, or "" for none
-		// linkHooks, when set, is the hooks/list reply for a symlink to the
-		// checkout (%s the link), which is then the working directory.
-		linkHooks string
+		// linkHooks, when set, is the hooks/list reply for a logical
+		// spelling of the checkout (%s that spelling): a symlink that is the
+		// working directory, or with cdTopLevel the -C directory below a
+		// top-level symlink.
+		linkHooks  string
+		cdTopLevel bool
 	}{
-		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, "", "", ""},
-		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, "", "", ""},
-		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, "", wakeStartupKindReview, ""},
-		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, "", wakeStartupKindReview, ""},
+		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, "", "", "", false},
+		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, "", "", "", false},
+		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, "", wakeStartupKindReview, "", false},
+		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, "", wakeStartupKindReview, "", false},
 		// Review finding (bead agent-message-queue-uue): from a symlinked
 		// working directory AMQ asked hooks/list for the logical path, while
-		// the TUI asks for its physical cwd (core/src/config/mod.rs:3560-3576
-		// at rust-v0.164.0), where the project hooks are untrusted.
-		{"symlinked cwd, physical project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted")},
+		// the TUI asks for its physical cwd, where the project hooks are
+		// untrusted.
+		{"symlinked cwd, physical project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), false},
+		// Review finding (bead agent-message-queue-uue): the TUI
+		// canonicalizes a -C directory and keeps the logical spelling only
+		// below a symlink with a grandparent (utils/absolute-path/src/lib.rs:
+		// 210-227 at rust-v0.164.0), so under macOS /var it asks for the
+		// /private realpath, where the project hooks are untrusted.
+		{"-C under a top-level symlink, realpath project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), true},
 		// Field: every 0.164 seat held until typed after v0.112.0 (bead
 		// agent-message-queue-uue). The seat carries AMQ's
 		// check_for_update_on_startup=false, which no requirement pins on,
 		// so no update prompt can show on any version.
 		{"unverified release, update check off, requirements clear", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, "", "", ""},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, "", "", "", false},
 		{"requirements pin the update check on", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, "", wakeStartupKindUpdate, ""},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, "", wakeStartupKindUpdate, "", false},
 		// Review finding (bead agent-message-queue-uue): legacy managed
 		// layers rank above session flags (config/src/config_layer_source.rs:
 		// 22-27 at rust-v0.164.0), so the seat's -c false can lose; only the
 		// effective value counts.
 		{"a legacy managed layer turns the update check on", "0.165.0", hooks("trusted"), noRequirements,
 			`{"id":4,"result":{"config":{"check_for_update_on_startup":true},"origins":{"check_for_update_on_startup":{"name":{"type":"legacyManagedConfigTomlFromFile","file":"/etc/codex/managed_config.toml"},"version":"sha256:ab"}}}}`,
-			wakeStartupKindUpdate, ""},
+			wakeStartupKindUpdate, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -321,7 +330,34 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 				t.Fatal(err)
 			}
 			byCwd := map[string]string{"": fmt.Sprintf(tc.hooks, real)}
-			if tc.linkHooks != "" {
+			args := []string{"-c", "check_for_update_on_startup=false"}
+			switch {
+			case tc.cdTopLevel:
+				// /var is a top-level symlink to /private/var on macOS.
+				base, err := os.MkdirTemp("/var/tmp", "amq-cd-")
+				if err != nil {
+					t.Skip("no /var/tmp here")
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(base) })
+				logical := filepath.Join(base, "c")
+				if err := os.MkdirAll(filepath.Join(logical, ".git"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				canonical, err := filepath.EvalSymlinks(logical)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if canonical == logical {
+					t.Skip("/var is not a symlink here")
+				}
+				trusted = "[projects.\"" + logical + "\"]\ntrust_level = \"trusted\"\n[projects.\"" + canonical + "\"]\ntrust_level = \"trusted\"\n"
+				if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				byCwd[""] = fmt.Sprintf(tc.hooks, canonical)
+				byCwd[logical] = fmt.Sprintf(tc.linkHooks, logical)
+				args = append(args, "-C", logical)
+			case tc.linkHooks != "":
 				link := filepath.Join(t.TempDir(), "link")
 				if err := os.Symlink(real, link); err != nil {
 					t.Fatal(err)
@@ -334,7 +370,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 				byCwd[link] = fmt.Sprintf(tc.linkHooks, link)
 			}
 			bin := fakeCodexForTest(t, filepath.Dir(config), tc.version, byCwd, tc.requirements, tc.config)
-			if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
+			if err := syncStartupDialogMarker(h.root, "codex", bin, args, false); err != nil {
 				t.Fatal(err)
 			}
 			raw, err := os.ReadFile(marker)

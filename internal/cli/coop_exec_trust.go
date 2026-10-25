@@ -278,16 +278,45 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 }
 
 // codexPhysicalLaunchDir is the cwd a Codex TUI started with args in wd
-// sends to hooks/list, spelled as Codex spells it: the process's physical
-// working directory (wd with symlinks resolved), an absolute -C/--cd value
-// as given, or a relative one joined to the physical directory, each
-// normalized lexically (core/src/config/mod.rs:3560-3576 at rust-v0.164.0).
+// sends to hooks/list, spelled as Codex spells it
+// (tui/src/startup_orchestration.rs:278-282 and lib.rs:948-962
+// config_cwd_for_app_server_target at rust-v0.164.0): without -C/--cd the
+// process's physical working directory (wd with symlinks resolved); with
+// one, its value joined to that directory and canonicalized as
+// codexCanonicalizePreservingSymlinks does.
 func codexPhysicalLaunchDir(args []string, wd string) (string, bool) {
 	real, err := filepath.EvalSymlinks(wd)
 	if err != nil {
 		return "", false
 	}
-	return codexLaunchDir(args, real), true
+	return codexCanonicalizePreservingSymlinks(codexLaunchDir(args, real))
+}
+
+// codexCanonicalizePreservingSymlinks ports Codex's
+// canonicalize_existing_preserving_symlinks
+// (utils/absolute-path/src/lib.rs:210-227 at rust-v0.164.0): the realpath
+// of logical, except that logical stays as spelled when the realpath
+// differs and logical or an ancestor is a symlink that has a grandparent.
+// A top-level symlink such as macOS /tmp therefore reads as its realpath.
+// A path that cannot be resolved fails, as it does for Codex.
+func codexCanonicalizePreservingSymlinks(logical string) (string, bool) {
+	logical = filepath.Clean(logical)
+	canonical, err := filepath.EvalSymlinks(logical)
+	if err != nil {
+		return "", false
+	}
+	if canonical == logical {
+		return canonical, true
+	}
+	for ancestor := logical; ; ancestor = filepath.Dir(ancestor) {
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return canonical, true
+		}
+		if info, err := os.Lstat(ancestor); err == nil && info.Mode()&os.ModeSymlink != 0 && filepath.Dir(parent) != parent {
+			return logical, true
+		}
+	}
 }
 
 // startupDialogMarkerDecision keeps trust and update evidence independent.

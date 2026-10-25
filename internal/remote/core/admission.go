@@ -665,9 +665,10 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 // justifies. It is the ONE reading of (adm, nerr): a transport failure
 // proves nothing (attachment_lost keeps the correlation), admitted binds the
 // run, a cancelled-before-admission code is a positive non-admission, busy
-// for a local request sent nothing natively and leaves the busy tombstone
-// an identical resubmit re-admits, and any other code (busy for a Buzz or
-// link request included) is a positive refusal.
+// for a local request that the adapter sent nothing for leaves the busy
+// tombstone an identical resubmit re-admits, and any other code (busy after
+// a native call, or for a Buzz or link request, included) is a positive
+// refusal.
 func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nativeEvidence) {
 	nev := nativeEvidence{runID: adm.RunID}
 	switch {
@@ -677,7 +678,7 @@ func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nat
 		return causeAdmitted, nev
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		return causeCancelledBeforeAdmission, nev
-	case adm.Code == protocol.CodeBusy && !sessionBound(rec.Origin):
+	case adm.Code == protocol.CodeBusy && adm.NothingSent && !sessionBound(rec.Origin):
 		nev.reason = adm.Message
 		return causeBusyTombstone, nev
 	default:

@@ -444,7 +444,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
 	if seatStartupHeld(a.threadID) {
-		return core.Admission{Code: protocol.CodeBusy, Message: "the Codex seat on this thread has not passed its startup screens yet"}, nil
+		return core.Admission{Code: protocol.CodeBusy, Message: "the Codex seat on this thread has not passed its startup screens yet", NothingSent: true}, nil
 	}
 
 	input := []map[string]any{{"type": "text", "text": req.Input.Text}}
@@ -488,7 +488,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy:
-		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread"}, nil
+		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread", NothingSent: true}, nil
 	}
 
 	// Idle turn/start. Register the run first so onItem can confirm our
