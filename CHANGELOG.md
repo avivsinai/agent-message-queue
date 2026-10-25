@@ -8,6 +8,35 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.108.0](https://github.com/avivsinai/agent-message-queue/compare/v0.107.0...v0.108.0) (2026-10-25)
+
+
+### Features
+
+* **board:** fleet board core with AMQ and beads sources ([#1172](https://github.com/avivsinai/agent-message-queue/issues/1172)) ([fdd2579](https://github.com/avivsinai/agent-message-queue/commit/fdd25792b13af93aed663b740edd7160be0ad9fd))
+* **board:** GitHub source, board config, and external providers ([#1200](https://github.com/avivsinai/agent-message-queue/issues/1200)) ([e37f1be](https://github.com/avivsinai/agent-message-queue/commit/e37f1be4ed7e6cb079b1e62c36563bf9ccec6214))
+* **board:** show Claude permission waits on their agents ([#1207](https://github.com/avivsinai/agent-message-queue/issues/1207)) ([8ec4dcf](https://github.com/avivsinai/agent-message-queue/commit/8ec4dcf6cf13bdacee999e42d56c074fa520ffca))
+* **board:** show Codex goals for the current project ([#1202](https://github.com/avivsinai/agent-message-queue/issues/1202)) ([2defc0d](https://github.com/avivsinai/agent-message-queue/commit/2defc0dcc27aa073a644c84853f1ab346d446bfe))
+* **board:** show usage per worker and limits per account ([#1203](https://github.com/avivsinai/agent-message-queue/issues/1203)) ([80d1841](https://github.com/avivsinai/agent-message-queue/commit/80d18411082b0ca348b4c543d932336e49a909b5))
+* **cli:** classify agent registration from rosters and identity records ([#1195](https://github.com/avivsinai/agent-message-queue/issues/1195)) ([c3ca5db](https://github.com/avivsinai/agent-message-queue/commit/c3ca5db0c3edf6e3679a8de11c7fad47761f2422))
+* **cli:** list open review requests, questions and todos per thread ([#1166](https://github.com/avivsinai/agent-message-queue/issues/1166)) ([fb36ddb](https://github.com/avivsinai/agent-message-queue/commit/fb36ddb23f1c71b0779115e1dbd46e917bed0064))
+* **cli:** record and list which harness session belongs to each agent ([#1192](https://github.com/avivsinai/agent-message-queue/issues/1192)) ([1bbdac3](https://github.com/avivsinai/agent-message-queue/commit/1bbdac3108e453e6cba580ff651491124fc8a92d))
+* **cli:** show every agent with its registration in who, presence and doctor ([#1196](https://github.com/avivsinai/agent-message-queue/issues/1196)) ([70410ed](https://github.com/avivsinai/agent-message-queue/commit/70410ed5b2b0d1a38b3878266b61ac55f55aa909))
+* **coop:** one harness table, and generic wake behavior for unknown programs ([#1197](https://github.com/avivsinai/agent-message-queue/issues/1197)) ([59d17dc](https://github.com/avivsinai/agent-message-queue/commit/59d17dc210e72eaa55b63aec667b27e5d157bf9e))
+* **coop:** record which harness runs under a handle ([#1201](https://github.com/avivsinai/agent-message-queue/issues/1201)) ([fed4fc9](https://github.com/avivsinai/agent-message-queue/commit/fed4fc96f38973e96224ba40174c69c4dfb8d39d))
+* **launchapi:** let an embedder name the AMQ executable for managed panes ([#1186](https://github.com/avivsinai/agent-message-queue/issues/1186)) ([aaec267](https://github.com/avivsinai/agent-message-queue/commit/aaec267664a6df55cf149e296ca439b802b7ca6d))
+* **launch:** start and resume pi seats with amq launch ([#1188](https://github.com/avivsinai/agent-message-queue/issues/1188)) ([575934f](https://github.com/avivsinai/agent-message-queue/commit/575934fb0617a40204c00df49e4b54473c247008))
+* **pi:** hold the wake doorbell while a pi extension prompt is open ([#1199](https://github.com/avivsinai/agent-message-queue/issues/1199)) ([e5b79b4](https://github.com/avivsinai/agent-message-queue/commit/e5b79b4796163c2c1b6d9a1badd1dd7842503ba4))
+* **setup:** name an agent and its harness separately ([#1205](https://github.com/avivsinai/agent-message-queue/issues/1205)) ([38b2a98](https://github.com/avivsinai/agent-message-queue/commit/38b2a987a6d1ba804a7d2f94d4d7c0054191e466))
+
+
+### Bug Fixes
+
+* **board:** one GitHub refresh at a time across board runs ([#1208](https://github.com/avivsinai/agent-message-queue/issues/1208)) ([b054486](https://github.com/avivsinai/agent-message-queue/commit/b054486700424deebba89e9860a8dd0f3ec65699))
+* **coop:** keep the doorbell until Codex accepts input after its trust dialog ([#1204](https://github.com/avivsinai/agent-message-queue/issues/1204)) ([ea93c9a](https://github.com/avivsinai/agent-message-queue/commit/ea93c9a3647c69b737607a3f59a9234f7b078c19))
+* **coop:** remove legacy hook scripts and notify only on new Codex mail ([#1198](https://github.com/avivsinai/agent-message-queue/issues/1198)) ([2ce39dc](https://github.com/avivsinai/agent-message-queue/commit/2ce39dc95e414784884858c84ece6a77d08d3b6a))
+* **wake:** survive concurrent self-upgrades on macOS ([#1193](https://github.com/avivsinai/agent-message-queue/issues/1193)) ([46577ec](https://github.com/avivsinai/agent-message-queue/commit/46577ec98fd7aa61de89d6e3f6019d94542cd0df))
+
 ## [0.107.0](https://github.com/avivsinai/agent-message-queue/compare/v0.106.2...v0.107.0) (2026-10-23)
 
 
