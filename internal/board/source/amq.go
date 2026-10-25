@@ -81,7 +81,25 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 		res.Status = board.StatusDegraded
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
-	defer func() { res.Detail = strings.Join(problems, "; ") }()
+	// A mailbox doctor could not count keeps an unknown count on its roster
+	// row and is a coverage gap; only a failed or unreadable command
+	// degrades the source.
+	var uncounted []string
+	defer func() {
+		res.Detail = strings.Join(problems, "; ")
+		if n := len(uncounted); n > 0 {
+			noun := "mailbox"
+			if n > 1 {
+				noun = "mailboxes"
+			}
+			note := fmt.Sprintf("%d %s not counted: %s", n, noun, strings.Join(uncounted, ", "))
+			res.Coverage.Skipped += n
+			if res.Coverage.Detail != "" {
+				note = res.Coverage.Detail + "; " + note
+			}
+			res.Coverage.Detail = note
+		}
+	}()
 
 	// Project and peers only enrich the rest; without them the read goes on,
 	// degraded, because cross-project answer actions need the peer set.
@@ -132,7 +150,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 		} else {
 			for _, e := range entries {
 				if e.CountError != "" {
-					fail("doctor could not count %s/%s: %s", s.Name, e.Handle, e.CountError)
+					uncounted = append(uncounted, s.Name+"/"+e.Handle)
 				}
 				counted[e.Handle] = e
 			}

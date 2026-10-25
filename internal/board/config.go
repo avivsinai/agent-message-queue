@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 // ConfigFile is the board configuration's name, under ~/.amq for the user
@@ -41,6 +43,9 @@ type FileConfig struct {
 	TokenOnce          bool
 	ReadyToMergeWaitsH bool
 	Providers          []Provider
+	// Usage is the "usage" key of the user file, loaded with the rest so
+	// that serve keeps it with the last good configuration.
+	Usage usage.Settings
 }
 
 // DefaultFileConfig is the configuration with no file.

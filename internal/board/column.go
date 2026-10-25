@@ -32,7 +32,9 @@ func (c Column) Title() string {
 // Place is the only place a column is decided (design 3.3). It looks at
 // typed state, owner kind, and WaitsOn of the card's open items, first match
 // wins, and returns the index of the item that placed the card (-1 when
-// hidden). Free text never reaches this function.
+// hidden). Free text never reaches this function. Waiting on you means a
+// structured field needs the human's action; work the human owns and can
+// move is In flight, and only human-owned blocked work waits on the human.
 func Place(items []Item) (Column, int) {
 	human := func(o Owner) bool { return o.Kind == OwnerHuman }
 	if i := first(items, func(it Item) bool {
@@ -44,7 +46,7 @@ func Place(items []Item) (Column, int) {
 				return true
 			}
 		}
-		return human(it.Owner) && (it.State == StateActive || it.State == StateBlocked)
+		return human(it.Owner) && it.State == StateBlocked
 	}); i >= 0 {
 		return ColumnWaiting, i
 	}
