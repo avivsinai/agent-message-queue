@@ -51,7 +51,7 @@ func (a setupFixtureAdapter) ValidateCommittedConfig(launch.CommittedConfigReque
 }
 
 func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
-	project := setupProjectFixture(t, "claude", "codex", "grok")
+	project := setupProjectFixture(t, "claude", "codex", "grok", launch.CursorProvider)
 	const gitignoreBefore = "# user-owned bytes\ncustom/cache\n"
 	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte(gitignoreBefore), 0o644); err != nil {
 		t.Fatal(err)
@@ -130,6 +130,88 @@ func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
 	after := setupTreeDigest(t, project)
 	if before != after {
 		t.Fatalf("matching rerun changed tree digest: %x != %x", before, after)
+	}
+
+	// Review finding on #1205: a Cursor entry stored under its "agent" alias
+	// was rebuilt by reviewer=agent, losing its arguments, environment, cwd,
+	// and resume policy. Both Cursor names select the stored entry unchanged.
+	setupCommitStepHook = nil
+	if _, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"-y", "--agents", "claude,codex,grok,reviewer=cursor-agent", "--json"})
+	}); err != nil {
+		t.Fatalf("add reviewer: %v", err)
+	}
+	projectPath := filepath.Join(project, setupConfigPath)
+	if projectRaw, err = os.ReadFile(projectPath); err != nil {
+		t.Fatal(err)
+	}
+	if projectConfig, err = launch.ParseProjectConfig(projectRaw); err != nil {
+		t.Fatal(err)
+	}
+	for i, agent := range projectConfig.Agents {
+		if agent.Handle == "reviewer" {
+			projectConfig.Agents[i] = launch.ProjectAgentConfig{
+				Handle: "reviewer", Adapter: "agent", Command: []string{"agent", "--model", "gpt-5"},
+				Env: map[string]string{"CURSOR_PROFILE": "review"}, Cwd: "docs", ResumePolicy: launch.ResumeFresh,
+			}
+		}
+	}
+	stored, err := launch.MarshalProjectConfig(projectConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, stored, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, selection := range []string{"reviewer=agent", "reviewer=cursor-agent"} {
+		if _, err := captureEnvStdout(t, func() error {
+			return runSetup([]string{"-y", "--agents", "claude,codex,grok," + selection, "--json"})
+		}); err != nil {
+			t.Fatalf("setup %s: %v", selection, err)
+		}
+		got, err := os.ReadFile(projectPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(stored) {
+			t.Fatalf("setup %s rewrote the stored Cursor entry:\n%s", selection, got)
+		}
+	}
+}
+
+func TestSetupNamesAgentApartFromItsAdapter(t *testing.T) {
+	project := setupProjectFixture(t, "claude")
+	if _, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"-y", "--agents", "reviewer=claude", "--default-session", "work", "--launcher-preference", "commands", "--json"})
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	projectRaw, err := os.ReadFile(filepath.Join(project, setupConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectConfig, err := launch.ParseProjectConfig(projectRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectConfig.Agents) != 1 {
+		t.Fatalf("agents = %#v", projectConfig.Agents)
+	}
+	agent := projectConfig.Agents[0]
+	if agent.Handle != "reviewer" || agent.Adapter != "claude" || !slices.Equal(agent.Command, []string{"claude"}) {
+		t.Fatalf("agent = %#v, want handle reviewer through adapter claude", agent)
+	}
+	root := filepath.Join(project, defaultCoopRoot)
+	if got := readAgentRoster(root).Agents; !slices.Equal(got, []string{"reviewer"}) {
+		t.Fatalf("roster = %v, want [reviewer]", got)
+	}
+	for _, base := range []string{root, filepath.Join(root, "work")} {
+		if err := validateSetupMailbox(base, "reviewer"); err != nil {
+			t.Fatalf("mailbox %s/reviewer: %v", base, err)
+		}
+		if _, err := os.Stat(filepath.Join(base, "agents", "claude")); !os.IsNotExist(err) {
+			t.Fatalf("adapter name became a mailbox under %s: %v", base, err)
+		}
 	}
 }
 

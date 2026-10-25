@@ -127,7 +127,7 @@ func setupAgentExplanations(agents []launch.ProjectAgentConfig) []string {
 func runSetup(args []string) (returnErr error) {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	rootFlag := fs.String("root", defaultCoopRoot, "Queue root written to .amqrc")
-	agentsFlag := fs.String("agents", "", "Comma-separated detected agent adapters")
+	agentsFlag := fs.String("agents", "", "Comma-separated agents: an adapter (claude) or handle=adapter (reviewer=claude)")
 	sessionFlag := fs.String("default-session", "", "Default session name")
 	launchersFlag := fs.String("launcher-preference", "", "Comma-separated launcher preference")
 	layoutFlag := fs.String("layout", launch.LayoutColumns, "Advisory layout intent")
@@ -578,18 +578,20 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 	}
 	names = dedupeStrings(names)
 	sort.Strings(names)
-	var selected []string
+	var selected []setupAgentSelection
 	switch {
 	case options.agentsExplicit:
 		var err error
-		selected, err = parseCoopInitAgents(options.agents)
+		selected, err = parseSetupAgents(options.agents)
 		if err != nil {
 			return nil, err
 		}
 	case exists && options.nonInteractive:
 		return append([]launch.ProjectAgentConfig(nil), existing.Agents...), nil
 	case options.nonInteractive:
-		selected = names
+		for _, name := range names {
+			selected = append(selected, setupAgentSelection{Handle: name, Adapter: name})
+		}
 	default:
 		if len(names) == 0 {
 			return nil, fmt.Errorf("no supported agent CLI detected")
@@ -602,7 +604,7 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 		if err != nil {
 			return nil, err
 		}
-		selected, err = parseCoopInitAgents(line)
+		selected, err = parseSetupAgents(line)
 		if err != nil {
 			return nil, err
 		}
@@ -611,28 +613,84 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 		return nil, fmt.Errorf("no supported agent CLI detected")
 	}
 	agents := make([]launch.ProjectAgentConfig, 0, len(selected))
-	for _, name := range selected {
-		if agent, ok := existingByHandle[name]; ok {
+	for _, selection := range selected {
+		adapterName := setupAdapterIdentity(selection.Adapter)
+		// An existing entry is kept byte-for-byte unless the selection names
+		// a different adapter for its handle.
+		if agent, ok := existingByHandle[selection.Handle]; ok && (!selection.Explicit || setupAdapterIdentity(agent.Adapter) == adapterName) {
 			agents = append(agents, agent)
 			continue
 		}
-		adapterName := name
-		if launch.ProviderForExecutable(name) == launch.CursorProvider {
-			adapterName = launch.CursorProvider
-		}
 		if _, ok := available[adapterName]; !ok {
-			return nil, UsageError("agent %q is not available through a supported adapter probe", name)
+			return nil, UsageError("agent %q is not available through a supported adapter probe", selection.Adapter)
 		}
-		command := name
+		command := selection.Adapter
 		if adapterName == launch.CursorProvider {
 			command = setupCursorCommand()
 		}
 		agents = append(agents, launch.ProjectAgentConfig{
-			Handle: name, Adapter: adapterName, Command: []string{command}, ResumePolicy: launch.ResumeEnabled,
+			Handle: selection.Handle, Adapter: adapterName, Command: []string{command}, ResumePolicy: launch.ResumeEnabled,
 		})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Handle < agents[j].Handle })
 	return agents, nil
+}
+
+// setupAdapterIdentity returns the adapter that serves an adapter name, as
+// stored or selected: every Cursor executable alias is the Cursor adapter.
+func setupAdapterIdentity(adapter string) string {
+	if launch.ProviderForExecutable(adapter) == launch.CursorProvider {
+		return launch.CursorProvider
+	}
+	return adapter
+}
+
+// setupAgentSelection is one --agents entry. A bare name is both the handle
+// and the adapter; handle=adapter names the agent apart from its harness.
+type setupAgentSelection struct {
+	Handle   string
+	Adapter  string
+	Explicit bool
+}
+
+// parseSetupAgents parses a comma-separated agent list sorted by handle. Only
+// the handle reaches rosters and mailboxes; one handle maps to one adapter.
+func parseSetupAgents(raw string) ([]setupAgentSelection, error) {
+	byHandle := map[string]setupAgentSelection{}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	for _, part := range parts {
+		handlePart, adapter, explicit := strings.Cut(part, "=")
+		handle, err := normalizeHandle(handlePart)
+		if err != nil {
+			return nil, err
+		}
+		adapter = strings.TrimSpace(adapter)
+		if !explicit {
+			adapter = handle
+		} else if adapter == "" {
+			return nil, UsageError("agent %q names no adapter after '='", handle)
+		}
+		if previous, ok := byHandle[handle]; ok {
+			if previous.Adapter != adapter {
+				return nil, UsageError("agent %q is given two adapters: %q and %q", handle, previous.Adapter, adapter)
+			}
+			if previous.Explicit {
+				continue
+			}
+		}
+		byHandle[handle] = setupAgentSelection{Handle: handle, Adapter: adapter, Explicit: explicit}
+	}
+	if len(byHandle) == 0 {
+		return nil, UsageError("at least one agent required")
+	}
+	selected := make([]setupAgentSelection, 0, len(byHandle))
+	for _, selection := range byHandle {
+		selected = append(selected, selection)
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Handle < selected[j].Handle })
+	return selected, nil
 }
 
 func chooseSetupSession(options setupOptions, existing launch.ProjectConfig, exists bool) (string, error) {

@@ -75,6 +75,9 @@ amq setup
 
 Select the agents and launcher, then confirm the preview. Setup writes the
 project configuration and creates the default session and its mailboxes.
+An agent's handle is its harness name (`claude`, `codex`) unless you enter
+`handle=harness`, for example `reviewer=claude`. Only the handle goes into the
+roster and the mailboxes.
 
 ### 4. Start both agents
 
