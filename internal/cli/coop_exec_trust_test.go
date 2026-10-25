@@ -288,12 +288,7 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = childEnd.Close()
-	t.Cleanup(func() { wakeStartupHoldFile = nil })
-	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
-	released, err := wakeStartupHoldFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
+	released := adoptWakeStartupHoldForTest(t, hold, fd)
 	agentDir, err := openWakeAgentDir(h.root, "codex")
 	if err != nil {
 		t.Fatal(err)
@@ -394,11 +389,7 @@ func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = childEnd.Close()
-	t.Cleanup(func() { wakeStartupHoldFile = nil })
-	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
-	if _, err := wakeStartupHoldFromEnv(); err != nil {
-		t.Fatal(err)
-	}
+	adoptWakeStartupHoldForTest(t, hold, fd)
 	successorEnv := carryWakeStartupHold(nil)
 	var value string
 	for _, entry := range successorEnv {
@@ -413,12 +404,17 @@ func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
 	if err != nil || flags&unix.FD_CLOEXEC != 0 {
 		t.Fatalf("startup hold fd flags = %#x, %v; it would close at the restart exec", flags, err)
 	}
-	// The successor adopts the same descriptor after exec.
-	t.Setenv(envWakeStartupHold, value)
-	released, err := wakeStartupHoldFromEnv()
+	// After exec the successor alone owns the carried descriptor. In this one
+	// process it adopts a duplicate, so each adopted file closes its own.
+	carried, err := strconv.Atoi(value)
+	if err != nil || carried != fd {
+		t.Fatalf("restart env carries startup hold %q, want fd %d", value, fd)
+	}
+	successorFD, err := unix.Dup(carried)
 	if err != nil {
 		t.Fatal(err)
 	}
+	released := adoptWakeStartupHoldForTest(t, hold, successorFD)
 	select {
 	case <-released:
 		t.Fatal("successor released the hold before coop exec did")
@@ -426,6 +422,30 @@ func TestWakeRestartKeepsAPendingStartupHold(t *testing.T) {
 	}
 	_ = hold.Close()
 	<-released
+}
+
+// adoptWakeStartupHoldForTest adopts fd as a wake's startup hold and, once
+// hold is closed and the wake saw the release, closes the adopted file.
+// A CI run failed TestCoopWakeAllModesInstallExactOwnerSupervisor with
+// "stat .wake.lifecycle.lock: bad file descriptor": the restart test had
+// adopted one fd number into two files, and the second finalizer closed
+// that number after a later test reused it for its lock. Each adoption here
+// owns its own descriptor and closes it exactly once.
+func adoptWakeStartupHoldForTest(t *testing.T, hold *os.File, fd int) <-chan struct{} {
+	t.Helper()
+	t.Setenv(envWakeStartupHold, strconv.Itoa(fd))
+	released, err := wakeStartupHoldFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted := wakeStartupHoldFile
+	t.Cleanup(func() {
+		_ = hold.Close()
+		<-released
+		_ = adopted.Close()
+		wakeStartupHoldFile = nil
+	})
+	return released
 }
 
 // #1190 review: a remover read the marker, compared it, then unlinked
