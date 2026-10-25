@@ -49,6 +49,10 @@ const (
 	maxReplyTimeout     = 24 * time.Hour
 )
 
+// windowClosed is the reason a request whose not_after passed before its
+// message was written is not delivered.
+const windowClosed = "the submit window closed before delivery"
+
 type config struct {
 	Handle       string `json:"handle"`
 	ReplyTimeout string `json:"reply_timeout,omitempty"`
@@ -210,9 +214,20 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 	if err != nil {
 		return core.Admission{}, err
 	}
+	// An entry may be visible without being durable (the barrier of the
+	// call that wrote it failed), so it is made durable before Submit
+	// accepts any state it records.
+	if found {
+		if err := a.barrier(root); err != nil {
+			return core.Admission{}, err
+		}
+	}
 	if found && ent.Undelivered != "" {
 		if ent.Cancelled {
 			return core.Admission{Code: protocol.CodeCancelledBeforeAdmission, Message: ent.Undelivered}, nil
+		}
+		if ent.Undelivered == windowClosed {
+			return core.Admission{Code: protocol.CodeExpired, Message: windowClosed}, nil
 		}
 		return core.Admission{Code: protocol.CodeNativeError, Message: notDelivered(a.handle, ent.Undelivered)}, nil
 	}
@@ -236,8 +251,8 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 	if err != nil {
 		return core.Admission{}, fmt.Errorf("mailbox: not_after: %w", err)
 	}
-	if !a.now().Before(notAfter) {
-		return core.Admission{Code: protocol.CodeExpired, Message: "the submit window closed before delivery"}, nil
+	if !a.now().Before(notAfter) && !found {
+		return core.Admission{Code: protocol.CodeExpired, Message: windowClosed}, nil
 	}
 	if !found {
 		now := a.now()
@@ -250,15 +265,24 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 		if err := a.createEntry(root, ref, ent); err != nil {
 			return core.Admission{}, err
 		}
-	}
-	// The entry may be visible without being durable (an earlier barrier
-	// failed), so it is made durable before any message can exist.
-	if err := a.barrier(root); err != nil {
-		return core.Admission{}, err
+		// The entry is durable before any message can exist.
+		if err := a.barrier(root); err != nil {
+			return core.Admission{}, err
+		}
 	}
 	created, err := time.Parse(time.RFC3339Nano, ent.Created)
 	if err != nil || ent.Prompt == nil || ent.MessageID == "" {
 		return core.Admission{}, fmt.Errorf("mailbox: journal entry %s is unreadable; refusing to deliver", ref)
+	}
+	// The window is checked again right before the write: the journal and
+	// its barrier may have taken it. An entry that exists records the
+	// non-delivery, so Forget can remove it.
+	if !a.now().Before(notAfter) {
+		ent.Undelivered = windowClosed
+		if err := a.writeEntry(root, ref, ent); err != nil {
+			return core.Admission{}, err
+		}
+		return core.Admission{Code: protocol.CodeExpired, Message: windowClosed}, nil
 	}
 	err = acp.PublishMailboxPrompt(root, ent.MessageID, created, *ent.Prompt)
 	if reason, refused := acp.NotDeliveredReason(err); refused {
@@ -500,10 +524,10 @@ func (a *Attachment) AcknowledgeResultChecked(key requests.Key, _ string, digest
 	defer a.enter(ref)()
 	return a.locked(ref, true, func(root *fsq.DeliveryRoot) error {
 		ent, found, err := a.readEntry(root, ref)
-		if err != nil || !found {
+		if err != nil {
 			return err
 		}
-		if !ent.Acked {
+		if found && !ent.Acked {
 			out, decided, err := a.readOutcome(root, ref)
 			if err != nil {
 				return err

@@ -1080,10 +1080,20 @@ func FindReplies(root *fsq.DeliveryRoot, inbox, handle, thread, promptID string,
 }
 
 // ConsumeReply drains one reply found by FindReplies for consumer, the
-// owner of inbox: a move from new to cur (one already in cur stays there)
-// and the drained receipt. Both steps are idempotent.
+// owner of inbox: a move from new to cur and the drained receipt. nil means
+// both are durable. A move whose directory sync failed is returned; a reply
+// already gone from new (an earlier move, maybe unsynced, or another
+// consumer's) gets both inbox directories synced again. Both steps are
+// idempotent.
 func ConsumeReply(root *fsq.DeliveryRoot, consumer string, r MailboxReply) error {
-	if _, err := moveReply(root, consumer, r.Name); err != nil {
+	err := fsq.MoveNewToCur(root, consumer, r.Name)
+	if os.IsNotExist(err) {
+		inbox := filepath.Join("agents", consumer, "inbox")
+		if err = root.SyncDir(filepath.Join(inbox, "cur")); err == nil {
+			err = root.SyncDir(filepath.Join(inbox, "new"))
+		}
+	}
+	if err != nil {
 		return err
 	}
 	return drainedReceipt(root, consumer, r.Header)
