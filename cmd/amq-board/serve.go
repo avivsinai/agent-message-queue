@@ -76,7 +76,7 @@ func runServe(args []string) int {
 			runner := execRunner{}
 			opt := sourceOptions{refresh: force}
 			if cfg.SourceGitHub && cfg.TokenOnce {
-				runner.ghToken, opt.ghAccount = token.get(ctx, newEnv(dir, runner), logf)
+				runner.ghToken = token.get(ctx, newEnv(dir, runner), logf)
 			}
 			opt.provider = func(e source.External) board.Source {
 				m := memos[e.Provider.Name]
@@ -131,16 +131,15 @@ func randomToken() (string, error) {
 }
 
 // ghToken is forges.github.token_once: `gh auth token` is read once per
-// process, with the account it belongs to, and later gh calls get it as
-// GH_TOKEN, so a serve session reads the keychain once. The token stays in
-// memory. When GH_TOKEN or GITHUB_TOKEN is already set, gh uses that and
-// nothing is read.
+// process and later gh calls get it as GH_TOKEN, so a serve session reads
+// the keychain once. The token stays in memory and reaches gh only. When
+// GH_TOKEN or GITHUB_TOKEN is already set, gh uses that and nothing is read.
 type ghToken struct {
-	once           sync.Once
-	token, account string
+	once  sync.Once
+	token string
 }
 
-func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...any)) (string, string) {
+func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...any)) string {
 	t.once.Do(func() {
 		if os.Getenv("GH_TOKEN") != "" || os.Getenv("GITHUB_TOKEN") != "" {
 			return
@@ -153,15 +152,9 @@ func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...a
 			logf("GitHub token not read; each gh call reads it: %v", err)
 			return
 		}
-		user, err := env.Run.Run(ctx, env.Dir, []string{"gh", "config", "get", "user", "-h", "github.com"})
-		if err != nil {
-			logf("GitHub account not read; each gh call reads the token: %v", err)
-			return
-		}
 		t.token = strings.TrimSpace(string(out))
-		t.account = strings.ToLower(strings.TrimSpace(string(user)))
 	})
-	return t.token, t.account
+	return t.token
 }
 
 // providerMemo is one external provider's last successful output.

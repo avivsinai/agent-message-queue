@@ -33,8 +33,11 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 			Ref: obligation, Title: hostile, State: StateNeedsHuman, Structural: true,
 			Owner:     Owner{Kind: OwnerHuman, Handle: "user"},
 			Requester: &agent, WaitsOn: []Owner{agent},
-			Reason:   Reason{Field: hostile, Text: hostile, Since: now.Add(-time.Hour)},
-			Evidence: []Evidence{{Field: hostile, Value: hostile, Text: hostile, At: now, URL: "javascript:alert(1)"}},
+			Reason: Reason{Field: hostile, Text: hostile, Since: now.Add(-time.Hour)},
+			Evidence: []Evidence{
+				{Field: hostile, Value: hostile, Text: hostile, At: now, URL: "javascript:alert(1)"},
+				{Field: hostile, Value: hostile, At: now, URL: "https://forge.example.net/o/r/pull/1"},
+			},
 			Obligation: &ObligationFacts{
 				OpenerID: hostile, Thread: hostile, OwnerSession: hostile,
 				Destination:    &Destination{Handle: hostile, Session: hostile, Project: hostile},
@@ -101,11 +104,13 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	if strings.Contains(outside, "javascript:") {
 		t.Error("page links a non-https URL")
 	}
+	// PR #1209 review: an https URL on a host that is not a configured forge
+	// became a link; it must stay text.
+	if strings.Contains(outside, `href="https://forge.example.net`) {
+		t.Error("page links an https URL outside the configured forge hosts")
+	}
 	if !strings.Contains(outside, "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;") {
 		t.Error("hostile text is not rendered escaped")
-	}
-	if strings.Contains(pageJS, "innerHTML") || strings.Contains(pageJS, "outerHTML") || strings.Contains(pageJS, "insertAdjacentHTML") || strings.Contains(pageJS, "document.write") {
-		t.Error("page script builds markup from strings")
 	}
 	for _, c := range m.Columns {
 		for _, card := range c.Cards {

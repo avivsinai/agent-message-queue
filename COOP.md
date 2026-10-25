@@ -29,6 +29,10 @@ own terminal exactly as printed. The command carries the session, launch nonce,
 execution ticket, and provider command from `.amq/launch.json`; do not rebuild it
 from an example.
 
+Each agent runs under its handle from `.amq/launch.json`. To name an agent
+apart from its harness, configure it with `amq setup --agents reviewer=claude`;
+for a direct run, use `amq coop exec --me reviewer claude`.
+
 Start both agents before sending a first message. A newly started wake can
 baseline messages already waiting, leaving them unread without notifying. If a
 message was sent first, run `amq drain --include-body` in the target agent.

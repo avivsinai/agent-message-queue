@@ -55,7 +55,7 @@ smoke:
 	./scripts/smoke-test.sh
 
 # Static gates the pre-push hook runs; tests and smoke run in CI.
-check: check-skills check-docs-cli mod-tidy-check fmt-check vet lint
+check: check-skills check-docs-cli check-board-page mod-tidy-check fmt-check vet lint
 
 ci: check test smoke contract-check hook-env-check
 
@@ -79,6 +79,12 @@ contract-check:
 check-skills:
 	@bash scripts/test_check_skills.sh
 	@bash scripts/check-skills.sh
+
+# The board page script builds no markup from strings and no event handler
+# from a string: escaping stays in html/template, the release gate of the page.
+check-board-page:
+	@! grep -nE 'innerHTML|outerHTML|insertAdjacentHTML|document\.write|setAttribute\(.on[a-z]|\.on[a-z]+[[:space:]]*=[^=]' internal/board/web/page.js || \
+		{ echo "internal/board/web/page.js uses a DOM API that parses strings as markup or code" >&2; exit 1; }
 
 # Generate the human-facing command reference from the real CLI help output.
 docs-cli:

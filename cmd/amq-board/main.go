@@ -144,8 +144,7 @@ func loadConfig(dir string) (board.FileConfig, []string) {
 
 // sourceOptions are what differ between the one-shot faces and serve.
 type sourceOptions struct {
-	refresh   bool   // ignore the forge cache
-	ghAccount string // the account a token read once belongs to; empty: look it up
+	refresh bool // ignore the forge cache
 	// provider wraps each enabled external provider; nil reads it on every
 	// refresh.
 	provider func(source.External) board.Source
@@ -161,7 +160,6 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
 		TTL:                      cfg.GitHubTTL,
 		Refresh:                  opt.refresh,
-		Account:                  opt.ghAccount,
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
 	if cfg.SourceBeads {
@@ -175,7 +173,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 	} else {
 		sources = append(sources, board.Disabled{SourceName: "beads"})
 	}
-	sources = append(sources, source.CodexGoals{})
+	sources = append(sources, source.ClaudePermissions{}, source.CodexGoals{})
 	if cfg.SourceGitHub {
 		if home, err := amqhome.EnsureDir(); err == nil {
 			gh.Cache = source.DirCache{Dir: filepath.Join(home, "board", "cache")}

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"html/template"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -404,13 +405,19 @@ func buildSession(rs RosterSession, now time.Time) pageSession {
 	return ps
 }
 
-// httpsOnly keeps a link only when it is an https URL; anything else is
-// shown as text, never as an anchor.
+// forgeHosts are the hosts of the configured forges. GitHub is the one
+// forge the board reads, always at github.com.
+var forgeHosts = map[string]bool{"github.com": true}
+
+// httpsOnly keeps a link only when the URL parses as https on a forge host,
+// with no credentials or port; anything else is shown as text, never as an
+// anchor.
 func httpsOnly(u string) string {
-	if strings.HasPrefix(u, "https://") && !hasControl(u) {
-		return u
+	p, err := url.Parse(u)
+	if err != nil || hasControl(u) || p.Scheme != "https" || p.User != nil || p.Port() != "" || !forgeHosts[p.Host] {
+		return ""
 	}
-	return ""
+	return u
 }
 
 // pluralize prints "n noun" or "n nouns".

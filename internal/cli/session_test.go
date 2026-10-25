@@ -67,6 +67,11 @@ func TestSessionCreatePrefersLaunchRoster(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(result.Path, "agents", "alice")); !os.IsNotExist(err) {
 		t.Fatalf("alice mailbox should not be created from base config: %v", err)
 	}
+	// agent-message-queue-t97.5: a launch.json handle missing from the base
+	// roster was provisioned but classified unregistered in the new session.
+	if status, diags := AgentRegistration(result.Path, "claude"); status != string(registrationDeclared) {
+		t.Fatalf("claude registration = %s %v, want declared from launch.json", status, diags)
+	}
 }
 
 func TestSessionListReportsCanonicalAndLegacy(t *testing.T) {
