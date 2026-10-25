@@ -36,6 +36,25 @@ func coopWakeHarness(binary, managedProvider string) string {
 	return facts.Name
 }
 
+// managedInvocation names what a managed launch ticket runs, for the
+// identity record. The ticket's provider executable is symlink-resolved, so
+// its basename can be a version directory or a script name; the harness
+// comes from the provider's built-in adapter, else from the provider's
+// unresolved path in the target argv, after the wrapper prefix.
+func managedInvocation(ticket launch.ExecutionTicket) harness.Invocation {
+	inv := harness.Invocation{Harness: launch.HarnessForProvider(ticket.Provider)}
+	providerIndex := 0
+	if ticket.Wrapper != nil {
+		inv.Wrapper = harness.WrapperName(ticket.Wrapper.Executable)
+		providerIndex = len(ticket.Wrapper.Args) + 1
+	}
+	if inv.Harness == harness.Other && providerIndex < len(ticket.TargetArgv) {
+		facts, _ := harness.ForExecutable(ticket.TargetArgv[providerIndex])
+		inv.Harness = facts.Name
+	}
+	return inv
+}
+
 // coopWakeInjectMode is the mode coop exec starts its wake with: the
 // person's choice, else the harness's.
 func coopWakeInjectMode(requested, wakeHarness string) string {

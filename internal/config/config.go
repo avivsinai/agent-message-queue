@@ -32,13 +32,13 @@ func WriteConfig(path string, cfg Config, force bool) error {
 		return fmt.Errorf("open root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
-	return writeConfigOn(root, cfg, force)
+	return WriteConfigOn(root, cfg, force)
 }
 
-// writeConfigOn writes config.json through the root capability, under the
+// WriteConfigOn writes config.json through the root capability, under the
 // config lock, for both the existence check and the write, so a directory
 // swapped in at the path after the root was opened is never touched.
-func writeConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
+func WriteConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
 	return root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
 		if !force {
 			// Stat, not a read: a FIFO or device at the path must not block
