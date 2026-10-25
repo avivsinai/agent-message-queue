@@ -47,6 +47,7 @@ func TestValidateStaticProviderInput(t *testing.T) {
 		{name: "spaced allowed tool", executable: "claude", args: []string{"--allowedTools", "Read, Write"}, want: "invalid value"},
 		{name: "unknown codex key", executable: "codex", args: []string{"-c", "notify=[]"}, want: "invalid value"},
 		{name: "unknown codex value", executable: "codex", args: []string{"-c", "model_reasoning_effort=ultra"}, want: "invalid value"},
+		{name: "codex writable roots path list", executable: "codex", args: []string{"-c", `sandbox_workspace_write.writable_roots=["/tmp"]`}, want: "invalid value"},
 		{name: "duplicate codex key", executable: "codex", args: []string{"-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=high"}, want: "duplicated"},
 	}
 	for _, test := range tests {

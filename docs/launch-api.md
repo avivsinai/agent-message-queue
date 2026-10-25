@@ -91,7 +91,7 @@ two `/`-separated parts, each matching `[a-z0-9_][a-z0-9_-]*`.
 | Claude | `-n`, `--name` | session label; `--name=<label>` is also accepted |
 | Claude | `--no-chrome`, `--safe-mode`, `--verbose` | none |
 | Claude | `--permission-mode` | `acceptEdits`, `auto`, `manual`, `dontAsk`, or `plan` |
-| Codex | `-c` | `model_reasoning_effort=<value>` with `minimal`, `low`, `medium`, `high`, or `xhigh`, or `approvals_reviewer=<value>` with `user`, `auto_review`, or `guardian_subagent`; the value may carry one surrounding pair of double quotes; duplicate or unknown keys are rejected |
+| Codex | `-c` | `model_reasoning_effort=<value>` with `minimal`, `low`, `medium`, `high`, or `xhigh`, or `approvals_reviewer=<value>` with `user`, `auto_review`, or `guardian_subagent`, where the value may carry one surrounding pair of double quotes; `sandbox_workspace_write.writable_roots=[]` (the empty array only, never a path list) or `sandbox_workspace_write.network_access=<value>` with `true` or `false`, unquoted; Codex applies these pins above `config.toml`, so a project or user configuration cannot widen a `workspace-write` sandbox; duplicate or unknown keys are rejected |
 | Codex | `--ask-for-approval` | `on-request` only; codex-cli refuses `untrusted` at start, and `never` is not admitted |
 | Codex | `--model` | safe value |
 | Codex | `--sandbox` | `read-only` or `workspace-write` |

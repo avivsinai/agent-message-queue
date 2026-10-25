@@ -63,7 +63,7 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 			}
 			listing, _ := json.Marshal(map[string]any{"sessions": []any{map[string]any{"name": "s1", "conversations": conversations}}})
 			queries := 0
-			runner := codexGoalsRunner(func(ctx context.Context, argv []string) ([]byte, error) {
+			runner := codexGoalsRunner(func(_ context.Context, argv []string) ([]byte, error) {
 				switch argv[0] {
 				case "amq":
 					if argv[1] == "session" {
@@ -97,7 +97,16 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 					}
 					// PR #1202 review: the happy path must execute the actual query,
 					// so a wrong table or column fails against the fixture schema.
-					output, err := exec.CommandContext(ctx, sqlite, argv[1:]...).CombinedOutput()
+					// The fixture child runs under the test's deadline, not the
+					// production 2 s read deadline: a loaded macOS runner killed
+					// it at 2.01 s (CI run 40174175830).
+					childCtx := context.Background()
+					if deadline, ok := t.Deadline(); ok {
+						var cancel context.CancelFunc
+						childCtx, cancel = context.WithDeadline(childCtx, deadline)
+						defer cancel()
+					}
+					output, err := exec.CommandContext(childCtx, sqlite, argv[1:]...).CombinedOutput()
 					if err != nil {
 						return nil, fmt.Errorf("sqlite3 fixture query: %w: %s", err, output)
 					}
