@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.110.0](https://github.com/avivsinai/agent-message-queue/compare/v0.109.0...v0.110.0) (2026-10-25)
+
+
+### Features
+
+* **launch:** admit Codex workspace-write sandbox pins as provider arguments ([#1221](https://github.com/avivsinai/agent-message-queue/issues/1221)) ([b7e1058](https://github.com/avivsinai/agent-message-queue/commit/b7e1058d3ee2d126cc76b4c80b51695f9d62f3dd))
+* **release:** create release PRs and tags with the release App ([#1224](https://github.com/avivsinai/agent-message-queue/issues/1224)) ([e5fb6b9](https://github.com/avivsinai/agent-message-queue/commit/e5fb6b9a05aa99a6b7976b3d107706148389c346))
+
+
+### Bug Fixes
+
+* **board:** page cells fit their longest value; document the live acceptance path ([#1222](https://github.com/avivsinai/agent-message-queue/issues/1222)) ([f5becb8](https://github.com/avivsinai/agent-message-queue/commit/f5becb8077d2f46eb5e19231fc3b296983a66e8c))
+* **release:** request only the installed App permissions ([#1225](https://github.com/avivsinai/agent-message-queue/issues/1225)) ([79434c2](https://github.com/avivsinai/agent-message-queue/commit/79434c2b9487ee75c94c3fe41ad886b323272971))
+
 ## [0.109.0](https://github.com/avivsinai/agent-message-queue/compare/v0.108.0...v0.109.0) (2026-10-25)
 
 
