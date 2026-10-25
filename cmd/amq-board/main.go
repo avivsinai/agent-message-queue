@@ -217,7 +217,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		}
 	}
 	model := board.Run(ctx, env, sources, cfg.Board, version)
-	return withUsage(model, env, cfg.Usage)
+	return withUsage(ctx, model, env, cfg.Usage)
 }
 
 // writePage writes the static page to stdout, or to out through a temporary
@@ -249,17 +249,21 @@ func writePage(m board.Model, out string) error {
 
 // withUsage adds what each harness account spent in this project and the
 // limits it reports, as the "usage" key of ~/.amq/board.json configures:
-// off, extra homes, and the run's budget. A session counts for the project when its recorded working
-// directory is in one of the project's Git worktrees (the directory itself
-// outside Git). Spend goes to the worker an AMQ conversation record ties
+// off, extra homes, and the run's budget. A session counts for the project
+// when its recorded working directory is in one of the project's Git
+// worktrees (the directory itself outside Git); the worktree list is read
+// under ctx within worktreeTimeout. Spend goes to the worker an AMQ conversation record ties
 // the harness session to; the rest shows under the account's other
 // sessions.
-func withUsage(m board.Model, env board.Env, st boardusage.Settings) board.Model {
+func withUsage(ctx context.Context, m board.Model, env board.Env, st boardusage.Settings) board.Model {
 	if !st.Enabled {
 		return m
 	}
 	roots := []string{env.Dir}
-	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
+	wctx, cancel := context.WithTimeout(ctx, worktreeTimeout)
+	out, err := env.Run.Run(wctx, env.Dir, []string{"git", "worktree", "list", "--porcelain"})
+	cancel()
+	if err == nil {
 		if wts := boardusage.Worktrees(out); len(wts) > 0 {
 			roots = wts
 		}
@@ -268,6 +272,10 @@ func withUsage(m board.Model, env board.Env, st boardusage.Settings) board.Model
 	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
 	return board.WithUsage(m, rep, mapping)
 }
+
+// worktreeTimeout bounds the one command usage runs, well inside a source's
+// deadline.
+const worktreeTimeout = 10 * time.Second
 
 // maxToolOutput bounds the stdout of any one source command. Forge responses
 // are not truncated on the server, so the bound is generous; providers get

@@ -11,9 +11,33 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
+
+// Codex review of PR #1215: usage ran `git worktree list` on
+// context.Background, so Ctrl-C could not cancel it and serve waited for
+// that refresh forever. A cancelled refresh ends the git child promptly.
+func TestUsageGitCallEndsWithTheRefresh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	env := board.Env{Dir: t.TempDir(), Now: time.Now, Run: execRunner{}}
+	st := boardusage.Settings{Enabled: true, Config: boardusage.DefaultConfig(t.TempDir())}
+	start := time.Now()
+	withUsage(ctx, board.Model{}, env, st)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("usage returned %v after its refresh was cancelled; want within 2s", elapsed)
+	}
+}
 
 // Codex review of PR #1215: usage reread ~/.amq/board.json on every refresh
 // outside the last-good reload, so an edit serve refused still turned usage
@@ -33,8 +57,8 @@ func TestServeRefusedEditKeepsUsageSettings(t *testing.T) {
 	env := board.Env{Dir: dir, Now: time.Now, Run: noGit{}}
 	l := &board.Live{
 		Load: func() (board.FileConfig, []string) { return loadConfigFiles(dir, home) },
-		Build: func(_ context.Context, cfg board.FileConfig, _ bool) board.Model {
-			return withUsage(board.Model{}, env, cfg.Usage)
+		Build: func(ctx context.Context, cfg board.FileConfig, _ bool) board.Model {
+			return withUsage(ctx, board.Model{}, env, cfg.Usage)
 		},
 		Now:  time.Now,
 		Logf: func(string, ...any) {},
