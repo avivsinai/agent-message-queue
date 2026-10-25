@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
@@ -252,6 +253,11 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 	}
 	// One Enter to submit the slash command. Extra newlines can land in the
 	// composer as a blank user message if the TUI is already at a prompt.
-	rawInjectSleep(rawInjectSettleDelay)
+	// A harness with a paste submit delay needs that much quiet before it.
+	delay := rawInjectSettleDelay
+	if facts, _ := harness.ForExecutable(binaryBase); facts.PasteSubmitDelay > delay {
+		delay = facts.PasteSubmitDelay
+	}
+	rawInjectSleep(delay)
 	return tiocstiInject("\r")
 }

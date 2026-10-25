@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
@@ -253,6 +254,51 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 				t.Fatalf("guard calls = %d, want %d", guardCalls, len(tc.want))
 			}
 		})
+	}
+}
+
+// Live run on amq 0.112.0, 2026-10-25 (Cursor agent 2026.10.22-27dcf5f,
+// coop-owned seat, paste mode): the submit Enter came 25 ms after the
+// doorbell paste, Cursor typed it as a newline in the composer, and the
+// doorbell sat as a draft until the 5 s retry Enter submitted it with a
+// trailing newline. Cursor's one submit Enter must follow the paste by at
+// least 500 ms.
+func TestCursorPasteDoorbellSubmitsOnceAfterThePasteSettles(t *testing.T) {
+	var timeline []string
+	oldSleep := rawInjectSleep
+	rawInjectSleep = func(d time.Duration) {
+		timeline = append(timeline, "sleep:"+d.String())
+		if d < 500*time.Millisecond {
+			t.Errorf("submit Enter waited %s after the paste, want at least 500ms", d)
+		}
+	}
+	t.Cleanup(func() { rawInjectSleep = oldSleep })
+
+	guardCalls := 0
+	cfg := &wakeConfig{
+		me:          "reviewer",
+		harness:     harness.Cursor,
+		injectMode:  wakeInjectModePaste,
+		controlStop: make(chan struct{}),
+		settings:    wakeSettings{bell: true},
+		beforeTerminalWrite: func() error {
+			guardCalls++
+			return nil
+		},
+		terminalWrite: func(chunk string) error {
+			timeline = append(timeline, "write:"+chunk)
+			return nil
+		},
+	}
+	if err := injectNotification(cfg, "dynamic text", false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"write:" + coopWakeDoorbell, "sleep:500ms", "write:\r"}
+	if strings.Join(timeline, "|") != strings.Join(want, "|") {
+		t.Fatalf("Cursor doorbell timeline = %q, want %q (one submit Enter after a 500ms settle)", timeline, want)
+	}
+	if guardCalls != 2 {
+		t.Fatalf("guard calls = %d, want 2", guardCalls)
 	}
 }
 

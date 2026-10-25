@@ -8,6 +8,7 @@ package harness
 import (
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Stable harness names: the discovery identity of a harness, independent of
@@ -68,12 +69,18 @@ type Facts struct {
 	// codex-tui maps a raw LF to Ctrl-J, which flushes paste-burst state so
 	// the later CR submits.
 	SubmitPrelude string
+	// PasteSubmitDelay is the least quiet time between a pasted notification
+	// and its submit Enter; zero keeps the generic spacing. Cursor's composer
+	// types an Enter that follows a paste too closely as a newline, and when
+	// text and Enter arrive as one burst it runs the turn without clearing
+	// the composer.
+	PasteSubmitDelay time.Duration
 }
 
 var known = map[string]Facts{
 	Claude: {Name: Claude, Naming: NamingArgv, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectRaw, AlternateScreen: true},
 	Codex:  {Name: Codex, Naming: NamingTUI, Resume: ResumeSyntaxCodex, WakeInjectMode: WakeInjectRaw, AlternateScreen: true, SubmitPrelude: "\n"},
-	Cursor: {Name: Cursor, Naming: NamingTUI, Resume: ResumeSyntaxCursor, WakeInjectMode: WakeInjectPaste},
+	Cursor: {Name: Cursor, Naming: NamingTUI, Resume: ResumeSyntaxCursor, WakeInjectMode: WakeInjectPaste, PasteSubmitDelay: 500 * time.Millisecond},
 	Grok:   {Name: Grok, Naming: NamingUnknown, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectPaste},
 	Pi:     {Name: Pi, Naming: NamingArgv, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectPaste},
 	Agy:    {Name: Agy, Naming: NamingUnknown, Resume: ResumeSyntaxFlags, WakeInjectMode: WakeInjectPaste},

@@ -98,21 +98,36 @@ func TestInjectCoopNamedSlashCommand(t *testing.T) {
 		rawInjectSleep = oldSleep
 		coopNamedTTYReady = oldReady
 	})
-	rawInjectSleep = func(time.Duration) {}
 	coopNamedTTYReady = func() bool { return true }
 
 	var injected []string
+	rawInjectSleep = func(d time.Duration) {
+		injected = append(injected, "sleep:"+d.String())
+	}
 	tiocstiInject = func(text string) error {
 		injected = append(injected, text)
 		return nil
 	}
 
-	if err := injectCoopNamedSlashCommand("coder1", "codex"); err != nil {
-		t.Fatalf("injectCoopNamedSlashCommand: %v", err)
+	tests := []struct {
+		binary string
+		want   []string
+	}{
+		{binary: "codex", want: []string{"/rename coder1", "sleep:150ms", "\r"}},
+		// Live trials 2026-10-25 (Cursor 2026.10.22-27dcf5f): text with its
+		// Enter under ~0.3 s later ran the turn but left the text in the
+		// composer. The rename used the same 150 ms burst; its Enter now
+		// follows Cursor's paste submit delay.
+		{binary: "agent", want: []string{"/rename coder1", "sleep:500ms", "\r"}},
 	}
-	want := []string{"/rename coder1", "\r"}
-	if !reflect.DeepEqual(injected, want) {
-		t.Fatalf("injected = %#v, want %#v", injected, want)
+	for _, tc := range tests {
+		injected = nil
+		if err := injectCoopNamedSlashCommand("coder1", tc.binary); err != nil {
+			t.Fatalf("%s: injectCoopNamedSlashCommand: %v", tc.binary, err)
+		}
+		if !reflect.DeepEqual(injected, tc.want) {
+			t.Fatalf("%s: injected = %#v, want %#v", tc.binary, injected, tc.want)
+		}
 	}
 }
 
