@@ -72,13 +72,14 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 	return f, fx, req, dir
 }
 
-// The first fixture is a real reply of codex 0.163.0 on a plan whose
-// windows are null, with its email and ids scrubbed; the second is built
-// from the protocol schema codex 0.163.0 generates, with the weekly window
-// in the primary slot.
+// The null-windows fixtures are real replies of codex 0.163.0 and 0.164.0
+// on a plan whose windows are null, with emails and ids scrubbed; the
+// windows fixture is built from the protocol schema codex 0.163.0
+// generates, with the weekly window in the primary slot.
 func TestRunCodexFacts(t *testing.T) {
 	for _, tc := range []struct {
 		fixture   string
+		version   string
 		accountID string
 		windows   map[string]usage.Window // by slot
 		money     []usage.Money
@@ -86,6 +87,7 @@ func TestRunCodexFacts(t *testing.T) {
 	}{
 		{
 			fixture:   "app-server-null-windows.jsonl",
+			version:   "0.163.0",
 			accountID: "00000000-0000-4000-8000-000000000001",
 			windows: map[string]usage.Window{
 				"primary":   {LimitID: "codex", Slot: "primary", Reported: usage.Null},
@@ -99,7 +101,23 @@ func TestRunCodexFacts(t *testing.T) {
 			status: usage.StatusPartial,
 		},
 		{
+			fixture:   "app-server-0.164.0.jsonl",
+			version:   "0.164.0",
+			accountID: "00000000-0000-4000-8000-000000000002",
+			windows: map[string]usage.Window{
+				"primary":   {LimitID: "codex", Slot: "primary", Reported: usage.Null},
+				"secondary": {LimitID: "codex", Slot: "secondary", Reported: usage.Null},
+			},
+			money: []usage.Money{
+				{LimitID: "codex", Kind: usage.MoneyBalance, Unit: "credits", Amount: usage.Some("198.5649837255478"), Unlimited: usage.Some(false)},
+				{LimitID: "codex", Kind: usage.MoneyCap, Amount: usage.Some("301.4350162744522"), Limit: usage.Some("500.00"),
+					RemainingPercent: usage.Some(40.0), ResetsAt: usage.Some(time.Unix(1793491201, 0).UTC())},
+			},
+			status: usage.StatusPartial,
+		},
+		{
 			fixture:   "app-server-windows.jsonl",
+			version:   "0.163.0",
 			accountID: "00000000-0000-4000-8000-000000000002",
 			windows: map[string]usage.Window{
 				"primary": {LimitID: "codex", Slot: "primary", Reported: usage.Present, Kind: usage.WindowWeekly,
@@ -114,7 +132,7 @@ func TestRunCodexFacts(t *testing.T) {
 		},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
-			_, fx, req, _ := setup(t, tc.fixture, "0.163.0")
+			_, fx, req, _ := setup(t, tc.fixture, tc.version)
 			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 			if len(got.Failures) != 0 {
 				t.Fatalf("failures: %+v", got.Failures)
@@ -165,10 +183,10 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 	}
 }
 
-// PR #1235 review: 0.164.0, which nobody ran against, passed the version
-// guard as verified.
+// PR #1235 review: a release nobody ran against passed the version guard as
+// verified because it lay inside a range.
 func TestRunSkipsUnverifiedCodex(t *testing.T) {
-	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.164.0")
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.165.0")
 	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 	if f.runs != 0 {
 		t.Fatalf("app-server ran %d times for an unverified version", f.runs)
