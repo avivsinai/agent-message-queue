@@ -729,8 +729,10 @@ Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
   AskUserQuestion, ExitPlanMode, or a permission dialog is open, and rings
   about 2s after it closes; after a permission dialog it rings when the turn
   ends or the person types. A marker older than 10m gets attention output,
-  still no input. Dialogs without a hook (workspace trust, pickers, MCP
-  elicitation) are not guarded. amq wake dialog is the hook receiver; amq wake
+  still no input. --harness codex and --harness cursor guard their approval
+  prompts until the turn ends. Dialogs without a hook (workspace trust,
+  pickers, MCP elicitation, Cursor prompts before a tool call) are not
+  guarded. amq wake dialog is the hook receiver; amq wake
   uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce
   zero synthetic input; stderr output may scribble until redraw.
 
@@ -1561,7 +1563,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex] open|close
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1569,13 +1571,14 @@ installs it. Reads the hook input JSON on stdin.
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
 of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. With --harness codex only a turn or session event removes it;
-without AM_* the seat is the one amq coop exec recorded for the hook's session_id.
+stdin removes it. With --harness codex or cursor only a turn or session event
+removes it; for codex without AM_* the seat is the one amq coop exec recorded for
+the hook's session_id.
 Always exits 0 once the arguments parse and prints nothing.
 
 Options:
   -harness string
-        Hook input of claude or codex (default "claude")
+        Hook input of claude, codex or cursor (default "claude")
   -me string
         Agent handle (or AM_ME)
   -root string
@@ -1587,10 +1590,12 @@ Options:
 ```text
 $ amq wake install-dialog-hook --help
 Usage:
-  amq wake install-dialog-hook [--dry-run] [--harness claude|codex|all]
+  amq wake install-dialog-hook [--dry-run] [--harness claude|codex|cursor|all]
 
-Install the wake dialog guard hooks in ~/.claude/settings.json, or with --harness
-codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks).
+Install the wake dialog guard hooks in ~/.claude/settings.json, with --harness
+codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks),
+or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session
+starts; it holds the doorbell from a tool call to the end of that turn).
 
 While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
 the hooks keep a marker in the agent's mailbox and every wake of that agent
@@ -1607,7 +1612,7 @@ Options:
   -dry-run
         Print the hooks without changing the settings file
   -harness string
-        claude, codex, or all (each harness whose home exists) (default "claude")
+        claude, codex, cursor, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq wake uninstall-dialog-hook
@@ -1615,15 +1620,16 @@ Options:
 ```text
 $ amq wake uninstall-dialog-hook --help
 Usage:
-  amq wake uninstall-dialog-hook [--harness claude|codex|all]
+  amq wake uninstall-dialog-hook [--harness claude|codex|cursor|all]
 
 Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
-~/.claude/settings.json, or $CODEX_HOME/hooks.json with --harness codex.
+~/.claude/settings.json, $CODEX_HOME/hooks.json with --harness codex, or
+~/.cursor/hooks.json with --harness cursor.
 Other settings and hooks are not changed.
 
 Options:
   -harness string
-        claude, codex, or all (each harness whose home exists) (default "claude")
+        claude, codex, cursor, or all (each harness whose home exists) (default "claude")
 ```
 
 ## amq coop init

@@ -87,6 +87,18 @@ func startupTrustDialog(binaryPath string, args []string, wd string) (harness, d
 			return "", "", startupTrustUnknown
 		}
 		harness, dir = launch.CodexProvider, codexLaunchDir(args, wd)
+	case launch.CursorProvider:
+		for _, arg := range args {
+			if arg == "--" {
+				break
+			}
+			if arg == "-p" || arg == "--print" {
+				return "", "", startupTrustUnknown
+			}
+		}
+		// Trust can be followed by MCP or sandbox prompts. Only the
+		// session-ready hook or a human submission releases this hold.
+		return "cursor", wd, startupTrustPending
 	default:
 		return "", "", startupTrustUnknown
 	}

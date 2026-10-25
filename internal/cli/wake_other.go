@@ -42,3 +42,8 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 func checkCodexDialogHook() (doctorCheck, bool) {
 	return doctorCheck{}, false
 }
+
+// checkCursorDialogHook has nothing to report where amq wake cannot run.
+func checkCursorDialogHook() (doctorCheck, bool) {
+	return doctorCheck{}, false
+}
