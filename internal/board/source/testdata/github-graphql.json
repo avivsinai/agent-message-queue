@@ -5,7 +5,7 @@
     },
     "r0": {
       "pullRequests": {
-        "totalCount": 26,
+        "totalCount": 27,
         "pageInfo": {
           "hasNextPage": true
         },
@@ -153,6 +153,7 @@
             "isDraft": false,
             "mergeable": "MERGEABLE",
             "reviewDecision": "REVIEW_REQUIRED",
+            "createdAt": "2026-10-01T09:00:00Z",
             "updatedAt": "2026-10-22T10:00:00Z",
             "author": {
               "login": "octo-agent"
@@ -208,6 +209,39 @@
                   "commit": {
                     "statusCheckRollup": {
                       "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "number": 17,
+            "title": "Create an explicit relative root in the current directory",
+            "body": "",
+            "url": "https://github.com/octo-org/demo/pull/17",
+            "headRefName": "fix/initroot",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "createdAt": "2026-10-21T09:00:00Z",
+            "updatedAt": "2026-10-22T09:30:00Z",
+            "author": {
+              "login": "octo-owner"
+            },
+            "reviewRequests": {
+              "totalCount": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "nodes": []
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "PENDING"
                     }
                   }
                 }

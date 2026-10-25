@@ -17,7 +17,7 @@ import (
 
 // GitHubQuerySchema versions the query and its cache entries: a cache entry
 // written for another schema is a miss.
-const GitHubQuerySchema = "amq/board-github/v1"
+const GitHubQuerySchema = "amq/board-github/v2"
 
 // maxGitHubRepos bounds the aliases in the one query.
 const maxGitHubRepos = 10
@@ -308,7 +308,7 @@ func GitHubRemoteRepo(url string) (string, bool) {
 	return m[1] + "/" + m[2], true
 }
 
-const githubPRFields = `number title body url headRefName isDraft mergeable reviewDecision updatedAt
+const githubPRFields = `number title body url headRefName isDraft mergeable reviewDecision createdAt updatedAt
         author { login }
         reviewRequests(first: 10) { totalCount pageInfo { hasNextPage }
           nodes { requestedReviewer { ... on User { login } ... on Team { slug } } } }
@@ -349,7 +349,7 @@ func GitHubQueryArgv(repos []string) []string {
 const githubAttentionFields = `
     issueCount
     pageInfo { hasNextPage endCursor }
-    nodes { ... on PullRequest { number title url updatedAt author { login } repository { nameWithOwner } } }`
+    nodes { ... on PullRequest { number title url createdAt updatedAt author { login } repository { nameWithOwner } } }`
 
 // maxAttentionPages bounds the review-request search per read, the first
 // page included; what is left over is counted as not fetched.
@@ -457,6 +457,7 @@ type ghPR struct {
 	IsDraft        bool     `json:"isDraft"`
 	Mergeable      string   `json:"mergeable"`
 	ReviewDecision *string  `json:"reviewDecision"`
+	CreatedAt      string   `json:"createdAt"`
 	UpdatedAt      string   `json:"updatedAt"`
 	Author         *ghLogin `json:"author"`
 	ReviewRequests struct {
@@ -518,6 +519,7 @@ type ghResponse struct {
 				Number     int      `json:"number"`
 				Title      string   `json:"title"`
 				URL        string   `json:"url"`
+				CreatedAt  string   `json:"createdAt"`
 				UpdatedAt  string   `json:"updatedAt"`
 				Author     *ghLogin `json:"author"`
 				Repository struct {
@@ -604,7 +606,7 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 		if !ok || seen[ref] {
 			continue
 		}
-		pr := ghPR{Number: n.Number, Title: n.Title, URL: n.URL, UpdatedAt: n.UpdatedAt, Author: n.Author}
+		pr := ghPR{Number: n.Number, Title: n.Title, URL: n.URL, CreatedAt: n.CreatedAt, UpdatedAt: n.UpdatedAt, Author: n.Author}
 		if it, ok := m.pr(owner+"/"+name, pr); ok {
 			res.Items = append(res.Items, it)
 		}
@@ -708,6 +710,7 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 		return board.Item{}, false
 	}
 	updated, _ := time.Parse(time.RFC3339, pr.UpdatedAt)
+	created, _ := time.Parse(time.RFC3339, pr.CreatedAt)
 	author := ""
 	if pr.Author != nil {
 		author = pr.Author.Login
@@ -794,11 +797,15 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 		if pr.Mergeable == "CONFLICTING" {
 			facts = append(facts, "conflicting")
 		}
-		text := "open PR"
+		// A plain open PR has been open since createdAt. Every fact above
+		// (a review request, requested changes, checks, approval, draft,
+		// conflict) can begin later at a time no fetched field records, so
+		// its since stays unknown rather than too early.
+		text, since := "open PR", created
 		if len(facts) > 0 {
-			text = strings.Join(facts, "; ")
+			text, since = strings.Join(facts, "; "), time.Time{}
 		}
-		it.Reason = board.Reason{Field: "reviewDecision", Text: text}
+		it.Reason = board.Reason{Field: "reviewDecision", Text: text, Since: since}
 	}
 
 	if br, ok := board.Branch("github.com", owner, name, pr.HeadRefName); ok {

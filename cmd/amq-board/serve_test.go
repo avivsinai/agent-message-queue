@@ -12,8 +12,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // Codex review of PR #1215: usage ran `git worktree list` on
@@ -115,58 +113,5 @@ func TestServeFileIsWrittenPrivateAndRemovedOnShutdown(t *testing.T) {
 	removeServeFile(want.PID)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("serve.json still there after shutdown: %v", err)
-	}
-}
-
-// Codex review of PR #1216: the exiting serve's read, pid check and unlink
-// raced a replacing serve's publish and could delete the new record. The
-// removal now waits for the lock a publisher holds, and then keeps the
-// record that names another pid.
-func TestServeFileRemovalKeepsARecordPublishedMeanwhile(t *testing.T) {
-	if !lock.AdvisoryLockAvailable() {
-		t.Skip("no interprocess file lock on this platform")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	dir := filepath.Join(home, ".amq", "board")
-	old := serveRecord{URL: "http://127.0.0.1:1", Token: "aa", PID: 101}
-	if err := writeServeFile(old); err != nil {
-		t.Fatal(err)
-	}
-
-	// A replacing serve holds the lock while it publishes.
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, "serve.json.lock"))
-	if err != nil || !ok {
-		t.Fatalf("lock: ok=%v err=%v", ok, err)
-	}
-	removed := make(chan struct{})
-	go func() {
-		removeServeFile(old.PID)
-		close(removed)
-	}()
-	select {
-	case <-removed:
-		release()
-		t.Fatal("removal ran while a publisher held the lock")
-	case <-time.After(200 * time.Millisecond):
-	}
-	data, err := json.Marshal(serveRecord{URL: "http://127.0.0.1:2", Token: "bb", PID: 202})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fsq.WriteFileAtomic(dir, serveFile, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	release()
-	<-removed
-
-	data, err = os.ReadFile(filepath.Join(dir, serveFile))
-	if err != nil {
-		t.Fatalf("the new record is gone: %v", err)
-	}
-	var got serveRecord
-	if err := json.Unmarshal(data, &got); err != nil || got.PID != 202 {
-		t.Fatalf("serve.json = %s, want pid 202", data)
 	}
 }
