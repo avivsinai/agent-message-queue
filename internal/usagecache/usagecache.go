@@ -45,24 +45,24 @@ func Open() (Store, error) {
 	return New(filepath.Join(home, "usage"))
 }
 
-// New is the store at dir. A missing dir is created with mode 0700 and its
-// parent synced; a symlink or a non-directory is refused.
+// New is the store at dir. A missing dir is created with mode 0700; a
+// symlink or a non-directory is refused. The parent is synced on every
+// open, so a directory whose creation was not made durable (a crash, or a
+// failed sync on an earlier open) is made durable before any file in it
+// counts.
 func New(dir string) (Store, error) {
-	info, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return Store{}, err
-		}
-		if err := fsq.SyncDir(filepath.Dir(dir)); err != nil {
-			return Store{}, err
-		}
-		info, err = os.Lstat(dir)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return Store{}, err
 	}
+	info, err := os.Lstat(dir)
 	if err != nil {
 		return Store{}, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return Store{}, fmt.Errorf("%s is not a plain directory; refusing", dir)
+	}
+	if err := fsq.SyncDir(filepath.Dir(dir)); err != nil {
+		return Store{}, err
 	}
 	return Store{dir: dir}, nil
 }
@@ -98,7 +98,37 @@ func (s Store) LoadJournal() (edge.Journal, error) {
 	if f.Schema != schema {
 		return edge.Journal{}, fmt.Errorf("%s: schema %d, want %d", journalFile, f.Schema, schema)
 	}
+	for i, a := range f.Attempts {
+		if err := complete(a); err != nil {
+			return edge.Journal{}, fmt.Errorf("%s: attempt %d: %w", journalFile, i, err)
+		}
+	}
 	return f.Journal, nil
+}
+
+// complete checks that an attempt carries every field its hold is computed
+// from. A missing field decodes as zero and would hold nothing back, so the
+// journal is corrupt rather than read as a shorter hold.
+func complete(a usage.Attempt) error {
+	switch {
+	case a.ID == "" || a.Operation == "" || a.Key.Provider == "" || a.Key.Home == "":
+		return errors.New("missing id, operation or key")
+	case a.ReservedAt.IsZero() || a.DeadlineAt.IsZero():
+		return errors.New("missing reserved_at or deadline_at")
+	case a.DeadlineAt.Before(a.ReservedAt):
+		return errors.New("deadline_at before reserved_at")
+	case a.Interval <= 0:
+		return errors.New("missing interval")
+	}
+	for name, p := range map[string]usage.Presence{"started_at": a.StartedAt.Presence, "finished_at": a.FinishedAt.Presence} {
+		if p != usage.Absent && p != usage.Present {
+			return fmt.Errorf("%s is %s", name, p)
+		}
+	}
+	if t, ok := a.FinishedAt.Get(); ok && t.IsZero() {
+		return errors.New("finished_at is zero")
+	}
+	return nil
 }
 
 // SaveJournal replaces the journal atomically and durably.

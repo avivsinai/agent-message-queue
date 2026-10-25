@@ -20,45 +20,56 @@ const home = "/codex-home"
 var now = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 // fakeCodex answers `codex --version` and the app-server run with captured
-// stdout, and counts app-server runs.
+// stdout, and counts app-server runs. versionTakes moves the clock while the
+// version check runs.
 type fakeCodex struct {
-	version string
-	stdout  []byte
-	mu      sync.Mutex
-	runs    int
+	version      string
+	stdout       []byte
+	versionTakes time.Duration
+	mu           sync.Mutex
+	clock        time.Time
+	runs         int
+}
+
+func (f *fakeCodex) now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clock
 }
 
 func (f *fakeCodex) run(_ context.Context, c edge.Command) edge.CommandReply {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if slices.Equal(c.Args, []string{"--version"}) {
+		f.clock = f.clock.Add(f.versionTakes)
 		return edge.CommandReply{Stdout: []byte("codex-cli " + f.version + "\n"), ExitCode: usage.Some(0)}
 	}
-	f.mu.Lock()
 	f.runs++
-	f.mu.Unlock()
 	if c.Done == nil || !c.Done(f.stdout) {
 		return edge.CommandReply{Stdout: f.stdout, Failure: usage.FailTimeout}
 	}
 	return edge.CommandReply{Stdout: f.stdout, ExitCode: usage.Some(0)}
 }
 
-func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, collect.Request) {
+func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, collect.Request, string) {
 	t.Helper()
 	stdout, err := os.ReadFile(filepath.Join("testdata", fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := usagecache.New(filepath.Join(t.TempDir(), "usage"))
+	dir := filepath.Join(t.TempDir(), "usage")
+	store, err := usagecache.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeCodex{version: version, stdout: stdout}
-	fx := edge.Effects{Clock: func() time.Time { return now }, Command: f.run, Store: store}
+	f := &fakeCodex{version: version, stdout: stdout, clock: now}
+	fx := edge.Effects{Clock: f.now, Command: f.run, Store: store}
 	req := collect.Request{
 		Codex:    collect.Codex{Bin: "codex", Homes: []string{home}},
 		Interval: 5 * time.Minute, Deadline: 3 * time.Second,
 		ClientName: "amq-board", ClientVersion: "test",
 	}
-	return f, fx, req
+	return f, fx, req, dir
 }
 
 // The first fixture is a real reply of codex 0.163.0 on a plan whose
@@ -103,7 +114,7 @@ func TestRunCodexFacts(t *testing.T) {
 		},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
-			_, fx, req := setup(t, tc.fixture, "0.163.0")
+			_, fx, req, _ := setup(t, tc.fixture, "0.163.0")
 			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 			if len(got.Failures) != 0 {
 				t.Fatalf("failures: %+v", got.Failures)
@@ -135,7 +146,7 @@ func TestRunCodexFacts(t *testing.T) {
 }
 
 func TestRunTwoCallersOneChild(t *testing.T) {
-	f, fx, req := setup(t, "app-server-windows.jsonl", "0.163.0")
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Add(1)
@@ -154,8 +165,10 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 	}
 }
 
+// PR #1235 review: 0.164.0, which nobody ran against, passed the version
+// guard as verified.
 func TestRunSkipsUnverifiedCodex(t *testing.T) {
-	f, fx, req := setup(t, "app-server-windows.jsonl", "1.0.0")
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.164.0")
 	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 	if f.runs != 0 {
 		t.Fatalf("app-server ran %d times for an unverified version", f.runs)
@@ -165,5 +178,38 @@ func TestRunSkipsUnverifiedCodex(t *testing.T) {
 	}
 	if a := usage.Assess(got, usage.ProviderCodex, home, now, 15*time.Minute); a.Status != usage.StatusUnknown {
 		t.Fatalf("status = %s, want unknown", a.Status)
+	}
+}
+
+// PR #1235 review: the reservation's deadline was set before the version
+// check, and the app-server still started with a fresh full deadline after
+// that deadline had passed.
+func TestRunDoesNotDispatchPastTheReservedDeadline(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	f.versionTakes = req.Deadline + time.Second
+	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	if f.runs != 0 {
+		t.Fatalf("app-server started %d times after the pass deadline", f.runs)
+	}
+	if len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailTimeout {
+		t.Fatalf("failures = %+v", got.Failures)
+	}
+}
+
+// PR #1235 review: a schema-1 journal attempt without its deadline and
+// interval held nothing back, so the next run dispatched at once.
+func TestRunRefusesAnIncompleteJournal(t *testing.T) {
+	f, fx, req, dir := setup(t, "app-server-windows.jsonl", "0.163.0")
+	journal := `{"schema":1,"attempts":[{"id":"a","operation":"codex.app-server.rate-limits",` +
+		`"key":{"provider":"codex","home":"/codex-home"},"reserved_at":"2026-10-25T11:59:00Z"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "coordination-v1.json"), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	if f.runs != 0 {
+		t.Fatalf("app-server ran %d times past an incomplete journal", f.runs)
+	}
+	if len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailJournal {
+		t.Fatalf("failures = %+v", got.Failures)
 	}
 }

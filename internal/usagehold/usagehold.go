@@ -18,8 +18,9 @@ type Rules struct {
 	Transient, TransientMax time.Duration
 	// Unavailable holds after a missing CLI or login.
 	Unavailable time.Duration
-	// Unsupported holds after an unverified version, a reply not
-	// understood, or a run against another home.
+	// Unsupported holds after an unverified version, a platform without
+	// process groups, a reply not understood, or a run against another
+	// home.
 	Unsupported time.Duration
 }
 
@@ -80,7 +81,7 @@ func failureHold(code string, streak int, r Rules) time.Duration {
 	switch code {
 	case usage.FailNotInstalled, usage.FailNotLoggedIn:
 		return r.Unavailable
-	case usage.FailUnsupportedVersion, usage.FailMalformed, usage.FailHomeMismatch:
+	case usage.FailUnsupportedVersion, usage.FailUnsupportedPlatform, usage.FailMalformed, usage.FailHomeMismatch:
 		return r.Unsupported
 	}
 	d := r.Transient

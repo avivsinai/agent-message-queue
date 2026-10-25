@@ -4,6 +4,10 @@ package command
 
 import "os/exec"
 
-// ownGroup keeps the default cancellation, which kills the command's
-// process; WaitDelay still bounds pipes held by descendants.
+// groups is false: without a process group the runner kills as a whole, a
+// descendant of the child could outlive the run, so Run starts nothing.
+const groups = false
+
 func ownGroup(*exec.Cmd) {}
+
+func killGroup(*exec.Cmd) error { return nil }

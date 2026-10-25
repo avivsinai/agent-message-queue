@@ -30,8 +30,13 @@ const (
 var _ edge.Runner = Run
 
 // Run runs c under parent. Stderr is discarded: it is free text that may
-// carry anything.
+// carry anything. After the child is reaped, whatever is left of its
+// process group is killed, however the child ended. Where the platform has
+// no such group Run fails closed and starts nothing.
 func Run(parent context.Context, c edge.Command) edge.CommandReply {
+	if !groups {
+		return edge.CommandReply{Failure: usage.FailUnsupportedPlatform, Err: errors.New("no process groups on this platform")}
+	}
 	path, err := exec.LookPath(c.Path)
 	if err != nil {
 		return edge.CommandReply{Failure: usage.FailNotInstalled, Err: err}
@@ -67,6 +72,7 @@ func Run(parent context.Context, c edge.Command) edge.CommandReply {
 		}
 	}()
 	waitErr := cmd.Wait()
+	groupErr := killGroup(cmd)
 	stdout, over, done := out.result()
 
 	reply := edge.CommandReply{Stdout: stdout}
@@ -74,6 +80,8 @@ func Run(parent context.Context, c edge.Command) edge.CommandReply {
 		reply.ExitCode = usage.Some(st.ExitCode())
 	}
 	switch {
+	case groupErr != nil:
+		reply.Failure, reply.Err = usage.FailExit, fmt.Errorf("%s: descendants not killed: %w", c.Path, groupErr)
 	case over:
 		reply.Failure, reply.Err = usage.FailOutputLimit, fmt.Errorf("%s: output over %d bytes", c.Path, c.MaxOut)
 	case done:

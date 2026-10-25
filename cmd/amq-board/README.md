@@ -178,19 +178,28 @@ Git worktrees.
   account's home and asks it, over its documented JSON-RPC interface on
   stdio, for `account/read` and `account/rateLimits/read`. The Codex process
   uses its own login and makes its own network call; amq-board reads no
-  credential file, keychain or cookie and passes no credential. Each window
+  credential file, keychain or cookie and passes no credential. Because this
+  runs your own Codex CLI, Codex may refresh its own login while it runs, as
+  it does in any Codex session. Each window
   shows its percent used and reset time, named by its duration (5 h, weekly),
   never by its position; credits and a spend cap show as reported, as exact
   decimals and never as money. A window the reply left null reads "windows
-  not reported in the app-server reply". Only Codex CLI 0.163.0 up to 1 is
-  read; another version shows why. Without a reading, the strip keeps the
-  credit balance Codex rollouts record.
+  not reported in the app-server reply". Only the Codex CLI versions the
+  reader was run against are read (0.163.0); any other version, a
+  pre-release included, starts no app-server and the strip says so. Without
+  a reading, the strip keeps the credit balance Codex rollouts record. The
+  CLI runs in its own process group, and whatever is left of that group is
+  killed when the run ends; on a platform without process groups (Windows)
+  no Codex CLI is started.
 - One Codex account is read at most once per 5 minutes across every
   amq-board run and serve. The readings, a journal of reserved runs, and the
   collector lock are in `~/.amq/usage/` (mode 0700, files 0600); they hold no
   response body, email, or raw account id. A one-shot run reads the saved
-  readings and starts the CLI only when a reading is due, waiting at most
-  3 s beside the other sources; serve waits at most 15 s. A failed read
+  readings and starts the CLI only when a reading is due, beside the other
+  sources. The whole pass (`codex --version`, the app-server run, and the
+  app-server's exit after its reply) is bounded by 3 s in a one-shot run and
+  15 s in serve; reaping a CLI killed at that bound adds at most 0.2 s. A
+  failed read
   waits the same 5 minutes, up to 15 minutes after repeated failures, or 1 h
   for an unverified version or a reply not understood, and the strip names
   the failure.

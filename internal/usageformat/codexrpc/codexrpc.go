@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,10 +32,10 @@ var Args = []string{"-s", "read-only", "-a", "never", "app-server"}
 // VersionArgs prints the CLI version.
 var VersionArgs = []string{"--version"}
 
-// verified is the CLI version range this parser was checked against: from
-// the oldest version whose replies were read for real, up to the next major
-// version, which may change the protocol.
-var verified = struct{ min, below [3]int }{min: [3]int{0, 163, 0}, below: [3]int{1, 0, 0}}
+// verified lists the exact CLI releases whose replies this parser was run
+// against for real. Any other version, a pre-release included, is
+// unverified: its replies are not read.
+var verified = []string{"0.163.0"}
 
 // Version reads `codex --version` output ("codex-cli 0.163.0").
 func Version(out []byte) (string, bool) {
@@ -49,13 +50,11 @@ func Version(out []byte) (string, bool) {
 	return fields[1], true
 }
 
-// Verified reports whether v lies in the checked range. Any pre-release or
-// build suffix is ignored.
-func Verified(v string) bool {
-	n, ok := parseVersion(v)
-	return ok && !less(n, verified.min) && less(n, verified.below)
-}
+// Verified reports whether v is exactly a verified release.
+func Verified(v string) bool { return slices.Contains(verified, v) }
 
+// parseVersion accepts major.minor.patch with an optional pre-release or
+// build suffix.
 func parseVersion(v string) ([3]int, bool) {
 	var n [3]int
 	if i := strings.IndexAny(v, "-+"); i >= 0 {
@@ -73,15 +72,6 @@ func parseVersion(v string) ([3]int, bool) {
 		n[i] = x
 	}
 	return n, true
-}
-
-func less(a, b [3]int) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] < b[i]
-		}
-	}
-	return false
 }
 
 // Request ids. Replies are matched by id: the server answers out of order.

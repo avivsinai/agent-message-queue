@@ -14,8 +14,10 @@ import (
 )
 
 // Plan limit pacing. A Codex account is read at most once per interval
-// across every board run and panel; a one-shot face waits for the child
-// only inside its short deadline, serve inside its longer one.
+// across every board run and panel. Each deadline bounds the whole pass:
+// `codex --version`, the app-server run, and the app-server's exit after
+// its reply; reaping a child killed at the deadline adds at most 0.2 s.
+// A one-shot face uses the short deadline, serve the longer one.
 const (
 	limitsInterval        = 5 * time.Minute
 	oneShotLimitsDeadline = 3 * time.Second

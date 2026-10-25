@@ -8,6 +8,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -24,7 +25,9 @@ type Request struct {
 	// Interval is the minimum time between two dispatches that may reach
 	// the same account.
 	Interval time.Duration
-	// Deadline bounds the app-server child of one pass.
+	// Deadline bounds one whole pass: the version check, the app-server
+	// run and the child's exit. The command runner may take a further
+	// moment to reap a killed child.
 	Deadline time.Duration
 	// ClientName and ClientVersion identify the caller to the app-server.
 	ClientName, ClientVersion string
@@ -45,7 +48,8 @@ type Memory struct{}
 // operation names the Codex dispatch in the journal.
 const operation = "codex.app-server.rate-limits"
 
-// versionDeadline bounds `codex --version`, which makes no network call.
+// versionDeadline bounds `codex --version`, which makes no network call,
+// inside the pass deadline.
 const versionDeadline = 2 * time.Second
 
 // Output bounds for the two child processes.
@@ -97,6 +101,15 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	if req.Codex.Bin == "" || len(req.Codex.Homes) == 0 {
 		return facts
 	}
+	if req.Interval <= 0 || req.Deadline <= 0 {
+		return usage.Merge(facts, infraFailure(usage.FailReservation, errors.New("interval and deadline must be positive")))
+	}
+	// One deadline bounds the whole pass: the version check, the
+	// reservation and the app-server run with its exit. notAfter is the
+	// same bound on the collector's clock, recorded in the reservation.
+	ctx, cancel := context.WithTimeout(ctx, req.Deadline)
+	defer cancel()
+	notAfter := fx.Clock().Add(req.Deadline)
 	journal, err := fx.Store.LoadJournal()
 	if err != nil {
 		return usage.Merge(facts, infraFailure(usage.FailJournal, err))
@@ -127,17 +140,18 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	if !ok {
 		return usage.Merge(facts, problems)
 	}
-	return usage.Merge(collectCodex(ctx, req, home, facts, journal, now, fx), problems)
+	return usage.Merge(collectCodex(ctx, req, home, facts, journal, now, notAfter, fx), problems)
 }
 
-// collectCodex reads one home's limits under the collector lock.
-func collectCodex(ctx context.Context, req Request, home string, facts usage.Result, journal edge.Journal, now time.Time, fx edge.Effects) usage.Result {
+// collectCodex reads one home's limits under the collector lock. ctx and
+// notAfter carry the pass deadline.
+func collectCodex(ctx context.Context, req Request, home string, facts usage.Result, journal edge.Journal, now, notAfter time.Time, fx edge.Effects) usage.Result {
 	attempt := usage.Attempt{
 		ID:         usage.ProviderCodex + ":" + home + ":" + strconv.FormatInt(now.UnixNano(), 10),
 		Operation:  operation,
 		Key:        usage.Account{Provider: usage.ProviderCodex, Home: home},
 		ReservedAt: now,
-		DeadlineAt: now.Add(req.Deadline),
+		DeadlineAt: notAfter,
 		Interval:   req.Interval,
 	}
 	ev := usage.Evidence{Source: codexnorm.Source, Contract: codexrpc.Contract, ObservedAt: now}
@@ -159,8 +173,7 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 		got = homeFailure(attempt.Key, ev, usage.FailUnsupportedVersion, "codex "+version+" is not a verified version")
 	}
 	if len(got.Failures) > 0 {
-		attempt.DeadlineAt = now
-		return finish(facts, got, attempt, now, journal, fx)
+		return finish(facts, got, attempt, fx.Clock(), journal, fx)
 	}
 	ev.ProducerVersion = usage.Some(version)
 
@@ -169,8 +182,17 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 		return usage.Merge(facts, homeFailure(attempt.Key, ev, usage.FailReservation, errText(err)))
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, req.Deadline)
-	attempt.StartedAt = usage.Some(fx.Clock())
+	// The reservation holds others back only until its deadline: past it,
+	// starting the child could overlap a dispatch another process now
+	// believes is allowed.
+	start := fx.Clock()
+	if !start.Before(attempt.DeadlineAt) {
+		ev.ObservedAt = start
+		got = homeFailure(attempt.Key, ev, usage.FailTimeout, "pass deadline passed before the app-server started")
+		return finish(facts, got, attempt, start, journal, fx)
+	}
+	cctx, cancel := context.WithTimeout(ctx, attempt.DeadlineAt.Sub(start))
+	attempt.StartedAt = usage.Some(start)
 	reply := fx.Command(cctx, edge.Command{
 		Path:   req.Codex.Bin,
 		Args:   codexrpc.Args,

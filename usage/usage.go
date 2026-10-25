@@ -181,20 +181,21 @@ type Failure struct {
 
 // Failure codes.
 const (
-	FailNotInstalled       = "not_installed"
-	FailUnsupportedVersion = "unsupported_version"
-	FailTimeout            = "timeout"
-	FailOutputLimit        = "output_limit"
-	FailExit               = "exit"
-	FailMalformed          = "malformed"
-	FailRPC                = "rpc_error"
-	FailNotLoggedIn        = "not_logged_in"
-	FailHomeMismatch       = "home_mismatch"
-	FailJournal            = "journal_unreadable"
-	FailReservation        = "reservation_failed"
-	FailCacheRead          = "cache_unreadable"
-	FailCacheWrite         = "cache_write_failed"
-	FailLock               = "lock_unavailable"
+	FailNotInstalled        = "not_installed"
+	FailUnsupportedPlatform = "unsupported_platform"
+	FailUnsupportedVersion  = "unsupported_version"
+	FailTimeout             = "timeout"
+	FailOutputLimit         = "output_limit"
+	FailExit                = "exit"
+	FailMalformed           = "malformed"
+	FailRPC                 = "rpc_error"
+	FailNotLoggedIn         = "not_logged_in"
+	FailHomeMismatch        = "home_mismatch"
+	FailJournal             = "journal_unreadable"
+	FailReservation         = "reservation_failed"
+	FailCacheRead           = "cache_unreadable"
+	FailCacheWrite          = "cache_write_failed"
+	FailLock                = "lock_unavailable"
 )
 
 // Result is the facts of one read or collection pass.
