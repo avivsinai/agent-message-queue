@@ -41,8 +41,24 @@ When command help changes, run `make docs-cli` and include the regenerated
 [CLI reference](docs/cli.md). Edit canonical agent skills under `skills/` and
 run `make check-skills`; the other skill paths are symlinks.
 
-Release Please maintains release PRs from conventional squash commits on
-`main`. Do not change release or skill version fields for an ordinary contribution.
+Do not change release or skill version fields for an ordinary contribution.
+Run `scripts/release.sh X.Y.Z` from this checkout to request a release. The
+command dispatches Release Please on `main`, waits up to ten minutes, and prints
+its PR URL. Release Please alone generates the changelog and all version changes;
+review and merge that PR through the normal checks. The current release must be
+published before a newer version can be requested.
+
+After merge, `release-tag.yml` binds the release to its merged PR and verifies
+metadata, tests, smoke checks, and embedded versions before the repository App
+creates its tag. `release.yml` publishes on that tag push. Tag creation requires
+`RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY`; there is no legacy token
+fallback. Tags are immutable: a retry accepts only the same commit.
+
+For a failed publication, dispatch **Release** with the existing tag. Leave
+`skip-skill-publish` enabled unless skill publication also needs recovery. Use
+`goreleaser-config-from-workflow-ref` only when recovering a tag whose packaging
+configuration failed; it builds the tag source with the dispatched ref's
+packaging configuration. Do not create or move a tag to retry publication.
 
 ## Live proofs (opt-in)
 

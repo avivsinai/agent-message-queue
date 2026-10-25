@@ -8,7 +8,7 @@ import pathlib
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ACTION_PIN = "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"
+APP_PIN = "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510"
 
 
 def test_release_please_config() -> None:
@@ -43,76 +43,42 @@ def test_release_please_config() -> None:
 
 
 def test_release_please_workflow_is_pr_only_and_staged() -> None:
+    # The release workflows are a security boundary: only the repository App
+    # creates release PRs and tags; publication consumes an existing tag.
     workflow = (ROOT / ".github/workflows/release-please.yml").read_text()
-    assert ACTION_PIN in workflow
-    assert "token: ${{ secrets.RELEASE_PLEASE_TOKEN }}" in workflow
-    assert "skip-github-release: true" in workflow
-    assert "RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}" in workflow
-    assert "if: ${{ env.RELEASE_PLEASE_TOKEN == '' }}" in workflow
-    assert "github.event_name == 'workflow_dispatch' &&" in workflow
-    assert "github.ref != 'refs/heads/main' &&" in workflow
-    assert "format('rejected-{0}', github.run_id) ||" in workflow
-    assert "github.repository" in workflow
-    assert "cancel-in-progress: true" in workflow
-
-    release_job = workflow[workflow.index("  release-please:\n") :]
-    assert "github.event_name != 'workflow_dispatch' ||" in release_job
-    assert "github.ref == 'refs/heads/main'" in release_job
-    assert "github.event.head_commit.message" not in release_job
+    assert APP_PIN in workflow
+    assert "release-please@17.6.0 release-please release-pr" in workflow
+    assert '--release-as "$RELEASE_VERSION"' in workflow
+    assert '--config-file release-please-config.json' in workflow
+    assert '--manifest-file .release-please-manifest.json' in workflow
+    assert "RELEASE_PLEASE_TOKEN" not in workflow
+    assert "secrets.RELEASE_APP_PRIVATE_KEY" in workflow
+    assert "vars.RELEASE_APP_CLIENT_ID" in workflow
+    assert "permission-pull-requests: write" in workflow
+    assert "permission-issues: write" in workflow
+    assert "cancel-in-progress: false" in workflow
     assert 'workflows: ["Release"]' in workflow
-    assert "types: [completed]" in workflow
-    assert "branches: [main]" in workflow
-    assert "github.event.workflow_run.conclusion" not in workflow
-    assert "github.event.workflow_run.head_sha" not in workflow
+    assert "branches: [main]" not in workflow
+    generation = workflow[workflow.index("      - name: Open or update release pull request\n"):]
+    assert "if: github.event_name == 'workflow_dispatch'" in generation
+    assert "steps.app.outputs.token" in generation
+    assert "github.token" not in generation
+    assert "./scripts/reconcile-release-please-labels.sh" in workflow
 
-    checkout_step = release_job[
-        release_job.index("      - uses: actions/checkout@") :
-        release_job.index("      - name: Check published release state\n")
-    ]
-    assert "ref: refs/heads/main" in checkout_step
-    assert "fetch-depth: 0" in checkout_step
-
-    state_step = release_job[
-        release_job.index("      - name: Check published release state\n") :
-        release_job.index("      - name: Revalidate current main\n")
-    ]
-    assert "run: ./scripts/check-release-please-state.sh" in state_step
-
-    revalidate_step = release_job[
-        release_job.index("      - name: Revalidate current main\n") :
-        release_job.index("      - name: Reconcile published release pull request\n")
-    ]
-    assert "if: ${{ steps.release_state.outputs.released == 'true' }}" in revalidate_step
-    assert "EXPECTED_MAIN_SHA: ${{ steps.release_state.outputs.main_sha }}" in revalidate_step
-    assert "run: ./scripts/revalidate-release-please-main.sh" in revalidate_step
-
-    reconcile_step = release_job[
-        release_job.index("      - name: Reconcile published release pull request\n") :
-        release_job.index("      - name: Await release-please credential\n")
-    ]
-    assert "GH_TOKEN: ${{ github.token }}" in reconcile_step
-    assert "RELEASE_VERSION: ${{ steps.release_state.outputs.version }}" in reconcile_step
-    assert "EXPECTED_MAIN_SHA: ${{ steps.release_state.outputs.main_sha }}" in reconcile_step
-    assert "steps.release_state.outputs.released == 'true'" in reconcile_step
-    assert "steps.main_state.outputs.current == 'true'" in reconcile_step
-    assert "RELEASE_PLEASE_TOKEN" not in reconcile_step
-    assert "run: ./scripts/reconcile-release-please-labels.sh" in reconcile_step
-
-    action_step = release_job[
-        release_job.index("      - name: Open or update release pull request\n") :
-    ]
-    assert (
-        "if: ${{ env.RELEASE_PLEASE_TOKEN != '' && "
-        "steps.release_state.outputs.released == 'true' && "
-        "steps.main_state.outputs.current == 'true' }}"
-    ) in action_step
-    assert "target-branch: main" in action_step
-    assert "aborts before PR mutation while a merged release PR is pending" in action_step
-    assert "release-please 17.6.0" in action_step
-
-    release_workflow = (ROOT / ".github/workflows/release.yml").read_text()
-    assert "predates scripts/release_changelog_section.py" in release_workflow
-    assert "python3 scripts/release_changelog_section.py" not in release_workflow
+    tagger = (ROOT / ".github/workflows/release-tag.yml").read_text()
+    assert APP_PIN in tagger
+    assert "permission-contents: write" in tagger
+    assert "./scripts/prepare-release-tag.sh" in tagger
+    assert "./scripts/create-release-tag.sh" in tagger
+    assert "needs: [prepare, verify]" in tagger
+    assert "make test" in tagger and "make smoke" in tagger
+    publisher = (ROOT / ".github/workflows/release.yml").read_text()
+    assert 'tags:\n      - "v*"' in publisher
+    assert "Create release tag" not in publisher
+    assert "cancel-in-progress: false" in publisher
+    assert "github.event.inputs.tag || github.ref_name" in publisher
+    assert publisher.count("goreleaser/goreleaser-action@") == 1
+    assert "predates scripts/release_changelog_section.py" in publisher
 
 
 def test_release_state_scripts_are_injection_safe() -> None:
@@ -197,7 +163,6 @@ def test_version_files_and_replacement_gates() -> None:
         "scripts/test_check_pr_changelog.py",
         "scripts/release_changelog.py",
         "scripts/test_release_changelog.py",
-        "scripts/release.sh",
     ]:
         assert not (ROOT / removed).exists(), removed
 

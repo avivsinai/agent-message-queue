@@ -1,19 +1,24 @@
 name: Release Please
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release request {0}', inputs.version) || 'Reconcile published release' }}
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact release version (X.Y.Z)"
+        required: true
+        type: string
   workflow_run:
     workflows: ["Release"]
     types: [completed]
-    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
   issues: write
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: >-
@@ -23,7 +28,7 @@ concurrency:
       format('rejected-{0}', github.run_id) ||
       github.repository
     }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release-please:
@@ -34,13 +39,12 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/heads/main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check published release state
         id: release_state
@@ -73,18 +77,62 @@ jobs:
           EXPECTED_MAIN_SHA: ${{ steps.release_state.outputs.main_sha }}
         run: ./scripts/reconcile-release-please-labels.sh
 
-      - name: Await release-please credential
-        if: ${{ env.RELEASE_PLEASE_TOKEN == '' }}
-        run: echo "::notice::RELEASE_PLEASE_TOKEN is not configured; add it, then dispatch this workflow."
-
-      - name: Open or update release pull request
-        if: ${{ env.RELEASE_PLEASE_TOKEN != '' && steps.release_state.outputs.released == 'true' && steps.main_state.outputs.current == 'true' }}
-        # The pinned release-please 17.6.0 aborts before PR mutation while a merged release PR is pending.
-        # release.yml removes that explicit pending label only after GoReleaser publication succeeds.
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - name: Validate explicit release request
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASED: ${{ steps.release_state.outputs.released }}
+          CURRENT: ${{ steps.main_state.outputs.current }}
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_VERSION: ${{ steps.release_state.outputs.version }}
+          APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$RELEASED" = true && test "$CURRENT" = true
+          test -n "$APP_CLIENT_ID" && test -n "$APP_PRIVATE_KEY"
+          python3 - "$CURRENT_VERSION" "$RELEASE_VERSION" <<'PYVERSION'
+          import sys
+          current, requested = (tuple(map(int, value.split('.'))) for value in sys.argv[1:])
+          if requested <= current:
+              raise SystemExit("Release version must be newer than the published version")
+          PYVERSION
+          pending="$(./scripts/find-release-pr.sh)"
+          pending_title="$(jq -r '.pull_request.title // empty' <<<"$pending")"
+          if [[ -n "$pending_title" && "$pending_title" != "chore(release): v${RELEASE_VERSION}" ]]; then
+            echo "::error::Conflicting pending release PR: ${pending_title}. Finish it before requesting v${RELEASE_VERSION}."
+            exit 1
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: github.event_name == 'workflow_dispatch'
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          target-branch: main
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-          skip-github-release: true
+          node-version: '24'
+      - name: Create repository-scoped release PR token
+        if: github.event_name == 'workflow_dispatch'
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Open or update release pull request
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+          token_file="$(mktemp "${RUNNER_TEMP}/release-please-token.XXXXXX")"
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$RELEASE_TOKEN" > "$token_file"
+          npx --yes --package=release-please@17.6.0 release-please release-pr \
+            --repo-url "$GITHUB_REPOSITORY" --target-branch main \
+            --config-file release-please-config.json \
+            --manifest-file .release-please-manifest.json \
+            --release-as "$RELEASE_VERSION" --token "$token_file"

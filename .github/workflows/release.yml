@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -25,17 +25,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.sha }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' ||
-        startsWith(github.event.head_commit.message, 'chore(release): v') ||
-        startsWith(github.event.head_commit.message, 'Merge pull request')
-      }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -61,37 +55,9 @@ jobs:
         shell: bash
         run: ./scripts/resolve-release-metadata.sh
 
-  verify:
+  release:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.tag != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.prepare.outputs.release_ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - name: Verify release metadata
-        run: ./scripts/check-release-version.sh "${{ needs.prepare.outputs.version }}"
-      - name: Run tests
-        run: make test
-      - name: Run smoke tests
-        run: make smoke
-      - name: Build CLI
-        run: VERSION=${{ needs.prepare.outputs.tag }} make build
-      - name: Check embedded version
-        run: |
-          ./amq version | grep -Fx "${{ needs.prepare.outputs.version }}"
-          ./amq-keepalive --version | grep -Fx "${{ needs.prepare.outputs.version }}"
-
-  release:
-    needs: [prepare, verify]
-    if: needs.prepare.result == 'success' && needs.prepare.outputs.tag != '' && needs.verify.result == 'success'
     runs-on: macos-latest
     # Each darwin binary is notarized in its build hook (up to 20 minutes per
     # submission), and GoReleaser runs only a few hooks at a time.
@@ -111,29 +77,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Create release tag after verification
-        shell: bash
-        env:
-          TAG: ${{ needs.prepare.outputs.tag }}
-          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
-        run: |
-          set -euo pipefail
-
-          tag_commit_sha() {
-            git rev-parse "refs/tags/${1}^{commit}" 2>/dev/null || git rev-parse "refs/tags/${1}"
-          }
-
-          git fetch --force --tags origin
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
-            existing_sha="$(tag_commit_sha "$TAG")"
-            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
-              echo "::error::Tag ${TAG} already exists but points to ${existing_sha}, not ${RELEASE_SHA}."
-              exit 1
-            fi
-          else
-            git tag "$TAG" "$RELEASE_SHA"
-            git push origin "refs/tags/${TAG}"
-          fi
       - name: Extract release notes for this tag
         shell: bash
         env:

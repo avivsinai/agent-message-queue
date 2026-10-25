@@ -17,6 +17,8 @@ mkdir -p "$REPO/scripts" "$REPO/skills/amq-cli" "$REPO/skills/amq-spec" \
 
 cp "$ROOT/scripts/resolve-release-metadata.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/check-release-version.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/prepare-release-tag.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/create-release-tag.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/release_changelog_section.py" "$REPO/scripts/"
 chmod +x "$REPO/scripts/resolve-release-metadata.sh" "$REPO/scripts/check-release-version.sh" \
   "$REPO/scripts/release_changelog_section.py"
@@ -42,6 +44,7 @@ version: 9.9.9 # x-release-please-version
 EOF
 done
 
+printf '{".":"9.9.9"}\n' >"$REPO/.release-please-manifest.json"
 printf '{"version":"9.9.9"}\n' >"$REPO/.claude-plugin/plugin.json"
 printf '{"version":"9.9.9"}\n' >"$REPO/.codex-plugin/plugin.json"
 
@@ -84,6 +87,7 @@ run_resolver() {
     cd "$REPO"
     EVENT_NAME=push \
       INPUT_TAG= \
+      GITHUB_REF=refs/heads/main \
       COMMIT_MESSAGE="$(git log -1 --format=%B "$sha")" \
       GITHUB_SHA="$sha" \
       GITHUB_OUTPUT="$output" \
@@ -115,4 +119,55 @@ if [[ -s "$TMPDIR/output" ]]; then
 fi
 grep -F "No release commit found" "$TMPDIR/stdout" >/dev/null
 
+# Happy path: an exact merged release PR passes pre-tag preparation, then the
+# App-authenticated API request creates that commit's immutable release ref.
+git init -q --bare "$TMPDIR/origin.git"
+git -C "$REPO" remote add origin "$TMPDIR/origin.git"
+git -C "$REPO" push -q origin main
+mkdir -p "$TMPDIR/bin"
+cat > "$TMPDIR/bin/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "api --paginate --slurp repos/example/amq/commits/${TEST_RELEASE_SHA}/pulls?per_page=100")
+    test "$GH_TOKEN" = reader-token
+    printf '[[{"number":7,"merged_at":"2026-06-22T00:00:00Z","base":{"ref":"main"},"title":"chore(release): v9.9.9","merge_commit_sha":"%s"}]]\n' "$TEST_RELEASE_SHA"
+    ;;
+  "api --method POST repos/example/amq/git/refs -f ref=refs/tags/v9.9.9 -f sha=${TEST_RELEASE_SHA}")
+    test "$GH_TOKEN" = app-token
+    printf '%s\n' "$*" > "$TAG_REQUEST_LOG"
+    git --git-dir "$TEST_ORIGIN" update-ref refs/tags/v9.9.9 "$TEST_RELEASE_SHA"
+    ;;
+  *) echo "Unexpected gh request: $*" >&2; exit 1 ;;
+esac
+GH
+chmod +x "$TMPDIR/bin/gh"
+export PATH="$TMPDIR/bin:$PATH"
+export TEST_RELEASE_SHA="$release_squash" TEST_ORIGIN="$TMPDIR/origin.git"
+export TAG_REQUEST_LOG="$TMPDIR/tag-request"
+: > "$TMPDIR/prepared"
+(
+  cd "$REPO"
+  EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_SHA="$release_squash" \
+    COMMIT_MESSAGE="$(git log -1 --format=%B)" GITHUB_REPOSITORY=example/amq \
+    GITHUB_OUTPUT="$TMPDIR/prepared" GH_TOKEN=reader-token \
+    ./scripts/prepare-release-tag.sh
+  TAG=v9.9.9 RELEASE_SHA="$release_squash" GITHUB_REPOSITORY=example/amq \
+    GH_TOKEN=app-token ./scripts/create-release-tag.sh
+)
+grep -Fx 'tag=v9.9.9' "$TMPDIR/prepared"
+grep -Fx "release_sha=$release_squash" "$TMPDIR/prepared"
+grep -Fx "api --method POST repos/example/amq/git/refs -f ref=refs/tags/v9.9.9 -f sha=$release_squash" "$TAG_REQUEST_LOG"
+test "$(git --git-dir "$TEST_ORIGIN" rev-parse 'refs/tags/v9.9.9^{commit}')" = "$release_squash"
+
+# Tag publication resolves the immutable tag rather than the merge subject.
+git -C "$REPO" tag v9.9.9 "$release_squash"
+: > "$TMPDIR/tag-output"
+(
+  cd "$REPO"
+  EVENT_NAME=push GITHUB_REF=refs/tags/v9.9.9 GITHUB_SHA="$release_squash" \
+    GITHUB_OUTPUT="$TMPDIR/tag-output" ./scripts/resolve-release-metadata.sh
+)
+grep -Fx 'release_ref=v9.9.9' "$TMPDIR/tag-output"
+grep -Fx "release_sha=$release_squash" "$TMPDIR/tag-output"
 printf 'release metadata resolver tests ok\n'
