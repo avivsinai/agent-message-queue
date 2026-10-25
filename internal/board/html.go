@@ -51,6 +51,10 @@ var pageCSP = "default-src 'none'; script-src 'sha256-" + sha256Base64(pageJS) +
 	"'; style-src 'sha256-" + sha256Base64(pageCSS) +
 	"'; img-src data:; base-uri 'none'; form-action 'none'"
 
+// liveCSP is pageCSP plus fetches back to the serving origin, which the live
+// page needs to read model.json and press refresh.
+var liveCSP = pageCSP + "; connect-src 'self'"
+
 func sha256Base64(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return base64.StdEncoding.EncodeToString(sum[:])
@@ -61,6 +65,15 @@ func sha256Base64(s string) string {
 // scripts that read it. regenerate is the command line the footer offers.
 func WriteHTML(w io.Writer, m Model, regenerate string) error {
 	return pageTemplate.Execute(w, buildPage(m, regenerate))
+}
+
+// WriteLiveHTML renders the page `amq-board serve` serves: the same page,
+// which also reads model.json from its own origin and reloads when a newer
+// model exists, and offers refresh instead of a regenerate command.
+func WriteLiveHTML(w io.Writer, m Model) error {
+	p := buildPage(m, "")
+	p.Live, p.CSP = true, liveCSP
+	return pageTemplate.Execute(w, p)
 }
 
 type pageData struct {
@@ -82,6 +95,7 @@ type pageData struct {
 	Regenerate string
 	Version    string
 	Dir        string
+	Live       bool
 }
 
 type pageSource struct {

@@ -159,6 +159,9 @@ a:hover { text-decoration-thickness: 2px; }
 
 .filter { display: flex; align-items: center; gap: 0.6em; flex: 0 1 20rem; }
 
+.live { display: flex; align-items: center; gap: 0.6em; flex: 0 1 auto; color: var(--rack-ink); }
+.live-state { font-size: var(--t-xs); }
+
 .filter input {
   flex: 1;
   min-width: 0;
@@ -493,7 +496,7 @@ a:hover { text-decoration-thickness: 2px; }
 
 .cmd code::before { content: "$ "; color: var(--muted); }
 
-.copy {
+.copy, .live-refresh {
   flex: none;
   font: 600 var(--t-xs)/1 var(--font-ui);
   color: var(--ink);
@@ -507,8 +510,9 @@ a:hover { text-decoration-thickness: 2px; }
   transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
-.copy:hover { border-color: var(--muted); }
-.copy:active { background: var(--stock-cell); }
+.copy:hover, .live-refresh:hover { border-color: var(--muted); }
+.copy:active, .live-refresh:active { background: var(--stock-cell); }
+.live-refresh:disabled { color: var(--muted); cursor: progress; }
 .copy.is-copied { background: var(--live); border-color: var(--live); color: var(--stock); }
 .copy.is-failed { border-color: var(--error); color: var(--error); }
 

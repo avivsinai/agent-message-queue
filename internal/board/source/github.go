@@ -36,6 +36,10 @@ type GitHub struct {
 	TTL                      time.Duration
 	Refresh                  bool  // ignore a fresh cache entry
 	Cache                    Cache // nil: no cache
+	// Account is the account gh calls run as when the caller knows it (a
+	// token read once, with the login it belongs to); empty means look it
+	// up.
+	Account string
 }
 
 func (GitHub) Name() string { return "github" }
@@ -73,7 +77,10 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
 	now := env.Now()
 	if g.Cache != nil && !g.Refresh {
-		if key.Account = githubAccount(ctx, env); key.Account != "" {
+		if key.Account = g.Account; key.Account == "" {
+			key.Account = githubAccount(ctx, env)
+		}
+		if key.Account != "" {
 			if resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL); ok {
 				return g.Build(resp, repos, fetchedAt, nil)
 			}
