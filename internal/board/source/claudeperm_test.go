@@ -33,7 +33,7 @@ func TestClaudePermissionWaitsFromSessionStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"mapped old wait", "inferred owner", "foreign project", "unknown version", "old discovery", "other dialog", "duplicate session", "dead process"} {
+	for _, name := range []string{"mapped old wait", "inferred owner", "foreign project", "unknown version", "old discovery", "other dialog", "duplicate session", "dead process", "nongit project"} {
 		t.Run(name, func(t *testing.T) {
 			home, project := t.TempDir(), t.TempDir()
 			t.Setenv("CLAUDE_CONFIG_DIR", home)
@@ -111,6 +111,11 @@ func TestClaudePermissionWaitsFromSessionStatus(t *testing.T) {
 				case "amq who --json":
 					return []byte(`[{"name":"s1","agents":[{"handle":"reviewer","active":true}]}]`), nil
 				case "git worktree list --porcelain -z":
+					// Board state/scope review: installed 0.111.0 degraded this
+					// source outside Git instead of reading the exact project directory.
+					if name == "nongit project" {
+						return nil, fmt.Errorf("git: fatal: not a git repository (or any of the parent directories): .git")
+					}
 					return []byte("worktree " + project + "\x00\x00"), nil
 				}
 				return nil, fmt.Errorf("unexpected command %v", argv)

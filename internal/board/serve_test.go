@@ -13,7 +13,7 @@ import (
 
 // liveFixture is a Live whose one source is an AMQ roster with alpha last
 // seen 45 minutes ago, so a 30m liveness window shows alpha quiet and a 1h
-// window shows it live.
+// window shows it recent.
 func liveFixture(t *testing.T, userPath string, logs *[]string, builds *int) *Live {
 	t.Helper()
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -67,15 +67,15 @@ func TestLiveReloadsConfigAndKeepsLastGoodOnRefusedEdit(t *testing.T) {
 
 	write(`{"liveness_window": "1h"}`)
 	l.Refresh(ctx, false)
-	if got := liveness(l.Model()); got != "live" {
-		t.Fatalf("after the edit to 1h: alpha is %s, want live", got)
+	if got := liveness(l.Model()); got != "recent" {
+		t.Fatalf("after the edit to 1h: alpha is %s, want recent", got)
 	}
 
 	write(`{"liveness_window": "1h",`)
 	l.Refresh(ctx, false)
 	l.Refresh(ctx, false)
-	if got := liveness(l.Model()); got != "live" {
-		t.Fatalf("after a refused edit: alpha is %s, want live (the last good 1h, not the 30m default)", got)
+	if got := liveness(l.Model()); got != "recent" {
+		t.Fatalf("after a refused edit: alpha is %s, want recent (the last good 1h, not the 30m default)", got)
 	}
 	refused := 0
 	for _, line := range logs {
