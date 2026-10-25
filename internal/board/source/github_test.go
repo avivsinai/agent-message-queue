@@ -2,6 +2,7 @@ package source_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -153,79 +154,115 @@ func TestGitHubCachedReadMakesOneCall(t *testing.T) {
 
 // Each gh call can open a keychain dialog on the owner's screen, and every
 // board run that found the cache expired called gh. Two runs that find the
-// entry expired make one call, and both show the refreshed data.
+// entry expired make one call. Codex review of PR #1208 added two rows: a gh
+// config login that differs from the token's viewer login (a renamed
+// account) made the waiter miss the entry and call gh again, and a failed
+// refresh made the waiter repeat it.
 func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
-	resp, err := os.ReadFile(filepath.Join("testdata", "github-graphql.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	race := &refreshRace{other: make(chan struct{})}
-	cache := probeCache{DirCache: source.DirCache{Dir: t.TempDir()}, race: race}
-	key := source.CacheKey{Host: "github.com", Repos: []string{"octo-org/demo"}, Account: "octo-owner", Schema: source.GitHubQuerySchema}
-	if err := cache.Put(key, githubNow.Add(-time.Hour), resp); err != nil {
-		t.Fatal(err)
-	}
-	r := gatedRunner{fakeRunner: fakeRunner{t: t, outputs: githubOutputs()}, race: race}
-	g := demoGitHub()
-	g.Cache = cache
+	seededAt := githubNow.Add(-time.Hour)
+	for _, tc := range []struct {
+		name       string
+		login      string // gh config user; the response's viewer is octo-owner
+		fail       error
+		wantStatus board.SourceStatus
+		wantAt     time.Time
+	}{
+		{name: "fresh data for both", login: "octo-owner", wantStatus: board.StatusOK, wantAt: githubNow},
+		{name: "renamed account", login: "octo-old-name", wantStatus: board.StatusOK, wantAt: githubNow},
+		{name: "failed refresh", login: "octo-owner", fail: errors.New("HTTP 502"), wantStatus: board.StatusDegraded, wantAt: seededAt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := fakeRunner{t: t, outputs: githubOutputs(), edit: map[string]func(string) string{
+				"gh config get user -h github.com": func(string) string { return tc.login + "\n" },
+			}}
+			seed := demoGitHub()
+			seed.Cache = source.DirCache{Dir: dir}
+			seedEnv := githubEnv(fake)
+			seedEnv.Now = func() time.Time { return seededAt }
+			if res := seed.Read(context.Background(), seedEnv); res.Status != board.StatusOK {
+				t.Fatalf("seed read: %s %s", res.Status, res.Detail)
+			}
 
-	results := make([]board.Result, 2)
-	var wg sync.WaitGroup
-	for i := range results {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results[i] = g.Read(context.Background(), githubEnv(r))
-		}()
-	}
-	wg.Wait()
-	if race.refreshes != 1 {
-		t.Errorf("graphql calls = %d, want 1", race.refreshes)
-	}
-	for i, res := range results {
-		if res.Status != board.StatusOK || !res.ObservedAt.Equal(githubNow) {
-			t.Errorf("run %d: %s %q observed %s, want the refreshed data", i, res.Status, res.Detail, res.ObservedAt)
-		}
+			fake.fail = map[string]error{"gh api graphql": tc.fail}
+			race := &refreshRace{readers: map[int]bool{}, release: make(chan struct{})}
+			r := gatedRunner{fakeRunner: fake, race: race}
+			results := make([]board.Result, 2)
+			var wg sync.WaitGroup
+			for i := range results {
+				g := demoGitHub()
+				g.Cache = probeCache{DirCache: source.DirCache{Dir: dir}, race: race, run: i}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					results[i] = g.Read(context.WithValue(context.Background(), runKey{}, i), githubEnv(r))
+				}()
+			}
+			wg.Wait()
+			if race.refreshes != 1 {
+				t.Errorf("graphql calls = %d, want 1", race.refreshes)
+			}
+			for i, res := range results {
+				if res.Status != tc.wantStatus || !res.ObservedAt.Equal(tc.wantAt) || len(res.Items) == 0 {
+					t.Errorf("run %d: %s %q observed %s with %d items, want %s data from %s", i, res.Status, res.Detail, res.ObservedAt, len(res.Items), tc.wantStatus, tc.wantAt)
+				}
+				if tc.fail != nil && !strings.Contains(res.Detail, tc.fail.Error()) {
+					t.Errorf("run %d detail %q does not name the failure", i, res.Detail)
+				}
+			}
+		})
 	}
 }
 
-// refreshRace holds the first refresh until the other run has read the
-// cache too, so a run that does not wait for that refresh calls gh itself.
+type runKey struct{}
+
+// refreshRace holds the first refresh until another run has read the cache,
+// so a run that does not wait for that refresh calls gh itself.
 type refreshRace struct {
-	mu              sync.Mutex
-	gets, refreshes int
-	once            sync.Once
-	other           chan struct{}
+	mu        sync.Mutex
+	readers   map[int]bool
+	refreshes int
+	first     int
+	once      sync.Once
+	release   chan struct{}
 }
 
-func (p *refreshRace) note(refresh bool) int {
+func (p *refreshRace) note(run int, refresh bool) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	n := &p.gets
 	if refresh {
-		n = &p.refreshes
+		if p.refreshes++; p.refreshes == 1 {
+			p.first = run
+		}
+	} else {
+		p.readers[run] = true
 	}
-	*n++
-	// The refreshing run reads the cache at most twice before it calls gh
-	// (before and under the lock), so a third read or a second refresh is
-	// the other run.
-	if p.gets >= 3 || p.refreshes >= 2 {
-		p.once.Do(func() { close(p.other) })
+	other := false
+	for r := range p.readers {
+		other = other || r != p.first
 	}
-	return *n
+	if p.refreshes >= 2 || (p.refreshes == 1 && other) {
+		p.once.Do(func() { close(p.release) })
+	}
+	return p.refreshes
 }
 
 type probeCache struct {
 	source.DirCache
 	race *refreshRace
+	run  int
 }
 
 func (c probeCache) Get(key source.CacheKey, now time.Time, ttl time.Duration) ([]byte, time.Time, bool) {
-	resp, at, ok := c.DirCache.Get(key, now, ttl)
-	c.race.note(false)
-	return resp, at, ok
+	c.race.note(c.run, false)
+	return c.DirCache.Get(key, now, ttl)
+}
+
+func (c probeCache) Last(key source.CacheKey) ([]byte, time.Time, bool) {
+	c.race.note(c.run, false)
+	return c.DirCache.Last(key)
 }
 
 type gatedRunner struct {
@@ -234,8 +271,8 @@ type gatedRunner struct {
 }
 
 func (r gatedRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
-	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" && r.race.note(true) == 1 {
-		<-r.race.other
+	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" && r.race.note(ctx.Value(runKey{}).(int), true) == 1 {
+		<-r.race.release
 	}
 	return r.fakeRunner.Run(ctx, dir, argv)
 }
