@@ -798,6 +798,12 @@ func TestNotifyNewMessagesInjectedPolicyAcknowledgesSuccessfulInjectVia(t *testi
 }
 
 func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAndFallback(t *testing.T) {
+	// This case reaches the injector fallback after a completed delivery;
+	// its terminal has already consumed the injected text.
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
