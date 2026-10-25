@@ -94,21 +94,37 @@ func initializeAMQ(ctx context.Context, client *Client) error {
 	return nil
 }
 
-// ListHooks returns the raw result of hooks/list for cwd on the daemon at
-// sock: the hooks Codex loads for that directory, each with its trust
-// status. It changes nothing on the daemon.
-func ListHooks(ctx context.Context, sock, cwd string) (json.RawMessage, error) {
+// ReadStartupState returns, from one session on the daemon at sock, the raw
+// results of hooks/list for cwd (the hooks Codex loads for that directory,
+// each with its trust status) and of configRequirements/read (the managed
+// and cloud requirements). A result is nil when the daemon answered its
+// request with an error. It changes nothing on the daemon.
+func ReadStartupState(ctx context.Context, sock, cwd string) (hooks, requirements json.RawMessage, err error) {
 	client, err := Dial(sock, Handlers{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = client.Close() }()
 	if err := initializeAMQ(ctx, client); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var result json.RawMessage
-	if err := client.Call(ctx, "hooks/list", map[string]any{"cwds": []string{cwd}}, &result); err != nil {
-		return nil, fmt.Errorf("hooks/list: %w", err)
+	call := func(method string, params any) (json.RawMessage, error) {
+		var result json.RawMessage
+		err := client.Call(ctx, method, params, &result)
+		var rpc *rpcError
+		if errors.As(err, &rpc) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", method, err)
+		}
+		return result, nil
 	}
-	return result, nil
+	if hooks, err = call("hooks/list", map[string]any{"cwds": []string{cwd}}); err != nil {
+		return nil, nil, err
+	}
+	if requirements, err = call("configRequirements/read", nil); err != nil {
+		return nil, nil, err
+	}
+	return hooks, requirements, nil
 }

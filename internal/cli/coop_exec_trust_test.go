@@ -264,19 +264,38 @@ func TestCodexUnknownVersionOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
 // Bead agent-message-queue-uue (live check on codex-cli 0.164.0, findings 1
 // and 3): after the person trusts the folder, Codex 0.164 shows "Hooks need
 // review", so a trust record no longer means the seat accepts input. A
-// 0.164 seat starts clear only when the update prompt is ruled out, the
-// directory trust is recorded, and Codex's own hooks/list shows no hook to
-// review; otherwise it gets the marker only the dialog hook releases.
+// 0.164 or unverified seat starts clear only when the update prompt is
+// ruled out, the directory trust is recorded, and Codex's own hooks/list
+// shows no hook to review; otherwise it gets the marker only the dialog
+// hook releases.
 func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
+	hooks := func(statuses ...string) string {
+		var list []string
+		for _, status := range statuses {
+			list = append(list, codexHookForTest(status))
+		}
+		return `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + strings.Join(list, ",") + `],"warnings":[],"errors":[]}]}}`
+	}
+	const noRequirements = `{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":null}}`
 	for _, tc := range []struct {
-		name  string
-		reply string // the hooks/list reply line, %s the checkout
-		hold  bool
+		name         string
+		version      string
+		hooks        string // the hooks/list reply line, %s the checkout
+		requirements string // the configRequirements/read reply line
+		kind         string // the marker kind, or "" for none
 	}{
-		{"every hook trusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `],"warnings":[],"errors":[]}]}}`, false},
-		{"managed hooks only", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("managed") + `],"warnings":[],"errors":[]}]}}`, false},
-		{"one hook untrusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `,` + codexHookForTest("untrusted") + `],"warnings":[],"errors":[]}]}}`, true},
-		{"hooks/list error", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, true},
+		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, ""},
+		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, ""},
+		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, wakeStartupKindReview},
+		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, wakeStartupKindReview},
+		// Field: every 0.164 seat held until typed after v0.112.0 (bead
+		// agent-message-queue-uue). The seat carries AMQ's
+		// check_for_update_on_startup=false, which no requirement pins on,
+		// so no update prompt can show on any version.
+		{"unverified release, update check off, requirements clear", "0.165.0", hooks("trusted"),
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, ""},
+		{"requirements pin the update check on", "0.165.0", hooks("trusted"),
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, wakeStartupKindUpdate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -284,20 +303,20 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			bin := fakeCodex164ForTest(t, filepath.Dir(config), fmt.Sprintf(tc.reply, real))
+			bin := fakeCodexForTest(t, filepath.Dir(config), tc.version, fmt.Sprintf(tc.hooks, real), tc.requirements)
 			if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 				t.Fatal(err)
 			}
 			raw, err := os.ReadFile(marker)
-			if !tc.hold {
+			if tc.kind == "" {
 				if !os.IsNotExist(err) {
-					t.Fatalf("Startup marker %q, %v; want none for a clear 0.164 start", raw, err)
+					t.Fatalf("Startup marker %q, %v; want none for a clear start", raw, err)
 				}
 				return
 			}
 			var got wakeDialogMarker
-			if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != wakeStartupKindReview {
-				t.Fatalf("Startup marker %q, %v; want kind %s", raw, err, wakeStartupKindReview)
+			if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != tc.kind {
+				t.Fatalf("Startup marker %q, %v; want kind %s", raw, err, tc.kind)
 			}
 		})
 	}
@@ -310,7 +329,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
 	h, config, real, marker := newCodexTrustDialogHarness(t)
 	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("trusted"))
-	bin := fakeCodex164ForTest(t, filepath.Dir(config), reply)
+	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", reply, `{"id":3,"result":{"requirements":null}}`)
 	if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -371,26 +390,31 @@ func TestCodexHoldHintNamesHooksForAnUntrustedDialogHook(t *testing.T) {
 	}
 }
 
-// fakeCodex164ForTest writes a codex that reports 0.164.0 and answers
-// hooks/list on a stdio app-server with reply, plus a version cache in
-// codexHome that rules the update prompt out.
-func fakeCodex164ForTest(t *testing.T, codexHome, reply string) string {
+// fakeCodexForTest writes a codex that reports version and answers
+// hooks/list and configRequirements/read on a stdio app-server with the
+// given reply lines, plus a version cache in codexHome that names 0.164.0
+// as the latest release, checked now.
+func fakeCodexForTest(t *testing.T, codexHome, version, hooks, requirements string) string {
 	t.Helper()
 	cache := fmt.Sprintf(`{"latest_version":"0.164.0","last_checked_at":%q,"dismissed_version":null}`, time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(filepath.Join(codexHome, codexVersionFile), []byte(cache), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	replyFile := filepath.Join(dir, "reply.json")
-	if err := os.WriteFile(replyFile, []byte(reply+"\n"), 0o600); err != nil {
+	hooksFile, requirementsFile := filepath.Join(dir, "hooks.json"), filepath.Join(dir, "requirements.json")
+	if err := os.WriteFile(hooksFile, []byte(hooks+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requirementsFile, []byte(requirements+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = --version ]; then printf 'codex-cli 0.164.0\\n'; exit 0; fi\n" +
+		"if [ \"$1\" = --version ]; then printf 'codex-cli " + version + "\\n'; exit 0; fi\n" +
 		"while IFS= read -r line; do\n" +
 		"  case \"$line\" in\n" +
 		"    *'\"method\":\"initialize\"'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"fake\"}}\\n' ;;\n" +
-		"    *'\"method\":\"hooks/list\"'*) cat '" + replyFile + "' ;;\n" +
+		"    *'\"method\":\"hooks/list\"'*) cat '" + hooksFile + "' ;;\n" +
+		"    *'\"method\":\"configRequirements/read\"'*) cat '" + requirementsFile + "' ;;\n" +
 		"  esac\n" +
 		"done\n"
 	bin := filepath.Join(dir, "codex")

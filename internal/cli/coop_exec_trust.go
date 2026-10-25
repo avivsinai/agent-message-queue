@@ -31,7 +31,7 @@ import (
 const wakeDialogStartupEvent = "Startup"
 
 // wakeStartupKindUpdate marks a Codex Startup marker written only because
-// the update prompt could not be ruled out (codexUpdatePromptRuledOut). No
+// the update prompt could not be ruled out (startupDialogMarkerFor). No
 // Codex record shows that prompt closed, so only the dialog hook releases
 // it.
 const wakeStartupKindUpdate = "update_prompt"
@@ -240,18 +240,39 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 		return startupDialogMarkerDecision(harness, dir, trust, true)
 	}
 	installed, known := codexInstalledVersion(binaryPath)
-	marker, hold := startupDialogMarkerDecision(harness, dir, trust, codexUpdatePromptRuledOut(installed, known))
-	if marker.Kind != "" || known && codexVersionNewer(codexHookReviewSince, installed) {
-		return marker, hold
+	cacheRuledOut := codexUpdatePromptRuledOut(installed, known)
+	// The verified releases before hook review keep the trust and version
+	// cache decision.
+	if known && codexUpdateVersionVerified(installed) && codexVersionNewer(codexHookReviewSince, installed) {
+		return startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
 	}
-	// A release that reviews hooks after its trust screen starts clear only
-	// when Codex records that it trusts the directory and its hooks/list
-	// shows no hook to review.
-	if trust == startupTrustAccepted && codexHookReviewClear(binaryPath, args, wd, dir, recorded) {
-		return wakeDialogMarker{}, false
+	// Any other release may review hooks after its trust screen. It starts
+	// clear only when Codex records that it trusts the directory, its
+	// hooks/list shows no hook to review, and the update prompt is ruled
+	// out: by the version cache of a verified release, or by AMQ's own
+	// override that turns the update check off where no requirement pins it
+	// on (tui/src/updates.rs:28 and :153 at rust-v0.164.0: the prompt needs
+	// an effective check_for_update_on_startup).
+	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindUpdate}
+	flagged := codexArgsDisableUpdateCheck(args)
+	if !cacheRuledOut && !flagged {
+		return marker, true
 	}
-	marker.Kind = wakeStartupKindReview
-	return marker, true
+	if trust != startupTrustAccepted {
+		if cacheRuledOut {
+			marker.Kind = wakeStartupKindReview
+		}
+		return marker, true
+	}
+	probe := probeCodexStartup(binaryPath, args, wd, dir, recorded)
+	if !cacheRuledOut && !probe.requirementsClear {
+		return marker, true
+	}
+	if !probe.hooksClear {
+		marker.Kind = wakeStartupKindReview
+		return marker, true
+	}
+	return wakeDialogMarker{}, false
 }
 
 // startupDialogMarkerDecision keeps trust and update evidence independent.

@@ -36,11 +36,13 @@ var codexHookReviewSince = [3]uint64{0, 164, 0}
 // start_app_server). Choosing "Not now" writes nothing, so no Codex record
 // shows that the prompt closed. coop exec therefore holds the doorbell
 // unless Codex's own state proves the prompt cannot show:
-// codexUpdatePromptRuledOut uses only Codex's version cache as release
-// evidence. A CLI or file setting cannot prove the effective value above
-// managed preferences and cloud requirements. Unknown state stays held
-// until Codex's first-turn dialog hook closes the marker. installed is the
-// binary's version, known only when its probe succeeded.
+// codexUpdatePromptRuledOut reads Codex's version cache. The other proof,
+// AMQ's own override with no requirement that pins the check on, needs the
+// app-server probe (startupDialogMarkerFor); a CLI or file setting alone
+// cannot prove the effective value above managed and cloud requirements.
+// Unknown state stays held until Codex's first-turn dialog hook closes the
+// marker. installed is the binary's version, known only when its probe
+// succeeded.
 func codexUpdatePromptRuledOut(installed [3]uint64, known bool) bool {
 	if !known || !codexUpdateVersionVerified(installed) {
 		return false

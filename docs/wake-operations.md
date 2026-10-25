@@ -203,26 +203,33 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   Codex's "Not now" on the update prompt records nothing, so an update
   prompt marker releases only through the dialog hook's first-turn close.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
-  identity overrides with `-c check_for_update_on_startup=false`. Managed
-  or cloud requirements can override that setting, so the flag is not
-  evidence that the prompt cannot show. A Codex seat gets no update prompt
-  marker only when `$CODEX_HOME/version.json` was checked less than 19 hours
-  ago and its `latest_version` is not newer than the installed version, or
-  is the dismissed version, for a codex-cli
-  version AMQ has checked. This proof applies only to the verified releases
-  `0.145.0`, `0.161.0`, `0.163.0`, and `0.164.0`; another release or patch
-  keeps the hold. Anything missing or unreadable keeps the hold until the dialog
-  hook runs at the first turn. Setting `check_for_update_on_startup = false`
-  in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) prevents
-  ordinary update prompts, but does not release this hold by itself. AMQ
-  does not edit that file.
+  identity overrides with `-c check_for_update_on_startup=false`. Codex
+  shows the prompt only when that setting is in effect, and managed or
+  cloud requirements can pin it on, so the flag alone is not evidence. The
+  update prompt is ruled out in either of two ways. On any release, the
+  seat's last `-c` for that key is AMQ's `check_for_update_on_startup=false`
+  and Codex's `configRequirements/read`, asked in the same probe as
+  `hooks/list` (below), returns no requirements, or requirements whose
+  `checkForUpdateOnStartup` is absent, null or false; true, an error, a
+  timeout or an unreadable reply proves nothing. On the verified releases
+  `0.145.0`, `0.161.0`, `0.163.0`, and `0.164.0`, `$CODEX_HOME/version.json`
+  was checked less than 19 hours ago and its `latest_version` is not newer
+  than the installed version, or is the dismissed version. Otherwise the
+  seat gets an update prompt marker, and anything missing or unreadable
+  keeps the hold until the dialog hook runs at the first turn. A seat on
+  the managed daemon carries no `-c` override, so only the version cache
+  can rule the prompt out there. Setting `check_for_update_on_startup =
+  false` in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`)
+  prevents ordinary update prompts, but does not release this hold by
+  itself. AMQ does not edit that file.
 
   Directory trust and native hook review are separate startup screens.
   Codex `0.164.0` and later reviews new or changed hooks after its trust
   screen and before the session starts, and records that review in
-  `[hooks.state]`, apart from `[projects]`. For such a release coop exec
-  writes no `Startup` marker only when all three are ruled out: the update
-  prompt (as above), the directory trust (Codex records that it trusts the
+  `[hooks.state]`, apart from `[projects]`. For every release other than
+  the verified releases before `0.164.0`, an unknown or newer one included,
+  coop exec writes no `Startup` marker only when all three are ruled out:
+  the update prompt (as above), the directory trust (Codex records that it trusts the
   directory), and the hook review. The hook review is ruled out only when
   Codex's own `hooks/list` for the launch directory, asked on the backend
   the TUI uses, lists every hook as trusted or managed, or none (Codex
@@ -233,8 +240,8 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   output stays out of AMQ diagnostics. An error, a timeout, an unreadable
   reply, an untrusted, modified, missing or unknown trust status, a
   `--profile` seat, or a backend AMQ
-  cannot tell writes the marker. A marker written for such a release, or
-  for a release AMQ has not verified, releases only through the dialog
+  cannot tell writes the marker. A marker written for such a release
+  releases only through the dialog
   hook's first-turn close: the trust record never releases it, and the
   recheck does not probe again. When the AMQ dialog hook is installed but
   Codex does not trust it, `amq doctor --ops` names the remedy: open
