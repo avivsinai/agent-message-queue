@@ -220,7 +220,7 @@ func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
 		}
 	}
 	mapping := board.UsageMapping(m.Conversations)
-	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
+	rep := boardusage.Read(st.Config, env.Now(), roots, mapping)
 	return board.WithUsage(m, rep, mapping), nil
 }
 

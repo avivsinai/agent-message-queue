@@ -26,7 +26,7 @@ func claudeLineJSON(version, msgID string) string {
 	return `{"type":"assistant","timestamp":"2026-10-22T11:00:00.000Z","sessionId":"aaaaaaaa-0000-4000-8000-000000000001","cwd":"/work/demo","version":"` + version + `","message":{"id":"` + msgID + `","usage":{"input_tokens":2,"cache_creation_input_tokens":275,"cache_read_input_tokens":800,"output_tokens":650}}}`
 }
 
-func demoEligible(cwd string) bool { return cwd == "/work/demo" }
+var demoRoots = []string{"/work/demo"}
 
 // Each way a read can miss data leaves the totals incomplete, so the
 // account must say "at least", never show a complete figure. Regression for
@@ -43,7 +43,7 @@ func TestIncompleteReadsKeepTheAccountPartial(t *testing.T) {
 	}
 	partial := func(t *testing.T, home string) {
 		t.Helper()
-		rep := Read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoEligible, nil)
+		rep := Read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoRoots, nil)
 		if a := rep.Accounts[0]; !a.Partial() {
 			t.Fatalf("account is complete: %+v", a)
 		}
@@ -90,7 +90,7 @@ func TestUnverifiedVersionsAreNotCounted(t *testing.T) {
 		`{"type":"session","version":4,"id":"eeeeeeee-0000-4000-8000-000000000005","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}`,
 		`{"type":"message","timestamp":"2026-10-22T10:00:05.000Z","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}`)
 	cfg := Config{Homes: map[string][]string{Claude: {claude}, Codex: {codex}, Pi: {pi}}}
-	rep := Read(cfg, testNow, demoEligible, nil)
+	rep := Read(cfg, testNow, demoRoots, nil)
 	if len(rep.Accounts) != 3 {
 		t.Fatalf("accounts = %d, want 3", len(rep.Accounts))
 	}
@@ -119,14 +119,20 @@ func TestUnverifiedVersionsAreNotCounted(t *testing.T) {
 // PR #1203 (P2: discovery outside the budget; a long line read whole).
 func TestReaderStaysInsideItsBudget(t *testing.T) {
 	t.Run("listing", func(t *testing.T) {
-		// Two accounts share a 1 byte budget, so the first gets none.
-		first, second := t.TempDir(), t.TempDir()
-		for _, home := range []string{first, second} {
-			for _, slug := range []string{"-work-demo", "-work-other"} {
-				writeFile(t, filepath.Join(home, "projects", slug, "aaaaaaaa-0000-4000-8000-000000000001.jsonl"), claudeLineJSON("2.1.300", "msg_a"))
-			}
+		// The wall budget is spent as soon as the run starts.
+		home := t.TempDir()
+		for _, slug := range []string{"-work-demo", "-work-other"} {
+			writeFile(t, filepath.Join(home, "projects", slug, "aaaaaaaa-0000-4000-8000-000000000001.jsonl"), claudeLineJSON("2.1.300", "msg_a"))
 		}
-		rep := Read(Config{Homes: map[string][]string{Claude: {first, second}}, BudgetBytes: 1}, testNow, demoEligible, nil)
+		t0, started := time.Now(), false
+		clock := func() time.Time {
+			if !started {
+				started = true
+				return t0
+			}
+			return t0.Add(time.Hour)
+		}
+		rep := read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoRoots, nil, clock)
 		if a := rep.Accounts[0]; a.Files != 0 || !a.Partial() {
 			t.Fatalf("spent budget still listed %d files (partial %v)", a.Files, a.Partial())
 		}
@@ -148,7 +154,7 @@ func TestReaderStaysInsideItsBudget(t *testing.T) {
 			}
 			return t0
 		}}
-		files, cut := listPattern(root, []string{"*", "s.jsonl"}, testNow.Add(-span), b)
+		files, cut := listPattern(root, []string{"*", "s.jsonl"}, testNow.Add(-span), func(string) bool { return false }, b)
 		if len(files) != 0 || !cut {
 			t.Fatalf("listed %d sessions (cut %v) after the budget ran out inside a directory", len(files), cut)
 		}
@@ -169,4 +175,52 @@ func TestReaderStaysInsideItsBudget(t *testing.T) {
 			t.Fatalf("read %d bytes on a %d byte budget (done %v), want a stop within one chunk", spent, allowance, done)
 		}
 	})
+}
+
+// A one-shot board must count this project's recent sessions even when the
+// home holds many files of other projects: listing them cannot spend the
+// budget reading needs. Regression for the live board of 2026-10-25, whose
+// Claude account read "partial: 0 of 560 files; session files not all
+// listed".
+func TestListingCannotStarveRecentProjectSessions(t *testing.T) {
+	home := t.TempDir()
+	at := func(path string, mtime time.Time, lines ...string) {
+		writeFile(t, path, lines...)
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := `{"type":"assistant","timestamp":"2026-10-22T11:50:00.000Z","sessionId":"bbbbbbbb-0000-4000-8000-000000000002","cwd":"/work/other","version":"2.1.300","message":{"id":"msg_o","usage":{"input_tokens":1,"output_tokens":1}}}`
+	for d := 0; d < 6; d++ {
+		for i := 0; i < 50; i++ {
+			at(filepath.Join(home, "projects", fmt.Sprintf("-work-other-%d", d), fmt.Sprintf("old-%02d.jsonl", i)), testNow.Add(-10*24*time.Hour), other)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		at(filepath.Join(home, "projects", "-work-other-0", fmt.Sprintf("busy-%02d.jsonl", i)), testNow.Add(-10*time.Minute), other)
+	}
+	for i := 0; i < 3; i++ {
+		at(filepath.Join(home, "projects", "-work-demo", fmt.Sprintf("recent-%d.jsonl", i)), testNow.Add(-time.Hour), claudeLineJSON("2.1.300", fmt.Sprintf("msg_%d", i)))
+	}
+	// Each budget check advances the clock 10 ms, so the 1 s budget holds
+	// 100 checks: fewer than one listing of every file needs.
+	t0 := time.Now()
+	ticks := 0
+	clock := func() time.Time {
+		ticks++
+		return t0.Add(time.Duration(ticks) * 10 * time.Millisecond)
+	}
+	cfg := Config{Homes: map[string][]string{Claude: {home}}, BudgetWall: time.Second}
+	a := read(cfg, testNow, []string{"/work/demo"}, nil, clock).Accounts[0]
+	var fresh int64
+	for _, s := range a.Sessions {
+		c, _ := s.Totals(testNow.Add(-span))
+		fresh += c.Fresh()
+	}
+	if want := int64(3 * (2 + 275 + 650)); fresh != want || a.Read < 3 {
+		t.Fatalf("project sessions counted %d fresh tokens from %d of %d files (%s), want %d", fresh, a.Read, a.Files, a.Detail, want)
+	}
+	if !a.Partial() {
+		t.Fatalf("account is complete although the budget stopped it: %+v", a)
+	}
 }

@@ -21,7 +21,7 @@ func TestBoardAttributesUsageThroughSessionConversations(t *testing.T) {
 		usage.Codex:  {"../usage/testdata/codex"},
 		usage.Pi:     {"../usage/testdata/pi"},
 	}}
-	rep := usage.Read(cfg, m.GeneratedAt, usage.ProjectEligible([]string{"/work/demo"}), mapping)
+	rep := usage.Read(cfg, m.GeneratedAt, []string{"/work/demo"}, mapping)
 	m = board.WithUsage(m, rep, mapping)
 
 	type want struct{ fresh, cached int64 }

@@ -20,10 +20,10 @@ func Worktrees(porcelain []byte) []string {
 	return out
 }
 
-// ProjectEligible accepts a working directory that is one of the project's
+// projectEligible accepts a working directory that is one of the project's
 // roots (its worktrees, or the project directory outside Git) or lies
 // inside one, compared after resolving symlinks.
-func ProjectEligible(roots []string) Eligible {
+func projectEligible(roots []string) Eligible {
 	var canon []string
 	for _, r := range roots {
 		canon = append(canon, canonical(r))
