@@ -238,7 +238,27 @@ func defaultRoot() string {
 	return root
 }
 
+// resolveRoot resolves a root that names an existing queue. A relative root
+// not found below cwd falls back to the nearest ancestor that holds it.
 func resolveRoot(raw string) string {
+	root := resolveCreateRoot(raw)
+	if root == "" || filepath.IsAbs(root) {
+		return root
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return root
+	}
+	if found, ok := findRootInParents(cwd, root); ok {
+		return found
+	}
+	return root
+}
+
+// resolveCreateRoot resolves a root that a command creates. A relative root
+// always names a path below cwd; it never resolves to an ancestor queue.
+// The result stays relative when cwd holds no such directory yet.
+func resolveCreateRoot(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return raw
@@ -254,9 +274,6 @@ func resolveRoot(raw string) string {
 	candidate := filepath.Join(cwd, cleaned)
 	if dirExists(candidate) {
 		return absPath(candidate)
-	}
-	if found, ok := findRootInParents(cwd, cleaned); ok {
-		return found
 	}
 	return cleaned
 }
