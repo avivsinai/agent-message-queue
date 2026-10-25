@@ -35,7 +35,13 @@ func runInit(args []string) error {
 	agents = dedupeStrings(agents)
 	sort.Strings(agents)
 
-	root := resolveRoot(*rootFlag)
+	// An explicit --root names the queue to create, relative to cwd. The
+	// implicit default keeps the shared resolver.
+	resolve := resolveRoot
+	if flagWasVisited(fs, "root") {
+		resolve = resolveCreateRoot
+	}
+	root := resolve(*rootFlag)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		return err
 	}

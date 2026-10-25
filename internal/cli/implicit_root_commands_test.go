@@ -118,3 +118,51 @@ func TestStandaloneImplicitRootCommandsRejectBrokenProjectAmqrcBeforeSideEffects
 		}
 	})
 }
+
+// Observed in the field 2026-10-25: init --root .agent-mail in a scratch
+// directory under HOME climbed to an existing ~/.agent-mail and wrote the
+// new mailboxes into the home queue.
+func TestInitExplicitRelativeRootCreatesQueueInCurrentDirectory(t *testing.T) {
+	fakeHome := t.TempDir()
+	homeQueue := filepath.Join(fakeHome, defaultCoopRoot)
+	scratch := filepath.Join(fakeHome, "scratch")
+	for _, dir := range []string{homeQueue, scratch} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	t.Setenv("HOME", fakeHome)
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envGlobalRoot} {
+		t.Setenv(key, "")
+	}
+	resetAmqrcCache()
+	if err := os.Chdir(scratch); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runInit([]string{"--root", defaultCoopRoot, "--agents", "alpha,beta,gamma"})
+	}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(scratch, defaultCoopRoot, "meta", "config.json")); err != nil {
+		t.Fatalf("queue not created in the current directory: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(homeQueue, "meta", "config.json"),
+		filepath.Join(homeQueue, "agents", "alpha"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("init wrote into the home queue: %s (stat err %v)", path, err)
+		}
+	}
+}
