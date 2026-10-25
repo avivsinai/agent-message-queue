@@ -6,6 +6,7 @@ that has an AMQ queue:
 ```sh
 amq-board            # text
 amq-board --json     # the board model (schema amq/board/v1)
+amq-board --html --out board.html  # the board as one static page
 amq-board --refresh  # ignore the GitHub cache and fetch once
 ```
 
@@ -30,6 +31,24 @@ requests; the rest are counted as quiet.
 Columns come only from structured fields (message kinds, bead status,
 assignees, dependencies). Subjects and titles are display text: a bead id in
 a subject is shown as a related reference and never moves or merges a card.
+
+## Static page
+
+`amq-board --html` prints the same board as one self-contained HTML page;
+`--out <file>` writes it to a file instead (through a temporary file renamed
+into place). Open the file in a browser. The page loads nothing from the
+network and runs only its own script and stylesheet, pinned by hash in its
+Content Security Policy. Every source value is escaped. The board model is
+embedded once as JSON (`<script type="application/json" id="model">`).
+
+Each item is one strip: its ref, title, reason, age, owner, and the time its
+source was last checked. Waiting on you shows every copy command on the strip;
+the other columns keep commands, references, and evidence under Details. A
+stale strip, or one whose owners disagree, sits out of line with its mark.
+Ages are as of generation; the header says how old the page is and marks it
+stale after 5 minutes, and the footer has the command that regenerates it.
+The page never runs a command: Copy puts the command on the clipboard, and
+the filter field hides strips that do not match a handle, ref, or title.
 
 ## Sources
 

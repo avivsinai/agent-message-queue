@@ -38,3 +38,7 @@ __pycache__/
 
 # pi package (integrations/pi)
 node_modules/
+
+# amq-board page: impeccable comps and review captures stay local
+internal/board/web/.impeccable/mocks/
+internal/board/web/.impeccable/review/

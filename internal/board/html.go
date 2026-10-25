@@ -1,0 +1,385 @@
+package board
+
+import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
+	"html/template"
+	"io"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/board/usage"
+)
+
+// The page files are named one by one, so nothing else under web/ (product
+// and design records, review captures) is ever embedded or served.
+var (
+	//go:embed web/page.html
+	pageHTML string
+	//go:embed web/page.css
+	pageCSS string
+	//go:embed web/page.js
+	pageJS string
+)
+
+var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{"stripArgs": stripArgs}).Parse(pageHTML))
+
+// stripCall is one strip's template input: its unique heading id, and
+// whether its commands sit in the strip (Waiting on you) or in its details.
+type stripCall struct {
+	ID     string
+	S      pageStrip
+	Inline bool
+}
+
+func stripArgs(bay string, i int, s pageStrip, inline bool) stripCall {
+	return stripCall{ID: "s-" + bay + "-" + strconv.Itoa(i), S: s, Inline: inline}
+}
+
+// pageCSP allows only the page's own stylesheet and script, by hash, so no
+// markup that reached the page could run or restyle it.
+var pageCSP = "default-src 'none'; script-src 'sha256-" + sha256Base64(pageJS) +
+	"'; style-src 'sha256-" + sha256Base64(pageCSS) +
+	"'; img-src data:; base-uri 'none'; form-action 'none'"
+
+func sha256Base64(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// WriteHTML renders the model as one static page. html/template escapes
+// every value for its context; the model is also embedded once as JSON for
+// scripts that read it. regenerate is the command line the footer offers.
+func WriteHTML(w io.Writer, m Model, regenerate string) error {
+	return pageTemplate.Execute(w, buildPage(m, regenerate))
+}
+
+type pageData struct {
+	Model      Model
+	CSS        template.CSS
+	JS         template.JS
+	CSP        string
+	Project    string
+	Generated  string
+	Clock      string
+	Sessions   string
+	Fleet      string
+	Sources    []pageSource
+	Limits     []pageLimit
+	Waiting    pageBay
+	Bays       []pageBay
+	Roster     []pageSession
+	RosterNote string
+	Regenerate string
+	Version    string
+	Dir        string
+}
+
+type pageSource struct {
+	Name, Status, Age, Detail, Gap string
+	Partial                        bool
+}
+
+type pageLimit struct {
+	Account, Limits, Other string
+	Reached                bool
+}
+
+type pageBay struct {
+	ID, Title, Empty string
+	Gates            []string
+	Strips           []pageStrip
+}
+
+type pageStrip struct {
+	Kind, ID, Title       string
+	Refs                  []string
+	Reason, Since         string
+	SinceAt               string
+	Checked               string
+	Owner                 string
+	People                []string
+	Marks                 []string
+	Cocked                bool
+	Related               []string
+	Evidence              []pageEvidence
+	Actions               []Action
+	HasDetail             bool
+	ReasonField, Priority string
+}
+
+type pageEvidence struct {
+	Source, Field, Value, Text, Age, URL string
+}
+
+type pageSession struct {
+	Name   string
+	Agents []pageAgent
+	Quiet  []string
+	Note   string
+}
+
+type pageAgent struct {
+	Handle, Liveness, Counts, Usage string
+	Human, Invalid, Limited         bool
+	Action                          *Action
+	Split                           []string
+}
+
+func buildPage(m Model, regenerate string) pageData {
+	now := m.GeneratedAt
+	project := m.Project
+	if project == "" {
+		project = m.Dir
+	}
+	p := pageData{
+		Model:      m,
+		CSS:        template.CSS(pageCSS),
+		JS:         template.JS(pageJS),
+		CSP:        pageCSP,
+		Project:    clean(project),
+		Generated:  now.Format(time.RFC3339),
+		Clock:      now.Local().Format("Jan 2 15:04"),
+		Sessions:   pluralize(len(m.Sessions), "session"),
+		RosterNote: clean(m.RosterNote),
+		Regenerate: regenerate,
+		Version:    clean(m.Version),
+		Dir:        clean(m.Dir),
+	}
+	if hasControl(regenerate) {
+		// A line with a control character would not paste as one command.
+		p.Regenerate = ""
+	}
+	if m.Usage != nil && len(m.Usage.Fleet) > 0 {
+		p.Fleet = clean(spendLine(m.Usage.Fleet, now, false))
+		for _, a := range m.Usage.Accounts {
+			other := ""
+			if a.OtherSessions > 0 {
+				other = "other sessions (" + strconv.Itoa(a.OtherSessions) + "): " + spendLine(a.Other, now, a.Harness == usage.Pi)
+			}
+			if a.Detail != "" {
+				other = strings.TrimPrefix(other+" · "+a.Detail, " · ")
+			}
+			p.Limits = append(p.Limits, pageLimit{
+				Account: accountName(a.Key), Limits: clean(limitsLine(a.Limits, now)),
+				Other: clean(other), Reached: reachedLimit(a.Limits) != nil,
+			})
+		}
+	}
+	for _, s := range m.Sources {
+		ps := pageSource{Name: clean(s.Name), Status: string(s.Status), Partial: s.Partial}
+		if !s.ObservedAt.IsZero() {
+			ps.Age = age(now.Sub(s.ObservedAt))
+		}
+		if s.Status == StatusDegraded || s.Status == StatusUnavailable {
+			ps.Detail = clean(s.Detail)
+		}
+		if s.Partial {
+			ps.Gap = clean(s.Coverage.Detail)
+			if ps.Gap == "" {
+				ps.Gap = "not every record assessed"
+			}
+		}
+		p.Sources = append(p.Sources, ps)
+	}
+
+	live := map[[2]string]string{}
+	for _, rs := range m.Roster {
+		for _, a := range append(append([]RosterAgent{}, rs.Agents...), rs.Quiet...) {
+			live[[2]string{a.Session, a.Handle}] = a.Liveness
+		}
+	}
+	for _, c := range m.Columns {
+		bay := pageBay{ID: string(c.ID), Title: c.Title, Empty: clean(c.Empty)}
+		for _, card := range c.Cards {
+			bay.Strips = append(bay.Strips, buildStrip(card, now, live))
+		}
+		if c.ID == ColumnWaiting {
+			for _, g := range m.Gates {
+				bay.Gates = append(bay.Gates, clean(g.Session)+": "+pluralize(g.OpenCount, "unread message")+" for user, oldest "+age(seconds(g.OldestAgeSeconds)))
+			}
+			p.Waiting = bay
+			continue
+		}
+		p.Bays = append(p.Bays, bay)
+	}
+	for _, rs := range m.Roster {
+		p.Roster = append(p.Roster, buildSession(rs, now))
+	}
+	return p
+}
+
+func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
+	s := pageStrip{Title: cleanTitle(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field)}
+	if s.Title == "" {
+		s.Title = clean(c.ID)
+	}
+	placing := Item{Ref: Ref{Kind: c.ID}}
+	for _, it := range c.Items {
+		if it.Ref.String() == c.ID {
+			placing = it
+			break
+		}
+	}
+	s.Kind, s.ID = refCell(placing)
+	for _, it := range c.Items {
+		s.Refs = append(s.Refs, clean(it.Source+" · "+refLabel(it)))
+		for _, e := range it.Evidence {
+			if e.Field == "priority" && s.Priority == "" {
+				s.Priority = clean(e.Value)
+			}
+		}
+	}
+	s.Since = "since unknown"
+	if !c.Reason.Since.IsZero() {
+		s.Since = age(now.Sub(c.Reason.Since))
+		s.SinceAt = c.Reason.Since.Format(time.RFC3339)
+	}
+	if !c.SourceObservedAt.IsZero() {
+		s.Checked = clean(c.ReasonSource) + " checked " + age(now.Sub(c.SourceObservedAt)) + " ago"
+	}
+	switch {
+	case len(c.Owners) == 0:
+		s.Owner = "no owner"
+	default:
+		var names []string
+		for _, o := range c.Owners {
+			names = append(names, ownerLabel(o, live))
+		}
+		s.Owner = clean(strings.Join(names, ", "))
+	}
+	for _, o := range c.WaitsOn {
+		s.People = append(s.People, clean("waits on "+ownerLabel(o, live)))
+	}
+	if c.Requester != nil {
+		s.People = append(s.People, clean("requested by "+ownerLabel(*c.Requester, nil)))
+	}
+	for _, mk := range c.Marks {
+		s.Marks = append(s.Marks, clean(mk))
+		if mk == "stale" || mk == "owners disagree" {
+			s.Cocked = true
+		}
+	}
+	for _, t := range c.Related {
+		s.Related = append(s.Related, clean(tokenLabel(t)))
+	}
+	var ev []pageEvidence
+	type dated struct {
+		at time.Time
+		e  pageEvidence
+	}
+	var all []dated
+	for _, it := range c.Items {
+		for _, e := range it.Evidence {
+			pe := pageEvidence{Source: clean(it.Source), Field: clean(e.Field), Value: clean(e.Value), Text: clean(e.Text), URL: httpsOnly(e.URL)}
+			if !e.At.IsZero() {
+				pe.Age = age(now.Sub(e.At)) + " ago"
+			}
+			all = append(all, dated{e.At, pe})
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].at.After(all[j].at) })
+	for _, d := range all {
+		ev = append(ev, d.e)
+	}
+	s.Evidence = ev
+	s.Actions = c.Actions
+	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
+	return s
+}
+
+// refCell is the strip's designator: a short kind and the id.
+func refCell(it Item) (string, string) {
+	switch it.Ref.Kind {
+	case RefBead:
+		return "bead", it.Ref.ID
+	case RefForge:
+		label := refLabel(it)
+		if kind, n, ok := strings.Cut(label, " "); ok {
+			return kind, n
+		}
+		return "forge", it.Ref.ID
+	case RefObligation:
+		kind := "request"
+		for _, e := range it.Evidence {
+			if e.Field == "kind" && e.Value != "" {
+				kind = e.Value
+			}
+		}
+		return "amq", clean(strings.ReplaceAll(kind, "_", " "))
+	case RefExternal:
+		provider := strings.TrimPrefix(it.Source, "ext:")
+		return clean(provider), clean(strings.TrimPrefix(it.Ref.ID, provider+":"))
+	case "codex-goal":
+		id := it.Ref.ID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		return "goal", id
+	}
+	return clean(it.Ref.Kind), clean(it.Ref.ID)
+}
+
+func buildSession(rs RosterSession, now time.Time) pageSession {
+	ps := pageSession{Name: clean(rs.Session)}
+	for _, a := range rs.Agents {
+		pa := pageAgent{Handle: clean(a.Handle), Liveness: a.Liveness, Human: a.Human, Invalid: !a.ValidHandle, Action: a.Action, Limited: a.LimitReached != nil}
+		if a.Human {
+			pa.Liveness = "human"
+		}
+		var counts []string
+		switch {
+		case a.CountError != "":
+			counts = append(counts, "not counted: "+a.CountError)
+		case !a.Counted:
+			counts = append(counts, "unread not counted")
+		case a.UnreadCount > 0:
+			counts = append(counts, strconv.Itoa(a.UnreadCount)+" unread · oldest "+age(seconds(a.OldestUnreadAgeSeconds)))
+		}
+		if a.DLQCount > 0 {
+			counts = append(counts, strconv.Itoa(a.DLQCount)+" in DLQ")
+		}
+		if a.Obligations > 0 {
+			counts = append(counts, "owes "+strconv.Itoa(a.Obligations))
+		}
+		pa.Counts = clean(strings.Join(counts, " · "))
+		pa.Usage = clean(usageLine(a, now))
+		for _, u := range a.Usage {
+			if u.Unknown != "" {
+				continue
+			}
+			pa.Split = append(pa.Split, windowName(u.Window)+": "+si(u.In)+" in, "+si(u.CacheRead)+" cache read, "+si(u.CacheWrite)+" cache write, "+si(u.Out)+" out")
+		}
+		ps.Agents = append(ps.Agents, pa)
+	}
+	for _, a := range rs.Quiet {
+		ps.Quiet = append(ps.Quiet, clean(a.Handle))
+	}
+	uncounted := 0
+	for _, a := range rs.Quiet {
+		if !a.Counted && a.CountError == "" {
+			uncounted++
+		}
+	}
+	if uncounted > 0 {
+		ps.Note = strconv.Itoa(uncounted) + " not in config.json: unread not counted"
+	}
+	return ps
+}
+
+// httpsOnly keeps a link only when it is an https URL; anything else is
+// shown as text, never as an anchor.
+func httpsOnly(u string) string {
+	if strings.HasPrefix(u, "https://") && !hasControl(u) {
+		return u
+	}
+	return ""
+}
+
+// pluralize prints "n noun" or "n nouns".
+func pluralize(n int, noun string) string {
+	return strconv.Itoa(n) + " " + noun + plural(n)
+}
