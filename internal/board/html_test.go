@@ -134,9 +134,8 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 }
 
 // Live board, 2026-10-25: a card with no since time read "since since
-// unknown" on narrow and medium strips, and the wide since cell overflowed
-// into the owner cell. The cue supplies "since"; the value is the age or
-// "unknown".
+// unknown" on narrow and medium strips. The cue supplies "since"; the value
+// is the age or "unknown".
 func TestHTMLUnknownSinceReadsOnce(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	ref, _ := Obligation("s1/alpha/demo")
