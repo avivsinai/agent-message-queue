@@ -103,20 +103,36 @@ type Session struct {
 
 // Limit is one account fact about what is left. It is never per worker.
 type Limit struct {
-	Kind     string     `json:"kind"` // "credits" | "reached" | "unknown"
+	Kind     string     `json:"kind"` // "window" | "credits" | "cap" | "reached" | "unknown"
 	Name     string     `json:"name,omitempty"`
 	Balance  string     `json:"balance,omitempty"`
 	ResetsAt *time.Time `json:"resets_at,omitempty"`
 	AsOf     time.Time  `json:"as_of,omitzero"`
 	Source   string     `json:"source"`
 	Reason   string     `json:"reason,omitempty"`
+	// Bucket names the metered bucket when it is not the account's main one.
+	Bucket string `json:"bucket,omitempty"`
+	// UsedPercent and WindowMinutes describe a plan window as reported.
+	UsedPercent   *float64 `json:"used_percent,omitempty"`
+	WindowMinutes int64    `json:"window_minutes,omitempty"`
+	// Unlimited marks unlimited credits.
+	Unlimited bool `json:"unlimited,omitempty"`
+	// Used and Cap are a spend cap's exact decimals as reported, in a unit
+	// the source does not name; RemainingPercent is what it reports left.
+	Used             string   `json:"used,omitempty"`
+	Cap              string   `json:"cap,omitempty"`
+	RemainingPercent *float64 `json:"remaining_percent,omitempty"`
+	// Status is the reading's derived status: fresh, stale or partial.
+	Status string `json:"status,omitempty"`
 }
 
 // Account is one harness home: its limits and the sessions of this project
 // it spent tokens in.
 type Account struct {
-	Key      string
-	Harness  string
+	Key     string
+	Harness string
+	// Home is the harness home the account was read from.
+	Home     string
 	Limits   []Limit
 	Sessions []Session
 	// Files is the number of session files in the read span; Read is how
@@ -244,7 +260,7 @@ func read(cfg Config, now time.Time, roots []string, mapping Mapping, clock func
 }
 
 func readHome(harness, home string, files []file, now time.Time, eligible Eligible, mapping Mapping, first func(string) bool, b *budget) Account {
-	acct := Account{Key: harness + ":" + displayHome(home), Harness: harness}
+	acct := Account{Key: harness + ":" + displayHome(home), Harness: harness, Home: home}
 	acct.Files = len(files)
 	sort.SliceStable(files, func(i, j int) bool {
 		mi, mj := mappedPath(files[i].path, mapping), mappedPath(files[j].path, mapping)

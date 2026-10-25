@@ -137,6 +137,18 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+    files: &board_files
+      # GoReleaser's default files, which a files list replaces.
+      - license*
+      - LICENSE*
+      - readme*
+      - README*
+      - changelog*
+      - CHANGELOG*
+      # amq-board carries rules translated from CodexBar under its MIT
+      # license, whose notice ships with the binary.
+      - third_party/codexbar/LICENSE
+      - third_party/codexbar/NOTICE.md
 
   - id: amq-keepalive
     ids: [amq-keepalive]
@@ -170,6 +182,7 @@ archives:
     ids: [amq-board]
     formats: [tar.gz]
     name_template: "amq-board_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: *board_files
 
 checksum:
   name_template: "checksums.txt"

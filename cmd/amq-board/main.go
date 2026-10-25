@@ -21,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
+	usagefacts "github.com/avivsinai/agent-message-queue/usage"
 )
 
 var version = "dev"
@@ -40,7 +41,9 @@ CLI, beads through bd --readonly --sandbox when a .beads directory exists,
 GitHub pull requests and issues through gh api graphql (one call, and up to
 4 more when review requests fill more than one page of 50) cached for the
 TTL (default 10m) when the origin remote is on github.com, and external
-providers registered in ~/.amq/board.json.
+providers registered in ~/.amq/board.json. Codex plan limits come from the
+installed codex CLI (codex app-server, read-only), at most once per 5 minutes
+per account across runs, saved under ~/.amq/usage.
 Commands on cards are printed for you to copy; amq-board never runs them.
 
 amq-board serve keeps the page live on 127.0.0.1; see amq-board serve --help.
@@ -101,7 +104,7 @@ func run(args []string) int {
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
 	}
-	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh})
+	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh, limits: oneShotLimits})
 
 	switch {
 	case *asJSON:
@@ -169,6 +172,8 @@ type sourceOptions struct {
 	// provider wraps each enabled external provider; nil reads it on every
 	// refresh.
 	provider func(source.External) board.Source
+	// limits returns the Codex plan limit facts; nil reads none.
+	limits limitsFunc
 }
 
 // boardModel reads every source cfg enables, under its own deadline, and
@@ -217,8 +222,17 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 			sources = append(sources, ext)
 		}
 	}
+	// Plan limits are read beside the sources, so a due app-server run
+	// overlaps them instead of adding to the board's time.
+	var limits <-chan usagefacts.Result
+	if cfg.Usage.Enabled && opt.limits != nil {
+		ch := make(chan usagefacts.Result, 1)
+		homes := cfg.Usage.Config.Homes[boardusage.Codex]
+		go func() { ch <- opt.limits(ctx, homes) }()
+		limits = ch
+	}
 	model := board.Run(ctx, env, sources, cfg.Board, version)
-	return withUsage(ctx, model, env, cfg.Usage)
+	return withUsage(ctx, model, env, cfg.Usage, limits)
 }
 
 // writePage writes the static page to stdout, or to out through a temporary
@@ -255,8 +269,9 @@ func writePage(m board.Model, out string) error {
 // worktrees (the directory itself outside Git); the worktree list is read
 // under ctx within worktreeTimeout. Spend goes to the worker an AMQ conversation record ties
 // the harness session to; the rest shows under the account's other
-// sessions.
-func withUsage(ctx context.Context, m board.Model, env board.Env, st boardusage.Settings) board.Model {
+// sessions. A non-nil limits delivers the Codex plan limit facts, which
+// replace the limits read from rollouts for the homes they cover.
+func withUsage(ctx context.Context, m board.Model, env board.Env, st boardusage.Settings, limits <-chan usagefacts.Result) board.Model {
 	if !st.Enabled {
 		return m
 	}
@@ -271,6 +286,9 @@ func withUsage(ctx context.Context, m board.Model, env board.Env, st boardusage.
 	}
 	mapping := board.UsageMapping(m.Conversations)
 	rep := boardusage.Read(st.Config, env.Now(), roots, mapping)
+	if limits != nil {
+		rep = board.WithPlanLimits(rep, <-limits, env.Now())
+	}
 	return board.WithUsage(m, rep, mapping)
 }
 
