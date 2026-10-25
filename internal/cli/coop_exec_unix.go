@@ -896,8 +896,8 @@ func (c *coopExecRun) execAgent() error {
 			fmt.Errorf("cleanup exact coop wake helper: %w", cleanupErr),
 		)
 	}
-	// The marker follows the final arguments, which decide Codex's update
-	// prompt. It changes only once this launch's wake holds the agent's wake
+	// The marker follows the final arguments, which determine the harness
+	// working directory. It changes only once this launch's wake holds the agent's wake
 	// lock, so a launch that loses the race touches no other owner's hold.
 	// That wake admits no input until the startup hold is released here, so
 	// no doorbell is typed before the marker exists: one typed before the

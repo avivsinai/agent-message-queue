@@ -79,8 +79,8 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells on the retry after a trust release = %d, want 1", got)
 	}
-	// The next launch in the trusted checkout, started without the update
-	// check, removes the leftover marker.
+	// The next launch with trusted input and a known-safe update decision
+	// removes the leftover trust marker.
 	syncStartupMarkerForTest(t, h.root, []string{"-c", "check_for_update_on_startup=false"})
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
 		t.Fatalf("Startup marker left after a launch with no dialog: %v", err)
@@ -226,22 +226,20 @@ func TestCodexStartOutsideAGitCheckoutHoldsTheDoorbell(t *testing.T) {
 // Live run on amq 0.110.0, 2026-10-25 (codex-cli 0.163.0): a seat restarted
 // in an already trusted checkout showed Codex's update prompt, whose default
 // choice runs brew upgrade, and coop exec wrote no Startup marker. A seat
-// whose Codex state does not prove the prompt cannot show (here a cached
-// newer release and an installed version AMQ cannot read) holds the
+// whose installed version AMQ cannot verify holds the
 // doorbell, Codex's trust record does not release it, and the Codex dialog
 // hook's first-turn close does.
-func TestCodexUpdatePromptOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
+func TestCodexUnknownVersionOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
 	h, config, real, marker := newCodexTrustDialogHarness(t)
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
 	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cache := `{"latest_version":"999.0.0","last_checked_at":"2026-10-25T00:00:00Z"}` + "\n"
-	if err := os.WriteFile(filepath.Join(filepath.Dir(config), "version.json"), []byte(cache), 0o600); err != nil {
+	// An explicit CLI setting is not proof that higher policy permits it.
+	// Unlike the trust-only fixtures, this calls the full startup producer.
+	if err := syncStartupDialogMarker(h.root, "codex", filepath.Join(t.TempDir(), "codex"), []string{"-c", "check_for_update_on_startup=false"}); err != nil {
 		t.Fatal(err)
 	}
-	// A daemon seat carries no configuration overrides.
-	syncStartupMarkerForTest(t, h.root, nil)
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatalf("no Startup marker for a possible update prompt: %v", err)
 	}
@@ -261,12 +259,18 @@ func TestCodexUpdatePromptOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
 	}
 }
 
-// syncStartupMarkerForTest runs the marker step of a coop exec of Codex with
-// args from the current directory. The binary does not exist, so a version
-// probe fails at once and proves nothing.
+// syncStartupMarkerForTest exercises the trust decision and marker IO with
+// the independent update decision already known safe. Update uncertainty
+// is covered through the full producer by the unknown-version test.
 func syncStartupMarkerForTest(t *testing.T, root string, args []string) {
 	t.Helper()
-	if err := syncStartupDialogMarker(root, "codex", filepath.Join(t.TempDir(), "codex"), args); err != nil {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, dir, trust := startupTrustDialog("/usr/local/bin/codex", args, wd)
+	marker, hold := startupDialogMarkerDecision(harness, dir, trust, true)
+	if err := syncStartupDialogMarkerState(root, "codex", marker, hold); err != nil {
 		t.Fatal(err)
 	}
 }

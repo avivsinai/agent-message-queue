@@ -256,9 +256,8 @@ type codexConfigOverrideRule struct {
 	stringTyped bool
 }
 
-// CodexNoUpdatePromptOverride is the -c value that starts Codex without its
-// startup update check. The update prompt's default choice runs the upgrade,
-// so a doorbell's Enter there would start it.
+// CodexNoUpdatePromptOverride asks Codex to disable its startup update
+// check. Higher managed requirements can override this setting.
 const CodexNoUpdatePromptOverride = "check_for_update_on_startup=false"
 
 var codexConfigOverrideValues = map[string]codexConfigOverrideRule{

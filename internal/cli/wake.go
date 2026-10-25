@@ -2354,8 +2354,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			switch {
 			case err != nil:
 				if cfg.debug {
-					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain wait unavailable after %s: %v; holding the submit key\n", waited, err)
 				}
+				return false, nil
 			case !drained:
 				if cfg.debug {
 					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: text still queued after %s; holding the submit key for the terminal reader\n", waited)

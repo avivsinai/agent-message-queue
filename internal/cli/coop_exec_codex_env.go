@@ -87,8 +87,8 @@ func codexOverrideSetsIdentity(key string) bool {
 // refuseCodexSeatArgs already refused any later override of them. Any
 // override other than a feature boolean makes the TUI run its own
 // app-server, so the identity also reaches a seat that would have run on
-// the daemon. The same seat also starts without Codex's update prompt,
-// whose default choice runs the upgrade on the Enter a doorbell types.
+// the daemon. The same seat asks Codex to disable its startup update check;
+// a higher managed requirement can still force that check on.
 func pinCodexShellIdentity(binaryPath string, args, env []string, recorded bool) []string {
 	if recorded || launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
 		return args

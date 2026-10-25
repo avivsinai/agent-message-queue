@@ -185,6 +185,12 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string) err
 		return err
 	}
 	marker, hold := startupDialogMarkerFor(binaryPath, args, wd)
+	return syncStartupDialogMarkerState(root, handle, marker, hold)
+}
+
+// syncStartupDialogMarkerState publishes the decided hold through the
+// caller's existing agent directory.
+func syncStartupDialogMarkerState(root, handle string, marker wakeDialogMarker, hold bool) error {
 	agentDir, err := openExistingWakeAgentDir(root, handle)
 	if err != nil {
 		return err
@@ -210,6 +216,13 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string) err
 // binaryPath with args in wd needs, and whether it needs one.
 func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
+	updateRuledOut := harness != launch.CodexProvider || codexUpdatePromptRuledOut(binaryPath)
+	return startupDialogMarkerDecision(harness, dir, trust, updateRuledOut)
+}
+
+// startupDialogMarkerDecision keeps trust and update evidence independent.
+// A trust decision cannot release a possible update prompt.
+func startupDialogMarkerDecision(harness, dir string, trust startupTrust, updateRuledOut bool) (wakeDialogMarker, bool) {
 	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir}
 	if harness == "" {
 		return wakeDialogMarker{}, false
@@ -218,7 +231,7 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDi
 	// record trust for the same root while this one still shows its update
 	// prompt, so a possible update prompt takes the kind only the hook
 	// releases.
-	if harness == launch.CodexProvider && !codexUpdatePromptRuledOut(binaryPath, args, dir) {
+	if harness == launch.CodexProvider && !updateRuledOut {
 		marker.Kind = wakeStartupKindUpdate
 		return marker, true
 	}
@@ -303,7 +316,7 @@ func codexStartupHoldRelease(marker wakeDialogMarker) string {
 	switch {
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
-			"; remedy: set " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml)"
+			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts, but does not release this hold by itself"
 	case codexNearestGitAncestor(marker.Cwd) == "":
 		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
 	}

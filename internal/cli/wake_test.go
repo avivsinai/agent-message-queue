@@ -324,8 +324,9 @@ func stubRawInjectSleep(t *testing.T) *[]time.Duration {
 func TestRawDoorbellHoldsTheSubmitKeyWhileTheTextIsStillQueued(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	queued := true
+	var drainErr error
 	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
-		return rawInjectDrainTimeout, !queued, nil
+		return rawInjectDrainTimeout, !queued, drainErr
 	})
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)
@@ -333,9 +334,17 @@ func TestRawDoorbellHoldsTheSubmitKeyWhileTheTextIsStillQueued(t *testing.T) {
 		t.Fatalf("typed %q while the doorbell text was still queued, want %q", h.injected, want)
 	}
 
-	queued = false
+	// A failed queue inspection cannot prove that the reader took the text.
+	drainErr = errors.New("queue inspection unavailable")
 	h.injected = nil
 	h.advance(wakeDoorbellRetryBase)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q while the input queue state was unknown", h.injected)
+	}
+
+	queued, drainErr = false, nil
+	h.advance(wakeDoorbellRetryMax)
 	h.scan(h.cfg)
 	if want := []string{"\n", "\r", "\r"}; strings.Join(h.injected, "|") != strings.Join(want, "|") {
 		t.Fatalf("after the reader took the text typed %q, want %q", h.injected, want)

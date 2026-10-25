@@ -200,19 +200,23 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   Codex's "Not now" on the update prompt records nothing, so an update
   prompt marker releases only through the dialog hook's first-turn close.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
-  identity overrides with `-c check_for_update_on_startup=false`. A seat on
-  the shared Codex
-  daemon carries no overrides; it gets no update prompt marker only when
-  Codex's own state proves the prompt cannot show:
-  `check_for_update_on_startup = false` in the user `config.toml` (and no
-  admin requirement, managed config, managed preferences, project or
-  profile config that turns it on), or a `$CODEX_HOME/version.json`
-  checked less than 19 hours ago whose `latest_version` is not newer than
-  the installed version, or is the dismissed version, for a codex-cli
-  version AMQ has checked. Anything missing or unreadable keeps the hold.
-  To run daemon seats without that hold, set
-  `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
-  (default `~/.codex/config.toml`); AMQ does not edit that file.
+  identity overrides with `-c check_for_update_on_startup=false`. Managed
+  or cloud requirements can override that setting, so the flag is not
+  evidence that the prompt cannot show. A Codex seat gets no update prompt
+  marker only when `$CODEX_HOME/version.json` was checked less than 19 hours
+  ago and its `latest_version` is not newer than the installed version, or
+  is the dismissed version, for a codex-cli
+  version AMQ has checked. This proof applies only to the verified releases
+  `0.145.0`, `0.161.0`, and `0.163.0`; another release or patch keeps the
+  hold. Anything missing or unreadable keeps the hold until the dialog
+  hook runs at the first turn. Setting `check_for_update_on_startup = false`
+  in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) prevents
+  ordinary update prompts, but does not release this hold by itself. AMQ
+  does not edit that file.
+
+  A raw doorbell's submit keys wait until the terminal reports that its
+  text was read. Queued text or an unavailable queue inspection keeps those
+  keys pending; a timeout never submits text left behind by an exited seat.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, login prompts, and update prompts other than Codex's startup prompt. It also cannot recall bytes the

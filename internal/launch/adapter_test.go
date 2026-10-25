@@ -495,9 +495,9 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	}
 	// Live run on amq 0.110.0, 2026-10-25: Codex's update prompt, whose
 	// default runs the upgrade, can take a doorbell's Enter. A managed seat
-	// starts without it.
+	// requests that Codex disable the update check.
 	if off := slices.Index(fresh.Argv, CodexNoUpdatePromptOverride); off < 1 || fresh.Argv[off-1] != "-c" {
-		t.Fatalf("fresh plan starts with the update prompt: %q", fresh.Argv)
+		t.Fatalf("fresh plan does not request disabling the update check: %q", fresh.Argv)
 	}
 	for _, dynamic := range fresh.DynamicArgv {
 		if dynamic.Kind != DynamicArgCodexIdentity {
