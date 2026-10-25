@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -9,6 +10,48 @@ import (
 	"sync"
 	"testing"
 )
+
+// Regression (sh3 review): a visible registration whose post-rename sync
+// failed was accepted on retry without making its config directory durable.
+func TestEnsureAgentIfConfiguredRetriesCommittedRegistrationSync(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "meta", "config.json")
+	if err := WriteConfig(path, Config{Version: 1, Agents: []string{"worker"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	wantErr := errors.New("meta sync failed")
+	metaSyncs := 0
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		if dir == "meta" {
+			metaSyncs++
+			if metaSyncs >= 2 {
+				return wantErr
+			}
+		}
+		return nil
+	})
+	_, err = EnsureAgentIfConfiguredOn(root, "amq-remote")
+	var committed *fsq.CommittedDurabilityError
+	if !errors.As(err, &committed) {
+		t.Fatalf("first registration = %v; want committed durability error", err)
+	}
+	if _, err := EnsureAgentIfConfiguredOn(root, "amq-remote"); !errors.Is(err, wantErr) {
+		t.Fatalf("registration retry = %v; want meta sync failure", err)
+	}
+	root.SetSyncDirFaultForTest(nil)
+	if added, err := EnsureAgentIfConfiguredOn(root, "amq-remote"); err != nil || added {
+		t.Fatalf("durable retry = %v, %v; want existing registration", added, err)
+	}
+}
 
 func TestConfigWriteRead(t *testing.T) {
 	root := t.TempDir()
