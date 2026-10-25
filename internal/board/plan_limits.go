@@ -101,6 +101,10 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 			l := base("credits", "credits", m.LimitID)
 			l.Unlimited = m.Unlimited.Value && m.Unlimited.Presence == facts.Present
 			l.Balance = m.Amount.Value
+			if !l.Unlimited && m.Amount.Presence != facts.Present {
+				l = base("unknown", "credits", m.LimitID)
+				l.Reason = "credit balance not reported in the app-server reply"
+			}
 			out = append(out, l)
 		case facts.MoneyCap:
 			l := base("cap", "spend cap", m.LimitID)
