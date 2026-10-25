@@ -34,7 +34,7 @@ for path in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
     if actual != version:
         mismatches.append((str(path), actual))
 
-for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]:
+for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "plugins/amq-board/.claude-plugin/plugin.json"]:
     pp = pathlib.Path(path)
     if not pp.exists():
         continue

@@ -82,6 +82,52 @@ later `gh auth switch` never serves the other account's cache. The usage
 settings are part of the configuration a refused edit keeps. Ctrl-C stops
 the view, cancels a running refresh's commands, and waits for them.
 
+While it runs, `serve` writes `~/.amq/board/serve.json` (mode `0600`) with its
+`url`, `token`, `pid`, and `started_at`, so a local client can find it without
+reading the terminal. A file whose `pid` is not alive is stale. Ctrl-C or
+SIGTERM removes the file; a second `serve` replaces it, and the first one does
+not remove the second one's file when it exits.
+
+## Claude Code panel
+
+The `amq-board` Claude Code plugin is opt-in and separate from `amq-cli`, so
+sessions that do not use it start no extra process. Install it from the
+`avivsinai/skills-marketplace` marketplace:
+
+```sh
+claude plugin marketplace add avivsinai/skills-marketplace
+claude plugin install amq-board@avivsinai-marketplace
+```
+
+Then type `/board` in a session of an AMQ project. A side panel shows the
+Waiting on you strips (title, reason, and age), the In flight, Blocked, and
+Unclaimed counts, one line of source status, and when the board was generated,
+marked stale after 5 minutes. A status line shows `board: N waiting · M in
+flight` while the panel is open. The panel refreshes every minute while it is
+open, and starts nothing before `/board` or after the panel closes. Closing it
+ends a refresh under way, which then draws nothing and sets no status, and
+asks Claude Code to stop that refresh's `amq-board` run.
+
+Each refresh reads the model from a running `amq-board serve` for the same
+project, found through `~/.amq/board/serve.json` and used only while its
+`pid` is alive. Without one, it runs `amq-board --json` in the session's
+directory, one run at a time; a run that has not answered in 90 seconds ends
+the refresh with "no answer in 90 s". GitHub then answers from the shared
+cache within its TTL. When neither works, the panel
+shows one line with the reason, for example `amq-board not found`. Every value
+is drawn as plain text with control and format characters removed. The panel
+runs no command from the board: a strip's copy command only puts it on the
+clipboard. The plugin needs Claude Code 2.1.308 or later and does nothing on
+an older version.
+
+To check a change to the plugin, run from the repository root with Claude Code
+2.1.308 or later; neither command needs a login:
+
+```sh
+claude plugin validate plugins/amq-board
+claude plugin test plugins/amq-board
+```
+
 ## Sources
 
 | Source | Read | Notes |

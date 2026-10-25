@@ -34,6 +34,11 @@
           "jsonpath": "$.version"
         },
         {
+          "type": "json",
+          "path": "plugins/amq-board/.claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
           "type": "generic",
           "path": "skills/amq-cli/SKILL.md"
         },

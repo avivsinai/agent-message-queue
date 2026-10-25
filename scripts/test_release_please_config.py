@@ -27,6 +27,7 @@ def test_release_please_config() -> None:
     assert package["extra-files"] == [
         {"type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version"},
         {"type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version"},
+        {"type": "json", "path": "plugins/amq-board/.claude-plugin/plugin.json", "jsonpath": "$.version"},
         {"type": "generic", "path": "skills/amq-cli/SKILL.md"},
         {"type": "generic", "path": "skills/amq-spec/SKILL.md"},
         {"type": "generic", "path": "skills/amq-remote/SKILL.md"},
@@ -37,7 +38,7 @@ def test_release_please_config() -> None:
     version = manifest["."]
     assert version
 
-    for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]:
+    for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "plugins/amq-board/.claude-plugin/plugin.json"]:
         assert json.loads((ROOT / path).read_text())["version"] == version
 
 

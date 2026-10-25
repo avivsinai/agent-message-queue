@@ -174,50 +174,84 @@ type file struct {
 	mtime time.Time
 }
 
-// Read runs every reader over the configured homes. now dates the windows;
-// mapped session files are read first, then the newest. Listing the files
-// is part of the run, so it spends the same budget as reading them.
-func Read(cfg Config, now time.Time, eligible Eligible, mapping Mapping) Report {
-	clock := time.Now
+// listShare is the part of the wall budget listing may spend: listing
+// stops there, so reading always keeps the rest.
+const listShare = 4
+
+// Read runs every reader over the configured homes for the project whose
+// roots (its worktrees, or the project directory outside Git) are given.
+// now dates the windows. Every home is listed first, inside a quarter of
+// the wall budget; reading then has the rest. Inside a home, mapped session
+// files are read first, then files in the project's session directories,
+// then the newest.
+func Read(cfg Config, now time.Time, roots []string, mapping Mapping) Report {
+	return read(cfg, now, roots, mapping, time.Now)
+}
+
+func read(cfg Config, now time.Time, roots []string, mapping Mapping, clock func() time.Time) Report {
 	if cfg.BudgetWall <= 0 {
 		cfg.BudgetWall = DefaultBudgetWall
 	}
 	if cfg.BudgetBytes <= 0 {
 		cfg.BudgetBytes = DefaultBudgetBytes
 	}
-	type home struct{ harness, path string }
+	eligible := projectEligible(roots)
+	type home struct {
+		harness, path string
+		first         func(string) bool
+		files         []file
+		unlisted      bool
+	}
 	var homes []home
 	for _, harness := range []string{Claude, Codex, Pi} {
 		for _, h := range cfg.Homes[harness] {
-			homes = append(homes, home{harness, h})
+			homes = append(homes, home{harness: harness, path: h, first: projectFirst(harness, h, roots)})
 		}
 	}
-	// Each account gets an equal share of what is left, so a large home
-	// cannot starve a small one; what an account leaves unspent passes on.
+	// Each home gets an equal share of what is left of a phase, so a large
+	// home cannot starve a small one; what a home leaves unspent passes on.
+	share := func(until time.Time, left int) time.Time {
+		return clock().Add(until.Sub(clock()) / time.Duration(left))
+	}
 	start := clock()
+	listed := start.Add(cfg.BudgetWall / listShare)
+	for i := range homes {
+		h := &homes[i]
+		b := &budget{deadline: share(listed, len(homes)-i), bytes: cfg.BudgetBytes, clock: clock}
+		h.files, h.unlisted = sessionFiles(h.harness, h.path, now.Add(-span), h.first, b)
+	}
+	// Homes with fewer files read first, so the budget a small home leaves
+	// passes on to the large ones.
+	order := make([]int, len(homes))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return len(homes[order[i]].files) < len(homes[order[j]].files) })
 	deadline := start.Add(cfg.BudgetWall)
 	bytesLeft := cfg.BudgetBytes
-	rep := Report{Now: now}
-	for i, h := range homes {
-		accounts := int64(len(homes) - i)
-		b := &budget{deadline: clock().Add(deadline.Sub(clock()) / time.Duration(accounts)), bytes: bytesLeft / accounts, clock: clock}
-		share := b.bytes
-		files, unlisted := sessionFiles(h.harness, h.path, now.Add(-span), b)
-		acct := readHome(h.harness, h.path, files, now, eligible, mapping, b)
-		acct.Unlisted = unlisted
-		rep.Accounts = append(rep.Accounts, withDetail(acct))
-		bytesLeft -= share - max(b.bytes, 0)
+	accounts := make([]Account, len(homes))
+	for k, i := range order {
+		h, left := homes[i], len(order)-k
+		b := &budget{deadline: share(deadline, left), bytes: bytesLeft / int64(left), clock: clock}
+		given := b.bytes
+		acct := readHome(h.harness, h.path, h.files, now, eligible, mapping, h.first, b)
+		acct.Unlisted = h.unlisted
+		accounts[i] = withDetail(acct)
+		bytesLeft -= given - max(b.bytes, 0)
 	}
-	return rep
+	return Report{Now: now, Accounts: accounts}
 }
 
-func readHome(harness, home string, files []file, now time.Time, eligible Eligible, mapping Mapping, b *budget) Account {
+func readHome(harness, home string, files []file, now time.Time, eligible Eligible, mapping Mapping, first func(string) bool, b *budget) Account {
 	acct := Account{Key: harness + ":" + displayHome(home), Harness: harness}
 	acct.Files = len(files)
 	sort.SliceStable(files, func(i, j int) bool {
 		mi, mj := mappedPath(files[i].path, mapping), mappedPath(files[j].path, mapping)
 		if mi != mj {
 			return mi
+		}
+		if fi, fj := first(files[i].path), first(files[j].path); fi != fj {
+			return fi
 		}
 		return files[i].mtime.After(files[j].mtime)
 	})
@@ -254,7 +288,9 @@ func withDetail(acct Account) Account {
 // by explicit pattern only: a literal segment is joined, never listed, so
 // only the session directories are read. It reports unlisted when the
 // budget stopped the listing or a directory or file could not be read.
-func sessionFiles(harness, home string, since time.Time, b *budget) (out []file, unlisted bool) {
+// Directories first reports true for are listed first, so a listing the
+// budget stops still holds the project's sessions.
+func sessionFiles(harness, home string, since time.Time, first func(string) bool, b *budget) (out []file, unlisted bool) {
 	var patterns [][]string
 	switch harness {
 	case Claude:
@@ -265,7 +301,7 @@ func sessionFiles(harness, home string, since time.Time, b *budget) (out []file,
 		patterns = [][]string{{"agent", "sessions", "*", "*.jsonl"}}
 	}
 	for _, segs := range patterns {
-		files, incomplete := listPattern(home, segs, since, b)
+		files, incomplete := listPattern(home, segs, since, first, b)
 		out = append(out, files...)
 		unlisted = unlisted || incomplete
 		if b.spent() {
@@ -282,8 +318,12 @@ const listBatch = 256
 // listPattern expands segs below root one directory level at a time,
 // checking the budget before each directory, between batches of its
 // entries, and before each file. A directory or file that exists but cannot
-// be read or stat'ed leaves the listing incomplete.
-func listPattern(root string, segs []string, since time.Time, b *budget) ([]file, bool) {
+// be read or stat'ed leaves the listing incomplete. At each level the
+// directories first reports true for go first, then the rest by name from
+// the highest, so dated directories (Codex's year/month/day) go newest
+// first. Directory mtimes do not order or skip anything: appending to a
+// session file does not change its directory's mtime.
+func listPattern(root string, segs []string, since time.Time, first func(string) bool, b *budget) ([]file, bool) {
 	var out []file
 	incomplete := false
 	addFile := func(p string) {
@@ -351,9 +391,57 @@ func listPattern(root string, segs []string, since time.Time, b *budget) ([]file
 			}
 			_ = dir.Close()
 		}
+		sort.SliceStable(next, func(i, j int) bool {
+			if fi, fj := first(next[i]), first(next[j]); fi != fj {
+				return fi
+			}
+			return next[i] > next[j]
+		})
 		dirs = next
 	}
 	return out, incomplete
+}
+
+// projectFirst reports whether a path lies in a session directory of this
+// project, so its sessions are listed and read before other projects'.
+// Claude Code names a session directory after the working directory, with
+// every character other than an ASCII letter or digit replaced by '-'; a
+// directory inside a root gets that root's name plus '-' and more. The name
+// only orders the work: eligibility still comes from each file's recorded
+// working directory, and a session under another name (a symlinked alias)
+// is read after the others, never dropped. Other harnesses' session paths
+// do not name the project.
+func projectFirst(harness, home string, roots []string) func(string) bool {
+	if harness != Claude || len(roots) == 0 {
+		return func(string) bool { return false }
+	}
+	var names []string
+	for _, r := range roots {
+		names = append(names, claudeDirName(r), claudeDirName(canonical(r)))
+	}
+	projects := filepath.Join(home, "projects")
+	return func(p string) bool {
+		rel, err := filepath.Rel(projects, p)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return false
+		}
+		dir, _, _ := strings.Cut(rel, string(filepath.Separator))
+		for _, n := range names {
+			if dir == n || strings.HasPrefix(dir, n+"-") {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func claudeDirName(p string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, p)
 }
 
 // spanFile is p when it is a regular file written inside the span. A file

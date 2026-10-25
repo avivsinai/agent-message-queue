@@ -1,0 +1,44 @@
+name: board plugin
+
+# Runs only when the amq-board Claude Code plugin or this workflow changes.
+# It is not a required check: a PR that touches neither never starts it.
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "plugins/amq-board/**"
+      - ".github/workflows/board-plugin.yml"
+  pull_request:
+    paths:
+      - "plugins/amq-board/**"
+      - ".github/workflows/board-plugin.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: board-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Validate and test the plugin
+        # claude plugin validate and test need no login and no secrets. The
+        # version is pinned to one whose plugin API the module is written for.
+        env:
+          DISABLE_AUTOUPDATER: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        run: |
+          npm install --global --no-fund --no-audit @anthropic-ai/claude-code@2.1.310
+          claude --version
+          claude plugin validate plugins/amq-board
+          claude plugin test plugins/amq-board

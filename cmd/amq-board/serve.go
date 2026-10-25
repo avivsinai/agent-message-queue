@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,13 +12,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const serveUsage = `Usage: amq-board serve
@@ -38,8 +43,11 @@ valid edit applies without a restart, and a refused edit keeps the last good
 configuration and is reported once. The project directory is fixed at start.
 With forges.github.token_once (default true), gh auth token is read once and
 held in memory for later gh calls, so a session prompts the keychain once;
-the GitHub cache follows that token's account. Ctrl-C stops the view and
-waits for a running refresh, whose commands it cancels.
+the GitHub cache follows that token's account. While it runs,
+~/.amq/board/serve.json (mode 0600) holds its url, token, pid and start
+time, so a local client finds it; a file whose pid is not alive is stale.
+Ctrl-C or SIGTERM stops the view, waits for a running refresh, whose
+commands it cancels, and removes the file.
 `
 
 func runServe(args []string) int {
@@ -110,6 +118,10 @@ func runServe(args []string) int {
 	host := ln.Addr().String()
 	srv := &http.Server{Handler: live.Handler(secret, host), ReadHeaderTimeout: 10 * time.Second}
 	fmt.Printf("amq-board: serving http://%s/%s/\n", host, secret)
+	record := serveRecord{URL: "http://" + host, Token: secret, PID: os.Getpid(), StartedAt: time.Now().UTC()}
+	if err := writeServeFile(record); err != nil {
+		logf("serve.json not written; local clients will not find this server: %v", err)
+	}
 
 	looped := make(chan struct{})
 	go func() {
@@ -133,7 +145,67 @@ func runServe(args []string) int {
 	_ = srv.Shutdown(shut)
 	<-looped
 	live.Wait()
+	removeServeFile(record.PID)
 	return code
+}
+
+// serveFile is the discovery record of a running serve, below ~/.amq.
+const serveFile = "serve.json"
+
+// serveRecord is what a local client needs to read a running serve:
+// URL/<token>/model.json. The record is stale when PID is not alive.
+type serveRecord struct {
+	URL       string    `json:"url"`
+	Token     string    `json:"token"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// withServeLock runs fn with ~/.amq/board, holding serve.json.lock beside
+// the record, so a publish and a conditional removal never interleave.
+func withServeLock(fn func(dir string) error) error {
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, "board")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if !lock.AdvisoryLockAvailable() {
+		return fn(dir)
+	}
+	return lock.WithExclusiveFileLock(filepath.Join(dir, serveFile+".lock"), func() error { return fn(dir) })
+}
+
+// writeServeFile replaces ~/.amq/board/serve.json atomically, mode 0600:
+// the token in it opens every route of the server.
+func writeServeFile(r serveRecord) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	return withServeLock(func(dir string) error {
+		_, err := fsq.WriteFileAtomic(dir, serveFile, append(data, '\n'), 0o600)
+		return err
+	})
+}
+
+// removeServeFile removes serve.json only while it still names pid: a later
+// serve that replaced the record keeps it when this one exits.
+func removeServeFile(pid int) {
+	_ = withServeLock(func(dir string) error {
+		path := filepath.Join(dir, serveFile)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var r serveRecord
+		if json.Unmarshal(data, &r) == nil && r.PID == pid {
+			return os.Remove(path)
+		}
+		return nil
+	})
 }
 
 // randomToken is 128 random bits, hex encoded.
