@@ -1,0 +1,12 @@
+{
+  "name": "amq-board",
+  "version": "0.108.0",
+  "description": "/board opens a side panel with the AMQ fleet board: what waits on you, counts, source status and age, refreshed every minute while open",
+  "author": {
+    "name": "Aviv Sinai",
+    "url": "https://github.com/avivsinai"
+  },
+  "repository": "https://github.com/avivsinai/agent-message-queue",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
