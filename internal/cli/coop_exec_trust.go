@@ -36,6 +36,13 @@ const wakeDialogStartupEvent = "Startup"
 // it.
 const wakeStartupKindUpdate = "update_prompt"
 
+// wakeStartupKindReview marks a Codex Startup marker for a release that
+// reviews hooks after its trust screen (codexHookReviewSince): the
+// directory trust is not recorded, or Codex's own hooks/list did not show
+// that no hook needs review. A trust record does not show that the hook
+// review closed, so only the dialog hook releases it.
+const wakeStartupKindReview = "hook_review"
+
 // startupTrust is what the harness's own trust record says about a
 // directory.
 type startupTrust uint8
@@ -190,13 +197,14 @@ func claudeStartupTrust(dir string) startupTrust {
 // still pending, or for Codex an update prompt its state does not rule out.
 // Otherwise it removes a Startup marker an earlier launch left (one
 // declined, or one that never started), which would hold this session's
-// doorbell. The caller owns the agent's wake.
-func syncStartupDialogMarker(root, handle, binaryPath string, args []string) error {
+// doorbell. recorded reports that coop exec recorded the identity of the
+// Codex thread args resume. The caller owns the agent's wake.
+func syncStartupDialogMarker(root, handle, binaryPath string, args []string, recorded bool) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	marker, hold := startupDialogMarkerFor(binaryPath, args, wd)
+	marker, hold := startupDialogMarkerFor(binaryPath, args, wd, recorded)
 	return syncStartupDialogMarkerState(root, handle, marker, hold)
 }
 
@@ -226,10 +234,24 @@ func syncStartupDialogMarkerState(root, handle string, marker wakeDialogMarker, 
 
 // startupDialogMarkerFor returns the Startup marker a harness started as
 // binaryPath with args in wd needs, and whether it needs one.
-func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDialogMarker, bool) {
+func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorded bool) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
-	updateRuledOut := harness != launch.CodexProvider || codexUpdatePromptRuledOut(binaryPath)
-	return startupDialogMarkerDecision(harness, dir, trust, updateRuledOut)
+	if harness != launch.CodexProvider {
+		return startupDialogMarkerDecision(harness, dir, trust, true)
+	}
+	installed, known := codexInstalledVersion(binaryPath)
+	marker, hold := startupDialogMarkerDecision(harness, dir, trust, codexUpdatePromptRuledOut(installed, known))
+	if marker.Kind != "" || known && codexVersionNewer(codexHookReviewSince, installed) {
+		return marker, hold
+	}
+	// A release that reviews hooks after its trust screen starts clear only
+	// when Codex records that it trusts the directory and its hooks/list
+	// shows no hook to review.
+	if trust == startupTrustAccepted && codexHookReviewClear(binaryPath, args, wd, dir, recorded) {
+		return wakeDialogMarker{}, false
+	}
+	marker.Kind = wakeStartupKindReview
+	return marker, true
 }
 
 // startupDialogMarkerDecision keeps trust and update evidence independent.
@@ -324,8 +346,15 @@ func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 // codexStartupHoldRelease says why a Codex Startup marker holds the
 // doorbell, what releases it, and the remedy.
 func codexStartupHoldRelease(marker wakeDialogMarker) string {
-	const hook = "the Codex dialog hook releases it at the first prompt typed in that Codex session (amq wake install-dialog-hook --harness codex)"
+	hook := "the Codex dialog hook releases it at the first prompt typed in that Codex session (amq wake install-dialog-hook --harness codex)"
+	// Codex skips an installed hook it does not trust, so the remedy then
+	// is the trust, not another install.
+	if check, ok := checkCodexDialogHook(); ok && check.Message == codexDialogHookUntrusted {
+		hook = "the Codex dialog hook releases it at the first prompt typed in that Codex session once Codex trusts the hook (open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries)"
+	}
 	switch {
+	case marker.Kind == wakeStartupKindReview:
+		return fmt.Sprintf("Codex may ask whether to trust %s or to review new or changed hooks, and a trust record does not show that the hook review closed; %s", marker.Cwd, hook)
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
 			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts, but does not release this hold by itself"

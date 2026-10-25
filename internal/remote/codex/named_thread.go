@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -91,4 +92,23 @@ func initializeAMQ(ctx context.Context, client *Client) error {
 		return fmt.Errorf("initialize: %w", err)
 	}
 	return nil
+}
+
+// ListHooks returns the raw result of hooks/list for cwd on the daemon at
+// sock: the hooks Codex loads for that directory, each with its trust
+// status. It changes nothing on the daemon.
+func ListHooks(ctx context.Context, sock, cwd string) (json.RawMessage, error) {
+	client, err := Dial(sock, Handlers{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+	if err := initializeAMQ(ctx, client); err != nil {
+		return nil, err
+	}
+	var result json.RawMessage
+	if err := client.Call(ctx, "hooks/list", map[string]any{"cwds": []string{cwd}}, &result); err != nil {
+		return nil, fmt.Errorf("hooks/list: %w", err)
+	}
+	return result, nil
 }

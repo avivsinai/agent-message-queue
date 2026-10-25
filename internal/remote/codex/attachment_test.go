@@ -98,7 +98,11 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "d.sock")
+	return startFakeAppServerAt(t, filepath.Join(dir, "d.sock"))
+}
+
+// startFakeAppServerAt is startFakeAppServer listening at sock.
+func startFakeAppServerAt(t *testing.T, sock string) (string, *fakeAppServer) {
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

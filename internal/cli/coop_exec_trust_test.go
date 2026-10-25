@@ -5,6 +5,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
 )
 
@@ -237,7 +239,7 @@ func TestCodexUnknownVersionOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
 	}
 	// An explicit CLI setting is not proof that higher policy permits it.
 	// Unlike the trust-only fixtures, this calls the full startup producer.
-	if err := syncStartupDialogMarker(h.root, "codex", filepath.Join(t.TempDir(), "codex"), []string{"-c", "check_for_update_on_startup=false"}); err != nil {
+	if err := syncStartupDialogMarker(h.root, "codex", filepath.Join(t.TempDir(), "codex"), []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
@@ -257,6 +259,153 @@ func TestCodexUnknownVersionOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells after the dialog hook closed the marker = %d, want 1", got)
 	}
+}
+
+// Bead agent-message-queue-uue (live check on codex-cli 0.164.0, findings 1
+// and 3): after the person trusts the folder, Codex 0.164 shows "Hooks need
+// review", so a trust record no longer means the seat accepts input. A
+// 0.164 seat starts clear only when the update prompt is ruled out, the
+// directory trust is recorded, and Codex's own hooks/list shows no hook to
+// review; otherwise it gets the marker only the dialog hook releases.
+func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string // the hooks/list reply line, %s the checkout
+		hold  bool
+	}{
+		{"every hook trusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `],"warnings":[],"errors":[]}]}}`, false},
+		{"one hook untrusted", `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[` + codexHookForTest("trusted") + `,` + codexHookForTest("untrusted") + `],"warnings":[],"errors":[]}]}}`, true},
+		{"hooks/list error", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, config, real, marker := newCodexTrustDialogHarness(t)
+			trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
+			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bin := fakeCodex164ForTest(t, filepath.Dir(config), fmt.Sprintf(tc.reply, real))
+			if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(marker)
+			if !tc.hold {
+				if !os.IsNotExist(err) {
+					t.Fatalf("Startup marker %q, %v; want none for a clear 0.164 start", raw, err)
+				}
+				return
+			}
+			var got wakeDialogMarker
+			if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != wakeStartupKindReview {
+				t.Fatalf("Startup marker %q, %v; want kind %s", raw, err, wakeStartupKindReview)
+			}
+		})
+	}
+}
+
+// Bead agent-message-queue-uue (live check on codex-cli 0.164.0, finding
+// 1): Codex wrote the folder's trust record while its "Hooks need review"
+// screen was still on screen. A 0.164 marker stays held after the trust
+// record is written.
+func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
+	h, config, real, marker := newCodexTrustDialogHarness(t)
+	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("trusted"))
+	bin := fakeCodex164ForTest(t, filepath.Dir(config), reply)
+	if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(marker)
+	var got wakeDialogMarker
+	if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != wakeStartupKindReview {
+		t.Fatalf("Startup marker %q, %v; want kind %s for an untrusted 0.164 checkout", raw, err, wakeStartupKindReview)
+	}
+	if err := os.Chtimes(marker, h.now, h.now); err != nil {
+		t.Fatal(err)
+	}
+	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
+	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.send("a", format.PriorityUrgent)
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q after the trust record, while Codex may review hooks", h.injected)
+	}
+}
+
+// Bead agent-message-queue-uue (live check on codex-cli 0.164.0, finding
+// 3): with the AMQ hook installed but not trusted, doctor's held-doorbell
+// line named amq wake install-dialog-hook; the remedy is to trust the hook
+// in Codex's /hooks.
+func TestCodexHoldHintNamesHooksForAnUntrustedDialogHook(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	home := t.TempDir()
+	codexHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	codexRequirementsPath = filepath.Join(home, "no-requirements.toml")
+	t.Cleanup(func() { codexRequirementsPath = "/etc/codex/requirements.toml" })
+	bin := filepath.Join(home, "amq")
+	if err := os.WriteFile(bin, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := codexDialogStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.InstallCommandHooksAt(filepath.Join(codexHome, "hooks.json"), codexDialogHooks(bin, store)); err != nil {
+		t.Fatal(err)
+	}
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "codex"), wakeDialogFileName), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hint, ok := codexStartupHoldHint(root, "codex")
+	if !ok || !strings.Contains(hint.Message, "open /hooks in Codex") || strings.Contains(hint.Message, "install-dialog-hook") {
+		t.Fatalf("held-doorbell hint = %+v, %v; want the /hooks remedy", hint, ok)
+	}
+}
+
+// fakeCodex164ForTest writes a codex that reports 0.164.0 and answers
+// hooks/list on a stdio app-server with reply, plus a version cache in
+// codexHome that rules the update prompt out.
+func fakeCodex164ForTest(t *testing.T, codexHome, reply string) string {
+	t.Helper()
+	cache := fmt.Sprintf(`{"latest_version":"0.164.0","last_checked_at":%q,"dismissed_version":null}`, time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(codexHome, codexVersionFile), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	replyFile := filepath.Join(dir, "reply.json")
+	if err := os.WriteFile(replyFile, []byte(reply+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then printf 'codex-cli 0.164.0\\n'; exit 0; fi\n" +
+		"while IFS= read -r line; do\n" +
+		"  case \"$line\" in\n" +
+		"    *'\"method\":\"initialize\"'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"fake\"}}\\n' ;;\n" +
+		"    *'\"method\":\"hooks/list\"'*) cat '" + replyFile + "' ;;\n" +
+		"  esac\n" +
+		"done\n"
+	bin := filepath.Join(dir, "codex")
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// codexHookForTest is one hooks/list entry in the shape Codex 0.164 sends
+// (app-server-protocol v2 HookMetadata).
+func codexHookForTest(trust string) string {
+	return `{"key":"/home/u/.codex/hooks.json:user_prompt_submit:0:0","eventName":"userPromptSubmit","matcher":null,"timeoutSec":5,` +
+		`"statusMessage":null,"additionalContextLimit":null,"sourcePath":"/home/u/.codex/hooks.json","source":"user","pluginId":null,` +
+		`"displayOrder":0,"enabled":true,"isManaged":false,"currentHash":"sha256:ab","trustStatus":"` + trust + `","handlerType":"command",` +
+		`"command":"true","async":false}`
 }
 
 // syncStartupMarkerForTest exercises the trust decision and marker IO with
@@ -389,6 +538,8 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 // amq wake check reports it, its age, and what releases it.
 func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	clearSendMailboxTestEnv(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -433,8 +584,6 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(trusted), 0o600); err != nil {
 		t.Fatal(err)

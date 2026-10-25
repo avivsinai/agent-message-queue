@@ -930,7 +930,7 @@ func (c *coopExecRun) execAgent() error {
 	// no doorbell is typed before the marker exists: one typed before the
 	// harness starts would wait in the terminal and answer its first prompt.
 	if c.wakeOwned {
-		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs); err != nil {
+		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded); err != nil {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
 	}
