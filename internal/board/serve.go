@@ -158,7 +158,9 @@ func (l *Live) reload() FileConfig {
 	var fresh []string
 	for _, w := range warnings {
 		if !l.accepted[w] {
-			fresh = append(fresh, w)
+			// A one-shot run falls back to the defaults; here the last
+			// good configuration stays.
+			fresh = append(fresh, strings.TrimSuffix(w, "; using defaults"))
 		}
 	}
 	if len(fresh) > 0 {
