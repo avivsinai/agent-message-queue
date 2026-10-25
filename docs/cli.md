@@ -176,7 +176,7 @@ Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
   -agents string
-        Comma-separated detected agent adapters
+        Comma-separated agents: an adapter (claude) or handle=adapter (reviewer=claude)
   -apply string
         Apply only when the recomputed preview matches this digest
   -default-session string

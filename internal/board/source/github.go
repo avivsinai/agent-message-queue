@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // GitHubQuerySchema versions the query and its cache entries: a cache entry
@@ -71,30 +72,204 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		return res
 	}
 	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
-	now := env.Now()
-	if g.Cache != nil && !g.Refresh {
-		if key.Account = githubAccount(ctx, env); key.Account != "" {
-			if resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL); ok {
-				return g.Build(resp, repos, fetchedAt, nil)
+	if g.Cache == nil {
+		res, _ := g.fetch(ctx, env, repos)
+		return res
+	}
+	// The configured login, known before any gh call that reads the token,
+	// names the refresh lock and this read's records. The response itself is
+	// stored only under the viewer login it names, and a viewer record maps
+	// the configured login to that viewer, so a renamed account still finds
+	// its entry and one viewer's data never sits under another login.
+	login := key
+	if login.Account = githubAccount(ctx, env); login.Account == "" {
+		return g.refresh(ctx, env, repos, key, false)
+	}
+	if res, ok := g.cached(login, repos, env.Now()); ok {
+		return res
+	}
+	// Each gh call can prompt the keychain, so board runs refresh one at a
+	// time: a run that waited reads the entry the other run wrote, or the
+	// failure it recorded, instead of calling gh again.
+	var res board.Result
+	err := g.Cache.Locked(login, func() bool { return ctx.Err() != nil }, func() error {
+		var ok bool
+		if res, ok = g.cached(login, repos, env.Now()); ok {
+			return nil
+		}
+		if res, ok = g.failedRecently(login, repos, env.Now()); ok {
+			return nil
+		}
+		res = g.refresh(ctx, env, repos, login, true)
+		return nil
+	})
+	switch {
+	case err == nil:
+		return res
+	case errors.Is(err, lock.ErrStopped):
+		return g.lastAs(login, repos, env.Now(), "another board run is refreshing GitHub")
+	default:
+		// No lock to take (a platform without advisory locks, an unusable
+		// cache directory): refresh unlocked, as a read without a cache does.
+		return g.refresh(ctx, env, repos, login, true)
+	}
+}
+
+// refreshFailureHold is how long a failed refresh stands for the next runs,
+// which show the last entry with the failure instead of calling gh again.
+const refreshFailureHold = 60 * time.Second
+
+const (
+	githubViewerSchema = GitHubQuerySchema + "/viewer"
+	githubFailedSchema = GitHubQuerySchema + "/refresh-failed"
+)
+
+type githubViewerRecord struct {
+	Viewer string `json:"viewer"`
+}
+
+type githubFailedRecord struct {
+	Detail string `json:"detail"`
+}
+
+func (g GitHub) putRecord(login CacheKey, schema string, at time.Time, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	login.Schema = schema
+	return g.Cache.Put(login, at, data)
+}
+
+func (g GitHub) record(login CacheKey, schema string, v any) (time.Time, bool) {
+	login.Schema = schema
+	data, at, ok := g.Cache.Last(login)
+	if !ok || json.Unmarshal(data, v) != nil {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// entryKey is the key of the entry the last successful refresh under login
+// stored: the same repos and query, under the viewer login.
+func (g GitHub) entryKey(login CacheKey) (CacheKey, bool) {
+	var v githubViewerRecord
+	if _, ok := g.record(login, githubViewerSchema, &v); !ok || v.Viewer == "" {
+		return CacheKey{}, false
+	}
+	login.Account = v.Viewer
+	return login, true
+}
+
+// cached is the read a fresh entry for login serves, unless Refresh is set.
+// A recent failed refresh newer than the entry degrades it.
+func (g GitHub) cached(login CacheKey, repos []string, now time.Time) (board.Result, bool) {
+	if g.Refresh {
+		return board.Result{}, false
+	}
+	key, ok := g.entryKey(login)
+	if !ok {
+		return board.Result{}, false
+	}
+	resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL)
+	if !ok {
+		return board.Result{}, false
+	}
+	if res, failed := g.failedRecently(login, repos, now); failed {
+		return res, true
+	}
+	return g.Build(resp, repos, fetchedAt, nil), true
+}
+
+// failedRecently is the read while a refresh under login that failed after
+// the last stored entry is younger than refreshFailureHold. Refresh skips it.
+func (g GitHub) failedRecently(login CacheKey, repos []string, now time.Time) (board.Result, bool) {
+	if g.Refresh {
+		return board.Result{}, false
+	}
+	var f githubFailedRecord
+	failedAt, ok := g.record(login, githubFailedSchema, &f)
+	if age := now.Sub(failedAt); !ok || age < 0 || age >= refreshFailureHold {
+		return board.Result{}, false
+	}
+	if key, ok := g.entryKey(login); ok {
+		if _, fetchedAt, ok := g.Cache.Last(key); ok && !fetchedAt.Before(failedAt) {
+			return board.Result{}, false
+		}
+	}
+	return g.lastAs(login, repos, now, "GitHub refresh failed at "+failedAt.UTC().Format(time.RFC3339)+": "+f.Detail), true
+}
+
+// lastAs is the last entry for login at any age, degraded with detail, or a
+// degraded result without items when there is none. It never calls gh.
+func (g GitHub) lastAs(login CacheKey, repos []string, now time.Time, detail string) board.Result {
+	if key, ok := g.entryKey(login); ok {
+		if resp, fetchedAt, ok := g.Cache.Last(key); ok {
+			res := g.Build(resp, repos, fetchedAt, nil)
+			if res.Status == board.StatusOK {
+				res.Status, res.Detail = board.StatusDegraded, detail+"; showing data from "+fetchedAt.UTC().Format(time.RFC3339)
+				return res
 			}
 		}
 	}
+	return board.Result{Status: board.StatusDegraded, Detail: detail + "; no cached data", ObservedAt: now, Feeds: githubFeeds, Version: GitHubQuerySchema}
+}
+
+// refresh calls gh and stores an OK response under the viewer login it
+// names. With record set, login is the configured login: a success records
+// login's viewer, and a failure is recorded for refreshFailureHold and shows
+// the last entry when the failed read has no items of its own.
+func (g GitHub) refresh(ctx context.Context, env board.Env, repos []string, login CacheKey, record bool) board.Result {
+	now := env.Now()
+	res, out := g.fetch(ctx, env, repos)
+	if res.Status != board.StatusOK {
+		if !record {
+			return res
+		}
+		// Stamped when the call returned, so a slow failing call does not
+		// use up the hold.
+		failedAt := env.Now()
+		recErr := g.putRecord(login, githubFailedSchema, failedAt, githubFailedRecord{Detail: res.Detail})
+		if len(res.Items) == 0 {
+			if last := g.lastAs(login, repos, failedAt, "GitHub refresh failed: "+res.Detail); len(last.Items) > 0 {
+				res = last
+			}
+		}
+		if recErr != nil {
+			res.Detail += "; failure not recorded: " + recErr.Error()
+		}
+		return res
+	}
+	viewer := githubViewer(out)
+	if viewer == "" {
+		res.Detail = "cache not written: response names no viewer"
+		return res
+	}
+	key := login
+	key.Account = viewer
+	err := g.Cache.Put(key, now, out)
+	if err == nil && record {
+		err = g.putRecord(login, githubViewerSchema, now, githubViewerRecord{Viewer: viewer})
+	}
+	if err != nil {
+		res.Detail = "cache not written: " + err.Error()
+	}
+	return res
+}
+
+// fetch runs the query and its review-request pages.
+func (g GitHub) fetch(ctx context.Context, env board.Env, repos []string) (board.Result, []byte) {
+	now := env.Now()
 	out, err := env.Run.Run(ctx, env.Dir, GitHubQueryArgv(repos))
 	if err != nil {
-		return g.Build(nil, repos, now, err)
+		return g.Build(nil, repos, now, err), nil
 	}
 	out, pageErr := githubAttentionPages(ctx, env, repos, out)
 	res := g.Build(out, repos, now, nil)
 	if pageErr != nil && res.Status == board.StatusOK {
 		res.Status, res.Detail = board.StatusDegraded, "review request search: "+errLine(pageErr)
 	}
-	if res.Status == board.StatusOK && g.Cache != nil {
-		key.Account = githubViewer(out)
-		if err := g.Cache.Put(key, now, out); err != nil {
-			res.Detail = "cache not written: " + err.Error()
-		}
-	}
-	return res
+	return res, out
 }
 
 // githubAccount is the account a gh call runs as, or "" when it is not

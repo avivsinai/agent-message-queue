@@ -308,7 +308,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 // mailbox through the pinned child capability. No provisioning write reopens
 // the session through its ambient lexical path.
 func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
-	root, _, err := provisionCoopSessionChild(base, session, agents, execAgent, execCommand, false)
+	root, _, err := provisionCoopSessionChild(base, session, agents, nil, execAgent, execCommand, false)
 	return root, err
 }
 
@@ -316,7 +316,7 @@ func provisionCoopSession(base, session string, agents []string, execAgent, exec
 // identity token of the session directory it provisioned, read from the
 // opened directory itself rather than a later lookup of its path.
 func provisionCoopExecSession(base, session string, agents []string, execAgent, execCommand string) (string, string, error) {
-	return provisionCoopSessionChild(base, session, agents, execAgent, execCommand, false)
+	return provisionCoopSessionChild(base, session, agents, nil, execAgent, execCommand, false)
 }
 
 // provisionCoopBaseAndSession is the shared provisioning primitive used by
@@ -338,13 +338,15 @@ func provisionCoopBaseAndSession(base, session string, agents []string) error {
 }
 
 // provisionNewNamedSession is session create: exclusive child creation so a
-// racing creator cannot silently open an existing session.
-func provisionNewNamedSession(base, session string, agents []string) (string, error) {
-	root, _, err := provisionCoopSessionChild(base, session, agents, "", "", true)
+// racing creator cannot silently open an existing session. A non-nil roster
+// becomes the new session's own meta/config.json, so those handles are
+// declared in the session even when the base roster does not list them.
+func provisionNewNamedSession(base, session string, agents, roster []string) (string, error) {
+	root, _, err := provisionCoopSessionChild(base, session, agents, roster, "", "", true)
 	return root, err
 }
 
-func provisionCoopSessionChild(base, session string, agents []string, execAgent, execCommand string, exclusive bool) (string, string, error) {
+func provisionCoopSessionChild(base, session string, agents, roster []string, execAgent, execCommand string, exclusive bool) (string, string, error) {
 	if err := validateSessionName(session); err != nil {
 		return "", "", err
 	}
@@ -410,6 +412,16 @@ func provisionCoopSessionChild(base, session string, agents []string, execAgent,
 		for _, agent := range withReservedHumanHandle(agents) {
 			if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
 				return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+			}
+		}
+		if roster != nil {
+			cfg := config.Config{
+				Version:    format.CurrentVersion,
+				CreatedUTC: time.Now().UTC().Format(time.RFC3339),
+				Agents:     roster,
+			}
+			if err := config.WriteConfigOn(sessionRoot, cfg, false); err != nil {
+				return fmt.Errorf("failed to declare session roster: %w", err)
 			}
 		}
 		result = sessionRoot.Base()
