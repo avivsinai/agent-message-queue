@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.113.1](https://github.com/avivsinai/agent-message-queue/compare/v0.113.0...v0.113.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **coop:** detect signed-in Codex daemon seats ([1c0cfca](https://github.com/avivsinai/agent-message-queue/commit/1c0cfca7e2116c362d10adb25bd1c039d9445a17))
+* **coop:** require terminals before Codex startup ([#1243](https://github.com/avivsinai/agent-message-queue/issues/1243)) ([41119a1](https://github.com/avivsinai/agent-message-queue/commit/41119a100b2c36e2c7e20ad08414b3053140dfb0))
+* **usage:** read symlinked homes and keep holds per home ([#1245](https://github.com/avivsinai/agent-message-queue/issues/1245)) ([df7f85b](https://github.com/avivsinai/agent-message-queue/commit/df7f85bf94d6ce67a0521921204bddbcd312d003))
+
 ## [0.113.0](https://github.com/avivsinai/agent-message-queue/compare/v0.112.0...v0.113.0) (2026-10-25)
 
 
