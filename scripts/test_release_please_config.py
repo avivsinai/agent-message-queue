@@ -55,7 +55,9 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
     assert "secrets.RELEASE_APP_PRIVATE_KEY" in workflow
     assert "vars.RELEASE_APP_CLIENT_ID" in workflow
     assert "permission-pull-requests: write" in workflow
-    assert "permission-issues: write" in workflow
+    # Run 40179756056: requesting Issues write rejected the App token. The
+    # installed App uses Contents and Pull requests; PR write covers labels.
+    assert "permission-issues:" not in workflow
     assert "cancel-in-progress: false" in workflow
     assert 'workflows: ["Release"]' in workflow
     assert "branches: [main]" not in workflow
