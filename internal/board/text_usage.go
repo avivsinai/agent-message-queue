@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board/usage"
+	facts "github.com/avivsinai/agent-message-queue/usage"
 )
 
 // writeUsage prints the fleet total, one limits line per account, and each
@@ -82,17 +83,54 @@ func spendLine(us []Usage, now time.Time, withCost bool) string {
 
 // limitsLine prints an account's limits. Unknown is a word with its reason,
 // never a blank.
+// App-server readings are dated once, at the end.
 func limitsLine(ls []usage.Limit, now time.Time) string {
 	var parts []string
+	var read time.Time
+	stale := false
 	for _, l := range ls {
-		switch l.Kind {
-		case "reached":
+		bucket := ""
+		if l.Bucket != "" {
+			bucket = l.Bucket + " "
+		}
+		if l.Source == appServer {
+			read = later(read, l.AsOf)
+			stale = stale || l.Status == string(facts.StatusStale)
+		}
+		switch {
+		case l.Kind == "window":
+			p := bucket + windowLimitName(l) + " "
+			if l.UsedPercent != nil {
+				p += percent(*l.UsedPercent) + " used"
+			} else {
+				p += "used unknown"
+			}
+			if l.ResetsAt != nil {
+				p += ", resets " + resetTime(*l.ResetsAt, now)
+			}
+			parts = append(parts, p)
+		case l.Kind == "cap":
+			p := bucket + "spend cap " + amount(l.Used) + " of " + amount(l.Cap) + " used"
+			if l.RemainingPercent != nil {
+				p += " (" + percent(*l.RemainingPercent) + " left)"
+			}
+			if l.ResetsAt != nil {
+				p += ", resets " + resetTime(*l.ResetsAt, now)
+			}
+			parts = append(parts, p)
+		case l.Kind == "reached" && l.Source == appServer:
+			parts = append(parts, bucket+strings.ReplaceAll(l.Name, "_", " "))
+		case l.Kind == "reached":
 			p := limitName(l.Name) + " limit reached"
 			if l.ResetsAt != nil {
 				p += ", resets " + l.ResetsAt.Local().Format("15:04")
 			}
 			parts = append(parts, p)
-		case "credits":
+		case l.Kind == "credits" && l.Source == appServer && l.Unlimited:
+			parts = append(parts, bucket+"unlimited credits")
+		case l.Kind == "credits" && l.Source == appServer:
+			parts = append(parts, bucket+credits(l.Balance)+" credits")
+		case l.Kind == "credits":
 			parts = append(parts, credits(l.Balance)+" credits as of "+age(now.Sub(l.AsOf))+" ago")
 		default:
 			parts = append(parts, l.Reason)
@@ -101,7 +139,50 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 	if len(parts) == 0 {
 		return "limit unknown"
 	}
+	if !read.IsZero() {
+		p := "read " + age(now.Sub(read)) + " ago"
+		if stale {
+			p += " (stale)"
+		}
+		parts = append(parts, p)
+	}
 	return strings.Join(parts, " · ")
+}
+
+// windowLimitName names a plan window by its duration.
+func windowLimitName(l usage.Limit) string {
+	switch {
+	case l.Name == facts.Window5h:
+		return "5 h"
+	case l.Name == facts.WindowWeekly:
+		return "weekly"
+	case l.WindowMinutes > 0 && l.WindowMinutes%60 == 0:
+		return strconv.FormatInt(l.WindowMinutes/60, 10) + " h window"
+	case l.WindowMinutes > 0:
+		return strconv.FormatInt(l.WindowMinutes, 10) + " min window"
+	}
+	return "window"
+}
+
+// resetTime prints a reset inside the next day as a clock time, a later one
+// with its date.
+func resetTime(t, now time.Time) string {
+	if d := t.Sub(now); d >= 0 && d < 24*time.Hour {
+		return t.Local().Format("15:04")
+	}
+	return t.Local().Format("Jan 2 15:04")
+}
+
+func percent(p float64) string { return strconv.FormatFloat(p, 'f', -1, 64) + "%" }
+
+// amount prints a decimal string with two decimals; the JSON face keeps the
+// source's string verbatim.
+func amount(s string) string {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return clean(s)
+	}
+	return strconv.FormatFloat(f, 'f', 2, 64)
 }
 
 func accountName(key string) string {

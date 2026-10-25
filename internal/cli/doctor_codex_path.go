@@ -27,13 +27,27 @@ func checkCodexExecutablePaths() (doctorCheck, bool) {
 	if err != nil {
 		return doctorCheck{Name: "Codex executable", Status: "warn", Message: fmt.Sprintf("cannot inspect the Codex executable selected by this PATH (%s): %v", selected, err)}, true
 	}
+	alternatives := laterExecutablePaths("codex", first)
+	if len(alternatives) == 0 {
+		return doctorCheck{}, false
+	}
+	return doctorCheck{
+		Name: "Codex executable", Status: "warn",
+		Message: fmt.Sprintf("multiple Codex executables: with this PATH, amx and amq coop exec codex select %s; alternatives: %s. Compare their --version outputs and put the intended installation first in PATH", selected, strings.Join(alternatives, ", ")),
+	}, true
+}
+
+// laterExecutablePaths keeps PATH order and compares physical files so
+// repeated entries, symlinks, and hard links do not duplicate an installation.
+func laterExecutablePaths(name string, first os.FileInfo) []string {
 	files := []os.FileInfo{first}
 	var alternatives []string
+	foundSelected := false
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
 			dir = "."
 		}
-		candidate, err := filepath.Abs(filepath.Join(dir, "codex"))
+		candidate, err := filepath.Abs(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
@@ -43,6 +57,10 @@ func checkCodexExecutablePaths() (doctorCheck, bool) {
 		}
 		info, err := os.Stat(candidate)
 		if err != nil {
+			continue
+		}
+		if !foundSelected {
+			foundSelected = os.SameFile(first, info)
 			continue
 		}
 		duplicate := false
@@ -57,11 +75,5 @@ func checkCodexExecutablePaths() (doctorCheck, bool) {
 			alternatives = append(alternatives, candidate)
 		}
 	}
-	if len(alternatives) == 0 {
-		return doctorCheck{}, false
-	}
-	return doctorCheck{
-		Name: "Codex executable", Status: "warn",
-		Message: fmt.Sprintf("multiple Codex executables: with this PATH, amx and amq coop exec codex select %s; alternatives: %s. Compare their --version outputs and put the intended installation first in PATH", selected, strings.Join(alternatives, ", ")),
-	}, true
+	return alternatives
 }

@@ -1285,7 +1285,7 @@ func prepareFreshCaptureRefusal(ctx context.Context, adapter HarnessAdapter, par
 	if adapter.Mode() != AdapterModeCapture {
 		return "", nil
 	}
-	if err := validateExecutableContainment(participant.Executable, projectRoot, participant.Provider); err != nil {
+	if err := ValidateExecutableContainment(participant.Executable, projectRoot, participant.Provider); err != nil {
 		var contained *LaunchPathError
 		if errors.As(err, &contained) && contained.Code == ProviderProjectContainedCode {
 			return ProviderProjectContainedCode, nil

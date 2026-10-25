@@ -1,0 +1,3 @@
+{"id":1,"result":{"userAgent":"amq-board/0.163.0 (amq-board; test)","codexHome":"/codex-home","platformFamily":"unix","platformOs":"macos"}}
+{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}
+{"id":3,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1793491200},"secondary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":1792940400},"credits":{"hasCredits":false,"unlimited":false,"balance":"0"},"individualLimit":null,"planType":"plus","rateLimitReachedType":null},"rateLimitsByLimitId":null,"accountId":"00000000-0000-4000-8000-000000000002"}}

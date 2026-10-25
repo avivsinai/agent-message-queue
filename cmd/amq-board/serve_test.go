@@ -31,7 +31,7 @@ func TestUsageGitCallEndsWithTheRefresh(t *testing.T) {
 	env := board.Env{Dir: t.TempDir(), Now: time.Now, Run: execRunner{}}
 	st := boardusage.Settings{Enabled: true, Config: boardusage.DefaultConfig(t.TempDir())}
 	start := time.Now()
-	withUsage(ctx, board.Model{}, env, st)
+	withUsage(ctx, board.Model{}, env, st, nil)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("usage returned %v after its refresh was cancelled; want within 2s", elapsed)
 	}
@@ -56,7 +56,7 @@ func TestServeRefusedEditKeepsUsageSettings(t *testing.T) {
 	l := &board.Live{
 		Load: func() (board.FileConfig, []string) { return loadConfigFiles(dir, home) },
 		Build: func(ctx context.Context, cfg board.FileConfig, _ bool) board.Model {
-			return withUsage(ctx, board.Model{}, env, cfg.Usage)
+			return withUsage(ctx, board.Model{}, env, cfg.Usage, nil)
 		},
 		Now:  time.Now,
 		Logf: func(string, ...any) {},
