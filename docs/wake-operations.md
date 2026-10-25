@@ -161,8 +161,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   where the harness records trust: Claude Code's `.claude.json` (in
   `CLAUDE_CONFIG_DIR` or the home directory) for the directory or an
   ancestor inside its Git checkout, and Codex's `config.toml` `[projects]`
-  for the directory or its Git trust root. Codex asks on every start in a
-  directory outside any Git checkout and records no answer there. Once its
+  for the directory or its Git trust root. Outside any Git checkout Codex
+  may ask on every start and record no answer, so AMQ treats trust there as
+  pending. Once its
   wake holds the agent's wake lock, coop exec writes a `Startup` marker that
   names the harness and directory when the harness has not recorded that it
   trusts the directory, including a Codex directory saved as untrusted,
@@ -179,16 +180,16 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   typed in that session. Without a hook close, the wake reads the trust file
   again on each recheck while a trust marker exists and treats the marker as
   closed only once the harness records that it trusts the directory, so the
-  doorbell rings within 2 seconds of acceptance. Codex shows its update
-  prompt before the trust dialog, so that record covers both prompts. The
-  trust record does not prove that the harness accepts input yet, so while
+  doorbell rings within 2 seconds of acceptance. A Codex marker for a
+  possible update prompt never closes on the trust record, since another
+  seat's Codex can record trust for the same root first. The trust record does not prove that the harness accepts input yet, so while
   the marker stays, a written doorbell does not count as presented: each
   retry types the full doorbell again, not only Enter, until the agent
   drains after such a doorbell, which proves that the harness accepts input.
   A drain before the release, such as one from another terminal, and an
   inbox file replaced in place prove nothing. A trust file that becomes
-  unreadable keeps the hold. Codex records no decision for a directory the
-  person keeps untrusted or one outside any Git checkout, so that hold
+  unreadable keeps the hold. AMQ reads no Codex decision for a directory
+  the person keeps untrusted or one outside any Git checkout, so that hold
   stays until the first-turn close of `amq wake install-dialog-hook
   --harness codex`; without that hook the marker ages as above (input held,
   attention output after 10 minutes), and `amq doctor --ops` names the
@@ -198,18 +199,20 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
 
   Codex's "Not now" on the update prompt records nothing, so an update
   prompt marker releases only through the dialog hook's first-turn close.
-  coop exec starts a Codex seat that carries AMQ's `-c` identity overrides
-  with `-c check_for_update_on_startup=false`. A seat on the shared Codex
+  coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
+  identity overrides with `-c check_for_update_on_startup=false`. A seat on
+  the shared Codex
   daemon carries no overrides; it gets no update prompt marker only when
   Codex's own state proves the prompt cannot show:
-  `check_for_update_on_startup = false` in its effective configuration (and
-  no admin requirement, managed config, managed preferences, project or
-  profile config that turns it on), or a `$CODEX_HOME/version.json` whose
-  `latest_version` is not newer than the installed version, or is the
-  dismissed version, for a codex-cli version AMQ has checked. Anything
-  missing or unreadable keeps the hold. To run daemon seats without that
-  hold, set `check_for_update_on_startup = false` in `~/.codex/config.toml`;
-  AMQ does not edit that file.
+  `check_for_update_on_startup = false` in the user `config.toml` (and no
+  admin requirement, managed config, managed preferences, project or
+  profile config that turns it on), or a `$CODEX_HOME/version.json`
+  checked less than 19 hours ago whose `latest_version` is not newer than
+  the installed version, or is the dismissed version, for a codex-cli
+  version AMQ has checked. Anything missing or unreadable keeps the hold.
+  To run daemon seats without that hold, set
+  `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
+  (default `~/.codex/config.toml`); AMQ does not edit that file.
 
 The guard does not cover other dialogs without a hook: MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
 rewind selector, login prompts, and update prompts other than Codex's startup prompt. It also cannot recall bytes the

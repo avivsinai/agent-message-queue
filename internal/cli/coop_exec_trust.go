@@ -24,8 +24,7 @@ import (
 // dialog ends the session: Claude Code's Enter picks the default "No, exit",
 // and Codex quits. A doorbell at Codex's update prompt runs the upgrade. A
 // trust marker closes when the harness records that it trusts the
-// directory; Codex shows its update prompt first, so that record covers both
-// prompts. Every Startup marker also closes when a harness dialog hook
+// directory. Every Startup marker also closes when a harness dialog hook
 // removes it: Claude Code's at SessionStart, Codex's at the first turn,
 // since Codex runs SessionStart hooks only when a turn starts
 // (core/src/session/turn.rs run_pending_session_start_hooks).
@@ -109,8 +108,10 @@ func readStartupTrust(harness, dir string) startupTrust {
 // tui/src/config_update.rs read_remote_project_trust): a [projects] entry
 // for the directory or its git trust root with trust_level "trusted" asks
 // nothing; no entry, or a saved "untrusted" one (a restricted dialog),
-// asks. In a directory in no git checkout codex-cli 0.145 and 0.163 ask on
-// every start and record nothing, so trust there stays pending.
+// asks. Outside a git checkout codex-cli 0.145 and 0.163 asked on every
+// start in one folder and recorded nothing, and asked nothing in another;
+// the decision there turns on project layers AMQ does not read, so trust
+// there stays pending.
 func codexStartupTrust(dir string) startupTrust {
 	if codexNearestGitAncestor(dir) == "" {
 		return startupTrustPending
@@ -210,16 +211,18 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string) err
 func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
 	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir}
-	switch {
-	case harness == "":
+	if harness == "" {
 		return wakeDialogMarker{}, false
-	case trust == startupTrustPending:
-		return marker, true
-	case harness == launch.CodexProvider && !codexUpdatePromptRuledOut(binaryPath, args, dir):
+	}
+	// A trust record releases a trust marker; a second seat's Codex can
+	// record trust for the same root while this one still shows its update
+	// prompt, so a possible update prompt takes the kind only the hook
+	// releases.
+	if harness == launch.CodexProvider && !codexUpdatePromptRuledOut(binaryPath, args, dir) {
 		marker.Kind = wakeStartupKindUpdate
 		return marker, true
 	}
-	return wakeDialogMarker{}, false
+	return marker, trust == startupTrustPending
 }
 
 // startupDialogClosed reports whether marker is a Startup trust marker whose
@@ -300,9 +303,9 @@ func codexStartupHoldRelease(marker wakeDialogMarker) string {
 	switch {
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
-			"; remedy: set " + codexUpdateCheckKey + " = false in ~/.codex/config.toml"
+			"; remedy: set " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml)"
 	case codexNearestGitAncestor(marker.Cwd) == "":
-		return fmt.Sprintf("Codex asks whether to trust %s on every start outside a git checkout and records no answer; %s", marker.Cwd, hook)
+		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
 	}
 	return fmt.Sprintf("Codex asks whether to trust %s; it rings once Codex records trust, or %s", marker.Cwd, hook)
 }

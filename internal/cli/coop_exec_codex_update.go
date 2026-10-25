@@ -38,15 +38,18 @@ const (
 	// Codex reads both as a config layer above the CLI overrides and as
 	// requirements (config/src/loader/layer_io.rs).
 	codexManagedConfigPath = "/etc/codex/managed_config.toml"
-	// codexSystemConfigPath is the system config layer, below the user's.
-	codexSystemConfigPath = "/etc/codex/config.toml"
 	// codexManagedPreferences is where macOS keeps forced managed
 	// preferences; Codex reads the com.openai.codex domain
 	// (config/src/loader/macos.rs). AMQ does not decode them.
 	codexManagedPreferences = "/Library/Managed Preferences"
 	codexManagedDomainFile  = "com.openai.codex.plist"
 
-	codexVersionFile          = "version.json"
+	codexVersionFile = "version.json"
+	// codexVersionCacheFresh bounds the age of a version cache that can
+	// prove anything: a Codex whose cache is older than 20 hours refreshes
+	// it in the background at its start (updates.rs get_upgrade_version),
+	// so another seat's Codex could read a newer release than AMQ did.
+	codexVersionCacheFresh    = 19 * time.Hour
 	codexVersionProbeTimeout  = 3 * time.Second
 	codexVersionProbeMaxBytes = 4 << 10
 )
@@ -73,11 +76,13 @@ func codexUpdatePromptRuledOut(binaryPath string, args []string, dir string) boo
 
 // codexUpdateCheckOff reports whether check_for_update_on_startup is
 // provably false for this start (config/src/loader/README.md layer order:
-// managed config, then CLI overrides, project, user profile, user, system;
-// requirements pin an exact value above all). A layer that turns the check
-// on, or one AMQ cannot read, defeats the proof. A project or profile layer
-// can veto but never proves: Codex disables an untrusted project's layer,
-// and only the selected profile counts.
+// managed config, then CLI overrides, project, user profile, user, cloud
+// managed, system; requirements pin an exact value above all). A layer that
+// turns the check on, or one AMQ cannot read, defeats the proof. A project
+// or profile layer can veto but never proves: Codex disables an untrusted
+// project's layer, and only the selected profile counts. Nothing below the
+// user layer proves either: AMQ cannot read the cloud managed layer.
+// Codex matches configuration keys exactly.
 func codexUpdateCheckOff(codexHome, dir string, args []string) bool {
 	if codexManagedPreferencesPresent() {
 		return false
@@ -90,6 +95,9 @@ func codexUpdateCheckOff(codexHome, dir string, args []string) bool {
 		if set {
 			return off
 		}
+	}
+	if value, set := codexArgsUpdateCheck(args); set {
+		return value == "false"
 	}
 	vetoes := []string{}
 	for d := dir; ; d = filepath.Dir(d) {
@@ -108,19 +116,8 @@ func codexUpdateCheckOff(codexHome, dir string, args []string) bool {
 			return false
 		}
 	}
-	if value, set := codexArgsUpdateCheck(args); set {
-		return value == "false"
-	}
-	for _, path := range []string{filepath.Join(codexHome, "config.toml"), codexSystemConfigPath} {
-		off, set, err := codexConfigUpdateCheck(path)
-		if err != nil {
-			return false
-		}
-		if set {
-			return off
-		}
-	}
-	return false
+	off, set, err := codexConfigUpdateCheck(filepath.Join(codexHome, "config.toml"))
+	return err == nil && set && off
 }
 
 // codexManagedPreferencesPresent reports a forced com.openai.codex domain,
@@ -175,7 +172,7 @@ func codexConfigUpdateCheck(path string) (off, set bool, err error) {
 func codexArgsUpdateCheck(args []string) (value string, set bool) {
 	for _, override := range codexConfigOverrides(args) {
 		key, v, _ := strings.Cut(override, "=")
-		if strings.EqualFold(strings.TrimSpace(key), codexUpdateCheckKey) {
+		if strings.TrimSpace(key) == codexUpdateCheckKey {
 			value, set = strings.TrimSpace(v), true
 		}
 	}
@@ -185,9 +182,9 @@ func codexArgsUpdateCheck(args []string) (value string, set bool) {
 // codexVersionCacheRulesOutPrompt reports whether Codex's version cache
 // rules the prompt out for the installed binary: its latest_version is not
 // newer than the installed version (update_versions.rs is_newer), or it is
-// the dismissed version. A missing or unparseable cache, a version Codex
-// itself cannot order, or an installed version outside the verified range
-// keeps the hold.
+// the dismissed version. A missing, unparseable, stale or future-dated
+// cache, a version Codex itself cannot order, or an installed version
+// outside the verified range keeps the hold.
 func codexVersionCacheRulesOutPrompt(binaryPath, codexHome string) bool {
 	raw, err := os.ReadFile(filepath.Join(codexHome, codexVersionFile))
 	if err != nil {
@@ -201,7 +198,11 @@ func codexVersionCacheRulesOutPrompt(binaryPath, codexHome string) bool {
 	if json.Unmarshal(raw, &cache) != nil || cache.Latest == nil || cache.Checked == nil {
 		return false
 	}
-	if _, err := time.Parse(time.RFC3339Nano, *cache.Checked); err != nil {
+	checked, err := time.Parse(time.RFC3339Nano, *cache.Checked)
+	if err != nil {
+		return false
+	}
+	if age := time.Since(checked); age < 0 || age >= codexVersionCacheFresh {
 		return false
 	}
 	latest, ok := parseCodexVersion(*cache.Latest)

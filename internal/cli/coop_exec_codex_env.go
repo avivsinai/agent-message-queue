@@ -93,7 +93,7 @@ func pinCodexShellIdentity(binaryPath string, args, env []string, recorded bool)
 	if recorded || launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
 		return args
 	}
-	overrides := append(codexIdentityOverrides(env), "-c", codexUpdateCheckKey+"=false")
+	overrides := append(codexIdentityOverrides(env), "-c", launch.CodexNoUpdatePromptOverride)
 	return append(overrides, args...)
 }
 
