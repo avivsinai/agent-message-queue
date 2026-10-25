@@ -153,6 +153,7 @@
             "isDraft": false,
             "mergeable": "MERGEABLE",
             "reviewDecision": "REVIEW_REQUIRED",
+            "createdAt": "2026-10-01T09:00:00Z",
             "updatedAt": "2026-10-22T10:00:00Z",
             "author": {
               "login": "octo-agent"

@@ -116,6 +116,13 @@ func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
 	if len(merged.Items) != 2 {
 		t.Fatalf("demo-g1 and #15: %d items on the card, want 2", len(merged.Items))
 	}
+	// Review of #1218: a reviewer can be requested long after the PR opened,
+	// so "review requested" never dates from createdAt.
+	for _, it := range merged.Items {
+		if it.Ref.Kind == board.RefForge && !it.Reason.Since.IsZero() {
+			t.Errorf("#15 %q since %v, want unknown", it.Reason.Text, it.Reason.Since)
+		}
+	}
 
 	// Pro finding 8: a page with more PRs is partial, not complete.
 	gh := source_(m, "github")

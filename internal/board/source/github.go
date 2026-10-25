@@ -768,20 +768,14 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 		it.Reason = board.Reason{Field: "reviewDecision", Text: "ready to merge"}
 	default:
 		it.State = board.StateActive
-		// An open PR waits on review from when it was opened. Requested
-		// changes and failing checks began later at a time no fetched field
-		// records, so their since stays unknown rather than too early.
-		since := created
 		var facts []string
 		switch {
 		case decision == "CHANGES_REQUESTED":
 			it.WaitsOn = []board.Owner{authorOwner}
 			facts = append(facts, "changes requested")
-			since = time.Time{}
 		case checks == "FAILURE" || checks == "ERROR":
 			it.WaitsOn = []board.Owner{authorOwner}
 			facts = append(facts, "checks failing")
-			since = time.Time{}
 		case len(reviewers) > 0:
 			it.WaitsOn = reviewers
 			facts = append(facts, "review requested")
@@ -795,9 +789,13 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 		if pr.Mergeable == "CONFLICTING" {
 			facts = append(facts, "conflicting")
 		}
-		text := "open PR"
+		// A plain open PR has been open since createdAt. Every fact above
+		// (a review request, requested changes, checks, approval, draft,
+		// conflict) can begin later at a time no fetched field records, so
+		// its since stays unknown rather than too early.
+		text, since := "open PR", created
 		if len(facts) > 0 {
-			text = strings.Join(facts, "; ")
+			text, since = strings.Join(facts, "; "), time.Time{}
 		}
 		it.Reason = board.Reason{Field: "reviewDecision", Text: text, Since: since}
 	}
