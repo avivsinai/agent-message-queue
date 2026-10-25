@@ -1,0 +1,865 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-25T06:00:12+00:00",
+  "title": "Design System: amq-board",
+  "extensions": {
+    "themes": {
+      "mechanism": "prefers-color-scheme only; no manual switch. Frontmatter key <name> is the light value and <name>-dark the dark value of the CSS custom property --<name> on :root in internal/board/web/page.css."
+    },
+    "colorMeta": {
+      "rack": {
+        "role": "neutral",
+        "displayName": "Rack Grey",
+        "theme": "light",
+        "cssVar": "--rack",
+        "canonical": "oklch(91.0% 0.008 241.7)",
+        "tonalRamp": [
+          "oklch(15% 0.008 241.7)",
+          "oklch(26% 0.008 241.7)",
+          "oklch(38% 0.008 241.7)",
+          "oklch(49% 0.008 241.7)",
+          "oklch(61% 0.008 241.7)",
+          "oklch(72% 0.008 241.7)",
+          "oklch(84% 0.008 241.7)",
+          "oklch(95% 0.008 241.7)"
+        ]
+      },
+      "rack-dark": {
+        "role": "neutral",
+        "displayName": "Rack Grey (dark)",
+        "theme": "dark",
+        "cssVar": "--rack",
+        "canonical": "oklch(20.2% 0.010 248.3)",
+        "tonalRamp": [
+          "oklch(15% 0.010 248.3)",
+          "oklch(26% 0.010 248.3)",
+          "oklch(38% 0.010 248.3)",
+          "oklch(49% 0.010 248.3)",
+          "oklch(61% 0.010 248.3)",
+          "oklch(72% 0.010 248.3)",
+          "oklch(84% 0.010 248.3)",
+          "oklch(95% 0.010 248.3)"
+        ]
+      },
+      "rack-rule": {
+        "role": "neutral",
+        "displayName": "Rack Rule",
+        "theme": "light",
+        "cssVar": "--rack-rule",
+        "canonical": "oklch(80.7% 0.013 244.3)",
+        "tonalRamp": [
+          "oklch(15% 0.013 244.3)",
+          "oklch(26% 0.013 244.3)",
+          "oklch(38% 0.013 244.3)",
+          "oklch(49% 0.013 244.3)",
+          "oklch(61% 0.013 244.3)",
+          "oklch(72% 0.013 244.3)",
+          "oklch(84% 0.013 244.3)",
+          "oklch(95% 0.013 244.3)"
+        ]
+      },
+      "rack-rule-dark": {
+        "role": "neutral",
+        "displayName": "Rack Rule (dark)",
+        "theme": "dark",
+        "cssVar": "--rack-rule",
+        "canonical": "oklch(35.2% 0.018 248.3)",
+        "tonalRamp": [
+          "oklch(15% 0.018 248.3)",
+          "oklch(26% 0.018 248.3)",
+          "oklch(38% 0.018 248.3)",
+          "oklch(49% 0.018 248.3)",
+          "oklch(61% 0.018 248.3)",
+          "oklch(72% 0.018 248.3)",
+          "oklch(84% 0.018 248.3)",
+          "oklch(95% 0.018 248.3)"
+        ]
+      },
+      "rack-ink": {
+        "role": "neutral",
+        "displayName": "Rack Ink",
+        "theme": "light",
+        "cssVar": "--rack-ink",
+        "canonical": "oklch(24.1% 0.014 253.1)",
+        "tonalRamp": [
+          "oklch(15% 0.014 253.1)",
+          "oklch(26% 0.014 253.1)",
+          "oklch(38% 0.014 253.1)",
+          "oklch(49% 0.014 253.1)",
+          "oklch(61% 0.014 253.1)",
+          "oklch(72% 0.014 253.1)",
+          "oklch(84% 0.014 253.1)",
+          "oklch(95% 0.014 253.1)"
+        ]
+      },
+      "rack-ink-dark": {
+        "role": "neutral",
+        "displayName": "Rack Ink (dark)",
+        "theme": "dark",
+        "cssVar": "--rack-ink",
+        "canonical": "oklch(92.6% 0.007 247.9)",
+        "tonalRamp": [
+          "oklch(15% 0.007 247.9)",
+          "oklch(26% 0.007 247.9)",
+          "oklch(38% 0.007 247.9)",
+          "oklch(49% 0.007 247.9)",
+          "oklch(61% 0.007 247.9)",
+          "oklch(72% 0.007 247.9)",
+          "oklch(84% 0.007 247.9)",
+          "oklch(95% 0.007 247.9)"
+        ]
+      },
+      "rack-muted": {
+        "role": "neutral",
+        "displayName": "Rack Muted",
+        "theme": "light",
+        "cssVar": "--rack-muted",
+        "canonical": "oklch(42.7% 0.020 251.1)",
+        "tonalRamp": [
+          "oklch(15% 0.020 251.1)",
+          "oklch(26% 0.020 251.1)",
+          "oklch(38% 0.020 251.1)",
+          "oklch(49% 0.020 251.1)",
+          "oklch(61% 0.020 251.1)",
+          "oklch(72% 0.020 251.1)",
+          "oklch(84% 0.020 251.1)",
+          "oklch(95% 0.020 251.1)"
+        ]
+      },
+      "rack-muted-dark": {
+        "role": "neutral",
+        "displayName": "Rack Muted (dark)",
+        "theme": "dark",
+        "cssVar": "--rack-muted",
+        "canonical": "oklch(74.3% 0.018 248.1)",
+        "tonalRamp": [
+          "oklch(15% 0.018 248.1)",
+          "oklch(26% 0.018 248.1)",
+          "oklch(38% 0.018 248.1)",
+          "oklch(49% 0.018 248.1)",
+          "oklch(61% 0.018 248.1)",
+          "oklch(72% 0.018 248.1)",
+          "oklch(84% 0.018 248.1)",
+          "oklch(95% 0.018 248.1)"
+        ]
+      },
+      "stock": {
+        "role": "neutral",
+        "displayName": "Strip Stock",
+        "theme": "light",
+        "cssVar": "--stock",
+        "canonical": "oklch(96.2% 0.022 89.8)",
+        "tonalRamp": [
+          "oklch(15% 0.022 89.8)",
+          "oklch(26% 0.022 89.8)",
+          "oklch(38% 0.022 89.8)",
+          "oklch(49% 0.022 89.8)",
+          "oklch(61% 0.022 89.8)",
+          "oklch(72% 0.022 89.8)",
+          "oklch(84% 0.022 89.8)",
+          "oklch(95% 0.022 89.8)"
+        ]
+      },
+      "stock-dark": {
+        "role": "neutral",
+        "displayName": "Strip Stock (dark)",
+        "theme": "dark",
+        "cssVar": "--stock",
+        "canonical": "oklch(26.6% 0.015 84.5)",
+        "tonalRamp": [
+          "oklch(15% 0.015 84.5)",
+          "oklch(26% 0.015 84.5)",
+          "oklch(38% 0.015 84.5)",
+          "oklch(49% 0.015 84.5)",
+          "oklch(61% 0.015 84.5)",
+          "oklch(72% 0.015 84.5)",
+          "oklch(84% 0.015 84.5)",
+          "oklch(95% 0.015 84.5)"
+        ]
+      },
+      "stock-cell": {
+        "role": "neutral",
+        "displayName": "Cell Stock",
+        "theme": "light",
+        "cssVar": "--stock-cell",
+        "canonical": "oklch(92.6% 0.032 89.1)",
+        "tonalRamp": [
+          "oklch(15% 0.032 89.1)",
+          "oklch(26% 0.032 89.1)",
+          "oklch(38% 0.032 89.1)",
+          "oklch(49% 0.032 89.1)",
+          "oklch(61% 0.032 89.1)",
+          "oklch(72% 0.032 89.1)",
+          "oklch(84% 0.032 89.1)",
+          "oklch(95% 0.032 89.1)"
+        ]
+      },
+      "stock-cell-dark": {
+        "role": "neutral",
+        "displayName": "Cell Stock (dark)",
+        "theme": "dark",
+        "cssVar": "--stock-cell",
+        "canonical": "oklch(30.3% 0.019 84.5)",
+        "tonalRamp": [
+          "oklch(15% 0.019 84.5)",
+          "oklch(26% 0.019 84.5)",
+          "oklch(38% 0.019 84.5)",
+          "oklch(49% 0.019 84.5)",
+          "oklch(61% 0.019 84.5)",
+          "oklch(72% 0.019 84.5)",
+          "oklch(84% 0.019 84.5)",
+          "oklch(95% 0.019 84.5)"
+        ]
+      },
+      "stock-rule": {
+        "role": "neutral",
+        "displayName": "Stock Rule",
+        "theme": "light",
+        "cssVar": "--stock-rule",
+        "canonical": "oklch(86.3% 0.042 88.8)",
+        "tonalRamp": [
+          "oklch(15% 0.042 88.8)",
+          "oklch(26% 0.042 88.8)",
+          "oklch(38% 0.042 88.8)",
+          "oklch(49% 0.042 88.8)",
+          "oklch(61% 0.042 88.8)",
+          "oklch(72% 0.042 88.8)",
+          "oklch(84% 0.042 88.8)",
+          "oklch(95% 0.042 88.8)"
+        ]
+      },
+      "stock-rule-dark": {
+        "role": "neutral",
+        "displayName": "Stock Rule (dark)",
+        "theme": "dark",
+        "cssVar": "--stock-rule",
+        "canonical": "oklch(37.1% 0.025 84.5)",
+        "tonalRamp": [
+          "oklch(15% 0.025 84.5)",
+          "oklch(26% 0.025 84.5)",
+          "oklch(38% 0.025 84.5)",
+          "oklch(49% 0.025 84.5)",
+          "oklch(61% 0.025 84.5)",
+          "oklch(72% 0.025 84.5)",
+          "oklch(84% 0.025 84.5)",
+          "oklch(95% 0.025 84.5)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Strip Ink",
+        "theme": "light",
+        "cssVar": "--ink",
+        "canonical": "oklch(23.7% 0.014 81.6)",
+        "tonalRamp": [
+          "oklch(15% 0.014 81.6)",
+          "oklch(26% 0.014 81.6)",
+          "oklch(38% 0.014 81.6)",
+          "oklch(49% 0.014 81.6)",
+          "oklch(61% 0.014 81.6)",
+          "oklch(72% 0.014 81.6)",
+          "oklch(84% 0.014 81.6)",
+          "oklch(95% 0.014 81.6)"
+        ]
+      },
+      "ink-dark": {
+        "role": "neutral",
+        "displayName": "Strip Ink (dark)",
+        "theme": "dark",
+        "cssVar": "--ink",
+        "canonical": "oklch(93.9% 0.025 86.9)",
+        "tonalRamp": [
+          "oklch(15% 0.025 86.9)",
+          "oklch(26% 0.025 86.9)",
+          "oklch(38% 0.025 86.9)",
+          "oklch(49% 0.025 86.9)",
+          "oklch(61% 0.025 86.9)",
+          "oklch(72% 0.025 86.9)",
+          "oklch(84% 0.025 86.9)",
+          "oklch(95% 0.025 86.9)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Strip Muted",
+        "theme": "light",
+        "cssVar": "--muted",
+        "canonical": "oklch(44.9% 0.027 84.5)",
+        "tonalRamp": [
+          "oklch(15% 0.027 84.5)",
+          "oklch(26% 0.027 84.5)",
+          "oklch(38% 0.027 84.5)",
+          "oklch(49% 0.027 84.5)",
+          "oklch(61% 0.027 84.5)",
+          "oklch(72% 0.027 84.5)",
+          "oklch(84% 0.027 84.5)",
+          "oklch(95% 0.027 84.5)"
+        ]
+      },
+      "muted-dark": {
+        "role": "neutral",
+        "displayName": "Strip Muted (dark)",
+        "theme": "dark",
+        "cssVar": "--muted",
+        "canonical": "oklch(77.8% 0.038 87.8)",
+        "tonalRamp": [
+          "oklch(15% 0.038 87.8)",
+          "oklch(26% 0.038 87.8)",
+          "oklch(38% 0.038 87.8)",
+          "oklch(49% 0.038 87.8)",
+          "oklch(61% 0.038 87.8)",
+          "oklch(72% 0.038 87.8)",
+          "oklch(84% 0.038 87.8)",
+          "oklch(95% 0.038 87.8)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Bay Amber",
+        "theme": "light",
+        "cssVar": "--accent",
+        "canonical": "oklch(77.1% 0.142 75.0)",
+        "tonalRamp": [
+          "oklch(15% 0.120 75.0)",
+          "oklch(26% 0.142 75.0)",
+          "oklch(38% 0.142 75.0)",
+          "oklch(49% 0.142 75.0)",
+          "oklch(61% 0.142 75.0)",
+          "oklch(72% 0.142 75.0)",
+          "oklch(84% 0.142 75.0)",
+          "oklch(95% 0.120 75.0)"
+        ]
+      },
+      "accent-dark": {
+        "role": "primary",
+        "displayName": "Bay Amber (dark)",
+        "theme": "dark",
+        "cssVar": "--accent",
+        "canonical": "oklch(75.7% 0.137 74.5)",
+        "tonalRamp": [
+          "oklch(15% 0.120 74.5)",
+          "oklch(26% 0.137 74.5)",
+          "oklch(38% 0.137 74.5)",
+          "oklch(49% 0.137 74.5)",
+          "oklch(61% 0.137 74.5)",
+          "oklch(72% 0.137 74.5)",
+          "oklch(84% 0.137 74.5)",
+          "oklch(95% 0.120 74.5)"
+        ]
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Amber Ink",
+        "theme": "light",
+        "cssVar": "--accent-ink",
+        "canonical": "oklch(22.0% 0.020 84.3)",
+        "tonalRamp": [
+          "oklch(15% 0.020 84.3)",
+          "oklch(26% 0.020 84.3)",
+          "oklch(38% 0.020 84.3)",
+          "oklch(49% 0.020 84.3)",
+          "oklch(61% 0.020 84.3)",
+          "oklch(72% 0.020 84.3)",
+          "oklch(84% 0.020 84.3)",
+          "oklch(95% 0.020 84.3)"
+        ]
+      },
+      "accent-ink-dark": {
+        "role": "primary",
+        "displayName": "Amber Ink (dark)",
+        "theme": "dark",
+        "cssVar": "--accent-ink",
+        "canonical": "oklch(20.4% 0.025 85.5)",
+        "tonalRamp": [
+          "oklch(15% 0.025 85.5)",
+          "oklch(26% 0.025 85.5)",
+          "oklch(38% 0.025 85.5)",
+          "oklch(49% 0.025 85.5)",
+          "oklch(61% 0.025 85.5)",
+          "oklch(72% 0.025 85.5)",
+          "oklch(84% 0.025 85.5)",
+          "oklch(95% 0.025 85.5)"
+        ]
+      },
+      "accent-wash": {
+        "role": "primary",
+        "displayName": "Amber Wash",
+        "theme": "light",
+        "cssVar": "--accent-wash",
+        "canonical": "oklch(91.1% 0.068 85.7)",
+        "tonalRamp": [
+          "oklch(15% 0.068 85.7)",
+          "oklch(26% 0.068 85.7)",
+          "oklch(38% 0.068 85.7)",
+          "oklch(49% 0.068 85.7)",
+          "oklch(61% 0.068 85.7)",
+          "oklch(72% 0.068 85.7)",
+          "oklch(84% 0.068 85.7)",
+          "oklch(95% 0.068 85.7)"
+        ]
+      },
+      "accent-wash-dark": {
+        "role": "primary",
+        "displayName": "Amber Wash (dark)",
+        "theme": "dark",
+        "cssVar": "--accent-wash",
+        "canonical": "oklch(35.3% 0.054 79.9)",
+        "tonalRamp": [
+          "oklch(15% 0.054 79.9)",
+          "oklch(26% 0.054 79.9)",
+          "oklch(38% 0.054 79.9)",
+          "oklch(49% 0.054 79.9)",
+          "oklch(61% 0.054 79.9)",
+          "oklch(72% 0.054 79.9)",
+          "oklch(84% 0.054 79.9)",
+          "oklch(95% 0.054 79.9)"
+        ]
+      },
+      "accent-text": {
+        "role": "primary",
+        "displayName": "Amber Text",
+        "theme": "light",
+        "cssVar": "--accent-text",
+        "canonical": "oklch(48.3% 0.111 61.6)",
+        "tonalRamp": [
+          "oklch(15% 0.111 61.6)",
+          "oklch(26% 0.111 61.6)",
+          "oklch(38% 0.111 61.6)",
+          "oklch(49% 0.111 61.6)",
+          "oklch(61% 0.111 61.6)",
+          "oklch(72% 0.111 61.6)",
+          "oklch(84% 0.111 61.6)",
+          "oklch(95% 0.111 61.6)"
+        ]
+      },
+      "accent-text-dark": {
+        "role": "primary",
+        "displayName": "Amber Text (dark)",
+        "theme": "dark",
+        "cssVar": "--accent-text",
+        "canonical": "oklch(82.4% 0.127 78.6)",
+        "tonalRamp": [
+          "oklch(15% 0.120 78.6)",
+          "oklch(26% 0.127 78.6)",
+          "oklch(38% 0.127 78.6)",
+          "oklch(49% 0.127 78.6)",
+          "oklch(61% 0.127 78.6)",
+          "oklch(72% 0.127 78.6)",
+          "oklch(84% 0.127 78.6)",
+          "oklch(95% 0.120 78.6)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus Amber",
+        "theme": "light",
+        "cssVar": "--focus",
+        "canonical": "oklch(54.5% 0.126 61.6)",
+        "tonalRamp": [
+          "oklch(15% 0.120 61.6)",
+          "oklch(26% 0.126 61.6)",
+          "oklch(38% 0.126 61.6)",
+          "oklch(49% 0.126 61.6)",
+          "oklch(61% 0.126 61.6)",
+          "oklch(72% 0.126 61.6)",
+          "oklch(84% 0.126 61.6)",
+          "oklch(95% 0.120 61.6)"
+        ]
+      },
+      "focus-dark": {
+        "role": "primary",
+        "displayName": "Focus Amber (dark)",
+        "theme": "dark",
+        "cssVar": "--focus",
+        "canonical": "oklch(82.4% 0.127 78.6)",
+        "tonalRamp": [
+          "oklch(15% 0.120 78.6)",
+          "oklch(26% 0.127 78.6)",
+          "oklch(38% 0.127 78.6)",
+          "oklch(49% 0.127 78.6)",
+          "oklch(61% 0.127 78.6)",
+          "oklch(72% 0.127 78.6)",
+          "oklch(84% 0.127 78.6)",
+          "oklch(95% 0.120 78.6)"
+        ]
+      },
+      "live": {
+        "role": "tertiary",
+        "displayName": "Signal Green",
+        "theme": "light",
+        "cssVar": "--live",
+        "canonical": "oklch(46.9% 0.108 145.4)",
+        "tonalRamp": [
+          "oklch(15% 0.108 145.4)",
+          "oklch(26% 0.108 145.4)",
+          "oklch(38% 0.108 145.4)",
+          "oklch(49% 0.108 145.4)",
+          "oklch(61% 0.108 145.4)",
+          "oklch(72% 0.108 145.4)",
+          "oklch(84% 0.108 145.4)",
+          "oklch(95% 0.108 145.4)"
+        ]
+      },
+      "live-dark": {
+        "role": "tertiary",
+        "displayName": "Signal Green (dark)",
+        "theme": "dark",
+        "cssVar": "--live",
+        "canonical": "oklch(80.6% 0.106 149.0)",
+        "tonalRamp": [
+          "oklch(15% 0.106 149.0)",
+          "oklch(26% 0.106 149.0)",
+          "oklch(38% 0.106 149.0)",
+          "oklch(49% 0.106 149.0)",
+          "oklch(61% 0.106 149.0)",
+          "oklch(72% 0.106 149.0)",
+          "oklch(84% 0.106 149.0)",
+          "oklch(95% 0.106 149.0)"
+        ]
+      },
+      "warn": {
+        "role": "tertiary",
+        "displayName": "Caution Violet",
+        "theme": "light",
+        "cssVar": "--warn",
+        "canonical": "oklch(47.1% 0.137 318.0)",
+        "tonalRamp": [
+          "oklch(15% 0.120 318.0)",
+          "oklch(26% 0.137 318.0)",
+          "oklch(38% 0.137 318.0)",
+          "oklch(49% 0.137 318.0)",
+          "oklch(61% 0.137 318.0)",
+          "oklch(72% 0.137 318.0)",
+          "oklch(84% 0.137 318.0)",
+          "oklch(95% 0.120 318.0)"
+        ]
+      },
+      "warn-dark": {
+        "role": "tertiary",
+        "displayName": "Caution Violet (dark)",
+        "theme": "dark",
+        "cssVar": "--warn",
+        "canonical": "oklch(81.2% 0.096 318.2)",
+        "tonalRamp": [
+          "oklch(15% 0.096 318.2)",
+          "oklch(26% 0.096 318.2)",
+          "oklch(38% 0.096 318.2)",
+          "oklch(49% 0.096 318.2)",
+          "oklch(61% 0.096 318.2)",
+          "oklch(72% 0.096 318.2)",
+          "oklch(84% 0.096 318.2)",
+          "oklch(95% 0.096 318.2)"
+        ]
+      },
+      "error": {
+        "role": "tertiary",
+        "displayName": "Fault Red",
+        "theme": "light",
+        "cssVar": "--error",
+        "canonical": "oklch(47.7% 0.166 29.3)",
+        "tonalRamp": [
+          "oklch(15% 0.120 29.3)",
+          "oklch(26% 0.166 29.3)",
+          "oklch(38% 0.166 29.3)",
+          "oklch(49% 0.166 29.3)",
+          "oklch(61% 0.166 29.3)",
+          "oklch(72% 0.166 29.3)",
+          "oklch(84% 0.166 29.3)",
+          "oklch(95% 0.120 29.3)"
+        ]
+      },
+      "error-dark": {
+        "role": "tertiary",
+        "displayName": "Fault Red (dark)",
+        "theme": "dark",
+        "cssVar": "--error",
+        "canonical": "oklch(77.9% 0.129 26.7)",
+        "tonalRamp": [
+          "oklch(15% 0.120 26.7)",
+          "oklch(26% 0.129 26.7)",
+          "oklch(38% 0.129 26.7)",
+          "oklch(49% 0.129 26.7)",
+          "oklch(61% 0.129 26.7)",
+          "oklch(72% 0.129 26.7)",
+          "oklch(84% 0.129 26.7)",
+          "oklch(95% 0.120 26.7)"
+        ]
+      },
+      "quiet": {
+        "role": "tertiary",
+        "displayName": "Quiet Grey",
+        "theme": "light",
+        "cssVar": "--quiet",
+        "canonical": "oklch(50.6% 0.022 83.0)",
+        "tonalRamp": [
+          "oklch(15% 0.022 83.0)",
+          "oklch(26% 0.022 83.0)",
+          "oklch(38% 0.022 83.0)",
+          "oklch(49% 0.022 83.0)",
+          "oklch(61% 0.022 83.0)",
+          "oklch(72% 0.022 83.0)",
+          "oklch(84% 0.022 83.0)",
+          "oklch(95% 0.022 83.0)"
+        ]
+      },
+      "quiet-dark": {
+        "role": "tertiary",
+        "displayName": "Quiet Grey (dark)",
+        "theme": "dark",
+        "cssVar": "--quiet",
+        "canonical": "oklch(71.4% 0.028 87.9)",
+        "tonalRamp": [
+          "oklch(15% 0.028 87.9)",
+          "oklch(26% 0.028 87.9)",
+          "oklch(38% 0.028 87.9)",
+          "oklch(49% 0.028 87.9)",
+          "oklch(61% 0.028 87.9)",
+          "oklch(72% 0.028 87.9)",
+          "oklch(84% 0.028 87.9)",
+          "oklch(95% 0.028 87.9)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The project name in the masthead."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Strip titles, clamped to three lines."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Page base: reason, owner, gates, meta lines."
+      },
+      "small": {
+        "displayName": "Small",
+        "purpose": "Secondary lines in lower strips, roster counts and usage, lamp notes, evidence, footer."
+      },
+      "count": {
+        "displayName": "Count",
+        "purpose": "Masthead and bay counts, tabular."
+      },
+      "count-waiting": {
+        "displayName": "Waiting Count",
+        "purpose": "The Waiting on you bay count; the largest text on the page."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Condensed uppercase field and section labels, ref kinds (700), marks (700). Always text-transform: uppercase."
+      },
+      "label-bay": {
+        "displayName": "Bay Title",
+        "purpose": "Bay head titles, condensed uppercase."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Refs, commands, tokens, evidence facts."
+      },
+      "mono-since": {
+        "displayName": "Since",
+        "purpose": "The since cell: mono at body size, 600, right-aligned, no wrap."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "The copy button label."
+      }
+    },
+    "shadows": [
+      {
+        "name": "strip-lift",
+        "value": "0 1px 2px rgb(27 32 38 / 0.24)",
+        "theme": "light",
+        "purpose": "Every strip, and nothing else."
+      },
+      {
+        "name": "strip-lift-dark",
+        "value": "0 1px 2px rgb(0 0 0 / 0.6)",
+        "theme": "dark",
+        "purpose": "Every strip, and nothing else."
+      }
+    ],
+    "motion": [
+      {
+        "name": "copy-state",
+        "value": "background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out",
+        "purpose": "Copy button state changes; the only transition on the page."
+      },
+      {
+        "name": "copy-reset",
+        "value": "1500ms",
+        "purpose": "Copied or Selected returns to Copy after this delay."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "transition: none; animation: none",
+        "purpose": "prefers-reduced-motion: reduce removes every transition and animation."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "max-width: 40rem",
+        "kind": "media",
+        "purpose": "Sticky bay heads, stacked sources and limits, full-row filter, cock offset 0.75rem."
+      },
+      {
+        "name": "lower-two",
+        "value": "min-width: 52rem",
+        "kind": "media",
+        "purpose": "Lower grid becomes two columns."
+      },
+      {
+        "name": "lower-wide",
+        "value": "min-width: 84rem",
+        "kind": "media",
+        "purpose": "Three bay columns plus a minmax(17rem, 0.85fr) roster column."
+      },
+      {
+        "name": "rack-medium",
+        "value": "min-width: 40rem",
+        "kind": "container (rack)",
+        "purpose": "Waiting strip folds into a left ref column and field rows."
+      },
+      {
+        "name": "rack-wide",
+        "value": "min-width: 68rem",
+        "kind": "container (rack)",
+        "purpose": "Waiting strip is one row under the bay's label row."
+      }
+    ],
+    "focus": {
+      "value": "outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px",
+      "purpose": "Every focusable element."
+    }
+  },
+  "components": [
+    {
+      "name": "Waiting Strip (wide)",
+      "kind": "custom",
+      "refersTo": "strip",
+      "description": "One row per item in the Waiting on you bay at container width 68rem and up: ref, title, reason, since, owner, checked, and the first command with Copy as the last cell.",
+      "html": "<article class=\"ds-strip ds-strip-waiting\"><p class=\"ds-ref\"><span class=\"ds-kind\">amq</span> <span class=\"ds-id\">todo</span></p><p class=\"ds-title\">Pick the retry window</p><p>todo from beta</p><p class=\"ds-since\">14m</p><p>you</p><p class=\"ds-muted\">amq checked &lt;1m ago</p><div class=\"ds-cmd\"><p class=\"ds-cmd-body\"><span class=\"ds-cmd-label\">complete: answer beta</span><code>amq send --session s2 --me user --to beta --kind status --body -</code></p><button type=\"button\" class=\"ds-copy\">Copy</button></div><details class=\"ds-detail\"><summary>More commands and evidence</summary></details></article>",
+      "css": ".ds-strip { display: grid; background: var(--stock, #f8f2e2); color: var(--ink, #221e17); box-shadow: var(--shadow, 0 1px 2px rgb(27 32 38 / 0.24)); border-radius: 2px; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; } .ds-strip > * { min-width: 0; margin: 0; padding: 0.4rem 0.625rem; } .ds-strip p { margin: 0; } .ds-ref { display: flex; align-items: baseline; gap: 0.5em; background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; } .ds-kind { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #5c5444); } .ds-id { font-weight: 600; } .ds-since { background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-weight: 600; text-align: end; white-space: nowrap; font-variant-numeric: tabular-nums; } .ds-cue { color: var(--muted, #5c5444); font-family: system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; font-weight: 400; } .ds-title { font-size: 0.9375rem; font-weight: 600; line-height: 1.3; } .ds-muted { color: var(--muted, #5c5444); } .ds-strip summary { cursor: pointer; color: var(--muted, #5c5444); font-size: 0.694rem; font-weight: 600; width: fit-content; } .ds-strip summary:hover { color: var(--ink, #221e17); } .ds-strip summary:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; } .ds-cmd { display: flex; align-items: flex-start; gap: 0.5rem; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; color: var(--ink, #221e17); } .ds-cmd-body { flex: 1; min-width: 0; display: grid; gap: 0.1rem; margin: 0; } .ds-cmd-label { font-size: 0.694rem; font-weight: 600; color: var(--muted, #5c5444); } .ds-cmd code { display: block; font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0.2rem 0.4rem; background: var(--stock-cell, #efe6cf); border-radius: 2px; } .ds-cmd code::before { content: \"$ \"; color: var(--muted, #5c5444); } .ds-copy { flex: none; font: 600 0.694rem/1 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; color: var(--ink, #221e17); background: var(--stock, #f8f2e2); border: 1px solid var(--stock-rule, #ddd1b3); border-radius: 3px; min-width: 4.25rem; min-height: 1.75rem; padding: 0.3rem 0.6rem; cursor: pointer; transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out; } .ds-copy:hover { border-color: var(--muted, #5c5444); } .ds-copy:active { background: var(--stock-cell, #efe6cf); } .ds-copy:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; } .ds-copy.is-copied { background: var(--live, #2c6a32); border-color: var(--live, #2c6a32); color: var(--stock, #f8f2e2); } .ds-copy.is-failed { border-color: var(--error, #a6261c); color: var(--error, #a6261c); } .ds-strip-waiting { grid-template-columns: 7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 5rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr); } .ds-strip-waiting .ds-ref { flex-direction: column; gap: 0.1rem; grid-row: 1 / 3; background: var(--accent-wash, #f6dfae); } .ds-strip-waiting .ds-kind { color: var(--accent-text, #8a4d00); } .ds-strip-waiting .ds-since { background: transparent; } .ds-strip-waiting > * + * { border-inline-start: 1px solid var(--stock-rule, #ddd1b3); } .ds-strip-waiting .ds-detail { grid-column: 2 / -1; border-top: 1px dashed var(--stock-rule, #ddd1b3); border-inline-start: 0; padding-block: 0.25rem 0.3rem; }"
+    },
+    {
+      "name": "Lower Strip",
+      "kind": "card",
+      "refersTo": "strip",
+      "description": "In flight, Blocked, and Unclaimed: a designator band with ref and since, the title, the owner, and a closing row with the reason left and Details right.",
+      "html": "<article class=\"ds-strip ds-strip-lower\"><p class=\"ds-ref\"><span class=\"ds-kind\">bead</span> <span class=\"ds-id\">demo-1fz</span></p><p class=\"ds-since\"><span class=\"ds-cue\">since </span>13m</p><p class=\"ds-title ds-wide\">Docs: board config reference</p><p class=\"ds-small ds-wide\"><span class=\"ds-cue\">owner </span>no owner</p><p class=\"ds-small\">bead open, no assignee <span class=\"ds-muted\">beads checked &lt;1m ago</span></p><details class=\"ds-end\"><summary>Details</summary></details></article>",
+      "css": ".ds-strip { display: grid; background: var(--stock, #f8f2e2); color: var(--ink, #221e17); box-shadow: var(--shadow, 0 1px 2px rgb(27 32 38 / 0.24)); border-radius: 2px; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; } .ds-strip > * { min-width: 0; margin: 0; padding: 0.4rem 0.625rem; } .ds-strip p { margin: 0; } .ds-ref { display: flex; align-items: baseline; gap: 0.5em; background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; } .ds-kind { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #5c5444); } .ds-id { font-weight: 600; } .ds-since { background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-weight: 600; text-align: end; white-space: nowrap; font-variant-numeric: tabular-nums; } .ds-cue { color: var(--muted, #5c5444); font-family: system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; font-weight: 400; } .ds-title { font-size: 0.9375rem; font-weight: 600; line-height: 1.3; } .ds-muted { color: var(--muted, #5c5444); } .ds-strip summary { cursor: pointer; color: var(--muted, #5c5444); font-size: 0.694rem; font-weight: 600; width: fit-content; } .ds-strip summary:hover { color: var(--ink, #221e17); } .ds-strip summary:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; } .ds-strip-lower { grid-template-columns: minmax(0, 1fr) auto; } .ds-strip-lower .ds-ref, .ds-strip-lower .ds-since { padding-block: 0.25rem; } .ds-strip-lower .ds-wide { grid-column: 1 / -1; padding-bottom: 0.1rem; } .ds-strip-lower .ds-small { font-size: 0.694rem; } .ds-strip-lower .ds-end { justify-self: end; padding-block: 0 0.3rem; }"
+    },
+    {
+      "name": "Cocked Strip",
+      "kind": "custom",
+      "refersTo": "strip",
+      "description": "The signature: a strip marked stale or owners disagree shifts out of its slot by the cock offset and leaves a dashed slot edge in the rack gutter.",
+      "html": "<div class=\"ds-rack\"><article class=\"ds-strip ds-strip-lower ds-cocked\"><p class=\"ds-ref\"><span class=\"ds-kind\">pr</span> <span class=\"ds-id\">#42</span></p><p class=\"ds-since\"><span class=\"ds-cue\">since </span>3d</p><div class=\"ds-wide\"><p class=\"ds-title\">Refactor the delivery pipeline</p><p class=\"ds-marks\"><span class=\"ds-mark\">stale</span></p></div></article></div>",
+      "css": ".ds-strip { display: grid; background: var(--stock, #f8f2e2); color: var(--ink, #221e17); box-shadow: var(--shadow, 0 1px 2px rgb(27 32 38 / 0.24)); border-radius: 2px; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; } .ds-strip > * { min-width: 0; margin: 0; padding: 0.4rem 0.625rem; } .ds-strip p { margin: 0; } .ds-ref { display: flex; align-items: baseline; gap: 0.5em; background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; } .ds-kind { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #5c5444); } .ds-id { font-weight: 600; } .ds-since { background: var(--stock-cell, #efe6cf); font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-weight: 600; text-align: end; white-space: nowrap; font-variant-numeric: tabular-nums; } .ds-cue { color: var(--muted, #5c5444); font-family: system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; font-weight: 400; } .ds-title { font-size: 0.9375rem; font-weight: 600; line-height: 1.3; } .ds-muted { color: var(--muted, #5c5444); } .ds-strip summary { cursor: pointer; color: var(--muted, #5c5444); font-size: 0.694rem; font-weight: 600; width: fit-content; } .ds-strip summary:hover { color: var(--ink, #221e17); } .ds-strip summary:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; } .ds-rack { --cock: 1.5rem; padding: 0.5rem 0; background: var(--rack, #dde2e6); } .ds-strip-lower { grid-template-columns: minmax(0, 1fr) auto; } .ds-strip-lower .ds-wide { grid-column: 1 / -1; } .ds-cocked { position: relative; margin-inline-start: var(--cock); } .ds-cocked::before { content: \"\"; position: absolute; inset-block: 0.25rem; inset-inline-start: calc(-1 * var(--cock)); width: calc(var(--cock) - 0.3rem); padding: 0; border: 1px dashed var(--rack-muted, #47505a); border-inline-end: 0; } .ds-marks { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.3rem 0 0; } .ds-mark { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 600; font-size: 0.694rem; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: var(--warn, #7a3d8c); border: 1px solid currentColor; padding: 0 0.3rem; border-radius: 2px; } @media (max-width: 40rem) { .ds-rack { --cock: 0.75rem; } }"
+    },
+    {
+      "name": "Command and Copy",
+      "kind": "button",
+      "refersTo": "copy-button",
+      "description": "A labelled command in a wrapping mono block with a drawn $ prompt, and the Copy button with its Copied and Selected (failed) states.",
+      "html": "<div style=\"display:grid;gap:0.5rem\"><div class=\"ds-cmd\"><p class=\"ds-cmd-body\"><span class=\"ds-cmd-label\">Regenerate</span><code>amq-board --html --out board.html</code></p><button type=\"button\" class=\"ds-copy\">Copy</button></div><div class=\"ds-cmd\"><p class=\"ds-cmd-body\"><span class=\"ds-cmd-label\">copied</span><code>amq-board --html --out board.html</code></p><button type=\"button\" class=\"ds-copy is-copied\">Copied</button></div><div class=\"ds-cmd\"><p class=\"ds-cmd-body\"><span class=\"ds-cmd-label\">clipboard refused</span><code>amq-board --html --out board.html</code></p><button type=\"button\" class=\"ds-copy is-failed\">Selected</button></div></div>",
+      "css": ".ds-cmd { display: flex; align-items: flex-start; gap: 0.5rem; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; color: var(--ink, #221e17); } .ds-cmd-body { flex: 1; min-width: 0; display: grid; gap: 0.1rem; margin: 0; } .ds-cmd-label { font-size: 0.694rem; font-weight: 600; color: var(--muted, #5c5444); } .ds-cmd code { display: block; font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0.2rem 0.4rem; background: var(--stock-cell, #efe6cf); border-radius: 2px; } .ds-cmd code::before { content: \"$ \"; color: var(--muted, #5c5444); } .ds-copy { flex: none; font: 600 0.694rem/1 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; color: var(--ink, #221e17); background: var(--stock, #f8f2e2); border: 1px solid var(--stock-rule, #ddd1b3); border-radius: 3px; min-width: 4.25rem; min-height: 1.75rem; padding: 0.3rem 0.6rem; cursor: pointer; transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out; } .ds-copy:hover { border-color: var(--muted, #5c5444); } .ds-copy:active { background: var(--stock-cell, #efe6cf); } .ds-copy:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; } .ds-copy.is-copied { background: var(--live, #2c6a32); border-color: var(--live, #2c6a32); color: var(--stock, #f8f2e2); } .ds-copy.is-failed { border-color: var(--error, #a6261c); color: var(--error, #a6261c); } @media (prefers-reduced-motion: reduce) { .ds-copy { transition: none; } }"
+    },
+    {
+      "name": "Bay Heads",
+      "kind": "nav",
+      "refersTo": "bay-head-waiting",
+      "description": "The amber Waiting on you head with its gates row, and a plain rack bay head.",
+      "html": "<div style=\"display:grid;gap:1rem\"><div><h2 class=\"ds-bay-head ds-bay-waiting\"><span class=\"ds-bay-title\">Waiting on you</span> <span class=\"ds-bay-count\">2</span></h2><ul class=\"ds-gates\"><li>s1: 1 unread message for user, oldest 14m</li></ul></div><h2 class=\"ds-bay-head\"><span class=\"ds-bay-title\">Blocked</span> <span class=\"ds-bay-count\">1</span></h2></div>",
+      "css": ".ds-bay-head { display: flex; align-items: baseline; gap: 0.6rem; margin: 0; padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--rack-rule, #b9c1c8); background: var(--rack, #dde2e6); color: var(--rack-ink, #1b2026); font-family: system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; } .ds-bay-title { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 700; font-size: 0.8125rem; letter-spacing: 0.1em; text-transform: uppercase; } .ds-bay-count { font-size: 1.125rem; font-weight: 650; font-variant-numeric: tabular-nums; } .ds-bay-waiting { background: var(--accent, #e9a63a); color: var(--accent-ink, #1f1a10); border-bottom: 0; border-radius: 3px 3px 0 0; } .ds-bay-waiting .ds-bay-count { font-size: 1.35rem; } .ds-gates { display: flex; flex-wrap: wrap; gap: 0.15rem 1.5rem; margin: 0; padding: 0.45rem 0.75rem; list-style: none; background: var(--accent-wash, #f6dfae); color: var(--ink, #221e17); font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Source Lamps",
+      "kind": "chip",
+      "refersTo": "source-lamp",
+      "description": "Square lamps with their words: ok (filled green), partial (hollow violet), degraded (filled violet), unavailable (filled red), disabled (hollow grey).",
+      "html": "<ul class=\"ds-lamps\"><li class=\"ds-lamp ds-ok\"><span class=\"ds-face\"></span><b>beads</b> <span class=\"ds-status\">ok</span> <span class=\"ds-age\">&lt;1m</span></li><li class=\"ds-lamp ds-ok ds-partial\"><span class=\"ds-face\"></span><b>amq</b> <span class=\"ds-status\">ok · partial</span></li><li class=\"ds-lamp ds-degraded\"><span class=\"ds-face\"></span><b>goals</b> <span class=\"ds-status\">degraded</span></li><li class=\"ds-lamp ds-unavailable\"><span class=\"ds-face\"></span><b>github</b> <span class=\"ds-status\">unavailable</span></li><li class=\"ds-lamp ds-disabled\"><span class=\"ds-face\"></span><b>cursor</b> <span class=\"ds-status\">disabled</span></li></ul>",
+      "css": ".ds-lamps { display: flex; flex-wrap: wrap; gap: 0.5rem 1.75rem; margin: 0; padding: 0.75rem; list-style: none; background: var(--rack, #dde2e6); color: var(--rack-ink, #1b2026); font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; } .ds-lamp { display: flex; align-items: baseline; gap: 0 0.45rem; } .ds-lamp b { font-weight: 650; } .ds-face { flex: none; width: 0.625rem; height: 0.625rem; background: var(--quiet, #6b6457); border: 1.5px solid var(--quiet, #6b6457); } .ds-status, .ds-age { color: var(--rack-muted, #47505a); font-variant-numeric: tabular-nums; } .ds-ok .ds-face { background: var(--live, #2c6a32); border-color: var(--live, #2c6a32); } .ds-degraded .ds-face { background: var(--warn, #7a3d8c); border-color: var(--warn, #7a3d8c); } .ds-degraded .ds-status, .ds-partial .ds-status { color: var(--warn, #7a3d8c); } .ds-unavailable .ds-face { background: var(--error, #a6261c); border-color: var(--error, #a6261c); } .ds-unavailable .ds-status { color: var(--error, #a6261c); } .ds-disabled .ds-face { background: transparent; } .ds-partial.ds-ok .ds-face { background: transparent; border-color: var(--warn, #7a3d8c); }"
+    },
+    {
+      "name": "Marks and Tokens",
+      "kind": "chip",
+      "refersTo": "mark",
+      "description": "Violet outlined marks on a strip, mono ref tokens on cell stock, and dashed related tokens.",
+      "html": "<div class=\"ds-chips\"><span class=\"ds-mark\">stale</span><span class=\"ds-mark\">owners disagree</span><span class=\"ds-token\">bead:demo-1fz</span><span class=\"ds-token ds-related\">related: pr #42</span></div>",
+      "css": ".ds-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.6rem; background: var(--stock, #f8f2e2); color: var(--ink, #221e17); } .ds-mark { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 600; font-size: 0.694rem; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: var(--warn, #7a3d8c); border: 1px solid currentColor; padding: 0 0.3rem; border-radius: 2px; } .ds-token { font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace; font-size: 0.694rem; padding: 0.05rem 0.35rem; background: var(--stock-cell, #efe6cf); border-radius: 2px; } .ds-related { background: transparent; border: 1px dashed var(--stock-rule, #ddd1b3); color: var(--muted, #5c5444); }"
+    },
+    {
+      "name": "Filter Input",
+      "kind": "input",
+      "refersTo": "filter-input",
+      "description": "The masthead filter: a condensed label beside a stock search field with an amber caret and the shared focus ring.",
+      "html": "<p class=\"ds-filter\"><label class=\"ds-label\" for=\"ds-filter\">Filter</label> <input id=\"ds-filter\" type=\"search\" placeholder=\"handle, ref, or title\"></p>",
+      "css": ".ds-filter { display: flex; align-items: center; gap: 0.6em; margin: 0; padding: 0.75rem; background: var(--rack, #dde2e6); max-width: 20rem; } .ds-label { font-family: \"Avenir Next Condensed\", \"Roboto Condensed\", \"Arial Narrow\", \"Helvetica Neue\", system-ui, sans-serif; font-stretch: condensed; font-weight: 600; font-size: 0.694rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--rack-muted, #47505a); } .ds-filter input { flex: 1; min-width: 0; font: 400 0.8125rem/1.45 system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif; color: var(--ink, #221e17); background: var(--stock, #f8f2e2); border: 1px solid var(--rack-rule, #b9c1c8); border-radius: 3px; padding: 0.35rem 0.55rem; caret-color: var(--accent-text, #8a4d00); } .ds-filter input::placeholder { color: var(--muted, #5c5444); } .ds-filter input:focus-visible { outline: 2px solid var(--focus, #a35c00); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Flight-Progress Rack",
+    "overview": "The board is an air-traffic flight-progress rack. Every card is a strip of buff card stock with fixed field cells, slotted into a cool grey rack. The owner's strips form the top bay at full width; the other three bays and the roster sit below it. A strip never floats free and never moves for decoration: it changes position only when a field says so. The one strip that leaves its slot is the cocked strip, and that displacement is the system's signature.\n\nThe world is dense and quiet. Two materials do almost all the work: the grey rack carries the chrome (masthead, source lamps, bay heads, roster, limits, footer), and the buff stock carries the items. One amber accent marks the Waiting on you bay and the focus ring. Status is told with square lamps and words, never with color alone. Small condensed uppercase labels name fields once; monospace carries refs, ages, and commands; every number uses tabular figures so values align down a bay.\n\nThe page follows the system color scheme only (`prefers-color-scheme`); there is no manual theme switch. The frontmatter records both themes as sibling keys: a plain key (`rack`) is the light value and its `-dark` sibling (`rack-dark`) is the dark value of the same CSS custom property in `internal/board/web/page.css`. All fonts are local system stacks; the page loads nothing external.",
+    "keyCharacteristics": [
+      "Two materials: cool grey rack for chrome, buff stock for items.",
+      "One amber bay at full width, first on every viewport.",
+      "Fixed field cells that repeat on every strip of a bay.",
+      "The cocked strip: a strip pushed out of its slot, with its empty slot edge drawn dashed in the rack gutter.",
+      "Square status lamps, each with its status word.",
+      "Condensed uppercase labels, monospace refs and commands, tabular figures."
+    ],
+    "rules": [
+      {
+        "name": "The Two-Material Rule",
+        "body": "Rack text uses `rack-ink` and `rack-muted`; stock text uses `ink` and `muted`. A surface's text pair never crosses to the other material.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Amber Rule",
+        "body": "The amber family belongs to the Waiting on you bay (its head, gates, empty state, and ref and since cells), the masthead Waiting count, focus, selection, the filter caret, and native control accents. No other bay, column, or status takes amber.",
+        "section": "colors"
+      },
+      {
+        "name": "The Violet Caution Rule",
+        "body": "Caution is violet, never amber or orange, so a warning can never be read as the owner's queue. Blocked has no color treatment at all: it is a plain bay like In flight and Unclaimed.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "Every count, age, time, and limit uses tabular figures (`.num`, `time`, counts, gates, limits).",
+        "section": "typography"
+      },
+      {
+        "name": "The Label Once Rule",
+        "body": "A field label is printed once per bay, not once per strip. Where a bay has no label row, the strip carries a short lowercase cue word (`since`, `owner`) in the body face instead.",
+        "section": "typography"
+      },
+      {
+        "name": "The Stock Lifts, The Rack Stays Rule",
+        "body": "Only strips cast a shadow. Bay heads, the roster, inputs, and buttons are flat.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** put every item on a strip with the same cells in the same positions as its bay neighbours.",
+      "**Do** keep Waiting on you first and full width on every viewport.",
+      "**Do** pair every status color with its word: lamp plus status text, mark plus its word, Copied or Selected on the button.",
+      "**Do** use square lamps: filled for a positive state, hollow for disabled or partial.",
+      "**Do** set refs, ages, and commands in monospace and every number in tabular figures.",
+      "**Do** put secondary content (extra commands, evidence, long source details, quiet handles) in native `details` disclosures.",
+      "**Do** cock a strip only for the `stale` or `owners disagree` mark, and always draw the dashed slot edge it leaves."
+    ],
+    "donts": [
+      "**Don't** use amber outside the Waiting on you bay, its masthead count, focus, selection, the caret, and native control accents.",
+      "**Don't** give Blocked a red frame or any color treatment; it is a plain bay.",
+      "**Don't** use orange or amber for caution; caution is `warn` violet.",
+      "**Don't** add shadows to anything but strips.",
+      "**Don't** let any layout scroll sideways at 390px; stack cells instead.",
+      "**Don't** load external fonts, scripts, or stylesheets.",
+      "**Don't** put a label above each strip's cells; label a bay once, or use a lowercase cue word."
+    ]
+  }
+}
