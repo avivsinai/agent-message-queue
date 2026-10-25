@@ -1,0 +1,279 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { BoardStrip, BoardView } from '../types'
+
+// The pane and its refresh period while it is open.
+const PANE = 'amq-board'
+const EVERY_MS = 60_000
+const RUN_TIMEOUT_MS = 90_000
+const STALE_MS = 5 * 60_000
+// The first Claude Code whose plugin API this module is written against.
+const MIN_VERSION = [2, 1, 308] as const
+
+const EMPTY: BoardView = {
+  status: 'loading the board…',
+  strips: [],
+  waiting: 0,
+  inFlight: 0,
+  blocked: 0,
+  unclaimed: 0,
+  sources: '',
+  project: '',
+  generatedAt: '',
+  isStale: false,
+}
+
+const view = atom({ plugin: 'amq-board', key: 'view' } as const, EMPTY)
+
+// Module state: a reload drops both, as it drops the engine's timers.
+let timer: { cancel: () => void } | undefined
+let isRunning = false
+let last: BoardModel | undefined
+
+// The parts of the amq/board/v1 model the pane reads. Every field is
+// optional: the model comes from another process and is checked here.
+type BoardModel = {
+  generated_at?: unknown
+  dir?: unknown
+  project?: unknown
+  sources?: unknown
+  columns?: unknown
+}
+
+/**
+ * Makes one value safe to draw: tabs and line breaks become spaces, and
+ * every other control (C0, DEL, C1) or format character is dropped, so an
+ * escape sequence in a title cannot restyle or blank the pane.
+ */
+export function clean(value: unknown, limit = 160): string {
+  if (typeof value !== 'string') return ''
+  const text = value
+    .replace(/[\t\n\r\v\f\u2028\u2029]/g, ' ')
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+  const chars = Array.from(text)
+  return chars.length > limit ? chars.slice(0, limit - 1).join('') + '…' : text
+}
+
+function list(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+    : []
+}
+
+function field(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined
+}
+
+function time(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined
+  const ms = Date.parse(value)
+  // Go's zero time (year 1) means unknown.
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined
+}
+
+function age(ms: number): string {
+  if (ms < 60_000) return '<1m'
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
+  if (ms < 48 * 3_600_000) return `${Math.floor(ms / 3_600_000)}h`
+  return `${Math.floor(ms / 86_400_000)}d`
+}
+
+/** Projects a model onto what the pane draws; ages are as of generation. */
+export function project(model: BoardModel, now: number): BoardView {
+  const generated = time(model.generated_at)
+  const columns = list(model.columns)
+  const cards = (id: string) => list(columns.find(c => c.id === id)?.cards)
+  const strips: BoardStrip[] = cards('waiting_on_you').map(card => {
+    const since = time(field(card.reason, 'since'))
+    const command = list(card.actions)[0]?.command
+    return {
+      title: clean(card.title),
+      reason: clean(field(card.reason, 'text')),
+      age: since !== undefined && generated !== undefined ? `${age(generated - since)} ago` : 'since unknown',
+      command: clean(command, 4096),
+    }
+  })
+  const sources = list(model.sources)
+    .map(s => `${clean(s.name, 40)} ${clean(s.status, 20)}${s.partial === true ? ' (partial)' : ''}`)
+    .join(' · ')
+  return {
+    status: '',
+    strips,
+    waiting: strips.length,
+    inFlight: cards('in_flight').length,
+    blocked: cards('blocked').length,
+    unclaimed: cards('unclaimed').length,
+    sources,
+    project: clean(model.project) || clean(model.dir),
+    generatedAt: clean(model.generated_at, 40),
+    isStale: generated === undefined || now - generated > STALE_MS,
+  }
+}
+
+function within(cwd: string, dir: unknown): boolean {
+  if (typeof dir !== 'string' || dir === '') return false
+  const root = dir.replace(/\/+$/, '')
+  return cwd === root || cwd.startsWith(root + '/')
+}
+
+/** Reads the model from a running amq-board serve for this project, if any. */
+async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | undefined> {
+  const home = await $.env.get('HOME')
+  if (!home) return undefined
+  let record: unknown
+  try {
+    const text = await $.fs.read(`${home}/.amq/board/serve.json`)
+    record = JSON.parse(typeof text === 'string' ? text : '')
+  } catch {
+    return undefined
+  }
+  const url = field(record, 'url')
+  const token = field(record, 'token')
+  // Loopback only, and a token that is one path segment.
+  if (typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) return undefined
+  if (typeof token !== 'string' || !/^[0-9a-f]+$/.test(token)) return undefined
+  try {
+    // A dead pid's port refuses the connection; a reused one answers 404.
+    const res = await $.http.fetch(`${url}/${token}/model.json`)
+    if (!res.ok) return undefined
+    const model = JSON.parse(res.text) as BoardModel
+    // serve reads one project; another project's board is not this one's.
+    return within(cwd, model.dir) ? model : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | string> {
+  let ran
+  try {
+    ran = await $.process.run(['amq-board', '--json'], { cwd, timeoutMs: RUN_TIMEOUT_MS })
+  } catch (err) {
+    const text = err instanceof Error ? err.message : String(err)
+    return /ENOENT|not found|no such file/i.test(text) ? 'amq-board not found' : `amq-board: ${clean(text)}`
+  }
+  if (ran.exitCode !== 0) {
+    const first = ran.stderr.split('\n').find(line => line.trim() !== '') ?? `exit ${ran.exitCode}`
+    return `amq-board: ${clean(first)}`
+  }
+  try {
+    return JSON.parse(ran.stdout) as BoardModel
+  } catch {
+    return 'amq-board: --json printed no JSON'
+  }
+}
+
+async function tick($: EngineInterface): Promise<void> {
+  if (isRunning) return
+  isRunning = true
+  try {
+    const cwd = await $.session.cwd()
+    const got = (await fromServe($, cwd)) ?? (await fromRun($, cwd))
+    const now = await $.clock.now()
+    let next: BoardView
+    if (typeof got === 'string') {
+      // Keep the last board on screen, marked by the failure.
+      next = last ? { ...project(last, now), status: got } : { ...EMPTY, status: got }
+    } else {
+      last = got
+      next = project(got, now)
+    }
+    await update($, view, () => next)
+    $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
+  } catch (err) {
+    await update($, view, old => ({ ...(old ?? EMPTY), status: `amq-board: ${clean(String(err))}` }))
+  } finally {
+    isRunning = false
+  }
+}
+
+function start($: EngineInterface): void {
+  if (timer) return
+  timer = $.clock.every(EVERY_MS, () => void tick($))
+  void tick($)
+}
+
+function stop($: EngineInterface): void {
+  timer?.cancel()
+  timer = undefined
+  $.ui.status(undefined)
+}
+
+async function isSupported($: EngineInterface): Promise<boolean> {
+  const base = (await $.session.version()).base
+  // A build that names no release is a development build: let it run.
+  if (!base) return true
+  const parts = base.split(/[.-]/).slice(0, 3).map(Number)
+  for (let i = 0; i < MIN_VERSION.length; i++) {
+    const have = parts[i] ?? 0
+    if (Number.isNaN(have)) return true
+    if (have !== MIN_VERSION[i]) return have > MIN_VERSION[i]!
+  }
+  return true
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    try {
+      if (await isSupported($)) {
+        await $.command.register({ name: 'board', description: 'Open the AMQ fleet board in a side panel' })
+        // Only after a reload can the pane already be open: resume its refresh.
+        if ((await $.ui.panes()).some(pane => pane.id === PANE)) start($)
+      }
+    } catch {
+      // An engine without these calls keeps loading everything else.
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'board' }, async ($, e) => {
+    const opened = await $.ui.open({ id: PANE, title: 'AMQ board' })
+    start($)
+    return opened.isPlaced
+      ? { text: 'AMQ board opened; it refreshes every minute while open.' }
+      : { text: `AMQ board opened; it waits for a surface that can show it (${opened.reason}).` }
+  }).catch(() => ({ text: 'AMQ board could not open.' }))
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    stop($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const v = await read($, view)
+    const width = Math.max(20, e.props.bodyColumns ?? 40)
+    return (
+      <Box flexDirection="column" width={width}>
+        {v.project !== '' && <Text weight="bold">{v.project}</Text>}
+        {v.status !== '' && <Text color="warning">{v.status}</Text>}
+        <Text weight="bold">Waiting on you ({v.waiting})</Text>
+        {v.generatedAt !== '' && v.strips.length === 0 && <Text dimColor>nothing waits on you</Text>}
+        {v.strips.map((strip, i) => (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text>{strip.title}</Text>
+            <Text dimColor>
+              {strip.reason} · {strip.age}
+            </Text>
+            {strip.command !== '' && (
+              <Button key={`copy-${i}`} plain onPress={press => void $.ui.copy({ text: strip.command, surface: press.surface })}>
+                copy command
+              </Button>
+            )}
+          </Box>
+        ))}
+        <Text>
+          In flight {v.inFlight} · Blocked {v.blocked} · Unclaimed {v.unclaimed}
+        </Text>
+        {v.sources !== '' && <Text dimColor>sources: {v.sources}</Text>}
+        {v.generatedAt !== '' && (
+          <Text dimColor={!v.isStale} color={v.isStale ? 'warning' : undefined}>
+            generated {v.generatedAt}
+            {v.isStale ? ' (stale)' : ''}
+          </Text>
+        )}
+      </Box>
+    )
+  })
+}

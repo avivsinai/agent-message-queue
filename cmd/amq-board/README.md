@@ -78,6 +78,41 @@ reported once on stderr. The project directory is fixed at start. With
 `gh auth token` once and passes it as `GH_TOKEN` to its later `gh` calls only,
 held in memory, so a session prompts the keychain once. Stop with Ctrl-C.
 
+While it runs, `serve` writes `~/.amq/board/serve.json` (mode `0600`) with its
+`url`, `token`, `pid`, and `started_at`, so a local client can find it without
+reading the terminal. A file whose `pid` is not alive is stale. Ctrl-C or
+SIGTERM removes the file; a second `serve` replaces it, and the first one does
+not remove the second one's file when it exits.
+
+## Claude Code panel
+
+The `amq-board` Claude Code plugin is opt-in and separate from `amq-cli`, so
+sessions that do not use it start no extra process. Install it from the
+`avivsinai/skills-marketplace` marketplace:
+
+```sh
+claude plugin marketplace add avivsinai/skills-marketplace
+claude plugin install amq-board@avivsinai-marketplace
+```
+
+Then type `/board` in a session of an AMQ project. A side panel shows the
+Waiting on you strips (title, reason, and age), the In flight, Blocked, and
+Unclaimed counts, one line of source status, and when the board was generated,
+marked stale after 5 minutes. A status line shows `board: N waiting · M in
+flight` while the panel is open. The panel refreshes every minute while it is
+open, and nothing runs before `/board` or after the panel closes; a refresh
+already running when it closes finishes, within 90 seconds.
+
+Each refresh reads the model from a running `amq-board serve` for the same
+project, found through `~/.amq/board/serve.json`. Without one, it runs
+`amq-board --json` in the session's directory, one run at a time; GitHub then
+answers from the shared cache within its TTL. When neither works, the panel
+shows one line with the reason, for example `amq-board not found`. Every value
+is drawn as plain text with control and format characters removed. The panel
+runs no command from the board: a strip's copy command only puts it on the
+clipboard. The plugin needs Claude Code 2.1.308 or later and does nothing on
+an older version.
+
 ## Sources
 
 | Source | Read | Notes |
