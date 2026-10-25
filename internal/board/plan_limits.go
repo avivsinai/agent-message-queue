@@ -107,6 +107,12 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 			}
 			out = append(out, l)
 		case facts.MoneyCap:
+			if m.Amount.Presence != facts.Present || m.Limit.Presence != facts.Present {
+				l := base("unknown", "spend cap", m.LimitID)
+				l.Reason = "spend cap not reported in the app-server reply"
+				out = append(out, l)
+				continue
+			}
 			l := base("cap", "spend cap", m.LimitID)
 			l.Used, l.Cap = m.Amount.Value, m.Limit.Value
 			if p, ok := m.RemainingPercent.Get(); ok {

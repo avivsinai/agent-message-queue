@@ -57,6 +57,21 @@ func TestPlanLimitsReplaceRolloutLimitsOnTheStrip(t *testing.T) {
 			want:   "5 h 37% used, resets " + resets + " · weekly 12% used, resets " + resets + " · 209.7 credits · last app-server read failed (command timed out) · read 1m ago",
 			status: facts.StatusPartial,
 		},
+		{
+			// usage slice review finding 6: a cap without its amounts
+			// printed "spend cap  of  used", and an unknown balance lost
+			// its bucket name.
+			name: "cap and balance not reported",
+			r: facts.Result{Windows: windows, Money: []facts.Fact[facts.Money]{
+				{Account: acct, Evidence: ev, Value: facts.Money{LimitID: "other", Kind: facts.MoneyBalance, Unit: "credits",
+					Amount: facts.Field[string]{Presence: facts.Null}, Unlimited: facts.Some(false)}},
+				{Account: acct, Evidence: ev, Value: facts.Money{LimitID: "codex", Kind: facts.MoneyCap,
+					Amount: facts.Some("12.5"), Limit: facts.Field[string]{Presence: facts.Null}}},
+			}},
+			want: "5 h 37% used, resets " + resets + " · weekly 12% used, resets " + resets +
+				" · other credit balance not reported in the app-server reply · spend cap not reported in the app-server reply · read 1m ago",
+			status: facts.StatusFresh,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rep := usage.Report{Now: now, Accounts: []usage.Account{{

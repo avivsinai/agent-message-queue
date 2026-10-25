@@ -45,16 +45,19 @@ func Conflicts(a, b usage.Account) bool {
 	return a.Remote == b.Remote
 }
 
-// HeldUntil is the earliest time a dispatch keyed k may be reserved. An
-// unfinished attempt holds through its deadline plus its interval, so a
-// crashed or paused dispatch still spends its interval; a finished one holds
-// for its interval after completion, or its failure hold if longer. When a
-// finished attempt's times disagree, its completion counts from the later
-// of its finish and its deadline.
-func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time {
+// HeldUntil is the earliest time at now a dispatch keyed k may be
+// reserved. An unfinished attempt holds through its deadline plus its
+// interval, so a crashed or paused dispatch still spends its interval; a
+// finished one holds for its interval after completion. An attempt of k's
+// own home also holds for its failure hold if longer, counted over that
+// home's consecutive failures; a failure of another home does not hold k
+// back. When a finished attempt's times disagree, its completion counts from
+// the later of its finish and its deadline. An attempt reserved in the
+// future holds nothing.
+func HeldUntil(attempts []usage.Attempt, k usage.Account, now time.Time, rules Rules) time.Time {
 	var conflicting []usage.Attempt
 	for _, a := range attempts {
-		if Conflicts(a.Key, k) {
+		if Conflicts(a.Key, k) && !future(a, now) {
 			conflicting = append(conflicting, a)
 		}
 	}
@@ -74,15 +77,24 @@ func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time
 			finished = later(finished, a.DeadlineAt)
 		}
 		t := finished.Add(a.Interval)
-		if a.FailureCode == "" {
+		switch {
+		case a.Key.Provider != k.Provider || a.Key.Home != k.Home:
+		case a.FailureCode == "":
 			streak = 0
-		} else {
+		default:
 			streak++
 			t = later(t, finished.Add(failureHold(a.FailureCode, streak, rules)))
 		}
 		until = later(until, t)
 	}
 	return until
+}
+
+// future reports whether a was reserved later than now by more than its own
+// deadline span: the wall clock was set back since, and the attempt can no
+// longer bound a dispatch. An attempt reserved at now is never in the future.
+func future(a usage.Attempt, now time.Time) bool {
+	return a.ReservedAt.After(now.Add(max(a.DeadlineAt.Sub(a.ReservedAt), 0)))
 }
 
 // ordered reports whether a finished attempt's times agree: reserved, then
@@ -121,7 +133,7 @@ func Next(provider string, homes []string, attempts []usage.Attempt, now time.Ti
 	var bestAt time.Time
 	for _, h := range homes {
 		k := usage.Account{Provider: provider, Home: h}
-		if now.Before(HeldUntil(attempts, k, rules)) {
+		if now.Before(HeldUntil(attempts, k, now, rules)) {
 			continue
 		}
 		var last time.Time
@@ -147,6 +159,7 @@ const (
 // Prune is the attempts the journal keeps at now: every unfinished one
 // whose hold has not been over for keepFor, and the newest finished ones per
 // home until keepFor after both their finish and their reservation bound.
+// An attempt reserved in the future is dropped.
 func Prune(attempts []usage.Attempt, now time.Time) []usage.Attempt {
 	sorted := append([]usage.Attempt{}, attempts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ReservedAt.After(sorted[j].ReservedAt) })
@@ -154,6 +167,9 @@ func Prune(attempts []usage.Attempt, now time.Time) []usage.Attempt {
 	var out []usage.Attempt
 	for _, a := range sorted {
 		home := usage.Account{Provider: a.Key.Provider, Home: a.Key.Home}
+		if future(a, now) {
+			continue
+		}
 		finished, done := a.FinishedAt.Get()
 		if !done && now.Sub(a.DeadlineAt.Add(a.Interval)) > keepFor {
 			continue

@@ -9,6 +9,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -177,6 +178,15 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 	}
 	ev.ProducerVersion = usage.Some(version)
 
+	// Codex canonicalizes CODEX_HOME and names the result in its initialize
+	// reply, so the run is given the canonical path and checked against it.
+	// A home that does not resolve has no login to read.
+	codexHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		got = homeFailure(attempt.Key, ev, usage.FailNotLoggedIn, "Codex home: "+errText(err))
+		return finish(facts, got, attempt, fx.Clock(), journal, fx)
+	}
+
 	journal.Attempts = usagehold.Prune(append(journal.Attempts, attempt), now)
 	if err := fx.Store.SaveJournal(journal); err != nil {
 		return usage.Merge(facts, homeFailure(attempt.Key, ev, usage.FailReservation, errText(err)))
@@ -196,7 +206,7 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 	reply := fx.Command(cctx, edge.Command{
 		Path:   req.Codex.Bin,
 		Args:   codexrpc.Args,
-		Env:    []string{"CODEX_HOME=" + home},
+		Env:    []string{"CODEX_HOME=" + codexHome},
 		Stdin:  codexrpc.Requests(req.ClientName, req.ClientVersion),
 		MaxOut: maxRPCOut,
 		Done:   codexrpc.Done,
@@ -205,7 +215,7 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 	done := fx.Clock()
 	attempt.ExitCode = reply.ExitCode
 	ev.ObservedAt = done
-	got = codexnorm.Normalize(codexrpc.Parse(reply.Stdout), home, ev)
+	got = codexnorm.Normalize(codexrpc.Parse(reply.Stdout), home, codexHome, ev)
 	if reply.Failure != "" {
 		got = usage.Merge(homeFailure(attempt.Key, ev, reply.Failure, "codex app-server: "+errText(reply.Err)), got)
 	}
@@ -214,13 +224,18 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 
 // finish publishes one home's new facts and records the attempt complete.
 // New windows or money replace the home's previous facts; a pass that read
-// none keeps the previous readings, which then age, beside its failure.
+// none keeps the previous readings, which then age, beside its failure, and
+// a new identity replaces the previous one. A snapshot that was not written
+// records the attempt as failed.
 func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, journal edge.Journal, fx edge.Effects) usage.Result {
 	home := attempt.Key.Home
 	next := got
 	if len(got.Windows) == 0 && len(got.Money) == 0 {
 		prev := facts.ForHome(usage.ProviderCodex, home)
 		prev.Failures = nil
+		if len(got.Identities) > 0 {
+			prev.Identities = nil
+		}
 		next = usage.Merge(prev, got)
 	}
 	facts = usage.Merge(facts.WithoutHome(usage.ProviderCodex, home), next)
@@ -230,8 +245,11 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 		problems = homeFailure(attempt.Key, usage.Evidence{ObservedAt: done}, usage.FailCacheWrite, errText(err))
 	}
 	attempt.FinishedAt = usage.Some(done)
-	if len(got.Failures) > 0 {
+	switch {
+	case len(got.Failures) > 0:
 		attempt.FailureCode = got.Failures[0].Value.Code
+	case len(problems.Failures) > 0:
+		attempt.FailureCode = usage.FailCacheWrite
 	}
 	replaced := false
 	for i := range journal.Attempts {

@@ -133,7 +133,7 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 		case l.Kind == "credits":
 			parts = append(parts, credits(l.Balance)+" credits as of "+age(now.Sub(l.AsOf))+" ago")
 		default:
-			parts = append(parts, l.Reason)
+			parts = append(parts, bucket+l.Reason)
 		}
 	}
 	if len(parts) == 0 {
