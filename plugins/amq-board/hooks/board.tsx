@@ -180,7 +180,8 @@ async function tick($: EngineInterface): Promise<void> {
       next = project(got, now)
     }
     await update($, view, () => next)
-    $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
+    // A run that finishes after the pane closed leaves no status behind.
+    if (timer) $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
   } catch (err) {
     await update($, view, old => ({ ...(old ?? EMPTY), status: `amq-board: ${clean(String(err))}` }))
   } finally {
@@ -235,6 +236,15 @@ export const register: Register = on => {
       : { text: `AMQ board opened; it waits for a surface that can show it (${opened.reason}).` }
   }).catch(() => ({ text: 'AMQ board could not open.' }))
 
+  // An older engine that refuses these events still loads the two above.
+  try {
+    registerPane(on)
+  } catch {
+    // No pane on this engine; skills and other plugins load as before.
+  }
+}
+
+function registerPane(on: Parameters<Register>[0]): void {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     stop($)
     return next(e)
