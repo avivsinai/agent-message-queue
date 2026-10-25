@@ -384,6 +384,9 @@ const (
 	// Enter re-extends the window. Claude Code's Ink fork has no timing
 	// heuristic (bracketed-paste markers only) and accepts any delay.
 	rawInjectSettleDelay = codexTUIEnterSuppressWindow + 30*time.Millisecond
+	// pasteSubmitReadCycleDelay keeps a paste-mode Enter out of the read that
+	// takes the paste payload.
+	pasteSubmitReadCycleDelay = 25 * time.Millisecond
 )
 
 func normalizeWakeRetryUntil(raw string) (string, error) {
@@ -2186,6 +2189,16 @@ func rawSubmitPrelude(cfg *wakeConfig) string {
 	return ""
 }
 
+// pasteSubmitDelay is the wait between a pasted notification and its submit
+// Enter: the harness's own delay when it has one, otherwise enough to put the
+// Enter in a separate read cycle from the paste.
+func pasteSubmitDelay(cfg *wakeConfig) time.Duration {
+	if delay := harness.Lookup(cfg.harness).PasteSubmitDelay; delay > 0 {
+		return delay
+	}
+	return pasteSubmitReadCycleDelay
+}
+
 func clearWakeInputState(cfg *wakeConfig) {
 	cfg.inputDelivery.reset()
 }
@@ -2394,8 +2407,10 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 
 		case wakeInputPrimarySubmitPending:
 			if state.mode == wakeInjectModePaste {
-				// Keep Enter in a separate read cycle from the paste payload.
-				time.Sleep(25 * time.Millisecond)
+				// Keep Enter apart from the paste payload. The write below
+				// authorizes the Enter after this wait, so a dialog or a
+				// foreground change during it holds the submit.
+				rawInjectSleep(pasteSubmitDelay(cfg))
 			} else {
 				// Hold the submit CR past the TUI's paste-burst window.
 				rawInjectSleep(rawInjectSettleDelay)
