@@ -26,12 +26,15 @@ const (
 	minutesWeekly = 7 * 24 * 60
 )
 
-// Normalize turns one run's replies against home into facts. The run is one
-// source instance: its initialize reply must name home, and its remote
-// account is resolved only when the same run's account/read reported a
-// ChatGPT login and its rate limit reply named the account. A slot reported
-// null stays a null window; nothing is filled from another observation.
-func Normalize(r codexrpc.Replies, home string, ev usage.Evidence) usage.Result {
+// Normalize turns one run's replies against home into facts. codexHome is
+// the canonical path the run was given as CODEX_HOME; Codex canonicalizes
+// that variable, so its initialize reply must name exactly this path. The
+// facts are keyed by home, the path as configured. The run is one source
+// instance: its remote account is resolved only when the same run's
+// account/read reported a ChatGPT login and its rate limit reply named the
+// account. A slot reported null stays a null window; nothing is filled from
+// another observation.
+func Normalize(r codexrpc.Replies, home, codexHome string, ev usage.Evidence) usage.Result {
 	acct := usage.Account{Provider: usage.ProviderCodex, Home: home}
 	fail := func(code, detail string) usage.Result {
 		return usage.Result{Failures: []usage.Fact[usage.Failure]{{Account: acct, Value: usage.Failure{Code: code, Detail: detail}, Evidence: ev}}}
@@ -46,7 +49,7 @@ func Normalize(r codexrpc.Replies, home string, ev usage.Evidence) usage.Result 
 		if !ok {
 			return fail(usage.FailMalformed, "initialize did not name its Codex home")
 		}
-		if filepath.Clean(got) != filepath.Clean(home) {
+		if filepath.Clean(got) != filepath.Clean(codexHome) {
 			return fail(usage.FailHomeMismatch, "app-server ran against another Codex home")
 		}
 	}

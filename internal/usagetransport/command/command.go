@@ -5,6 +5,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -96,9 +97,10 @@ func Run(parent context.Context, c edge.Command) edge.CommandReply {
 }
 
 // watch keeps up to max bytes of stdout and calls onDone once, the first
-// time done reports true for what it holds. The first write past max marks
-// it over and calls overflow; later writes are discarded so the child never
-// blocks on a full pipe.
+// time done reports true for what it holds; done is asked again only when a
+// write ends a line. The first write past max marks it over and calls
+// overflow. Writes after the reply is complete or past max are discarded,
+// so the child never blocks on a full pipe and a complete reply is kept.
 type watch struct {
 	mu       sync.Mutex
 	buf      []byte
@@ -114,7 +116,7 @@ type watch struct {
 func (w *watch) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.over {
+	if w.over || w.finished {
 		return len(p), nil
 	}
 	if len(w.buf)+len(p) > w.max {
@@ -123,7 +125,7 @@ func (w *watch) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	w.buf = append(w.buf, p...)
-	if !w.finished && w.done != nil && w.done(w.buf) {
+	if w.done != nil && bytes.IndexByte(p, '\n') >= 0 && w.done(w.buf) {
 		w.finished = true
 		w.onDone()
 	}

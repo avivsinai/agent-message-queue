@@ -207,7 +207,8 @@ Git worktrees.
   failed read
   waits the same 5 minutes, up to 15 minutes after repeated failures, or 1 h
   for an unverified version or a reply not understood, and the strip names
-  the failure.
+  the failure. Only the failed home waits that longer hold; other homes are
+  read after the 5 minutes.
 - Each reader counts only records of the harness versions it was checked
   against: Claude Code 2.1.267 up to 3, Codex 0.114.0 up to 1, and pi
   session format 3. A record of any other version, or with none, is not
