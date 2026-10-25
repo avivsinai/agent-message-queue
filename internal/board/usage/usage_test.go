@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -222,5 +223,122 @@ func TestListingCannotStarveRecentProjectSessions(t *testing.T) {
 	}
 	if !a.Partial() {
 		t.Fatalf("account is complete although the budget stopped it: %+v", a)
+	}
+}
+
+// Each spend record counts once, at its final value. Regressions for the
+// design review of usage-library-design-r2 (2026-10-25): Claude kept the
+// first streaming row of a message although a later row carries the final
+// output; a Codex total that went down counted again in full; a pi fork
+// copies its parent's entries, which counted twice. The copies belong to the
+// parent's worker, never to the fork's, even when the newer fork is read
+// first and its header has the copied entry's timestamp (Codex review of
+// PR #1227, P2, two rounds).
+func TestEachSpendRecordCountsOnce(t *testing.T) {
+	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
+	claudeRow := func(out int) string {
+		return `{"type":"assistant","timestamp":"2026-10-22T11:00:00.000Z","sessionId":"` + sid + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"msg_a","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":` + fmt.Sprint(out) + `}}}`
+	}
+	codexTotal := func(at string, total int) string {
+		return `{"timestamp":"2026-10-22T` + at + `.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":` + fmt.Sprint(total) + `,"cached_input_tokens":0,"output_tokens":0,"total_tokens":` + fmt.Sprint(total) + `}}}}`
+	}
+	piEntry := func(id, at string, in, out int) string {
+		return `{"type":"message","id":"` + id + `","parentId":null,"timestamp":"2026-10-22T` + at + `.000Z","message":{"role":"assistant","usage":{"input":` + fmt.Sprint(in) + `,"output":` + fmt.Sprint(out) + `,"cacheRead":0,"cacheWrite":0}}}`
+	}
+	const (
+		piParent = "eeeeeeee-0000-4000-8000-000000000005"
+		piFork   = "ffffffff-0000-4000-8000-000000000006"
+		piDir    = "agent/sessions/--work-demo--/"
+	)
+	parentFile := piDir + "2026-10-22T10-00-00-000Z_" + piParent + ".jsonl"
+	forkFile := piDir + "2026-10-22T10-30-00-000Z_" + piFork + ".jsonl"
+	parentWorker, forkWorker := RosterKey{Session: "s", Handle: "parent"}, RosterKey{Session: "s", Handle: "fork"}
+	for _, tc := range []struct {
+		name    string
+		harness string
+		files   map[string][]string
+		want    int64
+		// mtime, mapping and workers check attribution: each file's
+		// modification time, the session-to-worker mapping, and each
+		// worker's fresh tokens.
+		mtime   map[string]time.Time
+		mapping Mapping
+		workers map[RosterKey]int64
+	}{
+		{"claude streaming rows", Claude, map[string][]string{
+			"projects/-work-demo/" + sid + ".jsonl": {claudeRow(1), claudeRow(650)},
+		}, 2 + 650, nil, nil, nil},
+		{"codex total goes down", Codex, map[string][]string{
+			"sessions/2026/10/22/rollout-2026-10-22T11-00-00-cccccccc-0000-4000-8000-000000000003.jsonl": {
+				`{"timestamp":"2026-10-22T11:00:00.000Z","type":"session_meta","payload":{"id":"cccccccc-0000-4000-8000-000000000003","cwd":"/work/demo","cli_version":"0.163.0","source":"cli"}}`,
+				codexTotal("11:00:01", 1000), codexTotal("11:00:02", 1500), codexTotal("11:00:03", 1200),
+			},
+		}, 1500, nil, nil, nil},
+		{"pi fork copies parent entries", Pi, map[string][]string{
+			parentFile: {
+				`{"type":"session","version":3,"id":"` + piParent + `","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}`,
+				piEntry("a1b2c3d4", "10:00:05", 100, 50),
+			},
+			forkFile: {
+				`{"type":"session","version":3,"id":"` + piFork + `","timestamp":"2026-10-22T10:00:05.000Z","cwd":"/work/demo","parentSession":@parent}`,
+				piEntry("a1b2c3d4", "10:00:05", 100, 50),
+				piEntry("b5c6d7e8", "10:31:00", 10, 5),
+			},
+		}, 165,
+			map[string]time.Time{parentFile: testNow.Add(-90 * time.Minute), forkFile: testNow.Add(-30 * time.Minute)},
+			Mapping{{Harness: Pi, ID: piParent}: parentWorker, {Harness: Pi, ID: piFork}: forkWorker},
+			map[RosterKey]int64{parentWorker: 150, forkWorker: 15}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			// @parent is the parent file's path as pi records it.
+			parent, err := json.Marshal(filepath.Join(home, filepath.FromSlash(parentFile)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, lines := range tc.files {
+				full := filepath.Join(home, filepath.FromSlash(path))
+				for i := range lines {
+					lines[i] = strings.ReplaceAll(lines[i], "@parent", string(parent))
+				}
+				writeFile(t, full, lines...)
+				if at, ok := tc.mtime[path]; ok {
+					if err := os.Chtimes(full, at, at); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			a := Read(Config{Homes: map[string][]string{tc.harness: {home}}}, testNow, demoRoots, tc.mapping).Accounts[0]
+			var fresh int64
+			workers := map[RosterKey]int64{}
+			for _, s := range a.Sessions {
+				c, _ := s.Totals(testNow.Add(-span))
+				fresh += c.Fresh()
+				if w, ok := tc.mapping[SessionRef{Harness: s.Harness, ID: s.ID}]; ok {
+					workers[w] += c.Fresh()
+				}
+			}
+			if fresh != tc.want {
+				t.Fatalf("counted %d fresh tokens, want %d", fresh, tc.want)
+			}
+			for w, want := range tc.workers {
+				if workers[w] != want {
+					t.Fatalf("worker %s counted %d fresh tokens, want %d (all: %v)", w.Handle, workers[w], want, workers)
+				}
+			}
+		})
+	}
+}
+
+// "windows not reported by this plan" is a claim about the plan, so it needs
+// a rate limit report that carried no windows; with none read, the windows
+// are unknown. Regression for the design review of usage-library-design-r2
+// (2026-10-25): the text showed with no Codex record read at all.
+func TestCodexPlanWindowsNeedARateLimitReport(t *testing.T) {
+	a := Read(Config{Homes: map[string][]string{Codex: {t.TempDir()}}}, testNow, demoRoots, nil).Accounts[0]
+	for _, l := range a.Limits {
+		if strings.Contains(l.Reason, "not reported by this plan") {
+			t.Fatalf("limit %+v claims the plan's windows with no rate limit report read", l)
+		}
 	}
 }

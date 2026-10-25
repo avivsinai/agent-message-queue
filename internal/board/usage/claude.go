@@ -10,7 +10,8 @@ import (
 // claudeLine is the part of a Claude Code transcript line the reader keeps.
 // Subagent files carry their parent's sessionId, so a subagent's spend rolls
 // up to the parent by a recorded field. One API message is written once per
-// content block with the same usage, so each message.id counts once.
+// content block, each row carrying the usage so far, so each message.id
+// counts once, at its last row.
 type claudeLine struct {
 	Type      string    `json:"type"`
 	Timestamp time.Time `json:"timestamp"`
@@ -55,7 +56,8 @@ const claudeRelayOff = "limit unknown (status line relay off)"
 
 func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b *budget) {
 	sessions := map[string]*Session{}
-	seen := map[string]map[string]bool{}
+	// seen holds each counted message's index in its session's events.
+	seen := map[string]map[string]int{}
 	var reached *Limit
 	var unknown string
 	since := now.Add(-span)
@@ -128,15 +130,17 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 			}
 			ids := seen[l.SessionID]
 			if ids == nil {
-				ids = map[string]bool{}
+				ids = map[string]int{}
 				seen[l.SessionID] = ids
 			}
-			if ids[l.Message.ID] {
+			s := session(l.SessionID)
+			e := event{at: l.Timestamp, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}}
+			if i, ok := ids[l.Message.ID]; ok {
+				s.events[i] = e
 				return true
 			}
-			ids[l.Message.ID] = true
-			s := session(l.SessionID)
-			s.events = append(s.events, event{at: l.Timestamp, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}})
+			ids[l.Message.ID] = len(s.events)
+			s.events = append(s.events, e)
 			return true
 		})
 		_ = f.Close()
