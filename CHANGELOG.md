@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.111.0](https://github.com/avivsinai/agent-message-queue/compare/v0.110.0...v0.111.0) (2026-10-25)
+
+
+### Features
+
+* **remote:** deliver strict-share requests to AMQ mailboxes ([#1226](https://github.com/avivsinai/agent-message-queue/issues/1226)) ([2a779fe](https://github.com/avivsinai/agent-message-queue/commit/2a779fe2820eca674c174613dc0185671cdf9d4f))
+
+
+### Bug Fixes
+
+* **board:** count usage records once and say windows only when observed ([#1227](https://github.com/avivsinai/agent-message-queue/issues/1227)) ([1cd5c0d](https://github.com/avivsinai/agent-message-queue/commit/1cd5c0d25a620847e6a889da9095eb257ac0d8bf))
+
 ## [0.110.0](https://github.com/avivsinai/agent-message-queue/compare/v0.109.0...v0.110.0) (2026-10-25)
 
 
