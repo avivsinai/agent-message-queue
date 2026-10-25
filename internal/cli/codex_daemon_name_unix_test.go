@@ -143,9 +143,11 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 //   - Bead agent-message-queue-38l: with no daemon running and auto-start on,
 //     the TUI starts one; AMQ never starts it itself (#975: `codex app-server daemon start`
 //     replaces saved overrides).
-//   - #975: bedrock_setup_wizard makes the backend
-//     depend on sign-in, and a daemon that refuses the thread still runs
-//     the TUI; neither may start the watcher.
+//   - #975: bedrock_setup_wizard makes the backend depend on sign-in.
+//     Bead agent-message-queue-pjb: the observed 0.164.0 regression
+//     classified every signed-in seat as
+//     unknown; a successful login status must reach daemon naming.
+//     A daemon that refuses the thread still runs the TUI without a watcher.
 //   - #975: a command-line override of a gating feature,
 //     --remote, a failed feature probe, and an option after "--" (a prompt)
 //     do not establish an embedded Codex.
@@ -161,6 +163,7 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 		args     []string
 		repo     func(t *testing.T, codexHome string) string
 		watcher  bool
+		signedIn bool
 	}{
 		"untrusted repo": {plain, true, nil, func(t *testing.T, codexHome string) string {
 			repo := t.TempDir()
@@ -168,26 +171,27 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			return repo
-		}, false},
+		}, false, false},
 		"worktree pointer with a non-ASCII space": {plain, true, nil, func(t *testing.T, codexHome string) string {
 			main, worktree := makeLinkedWorktree(t, "\u00a0")
 			writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
 			return worktree
-		}, false},
-		"terminal instructions on":               {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, nil, nil, false},
-		"bedrock wizard on":                      {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false},
-		"daemon refuses the thread":              {plain, true, nil, nil, false},
-		"no daemon, auto-start on":               {plain, false, nil, nil, false},
-		"no daemon, auto-start off":              {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, nil, nil, true},
-		"embedded by a -c override":              {plain, true, []string{"-c", "approvals_reviewer=user"}, nil, true},
-		"auto-start enabled on the command line": {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, []string{"--enable", "daemon_auto_start"}, nil, false},
-		"remote app-server":                      {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
-		"feature probe fails":                    {"exit 1", true, nil, nil, false},
-		"option text after --":                   {plain, true, []string{"--", "--no-daemon"}, nil, false},
-		"search then remote":                     {plain, true, []string{"--search", "--remote", "ws://127.0.0.1:1"}, nil, false},
-		"exec server env then remote":            {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
-		"agents subcommand":                      {plain, true, []string{"--search", "agents"}, nil, false},
-		"commented TOML boolean":                 {plain, true, []string{"-c", "suppress_unstable_features_warning=true # quiet"}, nil, false},
+		}, false, false},
+		"terminal instructions on":               {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, nil, nil, false, false},
+		"bedrock wizard on":                      {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false, false},
+		"bedrock wizard on, signed in":           {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false, true},
+		"daemon refuses the thread":              {plain, true, nil, nil, false, false},
+		"no daemon, auto-start on":               {plain, false, nil, nil, false, false},
+		"no daemon, auto-start off":              {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, nil, nil, true, false},
+		"embedded by a -c override":              {plain, true, []string{"-c", "approvals_reviewer=user"}, nil, true, false},
+		"auto-start enabled on the command line": {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, []string{"--enable", "daemon_auto_start"}, nil, false, false},
+		"remote app-server":                      {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false, false},
+		"feature probe fails":                    {"exit 1", true, nil, nil, false, false},
+		"option text after --":                   {plain, true, []string{"--", "--no-daemon"}, nil, false, false},
+		"search then remote":                     {plain, true, []string{"--search", "--remote", "ws://127.0.0.1:1"}, nil, false, false},
+		"exec server env then remote":            {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false, false},
+		"agents subcommand":                      {plain, true, []string{"--search", "agents"}, nil, false, false},
+		"commented TOML boolean":                 {plain, true, []string{"-c", "suppress_unstable_features_warning=true # quiet"}, nil, false, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			codexHome, contacts := t.TempDir(), new(atomic.Int32)
@@ -201,7 +205,10 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 				writeCodexConfig(t, codexHome, "[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
 			}
 			bin := filepath.Join(t.TempDir(), "codex")
-			script := "#!/bin/sh\n[ \"$1 $2\" = \"features list\" ] && printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "'\n"
+			script := "#!/bin/sh\ncase \"$1 $2\" in\n'features list') printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "' ;;\n'login status') printf 'private status output\\n'; printf 'private status output\\n' >&2; exit 1 ;;\nesac\n"
+			if tc.signedIn {
+				script = strings.Replace(script, "exit 1", "exit 0", 1)
+			}
 			if tc.features == "exit 1" {
 				script = "#!/bin/sh\nexit 1\n"
 			}
@@ -218,7 +225,7 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			startCoopNamedTUIInjector = func(string, string, time.Time) error { watchers++; return nil }
 			t.Cleanup(func() { startCoopNamedTUIInjector = original })
 			var args []string
-			_, stderr, err := captureEnvOutput(t, func() error {
+			stdout, stderr, err := captureEnvOutput(t, func() error {
 				var err error
 				args, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now(), func(string) error { return nil })
 				return err
@@ -226,8 +233,11 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if strings.Contains(stdout+stderr, "private status output") {
+				t.Fatal("login status output reached AMQ diagnostics")
+			}
 			reminders := strings.Count(stderr, "enter \"/rename s1/codex\" manually")
-			wantContact := name == "daemon refuses the thread"
+			wantContact := name == "daemon refuses the thread" || tc.signedIn
 			if !slices.Equal(args, tc.args) || (watchers == 1) != tc.watcher || watchers > 1 || (reminders == 1) == tc.watcher || reminders > 1 || (contacts.Load() > 0) != wantContact {
 				t.Fatalf("args = %q, watchers = %d, reminders = %d, daemon contacts = %d; want unchanged args, watcher %v, one reminder otherwise, contact %v\n%s",
 					args, watchers, reminders, contacts.Load(), tc.watcher, wantContact, stderr)

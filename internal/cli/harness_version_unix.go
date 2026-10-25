@@ -12,10 +12,19 @@ import (
 	"time"
 )
 
-// probeHarnessVersion kills and reaps the probe at the caller's deadline.
-// The process group also covers children that inherit its output pipe.
 func probeHarnessVersion(ctx context.Context, binaryPath string) (string, bool) {
 	cmd := exec.CommandContext(ctx, binaryPath, "--version")
+	output := boundedOutput{limit: 4 << 10}
+	cmd.Stdout, cmd.Stderr = &output, io.Discard
+	if !runHarnessProbe(ctx, cmd) {
+		return "", false
+	}
+	return strings.TrimSpace(output.String()), true
+}
+
+// runHarnessProbe kills and reaps the probe at the caller's deadline.
+// The process group also covers children that inherit its output pipe.
+func runHarnessProbe(ctx context.Context, cmd *exec.Cmd) bool {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stopGroup := func() error {
 		if cmd.Process == nil {
@@ -28,15 +37,10 @@ func probeHarnessVersion(ctx context.Context, binaryPath string) (string, bool) 
 	}
 	cmd.Cancel = stopGroup
 	cmd.WaitDelay = time.Second
-	output := boundedOutput{limit: 4 << 10}
-	cmd.Stdout, cmd.Stderr = &output, io.Discard
 	if err := cmd.Start(); err != nil {
-		return "", false
+		return false
 	}
 	err := cmd.Wait()
 	cleanupErr := stopGroup()
-	if err != nil || cleanupErr != nil {
-		return "", false
-	}
-	return strings.TrimSpace(output.String()), true
+	return err == nil && cleanupErr == nil && ctx.Err() == nil
 }

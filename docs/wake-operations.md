@@ -85,7 +85,8 @@ running wake. Both write [`.wake.settings`](#live-settings).
   A distinct urgent message can revive a parked cohort for one further
   attempt. Ordinary urgent mail still passes through watcher debounce and
   input-quiet deferral; urgent mail with the configured interrupt label follows
-  the interrupt path.
+  the interrupt path. Input deferral detects typing activity, so a doorbell can
+  join and submit an idle draft after the quiet interval.
 - The hold changes only the first doorbell's timing. After an attempt, the
   configured retry and backoff rules apply, including the finite input-attempt
   budget for an unchanged cohort. Injection modes and recovery are unchanged.

@@ -313,10 +313,10 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 	if _, daemon := features["daemon_auto_start"]; !daemon {
 		return codexEmbedded, features
 	}
-	// With bedrock_setup_wizard on, a signed-out TUI runs embedded even when
-	// a daemon runs (startup_orchestration.rs:494-519, lib.rs:2305-2323);
-	// AMQ does not read the sign-in state.
-	if features["bedrock_setup_wizard"] {
+	// The Bedrock wizard can exclude a signed-out TUI from the daemon.
+	// A successful login-status probe rules out that exclusion; a failed
+	// probe cannot distinguish missing auth from an unreadable configuration.
+	if features["bedrock_setup_wizard"] && !codexLoginConfigured(cmdName, wd, dir, codexHome) {
 		return codexBackendUnknown, features
 	}
 	if _, err := codex.ControlSocket(codexHome); err != nil && !features["daemon_auto_start"] {
