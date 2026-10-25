@@ -21,4 +21,5 @@ func TestSignerForbidsCoreDumpsBeforeItRuns(t *testing.T) {
 	if lim.Cur != 0 || lim.Max != 0 {
 		t.Fatalf("RLIMIT_CORE after start = %d/%d, want 0/0", lim.Cur, lim.Max)
 	}
+	checkNoPipedDump(t)
 }
