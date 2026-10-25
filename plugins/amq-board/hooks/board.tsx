@@ -167,30 +167,38 @@ async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | 
   }
 }
 
-/** Runs amq-board --json; stop() or the 90 s deadline kills the run. */
+/**
+ * Runs amq-board --json. stop() or the 90 s deadline ends the refresh at
+ * once and asks the engine to kill the run; the refresh never waits on a
+ * child that does not answer.
+ */
 async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | string> {
   const run = $.process.spawn({ argv: ['amq-board', '--json'], cwd })
-  const kill = () => void run.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
-  let isTimedOut = false
-  const deadline = $.clock.after(RUN_TIMEOUT_MS, () => {
-    isTimedOut = true
-    kill()
+  let abort: (why: string) => void = () => {}
+  const aborted = new Promise<never>((_, reject) => {
+    abort = why => reject(new Error(why))
   })
-  killRun = kill
+  aborted.catch(() => {})
+  const kill = (why: string) => {
+    abort(why)
+    void run.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+  }
+  const deadline = $.clock.after(RUN_TIMEOUT_MS, () => kill('amq-board: no answer in 90 s'))
+  const stopped = () => kill('amq-board: stopped')
+  killRun = stopped
   let stdout = ''
   let stderr = ''
   try {
-    let step = await run.next()
+    let step = await Promise.race([run.next(), aborted])
     while (!step.done) {
       if (step.value.stream === 'stdout') stdout += step.value.text
       else if (stderr.length < 4096) stderr += step.value.text
       if (stdout.length > MAX_OUTPUT) {
-        kill()
+        kill('amq-board: --json printed more than 4 MiB')
         return 'amq-board: --json printed more than 4 MiB'
       }
-      step = await run.next()
+      step = await Promise.race([run.next(), aborted])
     }
-    if (isTimedOut) return 'amq-board: no answer in 90 s'
     const code = step.value?.code
     if (code !== 0) {
       const first = stderr.split('\n').find(line => line.trim() !== '') ?? `exit ${code ?? 'by signal'}`
@@ -198,10 +206,11 @@ async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | st
     }
   } catch (err) {
     const text = err instanceof Error ? err.message : String(err)
+    if (text.startsWith('amq-board: ')) return text
     return /ENOENT|not found|no such file/i.test(text) ? 'amq-board not found' : `amq-board: ${clean(text)}`
   } finally {
     deadline.cancel()
-    if (killRun === kill) killRun = undefined
+    if (killRun === stopped) killRun = undefined
   }
   try {
     return JSON.parse(stdout) as BoardModel
@@ -234,8 +243,11 @@ async function tick($: EngineInterface): Promise<void> {
     const served = await fromServe($, cwd)
     if (!(await isCurrent($, gen))) return
     const got = served ?? (await fromRun($, cwd))
-    if (!(await isCurrent($, gen))) return
     const now = await $.clock.now()
+    // Every await is a point where the pane may have closed: check before
+    // the update and again before the status, with nothing awaited between
+    // the last check and the call it guards.
+    if (!(await isCurrent($, gen))) return
     let next: BoardView
     if (typeof got === 'string') {
       // Keep the last board on screen, marked by the failure.
@@ -245,6 +257,7 @@ async function tick($: EngineInterface): Promise<void> {
       next = project(got, now)
     }
     await update($, view, () => next)
+    if (!(await isCurrent($, gen))) return
     $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
   } catch (err) {
     if (gen === generation && timer) {
