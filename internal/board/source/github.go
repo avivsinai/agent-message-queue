@@ -27,7 +27,8 @@ const maxGitHubRepos = 10
 const maxBodyBytes = 4096
 
 // GitHub reads open pull requests and issues of the project's GitHub
-// repositories with one `gh api graphql` call, cached on disk for the TTL,
+// repositories with one `gh api graphql` call, plus one per further page of
+// review requests up to maxAttentionPages, cached on disk for the TTL,
 // because each gh call that reads the token can prompt the keychain.
 type GitHub struct {
 	Repos                    []string          // configured owner/repo, added to the origin remote

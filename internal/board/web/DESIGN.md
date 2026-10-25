@@ -276,7 +276,7 @@ Inside a bay, strips stack in a rack with a 0.375rem gap. Cells pad 0.4rem by 0.
 The Waiting rack is a size container (`rack`) and its strip changes shape with the container, not the viewport:
 - Narrow: ref and since share the top row, then title, reason, owner, command, and details stack.
 - From 40rem: a 7rem ref column runs down the left edge; title and since, then reason and owner, then the command and details fill the right.
-- From 68rem: one row per strip under a label row (Ref, Title, Reason, Since, Owner, Checked, Command) on the grid `7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 5rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr)`. The command cell is the last cell, and only the first command sits on the strip; the rest go under details.
+- From 68rem: one row per strip under a label row (Ref, Title, Reason, Since, Owner, Checked, Command) on the grid `7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 6rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr)`. The command cell is the last cell, and only the first command sits on the strip; the rest go under details.
 
 Lower strips keep one shape everywhere: a designator band (ref and since), the title, the owner, and a closing row with the reason on the left and Details on the right.
 

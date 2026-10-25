@@ -562,7 +562,7 @@ details > summary::marker { color: var(--muted); }
 
 @container rack (min-width: 40rem) {
   .bay-waiting .strip {
-    grid-template-columns: 7rem minmax(0, 1fr) minmax(0, 1fr) 5.5rem;
+    grid-template-columns: 7rem minmax(0, 1fr) minmax(0, 1fr) 9rem;
     grid-template-areas:
       "ref title title since"
       "ref why owner owner"
@@ -577,7 +577,7 @@ details > summary::marker { color: var(--muted); }
 @container rack (min-width: 68rem) {
   .bay-waiting .rack-labels,
   .bay-waiting .strip {
-    grid-template-columns: 7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 5rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr);
+    grid-template-columns: 7rem minmax(10rem, 1.2fr) minmax(9rem, 1fr) 6rem minmax(9rem, 1fr) 7.5rem minmax(22rem, 2.6fr);
   }
   .bay-waiting .rack-labels { display: grid; }
   .bay-waiting .strip {

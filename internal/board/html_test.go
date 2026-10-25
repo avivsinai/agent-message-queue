@@ -132,3 +132,26 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 		t.Error("page offers a command for a hostile handle")
 	}
 }
+
+// Live board, 2026-10-25: a card with no since time read "since since
+// unknown" on narrow and medium strips, and the wide since cell overflowed
+// into the owner cell. The cue supplies "since"; the value is the age or
+// "unknown".
+func TestHTMLUnknownSinceReadsOnce(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	ref, _ := Obligation("s1/alpha/demo")
+	alpha := Owner{Kind: OwnerAgent, Handle: "alpha", Session: "s1"}
+	amq := Result{Status: StatusOK, ObservedAt: now, Feeds: []Column{ColumnWaiting}, Items: []Item{{
+		Ref: ref, Title: "Pick the retry window", State: StateNeedsHuman, Structural: true,
+		Owner: Owner{Kind: OwnerHuman, Handle: "user"}, Requester: &alpha, WaitsOn: []Owner{alpha},
+		Reason: Reason{Field: "kind", Text: "todo owed by user"},
+	}}}
+	m := Build(Input{Results: []NamedResult{{Name: "amq", Result: amq}}, Config: DefaultConfig(), Now: now})
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	if html := page.String(); strings.Contains(html, "since since") || !strings.Contains(html, `<span class="cue">since </span>unknown</p>`) {
+		t.Error(`the since cell does not read "since unknown" once`)
+	}
+}

@@ -254,7 +254,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 			}
 		}
 	}
-	s.Since = "since unknown"
+	s.Since = "unknown"
 	if !c.Reason.Since.IsZero() {
 		s.Since = age(now.Sub(c.Reason.Since))
 		s.SinceAt = c.Reason.Since.Format(time.RFC3339)

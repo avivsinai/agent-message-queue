@@ -66,7 +66,7 @@ The model is rebuilt every minute, and a request only reads the last one.
 GitHub answers from its cache until the TTL ends, and each external provider
 runs at most once per its TTL. Refresh on the page ignores those caches,
 at most once a minute: a press within a minute of the last forced refresh, or
-while a refresh runs, joins it, so five quick presses make one `gh api` call.
+while a refresh runs, joins it, so five quick presses make one GitHub fetch.
 The page reads `model.json` every 15 seconds and reloads when the model is
 newer, unless a details panel is open or text is selected; the filter stays.
 
@@ -270,3 +270,64 @@ deliver nothing.
   leaves on the next run.
 - **acknowledge**: sends `--kind status`; the card stays.
 - **show thread**, **message**, **show bead**, **claim bead**.
+
+## Live acceptance check
+
+Run this check with the installed `amq`, `amq-board`, and `bd` before you
+accept a board change. It uses a throwaway Git project and the handles
+`alpha` and `beta`. It writes only in that project, except for the
+`~/.amq/board/serve.json` file that `amq-board serve` keeps while it runs.
+
+1. Make the project and two sessions:
+
+   ```sh
+   mkdir board-check && cd board-check && git init -q
+   amq coop init --agents alpha,beta,user
+   amq session create s1 --me alpha
+   amq session create s2 --me beta
+   ```
+
+2. In a second terminal, as `alpha` in `s1`, send a review request to `beta`:
+
+   ```sh
+   eval "$(amq env --session s1 --me alpha)"
+   echo "Please review the backoff change." |
+     amq send --to beta --kind review_request --subject "Review: courier backoff" --body -
+   ```
+
+3. In a third terminal, as `beta` in `s2`, send two todos to `user`:
+
+   ```sh
+   eval "$(amq env --session s2 --me beta)"
+   echo "30 s or 2 min?" | amq send --to user --kind todo --subject "Pick the retry window" --body -
+   echo "Check the wording." | amq send --to user --kind todo --subject "Confirm the release note" --body -
+   ```
+
+4. In the first terminal, the owner's, run
+   `eval "$(amq env --session s1 --me user)"` and then `amq-board`. In
+   flight shows "Review: courier backoff", owned by `beta` in `s1`. Waiting
+   on you shows both todos, with the line "s2: 2 unread for user" above
+   them. The roster lists `s1` and `s2`.
+5. Run `amq-board serve` and open the URL it prints. The page shows the same
+   strips. The same address without the token answers 404.
+6. On "Pick the retry window", press Copy on the complete command, paste it
+   into the owner's terminal, type a reply, and press Ctrl-D. Press Refresh
+   on the page, or wait one minute: the strip leaves Waiting on you. The
+   unread line does not change, because it counts messages, not cards.
+7. On "Confirm the release note", run the acknowledge command (under More
+   commands and evidence) the same way and refresh: the strip stays.
+8. Run `bd init`, then
+   `bd update "$(bd create "Courier retry" --silent)" --status in_progress --assignee alpha`,
+   and refresh: the bead shows in In flight. Run the `.beads` check under
+   [Read-only](#read-only): it prints `unchanged`.
+9. Take `bd` off `PATH` for one run:
+
+   ```sh
+   nobd=$(mktemp -d) && ln -s "$(command -v amq)" "$nobd/amq"
+   PATH="$nobd:/usr/bin:/bin" "$(command -v amq-board)"
+   ```
+
+   The sources line shows `beads unavailable: bd not on PATH`, and the AMQ
+   cards still show.
+10. Press Ctrl-C in the `serve` terminal: it stops and removes
+    `~/.amq/board/serve.json`.
