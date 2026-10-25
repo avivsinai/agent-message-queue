@@ -493,6 +493,12 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 		at < 1 || fresh.Argv[at-1] != "-c" || len(fresh.DynamicArgv) != len(IdentityEnvKeys) {
 		t.Fatalf("fresh plan = %#v", fresh)
 	}
+	// Live run on amq 0.110.0, 2026-10-25: Codex's update prompt, whose
+	// default runs the upgrade, can take a doorbell's Enter. A managed seat
+	// requests that Codex disable the update check.
+	if off := slices.Index(fresh.Argv, CodexNoUpdatePromptOverride); off < 1 || fresh.Argv[off-1] != "-c" {
+		t.Fatalf("fresh plan does not request disabling the update check: %q", fresh.Argv)
+	}
 	for _, dynamic := range fresh.DynamicArgv {
 		if dynamic.Kind != DynamicArgCodexIdentity {
 			t.Fatalf("fresh plan dynamic argv = %#v", fresh.DynamicArgv)

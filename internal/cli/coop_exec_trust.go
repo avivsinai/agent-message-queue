@@ -20,12 +20,21 @@ import (
 )
 
 // wakeDialogStartupEvent marks a .wake.dialog that coop exec writes before
-// it execs a harness that will ask whether to trust its directory. A
-// doorbell at that dialog ends the session: Claude Code's Enter picks the
-// default "No, exit", and Codex quits. The marker closes when the harness's
-// SessionStart hook removes it, or when the harness records that it trusts
-// the directory, whichever comes first.
+// it execs a harness that may show a startup prompt. A doorbell at the trust
+// dialog ends the session: Claude Code's Enter picks the default "No, exit",
+// and Codex quits. A doorbell at Codex's update prompt runs the upgrade. A
+// trust marker closes when the harness records that it trusts the
+// directory. Every Startup marker also closes when a harness dialog hook
+// removes it: Claude Code's at SessionStart, Codex's at the first turn,
+// since Codex runs SessionStart hooks only when a turn starts
+// (core/src/session/turn.rs run_pending_session_start_hooks).
 const wakeDialogStartupEvent = "Startup"
+
+// wakeStartupKindUpdate marks a Codex Startup marker written only because
+// the update prompt could not be ruled out (codexUpdatePromptRuledOut). No
+// Codex record shows that prompt closed, so only the dialog hook releases
+// it.
+const wakeStartupKindUpdate = "update_prompt"
 
 // startupTrust is what the harness's own trust record says about a
 // directory.
@@ -96,13 +105,16 @@ func readStartupTrust(harness, dir string) startupTrust {
 
 // codexStartupTrust reads the user config.toml the way the Codex TUI
 // decides its startup trust screen (codex-cli 0.163
-// tui/src/config_update.rs read_remote_project_trust): a directory in no
-// git checkout is projectless and asks nothing; a [projects] entry for the
-// directory or its git trust root with trust_level "trusted" asks nothing;
-// no entry, or a saved "untrusted" one (a restricted dialog), asks.
+// tui/src/config_update.rs read_remote_project_trust): a [projects] entry
+// for the directory or its git trust root with trust_level "trusted" asks
+// nothing; no entry, or a saved "untrusted" one (a restricted dialog),
+// asks. Outside a git checkout codex-cli 0.145 and 0.163 asked on every
+// start in one folder and recorded nothing, and asked nothing in another;
+// the decision there turns on project layers AMQ does not read, so trust
+// there stays pending.
 func codexStartupTrust(dir string) startupTrust {
 	if codexNearestGitAncestor(dir) == "" {
-		return startupTrustUnknown
+		return startupTrustPending
 	}
 	codexHome, err := codexHomeDir()
 	if err != nil {
@@ -160,19 +172,39 @@ func claudeStartupTrust(dir string) startupTrust {
 	return startupTrustPending
 }
 
-// writeStartupDialogMarker writes the Startup marker when the harness about
-// to start will show its trust dialog, so the wake holds the doorbell until
-// the dialog is answered. A failed write leaves the behavior without a
-// guard.
-func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
-	withStartupDialog(root, handle, binaryPath, args, func(dirfd int, agentDir *wakeAgentDir, harness, dir string, trust startupTrust) error {
-		if trust != startupTrustPending {
-			return nil
+// syncStartupDialogMarker writes the Startup marker when the harness about
+// to start as binaryPath with its final args may show a startup prompt, so
+// the wake holds the doorbell until the prompt is answered: a trust dialog
+// still pending, or for Codex an update prompt its state does not rule out.
+// Otherwise it removes a Startup marker an earlier launch left (one
+// declined, or one that never started), which would hold this session's
+// doorbell. The caller owns the agent's wake.
+func syncStartupDialogMarker(root, handle, binaryPath string, args []string) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	marker, hold := startupDialogMarkerFor(binaryPath, args, wd)
+	return syncStartupDialogMarkerState(root, handle, marker, hold)
+}
+
+// syncStartupDialogMarkerState publishes the decided hold through the
+// caller's existing agent directory.
+func syncStartupDialogMarkerState(root, handle string, marker wakeDialogMarker, hold bool) error {
+	agentDir, err := openExistingWakeAgentDir(root, handle)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return agentDir.withFD(func(dirfd int) error {
+		if !hold {
+			return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+				var marker wakeDialogMarker
+				return json.Unmarshal(current, &marker) == nil && marker.Event == wakeDialogStartupEvent
+			})
 		}
-		raw, err := json.Marshal(wakeDialogMarker{
-			Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir,
-			OpenedAt: time.Now().UTC().Format(time.RFC3339),
-		})
+		marker.OpenedAt = time.Now().UTC().Format(time.RFC3339)
+		raw, err := json.Marshal(marker)
 		if err != nil {
 			return err
 		}
@@ -180,46 +212,40 @@ func writeStartupDialogMarker(root, handle, binaryPath string, args []string) {
 	})
 }
 
-// clearStaleStartupDialogMarker removes a Startup marker an earlier launch
-// left (one declined, or one that never started) when this launch's harness
-// shows no trust dialog; it would otherwise hold this session's doorbell.
-// The caller owns the agent's wake.
-func clearStaleStartupDialogMarker(root, handle, binaryPath string, args []string) {
-	withStartupDialog(root, handle, binaryPath, args, func(dirfd int, agentDir *wakeAgentDir, _, _ string, trust startupTrust) error {
-		if trust == startupTrustPending {
-			return nil
-		}
-		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
-			var marker wakeDialogMarker
-			return json.Unmarshal(current, &marker) == nil && marker.Event == wakeDialogStartupEvent
-		})
-	})
-}
-
-func withStartupDialog(root, handle, binaryPath string, args []string, fn func(dirfd int, agentDir *wakeAgentDir, harness, dir string, trust startupTrust) error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return
-	}
+// startupDialogMarkerFor returns the Startup marker a harness started as
+// binaryPath with args in wd needs, and whether it needs one.
+func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
-	agentDir, err := openExistingWakeAgentDir(root, handle)
-	if err != nil {
-		return
-	}
-	defer func() { _ = agentDir.Close() }()
-	_ = agentDir.withFD(func(dirfd int) error {
-		return fn(dirfd, agentDir, harness, dir, trust)
-	})
+	updateRuledOut := harness != launch.CodexProvider || codexUpdatePromptRuledOut(binaryPath)
+	return startupDialogMarkerDecision(harness, dir, trust, updateRuledOut)
 }
 
-// startupDialogClosed reports whether marker is a Startup marker whose
+// startupDialogMarkerDecision keeps trust and update evidence independent.
+// A trust decision cannot release a possible update prompt.
+func startupDialogMarkerDecision(harness, dir string, trust startupTrust, updateRuledOut bool) (wakeDialogMarker, bool) {
+	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir}
+	if harness == "" {
+		return wakeDialogMarker{}, false
+	}
+	// A trust record releases a trust marker; a second seat's Codex can
+	// record trust for the same root while this one still shows its update
+	// prompt, so a possible update prompt takes the kind only the hook
+	// releases.
+	if harness == launch.CodexProvider && !updateRuledOut {
+		marker.Kind = wakeStartupKindUpdate
+		return marker, true
+	}
+	return marker, trust == startupTrustPending
+}
+
+// startupDialogClosed reports whether marker is a Startup trust marker whose
 // harness now records that it trusts the directory. A record that cannot be
-// read or does not decide keeps the marker open. cache keeps the last
-// answer while the harness's trust file is unchanged, so a held wake does
-// not reparse it on every recheck.
+// read or does not decide keeps the marker open, and so does an update
+// prompt marker. cache keeps the last answer while the harness's trust file
+// is unchanged, so a held wake does not reparse it on every recheck.
 func startupDialogClosed(raw []byte, cache *startupDialogCache) bool {
 	var marker wakeDialogMarker
-	if json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent ||
+	if json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Kind != "" ||
 		!slices.Contains([]string{launch.ClaudeProvider, launch.CodexProvider}, marker.Harness) || !filepath.IsAbs(marker.Cwd) {
 		return false
 	}
@@ -265,10 +291,10 @@ func startupTrustFileStamp(harness string) string {
 }
 
 // codexStartupHoldHint reports a Codex Startup marker for handle that still
-// holds input (startupDialogClosed, as the wake decides). Codex
-// records no decision for a directory the person keeps untrusted, so
-// without the Codex dialog hook's SessionStart close that hold releases
-// only by aging: input held, attention output after wakeDialogQuietHold.
+// holds input (startupDialogClosed, as the wake decides). Without a Codex
+// record of the answer the hold releases only through the Codex dialog
+// hook at the session's first turn, or by aging: input held, attention
+// output after wakeDialogQuietHold.
 func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName), maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
@@ -277,11 +303,24 @@ func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 		return opsHint{}, false
 	}
 	return opsHint{
-		Code:   "codex_trust_hold",
-		Status: "warn",
-		Message: fmt.Sprintf("%s's doorbell is held while Codex asks whether to trust %s; it rings once Codex records trust, or with the Codex dialog hook when the session starts; remedy: amq wake install-dialog-hook --harness codex",
-			handle, marker.Cwd),
+		Code:    "codex_trust_hold",
+		Status:  "warn",
+		Message: fmt.Sprintf("%s's doorbell is held: %s", handle, codexStartupHoldRelease(marker)),
 	}, true
+}
+
+// codexStartupHoldRelease says why a Codex Startup marker holds the
+// doorbell, what releases it, and the remedy.
+func codexStartupHoldRelease(marker wakeDialogMarker) string {
+	const hook = "the Codex dialog hook releases it at the first prompt typed in that Codex session (amq wake install-dialog-hook --harness codex)"
+	switch {
+	case marker.Kind == wakeStartupKindUpdate:
+		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
+			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts, but does not release this hold by itself"
+	case codexNearestGitAncestor(marker.Cwd) == "":
+		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
+	}
+	return fmt.Sprintf("Codex asks whether to trust %s; it rings once Codex records trust, or %s", marker.Cwd, hook)
 }
 
 // envWakeStartupHold names the descriptor of a coop wake's startup hold:
@@ -390,7 +429,7 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; input stays held, with attention output after %s",
 		marker.Harness, wakeDialogQuietHold)
 	if marker.Harness == launch.CodexProvider {
-		release += "; a directory kept untrusted releases only through the Codex hook: amq wake install-dialog-hook --harness codex"
+		release = fmt.Sprintf("%s; input stays held, with attention output after %s", codexStartupHoldRelease(marker), wakeDialogQuietHold)
 	}
 	return &wakeStartupHoldStatus{
 		Harness: marker.Harness, Dir: marker.Cwd,

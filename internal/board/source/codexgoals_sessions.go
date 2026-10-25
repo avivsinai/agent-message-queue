@@ -63,17 +63,9 @@ func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner
 func codexGoalSessions(ctx context.Context, env board.Env, home string, owners map[string]board.Owner, known map[string]bool, kinds map[board.Owner]string) (map[string]codexGoalSession, board.Coverage, error) {
 	eligible := map[string]codexGoalSession{}
 	coverage := board.Coverage{}
-	out, err := env.Run.Run(ctx, env.Dir, []string{"git", "worktree", "list", "--porcelain", "-z"})
+	worktrees, err := projectWorktrees(ctx, env)
 	if err != nil {
 		return nil, coverage, fmt.Errorf("codex goal project worktrees: %w", err)
-	}
-	worktrees := map[string]bool{}
-	for _, field := range strings.Split(string(out), "\x00") {
-		if p, ok := strings.CutPrefix(field, "worktree "); ok {
-			if real, err := filepath.EvalSymlinks(p); err == nil {
-				worktrees[real] = true
-			}
-		}
 	}
 	// A ready structural binding is itself project eligibility. It remains
 	// usable even when the rollout has aged out, moved, or been removed.

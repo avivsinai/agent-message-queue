@@ -315,6 +315,42 @@ func stubRawInjectSleep(t *testing.T) *[]time.Duration {
 	return &slept
 }
 
+// Live run on amq 0.110.0, 2026-10-25 (codex-cli 0.145.0): Codex quit part
+// way through a doorbell typed into its trust dialog. The rest of the text
+// stayed queued with no reader, the drain wait timed out, the wake typed the
+// submit keys anyway, and the shell that took the terminal back ran
+// "amq drain --include-body then act on it". No submit key follows text
+// that is still queued; the delivery resumes once the reader takes it.
+func TestRawDoorbellHoldsTheSubmitKeyWhileTheTextIsStillQueued(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	queued := true
+	var drainErr error
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return rawInjectDrainTimeout, !queued, drainErr
+	})
+	h.send("a", format.PriorityUrgent)
+	h.scan(h.cfg)
+	if want := []string{coopWakeDoorbell}; strings.Join(h.injected, "|") != strings.Join(want, "|") {
+		t.Fatalf("typed %q while the doorbell text was still queued, want %q", h.injected, want)
+	}
+
+	// A failed queue inspection cannot prove that the reader took the text.
+	drainErr = errors.New("queue inspection unavailable")
+	h.injected = nil
+	h.advance(wakeDoorbellRetryBase)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q while the input queue state was unknown", h.injected)
+	}
+
+	queued, drainErr = false, nil
+	h.advance(wakeDoorbellRetryMax)
+	h.scan(h.cfg)
+	if want := []string{"\n", "\r", "\r"}; strings.Join(h.injected, "|") != strings.Join(want, "|") {
+		t.Fatalf("after the reader took the text typed %q, want %q", h.injected, want)
+	}
+}
+
 func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
 	// codex targets get a lone LF between the drained text and the settle: it
 	// routes through codex-tui's Ctrl-J binding, which flushes and clears
@@ -762,6 +798,12 @@ func TestNotifyNewMessagesInjectedPolicyAcknowledgesSuccessfulInjectVia(t *testi
 }
 
 func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAndFallback(t *testing.T) {
+	// This case reaches the injector fallback after a completed delivery;
+	// its terminal has already consumed the injected text.
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)

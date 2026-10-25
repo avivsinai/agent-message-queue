@@ -137,6 +137,9 @@ func runDoctor(args []string) error {
 
 	// Check 1: Binary
 	result.Checks = append(result.Checks, checkBinary())
+	if check, ok := checkCodexExecutablePaths(); ok {
+		result.Checks = append(result.Checks, check)
+	}
 
 	// Check 2: .amqrc
 	amqrcCheck, root := checkAmqrc()

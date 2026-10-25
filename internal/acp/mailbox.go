@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -601,6 +602,11 @@ func PublishMailboxPrompt(root *fsq.DeliveryRoot, id string, created time.Time, 
 	// its own. This runs before the redelivery check: a prompt delivered
 	// earlier still needs the mailbox for its reply.
 	if err := root.EnsureAgentDirs(p.From); err != nil {
+		return err
+	}
+	// A configured root must durably know the carrier as a reply recipient
+	// before this publisher delivers a prompt.
+	if _, err := config.EnsureAgentIfConfiguredOn(root, p.From); err != nil {
 		return err
 	}
 	// Only a readable message with this id, read through the pinned root,

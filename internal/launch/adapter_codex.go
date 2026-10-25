@@ -135,7 +135,7 @@ func (adapter *CodexAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	}
 	argv := append([]string{executable}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
-	argv = append(argv, "-c", notify)
+	argv = append(argv, "-c", notify, "-c", CodexNoUpdatePromptOverride)
 	argv, identity := codexIdentitySlots(argv)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
@@ -168,7 +168,7 @@ func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error
 	}
 	argv := append([]string{executable, "resume"}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
-	argv = append(argv, "-c", notify)
+	argv = append(argv, "-c", notify, "-c", CodexNoUpdatePromptOverride)
 	argv, identity := codexIdentitySlots(argv)
 	argv = append(argv, request.Conversation.ID)
 	plan := AgentPlan{
@@ -256,7 +256,12 @@ type codexConfigOverrideRule struct {
 	stringTyped bool
 }
 
+// CodexNoUpdatePromptOverride asks Codex to disable its startup update
+// check. Higher managed requirements can override this setting.
+const CodexNoUpdatePromptOverride = "check_for_update_on_startup=false"
+
 var codexConfigOverrideValues = map[string]codexConfigOverrideRule{
+	"check_for_update_on_startup":            {values: valueSet([]string{"false"})},
 	"model_reasoning_effort":                 {values: valueSet(codexReasoningEffortValues), stringTyped: true},
 	"approvals_reviewer":                     {values: valueSet(codexApprovalsReviewerValues), stringTyped: true},
 	"sandbox_workspace_write.writable_roots": {values: valueSet(codexWritableRootsValues)},

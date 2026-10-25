@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -66,18 +64,9 @@ func claudePermissionMapping(ctx context.Context, env board.Env) (claudePermissi
 			m.owners[c.ID] = owner
 		}
 	}
-	out, err = env.Run.Run(ctx, env.Dir, []string{"git", "worktree", "list", "--porcelain", "-z"})
+	m.worktrees, err = projectWorktrees(ctx, env)
 	if err != nil {
 		return m, fmt.Errorf("claude permission project worktrees: %w", err)
-	}
-	for _, field := range strings.Split(string(out), "\x00") {
-		if path, ok := strings.CutPrefix(field, "worktree "); ok {
-			real, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return m, fmt.Errorf("claude permission project worktree: %w", err)
-			}
-			m.worktrees[real] = true
-		}
 	}
 	out, err = env.Run.Run(ctx, env.Dir, []string{"amq", "who", "--json"})
 	if err != nil {
