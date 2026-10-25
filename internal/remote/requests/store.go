@@ -791,20 +791,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if err != nil || !exists {
 		return false, err
 	}
-	// The gate includes settlement — never reap a record we still owe the
-	// runtime (bound run, unacked result).
-	// Two obligations gate compaction and they are different: OwesAck is
-	// what we owe the RUNTIME (release its retained result); an unpublished
-	// revision is what we owe the CALLER. Compaction erases the only retained
-	// result, so a revision the caller has not received yet must survive it.
-	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision || len(rec.OwedOutcomes) > 0 {
-		return false, nil
-	}
-	// A retired outcome does not gate compaction: the record already shows
-	// the explicit uncertain resolution, and a late
-	// exact native resolution still corrects it while the record lives.
-	observed, err := protocol.ParseTime(rec.ObservedAt)
-	if err != nil || !observed.Before(before) {
+	if !rec.Compactable(before) {
 		return false, nil
 	}
 	rec.Revision++
@@ -1114,6 +1101,25 @@ func allowed(from, to protocol.State) bool {
 		}
 	}
 	return false
+}
+
+// Compactable is the compaction gate CompactOne applies: the record is
+// terminal, not a tombstone yet, owes nothing, and was observed before the
+// cutoff. The gate includes settlement: never reap a record we still owe the
+// runtime (bound run, unacked result). Two obligations gate compaction and
+// they are different: OwesAck is what we owe the RUNTIME (release its
+// retained result); an unpublished revision is what we owe the CALLER.
+// Compaction erases the only retained result, so a revision the caller has
+// not received yet must survive it. A retired outcome does not gate
+// compaction: the record already shows the explicit uncertain resolution,
+// and a late exact native resolution still corrects it while the record
+// lives.
+func (r *Record) Compactable(before time.Time) bool {
+	if !r.State.Terminal() || r.Tombstone || r.OwesAck() || r.PublishedRevision < r.Revision || len(r.OwedOutcomes) > 0 {
+		return false
+	}
+	observed, err := protocol.ParseTime(r.ObservedAt)
+	return err == nil && observed.Before(before)
 }
 
 // OwesAck reports whether this record has a result we have not released.

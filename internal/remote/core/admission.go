@@ -852,11 +852,7 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 	}
 	e.mu.Unlock()
 	if ackDigest != "" {
-		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// Delivered — record it durably (digest verified non-empty above).
-		// MarkAcknowledged failure ignored (MarkPublished
-		// shape): the next replay re-Lookups and re-Marks. Self-healing.
-		_ = e.store.MarkAcknowledged(ackKey)
+		_ = e.ackNative(ackAtt, ackKey, ackEpoch, ackDigest)
 	}
 	e.publishRevision(rec)
 	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: disposition}}, nil

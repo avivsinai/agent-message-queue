@@ -290,7 +290,7 @@ func writeSteerOnce(claim steerClaim, eventID, text string, mayWrite func() bool
 	// Only a readable message with this id, read through the pinned root,
 	// proves the earlier delivery: a directory or a dangling link at the
 	// name is not one.
-	if held, err := inboxHasMessage(root, claim.Handle, claim.MessageID); err != nil {
+	if held, err := InboxHasMessage(root, claim.Handle, claim.MessageID); err != nil {
 		return Delivery{}, err
 	} else if held {
 		return out, nil

@@ -1227,7 +1227,7 @@ func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err err
 // attachment ends when the endpoint unsubscribes it. The target stays due
 // for that rebuild until one succeeds: the manifest already holds approve,
 // so a retry after a failed build reports no change.
-func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
+func liveRegistrar(root, stateDir, me string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
 	var mu sync.Mutex
 	rebuild := map[string]bool{} // targets whose running attachment predates their entry
 	return func(r ipc.RegisterRequest) (protocol.Session, error) {
@@ -1242,7 +1242,7 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.A
 			rebuild[r.Target] = true
 		}
 		if _, ok := ep.AttachmentOf(r.Target); !ok || rebuild[r.Target] {
-			out := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{a}})
+			out := registry.Build(context.Background(), root, stateDir, me, manifest.File{Adapters: []manifest.Adapter{a}})
 			if len(out) != 1 || out[0].Refusal != nil {
 				reason := "no adapter built"
 				if len(out) == 1 {

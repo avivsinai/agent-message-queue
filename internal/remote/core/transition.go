@@ -155,19 +155,10 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// Use the attachment captured under the lock; never re-read
 	// e.targets after unlocking (a concurrent Register would race the map).
 	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
-		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// Crash window: the ack landed but the durable flag did
-		// not. The replay path self-heals (Lookup → EvidenceNone → Mark).
-		if e.crashAt(PointAfterAck) != nil {
-			return
-		}
-		// The ack DELIVERED — record it durably so the restart
-		// replay converges instead of re-Lookuping this record every tick
-		// (history digests never match: NativeRef suffix asymmetry). A
-		// MarkAcknowledged failure is ignored, same shape as MarkPublished:
-		// the record stays !Acknowledged and the next replay re-Lookups
-		// (EvidenceNone after release-on-ack) then re-Marks. Self-healing.
-		_ = e.store.MarkAcknowledged(ackKey)
+		// A delivered ack is recorded durably so the restart replay
+		// converges instead of re-Lookuping this record every tick (history
+		// digests never match: NativeRef suffix asymmetry).
+		_ = e.ackNative(ackAtt, ackKey, ackEpoch, ackDigest)
 	}
 }
 

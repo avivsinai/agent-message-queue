@@ -193,6 +193,12 @@ func (e *Endpoint) Reconcile() error {
 			if compacted >= 100 {
 				break
 			}
+			if ready, ferr := e.forgetBeforeCompact(key, cutoff); !ready {
+				if ferr != nil && firstErr == nil {
+					firstErr = ferr
+				}
+				continue
+			}
 			e.mu.Lock()
 			ok, cerr := e.store.CompactOne(key, cutoff)
 			e.mu.Unlock()
@@ -222,6 +228,43 @@ func (e *Endpoint) Reconcile() error {
 		}
 	}
 	return firstErr
+}
+
+// forgetBeforeCompact lets a Forgetter attachment drop its own state for a
+// record that passes the compaction gate now, and reports whether the record
+// may be compacted. A passing record is never looked up again (it does not
+// need the sweep and owes no result), so Forget is final. Forget runs
+// outside e.mu, as every attachment call does, and only for a record the
+// attachment saw (NativeDispatches > 0) whose result, if any, it has
+// acknowledged: an unacknowledged result keeps the record until the
+// acknowledgement replay succeeds. A failed Forget leaves the record a
+// compaction candidate, so the next sweep calls Forget again. A record of an
+// attachment without Forget compacts as before.
+func (e *Endpoint) forgetBeforeCompact(key requests.Key, cutoff time.Time) (bool, error) {
+	e.mu.Lock()
+	var forgetter Forgetter
+	if t, ok := e.targets[key.TargetID]; ok {
+		forgetter, _ = t.att.(Forgetter)
+	}
+	if forgetter == nil {
+		e.mu.Unlock()
+		return true, nil
+	}
+	rec, exists, err := e.store.Get(key)
+	e.mu.Unlock()
+	if err != nil || !exists || !rec.Compactable(cutoff) {
+		return false, err
+	}
+	if rec.NativeDispatches == 0 {
+		return true, nil
+	}
+	if rec.AckDigest != "" && !rec.Acknowledged {
+		return false, nil
+	}
+	if err := forgetter.Forget(key); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // replayTerminalAck re-releases the retained evidence of one terminal record
@@ -308,11 +351,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		e.mu.Lock()
 		att := t.att
 		e.mu.Unlock()
-		att.AcknowledgeResult(key, epoch, digest)
-		// Delivered — record it (MarkPublished failure shape:
-		// self-healing on the next replay).
-		_ = e.store.MarkAcknowledged(key)
-		return nil
+		return e.ackNative(att, key, epoch, digest)
 	}
 	// Validate retained terminal evidence against the bound run + digest,
 	// NOT against the client-facing state. A cancelled record keeps its
@@ -343,10 +382,29 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	e.mu.Lock()
 	att := t.att
 	e.mu.Unlock()
-	att.AcknowledgeResult(key, epoch, digest)
-	// Delivered — record it. A MarkAcknowledged failure is
-	// ignored (MarkPublished shape): the next replay re-Lookups, gets
-	// EvidenceNone, and re-Marks. Self-healing.
+	return e.ackNative(att, key, epoch, digest)
+}
+
+// ackNative sends one native acknowledgement outside e.mu and records it
+// durably once it is delivered: always for a plain AcknowledgeResult, and
+// for a CheckedAcknowledger only when it returns nil. A refused ack is
+// returned and leaves the record owing it (AckDigest set, not
+// Acknowledged), so replayTerminalAck sends the same digest again. A
+// MarkAcknowledged failure is ignored (MarkPublished shape): the next replay
+// re-Lookups, gets EvidenceNone, and re-Marks.
+func (e *Endpoint) ackNative(att Attachment, key requests.Key, epoch, digest string) error {
+	if checked, ok := att.(CheckedAcknowledger); ok {
+		if err := checked.AcknowledgeResultChecked(key, epoch, digest); err != nil {
+			return err
+		}
+	} else {
+		att.AcknowledgeResult(key, epoch, digest)
+	}
+	// Crash window: the ack landed but the durable flag did not. The replay
+	// path self-heals (Lookup -> EvidenceNone -> Mark).
+	if e.crashAt(PointAfterAck) != nil {
+		return nil
+	}
 	_ = e.store.MarkAcknowledged(key)
 	return nil
 }
@@ -548,11 +606,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	}
 	e.mu.Unlock()
 	if ackAtt != nil && ackDigest != "" {
-		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		// Delivered — record it durably (digest verified non-empty above).
-		// MarkAcknowledged failure ignored (MarkPublished
-		// shape): the next replay re-Lookups and re-Marks. Self-healing.
-		_ = e.store.MarkAcknowledged(ackKey)
+		_ = e.ackNative(ackAtt, ackKey, ackEpoch, ackDigest)
 	}
 	return nil
 }

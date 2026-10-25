@@ -548,12 +548,9 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 	return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
-// publishOnce delivers the prompt to the handle unless the claimed message
-// is already in its inbox (new or cur), so a redelivery never duplicates it.
-// It never creates the handle's mailbox or inbox. Once the message is known
-// absent, a refusal by the handle's mailbox is a *notDeliveredError; any
-// other error leaves the outcome unknown. A non-empty eventID labels the
-// message nostr:<eventID>, so the handle can fetch the DM event from the relay.
+// publishOnce delivers a binding's Buzz prompt to the handle through
+// PublishMailboxPrompt. A non-empty eventID labels the message
+// nostr:<eventID>, so the handle can fetch the DM event from the relay.
 func publishOnce(b binding.Binding, threadID, id, eventID string, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
@@ -564,42 +561,69 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, created time.T
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	// The handle answers buzz with `amq reply`, which cannot create a missing
-	// mailbox in a root without config.json, so the sender ensures its own.
-	// This runs before the redelivery check: a prompt an older amq-acp
-	// delivered still needs the mailbox for its reply.
-	if err := root.EnsureAgentDirs(mailboxSender); err != nil {
-		return err
-	}
-	name := id + ".md"
-	// Only a readable message with this id, read through the pinned root,
-	// proves the earlier delivery: a directory or a dangling link at the
-	// name is not one.
-	if held, err := inboxHasMessage(root, b.Handle, id); err != nil {
-		return err
-	} else if held {
-		return nil
-	}
-	body := strings.TrimRight(text, "\n") + "\n\n" +
-		"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
-		"A reply with `--kind status` shows as progress; any other reply is the final answer."
 	labels := []string{"acp", "buzz"}
 	if eventID != "" {
 		labels = append(labels, "nostr:"+eventID)
+	}
+	return PublishMailboxPrompt(root, id, created, MailboxPrompt{
+		To:      b.Handle,
+		From:    mailboxSender,
+		Thread:  threadID,
+		Subject: mailboxSubject,
+		Labels:  labels,
+		Body: strings.TrimRight(text, "\n") + "\n\n" +
+			"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
+			"A reply with `--kind status` shows as progress; any other reply is the final answer.",
+	})
+}
+
+// MailboxPrompt is one prompt for an AMQ handle: the handle it goes to, the
+// inbox the handle answers (From), and the exact thread, subject, labels and
+// body. PublishMailboxPrompt adds nothing to it.
+type MailboxPrompt struct {
+	To      string   `json:"to"`
+	From    string   `json:"from"`
+	Thread  string   `json:"thread"`
+	Subject string   `json:"subject"`
+	Labels  []string `json:"labels,omitempty"`
+	Body    string   `json:"body"`
+}
+
+// PublishMailboxPrompt delivers p to p.To as message id unless that message
+// is already in its inbox (new or cur), so a redelivery with the same id,
+// time and prompt never duplicates it. It never creates the handle's mailbox
+// or inbox. Once the message is known absent, a refusal by the handle's
+// mailbox is an error NotDeliveredReason recognizes; any other error leaves
+// the outcome unknown. A committed write whose sync failed is delivered.
+func PublishMailboxPrompt(root *fsq.DeliveryRoot, id string, created time.Time, p MailboxPrompt) error {
+	// The handle answers p.From with `amq reply`, which cannot create a
+	// missing mailbox in a root without config.json, so the sender ensures
+	// its own. This runs before the redelivery check: a prompt delivered
+	// earlier still needs the mailbox for its reply.
+	if err := root.EnsureAgentDirs(p.From); err != nil {
+		return err
+	}
+	// Only a readable message with this id, read through the pinned root,
+	// proves the earlier delivery: a directory or a dangling link at the
+	// name is not one.
+	if held, err := InboxHasMessage(root, p.To, id); err != nil {
+		return err
+	} else if held {
+		return nil
 	}
 	message := format.Message{
 		Header: format.Header{
 			Schema:   format.CurrentSchema,
 			ID:       id,
-			From:     mailboxSender,
-			To:       []string{b.Handle},
-			Thread:   threadID,
-			Subject:  mailboxSubject,
+			From:     p.From,
+			To:       []string{p.To},
+			Thread:   p.Thread,
+			Subject:  p.Subject,
 			Created:  created.UTC().Format(time.RFC3339Nano),
 			Priority: format.PriorityNormal,
-			Labels:   labels,
+			Labels:   p.Labels,
 		},
-		Body: body,
+		Body: p.Body,
 	}
 	data, err := message.Marshal()
 	if err != nil {
@@ -608,16 +632,26 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, created time.T
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	if err := completeMailbox(root, b.Handle); err != nil {
+	if err := completeMailbox(root, p.To); err != nil {
 		return err
 	}
-	if _, err := fsq.DeliverToExistingInbox(root, b.Handle, name, data); err != nil {
+	if _, err := fsq.DeliverToExistingInbox(root, p.To, id+".md", data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
 			return &notDeliveredError{reason: "its inbox refused the message: " + err.Error()}
 		}
 	}
 	return nil
+}
+
+// NotDeliveredReason returns the reason when err from PublishMailboxPrompt
+// proves that nothing reached the handle's inbox.
+func NotDeliveredReason(err error) (string, bool) {
+	var refused *notDeliveredError
+	if errors.As(err, &refused) {
+		return refused.reason, true
+	}
+	return "", false
 }
 
 // completeMailbox refuses delivery unless the handle's mailbox and inbox
@@ -740,12 +774,34 @@ type replyHit struct {
 // seen, not a read of every file. A header that cannot be parsed
 // is remembered as nil and the file is left for drain and the DLQ.
 type inboxScan struct {
-	dir     string
+	list    func() ([]os.DirEntry, error)
+	header  func(name string) (format.Header, error)
+	read    func(name string) (format.Message, error)
 	headers map[string]*format.Header
 }
 
 func newInboxScan(dir string) *inboxScan {
-	return &inboxScan{dir: dir, headers: map[string]*format.Header{}}
+	return &inboxScan{
+		list:    func() ([]os.DirEntry, error) { return os.ReadDir(dir) },
+		header:  func(name string) (format.Header, error) { return format.ReadHeaderFile(filepath.Join(dir, name)) },
+		read:    func(name string) (format.Message, error) { return format.ReadMessageFile(filepath.Join(dir, name)) },
+		headers: map[string]*format.Header{},
+	}
+}
+
+// newRootInboxScan is an inboxScan of the root-relative dir whose every
+// read goes through root.
+func newRootInboxScan(root *fsq.DeliveryRoot, dir string) *inboxScan {
+	return &inboxScan{
+		list: func() ([]os.DirEntry, error) { return root.ReadDir(dir) },
+		header: func(name string) (format.Header, error) {
+			return format.ReadHeaderFileRoot(root, filepath.Join(dir, name))
+		},
+		read: func(name string) (format.Message, error) {
+			return format.ReadMessageFileRoot(root, filepath.Join(dir, name))
+		},
+		headers: map[string]*format.Header{},
+	}
 }
 
 // replies refreshes the scan and returns its matches.
@@ -759,7 +815,7 @@ func (sc *inboxScan) replies(handle, threadID, promptID string, since time.Time)
 // refresh lists the box once, reads the headers of names not seen yet, and
 // forgets names that are gone. A missing dir is empty.
 func (sc *inboxScan) refresh() error {
-	entries, err := os.ReadDir(sc.dir)
+	entries, err := sc.list()
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -773,11 +829,13 @@ func (sc *inboxScan) refresh() error {
 		if _, known := sc.headers[name]; known {
 			continue
 		}
-		h, err := format.ReadHeaderFile(filepath.Join(sc.dir, name))
+		h, err := sc.header(name)
 		var pathErr *fs.PathError
 		switch {
 		case err == nil:
 			sc.headers[name] = &h
+		case errors.Is(err, fsq.ErrDeliveryRootChanged):
+			return err
 		case errors.As(err, &pathErr):
 			// gone or unreadable now; try again on the next refresh
 		default:
@@ -928,7 +986,7 @@ func (w *mailboxWatch) forward(newHits, curHits []replyHit) (string, string, []s
 			if err != nil {
 				return "", "", nil, err
 			}
-			drainedReceipt(dr, w.b.Handle, hit.header)
+			_ = drainedReceipt(dr, mailboxSender, hit.header)
 			owned = append(owned, ownedReply{strings.TrimSuffix(hit.filename, ".md"), msg})
 		}
 	}
@@ -958,22 +1016,87 @@ func (w *mailboxWatch) forward(newHits, curHits []replyHit) (string, string, []s
 // mover emits the drained receipt whoever wins forwarding, so a reply that
 // a concurrent cur recovery forwards first still gets one.
 func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, hit replyHit) (format.Message, bool, error) {
-	var committed *fsq.CommittedDurabilityError
-	if err := fsq.MoveNewToCur(root, mailboxSender, hit.filename); err != nil && !errors.As(err, &committed) {
-		if os.IsNotExist(err) {
-			return format.Message{}, false, nil
-		}
+	if moved, err := moveReply(root, mailboxSender, hit.filename); err != nil || !moved {
 		return format.Message{}, false, err
 	}
-	drainedReceipt(root, w.b.Handle, hit.header)
+	_ = drainedReceipt(root, mailboxSender, hit.header)
 	return w.recover(hit.filename)
 }
 
-// drainedReceipt records that consumer buzz drained a reply. It is
-// idempotent (one file per message id) and best effort, as in drain: the
-// claim already holds.
-func drainedReceipt(root *fsq.DeliveryRoot, sender string, h format.Header) {
-	_ = receipt.EmitDeliveryRoot(root, receipt.New(h.ID, h.Thread, sender, mailboxSender, receipt.StageDrained, ""))
+// moveReply moves one reply from consumer's inbox/new to cur the way drain
+// does. moved is false when another consumer moved it first (ENOENT); a
+// committed move whose sync failed is this caller's move.
+func moveReply(root *fsq.DeliveryRoot, consumer, filename string) (bool, error) {
+	var committed *fsq.CommittedDurabilityError
+	if err := fsq.MoveNewToCur(root, consumer, filename); err != nil && !errors.As(err, &committed) {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// drainedReceipt records that consumer drained the reply h. It is
+// idempotent: one file per message id.
+func drainedReceipt(root *fsq.DeliveryRoot, consumer string, h format.Header) error {
+	return receipt.EmitDeliveryRoot(root, receipt.New(h.ID, h.Thread, h.From, consumer, receipt.StageDrained, ""))
+}
+
+// MailboxReply is one message in a prompt's reply inbox that answers it:
+// its file name, the box that held it when found ("new" or "cur"), and its
+// header.
+type MailboxReply struct {
+	Name   string        `json:"name"`
+	Box    string        `json:"box"`
+	Header format.Header `json:"header"`
+}
+
+// FindReplies returns, oldest first, the messages in inbox (new, then cur)
+// that handle sent on thread, ref promptID and were created no earlier than
+// since: the match rule of a binding's reply watch. Every read goes through
+// root, and nothing is moved or written.
+func FindReplies(root *fsq.DeliveryRoot, inbox, handle, thread, promptID string, since time.Time) ([]MailboxReply, error) {
+	var out []replyHit
+	boxes := map[string]string{}
+	for _, box := range []string{"new", "cur"} {
+		hits, err := newRootInboxScan(root, filepath.Join("agents", inbox, "inbox", box)).replies(handle, thread, promptID, since)
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range hits {
+			if _, seen := boxes[h.filename]; !seen {
+				boxes[h.filename] = box
+				out = append(out, h)
+			}
+		}
+	}
+	sortHits(out)
+	replies := make([]MailboxReply, 0, len(out))
+	for _, h := range out {
+		replies = append(replies, MailboxReply{Name: h.filename, Box: boxes[h.filename], Header: h.header})
+	}
+	return replies, nil
+}
+
+// ConsumeReply drains one reply found by FindReplies for consumer, the
+// owner of inbox: a move from new to cur and the drained receipt. nil means
+// both are durable. A move whose directory sync failed is returned; a reply
+// already gone from new (an earlier move, maybe unsynced, or another
+// consumer's) gets both inbox directories synced again. Both steps are
+// idempotent.
+func ConsumeReply(root *fsq.DeliveryRoot, consumer string, r MailboxReply) error {
+	err := fsq.MoveNewToCur(root, consumer, r.Name)
+	if os.IsNotExist(err) {
+		inbox := filepath.Join("agents", consumer, "inbox")
+		if err = root.SyncDir(filepath.Join(inbox, "cur")); err == nil {
+			err = root.SyncDir(filepath.Join(inbox, "new"))
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return drainedReceipt(root, consumer, r.Header)
 }
 
 // recover forwards one reply in buzz/inbox/cur if this watch wins its

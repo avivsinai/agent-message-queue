@@ -185,7 +185,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 		}
 		created = parsed
 	}
-	delivered, err := inboxHasMessage(root, claim.To, claim.MessageID)
+	delivered, err := InboxHasMessage(root, claim.To, claim.MessageID)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -404,7 +404,7 @@ func DeliverPrepared(root *fsq.DeliveryRoot, to, thread, id string, created time
 	if len(data) > format.MaxMessageSize {
 		return Delivery{}, fmt.Errorf("message exceeds the maximum AMQ message size")
 	}
-	held, err := inboxHasMessage(root, to, id)
+	held, err := InboxHasMessage(root, to, id)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -420,14 +420,14 @@ func claimIdentity(eventID, messageID, to, thread string) *eventRecord {
 	return &eventRecord{EventID: eventID, MessageID: messageID, To: to, Thread: thread}
 }
 
-// inboxHasMessage reports whether the recipient's inbox (new or cur) already
+// InboxHasMessage reports whether the recipient's inbox (new or cur) already
 // holds the claimed message: the only delivery proof a replay trusts. Both
 // locations are inspected through the pinned delivery root with a no-follow
 // regular-file read: a directory or a symlink named <id>.md is not a
 // delivery, and the entry must parse as the claimed message
 // (header id equals the claimed id) — anything else refuses instead of
 // reporting a delivery that is not one.
-func inboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, error) {
+func InboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, error) {
 	name := messageID + ".md"
 	for _, rel := range []string{
 		filepath.Join("agents", handle, "inbox", "new", name),

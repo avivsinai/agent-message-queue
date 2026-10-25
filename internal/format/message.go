@@ -232,6 +232,17 @@ func ReadMessageFileRoot(root *fsq.DeliveryRoot, name string) (Message, error) {
 	return ParseMessage(data)
 }
 
+// ReadHeaderFileRoot reads the header of a root-relative message file
+// through the pinned DeliveryRoot, as ReadMessageFileRoot reads the message.
+func ReadHeaderFileRoot(root *fsq.DeliveryRoot, name string) (Header, error) {
+	file, _, err := root.OpenRegularNoFollow(name)
+	if err != nil {
+		return Header{}, err
+	}
+	defer func() { _ = file.Close() }()
+	return ReadHeader(file)
+}
+
 func ReadHeaderFile(path string) (Header, error) {
 	file, _, err := fsq.OpenRegularNoFollow(path)
 	if err != nil {

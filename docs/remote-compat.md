@@ -182,6 +182,7 @@ valid value for the runtime `terminal` enum.
 | pi | true | true | bridge revision 5 | false | bridge revision 4 | false | unavailable |
 | ACP host | true | true | true | false | reject only | false | unavailable |
 | Claude Code | true | submitted | false | false | opt-in, reject only | false | unavailable |
+| AMQ mailbox | true | submitted | true | false | false | false | unavailable |
 
 The v1 endpoint masks `steer` to false, even where an attachment declares it
 (`Endpoint.sessionProjection` in `internal/remote/core`). Claude Code
@@ -258,3 +259,13 @@ Reasons for every `false` (source: as cited per row in §3):
 - `claude_code.terminal`: `claude attach` works only on `--bg` sessions,
   which is a different kind of session than the one the user is typing into;
   no PTY or tmux binding is part of this feature.
+- `mailbox.submit` is graded **submitted**: the message is in the handle's
+  inbox, and nothing proves the handle read it. Its reply to the message is
+  the result.
+- `mailbox.cancel_request` cannot unsend a delivered message: after delivery
+  a cancel ends the request as delivered and no longer waited for. Before
+  delivery it keeps the message from being written.
+- `mailbox.approve_tool` and `mailbox.answer_question`: a mailbox has no
+  interaction seam, so the asking agent cannot answer its own question
+  through the share.
+- `mailbox.terminal`: a mailbox has no terminal.

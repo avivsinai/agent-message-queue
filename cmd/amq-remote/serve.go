@@ -195,7 +195,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	for _, a := range mfSnap.Adapters {
 		pinNative(a)
 	}
-	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep, pinNative))
+	server.SetRegistrar(liveRegistrar(c.root, stateDir, *me, ep, pinNative))
 	server.SetLinkHandler(links.request)
 	// amq-acp mirrors a Buzz-started request's native activity into Desktop.
 	server.SetActivityHandler(activity.MirrorHandler(ep))
@@ -472,7 +472,7 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 	var attachments []core.Attachment
 	var refusals []registry.Outcome
 	if len(mf.Adapters) > 0 {
-		for _, oc := range registry.Build(context.Background(), root, stateDir, mf) {
+		for _, oc := range registry.Build(context.Background(), root, stateDir, handle, mf) {
 			if oc.Attachment != nil {
 				attachments = append(attachments, oc.Attachment)
 			} else {
