@@ -119,7 +119,6 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
-          permission-issues: write
       - name: Open or update release pull request
         if: github.event_name == 'workflow_dispatch'
         env:

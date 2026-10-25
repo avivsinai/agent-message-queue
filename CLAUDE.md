@@ -26,7 +26,7 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
   artifacts from that tag. Existing tags can be dispatched again for recovery.
 - Configure `RELEASE_APP_CLIENT_ID` as a repository variable and
   `RELEASE_APP_PRIVATE_KEY` as a repository secret. The App needs repository
-  contents, pull-request, and issues write permissions. PR and tag creation fail
+  contents and pull-request write permissions. PR and tag creation fail
   closed without an App token; the publisher uses the default workflow token.
   Keep App-only tag protection disabled until an App-created release has been
   verified; then permit App tag creation and prohibit updates and deletion.
