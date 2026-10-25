@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.113.0](https://github.com/avivsinai/agent-message-queue/compare/v0.112.0...v0.113.0) (2026-10-25)
+
+
+### Features
+
+* **board:** show Codex plan limits from app-server ([#1235](https://github.com/avivsinai/agent-message-queue/issues/1235)) ([7142efb](https://github.com/avivsinai/agent-message-queue/commit/7142efb8d1a7c3857f2e3d55774e882e5d3b0c68))
+
+
+### Bug Fixes
+
+* **board:** bound one-shot GitHub refreshes ([#1239](https://github.com/avivsinai/agent-message-queue/issues/1239)) ([de3c9e7](https://github.com/avivsinai/agent-message-queue/commit/de3c9e72fd557d3ba0dc80542eed7d63355f89f4))
+* **coop:** warn when PATH hides a newer harness ([#1237](https://github.com/avivsinai/agent-message-queue/issues/1237)) ([200c696](https://github.com/avivsinai/agent-message-queue/commit/200c696ece366fdce1a1bf56e89fc34e505d87b6))
+* **wake:** answer Cursor hooks with a neutral JSON object ([#1240](https://github.com/avivsinai/agent-message-queue/issues/1240)) ([e2c7320](https://github.com/avivsinai/agent-message-queue/commit/e2c7320aa3c184bcdd6cfd9a2c56d90d6f0409d3))
+* **wake:** submit the Cursor doorbell after its paste settles ([#1236](https://github.com/avivsinai/agent-message-queue/issues/1236)) ([c1aab50](https://github.com/avivsinai/agent-message-queue/commit/c1aab508871285766fc9383d8b2984ca69fca789))
+
 ## [0.112.0](https://github.com/avivsinai/agent-message-queue/compare/v0.111.0...v0.112.0) (2026-10-25)
 
 
