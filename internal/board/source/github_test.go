@@ -327,34 +327,73 @@ func (r gatedRunner) Run(ctx context.Context, dir string, argv []string) ([]byte
 	return r.fakeRunner.Run(ctx, dir, argv)
 }
 
-// Codex review of PR #1208: a forced refresh that failed while the entry was
-// still fresh left the next run showing that entry as healthy.
+// Codex review of PR #1208: a failed forced refresh left warm cards healthy.
+// Field report 2026-10-25: a one-shot board stalled 18.5s on gh connect.
 func TestGitHubFailedForcedRefreshDegradesWarmCache(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
-	calls := map[string]int{}
-	fake := fakeRunner{t: t, outputs: githubOutputs(), calls: calls}
-	g := demoGitHub()
-	g.Cache = source.DirCache{Dir: t.TempDir()}
-	warmAt := githubNow.Add(-time.Minute)
-	env := githubEnv(fake)
-	env.Now = func() time.Time { return warmAt }
-	if res := g.Read(context.Background(), env); res.Status != board.StatusOK {
-		t.Fatalf("warm read: %s %s", res.Status, res.Detail)
-	}
+	for _, deadline := range []bool{false, true} {
+		name := "HTTP failure with fresh cache"
+		if deadline {
+			name = "deadline with stale cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := map[string]int{}
+			fake := fakeRunner{t: t, outputs: githubOutputs(), calls: calls}
+			g := demoGitHub()
+			g.Account = "octo-agent"
+			g.Repos = []string{"octo-org/demo"}
+			g.Cache = source.DirCache{Dir: t.TempDir()}
+			warmAt := githubNow.Add(-time.Minute)
+			if deadline {
+				warmAt = githubNow.Add(-g.TTL - time.Minute)
+			}
+			env := githubEnv(fake)
+			env.Now = func() time.Time { return warmAt }
+			if res := g.Read(context.Background(), env); res.Status != board.StatusOK {
+				t.Fatalf("warm read: %s %s", res.Status, res.Detail)
+			}
 
-	fake.fail = map[string]error{"gh api graphql": errors.New("HTTP 502")}
-	env = githubEnv(fake)
-	forced := g
-	forced.Refresh = true
-	forced.Read(context.Background(), env)
-	res := g.Read(context.Background(), env)
-	if calls["gh api graphql"] != 2 {
-		t.Errorf("graphql calls = %d, want 2 (warm and forced)", calls["gh api graphql"])
+			fake.fail = map[string]error{"gh api graphql": errors.New("HTTP 502")}
+			env = githubEnv(fake)
+			wantDetail := "HTTP 502"
+			if deadline {
+				g.Timeout = 10 * time.Millisecond
+				env.Run = githubDeadlineRunner{fakeRunner: fake, timeout: g.Timeout}
+				wantDetail = context.DeadlineExceeded.Error()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			refresh := g
+			refresh.Refresh = !deadline
+			for _, res := range []board.Result{refresh.Read(ctx, env), g.Read(ctx, env)} {
+				if res.Status != board.StatusDegraded || !strings.Contains(res.Detail, wantDetail) || !res.ObservedAt.Equal(warmAt) || len(res.Items) == 0 {
+					t.Errorf("read: %s %q observed %s with %d items, want warm cards degraded by %s", res.Status, res.Detail, res.ObservedAt, len(res.Items), wantDetail)
+				}
+			}
+			if calls["gh api graphql"] != 2 {
+				t.Errorf("graphql calls = %d, want 2 (warm and failed refresh)", calls["gh api graphql"])
+			}
+		})
 	}
-	if res.Status != board.StatusDegraded || !strings.Contains(res.Detail, "HTTP 502") || !res.ObservedAt.Equal(warmAt) || len(res.Items) == 0 {
-		t.Errorf("next run: %s %q observed %s with %d items, want the warm data degraded by the failure", res.Status, res.Detail, res.ObservedAt, len(res.Items))
+}
+
+type githubDeadlineRunner struct {
+	fakeRunner
+	timeout time.Duration
+}
+
+func (r githubDeadlineRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
+	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" {
+		r.calls["gh api graphql"]++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > r.timeout {
+			r.t.Fatalf("GraphQL deadline = %v (present %v), want within %v", deadline, ok, r.timeout)
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
+	return r.fakeRunner.Run(ctx, dir, argv)
 }
 
 func (r gatedRunner) RunLimited(ctx context.Context, dir string, argv []string, _ int) ([]byte, error) {

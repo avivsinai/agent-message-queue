@@ -25,6 +25,8 @@ import (
 
 var version = "dev"
 
+const oneShotGitHubTimeout = 2 * time.Second
+
 const (
 	exitGeneral = 1
 	exitUsage   = 2
@@ -101,7 +103,7 @@ func run(args []string) int {
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
 	}
-	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh})
+	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh, githubTimeout: oneShotGitHubTimeout})
 
 	switch {
 	case *asJSON:
@@ -164,8 +166,9 @@ func loadConfigFiles(dir, home string) (board.FileConfig, []string) {
 
 // sourceOptions are what differ between the one-shot faces and serve.
 type sourceOptions struct {
-	refresh   bool   // ignore the forge cache
-	ghAccount string // the viewer a token read once belongs to; empty: the configured login
+	githubTimeout time.Duration // zero keeps the source parent deadline
+	refresh       bool          // ignore the forge cache
+	ghAccount     string        // the viewer a token read once belongs to; empty: the configured login
 	// provider wraps each enabled external provider; nil reads it on every
 	// refresh.
 	provider func(source.External) board.Source
@@ -180,6 +183,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		Identities:               cfg.GitHubIdentities,
 		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
 		TTL:                      cfg.GitHubTTL,
+		Timeout:                  opt.githubTimeout,
 		Refresh:                  opt.refresh,
 		Account:                  opt.ghAccount,
 	}
