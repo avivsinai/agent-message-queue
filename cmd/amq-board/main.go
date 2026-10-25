@@ -37,8 +37,9 @@ Print the fleet board for the AMQ project of the current directory: the
 columns Waiting on you, In flight, Blocked, and Unclaimed, the source health
 strip, and the roster per session. Sources are read-only: AMQ through the amq
 CLI, beads through bd --readonly --sandbox when a .beads directory exists,
-GitHub pull requests and issues through one gh api graphql call cached for
-the TTL (default 10m) when the origin remote is on github.com, and external
+GitHub pull requests and issues through gh api graphql (one call, and up to
+4 more when review requests fill more than one page of 50) cached for the
+TTL (default 10m) when the origin remote is on github.com, and external
 providers registered in ~/.amq/board.json.
 Commands on cards are printed for you to copy; amq-board never runs them.
 

@@ -66,7 +66,7 @@ The model is rebuilt every minute, and a request only reads the last one.
 GitHub answers from its cache until the TTL ends, and each external provider
 runs at most once per its TTL. Refresh on the page ignores those caches,
 at most once a minute: a press within a minute of the last forced refresh, or
-while a refresh runs, joins it, so five quick presses make one `gh api` call.
+while a refresh runs, joins it, so five quick presses make one GitHub fetch.
 The page reads `model.json` every 15 seconds and reloads when the model is
 newer, unless a details panel is open or text is selected; the filter stays.
 
@@ -135,7 +135,7 @@ claude plugin test plugins/amq-board
 | AMQ | `amq env --json`, `amq session list --json`, `amq who --json`, per session `amq doctor --ops --json --root <session>`, `amq thread open --all-sessions --json` | Always on. AMQ resolves the root from the current directory. `doctor --ops` counts unread mail only for agents in a session's `config.json`; other mailboxes show "unread not counted", and a mailbox doctor could not read shows "not counted" with the reason and degrades the source. A failed `amq env` also degrades the source: the rest still shows, without cross-project answer actions. |
 | beads | `bd --readonly --sandbox list --json --brief --status open,in_progress,blocked,deferred --limit 0` | When `bd` is on `PATH` and the project has `.beads/`. `--limit 0` reads every row (bd stops at 50 otherwise). Deferred beads are read so that a deferred blocker still blocks; they are not shown. A bead id mentioned elsewhere and not open is looked up with one `bd --readonly --sandbox list --all --id ...` call, at most 200 ids per run. |
 
-| GitHub | `git remote get-url origin`, `gh config get user -h github.com`, and one `gh api graphql --hostname github.com` call for every repository in scope | When `gh` is on `PATH` and the `origin` remote is on github.com, or `forges.github.repos` names repositories. One call per refresh because a gh call that reads the token can prompt the keychain; the response is cached for the TTL (default 10 min) under `~/.amq/board/cache/`, keyed by host, repo set, account (the viewer login the response names), and query version, with no token in it. A second run within the TTL makes no `gh api` call. Concurrent runs refresh one at a time: a run that waits reads the entry the other run wrote. After a failed refresh, runs for the next 60 seconds show the last entry as degraded with the failure and make no `gh api` call; `--refresh` skips that wait. With `GH_TOKEN` or `GITHUB_TOKEN` set, the account is the token's, which the configured user does not name, so the cache is not read. The first 50 open PRs and issues per repository are read; more are reported as "N more PRs not fetched". PRs that request your review are found by a search even past that page; the search reads up to 5 pages of 50, each page after the first one more `gh api graphql` call, and reports the rest as "N more review requests not fetched". |
+| GitHub | `git remote get-url origin`, `gh config get user -h github.com`, and one `gh api graphql --hostname github.com` call for every repository in scope | When `gh` is on `PATH` and the `origin` remote is on github.com, or `forges.github.repos` names repositories. One call per refresh (plus the review-request pages below) because a gh call that reads the token can prompt the keychain; the response is cached for the TTL (default 10 min) under `~/.amq/board/cache/`, keyed by host, repo set, account (the viewer login the response names), and query version, with no token in it. A second run within the TTL makes no `gh api` call. Concurrent runs refresh one at a time: a run that waits reads the entry the other run wrote. After a failed refresh, runs for the next 60 seconds show the last entry as degraded with the failure and make no `gh api` call; `--refresh` skips that wait. With `GH_TOKEN` or `GITHUB_TOKEN` set, the account is the token's, which the configured user does not name, so the cache is not read. The first 50 open PRs and issues per repository are read; more are reported as "N more PRs not fetched". PRs that request your review are found by a search even past that page; the search reads up to 5 pages of 50, each page after the first one more `gh api graphql` call, and reports the rest as "N more review requests not fetched". |
 | External providers | The executable and fixed arguments registered in `~/.amq/board.json` | Data only: the board validates every field, names the source `ext:<name>`, and drops invalid items, counting them as skipped. A provider cannot add a command to a card. |
 
 On GitHub, a PR that requests your review, or one an agent authored that is
@@ -270,3 +270,65 @@ deliver nothing.
   leaves on the next run.
 - **acknowledge**: sends `--kind status`; the card stays.
 - **show thread**, **message**, **show bead**, **claim bead**.
+
+## Live acceptance check
+
+Run this check with the installed `amq`, `amq-board`, and `bd` before you
+accept a board change. It uses a throwaway Git project and the handles
+`alpha` and `beta`; remove the project when you are done.
+
+1. Make the project and two sessions:
+
+   ```sh
+   mkdir board-check && cd board-check && git init -q
+   amq coop init --agents alpha,beta,user
+   amq session create s1 --me alpha
+   amq session create s2 --me beta
+   ```
+
+2. In a second terminal, as `alpha` in `s1`, send a review request to `beta`:
+
+   ```sh
+   eval "$(amq env --session s1 --me alpha)"
+   echo "Please review the backoff change." |
+     amq send --to beta --kind review_request --subject "Review: courier backoff" --body -
+   ```
+
+3. In a third terminal, as `beta` in `s2`, send two todos to `user`:
+
+   ```sh
+   eval "$(amq env --session s2 --me beta)"
+   echo "30 s or 2 min?" | amq send --to user --kind todo --subject "Pick the retry window" --body -
+   echo "Check the wording." | amq send --to user --kind todo --subject "Confirm the release note" --body -
+   ```
+
+4. In the first terminal, the owner's, run
+   `eval "$(amq env --session s1 --me user)"` and then `amq-board`. In
+   flight shows "Review: courier backoff", owned by `beta` in `s1`. Waiting
+   on you shows both todos, with the line "s2: 2 unread for user" above
+   them. The roster lists `s1` and `s2`.
+5. In a separate terminal in this project, run `amq-board serve` and open
+   the URL it prints. Keep the owner's terminal free for the commands below.
+   The page shows the same strips. The same address without the token answers
+   404.
+6. On "Pick the retry window", press Copy on the complete command, paste it
+   into the owner's terminal, type a reply, and press Ctrl-D. Press Refresh
+   on the page, or wait one minute: the strip leaves Waiting on you. The
+   unread line does not change, because it counts messages, not cards.
+7. On "Confirm the release note", run the acknowledge command (under More
+   commands and evidence) the same way and refresh: the strip stays.
+8. Run `bd init`, then
+   `bd update "$(bd create "Courier retry" --silent)" --status in_progress --assignee alpha`,
+   and refresh: the bead shows in In flight. Run the `.beads` check under
+   [Read-only](#read-only): it prints `unchanged`.
+9. Take `bd` off `PATH` for one run:
+
+   ```sh
+   nobd=$(mktemp -d) && ln -s "$(command -v amq)" "$nobd/amq"
+   PATH="$nobd:/usr/bin:/bin" "$(command -v amq-board)"
+   ```
+
+   The sources line shows `beads unavailable: bd not on PATH`, and the AMQ
+   cards still show.
+10. Press Ctrl-C in the `serve` terminal: it stops and removes
+    `~/.amq/board/serve.json`.
