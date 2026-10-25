@@ -307,8 +307,10 @@ accept a board change. It uses a throwaway Git project and the handles
    flight shows "Review: courier backoff", owned by `beta` in `s1`. Waiting
    on you shows both todos, with the line "s2: 2 unread for user" above
    them. The roster lists `s1` and `s2`.
-5. Run `amq-board serve` and open the URL it prints. The page shows the same
-   strips. The same address without the token answers 404.
+5. In a separate terminal in this project, run `amq-board serve` and open
+   the URL it prints. Keep the owner's terminal free for the commands below.
+   The page shows the same strips. The same address without the token answers
+   404.
 6. On "Pick the retry window", press Copy on the complete command, paste it
    into the owner's terminal, type a reply, and press Ctrl-D. Press Refresh
    on the page, or wait one minute: the strip leaves Waiting on you. The
