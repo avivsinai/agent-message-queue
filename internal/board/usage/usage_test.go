@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -231,7 +232,8 @@ func TestListingCannotStarveRecentProjectSessions(t *testing.T) {
 // output; a Codex total that went down counted again in full; a pi fork
 // copies its parent's entries, which counted twice. The copies belong to the
 // parent's worker, never to the fork's, even when the newer fork is read
-// first (Codex review of PR #1227, P2).
+// first and its header has the copied entry's timestamp (Codex review of
+// PR #1227, P2, two rounds).
 func TestEachSpendRecordCountsOnce(t *testing.T) {
 	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
 	claudeRow := func(out int) string {
@@ -278,7 +280,7 @@ func TestEachSpendRecordCountsOnce(t *testing.T) {
 				piEntry("a1b2c3d4", "10:00:05", 100, 50),
 			},
 			forkFile: {
-				`{"type":"session","version":3,"id":"` + piFork + `","timestamp":"2026-10-22T10:30:00.000Z","cwd":"/work/demo","parentSession":"/home/u/.pi/` + parentFile + `"}`,
+				`{"type":"session","version":3,"id":"` + piFork + `","timestamp":"2026-10-22T10:00:05.000Z","cwd":"/work/demo","parentSession":@parent}`,
 				piEntry("a1b2c3d4", "10:00:05", 100, 50),
 				piEntry("b5c6d7e8", "10:31:00", 10, 5),
 			},
@@ -289,8 +291,16 @@ func TestEachSpendRecordCountsOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
+			// @parent is the parent file's path as pi records it.
+			parent, err := json.Marshal(filepath.Join(home, filepath.FromSlash(parentFile)))
+			if err != nil {
+				t.Fatal(err)
+			}
 			for path, lines := range tc.files {
 				full := filepath.Join(home, filepath.FromSlash(path))
+				for i := range lines {
+					lines[i] = strings.ReplaceAll(lines[i], "@parent", string(parent))
+				}
 				writeFile(t, full, lines...)
 				if at, ok := tc.mtime[path]; ok {
 					if err := os.Chtimes(full, at, at); err != nil {

@@ -92,7 +92,7 @@ type Session struct {
 	Harness string
 	// ID is the root session id: a Claude sessionId, the root Codex thread,
 	// or a pi session id. A mapping from it to a worker is structural. It is
-	// empty for pi entries a fork copied while their own session went unread.
+	// empty for pi entries a fork copied whose origin file went unread.
 	ID string
 	// Unknown is set when a record of this session has a format version
 	// the reader was not checked against: that record is not counted, so
