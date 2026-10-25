@@ -13,11 +13,11 @@ amq-board --refresh  # ignore the GitHub cache and fetch once
 It prints four columns, in this order:
 
 - **Waiting on you**: requests owed by the reserved `user` handle, and work
-  that waits on you or that you own. Above the cards, each session shows its
-  count of unread messages for `user`; that count overlaps the cards and is
-  never added to them.
-- **In flight**: work an owner holds (an AMQ request owed by an agent, a bead
-  in progress or assigned).
+  that waits on you or that you own and is blocked. Above the cards, each
+  session shows its count of unread messages for `user`; that count overlaps
+  the cards and is never added to them.
+- **In flight**: work an owner holds, you included (an AMQ request owed by an
+  agent, a bead in progress or assigned, an open PR waiting on review).
 - **Blocked**: work that cannot move, and whose action it waits on.
 - **Unclaimed**: work with no owner.
 

@@ -84,6 +84,12 @@ func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
 	if !hasToken(pr("16"), "bead:demo-g1", "branch name") {
 		t.Errorf("#16 related = %+v", pr("16").Related)
 	}
+	// Seen live 2026-10-25: an open PR the viewer authored, with no review
+	// requested from the viewer, sat in Waiting on you with "since unknown".
+	// Owning open work is In flight, and the reason dates from createdAt.
+	if c := pr("17"); c.Column != board.ColumnInFlight || !c.Reason.Since.Equal(time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("#17 = %s since %v, want In flight since its createdAt", c.Column, c.Reason.Since)
+	}
 	if c := cards["forge:github.com/octo-org/demo#20"]; c.Column != board.ColumnUnclaimed {
 		t.Errorf("issue #20 = %s", c.Column)
 	}
