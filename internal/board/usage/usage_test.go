@@ -224,3 +224,75 @@ func TestListingCannotStarveRecentProjectSessions(t *testing.T) {
 		t.Fatalf("account is complete although the budget stopped it: %+v", a)
 	}
 }
+
+// Each spend record counts once, at its final value. Regressions for the
+// design review of usage-library-design-r2 (2026-10-25): Claude kept the
+// first streaming row of a message although a later row carries the final
+// output; a Codex total that went down counted again in full; a pi fork
+// copies its parent's entries, which counted twice.
+func TestEachSpendRecordCountsOnce(t *testing.T) {
+	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
+	claudeRow := func(out int) string {
+		return `{"type":"assistant","timestamp":"2026-10-22T11:00:00.000Z","sessionId":"` + sid + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"msg_a","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":` + fmt.Sprint(out) + `}}}`
+	}
+	codexTotal := func(at string, total int) string {
+		return `{"timestamp":"2026-10-22T` + at + `.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":` + fmt.Sprint(total) + `,"cached_input_tokens":0,"output_tokens":0,"total_tokens":` + fmt.Sprint(total) + `}}}}`
+	}
+	piEntry := `{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2026-10-22T10:00:05.000Z","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}`
+	piSession := func(id string) string {
+		return `{"type":"session","version":3,"id":"` + id + `","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}`
+	}
+	for _, tc := range []struct {
+		name    string
+		harness string
+		files   map[string][]string
+		want    int64
+	}{
+		{"claude streaming rows", Claude, map[string][]string{
+			"projects/-work-demo/" + sid + ".jsonl": {claudeRow(1), claudeRow(650)},
+		}, 2 + 650},
+		{"codex total goes down", Codex, map[string][]string{
+			"sessions/2026/10/22/rollout-2026-10-22T11-00-00-cccccccc-0000-4000-8000-000000000003.jsonl": {
+				`{"timestamp":"2026-10-22T11:00:00.000Z","type":"session_meta","payload":{"id":"cccccccc-0000-4000-8000-000000000003","cwd":"/work/demo","cli_version":"0.163.0","source":"cli"}}`,
+				codexTotal("11:00:01", 1000), codexTotal("11:00:02", 1500), codexTotal("11:00:03", 1200),
+			},
+		}, 1500},
+		{"pi fork copies parent entries", Pi, map[string][]string{
+			"agent/sessions/--work-demo--/2026-10-22T10-00-00-000Z_eeeeeeee-0000-4000-8000-000000000005.jsonl": {
+				piSession("eeeeeeee-0000-4000-8000-000000000005"), piEntry,
+			},
+			"agent/sessions/--work-demo--/2026-10-22T10-30-00-000Z_ffffffff-0000-4000-8000-000000000006.jsonl": {
+				piSession("ffffffff-0000-4000-8000-000000000006"), piEntry,
+			},
+		}, 150},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			for path, lines := range tc.files {
+				writeFile(t, filepath.Join(home, filepath.FromSlash(path)), lines...)
+			}
+			a := Read(Config{Homes: map[string][]string{tc.harness: {home}}}, testNow, demoRoots, nil).Accounts[0]
+			var fresh int64
+			for _, s := range a.Sessions {
+				c, _ := s.Totals(testNow.Add(-span))
+				fresh += c.Fresh()
+			}
+			if fresh != tc.want {
+				t.Fatalf("counted %d fresh tokens, want %d", fresh, tc.want)
+			}
+		})
+	}
+}
+
+// "windows not reported by this plan" is a claim about the plan, so it needs
+// a rate limit report that carried no windows; with none read, the windows
+// are unknown. Regression for the design review of usage-library-design-r2
+// (2026-10-25): the text showed with no Codex record read at all.
+func TestCodexPlanWindowsNeedARateLimitReport(t *testing.T) {
+	a := Read(Config{Homes: map[string][]string{Codex: {t.TempDir()}}}, testNow, demoRoots, nil).Accounts[0]
+	for _, l := range a.Limits {
+		if strings.Contains(l.Reason, "not reported by this plan") {
+			t.Fatalf("limit %+v claims the plan's windows with no rate limit report read", l)
+		}
+	}
+}

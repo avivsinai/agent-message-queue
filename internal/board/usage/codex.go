@@ -38,8 +38,9 @@ type codexUsage struct {
 }
 
 // codexTokenCount is one token_count event. total_token_usage is the
-// thread's cumulative count; consecutive events can repeat it, so spend is
-// the delta between consecutive totals, never a sum of last_token_usage.
+// thread's cumulative count; consecutive events can repeat it or report an
+// older, lower total, so spend is the rise above the highest total so far,
+// never a sum of last_token_usage.
 type codexTokenCount struct {
 	Timestamp time.Time `json:"timestamp"`
 	Payload   struct {
@@ -77,6 +78,8 @@ type codexAccount struct {
 	newestAt    time.Time
 	reached     string
 	windowsSeen bool
+	// reportSeen is set by any rate limit report, with or without windows.
+	reportSeen bool
 	// unknown is set when an eligible rollout has an unverified version;
 	// its events, limits included, were not read.
 	unknown string
@@ -132,12 +135,16 @@ func readCodex(acct *Account, files []file, now time.Time, eligible Eligible, b 
 	if facts.balance != "" {
 		acct.Limits = append(acct.Limits, Limit{Kind: "credits", Name: "credits", Balance: facts.balance, AsOf: facts.balanceAt, Source: "rollout"})
 	}
-	reason := "windows not reported by this plan"
+	var reason string
 	switch {
 	case facts.unknown != "":
 		reason = "limit unknown (" + facts.unknown + ")"
 	case facts.windowsSeen:
 		reason = "plan windows reported; this version does not read them"
+	case facts.reportSeen:
+		reason = "windows not reported by this plan"
+	default:
+		reason = "limit unknown (no rate limit report read)"
 	}
 	acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Name: "windows", Source: "rollout", Reason: reason})
 }
@@ -208,11 +215,12 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 					return false
 				}
 			}
-			if prev != nil && cur.Total == prev.Total {
+			// A total at or below the highest so far is no new spend.
+			if prev != nil && cur.Total <= prev.Total {
 				return true
 			}
 			d := cur
-			if prev != nil && cur.Total > prev.Total {
+			if prev != nil {
 				d = codexUsage{In: cur.In - prev.In, Cached: cur.Cached - prev.Cached, CacheWrite: cur.CacheWrite - prev.CacheWrite, Out: cur.Out - prev.Out}
 			}
 			c := cur
@@ -271,6 +279,7 @@ func noteRateLimits(tc codexTokenCount, facts *codexAccount) {
 	if rl == nil {
 		return
 	}
+	facts.reportSeen = true
 	if rl.Credits != nil && rl.Credits.Balance != nil && tc.Timestamp.After(facts.balanceAt) {
 		facts.balance, facts.balanceAt = *rl.Credits.Balance, tc.Timestamp
 	}

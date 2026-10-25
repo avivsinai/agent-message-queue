@@ -18,11 +18,14 @@ type piHeader struct {
 }
 
 // piLine is an assistant message entry. Only these entries are counted;
-// "usage" entries and compaction usage would count the same tokens twice.
+// "usage" entries and compaction usage would count the same tokens twice. A
+// fork copies its parent's entries, id and timestamp unchanged, into its own
+// file, so an entry counts once across the account's files.
 // cost.total is the provider's billed cost when totalFromProvider is true,
 // otherwise a catalog estimate; a total of 0 with no flag reports no cost.
 type piLine struct {
 	Type      string    `json:"type"`
+	ID        string    `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
 	Message   struct {
 		Role  string `json:"role"`
@@ -46,6 +49,7 @@ const piNoLimits = "limit unknown (pi records no plan limits)"
 func readPi(acct *Account, files []file, now time.Time, eligible Eligible, b *budget) {
 	since := now.Add(-span)
 	sessions := map[string]*Session{}
+	seen := map[piEntry]bool{}
 	var unknown string
 	for _, fl := range files {
 		if b.spent() {
@@ -55,7 +59,7 @@ func readPi(acct *Account, files []file, now time.Time, eligible Eligible, b *bu
 		if err != nil {
 			continue // unread: the totals say "at least"
 		}
-		switch readPiSession(f, since, eligible, b, &acct.Skipped, sessions, &unknown) {
+		switch readPiSession(f, since, eligible, b, &acct.Skipped, sessions, seen, &unknown) {
 		case readDone:
 			acct.Read++
 		case readUnverified:
@@ -71,7 +75,14 @@ func readPi(acct *Account, files []file, now time.Time, eligible Eligible, b *bu
 	acct.Limits = append(acct.Limits, Limit{Kind: "unknown", Source: "none", Reason: reason})
 }
 
-func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, sessions map[string]*Session, unknown *string) readOutcome {
+// piEntry identifies an entry across files: ids are short, so the timestamp
+// keeps two sessions' entries apart.
+type piEntry struct {
+	id string
+	at int64 // Unix nanoseconds: one instant, whatever its zone
+}
+
+func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, skipped *int, sessions map[string]*Session, seen map[piEntry]bool, unknown *string) readOutcome {
 	r := bufio.NewReaderSize(f, 1<<16)
 	line, _ := readLine(r, b)
 	var h piHeader
@@ -102,6 +113,13 @@ func readPiSession(f *os.File, since time.Time, eligible Eligible, b *budget, sk
 		var l piLine
 		if json.Unmarshal(raw, &l) != nil || l.Type != "message" || l.Message.Role != "assistant" || l.Message.Usage == nil || l.Timestamp.Before(since) {
 			return true
+		}
+		if l.ID != "" {
+			k := piEntry{l.ID, l.Timestamp.UnixNano()}
+			if seen[k] {
+				return true
+			}
+			seen[k] = true
 		}
 		u := l.Message.Usage
 		c := Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}
