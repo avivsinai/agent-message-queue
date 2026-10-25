@@ -263,13 +263,15 @@ func TestBoardSourceDefects(t *testing.T) {
 	}{
 		{
 			// P2 1: an inbox doctor could not read looked empty and counted.
+			// Live board 2026-10-25: one incomplete mailbox marked the whole
+			// AMQ source degraded; it is a coverage note on an ok source.
 			name: "unreadable inbox is not counted",
 			edit: map[string]func(string) string{"amq doctor --ops --json --root /fixture/.agent-mail/s1": replace(
 				`{"handle": "alpha", "unread_count": 0,`,
 				`{"handle": "alpha", "unread_count": 0, "unread_count_error": "open inbox/new: permission denied",`)},
 			check: func(t *testing.T, m board.Model) {
-				if s := source_(m, "amq"); s.Status != board.StatusDegraded || !strings.Contains(s.Detail, "permission denied") {
-					t.Errorf("amq source = %s %q", s.Status, s.Detail)
+				if s := source_(m, "amq"); s.Status != board.StatusOK || !s.Partial || !strings.Contains(s.Coverage.Detail, "1 mailbox not counted: s1/alpha") {
+					t.Errorf("amq source = %s partial=%v %q", s.Status, s.Partial, s.Coverage.Detail)
 				}
 				if a, ok := rosterAgent(m, "s1", "alpha"); !ok || a.Counted {
 					t.Errorf("s1/alpha found=%v counted=%v", ok, a.Counted)
