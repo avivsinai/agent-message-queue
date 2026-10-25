@@ -162,6 +162,7 @@ func (g GitHub) entryKey(login CacheKey) (CacheKey, bool) {
 }
 
 // cached is the read a fresh entry for login serves, unless Refresh is set.
+// A recent failed refresh newer than the entry degrades it.
 func (g GitHub) cached(login CacheKey, repos []string, now time.Time) (board.Result, bool) {
 	if g.Refresh {
 		return board.Result{}, false
@@ -173,6 +174,9 @@ func (g GitHub) cached(login CacheKey, repos []string, now time.Time) (board.Res
 	resp, fetchedAt, ok := g.Cache.Get(key, now, g.TTL)
 	if !ok {
 		return board.Result{}, false
+	}
+	if res, failed := g.failedRecently(login, repos, now); failed {
+		return res, true
 	}
 	return g.Build(resp, repos, fetchedAt, nil), true
 }
@@ -222,9 +226,12 @@ func (g GitHub) refresh(ctx context.Context, env board.Env, repos []string, logi
 		if !record {
 			return res
 		}
-		recErr := g.putRecord(login, githubFailedSchema, now, githubFailedRecord{Detail: res.Detail})
+		// Stamped when the call returned, so a slow failing call does not
+		// use up the hold.
+		failedAt := env.Now()
+		recErr := g.putRecord(login, githubFailedSchema, failedAt, githubFailedRecord{Detail: res.Detail})
 		if len(res.Items) == 0 {
-			if last := g.lastAs(login, repos, now, "GitHub refresh failed: "+res.Detail); len(last.Items) > 0 {
+			if last := g.lastAs(login, repos, failedAt, "GitHub refresh failed: "+res.Detail); len(last.Items) > 0 {
 				res = last
 			}
 		}

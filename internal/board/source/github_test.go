@@ -157,7 +157,8 @@ func TestGitHubCachedReadMakesOneCall(t *testing.T) {
 // entry expired make one call. Codex review of PR #1208 added two rows: a gh
 // config login that differs from the token's viewer login (a renamed
 // account) made the waiter miss the entry and call gh again, and a failed
-// refresh made the waiter repeat it.
+// refresh made the waiter repeat it; its next review found that a failure
+// stamped before a slow request had already used up the hold.
 func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
@@ -166,12 +167,13 @@ func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
 		name       string
 		login      string // gh config user; the response's viewer is octo-owner
 		fail       error
+		elapsed    time.Duration // how long the GraphQL call takes
 		wantStatus board.SourceStatus
 		wantAt     time.Time
 	}{
 		{name: "fresh data for both", login: "octo-owner", wantStatus: board.StatusOK, wantAt: githubNow},
 		{name: "renamed account", login: "octo-old-name", wantStatus: board.StatusOK, wantAt: githubNow},
-		{name: "failed refresh", login: "octo-owner", fail: errors.New("HTTP 502"), wantStatus: board.StatusDegraded, wantAt: seededAt},
+		{name: "failed refresh", login: "octo-owner", fail: errors.New("HTTP 502"), elapsed: time.Minute, wantStatus: board.StatusDegraded, wantAt: seededAt},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -188,7 +190,10 @@ func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
 
 			fake.fail = map[string]error{"gh api graphql": tc.fail}
 			race := &refreshRace{readers: map[int]bool{}, release: make(chan struct{})}
-			r := gatedRunner{fakeRunner: fake, race: race}
+			clock := &testClock{now: githubNow}
+			r := gatedRunner{fakeRunner: fake, race: race, clock: clock, elapsed: tc.elapsed}
+			env := githubEnv(r)
+			env.Now = clock.Now
 			results := make([]board.Result, 2)
 			var wg sync.WaitGroup
 			for i := range results {
@@ -197,7 +202,7 @@ func TestGitHubExpiredCacheRefreshesOnceAcrossRuns(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					results[i] = g.Read(context.WithValue(context.Background(), runKey{}, i), githubEnv(r))
+					results[i] = g.Read(context.WithValue(context.Background(), runKey{}, i), env)
 				}()
 			}
 			wg.Wait()
@@ -265,16 +270,68 @@ func (c probeCache) Last(key source.CacheKey) ([]byte, time.Time, bool) {
 	return c.DirCache.Last(key)
 }
 
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 type gatedRunner struct {
 	fakeRunner
-	race *refreshRace
+	race    *refreshRace
+	clock   *testClock
+	elapsed time.Duration
 }
 
 func (r gatedRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
-	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" && r.race.note(ctx.Value(runKey{}).(int), true) == 1 {
-		<-r.race.release
+	if len(argv) > 2 && argv[0] == "gh" && argv[1] == "api" && argv[2] == "graphql" {
+		if r.race.note(ctx.Value(runKey{}).(int), true) == 1 {
+			<-r.race.release
+		}
+		r.clock.Add(r.elapsed)
 	}
 	return r.fakeRunner.Run(ctx, dir, argv)
+}
+
+// Codex review of PR #1208: a forced refresh that failed while the entry was
+// still fresh left the next run showing that entry as healthy.
+func TestGitHubFailedForcedRefreshDegradesWarmCache(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	calls := map[string]int{}
+	fake := fakeRunner{t: t, outputs: githubOutputs(), calls: calls}
+	g := demoGitHub()
+	g.Cache = source.DirCache{Dir: t.TempDir()}
+	warmAt := githubNow.Add(-time.Minute)
+	env := githubEnv(fake)
+	env.Now = func() time.Time { return warmAt }
+	if res := g.Read(context.Background(), env); res.Status != board.StatusOK {
+		t.Fatalf("warm read: %s %s", res.Status, res.Detail)
+	}
+
+	fake.fail = map[string]error{"gh api graphql": errors.New("HTTP 502")}
+	env = githubEnv(fake)
+	forced := g
+	forced.Refresh = true
+	forced.Read(context.Background(), env)
+	res := g.Read(context.Background(), env)
+	if calls["gh api graphql"] != 2 {
+		t.Errorf("graphql calls = %d, want 2 (warm and forced)", calls["gh api graphql"])
+	}
+	if res.Status != board.StatusDegraded || !strings.Contains(res.Detail, "HTTP 502") || !res.ObservedAt.Equal(warmAt) || len(res.Items) == 0 {
+		t.Errorf("next run: %s %q observed %s with %d items, want the warm data degraded by the failure", res.Status, res.Detail, res.ObservedAt, len(res.Items))
+	}
 }
 
 func (r gatedRunner) RunLimited(ctx context.Context, dir string, argv []string, _ int) ([]byte, error) {
