@@ -158,6 +158,20 @@ func runCoopExec(args []string) error {
 	if err := c.selectRoot(); err != nil {
 		return err
 	}
+	if facts, _ := harness.ForExecutable(c.cmdName); c.managedLaunchNonce == "" && facts.Name == harness.Codex {
+		if _, _, tui := codexLaunchArgs(c.agentArgs); tui {
+			var missing []string
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				missing = append(missing, "stdin")
+			}
+			if !term.IsTerminal(int(os.Stdout.Fd())) {
+				missing = append(missing, "stdout")
+			}
+			if len(missing) > 0 {
+				return UsageError("interactive Codex requires terminal stdin and stdout (missing: %s)", strings.Join(missing, " and "))
+			}
+		}
+	}
 	command, selected := c.cmdName, c.binaryPath
 	if managedTicket != nil {
 		index := 0

@@ -236,28 +236,28 @@ var codexSubcommands = map[string]bool{
 	"help": true, "stdio-to-uds": true, "responses-api-proxy": true, "tcp-tunnel": true, "execpolicy": true,
 }
 
-// codexLaunchBackend reports where a Codex TUI started with args in wd runs
-// (codex-cli 0.160 tui/src/startup_orchestration.rs:176-540), with the
-// effective features for its directory. A Codex that reports no
-// daemon_auto_start feature predates the daemon and runs embedded; a
-// failed feature probe establishes nothing.
-func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
+// codexLaunchArgs classifies the recognized plain-TUI grammar independently
+// of the environment and effective features. Backend uncertainty can still
+// describe a TUI; unknown or incomplete argument grammar does not.
+func codexLaunchArgs(args []string) (embedded, unknown, tui bool) {
 	// The whole command line is read before deciding: --remote, an option
 	// AMQ does not know, or an unclassified override outranks every reason
 	// to call the TUI embedded.
-	embedded, unknown, prompt := false, false, false
-	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
-		if _, set := os.LookupEnv(key); set {
-			embedded = true
-		}
-	}
+	tui = true
+	prompt := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--" {
+			if remaining := len(args) - i - 1; remaining > 1 || prompt && remaining > 0 {
+				tui = false
+			}
 			break // the rest is the prompt
 		}
 		if !strings.HasPrefix(args[i], "-") {
 			if !prompt && codexSubcommands[args[i]] {
-				return codexBackendUnknown, nil
+				return embedded, true, false
+			}
+			if prompt {
+				tui = false // more than one positional prompt is not classified
 			}
 			prompt = true
 			continue
@@ -265,7 +265,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 		flag, value, inline := strings.Cut(args[i], "=")
 		switch {
 		case (codexFlagOptions[flag] || codexEmbeddedFlags[flag]) && inline, !codexFlagOptions[flag] && !codexEmbeddedFlags[flag] && !codexValueOptions[flag]:
-			return codexBackendUnknown, nil
+			return embedded, true, false
 		case codexFlagOptions[flag]:
 			continue
 		case codexEmbeddedFlags[flag]:
@@ -274,10 +274,13 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 		}
 		if !inline {
 			if i+1 >= len(args) {
-				return codexBackendUnknown, nil
+				return embedded, true, false
 			}
 			i++
 			value = args[i]
+		}
+		if value == "" || strings.HasPrefix(value, "-") {
+			tui = false
 		}
 		if flag == "-p" || flag == "--profile" {
 			embedded = true
@@ -295,14 +298,33 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 		switch {
 		case codexGatingFeatures[feature] || !known:
 			unknown = true
+			if !known {
+				tui = false
+			}
 		case !keeps:
 			embedded = true
 		}
 	}
+	return embedded, unknown, tui
+}
+
+// codexLaunchBackend reports where a Codex TUI started with args in wd runs
+// (codex-cli 0.160 tui/src/startup_orchestration.rs:176-540), with the
+// effective features for its directory. A Codex that reports no
+// daemon_auto_start feature predates the daemon and runs embedded; a
+// failed feature probe establishes nothing.
+func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
+	envEmbedded := false
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if _, set := os.LookupEnv(key); set {
+			envEmbedded = true
+		}
+	}
+	embedded, unknown, _ := codexLaunchArgs(args)
 	if unknown {
 		return codexBackendUnknown, nil
 	}
-	if embedded {
+	if embedded || envEmbedded {
 		return codexEmbedded, nil
 	}
 	dir := codexLaunchDir(args, wd)
