@@ -661,12 +661,14 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	return ferr
 }
 
-// admissionCause maps Submit's answer to the transition it justifies. It is
-// the ONE reading of (adm, nerr): a transport failure proves nothing
-// (attachment_lost keeps the correlation), admitted binds the run, a
-// cancelled-before-admission code is a positive non-admission, and any other
-// code is a positive refusal.
-func admissionCause(adm Admission, nerr error) (cause, nativeEvidence) {
+// admissionCause maps Submit's answer for rec to the transition it
+// justifies. It is the ONE reading of (adm, nerr): a transport failure
+// proves nothing (attachment_lost keeps the correlation), admitted binds the
+// run, a cancelled-before-admission code is a positive non-admission, busy
+// for a local request sent nothing natively and leaves the busy tombstone
+// an identical resubmit re-admits, and any other code (busy for a Buzz or
+// link request included) is a positive refusal.
+func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nativeEvidence) {
 	nev := nativeEvidence{runID: adm.RunID}
 	switch {
 	case nerr != nil:
@@ -675,6 +677,9 @@ func admissionCause(adm Admission, nerr error) (cause, nativeEvidence) {
 		return causeAdmitted, nev
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		return causeCancelledBeforeAdmission, nev
+	case adm.Code == protocol.CodeBusy && !sessionBound(rec.Origin):
+		nev.reason = adm.Message
+		return causeBusyTombstone, nev
 	default:
 		nev.code = adm.Code
 		nev.reason = adm.Message
@@ -712,7 +717,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		// The normal path: no native event moved the record while Submit was
 		// in flight. Apply the admission outcome directly.
-		c, nev := admissionCause(adm, nerr)
+		c, nev := admissionCause(rec, adm, nerr)
 		e.transitionLocked(rec, c, nev)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.mu.Unlock()
@@ -774,7 +779,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	// this the record stays uncertain and the reservation blocks every later
 	// request for that target forever.
 	if rec.State == protocol.StateUncertain && nerr == nil && (adm.Admitted || adm.Code != "") {
-		c, nev := admissionCause(adm, nil)
+		c, nev := admissionCause(rec, adm, nil)
 		e.transitionLocked(rec, c, nev)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.notifyStorageFailureLocked(rec, err)

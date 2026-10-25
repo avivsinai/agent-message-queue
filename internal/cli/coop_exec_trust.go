@@ -260,7 +260,13 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 		}
 		return marker, true
 	}
-	probe := probeCodexStartup(binaryPath, args, wd, dir, recorded)
+	// Codex asks hooks/list for its config.cwd, which starts from the
+	// physical working directory, and project hooks are keyed by that
+	// spelling; a directory that cannot be resolved proves nothing.
+	var probe codexStartupProbe
+	if physical, ok := codexPhysicalLaunchDir(args, wd); ok {
+		probe = probeCodexStartup(binaryPath, args, wd, physical, recorded)
+	}
 	if !cacheRuledOut && (!probe.updateCheckOff || !probe.requirementsClear) {
 		return marker, true
 	}
@@ -269,6 +275,19 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 		return marker, true
 	}
 	return wakeDialogMarker{}, false
+}
+
+// codexPhysicalLaunchDir is the cwd a Codex TUI started with args in wd
+// sends to hooks/list, spelled as Codex spells it: the process's physical
+// working directory (wd with symlinks resolved), an absolute -C/--cd value
+// as given, or a relative one joined to the physical directory, each
+// normalized lexically (core/src/config/mod.rs:3560-3576 at rust-v0.164.0).
+func codexPhysicalLaunchDir(args []string, wd string) (string, bool) {
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		return "", false
+	}
+	return codexLaunchDir(args, real), true
 }
 
 // startupDialogMarkerDecision keeps trust and update evidence independent.

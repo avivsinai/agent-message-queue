@@ -17,17 +17,20 @@ import (
 // check): the first-prompt hook close releases a daemon seat's Startup
 // marker, and a turn amq-remote submits on the seat's thread runs that hook
 // as well, so a remote prompt could end the hold while the seat's TUI still
-// shows a startup screen. Submit is held while the seat's marker is open.
+// shows a startup screen. Submit through the endpoint is busy while the
+// seat's marker is open, and the identical resubmit runs once it closes.
+// Review finding: the daemon socket was given as its resolved target path,
+// outside CODEX_HOME, and the hold read the Codex home from the socket path
+// and failed open.
 func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	codexHome, err := os.MkdirTemp("", "amqcx")
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	sockDir, err := os.MkdirTemp("", "amqcx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(codexHome) })
-	if err := os.Mkdir(filepath.Join(codexHome, "c"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
 	root := t.TempDir()
 	if err := fsq.EnsureAgentDirs(root, "cx"); err != nil {
 		t.Fatal(err)
@@ -41,7 +44,7 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sock, srv := startFakeAppServerAt(t, filepath.Join(codexHome, "c", "s.sock"))
+	sock, srv := startFakeAppServerAt(t, filepath.Join(sockDir, "s.sock"))
 	att, err := Attach(sock, thread)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
@@ -49,11 +52,26 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 	t.Cleanup(func() { _ = att.Close() })
 	<-srv.calls // initialize
 	<-srv.calls // thread/resume
+	store, err := requests.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	ep.Register(att)
+	t.Cleanup(func() { _ = ep.Close() })
 	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111uue"}
-	adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-	if err != nil || adm.Admitted || adm.Code != protocol.CodeBusy {
-		t.Fatalf("submit during the seat's startup screens = %+v, %v; want busy", adm, err)
+	id := "11111111-1111-4111-8111-111111111ae1"
+	cmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: id, TargetID: s.TargetID, Epoch: s.Epoch,
+		NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "say PONG"},
+	}
+	local := core.Source{Host: "local"}
+	out, err := ep.Handle(cmd, local)
+	if err != nil || out.(protocol.Reply).Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("submit during the seat's startup screens = %+v, %v; want busy", out, err)
 	}
 	select {
 	case call := <-srv.calls:
@@ -61,28 +79,37 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 	default:
 	}
 
-	// The seat's dialog hook closes the marker; the next submit is sent.
+	// The seat's dialog hook closes the marker; the identical resubmit runs.
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: id}
 	srv.setTurnStartDelay(func() {
 		srv.notify(t, "turn/started", `{"threadId":"`+thread+`","turn":{"id":"turnA"}}`)
 		srv.notify(t, "item/started", `{"threadId":"`+thread+`","turnId":"turnA","item":{"type":"userMessage","id":"iA","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	})
-	done := make(chan core.Admission, 1)
+	done := make(chan protocol.Reply, 1)
 	go func() {
-		adm, _ := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- adm
+		out, _ := ep.Handle(cmd, local)
+		reply, _ := out.(protocol.Reply)
+		done <- reply
 	}()
-	if call := <-srv.calls; call.Method != "turn/start" {
-		t.Fatalf("submit after the marker closed sent %s, want turn/start", call.Method)
+	select {
+	case call := <-srv.calls:
+		if call.Method != "turn/start" {
+			t.Fatalf("resubmit after the marker closed sent %s, want turn/start", call.Method)
+		}
+	case reply := <-done:
+		t.Fatalf("resubmit after the marker closed = %s %q without a turn/start", reply.Snapshot.State, reply.Outcome.Code)
+	case <-time.After(10 * time.Second):
+		t.Fatal("resubmit after the marker closed sent nothing")
 	}
 	select {
-	case adm := <-done:
-		if !adm.Admitted {
-			t.Fatalf("submit after the marker closed = %+v, want admitted", adm)
+	case reply := <-done:
+		if reply.Snapshot.State != protocol.StateRunning || reply.Outcome.Code != "" {
+			t.Fatalf("resubmit after the marker closed = %s %q, want running", reply.Snapshot.State, reply.Outcome.Code)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("submit after the marker closed did not return")
+		t.Fatal("resubmit after the marker closed did not return")
 	}
 }

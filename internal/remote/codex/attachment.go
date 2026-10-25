@@ -101,7 +101,6 @@ type Attachment struct {
 	nextObs   uint64
 
 	client   atomic.Pointer[Client] // set before Attach returns, read by read-loop-spawned paths
-	socket   string
 	threadID string
 	targetID string
 	epoch    string
@@ -235,7 +234,6 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// that true: a handler that touches a.client outside those maps would
 	// read it before the assignment below.
 	a := &Attachment{
-		socket:            socketPath,
 		threadID:          threadID,
 		targetID:          TargetID(threadID),
 		epoch:             fmt.Sprintf("cx-%d", time.Now().UnixNano()),
@@ -445,7 +443,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Unlock()
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
-	if seatStartupHeld(a.socket, a.threadID) {
+	if seatStartupHeld(a.threadID) {
 		return core.Admission{Code: protocol.CodeBusy, Message: "the Codex seat on this thread has not passed its startup screens yet"}, nil
 	}
 

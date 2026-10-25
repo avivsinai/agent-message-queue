@@ -235,15 +235,16 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   coop exec writes no `Startup` marker only when all three are ruled out:
   the update prompt (as above), the directory trust (Codex records that it trusts the
   directory), and the hook review. The hook review is ruled out only when
-  Codex's own `hooks/list` for the launch directory, asked on the backend
-  the TUI uses, lists every hook as trusted or managed, or none (Codex
+  Codex's own `hooks/list` for the launch directory, spelled as the TUI
+  spells it (the physical working directory with symlinks resolved, or a
+  `-C` directory against it), asked on the backend the TUI uses, lists every hook as trusted or managed, or none (Codex
   reviews only untrusted and modified hooks): the managed daemon for
   a seat on the daemon, or a stdio `codex app-server` started with the
   seat's `CODEX_HOME`, directory, and `-c`, `--enable` and `--disable`
   options for any other seat. The probe is bounded to 5 seconds, and its
   output stays out of AMQ diagnostics. An error, a timeout, an unreadable
-  reply, an untrusted, modified, missing or unknown trust status, a
-  `--profile` seat, or a backend AMQ
+  reply, an untrusted, modified, missing or unknown trust status, a working
+  directory AMQ cannot resolve, a `--profile` seat, or a backend AMQ
   cannot tell writes the marker. A marker written for such a release
   releases only through the dialog
   hook's first-turn close: the trust record never releases it, and the
@@ -253,10 +254,14 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   names `amq wake install-dialog-hook --harness codex`.
 
   `amq-remote` holds a turn for a Codex seat on the managed daemon whose
-  thread identity coop exec recorded: while that seat has a `Startup`
-  marker that only the dialog hook releases, the attachment refuses the
-  submit as `busy`, which the sender retries, so a remote prompt does not
-  end the hold while the TUI shows a startup screen. A client other than
+  thread identity coop exec recorded under its `CODEX_HOME` (or
+  `~/.codex`): while that seat has a `Startup` marker that only the dialog
+  hook releases, the attachment refuses the submit as `busy`, so a remote
+  prompt does not end the hold while the TUI shows a startup screen. A busy
+  attachment sends nothing to Codex, and the endpoint keeps the request
+  re-admittable, so the sender's retry of the same request runs it once the
+  marker closes. A request from Buzz or a link keeps its terminal `busy`
+  refusal; sending it again takes a new request. A client other than
   AMQ that submits a turn on the same daemon thread runs the first-turn hook
   and can end the hold early.
 
