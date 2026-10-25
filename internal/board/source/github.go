@@ -35,6 +35,7 @@ type GitHub struct {
 	Humans                   []string          // GitHub logins of the owner
 	Identities               map[string]string // login -> AMQ handle
 	ReadyToMergeWaitsOnHuman bool
+	Timeout                  time.Duration // positive bounds the complete read
 	TTL                      time.Duration
 	Refresh                  bool  // ignore a fresh cache entry
 	Cache                    Cache // nil: no cache
@@ -69,6 +70,11 @@ func (g GitHub) RepoSet(ctx context.Context, env board.Env) []string {
 }
 
 func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
+	if g.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, g.Timeout)
+		defer cancel()
+	}
 	repos := g.RepoSet(ctx, env)
 	if len(repos) == 0 {
 		return board.Result{Status: board.StatusUnavailable, Detail: "no github.com origin remote and no forges.github.repos"}
