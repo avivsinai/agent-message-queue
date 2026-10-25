@@ -5,6 +5,7 @@ event_name="${EVENT_NAME:-}"
 input_tag="${INPUT_TAG:-}"
 commit_message="${COMMIT_MESSAGE:-}"
 github_sha="${GITHUB_SHA:-}"
+github_ref="${GITHUB_REF:-}"
 github_output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 validate_tag() {
@@ -50,6 +51,19 @@ case "$event_name" in
     release_sha="$(tag_commit_sha "$tag")"
     ;;
   push)
+    if [[ "$github_ref" == refs/tags/* ]]; then
+      tag="${github_ref#refs/tags/}"
+      validate_tag "$tag"
+      version="${tag#v}"
+      release_sha="$(tag_commit_sha "$tag")"
+      if [[ "$(git rev-parse 'HEAD^{commit}')" != "$release_sha" ||
+            "$(git rev-parse "${github_sha}^{commit}")" != "$release_sha" ]]; then
+        echo "::error::Tag event, checkout, and release commit do not match."
+        exit 1
+      fi
+      ./scripts/check-release-version.sh "$version"
+      release_ref="$tag"
+    else
     if [[ -z "$github_sha" ]]; then
       echo "::error::GITHUB_SHA is required for push release resolution."
       exit 1
@@ -78,6 +92,7 @@ case "$event_name" in
       fi
     fi
     release_ref="${release_sha}"
+    fi
     ;;
   *)
     echo "::error::Unsupported event: ${event_name}"

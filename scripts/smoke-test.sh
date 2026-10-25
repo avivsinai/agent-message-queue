@@ -147,6 +147,7 @@ if command -v python3 >/dev/null 2>&1; then
   python3 scripts/test_check_wake_test_changes.py
   python3 scripts/test_release_changelog_section.py
   python3 scripts/test_release_please_config.py
+  bash scripts/test_release.sh
   bash scripts/test_release_metadata.sh
   bash scripts/test_release_please_state.sh
   bash scripts/test_reconcile_release_please_labels.sh

@@ -14,6 +14,10 @@ import json, pathlib, re, sys
 
 version = sys.argv[1]
 mismatches = []
+manifest = pathlib.Path(".release-please-manifest.json")
+actual = json.loads(manifest.read_text()).get(".")
+if actual != version:
+    mismatches.append((str(manifest), actual))
 
 for path in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
     text = path.read_text()

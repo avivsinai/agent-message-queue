@@ -13,13 +13,23 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 
 ## Release Contract
 
-- Release Please maintains the release PR from conventional squash commits on
-  `main`. Do not create release branches, tags, or GitHub releases manually.
+- Run `scripts/release.sh X.Y.Z` to request a release PR on `main`. Release
+  Please alone updates the changelog and version metadata from conventional
+  squash commits. Push and publication events only reconcile release labels.
+  Do not create release branches, tags, or GitHub releases manually.
 - A push to `main` updates the AvivSinai marketplace for `amq-cli` and
   `amq-spec`.
 - Keep one version across `CHANGELOG.md`, `.release-please-manifest.json`, and
-  skill/plugin metadata. After the release PR merges, `release.yml` validates
-  that commit, creates the tag, and publishes GitHub and Homebrew artifacts.
+  skill/plugin metadata. After the release PR merges, `release-tag.yml` verifies the exact merged
+  release PR, metadata, tests, and embedded versions. A repository-scoped GitHub
+  App creates the immutable tag; `release.yml` publishes GitHub and Homebrew
+  artifacts from that tag. Existing tags can be dispatched again for recovery.
+- Configure `RELEASE_APP_CLIENT_ID` as a repository variable and
+  `RELEASE_APP_PRIVATE_KEY` as a repository secret. The App needs repository
+  contents, pull-request, and issues write permissions. PR and tag creation fail
+  closed without an App token; the publisher uses the default workflow token.
+  Keep App-only tag protection disabled until an App-created release has been
+  verified; then permit App tag creation and prohibit updates and deletion.
 - `scripts/codesign-macos.sh` signs every macOS binary with a Developer ID,
   hardened runtime, and the Apple Events entitlement, then notarizes it, when
   these repository secrets are set: `APPLE_TEAM_ID`,

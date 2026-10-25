@@ -1,0 +1,100 @@
+name: Release Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-tag-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      startsWith(github.event.head_commit.message, 'chore(release): v') ||
+      startsWith(github.event.head_commit.message, 'Merge pull request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      version: ${{ steps.prepare.outputs.version }}
+      release_ref: ${{ steps.prepare.outputs.release_ref }}
+      release_sha: ${{ steps.prepare.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve merged release pull request
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: push
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: ./scripts/prepare-release-tag.sh
+
+  verify:
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.release_ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify release metadata
+        run: ./scripts/check-release-version.sh "${{ needs.prepare.outputs.version }}"
+      - name: Run tests
+        run: make test
+      - name: Run smoke tests
+        run: make smoke
+      - name: Build CLI
+        run: VERSION=${{ needs.prepare.outputs.tag }} make build
+      - name: Check embedded version
+        run: |
+          ./amq version | grep -Fx "${{ needs.prepare.outputs.version }}"
+          ./amq-keepalive --version | grep -Fx "${{ needs.prepare.outputs.version }}"
+
+  tag:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.tag != '' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require release App configuration
+        env:
+          APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: test -n "$APP_CLIENT_ID" && test -n "$APP_PRIVATE_KEY"
+      - name: Create repository-scoped tag token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - name: Create immutable release tag
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: ./scripts/create-release-tag.sh

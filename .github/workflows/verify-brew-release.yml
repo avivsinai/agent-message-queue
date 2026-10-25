@@ -25,12 +25,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # release.yml runs on every push to main, but its `release` job is only
-  # non-skipped when the commit actually carried a version to publish; most
-  # main merges leave every job "skipped" while the workflow_run conclusion
-  # still reads "success". This job checks the triggering run's own `release`
-  # job conclusion so a routine merge doesn't get verified as if it were a
-  # release (which would just re-check a stale, already-verified version).
+  # Publication failures and manual recovery runs also complete this workflow.
+  # Only a successful publisher job owns a Homebrew verification attempt.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
