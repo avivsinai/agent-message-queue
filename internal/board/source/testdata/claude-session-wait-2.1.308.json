@@ -1,0 +1,14 @@
+{
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "cwd": "/work/project",
+  "pid": 4242,
+  "procStart": "Fri Jan  1 00:00:00 2027",
+  "kind": "interactive",
+  "version": "2.1.308",
+  "name": "reviewer",
+  "status": "waiting",
+  "waitingFor": "permission prompt",
+  "statusUpdatedAt": 1800000000000,
+  "updatedAt": 1800000000000,
+  "startedAt": 1799999900000
+}
