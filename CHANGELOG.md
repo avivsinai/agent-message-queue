@@ -8,6 +8,24 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.109.0](https://github.com/avivsinai/agent-message-queue/compare/v0.108.0...v0.109.0) (2026-10-25)
+
+
+### Features
+
+* **board:** /board panel for Claude Code as an opt-in plugin ([#1216](https://github.com/avivsinai/agent-message-queue/issues/1216)) ([d8f37f4](https://github.com/avivsinai/agent-message-queue/commit/d8f37f4fcdfd2b0d5cb3afc38a48835a0fe5d46d))
+* **board:** amq-board serve local live view ([#1215](https://github.com/avivsinai/agent-message-queue/issues/1215)) ([fd8e514](https://github.com/avivsinai/agent-message-queue/commit/fd8e514319a7ec9dcbdf6ba5f8563ca2b5bcb541))
+* **board:** static page for amq-board ([#1209](https://github.com/avivsinai/agent-message-queue/issues/1209)) ([34f6f79](https://github.com/avivsinai/agent-message-queue/commit/34f6f79da153e2d4201e3d7685402aae80c7e712))
+
+
+### Bug Fixes
+
+* **board:** an open PR you authored waits on its reviewers, not on you ([#1218](https://github.com/avivsinai/agent-message-queue/issues/1218)) ([94cc0c9](https://github.com/avivsinai/agent-message-queue/commit/94cc0c92836142d7dbf88aa410ee5a728ddf1e9b))
+* **board:** one uncountable mailbox is a note, not a degraded AMQ source ([#1217](https://github.com/avivsinai/agent-message-queue/issues/1217)) ([e5cbbcb](https://github.com/avivsinai/agent-message-queue/commit/e5cbbcb9a6255c1fc58fedf9934e9905978e56a2))
+* **board:** read recent usage first so listing cannot starve the budget ([#1219](https://github.com/avivsinai/agent-message-queue/issues/1219)) ([1a05251](https://github.com/avivsinai/agent-message-queue/commit/1a0525119dffe66db201a1fe951107e0824cbbc9))
+* **init:** create an explicit relative --root in the current directory ([#1213](https://github.com/avivsinai/agent-message-queue/issues/1213)) ([f02ccd6](https://github.com/avivsinai/agent-message-queue/commit/f02ccd6dbaed516b336c04c84773ea1612fd7df1))
+* **owner-sign:** forbid core dumps before reading the owner key ([#1220](https://github.com/avivsinai/agent-message-queue/issues/1220)) ([b343868](https://github.com/avivsinai/agent-message-queue/commit/b343868f7f7dde2c93f76f1ab346a85eea742778))
+
 ## [0.108.0](https://github.com/avivsinai/agent-message-queue/compare/v0.107.0...v0.108.0) (2026-10-25)
 
 
