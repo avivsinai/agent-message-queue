@@ -23,7 +23,7 @@ type Assessment struct {
 	Status Status
 	// ObservedAt is the newest observation of the home's windows and money.
 	ObservedAt time.Time
-	// Failure is the newest failure, when it is newer than ObservedAt.
+	// Failure is the newest failure, when it is at or after ObservedAt.
 	Failure *Failure
 }
 
@@ -53,7 +53,7 @@ func Assess(r Result, provider, home string, now time.Time, staleAfter time.Dura
 			a.Failure, failedAt = &v, t
 		}
 	}
-	if a.Failure != nil && !a.ObservedAt.IsZero() && !failedAt.After(a.ObservedAt) {
+	if a.Failure != nil && !a.ObservedAt.IsZero() && failedAt.Before(a.ObservedAt) {
 		a.Failure = nil
 	}
 	switch {
