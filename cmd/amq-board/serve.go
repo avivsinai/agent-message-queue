@@ -37,8 +37,9 @@ once a minute; presses within that minute, or while a refresh runs, join it.
 valid edit applies without a restart, and a refused edit keeps the last good
 configuration and is reported once. The project directory is fixed at start.
 With forges.github.token_once (default true), gh auth token is read once and
-held in memory for later gh calls, so a session prompts the keychain once.
-Stop with Ctrl-C.
+held in memory for later gh calls, so a session prompts the keychain once;
+the GitHub cache follows that token's account. Ctrl-C stops the view and
+waits for a running refresh, whose commands it cancels.
 `
 
 func runServe(args []string) int {
@@ -72,11 +73,12 @@ func runServe(args []string) int {
 		Load: func() (board.FileConfig, []string) { return loadConfig(dir) },
 		Now:  time.Now,
 		Logf: logf,
+		Ctx:  ctx,
 		Build: func(ctx context.Context, cfg board.FileConfig, force bool) board.Model {
 			runner := execRunner{}
 			opt := sourceOptions{refresh: force}
 			if cfg.SourceGitHub && cfg.TokenOnce {
-				runner.ghToken = token.get(ctx, newEnv(dir, runner), logf)
+				runner.ghToken, opt.ghAccount = token.get(ctx, newEnv(dir, runner), logf)
 			}
 			opt.provider = func(e source.External) board.Source {
 				m := memos[e.Provider.Name]
@@ -90,6 +92,9 @@ func runServe(args []string) int {
 		},
 	}
 	live.Refresh(ctx, false)
+	if ctx.Err() != nil {
+		return 0
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -106,19 +111,29 @@ func runServe(args []string) int {
 	srv := &http.Server{Handler: live.Handler(secret, host), ReadHeaderTimeout: 10 * time.Second}
 	fmt.Printf("amq-board: serving http://%s/%s/\n", host, secret)
 
-	go live.Loop(ctx, board.ServeEvery)
+	looped := make(chan struct{})
+	go func() {
+		defer close(looped)
+		live.Loop(ctx, board.ServeEvery)
+	}()
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
+	code := 0
 	select {
 	case <-ctx.Done():
-		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shut)
-		return 0
 	case err := <-served:
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
-		return exitGeneral
+		code = exitGeneral
 	}
+	// End the view: no new request and no new tick, then wait for the
+	// running refresh, whose commands the cancelled context kills.
+	stop()
+	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shut)
+	<-looped
+	live.Wait()
+	return code
 }
 
 // randomToken is 128 random bits, hex encoded.
@@ -131,15 +146,19 @@ func randomToken() (string, error) {
 }
 
 // ghToken is forges.github.token_once: `gh auth token` is read once per
-// process and later gh calls get it as GH_TOKEN, so a serve session reads
-// the keychain once. The token stays in memory and reaches gh only. When
+// process, the viewer login it belongs to is resolved once with it, and
+// later gh calls get it as GH_TOKEN, so a serve session reads the keychain
+// once. The token stays in memory and reaches gh only. The GitHub cache is
+// keyed by that viewer, not by the login gh is configured with, which an
+// account switch changes while the token stays. When the viewer cannot be
+// resolved the token is dropped and each gh call reads its own. When
 // GH_TOKEN or GITHUB_TOKEN is already set, gh uses that and nothing is read.
 type ghToken struct {
-	once  sync.Once
-	token string
+	once          sync.Once
+	token, viewer string
 }
 
-func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...any)) string {
+func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...any)) (string, string) {
 	t.once.Do(func() {
 		if os.Getenv("GH_TOKEN") != "" || os.Getenv("GITHUB_TOKEN") != "" {
 			return
@@ -148,13 +167,20 @@ func (t *ghToken) get(ctx context.Context, env board.Env, logf func(string, ...a
 			return
 		}
 		out, err := env.Run.Run(ctx, env.Dir, []string{"gh", "auth", "token", "--hostname", "github.com"})
-		if err != nil {
+		token := strings.TrimSpace(string(out))
+		if err != nil || token == "" {
 			logf("GitHub token not read; each gh call reads it: %v", err)
 			return
 		}
-		t.token = strings.TrimSpace(string(out))
+		viewer, err := execRunner{ghToken: token}.Run(ctx, env.Dir, []string{"gh", "api", "user", "--hostname", "github.com", "--jq", ".login"})
+		login := strings.ToLower(strings.TrimSpace(string(viewer)))
+		if err != nil || login == "" {
+			logf("GitHub token not used: its account is unknown (%v); each gh call reads the token", err)
+			return
+		}
+		t.token, t.viewer = token, login
 	})
-	return t.token
+	return t.token, t.viewer
 }
 
 // providerMemo is one external provider's last successful output.

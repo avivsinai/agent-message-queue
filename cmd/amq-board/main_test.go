@@ -81,11 +81,11 @@ func TestBoardReadsUsageSettings(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, ".amq", "board.json"), []byte(settings), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		m, err := withUsage(board.Model{}, env, home)
-		if err != nil {
-			t.Fatal(err)
+		cfg, warnings := loadConfigFiles(t.TempDir(), home)
+		if len(warnings) > 0 {
+			t.Fatal(warnings)
 		}
-		return m.Usage
+		return withUsage(board.Model{}, env, cfg.Usage).Usage
 	}
 
 	if u := read(t, `{"usage":{"enabled":false}}`); u != nil {

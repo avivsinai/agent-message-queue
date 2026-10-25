@@ -37,7 +37,11 @@ type Live struct {
 	Build func(ctx context.Context, cfg FileConfig, force bool) Model
 	Now   func() time.Time
 	Logf  func(format string, args ...any)
+	// Ctx is the life of the view. A refresh that a press starts runs under
+	// it, so its source reads and their commands end when the view ends.
+	Ctx context.Context
 
+	active    sync.WaitGroup // refreshes running
 	mu        sync.Mutex
 	running   bool
 	lastForce time.Time
@@ -76,9 +80,16 @@ func (l *Live) Request() string {
 		return "coalesced"
 	}
 	l.running, l.lastForce = true, l.Now()
+	l.active.Add(1)
 	l.mu.Unlock()
-	go l.run(context.Background(), true)
+	go l.run(l.Ctx, true)
 	return "started"
+}
+
+// Wait returns when no refresh runs. After Ctx ends, a serve that waits here
+// has reaped every command its refreshes started.
+func (l *Live) Wait() {
+	l.active.Wait()
 }
 
 // Loop refreshes every interval until ctx ends. A tick that finds a refresh
@@ -110,6 +121,7 @@ func (l *Live) begin(force bool) bool {
 		return false
 	}
 	l.running = true
+	l.active.Add(1)
 	if force {
 		l.lastForce = l.Now()
 	}
@@ -121,9 +133,14 @@ func (l *Live) run(ctx context.Context, force bool) {
 		l.mu.Lock()
 		l.running = false
 		l.mu.Unlock()
+		l.active.Done()
 	}()
 	start := time.Now()
 	m := l.Build(ctx, l.reload(), force)
+	if ctx.Err() != nil {
+		// The view is ending; a model of cancelled reads is not kept.
+		return
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		l.Logf("refresh: model not encoded: %v", err)

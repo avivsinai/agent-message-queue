@@ -76,7 +76,11 @@ value the board warns about) keeps the last good configuration and is
 reported once on stderr. The project directory is fixed at start. With
 `forges.github.token_once` (default `true`, user file only), `serve` reads
 `gh auth token` once and passes it as `GH_TOKEN` to its later `gh` calls only,
-held in memory, so a session prompts the keychain once. Stop with Ctrl-C.
+held in memory, so a session prompts the keychain once. It resolves the
+token's account once (`gh api user`) and keys the GitHub cache by it, so a
+later `gh auth switch` never serves the other account's cache. The usage
+settings are part of the configuration a refused edit keeps. Ctrl-C stops
+the view, cancels a running refresh's commands, and waits for them.
 
 ## Sources
 

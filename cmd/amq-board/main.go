@@ -135,16 +135,36 @@ func newEnv(dir string, run board.Runner) board.Env {
 
 // loadConfig reads ~/.amq/board.json and the project's .amq/board.json.
 func loadConfig(dir string) (board.FileConfig, []string) {
+	home, _ := os.UserHomeDir()
+	return loadConfigFiles(dir, home)
+}
+
+// loadConfigFiles reads the board configuration under home and dir, with
+// the user file's "usage" key. A refused usage key is a warning and turns
+// usage off, so a mistyped "enabled": false never reads the homes it meant
+// to keep closed.
+func loadConfigFiles(dir, home string) (board.FileConfig, []string) {
 	userPath := ""
-	if home, err := amqhome.Dir(); err == nil {
-		userPath = filepath.Join(home, board.ConfigFile)
+	if home != "" {
+		userPath = filepath.Join(amqhome.Under(home), board.ConfigFile)
 	}
-	return board.LoadConfig(userPath, filepath.Join(dir, ".amq", board.ConfigFile))
+	cfg, warnings := board.LoadConfig(userPath, filepath.Join(dir, ".amq", board.ConfigFile))
+	if home == "" {
+		return cfg, append(warnings, "no home directory: usage not read")
+	}
+	st, err := boardusage.LoadSettings(userPath, home)
+	if err != nil {
+		warnings = append(warnings, "usage not read: "+err.Error())
+		st.Enabled = false
+	}
+	cfg.Usage = st
+	return cfg, warnings
 }
 
 // sourceOptions are what differ between the one-shot faces and serve.
 type sourceOptions struct {
-	refresh bool // ignore the forge cache
+	refresh   bool   // ignore the forge cache
+	ghAccount string // the viewer a token read once belongs to; empty: the configured login
 	// provider wraps each enabled external provider; nil reads it on every
 	// refresh.
 	provider func(source.External) board.Source
@@ -160,6 +180,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
 		TTL:                      cfg.GitHubTTL,
 		Refresh:                  opt.refresh,
+		Account:                  opt.ghAccount,
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
 	if cfg.SourceBeads {
@@ -196,13 +217,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		}
 	}
 	model := board.Run(ctx, env, sources, cfg.Board, version)
-	if home, err := os.UserHomeDir(); err == nil {
-		var uerr error
-		if model, uerr = withUsage(model, env, home); uerr != nil {
-			fmt.Fprintln(os.Stderr, "amq-board: usage not read:", uerr)
-		}
-	}
-	return model
+	return withUsage(model, env, cfg.Usage)
 }
 
 // writePage writes the static page to stdout, or to out through a temporary
@@ -233,18 +248,15 @@ func writePage(m board.Model, out string) error {
 }
 
 // withUsage adds what each harness account spent in this project and the
-// limits it reports, as the "usage" key of ~/.amq/board.json under home
-// configures: off, extra homes, and the run's budget. A refused file reads
-// nothing, so a mistyped "enabled": false never reads the homes it meant to
-// keep closed. A session counts for the project when its recorded working
+// limits it reports, as the "usage" key of ~/.amq/board.json configures:
+// off, extra homes, and the run's budget. A session counts for the project when its recorded working
 // directory is in one of the project's Git worktrees (the directory itself
 // outside Git). Spend goes to the worker an AMQ conversation record ties
 // the harness session to; the rest shows under the account's other
 // sessions.
-func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
-	st, err := boardusage.LoadSettings(filepath.Join(amqhome.Under(home), board.ConfigFile), home)
-	if err != nil || !st.Enabled {
-		return m, err
+func withUsage(m board.Model, env board.Env, st boardusage.Settings) board.Model {
+	if !st.Enabled {
+		return m
 	}
 	roots := []string{env.Dir}
 	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
@@ -254,7 +266,7 @@ func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
 	}
 	mapping := board.UsageMapping(m.Conversations)
 	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
-	return board.WithUsage(m, rep, mapping), nil
+	return board.WithUsage(m, rep, mapping)
 }
 
 // maxToolOutput bounds the stdout of any one source command. Forge responses

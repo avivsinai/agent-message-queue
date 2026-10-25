@@ -119,3 +119,37 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 		t.Fatalf("a request without the token started a refresh: %d builds, want 1", builds)
 	}
 }
+
+// Codex review of PR #1215: a refresh a press started ran on
+// context.Background, so Ctrl-C neither cancelled its source commands nor
+// waited for them. It runs under the view's context, and Wait returns once
+// it has ended.
+func TestLivePressedRefreshEndsWithTheView(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	cancelled := false
+	l := &Live{
+		Load: func() (FileConfig, []string) { return DefaultFileConfig(), nil },
+		Build: func(c context.Context, _ FileConfig, _ bool) Model {
+			close(started)
+			select {
+			case <-c.Done():
+				cancelled = true
+			case <-time.After(2 * time.Second):
+			}
+			return Model{}
+		},
+		Now:  time.Now,
+		Logf: func(string, ...any) {},
+		Ctx:  ctx,
+	}
+	if got := l.Request(); got != "started" {
+		t.Fatalf("Request = %q, want started", got)
+	}
+	<-started
+	cancel()
+	l.Wait()
+	if !cancelled {
+		t.Fatal("the pressed refresh did not see the view end")
+	}
+}
