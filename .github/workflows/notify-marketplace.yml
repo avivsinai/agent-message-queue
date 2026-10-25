@@ -15,17 +15,22 @@ jobs:
     permissions:
       contents: read
     steps:
+      # The token must be scoped to the target repository: without owner and
+      # repositories the action mints a token for this repository only, and
+      # GITHUB_TOKEN cannot dispatch to another repository either.
       - name: Mint marketplace dispatch token
         id: marketplace-token
-        continue-on-error: true
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: avivsinai
+          repositories: skills-marketplace
+          permission-contents: write
 
       - name: Dispatch plugin update
         env:
-          GITHUB_TOKEN: ${{ steps.marketplace-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.marketplace-token.outputs.token }}
         shell: bash
         run: |
           # Keep the marketplace pin aligned with this repo's latest default-branch HEAD.
