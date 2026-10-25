@@ -168,7 +168,7 @@ func runCoopExec(args []string) error {
 			command, selected = managedTicket.TargetArgv[index], managedTicket.ProviderExecutable
 		}
 	}
-	warnShadowedHarness(command, selected)
+	warnShadowedHarness(command, selected, managedTicket)
 	if err := c.provisionRoot(); err != nil {
 		return err
 	}

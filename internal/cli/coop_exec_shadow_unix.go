@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const launchVersionProbeBudget = time.Second
@@ -21,10 +23,24 @@ var stableHarnessVersion = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)$`
 
 // warnShadowedHarness is advisory: it never changes the selected executable,
 // PATH, arguments, or launch disposition. One deadline bounds all probes.
-func warnShadowedHarness(command, selected string) {
+func warnShadowedHarness(command, selected string, ticket *launch.ExecutionTicket) {
 	facts, known := harness.ForExecutable(command)
 	if !known {
 		return
+	}
+	if ticket != nil {
+		// A diagnostic must not execute a replaced ticket binary before the
+		// final launch boundary has a chance to refuse that replacement.
+		resolved, err := filepath.EvalSymlinks(selected)
+		if err != nil || resolved != ticket.ProviderExecutable {
+			return
+		}
+		identity, err := fsq.StableFileIdentity(selected)
+		if err != nil || identity != ticket.ProviderExecutableIdentity ||
+			launch.ValidateExecutableContainment(command, ticket.ProjectRoot, ticket.Provider) != nil ||
+			launch.ValidateExecutableContainment(selected, ticket.ProjectRoot, ticket.Provider) != nil {
+			return
+		}
 	}
 	first, err := os.Stat(selected)
 	if err != nil {
@@ -43,6 +59,9 @@ func warnShadowedHarness(command, selected string) {
 	for _, candidate := range alternatives {
 		if ctx.Err() != nil {
 			return
+		}
+		if ticket != nil && launch.ValidateExecutableContainment(candidate, ticket.ProjectRoot, ticket.Provider) != nil {
+			continue
 		}
 		version, order, ok := launchHarnessVersion(ctx, candidate, facts.Name)
 		if ok && codexVersionNewer(order, currentOrder) {

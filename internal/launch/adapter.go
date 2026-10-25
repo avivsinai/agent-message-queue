@@ -573,11 +573,11 @@ func resolveExternalExecutable(executable, projectRoot, label string, matchProvi
 	return executable, nil
 }
 
-// validateExecutableContainment checks the property that must be established
+// ValidateExecutableContainment checks the property that must be established
 // before an adapter capability probe: a provider executable must not resolve
 // into the project. Availability and executable shape remain capability/plan
 // concerns; a missing command cannot be a project-contained process.
-func validateExecutableContainment(executable, projectRoot, provider string) error {
+func ValidateExecutableContainment(executable, projectRoot, provider string) error {
 	if strings.TrimSpace(executable) == "" || strings.TrimSpace(projectRoot) == "" {
 		return nil
 	}
