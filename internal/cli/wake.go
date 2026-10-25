@@ -70,6 +70,8 @@ type wakeConfig struct {
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
+	dialogHoldReason              func() (reason string, marker bool)          // why the marker holds input; marker=false when no marker exists; nil = a generic reason
+	desktopNotify                 func(title, body string) error               // the held-doorbell desktop notice; nil = none (direct loop tests)
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
 	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release
 	startupInputProven            bool                                         // a drain followed a post-release attempt, so the harness accepts input
@@ -1151,7 +1153,10 @@ func deliverNewMessageNotification(
 		// ledger record nor an input attempt.
 		state, readErr := cfg.dialogState()
 		if state != wakeDialogClosed {
-			return holdWakeForDialog(cfg, state, readErr, notice.output)
+			return holdWakeForDialog(cfg, state, readErr, notice.output, len(currentPending))
+		}
+		if cfg.dialogHold != wakeDialogClosed {
+			cfg.doorbell.endHeldNotice()
 		}
 		cfg.dialogHold = wakeDialogClosed
 	}

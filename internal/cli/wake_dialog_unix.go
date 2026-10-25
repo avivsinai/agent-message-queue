@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
 )
@@ -116,6 +117,59 @@ func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir) func() bool {
 		}
 		return exists && startupDialogClosed(raw, &startup)
 	}
+}
+
+// wakeDialogHoldReasonInDir says why the agent's marker holds input, for the
+// held-doorbell notice. marker is false when no marker exists. A marker that
+// cannot be read or parsed gives the generic reason.
+func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() (string, bool) {
+	return func() (string, bool) {
+		raw, _, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
+		if err != nil || readErr != nil {
+			return wakeDialogGenericHoldReason, true
+		}
+		if !exists {
+			return "", false
+		}
+		var marker wakeDialogMarker
+		if json.Unmarshal(raw, &marker) != nil {
+			return wakeDialogGenericHoldReason, true
+		}
+		return wakeDialogHoldReason(marker), true
+	}
+}
+
+// wakeDialogHoldReason maps a marker to fixed text; no marker field is
+// copied into it.
+func wakeDialogHoldReason(marker wakeDialogMarker) string {
+	var harness string
+	switch marker.Harness {
+	case launch.CodexProvider:
+		harness = "Codex"
+	case "claude":
+		harness = "Claude Code"
+	case "cursor":
+		harness = "Cursor"
+	case "agy":
+		harness = "Antigravity"
+	case "pi":
+		harness = "pi"
+	case "":
+		// Claude Code dialog hooks write no harness.
+		if marker.Event != wakeDialogStartupEvent {
+			harness = "Claude Code"
+		}
+	}
+	if harness == "" {
+		harness = "The harness"
+	}
+	switch {
+	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
+		return harness + " startup screen open; type a prompt in that terminal to release"
+	case marker.Event == wakeDialogStartupEvent:
+		return harness + " startup screen open; answer it in that terminal to release"
+	}
+	return harness + " dialog open; answer it in that terminal to release"
 }
 
 // readWakeDialogMarkerInDir reads the marker through the canonical agent

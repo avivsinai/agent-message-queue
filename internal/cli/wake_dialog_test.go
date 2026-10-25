@@ -50,10 +50,35 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatal(err)
 	}
+	// field: held Codex doorbell invisible for 2.4 h (2026-10-25). The
+	// first held attempt shows the desktop notice at once, not after
+	// wakeDialogQuietHold; an unchanged count stays quiet within the
+	// attention period, and a new message shows it again.
+	var notices []string
+	h.cfg.settings.heldNotice = true
+	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+	h.cfg.desktopNotify = func(title, body string) error {
+		notices = append(notices, title+": "+body)
+		return nil
+	}
 	h.send("a", format.PriorityNormal)
 	h.scan(h.cfg)
 	if len(h.injected) != 0 {
 		t.Fatalf("typed %q into an open dialog", h.injected)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "AMQ: codex: 1 message waiting") ||
+		!strings.Contains(notices[0], "Claude Code dialog open") {
+		t.Fatalf("notices on the first held attempt = %q, want one for codex's 1 message", notices)
+	}
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(notices) != 1 {
+		t.Fatalf("notices within the attention period = %q, want still one", notices)
+	}
+	h.send("b", format.PriorityNormal)
+	h.scan(h.cfg)
+	if len(notices) != 2 || !strings.Contains(notices[1], "2 messages waiting") {
+		t.Fatalf("notices after a new message = %q, want a second for 2 messages", notices)
 	}
 	if h.cfg.doorbell.reminderAttempts != 0 || h.cfg.doorbell.presentationConfirmed {
 		t.Fatalf("hold spent the doorbell: reminderAttempts=%d presentationConfirmed=%v",

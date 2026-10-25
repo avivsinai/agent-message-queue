@@ -30,6 +30,7 @@ const (
 	defaultWakeInterruptPriority = format.PriorityUrgent
 	defaultWakeInterruptCooldown = 7 * time.Second
 	defaultWakeSelfUpgrade       = true
+	defaultWakeHeldNotice        = true
 )
 
 const (
@@ -72,6 +73,7 @@ type wakeSettings struct {
 	interruptCooldown time.Duration
 	injectTimeout     time.Duration
 	selfUpgrade       bool
+	heldNotice        bool
 }
 
 func defaultWakeSettings() wakeSettings {
@@ -88,6 +90,7 @@ func defaultWakeSettings() wakeSettings {
 		interruptCooldown: defaultWakeInterruptCooldown,
 		injectTimeout:     defaultInjectTimeout,
 		selfUpgrade:       defaultWakeSelfUpgrade,
+		heldNotice:        defaultWakeHeldNotice,
 	}
 }
 
@@ -175,6 +178,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.injectTimeout }},
 	{"self_upgrade", "self-upgrade", "Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade)",
 		func(s *wakeSettings) any { return &s.selfUpgrade }},
+	{"held_notice", "held-notice", "Show a desktop notification at once when a harness dialog holds the doorbell (macOS osascript, Linux notify-send)",
+		func(s *wakeSettings) any { return &s.heldNotice }},
 }
 
 // wakeRestartOnlyFlags are the amq wake flags bound into the running wake's
