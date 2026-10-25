@@ -84,6 +84,16 @@ jobs:
           node-version: '24'
       - name: pi extension test
         run: npm test
+      - name: amq-board Claude Code plugin test
+        # claude plugin test needs no login; the version is the one whose
+        # plugin API the module and its tests are written against or later.
+        env:
+          DISABLE_AUTOUPDATER: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        run: |
+          npm install --global --no-fund --no-audit @anthropic-ai/claude-code@2.1.310
+          claude plugin validate plugins/amq-board
+          claude plugin test plugins/amq-board
       - name: Smoke test
         run: make smoke
       - name: Module, contract, and hook checks

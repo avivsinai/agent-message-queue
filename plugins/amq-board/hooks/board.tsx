@@ -7,6 +7,8 @@ import type { BoardStrip, BoardView } from '../types'
 const PANE = 'amq-board'
 const EVERY_MS = 60_000
 const RUN_TIMEOUT_MS = 90_000
+// More than any board prints: a run past it is stopped.
+const MAX_OUTPUT = 4 * 1024 * 1024
 const STALE_MS = 5 * 60_000
 // The first Claude Code whose plugin API this module is written against.
 const MIN_VERSION = [2, 1, 308] as const
@@ -26,9 +28,15 @@ const EMPTY: BoardView = {
 
 const view = atom({ plugin: 'amq-board', key: 'view' } as const, EMPTY)
 
-// Module state: a reload drops both, as it drops the engine's timers.
+// Module state: a reload drops it, as it drops the engine's timers and
+// kills the module's children.
 let timer: { cancel: () => void } | undefined
+// Bumped by start and stop: a refresh started under an older value belongs
+// to a pane that has closed since, and draws and starts nothing.
+let generation = 0
 let isRunning = false
+// Kills the amq-board run in flight.
+let killRun: (() => void) | undefined
 let last: BoardModel | undefined
 
 // The parts of the amq/board/v1 model the pane reads. Every field is
@@ -117,6 +125,17 @@ function within(cwd: string, dir: unknown): boolean {
   return cwd === root || cwd.startsWith(root + '/')
 }
 
+/** Whether pid is a live process; true where no kill command can tell. */
+async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
+  try {
+    const ran = await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5_000 })
+    return ran.exitCode === 0
+  } catch {
+    // No kill command (Windows): the token on the fetch still has to match.
+    return true
+  }
+}
+
 /** Reads the model from a running amq-board serve for this project, if any. */
 async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | undefined> {
   const home = await $.env.get('HOME')
@@ -130,11 +149,14 @@ async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | 
   }
   const url = field(record, 'url')
   const token = field(record, 'token')
+  const pid = field(record, 'pid')
   // Loopback only, and a token that is one path segment.
   if (typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) return undefined
   if (typeof token !== 'string' || !/^[0-9a-f]+$/.test(token)) return undefined
+  // A record whose serve is gone is stale.
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined
+  if (!(await isAlive($, pid))) return undefined
   try {
-    // A dead pid's port refuses the connection; a reused one answers 404.
     const res = await $.http.fetch(`${url}/${token}/model.json`)
     if (!res.ok) return undefined
     const model = JSON.parse(res.text) as BoardModel
@@ -145,31 +167,74 @@ async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | 
   }
 }
 
+/** Runs amq-board --json; stop() or the 90 s deadline kills the run. */
 async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | string> {
-  let ran
+  const run = $.process.spawn({ argv: ['amq-board', '--json'], cwd })
+  const kill = () => void run.return({ code: null, signal: 'SIGTERM' }).catch(() => {})
+  let isTimedOut = false
+  const deadline = $.clock.after(RUN_TIMEOUT_MS, () => {
+    isTimedOut = true
+    kill()
+  })
+  killRun = kill
+  let stdout = ''
+  let stderr = ''
   try {
-    ran = await $.process.run(['amq-board', '--json'], { cwd, timeoutMs: RUN_TIMEOUT_MS })
+    let step = await run.next()
+    while (!step.done) {
+      if (step.value.stream === 'stdout') stdout += step.value.text
+      else if (stderr.length < 4096) stderr += step.value.text
+      if (stdout.length > MAX_OUTPUT) {
+        kill()
+        return 'amq-board: --json printed more than 4 MiB'
+      }
+      step = await run.next()
+    }
+    if (isTimedOut) return 'amq-board: no answer in 90 s'
+    const code = step.value?.code
+    if (code !== 0) {
+      const first = stderr.split('\n').find(line => line.trim() !== '') ?? `exit ${code ?? 'by signal'}`
+      return `amq-board: ${clean(first)}`
+    }
   } catch (err) {
     const text = err instanceof Error ? err.message : String(err)
     return /ENOENT|not found|no such file/i.test(text) ? 'amq-board not found' : `amq-board: ${clean(text)}`
-  }
-  if (ran.exitCode !== 0) {
-    const first = ran.stderr.split('\n').find(line => line.trim() !== '') ?? `exit ${ran.exitCode}`
-    return `amq-board: ${clean(first)}`
+  } finally {
+    deadline.cancel()
+    if (killRun === kill) killRun = undefined
   }
   try {
-    return JSON.parse(ran.stdout) as BoardModel
+    return JSON.parse(stdout) as BoardModel
   } catch {
     return 'amq-board: --json printed no JSON'
   }
 }
 
+/**
+ * Whether a refresh started under gen may go on: no stop since, and the
+ * pane still open by the engine's record, which a close the module never
+ * heard of (an unload) also ends.
+ */
+async function isCurrent($: EngineInterface, gen: number): Promise<boolean> {
+  if (gen !== generation || !timer) return false
+  if (!(await $.ui.panes()).some(pane => pane.id === PANE)) {
+    if (gen === generation) stop($)
+    return false
+  }
+  return gen === generation
+}
+
 async function tick($: EngineInterface): Promise<void> {
   if (isRunning) return
   isRunning = true
+  const gen = generation
   try {
+    if (!(await isCurrent($, gen))) return
     const cwd = await $.session.cwd()
-    const got = (await fromServe($, cwd)) ?? (await fromRun($, cwd))
+    const served = await fromServe($, cwd)
+    if (!(await isCurrent($, gen))) return
+    const got = served ?? (await fromRun($, cwd))
+    if (!(await isCurrent($, gen))) return
     const now = await $.clock.now()
     let next: BoardView
     if (typeof got === 'string') {
@@ -180,24 +245,31 @@ async function tick($: EngineInterface): Promise<void> {
       next = project(got, now)
     }
     await update($, view, () => next)
-    // A run that finishes after the pane closed leaves no status behind.
-    if (timer) $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
+    $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
   } catch (err) {
-    await update($, view, old => ({ ...(old ?? EMPTY), status: `amq-board: ${clean(String(err))}` }))
+    if (gen === generation && timer) {
+      await update($, view, old => ({ ...(old ?? EMPTY), status: `amq-board: ${clean(String(err))}` }))
+    }
   } finally {
     isRunning = false
+    // A pane opened again while this refresh ran gets its own refresh now.
+    if (gen !== generation && timer) void tick($)
   }
 }
 
 function start($: EngineInterface): void {
   if (timer) return
+  generation++
   timer = $.clock.every(EVERY_MS, () => void tick($))
   void tick($)
 }
 
 function stop($: EngineInterface): void {
+  generation++
   timer?.cancel()
   timer = undefined
+  killRun?.()
+  killRun = undefined
   $.ui.status(undefined)
 }
 

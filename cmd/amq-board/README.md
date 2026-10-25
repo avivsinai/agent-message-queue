@@ -104,12 +104,15 @@ Waiting on you strips (title, reason, and age), the In flight, Blocked, and
 Unclaimed counts, one line of source status, and when the board was generated,
 marked stale after 5 minutes. A status line shows `board: N waiting · M in
 flight` while the panel is open. The panel refreshes every minute while it is
-open, and nothing runs before `/board` or after the panel closes; a refresh
-already running when it closes finishes, within 90 seconds.
+open, and nothing runs before `/board` or after the panel closes: closing it
+stops an `amq-board` run in flight, and a refresh that was under way draws
+nothing.
 
 Each refresh reads the model from a running `amq-board serve` for the same
-project, found through `~/.amq/board/serve.json`. Without one, it runs
-`amq-board --json` in the session's directory, one run at a time; GitHub then
+project, found through `~/.amq/board/serve.json` and used only while its
+`pid` is alive. Without one, it runs
+`amq-board --json` in the session's directory, one run at a time and at most
+90 seconds; GitHub then
 answers from the shared cache within its TTL. When neither works, the panel
 shows one line with the reason, for example `amq-board not found`. Every value
 is drawn as plain text with control and format characters removed. The panel
