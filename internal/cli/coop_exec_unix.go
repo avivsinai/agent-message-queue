@@ -283,19 +283,6 @@ func runCoopExec(args []string) error {
 			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
 		}
 	}
-	// The marker changes only once this launch's wake holds the agent's wake
-	// lock, so a launch that loses the race touches no other owner's hold.
-	// That wake admits no input until the startup hold is released below,
-	// so no doorbell is typed before the marker exists: one typed before the
-	// harness starts would wait in the terminal and answer its trust dialog.
-	if c.wakeOwned {
-		writeStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
-		clearStaleStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs)
-	}
-	if c.wakeStartupHold != nil {
-		_ = c.wakeStartupHold.Close()
-	}
-
 	return c.execAgent()
 }
 
@@ -898,6 +885,33 @@ func (c *coopExecRun) execAgent() error {
 	if c.managedLaunchNonce == "" {
 		c.agentArgs = pinCodexShellIdentity(c.binaryPath, c.agentArgs, env, recorded)
 	}
+	// On failure from here on, clean up the wake process.
+	cleanupAfterError := func(cause error) error {
+		cleanupErr := c.cleanupWakeHelper(false)
+		if cleanupErr == nil {
+			return cause
+		}
+		return errors.Join(
+			cause,
+			fmt.Errorf("cleanup exact coop wake helper: %w", cleanupErr),
+		)
+	}
+	// The marker follows the final arguments, which decide Codex's update
+	// prompt. It changes only once this launch's wake holds the agent's wake
+	// lock, so a launch that loses the race touches no other owner's hold.
+	// That wake admits no input until the startup hold is released here, so
+	// no doorbell is typed before the marker exists: one typed before the
+	// harness starts would wait in the terminal and answer its first prompt.
+	if c.wakeOwned {
+		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs); err != nil {
+			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
+		}
+	}
+	if c.wakeStartupHold != nil {
+		if err := c.wakeStartupHold.Close(); err != nil {
+			return cleanupAfterError(fmt.Errorf("release the coop wake startup hold: %w", err))
+		}
+	}
 
 	invocation := c.managedInvocation
 	if invocation.Harness == "" {
@@ -912,16 +926,6 @@ func (c *coopExecRun) execAgent() error {
 	// On failure, clean up the wake process.
 	if c.cleanupWakeReady != nil {
 		c.cleanupWakeReady()
-	}
-	cleanupAfterError := func(cause error) error {
-		cleanupErr := c.cleanupWakeHelper(false)
-		if cleanupErr == nil {
-			return cause
-		}
-		return errors.Join(
-			cause,
-			fmt.Errorf("cleanup exact coop wake helper: %w", cleanupErr),
-		)
 	}
 	finalOwner, ownerErr := captureAuthoritativeCurrentWakeOwner()
 	if ownerErr != nil {

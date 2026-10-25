@@ -6,6 +6,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
+// codexUpdateCheckKey is the Codex configuration key that turns off the
+// startup update check and with it the update prompt.
+const codexUpdateCheckKey = "check_for_update_on_startup"
+
 // codexIdentityOverrides returns the Codex -c overrides that put each AMQ
 // identity variable present in env into the environment of Codex's shell
 // tool. Codex applies shell_environment_policy.set after its inherit mode,
@@ -83,12 +87,14 @@ func codexOverrideSetsIdentity(key string) bool {
 // refuseCodexSeatArgs already refused any later override of them. Any
 // override other than a feature boolean makes the TUI run its own
 // app-server, so the identity also reaches a seat that would have run on
-// the daemon.
+// the daemon. The same seat also starts without Codex's update prompt,
+// whose default choice runs the upgrade on the Enter a doorbell types.
 func pinCodexShellIdentity(binaryPath string, args, env []string, recorded bool) []string {
 	if recorded || launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
 		return args
 	}
-	return append(codexIdentityOverrides(env), args...)
+	overrides := append(codexIdentityOverrides(env), "-c", codexUpdateCheckKey+"=false")
+	return append(overrides, args...)
 }
 
 // codexDaemonSeatEnv is the environment for a Codex seat whose thread
