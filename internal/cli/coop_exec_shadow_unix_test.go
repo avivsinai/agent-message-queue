@@ -12,11 +12,23 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/creack/pty"
 )
 
 // Field report: launching Codex selected an older PATH installation that
 // rejected the configured model. Doctor named the files, but launch was silent.
 func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
+	master, terminal, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = terminal, terminal
+	t.Cleanup(func() {
+		os.Stdin, os.Stdout = stdin, stdout
+		_ = terminal.Close()
+		_ = master.Close()
+	})
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -55,6 +67,76 @@ func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
 	}
 	if selected != paths[0] {
 		t.Fatalf("executed %q, want selected installation %q", selected, paths[0])
+	}
+}
+
+// Field report agent-message-queue-ixq (terminal launch diagnostics): redirected
+// interactive Codex stdout failed after AMQ startup. The exec subcommand needs pipes.
+func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		tui  bool
+	}{
+		{"interactive stdout redirected", []string{"-m", "example-model", "explain this project"}, true},
+		{"exec stdout redirected", []string{"exec", "explain this project"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			master, terminal, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+			if err != nil {
+				_ = terminal.Close()
+				_ = master.Close()
+				t.Fatal(err)
+			}
+			stdin, stdout := os.Stdin, os.Stdout
+			os.Stdin, os.Stdout = terminal, output
+			t.Cleanup(func() {
+				os.Stdin, os.Stdout = stdin, stdout
+				_ = output.Close()
+				_ = terminal.Close()
+				_ = master.Close()
+			})
+			bin := t.TempDir()
+			binary := filepath.Join(bin, "codex")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			root := filepath.Join(secureTempDirForTest(t), "queue")
+			sentinel := errors.New("exec sentinel")
+			oldExec := coopExecProcess
+			t.Cleanup(func() { coopExecProcess = oldExec })
+			var selected string
+			var argv []string
+			coopExecProcess = func(path string, args, _ []string) error {
+				selected, argv = path, append([]string(nil), args...)
+				return sentinel
+			}
+			args := append([]string{"--root", root, "--me", "coder", "--no-wake", "--named=false", "-y", "codex", "--"}, tc.args...)
+			err = runCoopExec(args)
+			if tc.tui {
+				if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "missing: stdout") {
+					t.Fatalf("redirected Codex error = %v, want usage error naming stdout", err)
+				}
+				if selected != "" {
+					t.Fatalf("interactive Codex reached exec: %q", selected)
+				}
+				if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("interactive Codex provisioned its queue: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, sentinel) || selected != binary || len(argv) < len(tc.args) {
+				t.Fatalf("noninteractive Codex: error=%v selected=%q argv=%q", err, selected, argv)
+			}
+			if got := argv[len(argv)-len(tc.args):]; strings.Join(got, "\x00") != strings.Join(tc.args, "\x00") {
+				t.Fatalf("noninteractive arguments = %q, want %q", got, tc.args)
+			}
+		})
 	}
 }
 
