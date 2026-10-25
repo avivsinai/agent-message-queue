@@ -26,6 +26,9 @@ type FactoryConfig struct {
 	Root string
 	// StateDir is the companion's extensions/remote directory.
 	StateDir string
+	// Me is the endpoint's own mailbox handle in Root (serve's --me). An
+	// adapter that writes into the root refuses to use it.
+	Me string
 	// Target is the target id from the manifest.
 	Target string
 	// Epoch is test-only for the fake adapter; for all others it is empty
@@ -132,7 +135,7 @@ type Outcome struct {
 // Build never fails on a single adapter: a factory error becomes a typed
 // refusal in the Outcome, not a fatal return. An unknown kind is also a
 // refusal (not a fatal error), so serve can persist it and continue.
-func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcome {
+func Build(ctx context.Context, root, stateDir, me string, f manifest.File) []Outcome {
 	outcomes := make([]Outcome, 0, len(f.Adapters))
 	for _, a := range f.Adapters {
 		mu.RLock()
@@ -148,6 +151,7 @@ func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcom
 		att, err := fac(ctx, FactoryConfig{
 			Root:     root,
 			StateDir: stateDir,
+			Me:       me,
 			Target:   a.Target,
 			Epoch:    a.Epoch,
 			Config:   a.Config,

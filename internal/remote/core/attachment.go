@@ -157,6 +157,23 @@ type InteractionResolver interface {
 	ResolvedInteraction(key requests.Key, epoch, interactionID string) (protocol.Resolution, bool)
 }
 
+// CheckedAcknowledger is an optional Attachment method for an adapter whose
+// release of a retained result can fail. The endpoint records the
+// acknowledgement only when it returns nil; otherwise the record keeps
+// owing it and the acknowledgement replay sends the same digest again.
+type CheckedAcknowledger interface {
+	AcknowledgeResultChecked(key requests.Key, epoch, digest string) error
+}
+
+// Forgetter is an optional Attachment method for an adapter that keeps
+// durable per-request state of its own. The endpoint calls Forget once the
+// request record may be compacted, outside the endpoint lock, and compacts
+// the record only after Forget returns nil, so a failed Forget is retried by
+// the next compaction sweep.
+type Forgetter interface {
+	Forget(key requests.Key) error
+}
+
 // SubmitBlocker is an optional Attachment method: Inspect plus, when the
 // projection advertises submit false, the adapter's actionable reason, both
 // from one observation. The endpoint's unsupported refusal carries it

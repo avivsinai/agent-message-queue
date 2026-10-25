@@ -931,7 +931,7 @@ func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, b
 		return "", false, err
 	}
 	for index := len(hits) - 1; index >= 0; index-- {
-		msg, err := format.ReadMessageFile(filepath.Join(scan.dir, hits[index].filename))
+		msg, err := scan.read(hits[index].filename)
 		if err != nil || strings.TrimSpace(msg.Body) == "" {
 			continue
 		}

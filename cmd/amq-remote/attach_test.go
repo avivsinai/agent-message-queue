@@ -49,7 +49,7 @@ func TestLiveRegisterAttachesAndPersistsTheTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.SetRegistrar(liveRegistrar(root, stateDir, ep, nil))
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = srv.Serve(ctx) }()
@@ -786,13 +786,13 @@ func TestLiveRegisterAppliesAnApproveUpgrade(t *testing.T) {
 			}
 			ep := core.New(core.Config{Store: store})
 			t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
-			built := registry.Build(context.Background(), root, stateDir, manifest.File{Adapters: []manifest.Adapter{before}})
+			built := registry.Build(context.Background(), root, stateDir, "remote", manifest.File{Adapters: []manifest.Adapter{before}})
 			if len(built) != 1 || built[0].Refusal != nil {
 				t.Fatalf("setup: build = %+v", built)
 			}
 			ep.Register(built[0].Attachment) // what startup built: approve off
 			pinned := 0
-			register := liveRegistrar(root, stateDir, ep, func(manifest.Adapter) { pinned++ })
+			register := liveRegistrar(root, stateDir, "remote", ep, func(manifest.Adapter) { pinned++ })
 			upgrade := ipc.RegisterRequest{Kind: "claude", Target: target, Config: json.RawMessage(`{"pid":` + strconv.Itoa(pid) + `,"approve":true}`)}
 			if failFirst {
 				if err := os.Remove(regPath); err != nil {
@@ -910,7 +910,7 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.SetRegistrar(liveRegistrar(root, stateDir, ep, nil))
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = srv.Serve(ctx) }()

@@ -103,6 +103,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` only while the live bridge advertises `bridge_revision` 5 or higher. Submit evidence is `submitted`. |
 | `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `ApproveTool`, reject only: the owner can reject a tool call from Buzz; the host's policy rejects at expiry. `CancelRequest`: `amq-remote cancel` or `/cancel` stops the request's ACP turn, or keeps a request that has not run from running. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
+| `mailbox` | `handle`: an AMQ handle in serve's own root whose `agents/<handle>/inbox` already exists; the adapter never creates it. Optional `reply_timeout` (default `10m`, at most `24h`). The handle must not be `buzz`, `amq-remote` or serve's `--me`, and `--me` must not be `buzz` or `amq-remote`. Unknown config fields are refused. | `Inspect`, `Submit` and `CancelRequest`. Each request is one AMQ message to the handle: from `buzz` on thread `cockpit/<channel>` with the label `nostr:<event>` for a Buzz DM, else from `amq-remote` on thread `remote/<creator host>`. The handle answers with `amq reply --id <id>`; its first reply that is not `--kind status` is the request's result. With no such reply within `reply_timeout` the request fails, and the message stays in the inbox. A cancel after delivery ends the request as delivered and no longer waited for. One request runs at a time, so the handle ends its request before it asks the owner a question. Submit evidence is `submitted`. See [Strict share in one owner step](#strict-share-in-one-owner-step). |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
@@ -274,6 +275,12 @@ and `--relay`. With `--target`, a bundle signed by a different owner is
 refused before anything is enrolled. Without `--target`, `share --bundle`
 enrolls the bundle and leaves the manifest unchanged. The policy event is
 addressed by the body key, so publishing it again replaces it.
+
+To share an AMQ handle instead of a harness session, add a `mailbox`
+target for it to the manifest and bind the share with `--target <target>
+--native-session <handle> --min-evidence submitted`. The owner's DM then
+reaches the handle as one AMQ message, and the handle's `amq reply` is the
+result row. Buzz Desktop does not need to run.
 
 The body cannot open a DM channel. Its grants cover the kinds in
 `ShareKinds` plus the opt-in surfaces, and none creates a channel. The owner

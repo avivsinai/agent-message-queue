@@ -58,7 +58,7 @@ func TestBuildPartialFailureReturnsRefusals(t *testing.T) {
 			{Kind: "nonexistent-kind", Target: "x"},
 		},
 	}
-	outcomes := Build(context.Background(), "/tmp/root", "/tmp/state", f)
+	outcomes := Build(context.Background(), "/tmp/root", "/tmp/state", "remote", f)
 	if len(outcomes) != 3 {
 		t.Fatalf("got %d outcomes, want 3", len(outcomes))
 	}
