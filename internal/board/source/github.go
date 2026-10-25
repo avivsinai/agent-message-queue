@@ -37,6 +37,11 @@ type GitHub struct {
 	TTL                      time.Duration
 	Refresh                  bool  // ignore a fresh cache entry
 	Cache                    Cache // nil: no cache
+	// Account is the viewer login of a token the caller holds and passes
+	// to gh (serve's token_once). It replaces the configured login as the
+	// cache identity, since an account switch changes that login but not
+	// the token. Empty: the configured login.
+	Account string
 }
 
 func (GitHub) Name() string { return "github" }
@@ -82,7 +87,10 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 	// the configured login to that viewer, so a renamed account still finds
 	// its entry and one viewer's data never sits under another login.
 	login := key
-	if login.Account = githubAccount(ctx, env); login.Account == "" {
+	if login.Account = g.Account; login.Account == "" {
+		login.Account = githubAccount(ctx, env)
+	}
+	if login.Account == "" {
 		return g.refresh(ctx, env, repos, key, false)
 	}
 	if res, ok := g.cached(login, repos, env.Now()); ok {

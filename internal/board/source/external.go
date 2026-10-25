@@ -33,9 +33,14 @@ func (e External) Name() string { return "ext:" + e.Provider.Name }
 func (e External) Discover(board.Env) (bool, string) { return true, "" }
 
 func (e External) Read(ctx context.Context, env board.Env) board.Result {
-	argv := append([]string{e.Provider.Exec}, e.Provider.Args...)
-	out, err := env.Run.RunLimited(ctx, env.Dir, argv, maxProviderBytes)
+	out, err := e.Fetch(ctx, env)
 	return e.Build(out, err, env.Now())
+}
+
+// Fetch runs the provider once and returns its stdout, at most 1 MiB.
+func (e External) Fetch(ctx context.Context, env board.Env) ([]byte, error) {
+	argv := append([]string{e.Provider.Exec}, e.Provider.Args...)
+	return env.Run.RunLimited(ctx, env.Dir, argv, maxProviderBytes)
 }
 
 var externalFeeds = []board.Column{board.ColumnWaiting, board.ColumnInFlight, board.ColumnBlocked, board.ColumnUnclaimed}

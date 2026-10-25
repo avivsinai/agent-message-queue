@@ -2,6 +2,8 @@
   "use strict";
 
   var announce = document.getElementById("announce");
+  // Served by amq-board serve, not opened as a file.
+  var live = document.documentElement.hasAttribute("data-live");
 
   // Copy: the command is the text of the code element beside the button.
   // When the clipboard refuses, the command is selected instead and the
@@ -79,7 +81,7 @@
     }
     var ms = Math.max(0, Date.now() - generated);
     var stale = ms > 5 * 60000;
-    ageNode.textContent = "(" + ago(ms) + (stale ? ", stale: regenerate" : "") + ")";
+    ageNode.textContent = "(" + ago(ms) + (stale ? (live ? ", stale: the server has not refreshed" : ", stale: regenerate") : "") + ")";
     ageNode.classList.toggle("is-stale", stale);
   }
 
@@ -119,4 +121,93 @@
   if (input) {
     input.addEventListener("input", applyFilter);
   }
+
+  // Live view: the server rebuilds the model every minute. The page reads
+  // model.json by a relative URL, so it stays under the server's token, and
+  // reloads when a newer model exists; the server renders the new page.
+  // A reload waits while a details panel is open or text is selected, and
+  // the filter survives it.
+  if (!live) {
+    return;
+  }
+  var filterKey = "amq-board-filter";
+  try {
+    var kept = window.sessionStorage.getItem(filterKey);
+    if (input && kept) {
+      input.value = kept;
+      applyFilter();
+    }
+  } catch (e) { /* no storage: the filter starts empty */ }
+
+  var shown = "";
+  try {
+    shown = JSON.parse(document.getElementById("model").textContent).generated_at || "";
+  } catch (e) { /* no model: any served model is newer */ }
+  var state = document.getElementById("live-state");
+  var button = document.getElementById("refresh");
+
+  function busy() {
+    var sel = window.getSelection();
+    return document.querySelector("details[open]") !== null || (sel !== null && sel.toString() !== "");
+  }
+
+  function reload() {
+    try {
+      window.sessionStorage.setItem(filterKey, input ? input.value : "");
+    } catch (e) { /* no storage: the filter is lost */ }
+    window.location.reload();
+  }
+
+  // check resolves true when the server has a model newer than the page's.
+  function check() {
+    return fetch("model.json", { cache: "no-store" }).then(function (r) {
+      if (!r.ok) {
+        throw new Error("status " + r.status);
+      }
+      return r.json();
+    }).then(function (m) {
+      var newer = typeof m.generated_at === "string" && m.generated_at !== shown;
+      if (newer && busy()) {
+        state.textContent = "newer board ready: close details to update";
+      } else if (newer) {
+        reload();
+      }
+      return newer;
+    }, function () {
+      state.textContent = "server not reachable";
+      return false;
+    });
+  }
+
+  window.setInterval(check, 15000);
+
+  button.addEventListener("click", function () {
+    button.disabled = true;
+    state.textContent = "refreshing";
+    fetch("refresh", { cache: "no-store" }).then(function (r) {
+      return r.json();
+    }).then(function (res) {
+      if (res.refresh === "coalesced") {
+        state.textContent = "refreshed less than a minute ago";
+        button.disabled = false;
+        return;
+      }
+      var tries = 0;
+      var poll = window.setInterval(function () {
+        tries++;
+        check().then(function (newer) {
+          if (newer || tries >= 45) {
+            window.clearInterval(poll);
+            button.disabled = false;
+            if (!newer) {
+              state.textContent = "refresh still running";
+            }
+          }
+        });
+      }, 2000);
+    }, function () {
+      state.textContent = "refresh failed: server not reachable";
+      button.disabled = false;
+    });
+  });
 })();

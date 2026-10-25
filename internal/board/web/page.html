@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"{{if .Live}} data-live{{end}}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -25,6 +25,9 @@
   <div class="mast-tools">
     {{- if .Fleet}}
     <p class="mast-fleet"><span class="label">Fleet</span> <span class="num">{{.Fleet}}</span></p>
+    {{- end}}
+    {{- if .Live}}
+    <p class="live"><button type="button" class="live-refresh" id="refresh">Refresh</button> <span class="live-state" id="live-state" aria-live="polite">updates every minute</span></p>
     {{- end}}
     <p class="filter"><label class="label" for="filter">Filter</label> <input id="filter" type="search" autocomplete="off" spellcheck="false" placeholder="handle, ref, or title"></p>
   </div>

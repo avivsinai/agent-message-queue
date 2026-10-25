@@ -31,6 +31,7 @@ const (
 )
 
 const usage = `Usage: amq-board [--json | --html [--out <file>]] [--refresh]
+       amq-board serve
 
 Print the fleet board for the AMQ project of the current directory: the
 columns Waiting on you, In flight, Blocked, and Unclaimed, the source health
@@ -40,6 +41,8 @@ GitHub pull requests and issues through one gh api graphql call cached for
 the TTL (default 10m) when the origin remote is on github.com, and external
 providers registered in ~/.amq/board.json.
 Commands on cards are printed for you to copy; amq-board never runs them.
+
+amq-board serve keeps the page live on 127.0.0.1; see amq-board serve --help.
 
 Flags:
   --json      print the board model as JSON (schema amq/board/v1)
@@ -54,6 +57,9 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 && args[0] == "serve" {
+		return runServe(args[1:])
+	}
 	flags := flag.NewFlagSet("amq-board", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() { fmt.Fprint(os.Stderr, usage) }
@@ -90,33 +96,91 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
 		return exitGeneral
 	}
-	env := board.Env{
+	cfg, warnings := loadConfig(dir)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	}
+	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh})
+
+	switch {
+	case *asJSON:
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		err = enc.Encode(model)
+	case *asHTML:
+		err = writePage(model, *out)
+	default:
+		err = board.WriteText(os.Stdout, model)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitGeneral
+	}
+	return 0
+}
+
+// newEnv is what the sources of one refresh may use.
+func newEnv(dir string, run board.Runner) board.Env {
+	return board.Env{
 		Dir:      dir,
 		Now:      time.Now,
-		Run:      execRunner{},
+		Run:      run,
 		LookPath: exec.LookPath,
 		IsDir: func(p string) bool {
 			info, err := os.Stat(p)
 			return err == nil && info.IsDir()
 		},
 	}
+}
+
+// loadConfig reads ~/.amq/board.json and the project's .amq/board.json.
+func loadConfig(dir string) (board.FileConfig, []string) {
+	home, _ := os.UserHomeDir()
+	return loadConfigFiles(dir, home)
+}
+
+// loadConfigFiles reads the board configuration under home and dir, with
+// the user file's "usage" key. A refused usage key is a warning and turns
+// usage off, so a mistyped "enabled": false never reads the homes it meant
+// to keep closed.
+func loadConfigFiles(dir, home string) (board.FileConfig, []string) {
 	userPath := ""
-	if home, err := amqhome.Dir(); err == nil {
-		userPath = filepath.Join(home, board.ConfigFile)
+	if home != "" {
+		userPath = filepath.Join(amqhome.Under(home), board.ConfigFile)
 	}
 	cfg, warnings := board.LoadConfig(userPath, filepath.Join(dir, ".amq", board.ConfigFile))
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	if home == "" {
+		return cfg, append(warnings, "no home directory: usage not read")
 	}
+	st, err := boardusage.LoadSettings(userPath, home)
+	if err != nil {
+		warnings = append(warnings, "usage not read: "+err.Error())
+		st.Enabled = false
+	}
+	cfg.Usage = st
+	return cfg, warnings
+}
 
-	ctx := context.Background()
+// sourceOptions are what differ between the one-shot faces and serve.
+type sourceOptions struct {
+	refresh   bool   // ignore the forge cache
+	ghAccount string // the viewer a token read once belongs to; empty: the configured login
+	// provider wraps each enabled external provider; nil reads it on every
+	// refresh.
+	provider func(source.External) board.Source
+}
+
+// boardModel reads every source cfg enables, under its own deadline, and
+// builds the board model with the usage of each harness account.
+func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt sourceOptions) board.Model {
 	gh := source.GitHub{
 		Repos:                    cfg.GitHubRepos,
 		Humans:                   cfg.GitHubLogins,
 		Identities:               cfg.GitHubIdentities,
 		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
 		TTL:                      cfg.GitHubTTL,
-		Refresh:                  *refresh,
+		Refresh:                  opt.refresh,
+		Account:                  opt.ghAccount,
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
 	if cfg.SourceBeads {
@@ -142,34 +206,18 @@ func run(args []string) int {
 		sources = append(sources, board.Disabled{SourceName: "github"})
 	}
 	for _, p := range cfg.Providers {
-		if p.Enabled {
-			sources = append(sources, source.External{Provider: p})
-		} else {
-			sources = append(sources, board.Disabled{SourceName: source.External{Provider: p}.Name()})
+		ext := source.External{Provider: p}
+		switch {
+		case !p.Enabled:
+			sources = append(sources, board.Disabled{SourceName: ext.Name()})
+		case opt.provider != nil:
+			sources = append(sources, opt.provider(ext))
+		default:
+			sources = append(sources, ext)
 		}
 	}
 	model := board.Run(ctx, env, sources, cfg.Board, version)
-	if home, err := os.UserHomeDir(); err == nil {
-		if model, err = withUsage(model, env, home); err != nil {
-			fmt.Fprintln(os.Stderr, "amq-board: usage not read:", err)
-		}
-	}
-
-	switch {
-	case *asJSON:
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		err = enc.Encode(model)
-	case *asHTML:
-		err = writePage(model, *out)
-	default:
-		err = board.WriteText(os.Stdout, model)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board:", err)
-		return exitGeneral
-	}
-	return 0
+	return withUsage(ctx, model, env, cfg.Usage)
 }
 
 // writePage writes the static page to stdout, or to out through a temporary
@@ -200,29 +248,34 @@ func writePage(m board.Model, out string) error {
 }
 
 // withUsage adds what each harness account spent in this project and the
-// limits it reports, as the "usage" key of ~/.amq/board.json under home
-// configures: off, extra homes, and the run's budget. A refused file reads
-// nothing, so a mistyped "enabled": false never reads the homes it meant to
-// keep closed. A session counts for the project when its recorded working
-// directory is in one of the project's Git worktrees (the directory itself
-// outside Git). Spend goes to the worker an AMQ conversation record ties
+// limits it reports, as the "usage" key of ~/.amq/board.json configures:
+// off, extra homes, and the run's budget. A session counts for the project
+// when its recorded working directory is in one of the project's Git
+// worktrees (the directory itself outside Git); the worktree list is read
+// under ctx within worktreeTimeout. Spend goes to the worker an AMQ conversation record ties
 // the harness session to; the rest shows under the account's other
 // sessions.
-func withUsage(m board.Model, env board.Env, home string) (board.Model, error) {
-	st, err := boardusage.LoadSettings(filepath.Join(amqhome.Under(home), board.ConfigFile), home)
-	if err != nil || !st.Enabled {
-		return m, err
+func withUsage(ctx context.Context, m board.Model, env board.Env, st boardusage.Settings) board.Model {
+	if !st.Enabled {
+		return m
 	}
 	roots := []string{env.Dir}
-	if out, err := env.Run.Run(context.Background(), env.Dir, []string{"git", "worktree", "list", "--porcelain"}); err == nil {
+	wctx, cancel := context.WithTimeout(ctx, worktreeTimeout)
+	out, err := env.Run.Run(wctx, env.Dir, []string{"git", "worktree", "list", "--porcelain"})
+	cancel()
+	if err == nil {
 		if wts := boardusage.Worktrees(out); len(wts) > 0 {
 			roots = wts
 		}
 	}
 	mapping := board.UsageMapping(m.Conversations)
 	rep := boardusage.Read(st.Config, env.Now(), boardusage.ProjectEligible(roots), mapping)
-	return board.WithUsage(m, rep, mapping), nil
+	return board.WithUsage(m, rep, mapping)
 }
+
+// worktreeTimeout bounds the one command usage runs, well inside a source's
+// deadline.
+const worktreeTimeout = 10 * time.Second
 
 // maxToolOutput bounds the stdout of any one source command. Forge responses
 // are not truncated on the server, so the bound is generous; providers get
@@ -234,8 +287,11 @@ const maxToolOutput = 64 << 20
 const stderrTail = 4 << 10
 
 // execRunner runs argv directly (no shell) with no stdin and returns stdout.
-// A failed command's error carries its stderr.
-type execRunner struct{}
+// A failed command's error carries its stderr. A non-empty ghToken is passed
+// as GH_TOKEN to gh commands only, never to another tool or a provider.
+type execRunner struct {
+	ghToken string
+}
 
 func (r execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
 	return r.RunLimited(ctx, dir, argv, maxToolOutput)
@@ -249,11 +305,14 @@ const pipeCloseDelay = 200 * time.Millisecond
 // command instead of buffering more. On cancellation or overflow the whole
 // process group is killed and the pipes close within pipeCloseDelay, so a
 // descendant that holds stdout cannot carry the call past its deadline.
-func (execRunner) RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error) {
+func (r execRunner) RunLimited(ctx context.Context, dir string, argv []string, maxOut int) ([]byte, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	if r.ghToken != "" && argv[0] == "gh" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+r.ghToken)
+	}
 	stdout := &limitBuffer{max: maxOut, overflow: cancel}
 	var stderr tailBuffer
 	cmd.Stdout, cmd.Stderr = stdout, &stderr

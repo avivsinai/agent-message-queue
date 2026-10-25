@@ -8,6 +8,7 @@ amq-board            # text
 amq-board --json     # the board model (schema amq/board/v1)
 amq-board --html --out board.html  # the board as one static page
 amq-board --refresh  # ignore the GitHub cache and fetch once
+amq-board serve      # the page, live on 127.0.0.1
 ```
 
 It prints four columns, in this order:
@@ -49,6 +50,37 @@ Ages are as of generation; the header says how old the page is and marks it
 stale after 5 minutes, and the footer has the command that regenerates it.
 The page never runs a command: Copy puts the command on the clipboard, and
 the filter field hides strips that do not match a handle, ref, or title.
+
+## Live page
+
+`amq-board serve` serves the same page on `127.0.0.1`, on a free port, and
+prints its URL once. The URL holds a random token, and every route lives under
+it: `/<token>/` is the page, `/<token>/model.json` is the last built model
+(the same JSON as `amq-board --json`), and `/<token>/refresh` refreshes now.
+A request without the exact token is 404, a request whose `Host` is not the
+printed address is refused, and any method other than GET is refused. The
+page carries the static page's Content Security Policy plus `connect-src
+'self'`.
+
+The model is rebuilt every minute, and a request only reads the last one.
+GitHub answers from its cache until the TTL ends, and each external provider
+runs at most once per its TTL. Refresh on the page ignores those caches,
+at most once a minute: a press within a minute of the last forced refresh, or
+while a refresh runs, joins it, so five quick presses make one `gh api` call.
+The page reads `model.json` every 15 seconds and reloads when the model is
+newer, unless a details panel is open or text is selected; the filter stays.
+
+Each refresh reads `~/.amq/board.json` and `.amq/board.json` again. A valid
+edit applies on that refresh without a restart. A refused edit (bad JSON or a
+value the board warns about) keeps the last good configuration and is
+reported once on stderr. The project directory is fixed at start. With
+`forges.github.token_once` (default `true`, user file only), `serve` reads
+`gh auth token` once and passes it as `GH_TOKEN` to its later `gh` calls only,
+held in memory, so a session prompts the keychain once. It resolves the
+token's account once (`gh api user`) and keys the GitHub cache by it, so a
+later `gh auth switch` never serves the other account's cache. The usage
+settings are part of the configuration a refused edit keeps. Ctrl-C stops
+the view, cancels a running refresh's commands, and waits for them.
 
 ## Sources
 
@@ -142,7 +174,7 @@ this:
   "stale_after": "36h",
   "obligation_max_age": "14d",
   "sources": {"beads": true, "github": true},
-  "forges": {"github": {"repos": [], "ttl": "10m",
+  "forges": {"github": {"repos": [], "ttl": "10m", "token_once": true,
                         "ready_to_merge_waits_on_human": true}},
   "providers": [{"name": "tracker", "exec": "/abs/path", "args": [], "ttl": "10m"}]
 }
@@ -152,7 +184,8 @@ A project may override `liveness_window`, `stale_after`,
 `obligation_max_age`, `sources`, `forges.github.repos`, and
 `forges.github.ready_to_merge_waits_on_human` in `.amq/board.json`, and turn
 a registered provider on or off with `{"name": "tracker", "enabled": false}`.
-Executables, arguments, humans, and identities come only from the user file;
+Executables, arguments, humans, identities, the GitHub TTL, and
+`token_once` come only from the user file;
 the board refuses them in a project file with a warning. The reserved AMQ
 `user` and your GitHub login are always you; a GitHub author maps to an
 agent only through `identities`.

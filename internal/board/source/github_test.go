@@ -155,13 +155,23 @@ func TestGitHubCachedReadMakesOneCall(t *testing.T) {
 		t.Errorf("graphql calls = %d, want 2", calls["gh api graphql"])
 	}
 
-	// Codex review of PR #1200: a token in the environment overrides the
-	// configured user, so the configured user's entry must not be served.
+	// Codex review of PR #1215: serve holds a token read once; after an
+	// account switch the configured login names another account, whose
+	// entry must not be served. The token's viewer is the cache identity.
 	g.Refresh = false
-	t.Setenv("GH_TOKEN", "fake-token-of-another-account")
+	g.Account = "other-viewer"
 	read()
 	if calls["gh api graphql"] != 3 {
-		t.Errorf("graphql calls with GH_TOKEN set = %d, want 3 (cache not read)", calls["gh api graphql"])
+		t.Errorf("graphql calls under another token's viewer = %d, want 3 (configured login's entry not served)", calls["gh api graphql"])
+	}
+	g.Account = ""
+
+	// Codex review of PR #1200: a token in the environment overrides the
+	// configured user, so the configured user's entry must not be served.
+	t.Setenv("GH_TOKEN", "fake-token-of-another-account")
+	read()
+	if calls["gh api graphql"] != 4 {
+		t.Errorf("graphql calls with GH_TOKEN set = %d, want 4 (cache not read)", calls["gh api graphql"])
 	}
 }
 
