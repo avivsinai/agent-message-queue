@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{.CSP}}">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>{{.Project}} · fleet board</title>
+<link rel="icon" href="data:,">
+<style>{{.CSS}}</style>
+</head>
+<body>
+<header class="mast">
+  <div class="mast-id">
+    <h1 class="mast-project">{{.Project}}</h1>
+    <p class="mast-meta"><span>{{.Sessions}}</span> <span class="mast-gen">generated <time datetime="{{.Generated}}">{{.Clock}}</time><span class="mast-age" id="page-age"></span></span></p>
+  </div>
+  <p class="mast-counts">
+    <a class="count count-waiting" href="#bay-waiting_on_you"><span class="count-name">{{.Waiting.Title}}</span> <span class="count-n">{{len .Waiting.Strips}}</span></a>
+    {{- range .Bays}}
+    <a class="count" href="#bay-{{.ID}}"><span class="count-name">{{.Title}}</span> <span class="count-n">{{len .Strips}}</span></a>
+    {{- end}}
+  </p>
+  <div class="mast-tools">
+    {{- if .Fleet}}
+    <p class="mast-fleet"><span class="label">Fleet</span> <span class="num">{{.Fleet}}</span></p>
+    {{- end}}
+    <p class="filter"><label class="label" for="filter">Filter</label> <input id="filter" type="search" autocomplete="off" spellcheck="false" placeholder="handle, ref, or title"></p>
+  </div>
+</header>
+
+<main>
+  <section class="lamps" aria-labelledby="lamps-h">
+    <h2 class="label lamps-h" id="lamps-h">Sources</h2>
+    <ul class="lamp-list">
+      {{- range .Sources}}
+      <li class="lamp lamp-{{.Status}}{{if .Partial}} is-partial{{end}}">
+        <span class="lamp-face" aria-hidden="true"></span>
+        <span class="lamp-name">{{.Name}}</span>
+        <span class="lamp-status">{{.Status}}{{if .Partial}} · partial{{end}}</span>
+        {{- if .Age}}<span class="lamp-age num">{{.Age}}</span>{{end}}
+        {{- if .Gap}}
+        <span class="lamp-note"><span class="lamp-note-k">not assessed:</span> {{.Gap}}</span>
+        {{- end}}
+        {{- if .Detail}}
+        {{- if gt (len .Detail) 60}}
+        <details class="lamp-note lamp-detail"><summary>why {{.Status}}</summary>{{.Detail}}</details>
+        {{- else}}
+        <span class="lamp-note lamp-detail">{{.Detail}}</span>
+        {{- end}}
+        {{- end}}
+      </li>
+      {{- end}}
+    </ul>
+  </section>
+
+
+  {{- with .Waiting}}
+  <section class="bay bay-waiting" id="bay-{{.ID}}" aria-labelledby="h-{{.ID}}">
+    <h2 class="bay-head" id="h-{{.ID}}"><span class="bay-title">{{.Title}}</span> <span class="bay-count num">{{len .Strips}}</span></h2>
+    {{- if .Gates}}
+    <ul class="gates">
+      {{- range .Gates}}
+      <li>{{.}}</li>
+      {{- end}}
+    </ul>
+    {{- end}}
+    {{- if .Strips}}
+    <div class="rack">
+      <div class="rack-labels" aria-hidden="true"><span>Ref</span><span>Title</span><span>Reason</span><span>Since</span><span>Owner</span><span>Checked</span><span>Command</span></div>
+      {{- $bay := .ID}}
+      {{- range $i, $s := .Strips}}{{template "strip" (stripArgs $bay $i $s true)}}{{end}}
+    </div>
+    {{- else}}
+    <p class="empty">{{.Empty}}</p>
+    {{- end}}
+    <p class="filtered" hidden></p>
+  </section>
+  {{- end}}
+
+  <div class="lower">
+    {{- range .Bays}}
+    <section class="bay bay-{{.ID}}" id="bay-{{.ID}}" aria-labelledby="h-{{.ID}}">
+      <h2 class="bay-head" id="h-{{.ID}}"><span class="bay-title">{{.Title}}</span> <span class="bay-count num">{{len .Strips}}</span></h2>
+      {{- if .Strips}}
+      <div class="rack">
+        {{- $bay := .ID}}
+        {{- range $i, $s := .Strips}}{{template "strip" (stripArgs $bay $i $s false)}}{{end}}
+      </div>
+      {{- else}}
+      <p class="empty">{{.Empty}}</p>
+      {{- end}}
+      <p class="filtered" hidden></p>
+    </section>
+    {{- end}}
+
+    <section class="bay bay-roster" id="bay-roster" aria-labelledby="h-roster">
+      <h2 class="bay-head" id="h-roster"><span class="bay-title">Roster</span></h2>
+      {{- if .RosterNote}}
+      <p class="empty roster-note">{{.RosterNote}}</p>
+      {{- end}}
+      {{- range .Roster}}
+      <div class="crew">
+        <h3 class="crew-name label">{{.Name}}</h3>
+        {{- if .Agents}}
+        <ul class="crew-list">
+          {{- range .Agents}}
+          <li class="agent agent-{{.Liveness}}">
+            <span class="agent-lamp" aria-hidden="true"></span>
+            <span class="agent-handle">{{.Handle}}</span>
+            <span class="agent-state">{{.Liveness}}{{if .Invalid}} · invalid mailbox name{{end}}</span>
+            {{- if .Counts}}<span class="agent-counts num">{{.Counts}}</span>{{end}}
+            {{- if .Usage}}<span class="agent-usage num{{if .Limited}} is-reached{{end}}">{{.Usage}}</span>{{end}}
+            {{- if or .Action .Split}}
+            <details class="agent-more">
+              <summary>Details</summary>
+              {{- range .Split}}
+              <p class="agent-split num">{{.}}</p>
+              {{- end}}
+              {{- with .Action}}
+              {{template "cmd" .}}
+              {{- end}}
+            </details>
+            {{- end}}
+          </li>
+          {{- end}}
+        </ul>
+        {{- else}}
+        <p class="crew-none">No live agents.</p>
+        {{- end}}
+        {{- if .Quiet}}
+        <details class="crew-quiet">
+          <summary>{{len .Quiet}} quiet</summary>
+          <p class="crew-quiet-list">{{range $i, $h := .Quiet}}{{if $i}}, {{end}}{{$h}}{{end}}</p>
+          {{- if .Note}}<p class="crew-quiet-note">{{.Note}}</p>{{end}}
+        </details>
+        {{- end}}
+      </div>
+      {{- end}}
+    </section>
+  </div>
+  {{- if .Limits}}
+  <section class="limits" aria-labelledby="limits-h">
+    <h2 class="label limits-h" id="limits-h">Limits</h2>
+    <ul class="limit-list">
+      {{- range .Limits}}
+      <li class="limit{{if .Reached}} is-reached{{end}}"><span class="limit-account">{{.Account}}</span> <span class="limit-value">{{.Limits}}</span>{{if .Other}} <span class="limit-other">{{.Other}}</span>{{end}}</li>
+      {{- end}}
+    </ul>
+  </section>
+  {{- end}}
+</main>
+
+<footer class="foot">
+  {{- if .Regenerate}}
+  <div class="cmd foot-cmd"><span class="label">Regenerate</span><code>{{.Regenerate}}</code><button type="button" class="copy" aria-label="Copy: regenerate this page">Copy</button></div>
+  {{- end}}
+  <p class="foot-meta">amq-board {{.Version}} · {{.Dir}} · ages are as of generation; commands are copied, never run.</p>
+</footer>
+<p class="sr-only" id="announce" aria-live="polite"></p>
+<script type="application/json" id="model">{{.Model}}</script>
+<script>{{.JS}}</script>
+</body>
+</html>
+{{- define "strip"}}
+<article class="strip{{if .S.Cocked}} is-cocked{{end}}" aria-labelledby="{{.ID}}">
+  <p class="c-ref"><span class="ref-kind">{{.S.Kind}}</span> <span class="ref-id">{{.S.ID}}</span></p>
+  <div class="c-title">
+    <h3 class="title" id="{{.ID}}">{{.S.Title}}</h3>
+    {{- if .S.Marks}}
+    <p class="marks">{{range .S.Marks}}<span class="mark">{{.}}</span> {{end}}</p>
+    {{- end}}
+  </div>
+  <p class="c-since num"><span class="cue">since </span>{{if .S.SinceAt}}<time datetime="{{.S.SinceAt}}">{{.S.Since}}</time>{{else}}{{.S.Since}}{{end}}</p>
+  <div class="c-why">
+    <p class="c-reason">{{.S.Reason}}</p>
+    {{- if .S.Checked}}
+    <p class="c-checked num">{{.S.Checked}}</p>
+    {{- end}}
+  </div>
+  <div class="c-owner">
+    <p><span class="cue">owner </span>{{.S.Owner}}</p>
+    {{- range .S.People}}
+    <p class="people">{{.}}</p>
+    {{- end}}
+  </div>
+  {{- if .Shown}}
+  <div class="c-cmd">
+    {{- range .Shown}}
+    {{template "cmd" .}}
+    {{- end}}
+  </div>
+  {{- end}}
+  {{- if .S.HasDetail}}
+  <details class="c-detail">
+    <summary>{{if .Shown}}More commands and evidence{{else}}Details{{end}}</summary>
+    <div class="detail">
+      {{- if .More}}
+      <div class="detail-cmds">
+        {{- range .More}}
+        {{template "cmd" .}}
+        {{- end}}
+      </div>
+      {{- end}}
+      <p class="detail-title">{{.S.Title}}</p>
+      <ul class="detail-refs">
+        {{- range .S.Refs}}
+        <li class="token">{{.}}</li>
+        {{- end}}
+        {{- range .S.Related}}
+        <li class="token token-related">related: {{.}}</li>
+        {{- end}}
+      </ul>
+      {{- if .S.Evidence}}
+      <ul class="evidence">
+        {{- range .S.Evidence}}
+        <li><span class="ev-fact"><span class="ev-source">{{.Source}}</span> {{.Field}} = <span class="ev-value">{{if .URL}}<a href="{{.URL}}" rel="noreferrer noopener">{{.Value}}</a>{{else}}{{.Value}}{{end}}</span>{{if .Age}} <span class="ev-age num">{{.Age}}</span>{{end}}</span>{{if .Text}}<span class="ev-text">{{.Text}}</span>{{end}}</li>
+        {{- end}}
+      </ul>
+      {{- end}}
+    </div>
+  </details>
+  {{- end}}
+</article>
+{{- end}}
+{{- define "cmd"}}
+<div class="cmd"><p class="cmd-body"><span class="cmd-label">{{.Label}}</span><code>{{.Command}}</code></p><button type="button" class="copy" aria-label="Copy: {{.Label}}">Copy</button></div>
+{{- end}}

@@ -47,6 +47,8 @@ jobs:
         run: make check-skills
       - name: Check CLI docs freshness
         run: make check-docs-cli
+      - name: Check board page script
+        run: make check-board-page
       - name: Format check
         run: make fmt-check
       - name: Vet

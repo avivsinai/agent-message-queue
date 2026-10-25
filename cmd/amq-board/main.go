@@ -30,7 +30,7 @@ const (
 	exitUsage   = 2
 )
 
-const usage = `Usage: amq-board [--json] [--refresh]
+const usage = `Usage: amq-board [--json | --html [--out <file>]] [--refresh]
 
 Print the fleet board for the AMQ project of the current directory: the
 columns Waiting on you, In flight, Blocked, and Unclaimed, the source health
@@ -43,6 +43,8 @@ Commands on cards are printed for you to copy; amq-board never runs them.
 
 Flags:
   --json      print the board model as JSON (schema amq/board/v1)
+  --html      print the board as one static HTML page
+  --out FILE  with --html, write the page to FILE instead of stdout
   --refresh   ignore the GitHub cache and fetch once
   --version   print the version
 `
@@ -58,6 +60,8 @@ func run(args []string) int {
 	asJSON := flags.Bool("json", false, "print the board model as JSON")
 	showVersion := flags.Bool("version", false, "print the version")
 	refresh := flags.Bool("refresh", false, "ignore the GitHub cache and fetch once")
+	asHTML := flags.Bool("html", false, "print the board as one static HTML page")
+	out := flags.String("out", "", "with --html, write the page to this file")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -66,6 +70,14 @@ func run(args []string) int {
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "amq-board: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
+		return exitUsage
+	}
+	if *asJSON && *asHTML {
+		fmt.Fprintln(os.Stderr, "amq-board: --json and --html are exclusive")
+		return exitUsage
+	}
+	if *out != "" && !*asHTML {
+		fmt.Fprintln(os.Stderr, "amq-board: --out needs --html")
 		return exitUsage
 	}
 	if *showVersion {
@@ -143,11 +155,14 @@ func run(args []string) int {
 		}
 	}
 
-	if *asJSON {
+	switch {
+	case *asJSON:
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		err = enc.Encode(model)
-	} else {
+	case *asHTML:
+		err = writePage(model, *out)
+	default:
 		err = board.WriteText(os.Stdout, model)
 	}
 	if err != nil {
@@ -155,6 +170,33 @@ func run(args []string) int {
 		return exitGeneral
 	}
 	return 0
+}
+
+// writePage writes the static page to stdout, or to out through a temporary
+// file renamed into place, so a browser never reads a half-written page.
+func writePage(m board.Model, out string) error {
+	regenerate := []string{"amq-board", "--html"}
+	if out == "" {
+		return board.WriteHTML(os.Stdout, m, board.Quote(regenerate))
+	}
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(abs), "."+filepath.Base(abs)+".*")
+	if err != nil {
+		return err
+	}
+	// After the rename the temporary name is gone and Remove fails harmlessly.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := board.WriteHTML(tmp, m, board.Quote(append(regenerate, "--out", abs))); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), abs)
 }
 
 // withUsage adds what each harness account spent in this project and the

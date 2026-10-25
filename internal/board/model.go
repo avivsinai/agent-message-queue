@@ -377,14 +377,13 @@ func emptyText(col Column, results []NamedResult) string {
 		if !feeds(r.Feeds, col) {
 			continue
 		}
-		switch {
-		case r.Status == StatusDegraded:
-			gap := nr.Name + " degraded"
-			if r.Detail != "" {
-				gap += ": " + r.Detail
-			}
-			gaps = append(gaps, gap)
-		case r.Status == StatusOK && r.Coverage.Partial():
+		// A degraded source names itself here; its error detail stays in
+		// the source strip. Its coverage gap is a separate fact and shows
+		// whether or not the source also degraded.
+		if r.Status == StatusDegraded {
+			gaps = append(gaps, nr.Name+" degraded (see sources)")
+		}
+		if (r.Status == StatusOK || r.Status == StatusDegraded) && r.Coverage.Partial() {
 			detail := r.Coverage.Detail
 			if detail == "" {
 				detail = "partial"
