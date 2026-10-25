@@ -48,8 +48,9 @@ func Conflicts(a, b usage.Account) bool {
 // HeldUntil is the earliest time a dispatch keyed k may be reserved. An
 // unfinished attempt holds through its deadline plus its interval, so a
 // crashed or paused dispatch still spends its interval; a finished one holds
-// for its interval after completion, or its failure hold if longer, and
-// never less than the unfinished bound when its times disagree.
+// for its interval after completion, or its failure hold if longer. When a
+// finished attempt's times disagree, its completion counts from the later
+// of its finish and its deadline.
 func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time {
 	var conflicting []usage.Attempt
 	for _, a := range attempts {
@@ -62,13 +63,15 @@ func HeldUntil(attempts []usage.Attempt, k usage.Account, rules Rules) time.Time
 	streak := 0
 	for _, a := range conflicting {
 		finished, ok := a.FinishedAt.Get()
-		if !ok || !ordered(a) {
-			// Unfinished, or its times disagree (a wall clock set back
-			// during the run): the reservation's own bound holds.
-			until = later(until, a.DeadlineAt.Add(a.Interval))
-		}
 		if !ok {
+			until = later(until, a.DeadlineAt.Add(a.Interval))
 			continue
+		}
+		if !ordered(a) {
+			// Its times disagree (a wall clock set back during the run):
+			// it completed no earlier than its deadline, for the interval
+			// and the failure hold alike.
+			finished = later(finished, a.DeadlineAt)
 		}
 		t := finished.Add(a.Interval)
 		if a.FailureCode == "" {

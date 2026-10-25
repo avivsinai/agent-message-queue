@@ -213,8 +213,9 @@ func TestRunHonorsTheJournal(t *testing.T) {
 		},
 		{
 			name: "finished before reserved",
-			journal: attempt + `"reserved_at":"2026-10-25T12:10:00Z","deadline_at":"2026-10-25T12:10:03Z",` +
-				`"interval":300000000000,"finished_at":{"presence":"present","value":"2026-10-25T11:54:00Z"}}]}`,
+			journal: attempt + `"reserved_at":"2026-10-25T11:50:00Z","deadline_at":"2026-10-25T11:50:03Z",` +
+				`"interval":300000000000,"finished_at":{"presence":"present","value":"2026-10-25T10:30:00Z"},` +
+				`"failure_code":"unsupported_version"}]}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
