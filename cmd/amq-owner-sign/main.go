@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,15 @@ func main() {
 }
 
 func runMain(args []string, stdout, stderr io.Writer) int {
+	// The owner key must never reach a core file, so core dumps are forbidden
+	// before anything else runs, and the key is not read if that fails.
+	// SetTraceback cannot go below a GOTRACEBACK set in the environment; it
+	// only quiets the default. The zero core limit is the guarantee.
+	if err := forbidCoreDumps(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: cannot forbid core dumps, so the owner key is not read: %v\n", err)
+		return 1
+	}
+	debug.SetTraceback("none")
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v" || args[0] == "version") {
 		_, _ = fmt.Fprintln(stdout, version)
 		return 0
