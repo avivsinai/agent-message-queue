@@ -85,7 +85,7 @@ func TestBoardReadsUsageSettings(t *testing.T) {
 		if len(warnings) > 0 {
 			t.Fatal(warnings)
 		}
-		return withUsage(board.Model{}, env, cfg.Usage).Usage
+		return withUsage(context.Background(), board.Model{}, env, cfg.Usage).Usage
 	}
 
 	if u := read(t, `{"usage":{"enabled":false}}`); u != nil {
