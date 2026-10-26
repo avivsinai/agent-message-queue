@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.113.3](https://github.com/avivsinai/agent-message-queue/compare/v0.113.2...v0.113.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **board:** close the panel with a second board command ([#1249](https://github.com/avivsinai/agent-message-queue/issues/1249)) ([a25d802](https://github.com/avivsinai/agent-message-queue/commit/a25d802658bebfad7d9be913785632fe34095076))
+* **remote:** preserve busy cancellation and bind startup checks ([#1250](https://github.com/avivsinai/agent-message-queue/issues/1250)) ([4d2c37f](https://github.com/avivsinai/agent-message-queue/commit/4d2c37f2562046d62c91e04b36b074e714acccf9))
+* **wake:** keep terminal notices out of harness composers ([#1251](https://github.com/avivsinai/agent-message-queue/issues/1251)) ([8d561e9](https://github.com/avivsinai/agent-message-queue/commit/8d561e9c62a2ab76ea61a0e4124881899d8f1f40))
+
 ## [0.113.2](https://github.com/avivsinai/agent-message-queue/compare/v0.113.1...v0.113.2) (2026-10-26)
 
 
