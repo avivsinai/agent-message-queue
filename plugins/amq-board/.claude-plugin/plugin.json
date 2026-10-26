@@ -1,6 +1,6 @@
 {
   "name": "amq-board",
-  "version": "0.113.1",
+  "version": "0.113.2",
   "description": "/board opens a side panel with the AMQ fleet board: what waits on you, counts, source status and age, refreshed every minute while open",
   "author": {
     "name": "Aviv Sinai",
