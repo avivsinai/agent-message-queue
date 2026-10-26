@@ -169,7 +169,7 @@ type wakeDialogMarker struct {
 	// in the main transcript, so such a marker is never bound.
 	Agent string `json:"agent,omitempty"`
 	// BoundToolUseID is the one call the wake bound a permission marker to
-	// (claudePermissionCall); only that call's result closes the marker.
+	// (claudeTranscriptFold.permissionCall); only that call's result closes the marker.
 	BoundToolUseID string `json:"bound_tool_use_id,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
 	TurnID    string `json:"turn_id,omitempty"`
@@ -190,8 +190,9 @@ type wakeDialogMarker struct {
 // (claudeDialogAnswered) is removed; a missing or unreadable transcript, a
 // busy lock or a changed marker keeps the hold until the next recheck. An
 // unbound permission marker is first bound to its one pending call
-// (bindClaudePermissionMarker).
-func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
+// (bindClaudePermissionMarker) from transcripts, the fold it shares with
+// wakeDialogHoldDetailInDir.
+func wakeDialogSourceInDir(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
 	return func(now time.Time) (wakeDialogState, error) {
@@ -202,7 +203,7 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
 			return wakeDialogClosed, nil
 		}
-		if readErr == nil && exists && info != nil && bindClaudePermissionMarker(agentDir, raw, info, now) {
+		if readErr == nil && exists && info != nil && bindClaudePermissionMarker(agentDir, transcripts, raw, info, now) {
 			if raw, info, exists, readErr, err = readWakeDialogMarkerInDir(agentDir); err != nil {
 				return wakeDialogUnknown, err
 			}
@@ -268,7 +269,7 @@ func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() wakeDialogHoldCaus
 // wakeDialogHoldDetailInDir names the marker that holds input for the wake
 // log: its event, kind, harness, tool and age by mtime. Marker fields are
 // quoted, so no hook input reaches the log raw.
-func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir) func(time.Time) string {
+func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold) func(time.Time) string {
 	return func(now time.Time) string {
 		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		switch {
@@ -296,7 +297,7 @@ func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir) func(time.Time) string {
 		case marker.Event == wakeDialogPermissionEvent:
 			// Why the permission marker has no call to wait for.
 			transcript = "one pending call, binding"
-			if _, why, err := claudePermissionCall(marker); err != nil {
+			if _, why, err := transcripts.permissionCall(marker); err != nil {
 				transcript = fmt.Sprintf("unreadable, holding: %q", err.Error())
 			} else if why != "" {
 				transcript = why + ", holding"
@@ -584,14 +585,14 @@ func installWakeDialogMarkerAt(
 
 // bindClaudePermissionMarker binds the unbound Claude Code permission
 // marker the wake read as raw with info to its one pending call
-// (claudePermissionCall). The binding replaces exactly that marker
+// (claudeTranscriptFold.permissionCall). The binding replaces exactly that marker
 // version, compare-and-replace under the marker lock taken without
 // waiting, and keeps its mtime, so the marker's age and hold stay the
 // same. It waits wakeDialogRecheck after the marker opened, so Claude
 // Code has written the asked call to the transcript. It reports whether it
 // bound the marker. A call with equal input must never release another
 // call's dialog, so only a unique pending call binds.
-func bindClaudePermissionMarker(agentDir *wakeAgentDir, raw []byte, info os.FileInfo, now time.Time) bool {
+func bindClaudePermissionMarker(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold, raw []byte, info os.FileInfo, now time.Time) bool {
 	marker, ok := unboundClaudePermissionMarker(raw)
 	if !ok {
 		return false
@@ -599,7 +600,7 @@ func bindClaudePermissionMarker(agentDir *wakeAgentDir, raw []byte, info os.File
 	if opened, err := time.Parse(time.RFC3339Nano, marker.OpenedAt); err != nil || now.Sub(opened) < wakeDialogRecheck {
 		return false
 	}
-	id, _, err := claudePermissionCall(marker)
+	id, _, err := transcripts.permissionCall(marker)
 	if err != nil || id == "" {
 		return false
 	}

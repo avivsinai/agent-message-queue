@@ -38,7 +38,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	hook := func(verb, input string) {
 		t.Helper()
 		if err := runWakeDialog([]string{verb}, strings.NewReader(input)); err != nil {
@@ -67,7 +67,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	// field: session3/claude doorbell held 13 h (2026-10-26). The wake log
 	// named no marker event, kind or time, so the hold could not be traced;
 	// the holding line now dates itself and names the marker.
-	h.cfg.dialogHoldDetail = wakeDialogHoldDetailInDir(agentDir)
+	h.cfg.dialogHoldDetail = wakeDialogHoldDetailInDir(agentDir, &claudeTranscriptFold{})
 	h.send("a", format.PriorityNormal)
 	_, stderr, _ := captureEnvOutput(t, func() error {
 		h.scan(h.cfg)
@@ -147,7 +147,7 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 			}
 			var notices []string
 			attention := 0
-			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 			h.cfg.settings.heldNotice = true
 			h.cfg.desktopNotify = func(title, body string) error {
@@ -196,7 +196,7 @@ func TestWakeDialogPromptAfterABusyTurnNoticesAtOnce(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -240,7 +240,7 @@ func TestWakeDialogNewPromptMarkerNoticesAtOnce(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -286,7 +286,7 @@ func TestWakeDialogNewBusyTurnStartsAFreshNoticeLadder(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -375,9 +375,16 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 	)
 	use := func(id string) string { return strings.ReplaceAll(liveUse, "ID", id) }
 	reject := func(id string) string { return strings.ReplaceAll(liveReject, "ID", id) }
+	approved := func(id string) string {
+		return `{"type":"user","timestamp":"NOW","isSidechain":false,"message":{"content":[{"type":"tool_result","content":"ok","is_error":false,"tool_use_id":"` + id + `"}]}}`
+	}
+	// filler is one unrelated record longer than the old 256 KiB tail.
+	filler := `{"type":"attachment","timestamp":"2026-10-26T08:08:29.600Z","isSidechain":false,"attachment":{"type":"file","content":"` +
+		strings.Repeat("x", 300<<10) + `"}}`
+	unrelated := `{"type":"system","timestamp":"2026-10-26T08:08:29.650Z","subtype":"turn_duration"}`
 	// Steps: open and close run the hook receiver, append adds transcript
-	// lines, and recheck runs one wake recheck that must leave the marker
-	// held.
+	// lines, replace rewrites the transcript in place, and recheck runs one
+	// wake recheck that must leave the marker held.
 	type step struct{ verb, input string }
 	for _, tc := range []struct {
 		name  string
@@ -417,6 +424,19 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		{name: "an unreadable transcript",
 			steps:   []step{{"open", livePermission}, {"recheck", ""}},
 			missing: true, detail: `transcript=unreadable, holding: "open transcript: `},
+		// Pro review of 478eca46 (findings5 P1): the dialog's call A sat
+		// before the 256 KiB tail, so an equal auto-approved call B in the
+		// tail was bound and its result released A's open dialog. The wake
+		// folds the whole transcript, sees both, and holds. Same shape as
+		// the Codex reproducer through the real wake (tail-repro).
+		{name: "an equal auto-approved call after the dialog's call left the old tail",
+			steps: []step{{"append", use("toolu_A")}, {"append", filler}, {"append", unrelated + "\n" + use("toolu_B")},
+				{"open", livePermission}, {"append", approved("toolu_B")}},
+			detail: "transcript=ambiguous: 2 pending calls, holding"},
+		{name: "a transcript replaced by a smaller one is folded again",
+			steps: []step{{"append", use("toolu_x") + "\n" + use("toolu_y")}, {"open", livePermission}, {"recheck", ""},
+				{"replace", use("toolu_y")}, {"recheck", ""}, {"append", reject("toolu_y")}},
+			closed: true},
 		{name: "answered AskUserQuestion", steps: []step{{"open", askPre}, {"close", askPost}}, closed: true},
 		{name: "Esc on AskUserQuestion", steps: []step{{"open", askPre}}, transcript: askEsc, closed: true},
 		// W1 review (Pro finding 3, Codex reproducer): a PermissionRequest
@@ -452,13 +472,18 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
-			source := wakeDialogSourceInDir(agentDir)
+			transcripts := &claudeTranscriptFold{}
+			source := wakeDialogSourceInDir(agentDir, transcripts)
 			holdOf := wakeDialogHoldReasonInDir(agentDir)
 			marker := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
 			// A recheck runs a full recheck period after the marker opened.
 			recheckNow := func() time.Time { return time.Now().Add(wakeDialogRecheck) }
 			for _, step := range tc.steps {
 				switch step.verb {
+				case "replace":
+					if err := os.WriteFile(transcript, []byte(step.input+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				case "append":
 					lines := strings.ReplaceAll(step.input, "NOW", time.Now().UTC().Format(time.RFC3339Nano))
 					file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
@@ -498,7 +523,7 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 				t.Fatalf("marker closed = %v (%v), want %v; marker %s", got, err, tc.closed, raw)
 			}
 			if tc.detail != "" {
-				if got := wakeDialogHoldDetailInDir(agentDir)(time.Now()); !strings.Contains(got, tc.detail) {
+				if got := wakeDialogHoldDetailInDir(agentDir, transcripts)(time.Now()); !strings.Contains(got, tc.detail) {
 					t.Fatalf("hold line detail = %q, want it to contain %q", got, tc.detail)
 				}
 			}

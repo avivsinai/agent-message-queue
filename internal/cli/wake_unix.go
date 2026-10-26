@@ -2844,6 +2844,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 	activeAgentDir := s.activeAgentDir
 	currentWake := s.currentWake
 	startupSettings := s.startupSettings
+	dialogTranscripts := &claudeTranscriptFold{}
 	cfg := wakeConfig{
 		me:                  me,
 		root:                root,
@@ -2881,9 +2882,9 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir), s.startupHold),
+		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir, dialogTranscripts), s.startupHold),
 		dialogHoldReason:        wakeDialogHoldReasonInDir(activeAgentDir),
-		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir),
+		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir, dialogTranscripts),
 		desktopNotify:           wakeDesktopNotifier(),
 		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir),
 		settingsObserved:        startupSettings.observed,

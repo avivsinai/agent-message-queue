@@ -462,7 +462,7 @@ func newCodexTrustDialogHarness(t *testing.T) (h *wakeHoldHarness, config, real,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir)
 	return h, filepath.Join(codexHome, "config.toml"), real, filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 }
@@ -532,7 +532,7 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir), released)
+	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{}), released)
 
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)

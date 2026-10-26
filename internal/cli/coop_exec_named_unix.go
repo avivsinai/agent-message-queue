@@ -205,7 +205,7 @@ func waitCoopNamedInputFree(root, handle string, limit, interval time.Duration) 
 		return false
 	}
 	defer func() { _ = agentDir.Close() }()
-	source := wakeDialogSourceInDir(agentDir)
+	source := wakeDialogSourceInDir(agentDir, &claudeTranscriptFold{})
 	deadline := time.Now().Add(limit)
 	for {
 		if state, err := source(time.Now()); err == nil && state == wakeDialogClosed {

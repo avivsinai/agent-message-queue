@@ -214,11 +214,19 @@ version supports it.
   marker keeps the hook's `transcript_path`, the tool name, and a canonical
   digest of the tool input; the digest only finds candidate calls and never
   proves which call asked. At each recheck, from 2 seconds after the marker
-  opened, the wake reads the transcript tail (as below) and binds the marker
-  to a tool call id only when exactly one `tool_use` of the main
+  opened, the wake folds the whole transcript into an inventory of its tool
+  calls and binds the marker to a tool call id only when exactly one
+  `tool_use` of the main
   conversation with that name and input was pending when the marker opened
   (stamped at or before `opened_at`, with no `tool_result` stamped at or
-  before it), and no other equal call is pending then or now. Claude Code
+  before it), and no other equal call is pending then or now. A tail alone
+  cannot show this, because the dialog's own call can sit before it. The
+  wake keeps the inventory in memory per transcript: the first recheck reads
+  the file from byte 0 (a regular file, no symlink followed), and each later
+  one reads only the bytes appended since; a file that shrank, was replaced,
+  or no longer holds the bytes last read is folded again from byte 0. A
+  transcript over 64 MiB, or one with a record over 8 MiB, is never used to
+  bind. Claude Code
   2.1.310 writes a subagent's records to their own file with `isSidechain`
   true and an `agentId`; an equal pending call with either field makes the
   marker ambiguous, and a `PermissionRequest` with `agent_id` or
@@ -228,14 +236,13 @@ version supports it.
   change. A bound marker closes only on a `tool_result` for that id in the
   transcript (Esc, a deny, or an approved call's result) or on
   `PostToolUse` or `PostToolUseFailure` with that id. A marker that stays
-  unbound (no pending call in the tail, several equal pending calls, a
-  subagent call, or a missing or unreadable transcript) closes only on
+  unbound (no pending call, several equal pending calls, a subagent call, a
+  transcript too large to fold, or a missing or unreadable transcript)
+  closes only on
   `UserPromptSubmit`, `Stop`, or a session event, and the hold line says
   why, for example `transcript=ambiguous: 2 pending calls, holding`. The
   "[Request interrupted by user for tool use]" record names no call, so it
-  never closes a marker. Limit: an equal pending call older than the
-  256 KiB tail is not seen; when the tail is cut, the bound call must not be
-  its first stamped record.
+  never closes a marker.
 - **AskUserQuestion and ExitPlanMode.** A marker that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
