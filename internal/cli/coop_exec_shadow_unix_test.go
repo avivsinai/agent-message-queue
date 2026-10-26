@@ -5,7 +5,9 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,8 +17,6 @@ import (
 	"github.com/creack/pty"
 )
 
-// Field report: launching Codex selected an older PATH installation that
-// rejected the configured model. Doctor named the files, but launch was silent.
 // setCodexTerminalForTest gives a test the terminal type term and clears
 // every variable Codex reads to name a terminal before TERM, so a coop exec
 // test does not depend on the shell it runs in (W1 review: a non-TTY CI or
@@ -30,6 +30,19 @@ func setCodexTerminalForTest(t *testing.T, term string) {
 	t.Setenv("TERM", term)
 }
 
+// prewarmExecutableForTest runs a freshly written fake binary once, outside
+// any deadline. The warning's probes run real executables (the boundary
+// under test) inside launchVersionProbeBudget, and the first start of a new
+// file can take longer than that on a loaded or scanned machine.
+func prewarmExecutableForTest(t *testing.T, path string) {
+	t.Helper()
+	cmd := exec.Command(path, "--version")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	_ = cmd.Run()
+}
+
+// Field report: launching Codex selected an older PATH installation that
+// rejected the configured model. Doctor named the files, but launch was silent.
 func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
 	setCodexTerminalForTest(t, "xterm-256color")
 	master, terminal, err := pty.Open()
@@ -58,6 +71,7 @@ func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
 		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		prewarmExecutableForTest(t, path)
 		paths = append(paths, path)
 	}
 	t.Setenv("PATH", filepath.Dir(paths[0])+string(os.PathListSeparator)+filepath.Dir(paths[1]))
@@ -192,6 +206,9 @@ func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The project candidate must never run, so only the others are warmed.
+	prewarmExecutableForTest(t, selected)
+	prewarmExecutableForTest(t, filepath.Join(newer, "codex"))
 	t.Setenv("PATH", strings.Join([]string{external, unsafe, newer}, string(os.PathListSeparator)))
 	identity, err := fsq.StableFileIdentity(selected)
 	if err != nil {
