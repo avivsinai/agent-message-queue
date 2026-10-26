@@ -167,11 +167,15 @@ in `~/.amq/keepalive`.
   `claude-print/*/inject.lock`. Otherwise the command refuses and names what
   it holds.
 
-## Locations outside `~/.amq`
+## Darwin wake restart stages
 
-These locations stay outside the per-user home:
+On macOS, a wake restart or self-upgrade stages the new binary under
+`~/.amq/state/wake-stages`. `~/.amq` and `~/.amq/state` must not be symlinks,
+another user's directories, or group-writable or world-writable; each level
+below them is mode 0700.
 
-- Darwin wake restart stages are written to `<legacy>/wake-stages`, on every
-  machine; a wake also accepts, validates, and prunes a stage under
-  `~/.amq/state/wake-stages`
+- Legacy stages are still read: a wake also validates and prunes a stage
+  under `<legacy>/wake-stages` (and a stage next to the binary), so a restart
+  or self-upgrade that an older release started finishes, and its stage is
+  removed
   ([issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).

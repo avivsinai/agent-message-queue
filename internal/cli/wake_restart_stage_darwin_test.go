@@ -42,8 +42,11 @@ func newDarwinWakeRestartStageRecordForRootTest(t *testing.T, root, agent string
 	return record
 }
 
+// setDarwinWakeRestartStateHomeForTest gives the test its own HOME, which
+// holds the stage root it writes, and its own legacy stage root.
 func setDarwinWakeRestartStateHomeForTest(t *testing.T, stateHome string) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	t.Setenv("AMQ_TEST_DARWIN_WAKE_STAGE_STATE", stateHome)
 }
@@ -149,15 +152,16 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 	}
 }
 
-func TestDarwinRestartStageUsesMachineLocalStateAndSurvivesCandidateRemoval(t *testing.T) {
+func TestDarwinRestartStageIsWrittenUnderAMQHomeAndSurvivesCandidateRemoval(t *testing.T) {
 	stateHome := t.TempDir()
 	setDarwinWakeRestartStateHomeForTest(t, stateHome)
 	record := newDarwinWakeRestartStageRecordForTest(t)
 
-	wakeStages, err := darwinWakeRestartStageRoot()
+	home, err := filepath.EvalSymlinks(os.Getenv("HOME"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	wakeStages := filepath.Join(home, ".amq", "state", "wake-stages")
 	rootIdentity, err := resolveTreeIdentityToken(record.Root)
 	if err != nil {
 		t.Fatal(err)
@@ -202,29 +206,29 @@ func TestDarwinRestartStageUsesMachineLocalStateAndSurvivesCandidateRemoval(t *t
 	}
 }
 
-// Regression: #1046, a restart that a later release stages under ~/.amq/state/wake-stages
-// validates and is pruned by this release, which still writes the legacy root.
-func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
+// Regression: #1046, a restart that an older release staged under the legacy
+// root validates and is pruned by this release, which writes ~/.amq/state.
+func TestDarwinRestartStageUnderLegacyRootValidatesAndIsPruned(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		stateHome func(root string) string
+		name string
+		home func(root string) string
 	}{
-		{name: "legacy root elsewhere", stateHome: func(string) string { return t.TempDir() }},
-		// Regression: #1046, a legacy plan that fails (legacy root inside AM_ROOT)
-		// must not refuse a stage under ~/.amq/state.
-		{name: "legacy root inside AM_ROOT", stateHome: func(root string) string {
-			return filepath.Join(root, "state")
+		{name: "home elsewhere", home: func(string) string { return t.TempDir() }},
+		// Regression: #1046, a ~/.amq plan that fails (~/.amq inside AM_ROOT)
+		// must not refuse a stage under the legacy root.
+		{name: "home inside AM_ROOT", home: func(root string) string {
+			return filepath.Join(root, "home")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := canonicalWakeRoot(t.TempDir())
-			setDarwinWakeRestartStateHomeForTest(t, tc.stateHome(root))
-			t.Setenv("HOME", t.TempDir())
+			setDarwinWakeRestartStateHomeForTest(t, t.TempDir())
+			t.Setenv("HOME", tc.home(root))
 			path := filepath.Join(t.TempDir(), "amq")
 			if err := os.WriteFile(path, []byte("amq image"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			candidate, err := captureWakeImageEvidence(path, "stage-amq-home-test")
+			candidate, err := captureWakeImageEvidence(path, "stage-legacy-root-test")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -234,7 +238,7 @@ func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
 				Agent:     "codex",
 				Candidate: candidate,
 			}
-			stageRoot, err := darwinWakeRestartAMQHomeStageRoot()
+			stageRoot, err := darwinWakeRestartLegacyStageRoot()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -253,10 +257,10 @@ func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
 			record.BoundImage = &evidence
 
 			if err := validateWakeRestartStageStatePlatform(record); err != nil {
-				t.Fatalf("validate stage under ~/.amq/state: %v", err)
+				t.Fatalf("validate stage under the legacy root: %v", err)
 			}
 			if err := reclaimWakeRestartStagePlatform(record); err != nil {
-				t.Fatalf("prune stage under ~/.amq/state: %v", err)
+				t.Fatalf("prune stage under the legacy root: %v", err)
 			}
 			entries, err := os.ReadDir(stageRoot)
 			if err != nil {
