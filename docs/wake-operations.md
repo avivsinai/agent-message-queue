@@ -336,9 +336,18 @@ version supports it.
   `-c tui.resume_cwd="current"`, and a recorded seat on the Codex daemon gets
   `-C <launch directory>`, because any other `-c` override would take its
   TUI off the daemon (tui/src/daemon_startup.rs:89-113). A choice that is
-  already set is kept. When it is not the current mode, Codex resumes in a
-  directory whose trust and hooks AMQ does not check, so coop exec writes a
-  `Startup` marker that only the dialog hook releases. With `TERM=dumb` (as Codex detects it)
+  already set is kept; a `session` choice shows no prompt either. When AMQ
+  cannot read the choice (a `--profile`, or a configuration it cannot
+  parse), the prompt may show, so coop exec writes a `Startup` marker.
+
+  A seat on the Codex daemon runs its hooks in the daemon, not under its
+  launch, so no prompt hook could release its `Startup` marker. coop exec
+  therefore decides the marker before it names or records a thread: a seat
+  whose startup screen may show runs its own app-server for that launch,
+  with the identity overrides and no daemon thread or thread record, and a
+  seat stays on the daemon only when no screen can show. A seat that starts
+  with a screen pending runs embedded for that launch, so `amq-remote`
+  native attach is not available to it. With `TERM=dumb` (as Codex detects it)
   Codex asks `Continue anyway? [y/N]` before its TUI starts, where the
   doorbell's Enter answers No; coop exec refuses that interactive Codex
   launch with a usage error that names the remedy (set `TERM` to the

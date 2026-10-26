@@ -938,3 +938,29 @@ func TestCodexResumeLaunchKeepsTheLaunchDirectory(t *testing.T) {
 		}
 	}
 }
+
+// Pre-merge review of fix/wake-holds-0113 (lead's ruling on the daemon
+// hold): a recorded resume runs its hooks in the Codex daemon, so no prompt
+// hook of this launch could release its Startup marker, and the hold never
+// ended. A resume whose screen may show now runs its own app-server for this
+// launch, and the marker names this launch's process.
+func TestCodexResumeWithAStartupScreenLaunchesEmbedded(t *testing.T) {
+	_, config, real, _ := newCodexTrustDialogHarness(t)
+	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}
+	env := []string{"AM_ME=codex", "AM_ROOT=/q"}
+	decision, err := decideCodexLaunch("/usr/local/bin/codex", args, env, real, coopNamedChoice{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.hold || !decision.embeddedOnly || decision.marker.Launch == nil || decision.marker.Launch.PID != os.Getpid() {
+		t.Fatalf("decision = %+v, want an embedded launch whose marker names this process", decision)
+	}
+	final := pinCodexShellIdentity("/usr/local/bin/codex", args, env, !decision.embeddedOnly)
+	if !strings.Contains(strings.Join(final, " "), "shell_environment_policy") {
+		t.Fatalf("embedded resume args = %q, want the identity overrides", final)
+	}
+}

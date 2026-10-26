@@ -899,12 +899,24 @@ func (c *coopExecRun) execAgent() error {
 	namedLabel := coopNamedSessionLabel(sessionIdentity, c.agentHandle)
 	execStart := time.Now()
 	recordIdentity := codexThreadIdentityRecorder(env)
-	var startNamer func(root, handle string)
-	c.agentArgs, startNamer, err = applyCoopNamedBeforeExecAt(c.named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
+	c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
 	if err != nil {
 		return err
 	}
-	c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
+	codex := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider
+	// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
+	wd, wdErr := syscall.Getwd()
+	named := c.named
+	var launchDecision codexLaunchDecision
+	if codex && c.wakeOwned && c.managedLaunchNonce == "" && wdErr == nil {
+		if launchDecision, err = decideCodexLaunch(c.binaryPath, c.agentArgs, env, wd, named); err != nil {
+			return err
+		}
+	}
+	codexMarker, codexHold, codexDecided, embeddedOnly := launchDecision.marker, launchDecision.hold, launchDecision.decided, launchDecision.embeddedOnly
+	named.daemonless = embeddedOnly
+	var startNamer func(root, handle string)
+	c.agentArgs, startNamer, err = applyCoopNamedBeforeExecAt(named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
 	if err != nil {
 		return err
 	}
@@ -913,12 +925,9 @@ func (c *coopExecRun) execAgent() error {
 	// reads that marker. recordResumedCodexThread records exactly the
 	// thread codexResumeSelection selects, or fails the launch.
 	_, selected, unresolved := codexResumeSelection(c.agentArgs)
-	recorded := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider && selected && !unresolved
-	if c.managedLaunchNonce == "" {
-		// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
-		if wd, wdErr := syscall.Getwd(); wdErr == nil {
-			c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded)
-		}
+	recorded := codex && selected && !unresolved && !embeddedOnly
+	if c.managedLaunchNonce == "" && wdErr == nil {
+		c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded)
 	}
 	// A managed plan carries the identity overrides as its own dynamic
 	// slots, which the launch wrapper fills.
@@ -943,12 +952,20 @@ func (c *coopExecRun) execAgent() error {
 	// no doorbell is typed before the marker exists: one typed before the
 	// harness starts would wait in the terminal and answer its first prompt.
 	if c.wakeOwned {
-		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded); err != nil {
+		publish := func() error {
+			if codexDecided {
+				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold)
+			}
+			return syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded)
+		}
+		if err := publish(); err != nil {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
 	}
-	if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
-		return cleanupAfterError(err)
+	if !embeddedOnly {
+		if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
+			return cleanupAfterError(err)
+		}
 	}
 	if startNamer != nil {
 		startNamer(c.root, c.agentHandle)

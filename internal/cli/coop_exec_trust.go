@@ -46,10 +46,9 @@ const wakeStartupKindUpdate = "update_prompt"
 const wakeStartupKindReview = "hook_review"
 
 // wakeStartupKindResumeDir marks a Codex Startup marker for a resume or
-// fork whose directory choice is not the launch directory: Codex resumes in
-// the thread's recorded directory, whose trust and hooks AMQ does not
-// check, or a choice AMQ cannot read may still ask. Only the dialog hook
-// releases it.
+// fork whose directory choice AMQ cannot read (a profile, or a [tui]
+// override or config.toml it cannot parse): Codex may ask which directory
+// to resume in. Only the dialog hook releases it.
 const wakeStartupKindResumeDir = "resume_dir"
 
 // startupTrust is what the harness's own trust record says about a
@@ -211,9 +210,60 @@ func claudeStartupTrust(dir string) startupTrust {
 // doorbell. recorded reports that coop exec recorded the identity of the
 // Codex thread args resume. The caller owns the agent's wake.
 func syncStartupDialogMarker(root, handle, binaryPath string, args []string, recorded bool) error {
-	wd, err := os.Getwd()
+	marker, hold, err := decideStartupDialogMarker(binaryPath, args, recorded)
 	if err != nil {
 		return err
+	}
+	return publishStartupDialogMarker(root, handle, marker, hold)
+}
+
+// codexLaunchDecision is a Codex seat's startup marker and backend for one
+// launch.
+type codexLaunchDecision struct {
+	marker        wakeDialogMarker
+	hold, decided bool
+	// embeddedOnly keeps a seat that could run on the Codex daemon on its
+	// own app-server for this launch: no daemon thread and no thread record.
+	embeddedOnly bool
+}
+
+// decideCodexLaunch decides a Codex seat's startup marker before naming and
+// recording. A seat on the daemon runs its hooks in the daemon, where no
+// prompt hook proves this launch left its startup screens. So a seat whose
+// screen may show runs its own app-server for this launch, with the
+// identity overrides, no daemon thread and no thread record, and its own
+// children run the dialog hook (startupPromptOfLaunch). A seat stays on the
+// daemon only when no screen can show.
+func decideCodexLaunch(binaryPath string, args, env []string, wd string, named coopNamedChoice) (codexLaunchDecision, error) {
+	var decision codexLaunchDecision
+	var err error
+	_, selected, unresolved := codexResumeSelection(args)
+	daemonCandidate := selected && !unresolved ||
+		named.enabled && coopNamedModeFor(binaryPath) == coopNamedModeTUI && !agentArgsPreventAutoNameFor(binaryPath, args)
+	if daemonCandidate {
+		daemonArgs := pinCodexResumeLaunchDir(binaryPath, args, wd, true)
+		if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, daemonArgs, true); err != nil {
+			return codexLaunchDecision{}, err
+		}
+		if !decision.hold {
+			decision.decided = true
+			return decision, nil
+		}
+	}
+	embeddedArgs := pinCodexShellIdentity(binaryPath, pinCodexResumeLaunchDir(binaryPath, args, wd, false), env, false)
+	if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, embeddedArgs, false); err != nil {
+		return codexLaunchDecision{}, err
+	}
+	decision.decided, decision.embeddedOnly = true, daemonCandidate
+	return decision, nil
+}
+
+// decideStartupDialogMarker is the Startup marker decision of
+// syncStartupDialogMarker, without publishing it.
+func decideStartupDialogMarker(binaryPath string, args []string, recorded bool) (wakeDialogMarker, bool, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return wakeDialogMarker{}, false, err
 	}
 	marker, hold := startupDialogMarkerFor(binaryPath, args, wd, recorded)
 	if hold && marker.Harness == launch.CodexProvider {
@@ -223,6 +273,12 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string, rec
 			marker.Launch = &holder
 		}
 	}
+	return marker, hold, nil
+}
+
+// publishStartupDialogMarker publishes a decided Startup marker, and says on
+// stderr when a Codex hold waits for a dialog hook that cannot run.
+func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err
 	}
@@ -280,7 +336,7 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	}
 	// The trust and hooks evidence below is for the launch directory; a
 	// resume in another directory has none.
-	if codexResumeOrForkAt(args) >= 0 && codexResumeCwdChoice(args) != "current" {
+	if codexResumeOrForkAt(args) >= 0 && codexResumeCwdChoice(args) == "unknown" {
 		return wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindResumeDir}, true
 	}
 	installed, known := codexInstalledVersion(binaryPath)
@@ -607,7 +663,7 @@ func codexStartupHoldRelease(marker wakeDialogMarker) string {
 	hook := codexStartupHookRelease()
 	switch {
 	case marker.Kind == wakeStartupKindResumeDir:
-		return "Codex resumes the thread in a directory AMQ does not check (tui.resume_cwd or a profile chooses it), where a trust, hook review or directory prompt can show; " + hook
+		return "Codex may ask which directory to resume the thread in (a profile or a configuration AMQ cannot read chooses it), and Enter picks one; " + hook
 	case marker.Kind == wakeStartupKindReview:
 		return fmt.Sprintf("Codex may ask whether to trust %s or to review new or changed hooks, and a trust record does not show that the hook review closed; %s", marker.Cwd, hook)
 	case marker.Kind == wakeStartupKindUpdate:

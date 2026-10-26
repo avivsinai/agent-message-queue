@@ -99,6 +99,9 @@ func coopNamedSessionLabel(session, handle string) string {
 // whether the flag, the environment, or the launch config asked for it.
 type coopNamedChoice struct {
 	enabled, explicit bool
+	// daemonless keeps a Codex launch off a named daemon thread: a seat
+	// whose startup screen may show runs its own app-server.
+	daemonless bool
 }
 
 func resolveCoopNamedEnabled(fsFlagVisited bool, flagValue bool) (coopNamedChoice, error) {
@@ -586,8 +589,10 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil, nil
 	case coopNamedModeTUI:
-		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name, record); done {
-			return args, nil, nil
+		if !named.daemonless {
+			if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name, record); done {
+				return args, nil, nil
+			}
 		}
 		return agentArgs, func(root, handle string) {
 			if err := startCoopNamedTUIInjector(name, cmdName, root, handle, execStart); err != nil {

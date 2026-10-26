@@ -70,7 +70,9 @@ type codexStartupPlan struct {
 // reviews every untrusted or modified hook (tui/src/startup_hooks_review.rs:
 // 52-82 and hooks_rpc.rs:23-56 at rust-v0.164.0). A failed, late or
 // unreadable answer, and a backend AMQ cannot tell, prove nothing.
-// recorded reports a resumed thread whose identity coop exec recorded;
+// recorded reports a seat that runs on the Codex daemon when its backend
+// allows: a resumed thread whose identity coop exec records, or a fresh
+// launch that coop exec names on a daemon thread;
 // every other Codex seat carries the identity overrides, which make its TUI
 // run its own app-server (pinCodexShellIdentity). One deadline covers
 // backend discovery and the probe.
@@ -99,11 +101,14 @@ func planCodexStartupProbe(ctx context.Context, binaryPath string, args []string
 	}
 	plan := codexStartupPlan{Binary: filepath.Clean(binaryPath), Dir: dir, CodexHome: absPath(filepath.Clean(codexHome))}
 	if recorded {
-		r, ok := parseCodexResume(args)
-		if !ok || r.unparsed {
-			return codexStartupPlan{}, false
+		opts := args
+		if r, ok := parseCodexResume(args); ok {
+			if r.unparsed {
+				return codexStartupPlan{}, false
+			}
+			opts = append(slices.Clone(args[:r.start]), r.opts...)
 		}
-		backend, _ := codexLaunchBackend(ctx, plan.Binary, append(slices.Clone(args[:r.start]), r.opts...), wd, plan.CodexHome)
+		backend, _ := codexLaunchBackend(ctx, plan.Binary, opts, wd, plan.CodexHome)
 		switch backend {
 		case codexOnDaemon:
 			plan.Daemon = true
