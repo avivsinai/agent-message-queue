@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,7 +15,10 @@ import (
 // answered agy's "Run this command?" prompt. agy reports the prompt as
 // OSC 7501 blocked:kind=permission; the relay holds the doorbell while it
 // is open and shows the person agy's output without the status sequences.
-func TestAgyStatusHoldsTheDoorbellWhilePermissionIsOpen(t *testing.T) {
+// field: agy doorbell parked while busy (2026-10-26): working removed the
+// marker, so the wake spent its attempts on a busy agy and never rang at
+// the end of the turn. working holds the doorbell until done or idle.
+func TestAgyStatusHoldsTheDoorbellWhileAPromptOrTurnIsOpen(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "agy"); err != nil {
 		t.Fatal(err)
@@ -27,14 +31,39 @@ func TestAgyStatusHoldsTheDoorbellWhilePermissionIsOpen(t *testing.T) {
 	parser := &osc7501Parser{strip: true, onState: sink.onState}
 	marker := filepath.Join(fsq.AgentBase(root, "agy"), wakeDialogFileName)
 
-	shown := string(parser.feed([]byte("Run this command?\x1b]0;agy\x07\x1b]7501;state=blocked:kind=perm")))
-	shown += string(parser.feed([]byte("ission:app=antigravity:msg=QQ==\x07 1. Yes")))
-	if _, err := os.Lstat(marker); err != nil {
-		t.Fatalf("no dialog marker while agy asks for permission: %v", err)
+	// The steps run in order; kind is the marker kind after the step, ""
+	// for no marker.
+	steps := []struct {
+		name   string
+		chunks []string
+		kind   string
+	}{
+		{"permission opens", []string{
+			"Run this command?\x1b]0;agy\x07\x1b]7501;state=blocked:kind=perm",
+			"ission:app=antigravity:msg=QQ==\x07 1. Yes",
+		}, "permission"},
+		{"working keeps", []string{"\x1b]7501;state=working:app=antigravity\x1b\\done"}, "working"},
+		{"done clears", []string{"\x1b]7501;state=done:app=antigravity\x07"}, ""},
+		{"working opens", []string{"\x1b]7501;state=working:app=antigravity\x07"}, "working"},
+		{"idle clears", []string{"\x1b]7501;state=idle:app=antigravity\x07"}, ""},
 	}
-	shown += string(parser.feed([]byte("\x1b]7501;state=working:app=antigravity\x1b\\done")))
-	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
-		t.Fatalf("dialog marker after agy went back to work: %v", err)
+	var shown string
+	for _, step := range steps {
+		for _, chunk := range step.chunks {
+			shown += string(parser.feed([]byte(chunk)))
+		}
+		raw, err := os.ReadFile(marker)
+		switch {
+		case step.kind == "" && !os.IsNotExist(err):
+			t.Fatalf("%s: marker %q (%v), want none", step.name, raw, err)
+		case step.kind != "" && err != nil:
+			t.Fatalf("%s: no marker: %v", step.name, err)
+		case step.kind != "":
+			var got wakeDialogMarker
+			if err := json.Unmarshal(raw, &got); err != nil || got.Kind != step.kind {
+				t.Fatalf("%s: marker %q, want kind %q", step.name, raw, step.kind)
+			}
+		}
 	}
 	if want := "Run this command?\x1b]0;agy\x07 1. Yesdone"; shown != want {
 		t.Fatalf("shown %q, want %q", shown, want)

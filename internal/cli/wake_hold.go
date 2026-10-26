@@ -23,10 +23,6 @@ type wakeHold struct {
 	urgent bool
 }
 
-func (policy wakeHoldPolicy) enabled() bool {
-	return policy.normal > 0 || policy.low > 0
-}
-
 func (policy wakeHoldPolicy) forPriority(priority string) time.Duration {
 	switch strings.TrimSpace(priority) {
 	case format.PriorityUrgent:

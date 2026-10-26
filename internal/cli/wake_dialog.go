@@ -5,7 +5,9 @@ import "time"
 // Dialog guard: a Claude Code hook (amq wake dialog open|close)
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
-// wake only reads the marker. Doorbell text and its CR would answer the
+// wake reads the marker, and removes it only when the Claude Code transcript
+// proves the dialog answered or Codex's state proves its startup screens
+// closed. Doorbell text and its CR would answer the
 // dialog, so no input byte is written while the marker is present.
 
 type wakeDialogState uint8
@@ -15,8 +17,9 @@ const (
 	wakeDialogOpen
 	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
 	// the future, or one that cannot be read. It may still hide an open
-	// dialog, so input stays held; held attempts follow the attention retry
-	// ladder instead of the 2-second recheck.
+	// dialog, so input stays held; held attempts follow the input retry
+	// ladder (5 s doubling to 2 min) instead of the 2-second recheck, and
+	// the held notice follows the attention ladder.
 	wakeDialogUnknown
 )
 
@@ -66,8 +69,9 @@ func classifyWakeDialogMarker(
 // before the notification attempt starts, so it writes no ledger record and
 // records no input attempt: the reminder budget and presentation state stay
 // as they are, and the next ring after the dialog closes is the full
-// doorbell. The message stays in the inbox. The hold is never silent: each
-// held attempt goes through presentWakeDialogHold.
+// doorbell. The message stays in the inbox. Each held attempt goes through
+// presentWakeDialogHold; only a busy turn younger than wakeDialogQuietHold
+// is quiet.
 func holdWakeForDialog(
 	cfg *wakeConfig,
 	state wakeDialogState,
@@ -76,23 +80,33 @@ func holdWakeForDialog(
 	pending int,
 ) error {
 	now := cfg.wakeDoorbellNow()
+	cause := cfg.dialogHoldCause()
 	if cfg.dialogHold != state {
 		cfg.dialogHold = state
+		var detail string
+		if cfg.dialogHoldDetail != nil {
+			detail = " (" + cfg.dialogHoldDetail(now) + ")"
+		}
 		switch {
 		case readErr != nil:
 			_ = writeWakeDiagnostic(cfg, "amq wake: holding input: cannot read the dialog marker: %v\n", readErr)
+		case state == wakeDialogOpen && cause.busy:
+			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while the harness is busy%s\n", detail)
 		case state == wakeDialogOpen:
-			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open\n")
+			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open%s\n", detail)
 		default:
-			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only\n", wakeDialogQuietHold)
+			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only%s\n", wakeDialogQuietHold, detail)
 		}
 	}
+	// A busy turn younger than wakeDialogQuietHold is routine: the doorbell
+	// rings when it ends. A longer one is worth a notice.
+	quiet := cause.busy && state == wakeDialogOpen
 	if state == wakeDialogOpen {
 		cfg.doorbell.recordDialogHold(now, wakeDialogRecheck)
 		persistWakeDoorbellStatusBestEffort(cfg)
-		return presentWakeDialogHold(cfg, output, pending)
+		return presentWakeDialogHold(cfg, output, pending, cause, quiet)
 	}
-	if err := presentWakeDialogHold(cfg, output, pending); err != nil {
+	if err := presentWakeDialogHold(cfg, output, pending, cause, quiet); err != nil {
 		return err
 	}
 	cfg.doorbell.recordDeferredInputAttempt(now)
@@ -100,32 +114,47 @@ func holdWakeForDialog(
 	return nil
 }
 
+// wakeDialogHoldCause says why the marker holds input. marker is false when
+// no marker exists; busy marks a harness turn in progress (an agy working
+// marker) rather than a dialog that waits for the person.
+type wakeDialogHoldCause struct {
+	reason string
+	marker bool
+	busy   bool
+}
+
+// dialogHoldCause reads the marker's cause; without a reader it is a
+// generic dialog.
+func (cfg *wakeConfig) dialogHoldCause() wakeDialogHoldCause {
+	if cfg.dialogHoldReason == nil {
+		return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
+	}
+	return cfg.dialogHoldReason()
+}
+
 // presentWakeDialogHold shows a held doorbell to the owner: the desktop
 // notice (held_notice) and the terminal attention floor, at the first held
-// attempt, then once per attention period, and again at once when more
-// messages wait than the last notice named. Input stays held throughout.
-func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int) error {
+// attempt, then once per attention period. A quiet hold shows nothing.
+// Input stays held throughout.
+func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int, cause wakeDialogHoldCause, quiet bool) error {
 	if err := authorizePeerWakeAttention(cfg, output); err != nil {
 		return err
 	}
-	reason := wakeDialogGenericHoldReason
-	if cfg.dialogHoldReason != nil {
-		text, marker := cfg.dialogHoldReason()
-		if !marker {
-			// No marker: coop exec's startup hold has not written or
-			// cleared the Startup marker yet, or the dialog just closed.
-			return nil
-		}
-		reason = text
-	}
-	now := cfg.wakeDoorbellNow()
-	if !cfg.doorbell.heldNoticeDue(now, pending) {
-		cfg.doorbell.heldNoticeCount = min(cfg.doorbell.heldNoticeCount, pending)
+	if !cause.marker {
+		// No marker: coop exec's startup hold has not written or
+		// cleared the Startup marker yet, or the dialog just closed.
 		return nil
 	}
-	cfg.doorbell.recordHeldNotice(now, pending)
+	if quiet {
+		return nil
+	}
+	now := cfg.wakeDoorbellNow()
+	if !cfg.doorbell.heldNoticeDue(now) {
+		return nil
+	}
+	cfg.doorbell.recordHeldNotice(now)
 	if cfg.settings.heldNotice && cfg.desktopNotify != nil {
-		if err := cfg.desktopNotify(wakeDesktopNoticeTitle, wakeHeldNoticeBody(cfg.me, pending, reason)); err != nil {
+		if err := cfg.desktopNotify(wakeDesktopNoticeTitle, wakeHeldNoticeBody(cfg.me, pending, cause.reason)); err != nil {
 			_ = writeWakeDiagnostic(cfg, "amq wake: held-doorbell desktop notice failed: %v\n", err)
 		}
 	}

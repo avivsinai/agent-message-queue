@@ -903,10 +903,12 @@ func (c *coopExecRun) execAgent() error {
 	if err != nil {
 		return err
 	}
-	recorded, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity)
-	if err != nil {
-		return err
-	}
+	// The thread is recorded only after the Startup marker exists: a
+	// recorded thread lets amq-remote admit turns on it, and its guard
+	// reads that marker. recordResumedCodexThread records exactly the
+	// thread codexResumeSelection selects, or fails the launch.
+	_, selected, unresolved := codexResumeSelection(c.agentArgs)
+	recorded := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider && selected && !unresolved
 	// A managed plan carries the identity overrides as its own dynamic
 	// slots, which the launch wrapper fills.
 	if c.managedLaunchNonce == "" {
@@ -933,6 +935,9 @@ func (c *coopExecRun) execAgent() error {
 		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded); err != nil {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
+	}
+	if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
+		return cleanupAfterError(err)
 	}
 	if c.wakeStartupHold != nil {
 		if err := c.wakeStartupHold.Close(); err != nil {

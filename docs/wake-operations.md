@@ -92,7 +92,7 @@ running wake. Both write [`.wake.settings`](#live-settings).
   modification time. After the first attempt, holds no longer apply.
 - `urgent` mail skips the priority hold, including when a cohort is parked.
   A distinct urgent message can revive a parked cohort for one further
-  attempt. Ordinary urgent mail still passes through watcher debounce and
+  attempt, also when both holds are 0. Ordinary urgent mail still passes through watcher debounce and
   input-quiet deferral; urgent mail with the configured interrupt label follows
   the interrupt path. Input deferral detects typing activity, so a doorbell can
   join and submit an idle draft after the quiet interval.
@@ -124,14 +124,24 @@ Running it again keeps current entries and replaces older forms;
 the change through the settings watcher; if `/hooks` does not list the
 entries, restart the session. `amq doctor` warns when `~/.claude` exists and
 the hook is missing, runs an amq binary that is gone, or has an older form.
+The installer reads `claude --version` from the `claude` on `PATH` and adds
+`Notification` only for Claude Code 2.0.37 or later and `PostToolUseFailure`
+only for 2.1.119 or later, because before 2.1.101 an unknown hook event made
+Claude Code ignore the whole settings file. With no readable version it adds
+neither. Doctor counts an event as missing only when that version supports
+it.
 
-- **Marker.** The hooks run `amq wake dialog open|close`, which writes or
-  removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
-  AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
-  runs on `PostToolUse` for the same two tools (only for the tool call that
-  opened the marker), and on `UserPromptSubmit`, `Stop`, `SessionStart`, and
-  `SessionEnd`. The receiver exits 0 once its arguments parse and prints
-  nothing, so it never decides a tool call or a permission. The marker is
+- **Marker.** The hooks run `amq wake dialog open|close|notify`, which writes
+  or removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse`
+  for AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`.
+  `close` runs on every `PostToolUse` and `PostToolUseFailure` (it removes
+  only the marker of that tool call), and on `UserPromptSubmit`, `Stop`,
+  `SessionStart`, and `SessionEnd`. `notify` runs on `Notification` for
+  `idle_prompt` and `permission_prompt`: `idle_prompt` (Claude finished
+  responding 60 seconds ago and the prompt is idle) closes the marker, and
+  `permission_prompt` (a permission dialog waited 6 seconds) writes a marker
+  when none is present. The receiver exits 0 once its arguments parse and
+  prints nothing, so it never decides a tool call or a permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
   wake as it is without the hook. Every hook has a 5 second timeout, except
   `SessionEnd` at 1 second, so the hook never extends Claude Code's exit.
@@ -153,32 +163,70 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   dialog that opens during a doorbell stops its remaining bytes; the held
   Enter is sent after the dialog closes. Urgent and interrupt mail is held the
   same way.
-- **Held-doorbell notice.** A held doorbell is never silent. At the first
+- **Held-doorbell notice.** A held doorbell is never silent, except during
+  a busy harness turn (below). At the first
   delivery attempt a marker blocks, the wake shows a desktop notification
   titled `AMQ` that names the agent, the number of waiting messages, and why
   input is held, for example `codex: 1 message waiting, doorbell held. Codex
-  startup screen open; type a prompt in that terminal to release`. It also
+  startup screen open; answer it in that terminal; the doorbell rings once
+  Codex's state shows the screen closed; a prompt typed there releases it
+  too`.
+  When the Codex dialog hook cannot run, the reason names its remedy instead
+  of a typed prompt. It also
   writes the terminal attention floor (title, bell, and an OSC 9 or OSC 777
   notice where the terminal supports one) to the wake's attention output. The
   notice repeats once per attention period (30 seconds, doubling to 15
-  minutes) while the hold lasts, and at once when more messages wait than the
-  last notice named. On macOS the notification comes from `osascript`; on
+  minutes) while the hold lasts; new messages do not make it due sooner. On
+  macOS the notification comes from `osascript`; on
   Linux from `notify-send` when it is installed; elsewhere only the terminal
   floor is written. Each notification is one child process with a 2-second
   limit, and a failure is one diagnostic line. The live setting `held_notice`
   (default `true`) turns the desktop notification off; the terminal floor
   stays. During the moment before `amq coop exec` writes or clears the
   `Startup` marker, the wake holds without a notice.
-- **Whole-turn hold after a permission dialog.** Permission hook input has no
-  tool call id, so only `Stop` or `UserPromptSubmit` clears a permission
-  marker. A doorbell that would land mid-turn after a permission dialog lands
-  when the turn ends or the person types.
-- **Esc and stale markers.** Esc on a dialog is a user interrupt, and Claude
-  Code runs no `Stop` hook for it. A denied permission is the same. The marker
-  then stays until the person's next prompt. A marker older than 10 minutes,
-  dated in the future, or one the wake cannot read, still blocks input. The
-  wake then stops the 2-second recheck and retries on the attention cadence,
-  with the held-doorbell notice.
+- **Permission dialogs close with their tool call.** Permission hook input
+  has no tool call id, so the marker records a digest of the tool name and
+  input, which Claude Code repeats in that call's `PostToolUse` or
+  `PostToolUseFailure`. An approved call closes the marker when it finishes.
+  Claude Code asks parallel calls one dialog at a time, and the next call's
+  `PermissionRequest` can run before the previous call's `PostToolUse`, so a
+  marker records the digest only when no other marker is present. A marker
+  without one, or a call whose input changed after the dialog, closes at
+  `Stop` or the next prompt. Claude Code also sends `PermissionRequest` for
+  AskUserQuestion and ExitPlanMode right after their `PreToolUse`; that
+  marker keeps the `PreToolUse` tool call id, so the answered call's
+  `PostToolUse` closes it.
+- **Esc, deny, and the transcript.** Esc or a deny on a dialog is a user
+  interrupt. Claude Code runs no hook for it: no `Stop`, no `PostToolUse`,
+  and no `idle_prompt` notification, which follows only a `Stop`. Claude Code
+  writes it to the session transcript at once: a `tool_result` for the asked
+  tool call (`is_error`, "User rejected tool use") and a user record whose
+  text starts with `[Request interrupted by user`. The marker keeps the hook's
+  `transcript_path`. At each recheck the wake reads, read-only, at most the
+  last 256 KiB of that file (a regular file, no symlink followed). It removes
+  the marker when the tail holds a `tool_result` for the marker's tool call,
+  found by its tool call id or, for a permission marker, by the newest
+  `tool_use` whose name and input match the marker's digest, or an interrupt
+  record dated after the marker. It removes it under the marker lock, without
+  waiting, and only if the marker is still the version it read; otherwise it
+  holds and checks again at the next recheck. The next dialog in the turn then
+  writes a fresh marker with its own digest. A missing or unreadable
+  transcript proves nothing: the hold stays, and the hold line says so. If
+  both the `UserPromptSubmit` and the next `PermissionRequest` hook fail, an
+  interrupt from the previous turn that is newer than the stale marker can
+  remove it while the new dialog shows.
+- **Stale markers.** A marker older than 10 minutes, dated in the future, or
+  one the wake cannot read, still blocks input unless the transcript proves
+  it closed. The wake then stops the 2-second recheck and retries on the
+  input retry ladder (5 seconds, doubling to 2 minutes), with the
+  held-doorbell notice on the attention cadence. No timer releases the
+  hold, because Enter on an open permission dialog approves the tool call.
+  Each hold line in `.wake.log` starts with the UTC time and names the
+  marker's event, kind, harness, tool, age, and transcript state.
+- **Known limitation.** A call that Claude Code allows without asking (for
+  example by the auto-mode classifier) with the same tool and input as a
+  dialog that still shows would close that dialog's marker through its
+  `PostToolUse`.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
   directory before the session starts, and Enter at that dialog ends the
@@ -226,7 +274,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   what releases it.
 
   Codex's "Not now" on the update prompt records nothing, so an update
-  prompt marker releases only through the dialog hook's first-turn close.
+  prompt marker releases through the dialog hook's first-turn close, or
+  through the wake's startup recheck (below) once Codex's state rules the
+  prompt out.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
   identity overrides with `-c check_for_update_on_startup=false`. Codex
   shows the prompt only when that setting is in effect, a legacy managed
@@ -247,9 +297,10 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   so there the effective value comes from the configuration files: setting
   `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
   (default `~/.codex/config.toml`) releases a daemon seat too, when no
-  managed layer or requirement turns it on. The probe runs only for
-  releases that review hooks (below), so on `0.145.0`, `0.161.0` and
-  `0.163.0` only the version cache rules the prompt out. AMQ does not edit
+  managed layer or requirement turns it on. At launch the probe runs only
+  for releases that review hooks (below), so on `0.145.0`, `0.161.0` and
+  `0.163.0` coop exec rules the prompt out by the version cache alone; the
+  wake's recheck also asks their probe. AMQ does not edit
   `config.toml`.
 
   Directory trust and native hook review are separate startup screens.
@@ -273,10 +324,29 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   output stays out of AMQ diagnostics. An error, a timeout, an unreadable
   reply, an untrusted, modified, missing or unknown trust status, a working
   directory AMQ cannot resolve, a `--profile` seat, or a backend AMQ
-  cannot tell writes the marker. A marker written for such a release
-  releases only through the dialog
-  hook's first-turn close: the trust record never releases it, and the
-  recheck does not probe again. When the AMQ dialog hook is installed but
+  cannot tell writes the marker. The marker keeps the probe's plan (binary,
+  options, directory, backend, `CODEX_HOME` and version). While it is open
+  the wake repeats the same bounded probe at most once every 10 seconds,
+  after Codex records the directory trust, and removes the marker once the
+  probe shows no hook to review and the update prompt ruled out. That
+  release needs no hook, and nothing releases on a timer. On the verified
+  releases before `0.164.0` an update prompt marker keeps the plan too, and
+  the recheck releases it once the trust is recorded and the version cache
+  or the probe rules the prompt out. The plan leaves out the seat's
+  `shell_environment_policy.set` identity overrides. Known limit: Codex's
+  resume directory prompt (`codex resume <id>` from another directory,
+  tui/src/lib.rs:1003-1037 at rust-v0.164.0) records no answer, so AMQ does
+  not model it, and a recheck release can ring while it shows. The dialog hook's
+  `UserPromptSubmit` close releases it too; a `Stop`, `Interrupt` or session
+  event does not, because a daemon turn admitted before this terminal
+  started sends them. `codex app-server` refuses `--profile`, and
+  `-c profile=<name>` selects a legacy `[profiles]` table rather than the
+  profile file `--profile` loads, so a `--profile` seat cannot be probed and
+  its marker releases only through the dialog hook. With `TERM=dumb` (as
+  Codex detects it) Codex asks `Continue anyway? [y/N]` first, so coop exec
+  writes a marker that only the dialog hook releases. As after a trust
+  release, a written doorbell does not count as presented until a drain
+  that follows it. When the AMQ dialog hook is installed but
   Codex does not trust it, `amq doctor --ops` names the remedy: open
   `/hooks` in Codex and trust the `AMQ_DIALOG_HOOK` entries. A missing hook
   names `amq wake install-dialog-hook --harness codex`.
@@ -407,6 +477,29 @@ sessions after an install.
 hooks file without a numeric positive integer `version`, unsafe comment
 markers inside strings, a missing binary, or an older command. Reinstall
 repairs AMQ entries; unrelated unsafe content needs an operator edit.
+
+## Dialog guard (agy turns and prompts)
+
+agy runs no hooks with Google Cloud sign-in. `amq coop exec agy` runs agy on
+a pseudo-terminal, turns on its terminal status (OSC 7501), and keeps the
+marker in step with it:
+
+- **Open.** `blocked:kind=permission` and `blocked:kind=auth` open the
+  marker, and so does `working`. agy queues a doorbell typed during a turn
+  and ignores the Enter-only reminders, so without the turn hold the
+  attempt budget ends while agy is busy and nothing rings when it is
+  idle. agy reports `working` once when a turn starts and again after a
+  prompt is answered.
+- **Close.** `done` and `idle` close it, and so does agy's exit. Esc reports
+  `idle`. The doorbell rings once, within 2 seconds of the close. A held
+  attempt is not an attempt, so the turn spends no budget. A turn hold is
+  quiet: it shows no desktop notice and no terminal attention, and the
+  `.wake.log` hold line says the harness is busy. A permission or sign-in
+  prompt shows the held notice at once.
+- **Not covered.** A turn longer than 10 minutes makes the marker
+  unconfirmed: input stays held, the held notice says that agy is busy, and
+  the doorbell rings on the deferred retry ladder, up to 2 minutes after the
+  close. Another `blocked` kind changes nothing and is logged once.
 
 ## Dialog guard (pi prompts)
 

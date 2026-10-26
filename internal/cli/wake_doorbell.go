@@ -43,12 +43,10 @@ type wakeDoorbellState struct {
 	recoveryPending              bool
 	recoveryAttentionUndelivered bool
 	// The held-doorbell notice has its own attention ladder, so input
-	// deferral never delays the first notice of a hold. heldNoticeCount is
-	// the pending count the last notice named; a larger count makes the next
-	// notice due at once.
+	// deferral never delays the first notice of a hold. New messages do not
+	// make a notice due: only the ladder paces it.
 	heldNoticeAttempts uint
 	nextHeldNotice     time.Time
-	heldNoticeCount    int
 	// holdUntil delays a new announcement, including an addition that revives
 	// a parked cohort. It is separate from the delivery retry deadline.
 	holdUntil time.Time
@@ -349,28 +347,26 @@ func (state *wakeDoorbellState) recordTransientAttentionAttempt(now time.Time) {
 }
 
 // heldNoticeDue reports whether a dialog-held doorbell shows its notice now:
-// at the first held attempt, then on the attention ladder, and at once when
-// more messages wait than the last notice named.
-func (state *wakeDoorbellState) heldNoticeDue(now time.Time, pending int) bool {
-	return state.nextHeldNotice.IsZero() || !now.Before(state.nextHeldNotice) ||
-		pending > state.heldNoticeCount
+// at the first held attempt, then on the attention ladder (30 s doubling to
+// 15 min). A turn-scoped marker holds through ordinary work, so a new
+// message alone never makes it due.
+func (state *wakeDoorbellState) heldNoticeDue(now time.Time) bool {
+	return state.nextHeldNotice.IsZero() || !now.Before(state.nextHeldNotice)
 }
 
-func (state *wakeDoorbellState) recordHeldNotice(now time.Time, pending int) {
+func (state *wakeDoorbellState) recordHeldNotice(now time.Time) {
 	state.heldNoticeAttempts++
 	state.nextHeldNotice = now.Add(cappedExponentialBackoff(
 		state.heldNoticeAttempts,
 		wakeDoorbellAttentionRetryBase,
 		wakeDoorbellAttentionRetryMax,
 	))
-	state.heldNoticeCount = pending
 }
 
 // endHeldNotice starts the next hold with an immediate notice.
 func (state *wakeDoorbellState) endHeldNotice() {
 	state.heldNoticeAttempts = 0
 	state.nextHeldNotice = time.Time{}
-	state.heldNoticeCount = 0
 }
 
 func (state *wakeDoorbellState) recordAttemptWithBase(

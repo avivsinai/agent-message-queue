@@ -387,7 +387,7 @@ func acquireWakeLockWithOptionsInDir(
 					options,
 				)
 			}); cleanupErr != nil {
-				_ = writeStderr("amq wake: cleanup failed: %v\n", cleanupErr)
+				_ = writeWakeLogLine("amq wake: cleanup failed: %v\n", cleanupErr)
 			}
 		}
 		return cleanup, nil
@@ -2812,7 +2812,7 @@ func (s *wakeStart) prepareNotifier() error {
 		return fmt.Errorf("clear wake doorbell status: %w", err)
 	}
 	if s.initialNotifierStatus == wakeInjectorUnsupportedStatus {
-		_ = writeStderr("amq wake: warning: %s\n", s.initialNotifierReason)
+		_ = writeWakeLogLine("amq wake: warning: %s\n", s.initialNotifierReason)
 	}
 	return nil
 }
@@ -2838,6 +2838,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 	activeAgentDir := s.activeAgentDir
 	currentWake := s.currentWake
 	startupSettings := s.startupSettings
+	startupRecheck := &wakeStartupRecheck{}
 	cfg := wakeConfig{
 		me:                  me,
 		root:                root,
@@ -2874,10 +2875,11 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir), s.startupHold),
+		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir, startupRecheck), s.startupHold),
 		dialogHoldReason:        wakeDialogHoldReasonInDir(activeAgentDir),
+		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir),
 		desktopNotify:           wakeDesktopNotifier(),
-		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir),
+		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir, startupRecheck),
 		settingsObserved:        startupSettings.observed,
 		machineSettingsSource:   readMachineWakeSettings,
 		machineSettingsObserved: startupSettings.machineObserved,
@@ -3131,7 +3133,7 @@ func (s *wakeStart) startReloadTransport() (func(), error) {
 		if !errors.As(startErr, &unavailable) {
 			return nil, startErr
 		}
-		_ = writeStderr(
+		_ = writeWakeLogLine(
 			"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
 			startErr,
 		)

@@ -59,8 +59,8 @@ Wake treats a terminal notification as an attempt, not delivery, and retries
 on a capped backoff. Input-injecting attempts for an unchanged cohort stop
 after four attempts; the cohort then parks until inbox progress or an eligible
 new message. Later distinct nonurgent additions can permit further attempts up
-to an eight-attempt lifetime cap. With priority holds enabled, a distinct
-urgent addition permits one more attempt even at that cap. Attention-only
+to an eight-attempt lifetime cap. A distinct urgent addition permits one
+more attempt even at that cap, with or without priority holds. Attention-only
 attempts remain on their own cadence while the cohort remains unread.
 
 - By default, the first notification for a newly pending cohort is eligible

@@ -230,9 +230,11 @@ notice instead of injecting. Unavailable input sampling remains best-effort.
 agy runs no hooks with Google Cloud sign-in, so `amq coop exec agy` runs agy
 on a pseudo-terminal and stays as its terminal. It turns on agy's terminal
 status (`AGY_CLI_OSC7501=on`, `AGY_CLI_OSC7501_MESSAGES=brief`) and holds the
-doorbell while agy reports a permission or sign-in prompt. When you set
-`AGY_CLI_OSC7501` to anything but `on`, agy runs as before and a doorbell can
-answer its permission prompt.
+doorbell while agy reports a permission or sign-in prompt or a running turn.
+The doorbell rings once, within 2 seconds after agy reports the turn done or
+idle. When you set `AGY_CLI_OSC7501` to anything but `on`, agy runs as
+before: a doorbell can answer its permission prompt, and doorbells typed
+during a turn can use up the attempt budget.
 
 For Cursor, `amq wake install-dialog-hook --harness cursor` holds the
 doorbell from each tool call of an `amq coop exec cursor-agent` seat to the
