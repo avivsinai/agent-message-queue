@@ -225,19 +225,23 @@ version supports it.
   and keeps it in memory per transcript: the first read streams the file
   from byte 0 (a regular file, no symlink followed) through one buffer of
   at most one record, outside the marker lock, and each later recheck reads
-  only the bytes appended since; a file that shrank, was replaced, or no
-  longer holds the bytes last read is folded again from byte 0. A
+  only the bytes appended since; a file that shrank below the size last
+  seen, was replaced, or no longer holds the bytes last read is folded
+  again from byte 0. A trailing record still being written defers the
+  binding to the next recheck, because it can be the dialog's own call. A
   transcript over 1 GiB, or one with a record over 8 MiB, is never used to
   bind. Claude Code
   2.1.310 writes a subagent's records to their own file with `isSidechain`
   true and an `agentId`; an equal pending call with either field makes the
-  marker ambiguous, and a `PermissionRequest` with `agent_id` or
-  `agent_type` (a subagent's dialog) is never bound. The binding replaces
-  exactly the marker version the wake read, under the marker lock without
-  waiting, and keeps its mtime, so the hold's age and notice ladder do not
-  change. A bound marker closes only on a `tool_result` for that id in the
-  transcript (Esc, a deny, or an approved call's result) or on
-  `PostToolUse` or `PostToolUseFailure` with that id. A marker that stays
+  marker ambiguous, and a `PermissionRequest` with `agent_id` (a subagent's
+  dialog) is never bound. `agent_type` alone does not mark a subagent: a
+  main session started with `claude --agent` sets it too. The binding
+  replaces exactly the marker version the wake read, under the marker lock
+  without waiting, and keeps its mtime, so the hold's age and notice ladder
+  do not change. A bound marker closes only on a `tool_result` for that id
+  in the inventory (Esc, a deny, or an approved call's result), however far
+  back in the file, or on `PostToolUse` or `PostToolUseFailure` with that
+  id. A marker that stays
   unbound (no pending call, several equal pending calls, a subagent call, a
   transcript too large to fold, or a missing or unreadable transcript)
   closes only on
@@ -255,10 +259,12 @@ version supports it.
   share the marker lock. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
-  the hook's `transcript_path`. At each recheck the wake reads, read-only, at
-  most the last 256 KiB of that file (a regular file, no symlink followed),
-  and removes the marker when the tail holds a `tool_result` for the
-  marker's tool call id. It removes it under the marker lock, without
+  the hook's `transcript_path`. At each recheck the wake reads that file
+  read-only (a regular file, no symlink followed) through the same
+  inventory as a permission marker, and for a transcript too large to fold
+  also its last 256 KiB, and removes the marker when either holds a
+  `tool_result` for the marker's tool call id. It removes it under the
+  marker lock, without
   waiting, and only if the marker is still the version it read. A missing or
   unreadable transcript proves nothing: the hold stays, and the hold line
   says so.

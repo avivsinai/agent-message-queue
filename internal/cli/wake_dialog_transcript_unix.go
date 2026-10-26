@@ -91,12 +91,19 @@ func markerToolUseID(marker wakeDialogMarker) string {
 }
 
 // claudeDialogAnswered reports whether the transcript the marker names
-// holds a tool_result for the marker's tool call. A marker without one is
-// never proven answered. An error means no proof: the hold stays.
-func claudeDialogAnswered(marker wakeDialogMarker) (bool, error) {
+// holds a tool_result for the marker's tool call, from the fold of the
+// whole transcript, so a result that left the tail still counts. A marker
+// without a call is never proven answered. A PreToolUse marker also
+// accepts its result in the tail, for a transcript too large to fold; a
+// bound permission marker relies on the fold that bound it. An error means
+// no proof: the hold stays.
+func claudeDialogAnswered(marker wakeDialogMarker, transcripts *claudeTranscriptFold) (bool, error) {
 	id := markerToolUseID(marker)
 	if id == "" {
 		return false, nil
+	}
+	if ok, err := transcripts.resulted(marker.TranscriptPath, id); ok || err != nil || marker.ToolUseID == "" {
+		return ok, err
 	}
 	tail, err := readClaudeTranscriptTail(marker.TranscriptPath)
 	if err != nil {
@@ -149,6 +156,9 @@ type claudeTranscriptFold struct {
 	path   string
 	file   os.FileInfo
 	offset int64
+	// size is the file size the last advance observed; a smaller one means
+	// the file was rewritten in place.
+	size int64
 	// anchor is the last bytes folded, up to offset; other bytes there
 	// mean the file was rewritten in place.
 	anchor []byte
@@ -160,7 +170,7 @@ type claudeTranscriptFold struct {
 
 // reset starts the fold of path over from byte 0.
 func (fold *claudeTranscriptFold) reset(path string, info os.FileInfo) {
-	fold.path, fold.file, fold.offset, fold.anchor = path, info, 0, nil
+	fold.path, fold.file, fold.offset, fold.size, fold.anchor = path, info, 0, 0, nil
 	fold.calls = make(map[string]*claudeTranscriptCall)
 	fold.incomplete = ""
 }
@@ -169,30 +179,32 @@ func (fold *claudeTranscriptFold) reset(path string, info os.FileInfo) {
 // The open follows no symlink and accepts only a regular file. It streams
 // through one buffer of at most one record, never the whole file, and
 // holds no marker lock: the wake binds under the marker lock only after
-// the fold returns. A partial trailing record is read again next time. An
-// error means the transcript cannot be read now; the fold keeps what it
-// has.
-func (fold *claudeTranscriptFold) advance(path string) error {
+// the fold returns. complete reports that the fold reached the size it
+// observed through whole records; a partial trailing record (one still
+// being written) or a short read leaves it false, and the next call reads
+// that record again. An error means the transcript cannot be read now; the
+// fold keeps what it has.
+func (fold *claudeTranscriptFold) advance(path string) (complete bool, err error) {
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("transcript path %q is not absolute", path)
+		return false, fmt.Errorf("transcript path %q is not absolute", path)
 	}
 	file, info, err := fsq.OpenRegularNoFollowBounded(path, 0)
 	if err != nil {
-		return fmt.Errorf("open transcript: %w", err)
+		return false, fmt.Errorf("open transcript: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 	size := info.Size()
-	if path != fold.path || fold.file == nil || !os.SameFile(fold.file, info) || size < fold.offset ||
-		!fold.anchored(file) {
+	if path != fold.path || fold.file == nil || !os.SameFile(fold.file, info) || size < fold.size ||
+		size < fold.offset || !fold.anchored(file) {
 		fold.reset(path, info)
 	}
-	fold.file = info
+	fold.file, fold.size = info, size
 	switch {
 	case fold.incomplete != "":
-		return nil
+		return false, nil
 	case size > maxWakeDialogTranscriptBytes:
 		fold.incomplete = fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20)
-		return nil
+		return false, nil
 	}
 	var chunk []byte
 	for fold.offset < size {
@@ -202,7 +214,7 @@ func (fold *claudeTranscriptFold) advance(path string) error {
 		buf := chunk[:min(size-fold.offset, int64(len(chunk)))]
 		n, err := file.ReadAt(buf, fold.offset)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return fmt.Errorf("read transcript: %w", err)
+			return false, fmt.Errorf("read transcript: %w", err)
 		}
 		buf = buf[:n]
 		end := bytes.LastIndexByte(buf, '\n')
@@ -210,19 +222,31 @@ func (fold *claudeTranscriptFold) advance(path string) error {
 			if len(buf) > maxWakeDialogTranscriptLine {
 				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
 			}
-			return nil // a record still being written
+			return false, nil
 		}
 		for line := range bytes.SplitSeq(buf[:end], []byte{'\n'}) {
 			if len(line) > maxWakeDialogTranscriptLine {
 				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
-				return nil
+				return false, nil
 			}
 			fold.add(line)
 		}
 		fold.offset += int64(end) + 1
 		fold.anchor = append([]byte(nil), buf[max(0, end+1-wakeDialogTranscriptAnchor):end+1]...)
 	}
-	return nil
+	return true, nil
+}
+
+// resulted reports whether the transcript at path holds a tool_result for
+// the call id. Any folded result proves it, also from an incomplete fold.
+func (fold *claudeTranscriptFold) resulted(path, id string) (bool, error) {
+	fold.mu.Lock()
+	defer fold.mu.Unlock()
+	if _, err := fold.advance(path); err != nil {
+		return false, err
+	}
+	call := fold.calls[id]
+	return call != nil && call.resulted, nil
 }
 
 // wakeDialogTranscriptAnchor is how many folded bytes the fold rechecks.
@@ -284,11 +308,15 @@ func (fold *claudeTranscriptFold) permissionCall(marker wakeDialogMarker) (id, w
 	}
 	fold.mu.Lock()
 	defer fold.mu.Unlock()
-	if err := fold.advance(marker.TranscriptPath); err != nil {
+	complete, err := fold.advance(marker.TranscriptPath)
+	switch {
+	case err != nil:
 		return "", "", err
-	}
-	if fold.incomplete != "" {
+	case fold.incomplete != "":
 		return "", fold.incomplete, nil
+	case !complete:
+		// The record being written can be the dialog's own call.
+		return "", "a transcript record is still being written", nil
 	}
 	var pending []string
 	side := false
@@ -361,8 +389,7 @@ func readClaudeTranscriptTail(path string) ([]byte, error) {
 }
 
 // claudeDialogProof caches a positive transcript proof per marker version
-// (its bytes and mtime): the proof records may later scroll out of the
-// tail, and the wake rechecks often.
+// (its bytes and mtime): the wake rechecks often.
 type claudeDialogProof struct {
 	raw     string
 	modTime time.Time
@@ -371,7 +398,7 @@ type claudeDialogProof struct {
 // answered reports whether a Claude Code marker's dialog is proven gone.
 // Other harnesses' markers, Startup markers, and markers without a
 // transcript or a tool call never are.
-func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time) bool {
+func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time, transcripts *claudeTranscriptFold) bool {
 	if proof.raw == string(raw) && proof.modTime.Equal(modTime) {
 		return true
 	}
@@ -380,7 +407,7 @@ func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time) bool {
 		marker.Event == wakeDialogStartupEvent || marker.TranscriptPath == "" || markerToolUseID(marker) == "" {
 		return false
 	}
-	if ok, err := claudeDialogAnswered(marker); err != nil || !ok {
+	if ok, err := claudeDialogAnswered(marker, transcripts); err != nil || !ok {
 		return false
 	}
 	proof.raw, proof.modTime = string(raw), modTime

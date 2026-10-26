@@ -130,8 +130,9 @@ type wakeDialogHookInput struct {
 	// ToolInput is the asked call's input; a permission marker keeps only
 	// its digest.
 	ToolInput json.RawMessage `json:"tool_input"`
-	// AgentID and AgentType are set when the hook runs for a subagent's
-	// call.
+	// AgentID is set when the hook runs for a subagent's call. AgentType
+	// is set for a subagent and also for a main session started with
+	// --agent, so it never marks a subagent.
 	AgentID   string `json:"agent_id"`
 	AgentType string `json:"agent_type"`
 	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
@@ -165,9 +166,11 @@ type wakeDialogMarker struct {
 	// input. It only finds candidate calls in the transcript; equal input
 	// never proves the same call.
 	InputDigest string `json:"input_digest,omitempty"`
-	// Agent is the subagent a permission dialog asks for; its call is not
-	// in the main transcript, so such a marker is never bound.
-	Agent string `json:"agent,omitempty"`
+	// Agent is the agent_id of the subagent a permission dialog asks for;
+	// its call is not in the main transcript, so such a marker is never
+	// bound. AgentType is the hook's agent_type, for diagnosis only.
+	Agent     string `json:"agent,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
 	// BoundToolUseID is the one call the wake bound a permission marker to
 	// (claudeTranscriptFold.permissionCall); only that call's result closes the marker.
 	BoundToolUseID string `json:"bound_tool_use_id,omitempty"`
@@ -208,7 +211,7 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir, transcripts *claudeTranscript
 				return wakeDialogUnknown, err
 			}
 		}
-		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime()) &&
+		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime(), transcripts) &&
 			removeWakeDialogMarkerVersion(agentDir, raw, info) {
 			return wakeDialogClosed, nil
 		}
@@ -291,7 +294,7 @@ func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir, transcripts *claudeTransc
 		case marker.TranscriptPath == "" || harness != "claude":
 		case markerToolUseID(marker) != "":
 			transcript = "no proof yet"
-			if _, err := claudeDialogAnswered(marker); err != nil {
+			if _, err := claudeDialogAnswered(marker, transcripts); err != nil {
 				transcript = fmt.Sprintf("unreadable, holding: %q", err.Error())
 			}
 		case marker.Event == wakeDialogPermissionEvent:
@@ -475,10 +478,7 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	}
 	if in.Event == wakeDialogPermissionEvent && in.ToolUseID == "" {
 		marker.InputDigest, _ = claude.ActionHash(in.Tool, in.ToolInput)
-		marker.Agent = in.AgentID
-		if marker.Agent == "" {
-			marker.Agent = in.AgentType
-		}
+		marker.Agent, marker.AgentType = in.AgentID, in.AgentType
 	}
 	raw, err := json.Marshal(marker)
 	if err != nil {

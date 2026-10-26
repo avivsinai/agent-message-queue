@@ -351,10 +351,11 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		liveInput = `{"command":"date > a.txt","description":"Write current date into a.txt"}`
 		// The hook input carries the same input with other key order and
 		// spacing; the digest is canonical.
-		livePermission     = `{"cwd":"/p","effort":{"level":"high"},"hook_event_name":"PermissionRequest","permission_mode":"default","permission_suggestions":[],"prompt_id":"p1","session_id":"s1","tool_input":{ "description":"Write current date into a.txt", "command":"date > a.txt" },"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
-		subagentPermission = `{"hook_event_name":"PermissionRequest","session_id":"s1","agent_id":"a1","agent_type":"Explore","tool_input":` + liveInput + `,"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
-		liveUse            = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.719Z","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"ID","name":"Bash","input":` + liveInput + `,"caller":{"type":"direct"}}]}}`
-		liveReject         = `{"type":"user","timestamp":"NOW","isSidechain":false,"toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"ID"}]}}
+		livePermission      = `{"cwd":"/p","effort":{"level":"high"},"hook_event_name":"PermissionRequest","permission_mode":"default","permission_suggestions":[],"prompt_id":"p1","session_id":"s1","tool_input":{ "description":"Write current date into a.txt", "command":"date > a.txt" },"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+		agentMainPermission = `{"hook_event_name":"PermissionRequest","session_id":"s1","agent_type":"security-reviewer","tool_input":` + liveInput + `,"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+		subagentPermission  = `{"hook_event_name":"PermissionRequest","session_id":"s1","agent_id":"a1","agent_type":"Explore","tool_input":` + liveInput + `,"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+		liveUse             = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.719Z","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"ID","name":"Bash","input":` + liveInput + `,"caller":{"type":"direct"}}]}}`
+		liveReject          = `{"type":"user","timestamp":"NOW","isSidechain":false,"toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"ID"}]}}
 {"type":"user","timestamp":"NOW","isSidechain":false,"message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
 {"type":"system","timestamp":"NOW","subtype":"turn_duration"}`
 		// An api-request-blob repeats tool blocks without a stamp; it is
@@ -384,8 +385,9 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		strings.Repeat("x", 300<<10) + `"}}`
 	unrelated := `{"type":"system","timestamp":"2026-10-26T08:08:29.650Z","subtype":"turn_duration"}`
 	// Steps: open and close run the hook receiver, append adds transcript
-	// lines, replace rewrites the transcript in place, and recheck runs one
-	// wake recheck that must leave the marker held.
+	// lines, replace rewrites the transcript in place, pad, write and
+	// truncate shape it (below), and recheck runs one wake recheck that
+	// must leave the marker held.
 	type step struct{ verb, input string }
 	for _, tc := range []struct {
 		name  string
@@ -442,6 +444,32 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		// and over the first 64 MiB fold cap, so its hold never bound.
 		{name: "a transcript over 64 MiB still binds",
 			steps:  []step{{"append", use("toolu_big")}, {"pad", "72"}, {"open", livePermission}, {"append", reject("toolu_big")}},
+			closed: true},
+		// Pro review of 025fa229 (findings6 P1): the dialog's call A was
+		// half written when the wake folded, so the complete prefix showed
+		// only the equal auto-approved B, which was bound and released A's
+		// open dialog. A partial record defers the binding.
+		{name: "an equal call while the dialog's call is still being written",
+			steps: []step{{"append", use("toolu_B")}, {"write", use("toolu_A")[:60]}, {"open", livePermission}, {"recheck", ""},
+				{"append", use("toolu_A")[60:]}, {"append", approved("toolu_B")}},
+			detail: "transcript=ambiguous: 2 pending calls, holding"},
+		// Pro review of 025fa229 (findings6 P2): the bound call's result
+		// left the 256 KiB tail before the recheck, so the release never
+		// saw it. The release reads the fold of the whole transcript.
+		{name: "a deny pushed out of the old tail before the recheck",
+			steps:  []step{{"append", use("toolu_A")}, {"open", livePermission}, {"append", reject("toolu_A")}, {"append", filler}},
+			closed: true},
+		// Pro review of 025fa229 (findings6 P2): agent_type is also set for
+		// a main session started with claude --agent; only agent_id marks
+		// a subagent.
+		{name: "a main session started with --agent",
+			steps:  []step{{"append", use("toolu_main")}, {"open", agentMainPermission}, {"append", reject("toolu_main")}},
+			closed: true},
+		// Pro review of 025fa229 (findings6 P2): a size rejection survived
+		// an in-place rewrite to a valid transcript, whose offset stayed 0.
+		{name: "a transcript rewritten in place below the size limit",
+			steps: []step{{"append", use("toolu_x")}, {"truncate", "1025"}, {"open", livePermission}, {"recheck", ""},
+				{"replace", use("toolu_x")}, {"append", reject("toolu_x")}},
 			closed: true},
 		{name: "answered AskUserQuestion", steps: []step{{"open", askPre}, {"close", askPost}}, closed: true},
 		{name: "Esc on AskUserQuestion", steps: []step{{"open", askPre}}, transcript: askEsc, closed: true},
@@ -500,6 +528,27 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 					info, err := file.Stat()
 					for end := int64(4 << 20); err == nil && end <= int64(mib)<<20; end += 4 << 20 {
 						_, err = file.WriteAt([]byte{'\n'}, info.Size()+end-1)
+					}
+					if cerr := file.Close(); err == nil {
+						err = cerr
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				case "write", "truncate":
+					// write appends bytes without a newline; truncate sets
+					// the size in MiB (a sparse extension).
+					file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o600)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if step.verb == "write" {
+						_, err = file.WriteString(step.input)
+					} else {
+						var mib int
+						if mib, err = strconv.Atoi(step.input); err == nil {
+							err = file.Truncate(int64(mib) << 20)
+						}
 					}
 					if cerr := file.Close(); err == nil {
 						err = cerr
