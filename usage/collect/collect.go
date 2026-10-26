@@ -269,7 +269,9 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 		attempt.Key.Remote = remote
 	}
 	switch {
-	case len(got.Failures) > 0:
+	case len(got.Failures) > 0 && len(got.Windows) == 0 && len(got.Money) == 0:
+		// A pass that read limits backs off nothing: its failure stays a
+		// fact, and the readings keep their interval.
 		attempt.FailureCode = got.Failures[0].Value.Code
 	case len(problems.Failures) > 0:
 		attempt.FailureCode = usage.FailCacheWrite

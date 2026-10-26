@@ -101,25 +101,64 @@ func TestPlanLimitsReplaceRolloutLimitsOnTheStrip(t *testing.T) {
 }
 
 // post-release review v0.113.2 finding U2: a week-old app-server snapshot
-// replaced one-minute-old rollout limits, and its old "reached" flagged the
-// account with no date.
-func TestPlanLimitsKeepNewerRolloutLimits(t *testing.T) {
+// replaced one-minute-old rollout limits and flagged the account with an
+// undated "reached". Rollouts hold no windows, so a snapshot inside the
+// freshness bound still replaces them although a rollout reading is newer.
+func TestPlanLimitsReplaceRolloutOnlyWhenTheSnapshotIsNotStale(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	home := "/home/u/.codex"
 	acct := facts.Account{Provider: facts.ProviderCodex, Home: home}
-	ev := facts.Evidence{Source: "codex-app-server", ObservedAt: now.Add(-7 * 24 * time.Hour)}
+	for _, tc := range []struct {
+		name     string
+		age      time.Duration
+		appLimit bool // the app-server reading is on the strip
+	}{
+		{"fresh snapshot older than the last turn", 2 * time.Minute, true},
+		{"stale snapshot", 7 * 24 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := facts.Evidence{Source: "codex-app-server", ObservedAt: now.Add(-tc.age)}
+			r := facts.Result{
+				Windows: []facts.Fact[facts.Window]{{Account: acct, Evidence: ev, Value: facts.Window{
+					LimitID: "codex", Slot: "primary", Reported: facts.Present, Kind: facts.Window5h,
+					DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(42.0)}}},
+				Buckets: []facts.Fact[facts.Bucket]{{Account: acct, Evidence: ev,
+					Value: facts.Bucket{LimitID: "codex", Reached: facts.Some("primary")}}},
+			}
+			rollout := []usage.Limit{{Kind: "credits", Name: "credits", Balance: "3.0", AsOf: now.Add(-20 * time.Second), Source: "rollout"}}
+			rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home, Limits: rollout}}}
+			app := false
+			for _, l := range WithPlanLimits(rep, r, now).Accounts[0].Limits {
+				app = app || l.Source == appServer && l.Kind == "window"
+				if !tc.appLimit && l.Source == appServer {
+					t.Fatalf("a stale app-server reading replaced rollout limits: %+v", l)
+				}
+			}
+			if app != tc.appLimit {
+				t.Fatalf("app-server window shown = %v, want %v", app, tc.appLimit)
+			}
+		})
+	}
+}
+
+// post-release review v0.113.2 finding U1 follow-up: a recovered journal
+// marked every account "last app-server read failed" beside readings made in
+// the same pass.
+func TestPlanLimitsIgnoreARecoveredJournalBesideFreshReadings(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	home := "/home/u/.codex"
+	acct := facts.Account{Provider: facts.ProviderCodex, Home: home}
+	ev := facts.Evidence{Source: "codex-app-server", ObservedAt: now.Add(-time.Minute)}
 	r := facts.Result{
 		Windows: []facts.Fact[facts.Window]{{Account: acct, Evidence: ev, Value: facts.Window{
 			LimitID: "codex", Slot: "primary", Reported: facts.Present, Kind: facts.Window5h,
-			DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(100.0)}}},
-		Buckets: []facts.Fact[facts.Bucket]{{Account: acct, Evidence: ev,
-			Value: facts.Bucket{LimitID: "codex", Reached: facts.Some("primary")}}},
+			DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(42.0)}}},
+		Failures: []facts.Fact[facts.Failure]{{Value: facts.Failure{Code: facts.FailJournal, Detail: "kept as x"}}},
 	}
-	rollout := []usage.Limit{{Kind: "credits", Name: "credits", Balance: "3.0", AsOf: now.Add(-time.Minute), Source: "rollout"}}
-	rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home, Limits: rollout}}}
+	rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home}}}
 	for _, l := range WithPlanLimits(rep, r, now).Accounts[0].Limits {
-		if l.Source == appServer {
-			t.Fatalf("a stale app-server reading replaced newer rollout limits: %+v", l)
+		if strings.Contains(l.Reason, "failed") {
+			t.Fatalf("limit %+v carries the journal diagnostic", l)
 		}
 	}
 }

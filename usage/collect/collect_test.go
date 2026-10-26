@@ -499,3 +499,20 @@ func TestRunKeepsRateLimitsWhenAccountReadFails(t *testing.T) {
 		t.Fatalf("status = %s, want partial", a.Status)
 	}
 }
+
+// post-release review v0.113.2 finding U4 follow-up: a failed account/read
+// beside good limits set the attempt's failure code, so pacing backed off to
+// 15 minutes and every reading went stale.
+func TestRunPartialReadKeepsTheInterval(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
+	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
+	f.stdout = bytes.Join(lines, nil)
+	for range 6 {
+		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		f.clock = f.clock.Add(req.Interval + time.Second)
+	}
+	if f.runs != 6 {
+		t.Fatalf("app-server ran %d times in 6 intervals, want 6", f.runs)
+	}
+}

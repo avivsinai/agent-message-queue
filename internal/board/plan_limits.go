@@ -39,6 +39,11 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		// A failure of the collection itself names no provider and
 		// concerns every home.
 		for _, x := range r.ForHome("", "").Failures {
+			// A recovered journal is a diagnostic of the collector, not a
+			// failed read: it does not mark readings made in the same pass.
+			if x.Value.Code == facts.FailJournal && as.Status != facts.StatusUnknown {
+				continue
+			}
 			v := x.Value
 			failure = &v
 		}
@@ -52,10 +57,11 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 			Reason: "plan limits not read (" + failure.Detail + ")",
 		})
 	}
-	if newest := newestAsOf(rollout); !as.ObservedAt.After(newest) {
-		// The rollout readings are the fresher ones: a snapshot that aged
-		// behind them, for example after a failed pass, must not replace
-		// them or carry its old flags onto the account.
+	if as.Status == facts.StatusStale && len(rollout) > 0 {
+		// A stale snapshot must not replace the rollout readings or carry
+		// its old flags onto the account. Rollouts hold no windows, so a
+		// snapshot inside the freshness bound is the better reading even
+		// when a rollout reading is newer.
 		if failure == nil {
 			return rollout
 		}
@@ -142,17 +148,6 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		out = append(out, l)
 	}
 	return out
-}
-
-// newestAsOf is the newest reading time among limits, zero when none is dated.
-func newestAsOf(limits []usage.Limit) time.Time {
-	var t time.Time
-	for _, l := range limits {
-		if l.AsOf.After(t) {
-			t = l.AsOf
-		}
-	}
-	return t
 }
 
 // bucketName is a limit's bucket when it is not Codex's main one.
