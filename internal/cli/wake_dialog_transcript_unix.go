@@ -9,62 +9,47 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
-// Esc or a deny on a Claude Code permission dialog runs no hook, but Claude
-// Code 2.1.310 writes it to the session transcript at once (observed live):
-// a user record with a tool_result for the asked tool call (is_error, "User
-// rejected tool use"), then a user record whose text starts with
-// claudeTranscriptInterruptPrefix. The wake reads the transcript read-only
-// as proof that the dialog is gone; without those records the hold stays.
+// Esc or a deny on a Claude Code AskUserQuestion or ExitPlanMode dialog
+// runs no hook, but Claude Code 2.1.310 writes it to the session transcript
+// at once (observed live): a user record with a tool_result for the asked
+// tool call (is_error, "User rejected tool use"). The wake reads the
+// transcript read-only as proof that the dialog of that tool_use_id is
+// gone; without that record the hold stays. A permission marker has no
+// tool_use_id, so no transcript record proves it closed.
 
-const (
-	// maxWakeDialogTranscriptTail bounds each transcript read; the records
-	// that prove a closed dialog are the newest ones.
-	maxWakeDialogTranscriptTail = 256 << 10
-	// claudeTranscriptInterruptPrefix starts the text Claude Code records
-	// when the person ends a turn with Esc or a deny on a dialog.
-	claudeTranscriptInterruptPrefix = "[Request interrupted by user"
-)
+// maxWakeDialogTranscriptTail bounds each transcript read; the records that
+// prove a closed dialog are the newest ones.
+const maxWakeDialogTranscriptTail = 256 << 10
 
 type claudeTranscriptRecord struct {
-	Type      string `json:"type"`
-	Timestamp string `json:"timestamp"`
-	Message   struct {
+	Type    string `json:"type"`
+	Message struct {
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
 }
 
 type claudeTranscriptBlock struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
-	Text      string          `json:"text"`
+	Type      string `json:"type"`
+	ToolUseID string `json:"tool_use_id"`
 }
 
-// claudeDialogAnswered reports whether the transcript the marker names shows
-// its dialog gone: a tool_result for the marker's tool call, or an
-// interrupt record dated after openedAt (the marker's mtime). The tool call
-// is the marker's tool_use_id, or the newest tool_use whose name and input
-// match its input digest; a call is recorded before its PermissionRequest
-// runs, so an older identical call never stands in for it. An error means
-// no proof: the hold stays.
-func claudeDialogAnswered(marker wakeDialogMarker, openedAt time.Time) (bool, error) {
+// claudeDialogAnswered reports whether the transcript the marker names
+// holds a tool_result for the marker's tool_use_id. A marker without one is
+// never proven answered. An error means no proof: the hold stays.
+func claudeDialogAnswered(marker wakeDialogMarker) (bool, error) {
+	if marker.ToolUseID == "" {
+		return false, nil
+	}
 	tail, err := readClaudeTranscriptTail(marker.TranscriptPath)
 	if err != nil {
 		return false, err
 	}
-	toolUseID := marker.ToolUseID
-	results := make(map[string]bool)
-	interrupted := false
 	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
 		var record claudeTranscriptRecord
-		if json.Unmarshal(line, &record) != nil ||
-			(record.Type != "user" && record.Type != "assistant") {
+		if json.Unmarshal(line, &record) != nil || record.Type != "user" {
 			continue
 		}
 		var blocks []claudeTranscriptBlock
@@ -72,23 +57,12 @@ func claudeDialogAnswered(marker wakeDialogMarker, openedAt time.Time) (bool, er
 			continue // a typed prompt is a string
 		}
 		for _, block := range blocks {
-			switch {
-			case record.Type == "assistant" && block.Type == "tool_use":
-				if marker.ToolUseID == "" && marker.InputDigest != "" &&
-					wakeDialogInputDigest(wakeDialogHookInput{Tool: block.Name, ToolInput: block.Input}) == marker.InputDigest {
-					toolUseID = block.ID
-				}
-			case record.Type == "user" && block.Type == "tool_result":
-				results[block.ToolUseID] = true
-			case record.Type == "user" && block.Type == "text" &&
-				strings.HasPrefix(block.Text, claudeTranscriptInterruptPrefix):
-				if at, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil && at.After(openedAt) {
-					interrupted = true
-				}
+			if block.Type == "tool_result" && block.ToolUseID == marker.ToolUseID {
+				return true, nil
 			}
 		}
 	}
-	return interrupted || (toolUseID != "" && results[toolUseID]), nil
+	return false, nil
 }
 
 // readClaudeTranscriptTail reads at most the last
@@ -136,18 +110,18 @@ type claudeDialogProof struct {
 }
 
 // answered reports whether a Claude Code marker's dialog is proven gone.
-// Other harnesses' markers, Startup markers and markers without a
-// transcript never are.
+// Other harnesses' markers, Startup markers, and markers without a
+// transcript or a tool_use_id never are.
 func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time) bool {
 	if proof.raw == string(raw) && proof.modTime.Equal(modTime) {
 		return true
 	}
 	var marker wakeDialogMarker
 	if json.Unmarshal(raw, &marker) != nil || marker.Harness != "" ||
-		marker.Event == wakeDialogStartupEvent || marker.TranscriptPath == "" {
+		marker.Event == wakeDialogStartupEvent || marker.TranscriptPath == "" || marker.ToolUseID == "" {
 		return false
 	}
-	if ok, err := claudeDialogAnswered(marker, modTime); err != nil || !ok {
+	if ok, err := claudeDialogAnswered(marker); err != nil || !ok {
 		return false
 	}
 	proof.raw, proof.modTime = string(raw), modTime

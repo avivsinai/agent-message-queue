@@ -81,8 +81,13 @@ func holdWakeForDialog(
 ) error {
 	now := cfg.wakeDoorbellNow()
 	cause := cfg.dialogHoldCause()
-	if cfg.dialogHold != state {
-		cfg.dialogHold = state
+	// A dialog that follows a busy turn is a new hold: its notice is due
+	// at once, not on the ladder the earlier hold left.
+	if cfg.dialogHoldBusy && !cause.busy {
+		cfg.doorbell.endHeldNotice()
+	}
+	if cfg.dialogHold != state || cfg.dialogHoldBusy != cause.busy {
+		cfg.dialogHold, cfg.dialogHoldBusy = state, cause.busy
 		var detail string
 		if cfg.dialogHoldDetail != nil {
 			detail = " (" + cfg.dialogHoldDetail(now) + ")"

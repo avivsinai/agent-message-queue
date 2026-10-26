@@ -159,7 +159,11 @@ func runCoopExec(args []string) error {
 		return err
 	}
 	if facts, _ := harness.ForExecutable(c.cmdName); c.managedLaunchNonce == "" && facts.Name == harness.Codex {
-		if _, _, tui := codexLaunchArgs(c.agentArgs); tui {
+		_, _, tui := codexLaunchArgs(c.agentArgs)
+		if (tui || codexResumeOrForkAt(c.agentArgs) >= 0) && codexTerminalDumb() {
+			return UsageError("interactive Codex reads this terminal as dumb (TERM=dumb) and asks \"Continue anyway? [y/N]\" first, which a doorbell would answer; set TERM to your terminal's type (for example TERM=xterm-256color) and run again")
+		}
+		if tui {
 			var missing []string
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				missing = append(missing, "stdin")
@@ -895,7 +899,8 @@ func (c *coopExecRun) execAgent() error {
 	namedLabel := coopNamedSessionLabel(sessionIdentity, c.agentHandle)
 	execStart := time.Now()
 	recordIdentity := codexThreadIdentityRecorder(env)
-	c.agentArgs, err = applyCoopNamedBeforeExecAt(c.named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
+	var startNamer func(root, handle string)
+	c.agentArgs, startNamer, err = applyCoopNamedBeforeExecAt(c.named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
 	if err != nil {
 		return err
 	}
@@ -909,6 +914,12 @@ func (c *coopExecRun) execAgent() error {
 	// thread codexResumeSelection selects, or fails the launch.
 	_, selected, unresolved := codexResumeSelection(c.agentArgs)
 	recorded := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider && selected && !unresolved
+	if c.managedLaunchNonce == "" {
+		// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
+		if wd, wdErr := syscall.Getwd(); wdErr == nil {
+			c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded)
+		}
+	}
 	// A managed plan carries the identity overrides as its own dynamic
 	// slots, which the launch wrapper fills.
 	if c.managedLaunchNonce == "" {
@@ -938,6 +949,9 @@ func (c *coopExecRun) execAgent() error {
 	}
 	if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
 		return cleanupAfterError(err)
+	}
+	if startNamer != nil {
+		startNamer(c.root, c.agentHandle)
 	}
 	if c.wakeStartupHold != nil {
 		if err := c.wakeStartupHold.Close(); err != nil {

@@ -45,28 +45,22 @@ type codexStartupProbe struct {
 	// cloud requirement pins check_for_update_on_startup to true
 	// (codexRequirementsAllowNoUpdateCheck).
 	requirementsClear bool
-	// plan is what the probe asked, or nil when the seat cannot be probed.
-	plan *codexStartupPlan
 }
 
-// codexStartupPlan is what one startup probe needs: coop exec decides it
-// once, and the Startup marker keeps it, so the wake can ask the same
-// app-server again while the marker is open (wakeStartupRecheck).
+// codexStartupPlan is what one startup probe needs.
 type codexStartupPlan struct {
-	// Binary is the Codex executable the seat runs.
-	Binary string `json:"binary"`
+	// Binary is the absolute path of the Codex executable the seat runs.
+	Binary string
 	// Overrides are the seat's -c, --enable and --disable options, for an
-	// embedded probe, without its identity overrides.
-	Overrides []string `json:"overrides,omitempty"`
+	// embedded probe.
+	Overrides []string
 	// Dir is the physical cwd the TUI sends hooks/list and config/read
 	// for (codexPhysicalLaunchDir).
-	Dir string `json:"dir"`
+	Dir string
 	// Daemon reports a seat on the shared app-server daemon.
-	Daemon bool `json:"daemon,omitempty"`
+	Daemon bool
 	// CodexHome is the seat's CODEX_HOME.
-	CodexHome string `json:"codex_home"`
-	// Version is the X.Y.Z the binary reported, or "" when unknown.
-	Version string `json:"version,omitempty"`
+	CodexHome string
 }
 
 // probeCodexStartup asks the app-server the seat's TUI will use for
@@ -79,8 +73,7 @@ type codexStartupPlan struct {
 // recorded reports a resumed thread whose identity coop exec recorded;
 // every other Codex seat carries the identity overrides, which make its TUI
 // run its own app-server (pinCodexShellIdentity). One deadline covers
-// backend discovery and the probe. The result carries the plan, or nil
-// when the seat cannot be probed.
+// backend discovery and the probe.
 func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorded bool) codexStartupProbe {
 	ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
 	defer cancel()
@@ -88,27 +81,29 @@ func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorde
 	if !ok {
 		return codexStartupProbe{}
 	}
-	probe := runCodexStartupProbe(ctx, plan)
-	probe.plan = &plan
-	return probe
+	return runCodexStartupProbe(ctx, plan)
 }
 
 // planCodexStartupProbe decides the backend, CODEX_HOME and overrides of
-// a probe for a seat started as binaryPath with args in wd. ok is false
-// for a seat a probe cannot ask: an unknown backend, or options a probe
-// app-server does not take.
+// a probe for a seat started as binaryPath with args in wd. A relative
+// binary path resolves against wd, as the seat's exec resolves it. ok is
+// false for a seat a probe cannot ask: an unknown backend, or options a
+// probe app-server does not take.
 func planCodexStartupProbe(ctx context.Context, binaryPath string, args []string, wd, dir string, recorded bool) (codexStartupPlan, bool) {
 	codexHome, err := codexHomeDir()
 	if err != nil {
 		return codexStartupPlan{}, false
 	}
-	plan := codexStartupPlan{Binary: binaryPath, Dir: dir, CodexHome: absPath(filepath.Clean(codexHome))}
+	if !filepath.IsAbs(binaryPath) {
+		binaryPath = filepath.Join(wd, binaryPath)
+	}
+	plan := codexStartupPlan{Binary: filepath.Clean(binaryPath), Dir: dir, CodexHome: absPath(filepath.Clean(codexHome))}
 	if recorded {
 		r, ok := parseCodexResume(args)
 		if !ok || r.unparsed {
 			return codexStartupPlan{}, false
 		}
-		backend, _ := codexLaunchBackend(ctx, binaryPath, append(slices.Clone(args[:r.start]), r.opts...), wd, plan.CodexHome)
+		backend, _ := codexLaunchBackend(ctx, plan.Binary, append(slices.Clone(args[:r.start]), r.opts...), wd, plan.CodexHome)
 		switch backend {
 		case codexOnDaemon:
 			plan.Daemon = true
@@ -122,24 +117,8 @@ func planCodexStartupProbe(ctx context.Context, binaryPath string, args []string
 	if !ok {
 		return codexStartupPlan{}, false
 	}
-	plan.Overrides = withoutCodexIdentityOverrides(overrides)
+	plan.Overrides = overrides
 	return plan, true
-}
-
-// withoutCodexIdentityOverrides drops the shell_environment_policy.set
-// overrides, which carry the seat's AM_* identity (a token among them):
-// the plan is stored in the Startup marker, and those values change
-// neither the update check, the hooks, nor the trust a probe reads.
-func withoutCodexIdentityOverrides(overrides []string) []string {
-	var out []string
-	for i := 0; i+1 < len(overrides); i += 2 {
-		key, _, _ := strings.Cut(overrides[i+1], "=")
-		if overrides[i] != "--enable" && overrides[i] != "--disable" && strings.HasPrefix(strings.TrimSpace(key), "shell_environment_policy.set") {
-			continue
-		}
-		out = append(out, overrides[i], overrides[i+1])
-	}
-	return out
 }
 
 // runCodexStartupProbe asks the app-server plan names, within ctx.

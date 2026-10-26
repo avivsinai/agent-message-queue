@@ -564,6 +564,10 @@ func coopNamedUnknownReminder(me, binary string) string {
 	)
 }
 
+// applyCoopNamedBeforeExecAt returns the arguments that name the session
+// and, for a CLI named through its terminal, the start of that namer. The
+// caller starts it only after the startup marker decision is published, so
+// the namer, like the doorbell, never types before it can see the marker.
 func applyCoopNamedBeforeExecAt(
 	named coopNamedChoice,
 	cmdName string,
@@ -571,32 +575,33 @@ func applyCoopNamedBeforeExecAt(
 	name string,
 	execStart time.Time,
 	record func(thread string) error,
-) ([]string, error) {
+) ([]string, func(root, handle string), error) {
 	if !named.enabled {
-		return agentArgs, nil
+		return agentArgs, nil, nil
 	}
 	if agentArgsPreventAutoNameFor(cmdName, agentArgs) {
-		return agentArgs, nil
+		return agentArgs, nil, nil
 	}
 	switch coopNamedModeFor(cmdName) {
 	case coopNamedModeArgv:
-		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
+		return injectCoopNamedArgv(cmdName, agentArgs, name), nil, nil
 	case coopNamedModeTUI:
 		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name, record); done {
-			return args, nil
+			return args, nil, nil
 		}
-		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {
-			_ = writeStderr("warning: coop named inject: %v\n", err)
-		}
-		return agentArgs, nil
+		return agentArgs, func(root, handle string) {
+			if err := startCoopNamedTUIInjector(name, cmdName, root, handle, execStart); err != nil {
+				_ = writeStderr("warning: coop named inject: %v\n", err)
+			}
+		}, nil
 	case coopNamedModeUnknown:
 		// Default naming is best effort: an unknown CLI starts quietly. Only
 		// an explicit request is owed the manual step (7ja).
 		if named.explicit {
 			_ = writeStderr("%s\n", coopNamedUnknownReminder(name, cmdName))
 		}
-		return agentArgs, nil
+		return agentArgs, nil, nil
 	default:
-		return agentArgs, nil
+		return agentArgs, nil, nil
 	}
 }

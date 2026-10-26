@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -90,8 +92,17 @@ func TestCodexDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 
 	// post-release review v0.113.2 finding S3: the Stop of a daemon turn
 	// admitted before this terminal started removed its Startup marker.
-	// Only a prompt typed in the session releases it.
-	startup := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
+	// Only a prompt typed in the launch releases it; this test process
+	// stands in for the launch.
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfJSON, err := json.Marshal(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x","launch":` + string(selfJSON) + `}` + "\n"
 	if err := os.WriteFile(marker, []byte(startup), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -251,5 +262,66 @@ func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
 	writeState(current, "")
 	if check, _ := checkCodexDialogHook(); check.Status == "ok" || !strings.Contains(check.Message, "PermissionRequest") {
 		t.Errorf("async open: doctor = %+v, want a stale PermissionRequest", check)
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (Codex, binding rule 2): any
+// UserPromptSubmit cleared any Codex Startup marker, including one adopted
+// through the thread identity record and one from another client of the
+// thread. Only a prompt hook with its own identity that runs under the
+// marker's launch process releases it.
+func TestCodexStartupMarkerClosesOnlyForAPromptOfItsLaunch(t *testing.T) {
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := exec.Command("sleep", "5")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+	elsewhere, err := launch.HolderOf(other.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := wakeDialogHookInput{Event: "UserPromptSubmit", SessionID: "01a165af-5f6d-7270-bb60-671490b46ea1"}
+	for _, tc := range []struct {
+		name        string
+		launch      launch.HolderIdentity
+		ownIdentity bool
+		closed      bool
+	}{
+		{"own identity under the launch", self, true, true},
+		{"identity adopted through the thread record", self, false, false},
+		{"another process tree", elsewhere, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			agentDir, err := openWakeAgentDir(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = agentDir.Close() })
+			holder := tc.launch
+			raw, err := json.Marshal(wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: "codex", Kind: wakeStartupKindReview, Cwd: "/work", Launch: &holder})
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(fsq.AgentBase(root, "codex"), wakeDialogFileName)
+			if err := os.WriteFile(marker, append(raw, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			in := prompt
+			in.ownIdentity = tc.ownIdentity
+			if err := agentDir.withFD(func(dirfd int) error { return clearTurnDialogMarker(dirfd, agentDir, in) }); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(marker); os.IsNotExist(err) != tc.closed {
+				t.Fatalf("marker closed = %v, want %v", os.IsNotExist(err), tc.closed)
+			}
+		})
 	}
 }

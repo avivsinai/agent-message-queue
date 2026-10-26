@@ -38,7 +38,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{})
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
 	hook := func(verb, input string) {
 		t.Helper()
 		if err := runWakeDialog([]string{verb}, strings.NewReader(input)); err != nil {
@@ -147,7 +147,7 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 			}
 			var notices []string
 			attention := 0
-			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{})
+			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 			h.cfg.settings.heldNotice = true
 			h.cfg.desktopNotify = func(title, body string) error {
@@ -173,61 +173,109 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 	}
 }
 
-// field: session3/claude doorbell held 13 h (2026-10-26). A permission
-// marker carries no tool_use_id, so only Stop or a prompt closed it, and a
-// turn interrupted after an approval held the doorbell for hours. The
-// approved call's PostToolUse or PostToolUseFailure, matched by tool_input,
-// and idle_prompt now close it. Another call's PostToolUse does not: Claude
-// Code asks parallel calls one dialog at a time, and the next call's
-// PermissionRequest can land before the previous call's PostToolUse.
-// AskUserQuestion gets a PermissionRequest right after its PreToolUse, and
-// its PostToolUse input adds the answers, so the marker keeps the
-// PreToolUse tool_use_id (live, Claude Code 2.1.310). Esc or a deny runs
-// no hook; the wake reads the closed dialog from the session transcript.
-// The Esc and deny records are the ones Claude Code 2.1.310 wrote live,
-// trimmed to the fields read, with the timestamps moved past the marker.
+// Pre-merge review of fix/wake-holds-0113 (Pro finding 8): a permission
+// prompt after a quiet busy turn inherited the earlier hold's notice
+// ladder, so its first notice came up to 15 minutes late. A busy to dialog
+// change starts a new hold with an immediate notice.
+func TestWakeDialogPromptAfterABusyTurnNoticesAtOnce(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	agentDir, err := openWakeAgentDir(h.root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+	write := func(kind string) {
+		t.Helper()
+		raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"` + kind + `","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
+		if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(marker, h.now, h.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var notices []string
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+	h.cfg.settings.heldNotice = true
+	h.cfg.desktopNotify = func(_, body string) error {
+		notices = append(notices, body)
+		return nil
+	}
+	h.cfg.attentionWrite = func(p []byte) (int, error) { return len(p), nil }
+	write("permission")
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	write("working")
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	write("permission")
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(notices) != 2 || strings.Contains(notices[1], "busy") {
+		t.Fatalf("notices = %q, want one per permission prompt", notices)
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (lead's W1 brief): the Cursor
+// /rename namer typed its command and Enter after a fixed delay, while a
+// startup or dialog marker could hold the doorbell. It now waits for the
+// marker as the doorbell does.
+func TestCoopNamedInjectWaitsForTheDialogMarker(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "cur"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(fsq.AgentBase(root, "cur"), wakeDialogFileName)
+	if err := os.WriteFile(marker, []byte(`{"schema":1,"event":"Startup","harness":"cursor"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if waitCoopNamedInputFree(root, "cur", 50*time.Millisecond, 10*time.Millisecond) {
+		t.Fatal("the namer may type while the Startup marker holds")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if !waitCoopNamedInputFree(root, "cur", 50*time.Millisecond, 10*time.Millisecond) {
+		t.Fatal("the namer still waits after the marker is gone")
+	}
+}
+
+// field: session3/claude doorbell held 13 h (2026-10-26). AskUserQuestion
+// gets a PermissionRequest right after its PreToolUse, and its PostToolUse
+// input adds the answers, so the marker keeps the PreToolUse tool_use_id
+// and the call's own PostToolUse closes it (live, Claude Code 2.1.310). Esc
+// on that dialog runs no hook; Claude Code writes a tool_result for the
+// tool_use_id to the transcript, which closes it. Pre-merge review of
+// fix/wake-holds-0113 (Pro findings 1 and 2): an equal call's PostToolUse,
+// or the newest equal tool_use in the transcript, released a permission
+// dialog that still showed. A permission marker has no tool_use_id, so
+// only a turn or session event closes it.
 func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 	const (
-		permission = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"d"}}`
-		askPre     = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}]}}`
-		askPerm    = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Color?"}]}}`
+		permission = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"d"}}`
+		askPre     = `{"hook_event_name":"PreToolUse","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}]}}`
+		askPerm    = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Color?"}]}}`
 		askPost    = `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}],"answers":{"Color?":"Red"}}}`
-	)
-	const (
-		escPerm = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"Write current date into a.txt"}}`
-		escUse  = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.719Z","message":{"content":[{"type":"tool_use","id":"toolu_01SH6LQuDnMFhg2mcN57xcVp","name":"Bash","input":{"command":"date > a.txt","description":"Write current date into a.txt"},"caller":{"type":"direct"}}]}}`
-		escEnd  = `{"type":"user","timestamp":"AFTER","toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"toolu_01SH6LQuDnMFhg2mcN57xcVp"}]}}
-{"type":"user","timestamp":"AFTER","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
-		denyPerm = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > b.txt","description":"Write current date into b.txt"}}`
-		denyUse  = `{"type":"assistant","timestamp":"2026-10-26T08:14:24.324Z","message":{"content":[{"type":"tool_use","id":"toolu_01Gk4EfCc2fzxVLUcCGda2DJ","name":"Bash","input":{"command":"date > b.txt","description":"Write current date into b.txt"},"caller":{"type":"direct"}}]}}`
-		denyEnd  = `{"type":"user","timestamp":"AFTER","toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"toolu_01Gk4EfCc2fzxVLUcCGda2DJ"}]}}
-{"type":"user","timestamp":"AFTER","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
+		equalPost  = `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > a.txt","description":"d"},"tool_response":{}}`
+		askEsc     = `{"type":"user","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","is_error":true,"tool_use_id":"toolu_q"}]}}`
+		equalUse   = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"date > a.txt","description":"d"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"tool_use_id":"toolu_2"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
 	)
 	type step struct{ verb, input string }
 	for _, tc := range []struct {
-		name   string
-		steps  []step
-		closed bool
-		// shown is in the transcript while the dialog shows; answered is
-		// appended when the person answers it.
-		shown, answered string
-		// next is the turn's next PermissionRequest after a transcript close.
-		next string
+		name  string
+		steps []step
+		// transcript is the session transcript after the steps.
+		transcript string
+		closed     bool
 	}{
-		{"PostToolUse of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true, "", "", ""},
-		{"PostToolUseFailure of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true, "", "", ""},
-		{"PostToolUse of another call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false, "", "", ""},
-		{"idle_prompt", []step{{"open", permission}, {"notify",
-			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true, "", "", ""},
-		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true, "", "", ""},
-		{"Esc on a permission dialog", []step{{"open", escPerm}}, true, escUse, escEnd, ""},
-		{"deny on a permission dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd, ""},
-		// The wake removes a transcript-proved marker, so the next dialog in
-		// the turn gets a fresh marker with its own digest.
-		{"deny, then the next dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd, escPerm},
+		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, "", true},
+		{"Esc on AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}}, askEsc, true},
+		{"an equal call's PostToolUse after a permission dialog", []step{{"open", permission}, {"close", equalPost}}, "", false},
+		{"an equal call's result in the transcript after a permission dialog", []step{{"open", permission}}, equalUse, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -241,7 +289,7 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			t.Setenv(envMe, "claude")
 			t.Setenv(envRoot, root)
 			transcript := filepath.Join(t.TempDir(), "session.jsonl")
-			if err := os.WriteFile(transcript, []byte(tc.shown+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(transcript, []byte(tc.transcript+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			for _, step := range tc.steps {
@@ -255,48 +303,9 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
-			closed := func() bool {
-				state, err := wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{})(time.Now())
-				return err == nil && state == wakeDialogClosed
-			}
-			if tc.answered != "" {
-				if closed() {
-					t.Fatal("marker reads closed while the dialog shows")
-				}
-				after := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
-				file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				_, err = file.WriteString(strings.ReplaceAll(tc.answered, "AFTER", after) + "\n")
-				if cerr := file.Close(); err == nil {
-					err = cerr
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if got := closed(); got != tc.closed {
-				t.Fatalf("marker closed = %v, want %v", got, tc.closed)
-			}
-			if tc.next == "" {
-				return
-			}
-			markerPath := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
-			if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-				t.Fatalf("transcript-proved marker still on disk: stat %v", err)
-			}
-			next := strings.ReplaceAll(tc.next, "TRANSCRIPT", transcript)
-			if err := runWakeDialog([]string{"open"}, strings.NewReader(next)); err != nil {
-				t.Fatalf("wake dialog open: %v", err)
-			}
-			raw, err := os.ReadFile(markerPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var marker wakeDialogMarker
-			if err := json.Unmarshal(raw, &marker); err != nil || marker.InputDigest == "" {
-				t.Fatalf("next dialog's marker = %s (%v), want one with an input digest", raw, err)
+			state, err := wakeDialogSourceInDir(agentDir)(time.Now())
+			if got := err == nil && state == wakeDialogClosed; got != tc.closed {
+				t.Fatalf("marker closed = %v (%v), want %v", got, err, tc.closed)
 			}
 		})
 	}
@@ -351,13 +360,8 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	}{
 		{"PreToolUse", "AskUserQuestion|ExitPlanMode", "open", 5},
 		{"PermissionRequest", "", "open", 5},
-		// field: session3/claude doorbell held 13 h (2026-10-26). Every
-		// tool call's PostToolUse or PostToolUseFailure reaches the
-		// receiver, so an approved permission dialog closes at once; and
-		// Notification idle_prompt closes, permission_prompt reopens.
-		{"PostToolUse", "", "close", 5},
-		{"PostToolUseFailure", "", "close", 5},
-		{"Notification", "idle_prompt|permission_prompt", "notify", 5},
+		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close", 5},
+		{"PostToolUseFailure", "AskUserQuestion|ExitPlanMode", "close", 5},
 		{"UserPromptSubmit", "", "close", 5},
 		{"Stop", "", "close", 5},
 		{"SessionStart", "", "close", 5},
@@ -387,18 +391,16 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	// version gets no entry for it.
 	home = t.TempDir()
 	t.Setenv("HOME", home)
-	fakeClaudeOnPath(t, "2.0.36")
+	fakeClaudeOnPath(t, "2.1.118")
 	settings.Hooks = nil
 	if err := json.Unmarshal(install(), &settings); err != nil {
 		t.Fatal(err)
 	}
-	for _, event := range []string{"PostToolUseFailure", "Notification"} {
-		if groups, ok := settings.Hooks[event]; ok {
-			t.Errorf("Claude Code 2.0.36 got a %s entry: %+v", event, groups)
-		}
+	if groups, ok := settings.Hooks["PostToolUseFailure"]; ok {
+		t.Errorf("Claude Code 2.1.118 got a PostToolUseFailure entry: %+v", groups)
 	}
 	if len(settings.Hooks["PostToolUse"]) != 1 {
-		t.Errorf("Claude Code 2.0.36 PostToolUse = %+v, want one entry", settings.Hooks["PostToolUse"])
+		t.Errorf("Claude Code 2.1.118 PostToolUse = %+v, want one entry", settings.Hooks["PostToolUse"])
 	}
 }
 

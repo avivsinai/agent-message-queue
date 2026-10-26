@@ -182,73 +182,6 @@ func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
 				}
 			},
 		},
-		{
-			// post-release review v0.113.2 finding S1: only the Codex
-			// dialog hook removed a hook_review marker, so a seat without a
-			// working hook stayed held after Codex recorded trust and the
-			// hook review trusted every hook. The wake's recheck re-runs
-			// the startup probe and releases on that proof.
-			name: "startup probe proves the hook review closed",
-			run: func(t *testing.T, h *wakeHoldHarness) {
-				wd, err := os.Getwd()
-				if err != nil {
-					t.Fatal(err)
-				}
-				real, err := filepath.EvalSymlinks(wd)
-				if err != nil {
-					t.Fatal(err)
-				}
-				hooks := `{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`
-				bin := fakeCodexForTest(t, os.Getenv("CODEX_HOME"), "0.164.0",
-					map[string]string{"": fmt.Sprintf(hooks, real, codexHookForTest("untrusted"))}, `{"id":3,"result":{"requirements":null}}`, "")
-				if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
-					t.Fatal(err)
-				}
-				marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-				if err := os.Chtimes(marker, h.now, h.now); err != nil {
-					t.Fatalf("no Startup marker while Codex reviews an untrusted hook: %v", err)
-				}
-				h.send("a", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if len(h.injected) != 0 {
-					t.Fatalf("typed %q while Codex reviews an untrusted hook", h.injected)
-				}
-				reviewed := fmt.Sprintf(hooks, real, codexHookForTest("trusted")) + "\n"
-				if err := os.WriteFile(filepath.Join(filepath.Dir(bin), "hooks0.json"), []byte(reviewed), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				h.advance(10 * time.Second)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells once the probe shows every hook trusted = %d, want 1", got)
-				}
-			},
-		},
-		{
-			// post-release review v0.113.2 (lead ruling on finding S1):
-			// an update prompt marker of a verified release before hook
-			// review kept no probe plan, so only the dialog hook released
-			// it. Codex 0.163's app-server answers config/read and
-			// configRequirements/read, which rule the prompt out.
-			name: "0.163 startup probe rules the update prompt out",
-			run: func(t *testing.T, h *wakeHoldHarness) {
-				// The version cache names 0.164.0, newer than 0.163.0.
-				bin := fakeCodexForTest(t, os.Getenv("CODEX_HOME"), "0.163.0",
-					map[string]string{"": `{"id":2,"result":{"data":[]}}`}, `{"id":3,"result":{"requirements":null}}`, "")
-				if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
-					t.Fatal(err)
-				}
-				marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-				if err := os.Chtimes(marker, h.now, h.now); err != nil {
-					t.Fatalf("no Startup marker for a possible update prompt: %v", err)
-				}
-				h.send("a", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells once the probe rules the update prompt out = %d, want 1", got)
-				}
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -358,44 +291,37 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 		// top-level symlink.
 		linkHooks  string
 		cdTopLevel bool
-		// term is the seat's TERM, or "" to keep the test's.
-		term string
 	}{
-		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, "", "", "", false, ""},
-		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, "", "", "", false, ""},
-		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, "", wakeStartupKindReview, "", false, ""},
-		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, "", wakeStartupKindReview, "", false, ""},
+		{"every hook trusted", "0.164.0", hooks("trusted"), noRequirements, "", "", "", false},
+		{"managed hooks only", "0.164.0", hooks("managed"), noRequirements, "", "", "", false},
+		{"one hook untrusted", "0.164.0", hooks("trusted", "untrusted"), noRequirements, "", wakeStartupKindReview, "", false},
+		{"hooks/list error", "0.164.0", `{"id":2,"error":{"code":-32603,"message":"failed to load hooks for %s"}}`, noRequirements, "", wakeStartupKindReview, "", false},
 		// Review finding (bead agent-message-queue-uue): from a symlinked
 		// working directory AMQ asked hooks/list for the logical path, while
 		// the TUI asks for its physical cwd, where the project hooks are
 		// untrusted.
-		{"symlinked cwd, physical project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), false, ""},
+		{"symlinked cwd, physical project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), false},
 		// Review finding (bead agent-message-queue-uue): the TUI
 		// canonicalizes a -C directory and keeps the logical spelling only
 		// below a symlink with a grandparent (utils/absolute-path/src/lib.rs:
 		// 210-227 at rust-v0.164.0), so under macOS /var it asks for the
 		// /private realpath, where the project hooks are untrusted.
-		{"-C under a top-level symlink, realpath project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), true, ""},
+		{"-C under a top-level symlink, realpath project hooks untrusted", "0.164.0", hooks("untrusted"), noRequirements, "", wakeStartupKindReview, hooks("trusted"), true},
 		// Field: every 0.164 seat held until typed after v0.112.0 (bead
 		// agent-message-queue-uue). The seat carries AMQ's
 		// check_for_update_on_startup=false, which no requirement pins on,
 		// so no update prompt can show on any version.
 		{"unverified release, update check off, requirements clear", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, "", "", "", false, ""},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":null,"allowManagedHooksOnly":null}}}`, "", "", "", false},
 		{"requirements pin the update check on", "0.165.0", hooks("trusted"),
-			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, "", wakeStartupKindUpdate, "", false, ""},
+			`{"id":3,"result":{"supportsIndependentSpeedModes":true,"requirements":{"checkForUpdateOnStartup":true}}}`, "", wakeStartupKindUpdate, "", false},
 		// Review finding (bead agent-message-queue-uue): legacy managed
 		// layers rank above session flags (config/src/config_layer_source.rs:
 		// 22-27 at rust-v0.164.0), so the seat's -c false can lose; only the
 		// effective value counts.
 		{"a legacy managed layer turns the update check on", "0.165.0", hooks("trusted"), noRequirements,
 			`{"id":4,"result":{"config":{"check_for_update_on_startup":true},"origins":{"check_for_update_on_startup":{"name":{"type":"legacyManagedConfigTomlFromFile","file":"/etc/codex/managed_config.toml"},"version":"sha256:ab"}}}}`,
-			wakeStartupKindUpdate, "", false, ""},
-		// post-release review v0.113.2 finding S6: with TERM=dumb Codex
-		// asks "Continue anyway? [y/N]" before its TUI starts
-		// (cli/src/main.rs:2518-2533 at rust-v0.164.0); the doorbell's
-		// Enter answers No and Codex exits.
-		{"TERM=dumb", "0.164.0", hooks("trusted"), noRequirements, "", wakeStartupKindTermDumb, "", false, "dumb"},
+			wakeStartupKindUpdate, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -403,17 +329,8 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if tc.term != "" {
-				for _, key := range []string{"TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR", "WEZTERM_VERSION", "ITERM_SESSION_ID", "ITERM_PROFILE", "ITERM_PROFILE_NAME",
-					"KITTY_WINDOW_ID", "ALACRITTY_SOCKET", "KONSOLE_VERSION", "GNOME_TERMINAL_SCREEN", "VTE_VERSION", "WT_SESSION"} {
-					t.Setenv(key, "")
-					_ = os.Unsetenv(key)
-				}
-				t.Setenv("TERM", tc.term)
-			}
 			byCwd := map[string]string{"": fmt.Sprintf(tc.hooks, real)}
-			// coop exec gives the seat its identity as overrides.
-			args := pinCodexShellIdentity("/usr/local/bin/codex", nil, []string{"AM_ME=codex", "AM_TOKEN=tok-secret"}, false)
+			args := []string{"-c", "check_for_update_on_startup=false"}
 			switch {
 			case tc.cdTopLevel:
 				// /var is a top-level symlink to /private/var on macOS.
@@ -467,12 +384,6 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != tc.kind {
 				t.Fatalf("Startup marker %q, %v; want kind %s", raw, err, tc.kind)
 			}
-			// post-release review v0.113.2 (lead ruling): the stored probe
-			// plan kept the seat's AM_* identity overrides, a token among
-			// them.
-			if strings.Contains(string(raw), "AM_") || strings.Contains(string(raw), "tok-secret") {
-				t.Fatalf("Startup marker %q holds the seat's identity", raw)
-			}
 		})
 	}
 }
@@ -483,8 +394,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 // record is written.
 func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
 	h, config, real, marker := newCodexTrustDialogHarness(t)
-	// The review screen shows while a hook is untrusted.
-	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("untrusted"))
+	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("trusted"))
 	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{"": reply}, `{"id":3,"result":{"requirements":null}}`, "")
 	if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
 		t.Fatal(err)
@@ -655,9 +565,8 @@ func newCodexTrustDialogHarness(t *testing.T) (h *wakeHoldHarness, config, real,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	recheck := &wakeStartupRecheck{}
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, recheck)
-	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir, recheck)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir)
 	return h, filepath.Join(codexHome, "config.toml"), real, filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 }
 
@@ -726,7 +635,7 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{}), released)
+	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir), released)
 
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)
@@ -984,6 +893,48 @@ func TestCodexStartupProbeKillsAFeaturesChildThatHoldsStdout(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the features child %d survived the probe: %v", pid, err)
+		}
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (Pro finding 5 and the lead's
+// W1 ruling): a Codex Startup marker that only the dialog hook releases
+// held the doorbell with no sign before launch when the hook could not
+// run. coop exec now says so on stderr, with the remedy.
+func TestCodexStartupHoldNamesAMissingDialogHookBeforeLaunch(t *testing.T) {
+	h, config, real, _ := newCodexTrustDialogHarness(t)
+	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return syncStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", []string{"-c", "check_for_update_on_startup=false"}, false)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "holds this Codex seat's doorbell until the first prompt") ||
+		!strings.Contains(stderr, "amq wake install-dialog-hook --harness codex") {
+		t.Fatalf("stderr = %q, want the held-doorbell line with the install remedy", stderr)
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (Pro finding 4): Codex asks which
+// directory to resume a thread in when its recorded cwd differs from the
+// launch directory, and Enter picks one. With no choice set, coop exec sets
+// the current mode; a recorded seat gets -C, which keeps it on the daemon.
+func TestCodexResumeLaunchKeepsTheLaunchDirectory(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	const thread = "01a165af-5f6d-7270-bb60-671490b46ea1"
+	for _, tc := range []struct {
+		recorded bool
+		want     []string
+	}{
+		{false, []string{"-c", `tui.resume_cwd="current"`, "resume", thread}},
+		{true, []string{"-C", "/work/repo", "resume", thread}},
+	} {
+		if got := pinCodexResumeLaunchDir("/usr/local/bin/codex", []string{"resume", thread}, "/work/repo", tc.recorded); !slices.Equal(got, tc.want) {
+			t.Fatalf("recorded=%v resume args = %q, want %q", tc.recorded, got, tc.want)
 		}
 	}
 }

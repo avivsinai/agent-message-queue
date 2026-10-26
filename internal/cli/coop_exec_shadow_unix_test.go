@@ -76,10 +76,17 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
-		tui  bool
+		// refusal is the usage error text, or "" for a launch that runs.
+		refusal string
+		// dumb runs the launch with TERM=dumb.
+		dumb bool
 	}{
-		{"interactive stdout redirected", []string{"-m", "example-model", "explain this project"}, true},
-		{"exec stdout redirected", []string{"exec", "explain this project"}, false},
+		{"interactive stdout redirected", []string{"-m", "example-model", "explain this project"}, "missing: stdout", false},
+		{"exec stdout redirected", []string{"exec", "explain this project"}, "", false},
+		// Pre-merge review of fix/wake-holds-0113 (Pro finding 5): with
+		// TERM=dumb Codex asks "Continue anyway? [y/N]" before its TUI
+		// starts, and a doorbell's Enter answers No.
+		{"TERM=dumb resume", []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}, "TERM=dumb", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			master, terminal, err := pty.Open()
@@ -106,6 +113,14 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin)
+			if tc.dumb {
+				for _, key := range []string{"TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR", "WEZTERM_VERSION", "ITERM_SESSION_ID", "ITERM_PROFILE", "ITERM_PROFILE_NAME",
+					"KITTY_WINDOW_ID", "ALACRITTY_SOCKET", "KONSOLE_VERSION", "GNOME_TERMINAL_SCREEN", "VTE_VERSION", "WT_SESSION"} {
+					t.Setenv(key, "")
+					_ = os.Unsetenv(key)
+				}
+				t.Setenv("TERM", "dumb")
+			}
 			root := filepath.Join(secureTempDirForTest(t), "queue")
 			sentinel := errors.New("exec sentinel")
 			oldExec := coopExecProcess
@@ -118,9 +133,9 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 			}
 			args := append([]string{"--root", root, "--me", "coder", "--no-wake", "--named=false", "-y", "codex", "--"}, tc.args...)
 			err = runCoopExec(args)
-			if tc.tui {
-				if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "missing: stdout") {
-					t.Fatalf("redirected Codex error = %v, want usage error naming stdout", err)
+			if tc.refusal != "" {
+				if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), tc.refusal) {
+					t.Fatalf("Codex launch error = %v, want usage error naming %s", err, tc.refusal)
 				}
 				if selected != "" {
 					t.Fatalf("interactive Codex reached exec: %q", selected)

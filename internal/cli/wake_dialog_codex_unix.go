@@ -135,9 +135,10 @@ func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 // clearTurnDialogMarker removes the marker at a turn or session event. A
 // tool call's PostToolUse (Codex) or postToolUse (Cursor) keeps it: neither
 // harness ties a prompt to the call that completed. A Codex Startup marker
-// closes only at UserPromptSubmit: a Stop, Interrupt or session event can
-// come from a daemon turn admitted before this terminal started, which
-// shows nothing about its startup screens.
+// closes only at a UserPromptSubmit of this launch (startupPromptOfLaunch):
+// a Stop, Interrupt or session event can come from a daemon turn admitted
+// before this terminal started, and a prompt from another client shows
+// nothing about this terminal's startup screens.
 func clearTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	if in.Event == "PostToolUse" || in.Event == "postToolUse" {
 		return nil
@@ -150,12 +151,23 @@ func clearTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		}
 		switch {
 		case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
-			return in.Event == "UserPromptSubmit"
+			return startupPromptOfLaunch(marker, in)
 		case marker.Harness == "cursor":
 			return cursorDialogCloseMatches(marker, in)
 		}
 		return true
 	})
+}
+
+// startupPromptOfLaunch reports a UserPromptSubmit typed in the launch a
+// Codex Startup marker records: the hook's identity came from its own
+// environment, not adopted through a thread record, and the hook runs under
+// the marker's launch process with its start time. An embedded Codex runs
+// hooks as its own children; any other client's hook does not match, and
+// the hold stays.
+func startupPromptOfLaunch(marker wakeDialogMarker, in wakeDialogHookInput) bool {
+	return in.Event == "UserPromptSubmit" && in.ownIdentity &&
+		marker.Launch != nil && launch.RunsUnderProcess(*marker.Launch)
 }
 
 // codexHooksPath is the user hooks file Codex reads: $CODEX_HOME/hooks.json.

@@ -3,8 +3,8 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,26 +33,24 @@ import (
 const wakeDialogStartupEvent = "Startup"
 
 // wakeStartupKindUpdate marks a Codex Startup marker written only because
-// the update prompt could not be ruled out (startupDialogMarkerFor). The
-// dialog hook releases it, and so does the wake's startup recheck once
-// Codex's own state rules the prompt out, when the marker keeps a probe
-// plan.
+// the update prompt could not be ruled out (startupDialogMarkerFor). No
+// Codex record shows that prompt closed, so only the dialog hook releases
+// it.
 const wakeStartupKindUpdate = "update_prompt"
 
 // wakeStartupKindReview marks a Codex Startup marker for a release that
 // reviews hooks after its trust screen (codexHookReviewSince): the
 // directory trust is not recorded, or Codex's own hooks/list did not show
 // that no hook needs review. A trust record does not show that the hook
-// review closed, so the dialog hook releases it, or the wake's startup
-// recheck once Codex's hooks/list shows no hook to review.
+// review closed, so only the dialog hook releases it.
 const wakeStartupKindReview = "hook_review"
 
-// wakeStartupKindTermDumb marks a Codex Startup marker for a seat whose
-// terminal Codex reads as dumb: Codex asks "Continue anyway? [y/N]" before
-// its TUI starts (cli/src/main.rs:2518-2533 at rust-v0.164.0), and the
-// doorbell's Enter answers No. Codex records no answer, so only the dialog
-// hook releases it.
-const wakeStartupKindTermDumb = "term_dumb"
+// wakeStartupKindResumeDir marks a Codex Startup marker for a resume or
+// fork whose directory choice is not the launch directory: Codex resumes in
+// the thread's recorded directory, whose trust and hooks AMQ does not
+// check, or a choice AMQ cannot read may still ask. Only the dialog hook
+// releases it.
+const wakeStartupKindResumeDir = "resume_dir"
 
 // startupTrust is what the harness's own trust record says about a
 // directory.
@@ -144,20 +143,12 @@ func readStartupTrust(harness, dir string) startupTrust {
 // the decision there turns on project layers AMQ does not read, so trust
 // there stays pending.
 func codexStartupTrust(dir string) startupTrust {
-	codexHome, err := codexHomeDir()
-	if err != nil {
-		if codexNearestGitAncestor(dir) == "" {
-			return startupTrustPending
-		}
-		return startupTrustUnknown
-	}
-	return codexStartupTrustIn(codexHome, dir)
-}
-
-// codexStartupTrustIn is codexStartupTrust for the Codex home codexHome.
-func codexStartupTrustIn(codexHome, dir string) startupTrust {
 	if codexNearestGitAncestor(dir) == "" {
 		return startupTrustPending
+	}
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return startupTrustUnknown
 	}
 	level, _, err := codexProjectTrust(codexHome, dir)
 	switch {
@@ -225,7 +216,35 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string, rec
 		return err
 	}
 	marker, hold := startupDialogMarkerFor(binaryPath, args, wd, recorded)
-	return syncStartupDialogMarkerState(root, handle, marker, hold)
+	if hold && marker.Harness == launch.CodexProvider {
+		// coop exec execs Codex in this process, so its pid and start time
+		// name the launch whose prompt hook may release the marker.
+		if holder, err := launch.HolderOf(os.Getpid()); err == nil {
+			marker.Launch = &holder
+		}
+	}
+	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
+		return err
+	}
+	if hold && marker.Harness == launch.CodexProvider {
+		if remedy, blocked := codexDialogHookBlocked(); blocked {
+			_ = writeStderr("amq coop exec: AMQ holds this Codex seat's doorbell until the first prompt typed in it, because a Codex startup screen may show, and the AMQ dialog hook that sees that prompt cannot run: %s\n", remedy)
+		}
+	}
+	return nil
+}
+
+// codexDialogHookBlocked reports whether the AMQ Codex dialog hook is
+// missing, disabled or untrusted, with the remedy for the case.
+func codexDialogHookBlocked() (remedy string, blocked bool) {
+	check, ok := checkCodexDialogHook()
+	switch {
+	case ok && check.Status == "ok":
+		return "", false
+	case ok && check.Message == codexDialogHookUntrusted:
+		return "open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries", true
+	}
+	return "run amq wake install-dialog-hook --harness codex, then open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries", true
 }
 
 // syncStartupDialogMarkerState publishes the decided hold through the
@@ -259,26 +278,17 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	if harness != launch.CodexProvider {
 		return startupDialogMarkerDecision(harness, dir, trust, true)
 	}
+	// The trust and hooks evidence below is for the launch directory; a
+	// resume in another directory has none.
+	if codexResumeOrForkAt(args) >= 0 && codexResumeCwdChoice(args) != "current" {
+		return wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindResumeDir}, true
+	}
 	installed, known := codexInstalledVersion(binaryPath)
 	cacheRuledOut := codexUpdatePromptRuledOut(installed, known)
 	// The verified releases before hook review keep the trust and version
-	// cache decision. Their app-server answers config/read and
-	// configRequirements/read too (app-server-protocol common.rs at
-	// rust-v0.145.0, 0.161.0 and 0.163.0), so an update prompt marker keeps
-	// the probe's plan for the wake's startup recheck.
-	if known && codexUpdateVersionVerified(installed) && codexVersionNewer(codexHookReviewSince, installed) && !codexTerminalDumb() {
-		marker, hold := startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
-		if hold && marker.Kind == wakeStartupKindUpdate {
-			if physical, ok := codexPhysicalLaunchDir(args, wd); ok {
-				ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
-				plan, planned := planCodexStartupProbe(ctx, binaryPath, args, wd, physical, recorded)
-				cancel()
-				if planned {
-					marker.Probe = withCodexVersion(plan, installed, known)
-				}
-			}
-		}
-		return marker, hold
+	// cache decision.
+	if known && codexUpdateVersionVerified(installed) && codexVersionNewer(codexHookReviewSince, installed) {
+		return startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
 	}
 	// Any other release may review hooks after its trust screen. It starts
 	// clear only when Codex records that it trusts the directory, its
@@ -286,37 +296,20 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	// out: by the version cache of a verified release, or by an effective
 	// check_for_update_on_startup of false that no requirement pins on
 	// (tui/src/updates.rs:28 and :153 at rust-v0.164.0: the prompt needs
-	// that setting in effect). The marker keeps the probe's plan, so the
-	// wake can repeat the probe and release on the same proof.
+	// that setting in effect).
 	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindUpdate}
-	if codexTerminalDumb() {
-		marker.Kind = wakeStartupKindTermDumb
+	if trust != startupTrustAccepted {
+		if cacheRuledOut {
+			marker.Kind = wakeStartupKindReview
+		}
 		return marker, true
 	}
 	// Codex asks hooks/list for its config.cwd, which starts from the
 	// physical working directory, and project hooks are keyed by that
 	// spelling; a directory that cannot be resolved proves nothing.
-	physical, resolved := codexPhysicalLaunchDir(args, wd)
-	if trust != startupTrustAccepted {
-		if cacheRuledOut {
-			marker.Kind = wakeStartupKindReview
-		}
-		if resolved {
-			ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
-			plan, ok := planCodexStartupProbe(ctx, binaryPath, args, wd, physical, recorded)
-			cancel()
-			if ok {
-				marker.Probe = withCodexVersion(plan, installed, known)
-			}
-		}
-		return marker, true
-	}
 	var probe codexStartupProbe
-	if resolved {
+	if physical, ok := codexPhysicalLaunchDir(args, wd); ok {
 		probe = probeCodexStartup(binaryPath, args, wd, physical, recorded)
-	}
-	if probe.plan != nil {
-		marker.Probe = withCodexVersion(*probe.plan, installed, known)
 	}
 	if !cacheRuledOut && (!probe.updateCheckOff || !probe.requirementsClear) {
 		return marker, true
@@ -328,16 +321,106 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	return wakeDialogMarker{}, false
 }
 
-// withCodexVersion returns plan with the binary's version, when known.
-func withCodexVersion(plan codexStartupPlan, installed [3]uint64, known bool) *codexStartupPlan {
-	if known {
-		plan.Version = fmt.Sprintf("%d.%d.%d", installed[0], installed[1], installed[2])
+// pinCodexResumeLaunchDir keeps a Codex resume or fork launch in its
+// launch directory without the directory prompt, when no choice is set.
+// Codex asks which directory to resume in only when the resume mode is
+// unset and the thread's recorded cwd differs from the launch directory
+// (resolve_cwd_for_resume_or_fork, tui/src/session_resume.rs:84-141 at
+// rust-v0.164.0), and Enter picks a directory. A mode of current skips the
+// prompt and keeps the launch directory (session_resume.rs:35-43;
+// tui.resume_cwd, config/src/types.rs:114-122 and 995-998). A seat that
+// already runs its own app-server gets -c tui.resume_cwd="current", as it
+// gets check_for_update_on_startup=false. A recorded seat stays on the
+// Codex daemon, where any -c override other than a feature boolean would
+// make its TUI run its own app-server (config_exclusion,
+// tui/src/daemon_startup.rs:89-113), so it gets -C <wd>, which makes the
+// mode current too. A choice on the command line, in a profile, or in
+// config.toml is kept.
+func pinCodexResumeLaunchDir(binaryPath string, args []string, wd string, recorded bool) []string {
+	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider || codexArgsHaveRemote(args) ||
+		codexResumeOrForkAt(args) < 0 || codexResumeCwdChoice(args) != "" {
+		return args
 	}
-	return &plan
+	if recorded {
+		return append([]string{"-C", wd}, args...)
+	}
+	return append([]string{"-c", `tui.resume_cwd="current"`}, args...)
+}
+
+// codexResumeCwdChoice is the resume directory mode a Codex launch sets:
+// "current" for -C/--cd, the value of -c tui.resume_cwd, "unknown" for a
+// profile or a [tui] override AMQ does not read, or else config.toml's
+// tui.resume_cwd ("" when unset; "unknown" when config.toml cannot be read).
+func codexResumeCwdChoice(args []string) string {
+	for i := 0; i < len(args) && args[i] != "--"; i++ {
+		flag, value, inline := strings.Cut(args[i], "=")
+		switch {
+		case flag == "-C" || flag == "--cd":
+			return "current"
+		case flag == "-p" || flag == "--profile":
+			return "unknown"
+		case flag != "-c" && flag != "--config":
+			if codexValueOptions[flag] && !inline {
+				i++
+			}
+			continue
+		}
+		if !inline && i+1 < len(args) {
+			i++
+			value = args[i]
+		}
+		key, raw, _ := strings.Cut(value, "=")
+		switch strings.TrimSpace(key) {
+		case "tui.resume_cwd":
+			return strings.Trim(strings.TrimSpace(raw), `"'`)
+		case "tui":
+			return "unknown"
+		}
+	}
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return "unknown"
+	}
+	raw, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var config struct {
+		TUI struct {
+			ResumeCwd string `toml:"resume_cwd"`
+		} `toml:"tui"`
+	}
+	if err != nil || toml.Unmarshal(raw, &config) != nil {
+		return "unknown"
+	}
+	return config.TUI.ResumeCwd
+}
+
+// codexResumeOrForkAt is the index of a Codex launch's resume or fork
+// subcommand (its first positional), or -1 for any other launch.
+func codexResumeOrForkAt(args []string) int {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return -1
+		}
+		if !strings.HasPrefix(arg, "-") {
+			if arg == "resume" || arg == "fork" {
+				return i
+			}
+			return -1
+		}
+		if flag, _, inline := strings.Cut(arg, "="); codexValueOptions[flag] && !inline {
+			i++
+		}
+	}
+	return -1
 }
 
 // codexTerminalDumb reports whether Codex reads this terminal as dumb and
-// so asks "Continue anyway? [y/N]" first: TERM_PROGRAM (other than tmux)
+// so asks "Continue anyway? [y/N]" before its TUI starts
+// (cli/src/main.rs:2518-2533 at rust-v0.164.0), where the doorbell's Enter
+// answers No and no record shows the answer: TERM_PROGRAM (other than tmux)
 // names dumb, or none of the terminal variables Codex checks before TERM is
 // set and TERM is dumb (terminal-detection/src/lib.rs:254-330 at
 // rust-v0.164.0).
@@ -494,46 +577,37 @@ func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 // installed hook it does not trust, so the remedy then is the trust, not
 // another install.
 func codexStartupHookRelease() string {
-	check, ok := checkCodexDialogHook()
-	switch {
-	case ok && check.Status == "ok":
+	remedy, blocked := codexDialogHookBlocked()
+	if !blocked {
 		return "the Codex dialog hook releases it at the first prompt typed in that Codex session"
-	case ok && check.Message == codexDialogHookUntrusted:
-		return "the Codex dialog hook releases it at the first prompt typed in that Codex session once Codex trusts the hook (open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries)"
 	}
-	return "the Codex dialog hook releases it at the first prompt typed in that Codex session once it runs (amq wake install-dialog-hook --harness codex, then trust the AMQ_DIALOG_HOOK entries in Codex /hooks)"
+	return "the Codex dialog hook releases it at the first prompt typed in that Codex session once it runs (" + remedy + ")"
 }
 
 // codexStartupHoldRemedy is the fixed held-notice text that says what
-// releases a Codex Startup hold once its screen is answered. probed
-// reports a marker the wake's trust read or startup recheck can release.
-// It says that a typed prompt releases it only when the dialog hook can
-// run, and names the remedy otherwise.
-func codexStartupHoldRemedy(probed bool) string {
+// releases a Codex Startup hold once its screen is answered. trustOnly
+// reports a trust marker, which Codex's trust record also releases. It says
+// that a typed prompt releases it only when the dialog hook can run, and
+// names the remedy otherwise.
+func codexStartupHoldRemedy(trustOnly bool) string {
 	state := ""
-	if probed {
-		state = "the doorbell rings once Codex's state shows the screen closed; "
+	if trustOnly {
+		state = "the doorbell rings once Codex records the directory trust; "
 	}
-	check, ok := checkCodexDialogHook()
-	switch {
-	case ok && check.Status == "ok":
-		return state + "a prompt typed there releases it too"
-	case ok && check.Message == codexDialogHookUntrusted:
-		return state + "a prompt typed there releases it once the AMQ_DIALOG_HOOK entries are trusted in Codex /hooks"
+	remedy, blocked := codexDialogHookBlocked()
+	if !blocked {
+		return state + "a prompt typed there releases it"
 	}
-	return state + "a prompt typed there releases it once amq wake install-dialog-hook --harness codex runs and Codex /hooks trusts the entries"
+	return state + "a prompt typed there releases it once the AMQ dialog hook runs: " + remedy
 }
 
 // codexStartupHoldRelease says why a Codex Startup marker holds the
 // doorbell, what releases it, and the remedy.
 func codexStartupHoldRelease(marker wakeDialogMarker) string {
 	hook := codexStartupHookRelease()
-	if marker.Probe != nil && marker.Kind != wakeStartupKindTermDumb {
-		hook = "the wake rechecks Codex's state every 10 s and rings once Codex records the trust, no hook needs review, and the update prompt is ruled out; or " + hook
-	}
 	switch {
-	case marker.Kind == wakeStartupKindTermDumb:
-		return "Codex reads this terminal as dumb (TERM=dumb) and asks \"Continue anyway? [y/N]\", where the doorbell's Enter answers No; " + hook
+	case marker.Kind == wakeStartupKindResumeDir:
+		return "Codex resumes the thread in a directory AMQ does not check (tui.resume_cwd or a profile chooses it), where a trust, hook review or directory prompt can show; " + hook
 	case marker.Kind == wakeStartupKindReview:
 		return fmt.Sprintf("Codex may ask whether to trust %s or to review new or changed hooks, and a trust record does not show that the hook review closed; %s", marker.Cwd, hook)
 	case marker.Kind == wakeStartupKindUpdate:
