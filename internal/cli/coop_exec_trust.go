@@ -33,8 +33,9 @@ const wakeDialogStartupEvent = "Startup"
 
 // wakeStartupKindUpdate marks a Codex Startup marker written only because
 // the update prompt could not be ruled out (startupDialogMarkerFor). The
-// dialog hook releases it, or the wake's startup recheck once Codex's own
-// state rules the prompt out.
+// dialog hook releases it. On a release that reviews hooks, or one AMQ
+// cannot verify, the marker keeps a probe plan, and the wake's startup
+// recheck also releases it once Codex's own state rules the prompt out.
 const wakeStartupKindUpdate = "update_prompt"
 
 // wakeStartupKindReview marks a Codex Startup marker for a release that

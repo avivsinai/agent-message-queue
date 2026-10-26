@@ -71,11 +71,7 @@ func (r *wakeStartupRecheck) codexStartupProven(raw []byte, now time.Time) bool 
 		return false
 	}
 	installed, known := parseCodexVersion(plan.Version)
-	verified := known && codexUpdateVersionVerified(installed)
-	cacheRuledOut := verified && codexVersionCacheRulesOutPrompt(plan.CodexHome, installed)
-	if verified && codexVersionNewer(codexHookReviewSince, installed) {
-		return cacheRuledOut
-	}
+	cacheRuledOut := known && codexUpdateVersionVerified(installed) && codexVersionCacheRulesOutPrompt(plan.CodexHome, installed)
 	if !r.lastProbe.IsZero() && !now.Before(r.lastProbe) && now.Sub(r.lastProbe) < codexStartupRecheckEvery {
 		return false
 	}
