@@ -168,10 +168,11 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 
 	stderr := captureWakeStderr(t, func() {
 		cfg := &wakeConfig{
-			injectMode:     wakeInjectModeNone,
-			settings:       wakeSettings{bell: true},
-			attentionEnv:   func(string) string { return "" },
-			attentionIsTTY: func() bool { return true },
+			injectMode:            wakeInjectModeNone,
+			settings:              wakeSettings{bell: true},
+			attentionEnv:          func(string) string { return "" },
+			attentionIsTTY:        func() bool { return true },
+			attentionIsForeground: func() bool { return true },
 		}
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
 			t.Fatalf("injectNotification: %v", err)
@@ -181,7 +182,7 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("none mode injected terminal input: %q", injected)
 	}
-	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\r\n" {
 		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }

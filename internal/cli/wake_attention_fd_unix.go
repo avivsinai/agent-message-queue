@@ -88,3 +88,13 @@ func wakeAttentionFromEnv() (*os.File, error) {
 func wakeAttentionFileIsTerminal(attention *os.File) bool {
 	return attention != nil && term.IsTerminal(int(attention.Fd()))
 }
+
+// wakeFileIsForeground reports whether this process's group is the foreground
+// process group of the terminal behind file. Any error means not foreground.
+func wakeFileIsForeground(file *os.File) bool {
+	if file == nil {
+		return false
+	}
+	pgrp, err := wakeTerminalForegroundPGRP(file.Fd())
+	return err == nil && pgrp > 0 && pgrp == unix.Getpgrp()
+}

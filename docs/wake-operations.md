@@ -43,7 +43,16 @@ or parked signals through its own pane attention and `doctor --ops`
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only
 terminal-safe attention output, so fatal-error text stays out of full-screen
-agent composers. A new wake truncates the log when it has reached 1 MiB, and
+agent composers. A wake prints notice text and runtime diagnostics to a
+terminal only when it is that terminal's foreground process group, for
+example a wake that runs in the foreground of its own pane; each notice line
+then ends with CR LF. A wake that runs behind a harness, such as a background
+job (`&`) or the wake of `amq coop exec`, writes only non-printing signals to
+that terminal: the OSC 0 title, a bell, and an OSC 9 or OSC 777 notice where
+the terminal supports one. It drops diagnostics that have no log. A wake under
+`amq coop exec` never prints text to a terminal. Output to a destination that
+is not a terminal, such as a log file, is always plain text. A new wake
+truncates the log when it has reached 1 MiB, and
 the 30-second maintenance tick checks again, so a long-lived wake bounds its
 own log. The keepalive launcher's detached variant is in
 [the keepalive reference](amq-keepalive.md#detached-wake-diagnostics).
