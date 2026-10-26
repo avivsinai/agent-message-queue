@@ -188,6 +188,10 @@ func uninstallCodexDialogHook() error {
 	return writeStdout("dialog hook removed from %s\n", path)
 }
 
+// codexDialogHookUntrusted is the check message for installed AMQ entries
+// that Codex skips until the person trusts them in /hooks.
+const codexDialogHookUntrusted = "installed, not trusted as it is now, so Codex skips it; open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries"
+
 // codexRequirementsPath is the system requirements file of Codex on Unix.
 var codexRequirementsPath = "/etc/codex/requirements.toml"
 
@@ -278,7 +282,7 @@ func checkCodexDialogHook() (doctorCheck, bool) {
 				check.Message = fmt.Sprintf("the %s entry is disabled in Codex /hooks, so Codex skips it; enable it in /hooks", event)
 				return check, true
 			case state.TrustedHash != entry.hash(event):
-				check.Message = "installed, not trusted as it is now, so Codex skips it; open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries"
+				check.Message = codexDialogHookUntrusted
 				return check, true
 			}
 		}

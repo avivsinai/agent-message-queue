@@ -152,7 +152,7 @@ func Lookup(thread, codexHome string) (Record, error) {
 	if r.Thread != thread {
 		return Record{}, fmt.Errorf("the identity record of Codex thread %s names thread %s", thread, r.Thread)
 	}
-	if filepath.Clean(r.CodexHome) != filepath.Clean(codexHome) {
+	if resolvedHome(r.CodexHome) != resolvedHome(codexHome) {
 		return Record{}, fmt.Errorf("the Codex thread %s was recorded for CODEX_HOME %s, not %s", thread, r.CodexHome, codexHome)
 	}
 	var cur currentRecord
@@ -166,6 +166,17 @@ func Lookup(thread, codexHome string) (Record, error) {
 		return Record{}, fmt.Errorf("a later amq coop exec gave handle %s in %s to Codex thread %s; this thread %s no longer carries that identity", r.Me, r.Root, cur.Thread, thread)
 	}
 	return r, nil
+}
+
+// resolvedHome is home with its symlinks resolved, or home itself when it
+// cannot be resolved. Codex canonicalizes CODEX_HOME
+// (utils/home-dir/src/lib.rs:43 at rust-v0.164.0), so two spellings of one
+// home name the same Codex state.
+func resolvedHome(home string) string {
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(home)
 }
 
 // Binding is one interval during which a handle of a root carried a Codex

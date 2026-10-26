@@ -20,8 +20,15 @@ const (
 
 // A nearby release or a different patch is not verified evidence.
 func codexUpdateVersionVerified(version [3]uint64) bool {
-	return version == [3]uint64{0, 145, 0} || version == [3]uint64{0, 161, 0} || version == [3]uint64{0, 163, 0}
+	return version == [3]uint64{0, 145, 0} || version == [3]uint64{0, 161, 0} || version == [3]uint64{0, 163, 0} ||
+		version == [3]uint64{0, 164, 0}
 }
+
+// codexHookReviewSince is the first codex-cli release whose TUI reviews new
+// or changed hooks after its trust screen and before the session starts
+// (tui/src/lib.rs:2121-2182 at rust-v0.164.0). Directory trust does not
+// answer that review.
+var codexHookReviewSince = [3]uint64{0, 164, 0}
 
 // Codex shows its update prompt before its trust dialog and before its
 // session starts, and the prompt's default choice runs the upgrade
@@ -29,17 +36,20 @@ func codexUpdateVersionVerified(version [3]uint64) bool {
 // start_app_server). Choosing "Not now" writes nothing, so no Codex record
 // shows that the prompt closed. coop exec therefore holds the doorbell
 // unless Codex's own state proves the prompt cannot show:
-// codexUpdatePromptRuledOut uses only Codex's version cache as release
-// evidence. A CLI or file setting cannot prove the effective value above
-// managed preferences and cloud requirements. Unknown state stays held
-// until Codex's first-turn dialog hook closes the marker.
-func codexUpdatePromptRuledOut(binaryPath string) bool {
-	codexHome, err := codexHomeDir()
-	if err != nil {
+// codexUpdatePromptRuledOut reads Codex's version cache. The other proof,
+// an effective check_for_update_on_startup of false with no requirement
+// that pins the check on, needs the app-server probe
+// (startupDialogMarkerFor); a CLI or file setting alone cannot prove the
+// effective value above managed layers and requirements.
+// Unknown state stays held until Codex's first-turn dialog hook closes the
+// marker. installed is the binary's version, known only when its probe
+// succeeded.
+func codexUpdatePromptRuledOut(installed [3]uint64, known bool) bool {
+	if !known || !codexUpdateVersionVerified(installed) {
 		return false
 	}
-	installed, ok := codexInstalledVersion(binaryPath)
-	if !ok || !codexUpdateVersionVerified(installed) {
+	codexHome, err := codexHomeDir()
+	if err != nil {
 		return false
 	}
 	return codexVersionCacheRulesOutPrompt(absPath(filepath.Clean(codexHome)), installed)

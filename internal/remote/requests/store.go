@@ -478,7 +478,11 @@ func (s *Store) Update(rec *Record) error {
 	if !allowed(prev.State, rec.State) {
 		return protocol.Refuse(protocol.CodeInvalid, "state %s cannot become %s", prev.State, rec.State)
 	}
-	if rec.NativeDispatches > 1 || rec.NativeDispatches < prev.NativeDispatches {
+	// An attachment that answers busy dispatched nothing natively, so its
+	// busy tombstone carries no dispatch.
+	busyAnswer := (prev.State == protocol.StateDispatching || prev.State == protocol.StateUncertain) &&
+		rec.State == protocol.StateRejected && rec.Code == protocol.CodeBusy && rec.Tombstone && rec.NativeDispatches == 0
+	if rec.NativeDispatches > 1 || rec.NativeDispatches < prev.NativeDispatches && !busyAnswer {
 		return protocol.Refuse(protocol.CodeInvalid, "native dispatch count must be monotonic and at most 1")
 	}
 	if prev.State == protocol.StateRejected && rec.State == protocol.StateDispatching {

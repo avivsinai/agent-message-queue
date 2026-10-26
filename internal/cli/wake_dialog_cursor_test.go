@@ -71,7 +71,7 @@ func TestCursorDialogHookHoldsStartupAndTheTurn(t *testing.T) {
 	// PR #1233 review: Cursor can show trust, MCP and sandbox prompts
 	// before sessionStart; resume omits that hook and needs a human turn.
 	for _, ready := range []string{"sessionStart", "beforeSubmitPrompt"} {
-		if err := syncStartupDialogMarker(root, "cur", "/opt/bin/cursor-agent", nil); err != nil {
+		if err := syncStartupDialogMarker(root, "cur", "/opt/bin/cursor-agent", nil, false); err != nil {
 			t.Fatal(err)
 		}
 		if !held() {

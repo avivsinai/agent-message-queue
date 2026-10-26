@@ -31,10 +31,17 @@ import (
 const wakeDialogStartupEvent = "Startup"
 
 // wakeStartupKindUpdate marks a Codex Startup marker written only because
-// the update prompt could not be ruled out (codexUpdatePromptRuledOut). No
+// the update prompt could not be ruled out (startupDialogMarkerFor). No
 // Codex record shows that prompt closed, so only the dialog hook releases
 // it.
 const wakeStartupKindUpdate = "update_prompt"
+
+// wakeStartupKindReview marks a Codex Startup marker for a release that
+// reviews hooks after its trust screen (codexHookReviewSince): the
+// directory trust is not recorded, or Codex's own hooks/list did not show
+// that no hook needs review. A trust record does not show that the hook
+// review closed, so only the dialog hook releases it.
+const wakeStartupKindReview = "hook_review"
 
 // startupTrust is what the harness's own trust record says about a
 // directory.
@@ -190,13 +197,14 @@ func claudeStartupTrust(dir string) startupTrust {
 // still pending, or for Codex an update prompt its state does not rule out.
 // Otherwise it removes a Startup marker an earlier launch left (one
 // declined, or one that never started), which would hold this session's
-// doorbell. The caller owns the agent's wake.
-func syncStartupDialogMarker(root, handle, binaryPath string, args []string) error {
+// doorbell. recorded reports that coop exec recorded the identity of the
+// Codex thread args resume. The caller owns the agent's wake.
+func syncStartupDialogMarker(root, handle, binaryPath string, args []string, recorded bool) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	marker, hold := startupDialogMarkerFor(binaryPath, args, wd)
+	marker, hold := startupDialogMarkerFor(binaryPath, args, wd, recorded)
 	return syncStartupDialogMarkerState(root, handle, marker, hold)
 }
 
@@ -226,10 +234,89 @@ func syncStartupDialogMarkerState(root, handle string, marker wakeDialogMarker, 
 
 // startupDialogMarkerFor returns the Startup marker a harness started as
 // binaryPath with args in wd needs, and whether it needs one.
-func startupDialogMarkerFor(binaryPath string, args []string, wd string) (wakeDialogMarker, bool) {
+func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorded bool) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
-	updateRuledOut := harness != launch.CodexProvider || codexUpdatePromptRuledOut(binaryPath)
-	return startupDialogMarkerDecision(harness, dir, trust, updateRuledOut)
+	if harness != launch.CodexProvider {
+		return startupDialogMarkerDecision(harness, dir, trust, true)
+	}
+	installed, known := codexInstalledVersion(binaryPath)
+	cacheRuledOut := codexUpdatePromptRuledOut(installed, known)
+	// The verified releases before hook review keep the trust and version
+	// cache decision.
+	if known && codexUpdateVersionVerified(installed) && codexVersionNewer(codexHookReviewSince, installed) {
+		return startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
+	}
+	// Any other release may review hooks after its trust screen. It starts
+	// clear only when Codex records that it trusts the directory, its
+	// hooks/list shows no hook to review, and the update prompt is ruled
+	// out: by the version cache of a verified release, or by an effective
+	// check_for_update_on_startup of false that no requirement pins on
+	// (tui/src/updates.rs:28 and :153 at rust-v0.164.0: the prompt needs
+	// that setting in effect).
+	marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindUpdate}
+	if trust != startupTrustAccepted {
+		if cacheRuledOut {
+			marker.Kind = wakeStartupKindReview
+		}
+		return marker, true
+	}
+	// Codex asks hooks/list for its config.cwd, which starts from the
+	// physical working directory, and project hooks are keyed by that
+	// spelling; a directory that cannot be resolved proves nothing.
+	var probe codexStartupProbe
+	if physical, ok := codexPhysicalLaunchDir(args, wd); ok {
+		probe = probeCodexStartup(binaryPath, args, wd, physical, recorded)
+	}
+	if !cacheRuledOut && (!probe.updateCheckOff || !probe.requirementsClear) {
+		return marker, true
+	}
+	if !probe.hooksClear {
+		marker.Kind = wakeStartupKindReview
+		return marker, true
+	}
+	return wakeDialogMarker{}, false
+}
+
+// codexPhysicalLaunchDir is the cwd a Codex TUI started with args in wd
+// sends to hooks/list, spelled as Codex spells it
+// (tui/src/startup_orchestration.rs:278-282 and lib.rs:948-962
+// config_cwd_for_app_server_target at rust-v0.164.0): without -C/--cd the
+// process's physical working directory (wd with symlinks resolved); with
+// one, its value joined to that directory and canonicalized as
+// codexCanonicalizePreservingSymlinks does.
+func codexPhysicalLaunchDir(args []string, wd string) (string, bool) {
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		return "", false
+	}
+	return codexCanonicalizePreservingSymlinks(codexLaunchDir(args, real))
+}
+
+// codexCanonicalizePreservingSymlinks ports Codex's
+// canonicalize_existing_preserving_symlinks
+// (utils/absolute-path/src/lib.rs:210-227 at rust-v0.164.0): the realpath
+// of logical, except that logical stays as spelled when the realpath
+// differs and logical or an ancestor is a symlink that has a grandparent.
+// A top-level symlink such as macOS /tmp therefore reads as its realpath.
+// A path that cannot be resolved fails, as it does for Codex.
+func codexCanonicalizePreservingSymlinks(logical string) (string, bool) {
+	logical = filepath.Clean(logical)
+	canonical, err := filepath.EvalSymlinks(logical)
+	if err != nil {
+		return "", false
+	}
+	if canonical == logical {
+		return canonical, true
+	}
+	for ancestor := logical; ; ancestor = filepath.Dir(ancestor) {
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return canonical, true
+		}
+		if info, err := os.Lstat(ancestor); err == nil && info.Mode()&os.ModeSymlink != 0 && filepath.Dir(parent) != parent {
+			return logical, true
+		}
+	}
 }
 
 // startupDialogMarkerDecision keeps trust and update evidence independent.
@@ -324,11 +411,18 @@ func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 // codexStartupHoldRelease says why a Codex Startup marker holds the
 // doorbell, what releases it, and the remedy.
 func codexStartupHoldRelease(marker wakeDialogMarker) string {
-	const hook = "the Codex dialog hook releases it at the first prompt typed in that Codex session (amq wake install-dialog-hook --harness codex)"
+	hook := "the Codex dialog hook releases it at the first prompt typed in that Codex session (amq wake install-dialog-hook --harness codex)"
+	// Codex skips an installed hook it does not trust, so the remedy then
+	// is the trust, not another install.
+	if check, ok := checkCodexDialogHook(); ok && check.Message == codexDialogHookUntrusted {
+		hook = "the Codex dialog hook releases it at the first prompt typed in that Codex session once Codex trusts the hook (open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries)"
+	}
 	switch {
+	case marker.Kind == wakeStartupKindReview:
+		return fmt.Sprintf("Codex may ask whether to trust %s or to review new or changed hooks, and a trust record does not show that the hook review closed; %s", marker.Cwd, hook)
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
-			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts, but does not release this hold by itself"
+			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts; it does not release this open hold, and a later launch starts without one only when Codex reports the check off and no requirement turns it on"
 	case codexNearestGitAncestor(marker.Cwd) == "":
 		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
 	}
