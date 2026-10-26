@@ -136,7 +136,7 @@ func (l *Live) run(ctx context.Context, force bool) {
 		l.active.Done()
 	}()
 	start := time.Now()
-	m := l.Build(ctx, l.reload(), force)
+	m := l.Build(ctx, l.ReloadConfig(), force)
 	if ctx.Err() != nil {
 		// The view is ending; a model of cancelled reads is not kept.
 		return
@@ -162,7 +162,9 @@ func (l *Live) run(ctx context.Context, force bool) {
 	l.Logf("%s took %s", how, time.Since(start).Round(time.Millisecond))
 }
 
-func (l *Live) reload() FileConfig {
+// ReloadConfig applies valid live edits and keeps the last accepted configuration.
+// Call it from the single refresh or acquisition loop.
+func (l *Live) ReloadConfig() FileConfig {
 	cfg, warnings := l.Load()
 	if !l.started {
 		// A start has no last good value: it runs with what loaded.

@@ -13,25 +13,22 @@ import (
 
 // Entry is a thread message entry.
 type Entry struct {
-	ID       string   `json:"id"`
-	From     string   `json:"from"`
-	To       []string `json:"to"`
-	Thread   string   `json:"thread"`
-	Subject  string   `json:"subject"`
-	Created  string   `json:"created"`
-	Body     string   `json:"body,omitempty"`
-	Priority string   `json:"priority,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Labels   []string `json:"labels,omitempty"`
-	// Refs are the message's reply references (the ids it answers). Not
-	// part of the JSON output; consumers such as the ACP bridge correlate on
-	// them.
-	Refs    []string  `json:"-"`
-	RawTime time.Time `json:"-"`
-	// Routing and scope fields, also not part of the JSON output.
-	ReplyTo      string `json:"-"`
-	ReplyProject string `json:"-"`
-	FromProject  string `json:"-"`
+	ID           string         `json:"id"`
+	From         string         `json:"from"`
+	To           []string       `json:"to"`
+	Thread       string         `json:"thread"`
+	Subject      string         `json:"subject"`
+	Created      string         `json:"created"`
+	Body         string         `json:"body,omitempty"`
+	Priority     string         `json:"priority,omitempty"`
+	Kind         string         `json:"kind,omitempty"`
+	Labels       []string       `json:"labels,omitempty"`
+	Refs         []string       `json:"refs,omitempty"`
+	ReplyTo      string         `json:"reply_to,omitempty"`
+	ReplyProject string         `json:"reply_project,omitempty"`
+	FromProject  string         `json:"from_project,omitempty"`
+	Context      map[string]any `json:"context,omitempty"`
+	RawTime      time.Time      `json:"-"`
 	// Occurrences lists every copy of the message that a scan saw. Only
 	// CollectAll fills it.
 	Occurrences []Occurrence `json:"-"`
@@ -76,6 +73,7 @@ func entryFromHeader(header format.Header) Entry {
 		ReplyTo:      header.ReplyTo,
 		ReplyProject: header.ReplyProject,
 		FromProject:  header.FromProject,
+		Context:      header.Context,
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
 		entry.RawTime = ts

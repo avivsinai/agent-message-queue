@@ -38,9 +38,10 @@ type stripCall struct {
 	Shown, More []Action
 }
 
-func stripArgs(bay string, i int, s pageStrip, inline bool) stripCall {
-	c := stripCall{ID: "s-" + bay + "-" + strconv.Itoa(i), S: s, More: s.Actions}
-	if inline && len(s.Actions) > 0 {
+func stripArgs(bay string, s pageStrip) stripCall {
+	sum := sha256.Sum256([]byte(s.Key))
+	c := stripCall{ID: "item-" + bay + "-" + base64.RawURLEncoding.EncodeToString(sum[:12]), S: s, More: s.Actions}
+	if len(s.Actions) > 0 {
 		c.Shown, c.More = s.Actions[:1], s.Actions[1:]
 	}
 	return c
@@ -78,25 +79,34 @@ func WriteLiveHTML(w io.Writer, m Model) error {
 }
 
 type pageData struct {
-	Model      Model
-	CSS        template.CSS
-	JS         template.JS
-	CSP        string
-	Project    string
-	Generated  string
-	Clock      string
-	Sessions   string
-	Fleet      string
-	Sources    []pageSource
-	Limits     []pageLimit
-	Waiting    pageBay
-	Bays       []pageBay
-	Roster     []pageSession
-	RosterNote string
-	Regenerate string
-	Version    string
-	Dir        string
-	Live       bool
+	Model       Model
+	CSS         template.CSS
+	JS          template.JS
+	CSP         string
+	Project     string
+	Generated   string
+	Clock       string
+	Sessions    string
+	Fleet       string
+	Sources     []pageSource
+	Limits      []pageLimit
+	Waiting     pageBay
+	Bays        []pageBay
+	Roster      []pageSession
+	RosterNote  string
+	Regenerate  string
+	Version     string
+	Dir         string
+	Live        bool
+	TaskChoices []pageTaskChoice
+	Views       []pageView
+}
+
+type pageTaskChoice struct{ ID, Title string }
+
+type pageView struct {
+	ID, Title, Description, Empty, Coverage, CoverageTitle string
+	Strips                                                 []pageStrip
 }
 
 type pageSource struct {
@@ -116,20 +126,23 @@ type pageBay struct {
 }
 
 type pageStrip struct {
-	Kind, ID, Title       string
-	Refs                  []string
-	Reason, Since         string
-	SinceAt               string
-	Checked               string
-	Owner                 string
-	People                []string
-	Marks                 []string
-	Cocked                bool
-	Related               []string
-	Evidence              []pageEvidence
-	Actions               []Action
-	HasDetail             bool
-	ReasonField, Priority string
+	Key, State, NextReason, AgeLabel, CopyLabel string
+	TaskID                                      string
+	AttachKey                                   string
+	Kind, ID, Title                             string
+	Refs                                        []string
+	Reason, Since                               string
+	SinceAt                                     string
+	Checked                                     string
+	Owner                                       string
+	People                                      []string
+	Marks                                       []string
+	Cocked                                      bool
+	Related                                     []string
+	Evidence                                    []pageEvidence
+	Actions                                     []Action
+	HasDetail                                   bool
+	ReasonField, Priority                       string
 }
 
 type pageEvidence struct {
@@ -163,7 +176,7 @@ func buildPage(m Model, regenerate string) pageData {
 		CSP:        pageCSP,
 		Project:    clean(project),
 		Generated:  now.Format(time.RFC3339),
-		Clock:      now.Local().Format("Jan 2 15:04"),
+		Clock:      now.Local().Format("Jan 2, 15:04 MST"),
 		Sessions:   pluralize(len(m.Sessions), "session"),
 		RosterNote: clean(m.RosterNote),
 		Regenerate: regenerate,
@@ -230,15 +243,24 @@ func buildPage(m Model, regenerate string) pageData {
 	for _, rs := range m.Roster {
 		p.Roster = append(p.Roster, buildSession(rs, now))
 	}
+	p.Views = buildViews(m, now, live)
+	for _, column := range m.Columns {
+		for _, card := range column.Cards {
+			p.TaskChoices = append(p.TaskChoices, pageTaskChoice{ID: card.ID, Title: clean(card.Title)})
+		}
+	}
 	return p
 }
 
 func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
-	s := pageStrip{Title: cleanTitle(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field)}
+	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded", CopyLabel: "Copy context command"}
 	if s.Title == "" {
 		s.Title = clean(c.ID)
 	}
 	placing := Item{Ref: Ref{Kind: c.ID}}
+	if len(c.Items) > 0 {
+		placing = c.Items[0]
+	}
 	for _, it := range c.Items {
 		if it.Ref.String() == c.ID {
 			placing = it
@@ -246,6 +268,23 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		}
 	}
 	s.Kind, s.ID = refCell(placing)
+	switch placing.Ref.Kind {
+	case RefBead:
+		s.CopyLabel = "Copy task command"
+		if c.Column == ColumnUnclaimed {
+			s.AgeLabel = "Tracker updated"
+		}
+	case RefObligation:
+		s.CopyLabel, s.AgeLabel = "Copy thread command", "Requested"
+	case RefForge:
+		s.CopyLabel = "Copy issue command"
+	}
+	if c.Column == ColumnInFlight && placing.Ref.Kind != RefBead {
+		s.State = "Declared work"
+	}
+	if placing.Source == "codex-goals" {
+		s.State, s.AgeLabel = "Declared goal", "Goal updated"
+	}
 	for _, it := range c.Items {
 		s.Refs = append(s.Refs, clean(it.Source+" · "+refLabel(it)))
 		for _, e := range it.Evidence {
@@ -268,7 +307,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	default:
 		var names []string
 		for _, o := range c.Owners {
-			names = append(names, ownerLabel(o, live))
+			names = append(names, ownerLabel(o, nil))
 		}
 		s.Owner = clean(strings.Join(names, ", "))
 	}
@@ -276,7 +315,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		if owns(c.Owners, o) {
 			continue
 		}
-		s.People = append(s.People, clean("waits on "+ownerLabel(o, live)))
+		s.People = append(s.People, clean("waits on "+ownerLabel(o, nil)))
 	}
 	if c.Requester != nil {
 		s.People = append(s.People, clean("requested by "+ownerLabel(*c.Requester, nil)))
@@ -289,6 +328,9 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	}
 	for _, t := range c.Related {
 		s.Related = append(s.Related, clean(tokenLabel(t)))
+	}
+	for _, alias := range c.Aliases {
+		s.Related = append(s.Related, clean(alias))
 	}
 	var ev []pageEvidence
 	type dated struct {
@@ -309,8 +351,18 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	for _, d := range all {
 		ev = append(ev, d.e)
 	}
+	for _, attachment := range c.Attachments {
+		status := "attached " + attachment.Message.Kind
+		if attachment.Cancelled {
+			status += " (owner cancelled action)"
+		}
+		ev = append(ev, pageEvidence{Source: "amq", Field: status, Value: clean(attachment.Message.Key), Text: attachment.Message.Body})
+	}
 	s.Evidence = ev
 	s.Actions = c.Actions
+	if len(s.Actions) > 0 {
+		s.CopyLabel = "Copy " + strings.ToLower(s.Actions[0].Label)
+	}
 	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
 }

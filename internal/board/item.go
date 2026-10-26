@@ -18,6 +18,8 @@ type State string
 const (
 	StateNeedsHuman  State = "needs_human"
 	StateActive      State = "active"
+	StateRequested   State = "requested"
+	StateQueued      State = "queued"
 	StateBlocked     State = "blocked"
 	StateOpenUnowned State = "open_unowned"
 	StatePlanned     State = "planned"
@@ -46,6 +48,7 @@ const (
 
 // Item is one unit of work as a source reports it.
 type Item struct {
+	Namespace  string     `json:"namespace,omitempty"`
 	Source     string     `json:"source"`
 	Ref        Ref        `json:"ref"`
 	Title      string     `json:"title"`
@@ -61,11 +64,11 @@ type Item struct {
 
 	// Mentions are candidate tokens from free text. The core keeps only those
 	// that resolve to a verified ref, and only as related references.
-	Mentions []Mention `json:"-"`
+	Mentions []Mention `json:",omitempty"`
 	// Thread groups AMQ obligations of one session and thread as related.
-	Thread *Ref `json:"-"`
+	Thread *Ref `json:",omitempty"`
 	// Obligation carries the typed fields AMQ actions are built from.
-	Obligation *ObligationFacts `json:"-"`
+	Obligation *ObligationFacts `json:",omitempty"`
 }
 
 // Ref is a canonical identity; build it only with the constructors in ref.go.
@@ -217,14 +220,16 @@ type AMQContext struct {
 
 // Result is one source read.
 type Result struct {
-	Items      []Item
-	Roster     []RosterEntry
-	AMQ        *AMQContext
-	Status     SourceStatus
-	Detail     string
-	Coverage   Coverage
-	ObservedAt time.Time
-	Version    string
+	ActionStates map[string]string `json:"action_states,omitempty"`
+	Namespace    string            `json:"namespace,omitempty"`
+	Items        []Item
+	Roster       []RosterEntry
+	AMQ          *AMQContext
+	Status       SourceStatus
+	Detail       string
+	Coverage     Coverage
+	ObservedAt   time.Time
+	Version      string
 	// BeadIDs is the bead vocabulary (beads source only): every non-closed
 	// bead id -> its stored status.
 	BeadIDs map[string]string

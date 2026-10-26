@@ -36,6 +36,7 @@ func init() {
 			Handler: runThread,
 			Children: []CommandInfo{
 				{Name: "open", Summary: "List open review requests, questions, and todos", Handler: runThreadOpen},
+				{Name: "list", Summary: "List retained thread IDs and message IDs", Handler: runThreadList},
 			},
 		},
 		{Name: "trace", Summary: "Join current evidence for a message", Handler: runTrace},

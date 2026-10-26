@@ -106,21 +106,35 @@ type threadOpenActivity struct {
 }
 
 type threadOpenCoverage struct {
-	MaxAgeSeconds     int64                  `json:"max_age_seconds"`
-	AssessedSince     string                 `json:"assessed_since,omitempty"`
-	PrunedFiles       []threadOpenCount      `json:"pruned_files"`
-	Expired           []threadOpenExpired    `json:"expired"`
-	Skipped           []threadOpenSkipped    `json:"skipped"`
-	UnresolvedLineage []threadOpenUnresolved `json:"unresolved_lineage"`
-	Ambiguous         []threadOpenAmbiguous  `json:"ambiguous"`
-	OutboundRouted    []threadOpenCount      `json:"outbound_routed"`
-	SkewDeferred      []threadOpenCount      `json:"skew_deferred"`
-	TruncatedByLimit  threadOpenTruncated    `json:"truncated_by_limit"`
+	MaxAgeSeconds     int64                     `json:"max_age_seconds"`
+	AssessedSince     string                    `json:"assessed_since,omitempty"`
+	PrunedFiles       []threadOpenCount         `json:"pruned_files"`
+	Expired           []threadOpenExpired       `json:"expired"`
+	Skipped           []threadOpenSkipped       `json:"skipped"`
+	UnresolvedLineage []threadOpenUnresolved    `json:"unresolved_lineage"`
+	Ambiguous         []threadOpenAmbiguous     `json:"ambiguous"`
+	OutboundRouted    []threadOpenCount         `json:"outbound_routed"`
+	OutboundOpeners   []threadOpenRoutedOpener  `json:"outbound_routed_openers"`
+	ActionOutcomes    []threadOpenActionOutcome `json:"action_outcomes"`
+	SkewDeferred      []threadOpenCount         `json:"skew_deferred"`
+	TruncatedByLimit  threadOpenTruncated       `json:"truncated_by_limit"`
 }
 
 type threadOpenCount struct {
 	Session string `json:"session"`
 	Count   int    `json:"count"`
+}
+
+type threadOpenRoutedOpener struct {
+	ID      string `json:"id"`
+	Session string `json:"session"`
+}
+
+type threadOpenActionOutcome struct {
+	OpenerID string      `json:"opener_id"`
+	Key      string      `json:"key"`
+	OwedBy   participant `json:"owed_by"`
+	State    string      `json:"state"`
 }
 
 type threadOpenExpired struct {
@@ -170,6 +184,7 @@ func runThreadOpen(args []string) error {
 	fs := flag.NewFlagSet("thread open", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	allSessions := fs.Bool("all-sessions", false, "Scan every canonical session under the base root")
+	includeBase := fs.Bool("include-base", false, "Include base-root mailboxes with --all-sessions")
 	owedByFlag := fs.String("owed-by", "", "Comma-separated handles that owe a reply")
 	owedToFlag := fs.String("owed-to", "", "Comma-separated handles that are owed a reply")
 	kindFlag := fs.String("kind", "", "Comma-separated opener kinds: review_request, question, todo")
@@ -177,7 +192,7 @@ func runThreadOpen(args []string) error {
 	limitFlag := fs.Int("limit", 0, "List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)")
 	schemaFlag := fs.Int("json-schema", 1, "JSON schema version: 1 (requires --json)")
 
-	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]",
+	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]",
 		"List open review requests, questions, and todos per thread.",
 		"An obligation closes when its owner replies with the expected kind or a closing label.",
 		"Read-only: it never moves a message, writes a receipt, or reads a body.")
@@ -194,6 +209,9 @@ func runThreadOpen(args []string) error {
 	}
 	if *limitFlag < 0 {
 		return UsageError("--limit must be >= 0")
+	}
+	if *includeBase && !*allSessions {
+		return UsageError("--include-base requires --all-sessions")
 	}
 	maxAge, err := parseMaxAge(*maxAgeFlag)
 	if err != nil {
@@ -237,6 +255,9 @@ func runThreadOpen(args []string) error {
 		if scanRoots, err = canonicalSessionRoots(baseRoot); err != nil {
 			return err
 		}
+		if *includeBase {
+			scanRoots = append([]thread.ScanRoot{{Root: baseRoot}}, scanRoots...)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -278,6 +299,20 @@ func runThreadOpen(args []string) error {
 	result.Coverage.UnresolvedLineage = red.unresolved
 	result.Coverage.Ambiguous = red.ambiguous
 	result.Coverage.OutboundRouted = countsBySession(result.Sessions, red.outbound)
+	result.Coverage.OutboundOpeners = red.outboundOpeners
+	result.Coverage.ActionOutcomes = make([]threadOpenActionOutcome, 0, len(red.obligations))
+	for _, ob := range red.obligations {
+		state := "open"
+		if ob.closed {
+			state = "closed"
+		}
+		result.Coverage.ActionOutcomes = append(result.Coverage.ActionOutcomes, threadOpenActionOutcome{
+			OpenerID: ob.opener.ID,
+			Key:      ob.key,
+			OwedBy:   ob.owner,
+			State:    state,
+		})
+	}
 	result.Coverage.SkewDeferred = countsBySession(result.Sessions, red.deferred)
 
 	open, expired := red.report(filter)
@@ -337,31 +372,33 @@ type record struct {
 // later (clock skew), the action is deferred until then and counted in
 // skew_deferred.
 type obligationReducer struct {
-	roots       []thread.ScanRoot
-	cutoff      time.Time
-	records     map[string]*record
-	order       []*record
-	obligations []*obligation
-	byThread    map[string][]*obligation
-	lookups     int
-	skipped     []threadOpenSkipped
-	unresolved  []threadOpenUnresolved
-	ambiguous   []threadOpenAmbiguous
-	outbound    map[string]int
-	deferred    map[string]int
+	roots           []thread.ScanRoot
+	cutoff          time.Time
+	records         map[string]*record
+	order           []*record
+	obligations     []*obligation
+	byThread        map[string][]*obligation
+	lookups         int
+	skipped         []threadOpenSkipped
+	unresolved      []threadOpenUnresolved
+	ambiguous       []threadOpenAmbiguous
+	outbound        map[string]int
+	outboundOpeners []threadOpenRoutedOpener
+	deferred        map[string]int
 }
 
 func newObligationReducer(roots []thread.ScanRoot, entries []thread.Entry, cutoff time.Time) *obligationReducer {
 	red := &obligationReducer{
-		roots:      roots,
-		cutoff:     cutoff,
-		records:    map[string]*record{},
-		byThread:   map[string][]*obligation{},
-		skipped:    []threadOpenSkipped{},
-		unresolved: []threadOpenUnresolved{},
-		ambiguous:  []threadOpenAmbiguous{},
-		outbound:   map[string]int{},
-		deferred:   map[string]int{},
+		roots:           roots,
+		cutoff:          cutoff,
+		records:         map[string]*record{},
+		byThread:        map[string][]*obligation{},
+		skipped:         []threadOpenSkipped{},
+		unresolved:      []threadOpenUnresolved{},
+		ambiguous:       []threadOpenAmbiguous{},
+		outbound:        map[string]int{},
+		outboundOpeners: []threadOpenRoutedOpener{},
+		deferred:        map[string]int{},
 	}
 	for i := range entries {
 		red.order = append(red.order, red.add(&entries[i]))
@@ -655,6 +692,7 @@ func (red *obligationReducer) open(rec *record) []*obligation {
 	}
 	if routed {
 		red.outbound[rec.sender.Session]++
+		red.outboundOpeners = append(red.outboundOpeners, threadOpenRoutedOpener{ID: msg.ID, Session: rec.sender.Session})
 	}
 	return opened
 }

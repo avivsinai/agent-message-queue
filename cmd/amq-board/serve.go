@@ -27,27 +27,11 @@ import (
 
 const serveUsage = `Usage: amq-board serve
 
-Serve the board of the AMQ project of the current directory as a live page.
-It listens on 127.0.0.1 on a free port and prints the URL once; the URL holds
-a random token, and every route without it is 404:
-
-  /<token>/            the page
-  /<token>/model.json  the last built model (the same JSON as amq-board --json)
-  /<token>/refresh     refresh now
-
-The model is rebuilt every minute; GitHub is fetched at its cache TTL and each
-external provider at its TTL. Refresh on the page ignores those caches at most
-once a minute; presses within that minute, or while a refresh runs, join it.
-~/.amq/board.json and .amq/board.json are read again on every refresh: a
-valid edit applies without a restart, and a refused edit keeps the last good
-configuration and is reported once. The project directory is fixed at start.
-With forges.github.token_once (default true), gh auth token is read once and
-held in memory for later gh calls, so a session prompts the keychain once;
-the GitHub cache follows that token's account. While it runs,
-~/.amq/board/serve.json (mode 0600) holds its url, token, pid and start
-time, so a local client finds it; a file whose pid is not alive is stale.
-Ctrl-C or SIGTERM stops the view, waits for a running refresh, whose
-commands it cancels, and removes the file.
+Serve the published board on 127.0.0.1. The token URL protects the page.
+Refresh reloads the snapshot; it never reads sources or starts inference.
+Run amq-board sync --watch separately for source updates.
+Configuration reloads on refresh; a refused edit keeps the last good value.
+The project identity is fixed at start. Ctrl-C or SIGTERM stops the view.
 `
 
 func runServe(args []string) int {
@@ -75,31 +59,36 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "amq-board: "+format+"\n", a...)
 	}
 
-	var token ghToken
-	memos := map[string]*providerMemo{}
-	limits := &serveLimits{}
+	store, err := resolveStore(ctx, newEnv(dir, execRunner{}))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitGeneral
+	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitGeneral
+	}
+	last := initial
 	live := &board.Live{
-		Load: func() (board.FileConfig, []string) { return loadConfig(dir) },
-		Now:  time.Now,
-		Logf: logf,
-		Ctx:  ctx,
-		Build: func(ctx context.Context, cfg board.FileConfig, force bool) board.Model {
-			runner := execRunner{}
-			opt := sourceOptions{refresh: force, limits: limits.run}
-			if cfg.SourceGitHub && cfg.TokenOnce {
-				runner.ghToken, opt.ghAccount = token.get(ctx, newEnv(dir, runner), logf)
+		Load: func() (board.FileConfig, []string) { return loadConfig(dir) }, Now: time.Now, Logf: logf, Ctx: ctx,
+		Build: func(ctx context.Context, cfg board.FileConfig, _ bool) board.Model {
+			readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			state, err := store.ReadContext(readCtx)
+			if err != nil {
+				logf("snapshot not reloaded: %v", err)
+			} else {
+				last = state
 			}
-			opt.provider = func(e source.External) board.Source {
-				m := memos[e.Provider.Name]
-				if m == nil {
-					m = &providerMemo{}
-					memos[e.Provider.Name] = m
-				}
-				return memoProvider{External: e, memo: m, force: force}
+			model := last.Project(cfg.Board, time.Now(), version)
+			if err != nil {
+				model.Sources = append(model.Sources, board.SourceView{Name: "board-state", Status: board.StatusDegraded, Partial: true, Detail: "Published snapshot could not be reloaded: " + err.Error()})
 			}
-			return boardModel(ctx, newEnv(dir, runner), cfg, opt)
+			return model
 		},
 	}
+
 	live.Refresh(ctx, false)
 	if ctx.Err() != nil {
 		return 0

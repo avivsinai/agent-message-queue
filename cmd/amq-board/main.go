@@ -33,29 +33,22 @@ const (
 	exitUsage   = 2
 )
 
-const usage = `Usage: amq-board [--json | --html [--out <file>]] [--refresh]
+const usage = `Usage: amq-board [--json | --html [--out FILE]]
+       amq-board sync [--init] [--watch]
        amq-board serve
+       amq-board admit --message KEY --title OUTCOME
+       amq-board attach|detach --task ID --message KEY
+       amq-board move --from-task ID --task ID --message KEY
+       amq-board dismiss --message KEY
+       amq-board cancel|reopen --scope task --task ID
+       amq-board cancel|reopen --scope action --message KEY
+       amq-board adopt --file FILE
 
-Print the fleet board for the AMQ project of the current directory: the
-columns Waiting on you, In flight, Blocked, and Unclaimed, the source health
-strip, and the roster per session. Sources are read-only: AMQ through the amq
-CLI, beads through bd --readonly --sandbox when a .beads directory exists,
-GitHub pull requests and issues through gh api graphql (one call, and up to
-4 more when review requests fill more than one page of 50) cached for the
-TTL (default 10m) when the origin remote is on github.com, and external
-providers registered in ~/.amq/board.json. Codex plan limits come from the
-installed codex CLI (codex app-server, read-only), at most once per 5 minutes
-per account across runs, saved under ~/.amq/usage.
-Commands on cards are printed for you to copy; amq-board never runs them.
-
-amq-board serve keeps the page live on 127.0.0.1; see amq-board serve --help.
-
-Flags:
-  --json      print the board model as JSON (schema amq/board/v1)
-  --html      print the board as one static HTML page
-  --out FILE  with --html, write the page to FILE instead of stdout
-  --refresh   ignore the GitHub cache and fetch once
-  --version   print the version
+Views read the published project snapshot. Only sync reads sources.
+First initialization is explicit; an existing or interrupted store needs
+recovery and is never replaced. Native Beads and admitted AMQ outcomes
+have permanent task IDs. Unresolved messages are outside task counts.
+Owner commands make scoped local corrections; they never write sources.
 `
 
 func main() {
@@ -63,6 +56,14 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "sync":
+			return runSync(args[1:])
+		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt":
+			return runOwner(args[0], args[1:])
+		}
+	}
 	if len(args) > 0 && args[0] == "serve" {
 		return runServe(args[1:])
 	}
@@ -106,7 +107,20 @@ func run(args []string) int {
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
 	}
-	model := boardModel(context.Background(), newEnv(dir, execRunner{}), cfg, sourceOptions{refresh: *refresh, githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits})
+	if *refresh {
+		fmt.Fprintln(os.Stderr, "amq-board: --refresh is now a view reload; use amq-board sync to acquire sources")
+	}
+	store, err := resolveStore(context.Background(), newEnv(dir, execRunner{}))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitGeneral
+	}
+	state, err := store.Read()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitGeneral
+	}
+	model := state.Project(cfg.Board, time.Now(), version)
 
 	switch {
 	case *asJSON:
@@ -181,7 +195,7 @@ type sourceOptions struct {
 
 // boardModel reads every source cfg enables, under its own deadline, and
 // builds the board model with the usage of each harness account.
-func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt sourceOptions) board.Model {
+func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt sourceOptions) board.Acquisition {
 	gh := source.GitHub{
 		Repos:                    cfg.GitHubRepos,
 		Humans:                   cfg.GitHubLogins,
@@ -194,7 +208,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
 	if cfg.SourceBeads {
-		beads := source.Beads{Humans: cfg.BeadsAssignees}
+		beads := source.Beads{Humans: cfg.BeadsAssignees, IncludeClosed: true}
 		// A bead's external_ref gh-<n> names a PR only when exactly one
 		// GitHub repository is in scope.
 		if repos := gh.RepoSet(ctx, env); len(repos) == 1 {
@@ -204,7 +218,7 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 	} else {
 		sources = append(sources, board.Disabled{SourceName: "beads"})
 	}
-	sources = append(sources, source.ClaudePermissions{}, source.CodexGoals{})
+	sources = append(sources, board.Disabled{SourceName: "claude-native"}, board.Disabled{SourceName: "codex-native"})
 	if cfg.SourceGitHub {
 		if home, err := amqhome.EnsureDir(); err == nil {
 			gh.Cache = source.DirCache{Dir: filepath.Join(home, "board", "cache")}
@@ -235,8 +249,16 @@ func boardModel(ctx context.Context, env board.Env, cfg board.FileConfig, opt so
 		go func() { ch <- opt.limits(ctx, homes) }()
 		limits = ch
 	}
-	model := board.Run(ctx, env, sources, cfg.Board, version)
-	return withUsage(ctx, model, env, cfg.Usage, limits)
+	input := board.Acquire(ctx, env, sources, cfg.Board, version)
+	model := withUsage(ctx, board.Build(input), env, cfg.Usage, limits)
+	beadsStore := ""
+	for _, nr := range input.Results {
+		if nr.Name == "beads" {
+			beadsStore = nr.Result.Namespace
+		}
+	}
+
+	return board.Acquisition{Input: input, Usage: model.Usage, BeadsStore: beadsStore}
 }
 
 // writePage writes the static page to stdout, or to out through a temporary
@@ -313,7 +335,9 @@ const stderrTail = 4 << 10
 // A failed command's error carries its stderr. A non-empty ghToken is passed
 // as GH_TOKEN to gh commands only, never to another tool or a provider.
 type execRunner struct {
-	ghToken string
+	ghToken     string
+	amqEnv      []string
+	amqValidate func(context.Context) error
 }
 
 func (r execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
@@ -333,6 +357,9 @@ func (r execRunner) RunLimited(ctx context.Context, dir string, argv []string, m
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	if argv[0] == "amq" && r.amqEnv != nil {
+		cmd.Env = append([]string(nil), r.amqEnv...)
+	}
 	if r.ghToken != "" && argv[0] == "gh" {
 		cmd.Env = append(os.Environ(), "GH_TOKEN="+r.ghToken)
 	}

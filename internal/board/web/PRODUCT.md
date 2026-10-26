@@ -45,7 +45,7 @@ same-work identity and places them from structured fields only.
 
 ## Capabilities and Constraints
 
-- Columns, in order: Waiting on you, In flight, Blocked, Unclaimed. A source
+- Work categories distinguish needs-you items, declared in-progress work, blocked work, backlog, and reply-due requests. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept
   apart from card counts, usage per worker and limits per account.
@@ -61,14 +61,13 @@ same-work identity and places them from structured fields only.
 
 - The UI is built with impeccable, properly and idiomatically, to its full
   craft bar.
-- The information architecture is fixed: header line, sources strip, Waiting
-  on you at full width, the other three columns, roster, footer.
+- Next leads with supported useful actions. Work, Backlog, and Requests are separate views; Sources and Agents provide secondary context.
 - AMQ is open source: no company, tracker, host, or user names in the page,
   fixtures, or screenshots.
 
 ## Evidence on Hand
 
-- Real board models come from `amq-board --json` (schema `amq/board/v1`) on a
+- Real board models come from `amq-board --json` (schema `amq/board/v2`) on a
   live project. They hold real session names, handles, and titles: reference
   only, never copied into fixtures or committed screenshots.
 - Real data exists for AMQ roots, beads, Codex goals, and Claude, Codex, and pi
@@ -80,7 +79,7 @@ same-work identity and places them from structured fields only.
 2. Structure places, text informs.
 3. No silent source: coverage and age are always visible.
 4. Every action is complete and safe, or absent.
-5. Density over decoration.
+5. Readability and truthful state over density.
 
 ## Accessibility & Inclusion
 

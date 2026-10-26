@@ -13,8 +13,13 @@ import (
 )
 
 func runThread(args []string) error {
-	if len(args) > 0 && args[0] == "open" {
-		return runThreadOpen(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "open":
+			return runThreadOpen(args[1:])
+		case "list":
+			return runThreadList(args[1:])
+		}
 	}
 	fs := flag.NewFlagSet("thread", flag.ContinueOnError)
 	common := addCommonFlags(fs)

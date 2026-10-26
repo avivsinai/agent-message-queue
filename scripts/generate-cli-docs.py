@@ -17,7 +17,7 @@ ENTRY = re.compile(r"^  ([A-Za-z0-9_-]+)\s{2,}(.+?)\s*$")
 # option reference and does not print a Subcommands section. Keep this
 # small source-backed supplement so the public operator commands are covered.
 SOURCE_SUBCOMMANDS = {
-    "thread": ("open",),
+    "thread": ("open", "list"),
     "wake": (
         "check",
         "config",

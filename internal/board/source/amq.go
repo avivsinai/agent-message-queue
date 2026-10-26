@@ -71,7 +71,7 @@ func (a AMQ) Read(ctx context.Context, env board.Env) board.Result {
 }
 
 // amqFeeds are the columns AMQ obligations can fill.
-var amqFeeds = []board.Column{board.ColumnWaiting, board.ColumnInFlight}
+var amqFeeds = []board.Column{board.ColumnWaiting, board.ColumnRequests}
 
 // BuildAMQ maps one AMQ capture into a result. It is pure.
 func BuildAMQ(c AMQCapture) (res board.Result) {
@@ -433,7 +433,7 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 		}
 		requester := toOwner(o.OwedTo)
 		created, _ := time.Parse(time.RFC3339Nano, o.Opener.Created)
-		state := board.StateActive
+		state := board.StateRequested
 		if owner.Kind == board.OwnerHuman {
 			state = board.StateNeedsHuman
 		}

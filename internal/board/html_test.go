@@ -133,10 +133,9 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	}
 }
 
-// Live board, 2026-10-25: a card with no since time read "since since
-// unknown" on narrow and medium strips. The cue supplies "since"; the value
-// is the age or "unknown".
-func TestHTMLUnknownSinceReadsOnce(t *testing.T) {
+// Live board, 2026-10-25: a missing age repeated its label. The age label
+// appears once per rendering, including the Next and Requests views.
+func TestHTMLUnknownStateAgeReadsOnce(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	ref, _ := Obligation("s1/alpha/demo")
 	alpha := Owner{Kind: OwnerAgent, Handle: "alpha", Session: "s1"}
@@ -150,7 +149,7 @@ func TestHTMLUnknownSinceReadsOnce(t *testing.T) {
 	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
 		t.Fatal(err)
 	}
-	if html := page.String(); strings.Contains(html, "since since") || !strings.Contains(html, `<span class="cue">since </span>unknown</p>`) {
-		t.Error(`the since cell does not read "since unknown" once`)
+	if html := page.String(); strings.Contains(html, "Requested Requested") || strings.Count(html, "Requested unknown") != 2 {
+		t.Error(`the missing request age must read "Requested unknown" once in each view`)
 	}
 }
