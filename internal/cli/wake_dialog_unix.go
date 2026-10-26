@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,8 +14,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +59,70 @@ var wakeDialogHookEvents = []string{
 	"PermissionRequest",
 }
 
+// wakeDialogHookEventFloor is the first Claude Code version known to have
+// each gated event: Notification matchers arrived in 2.0.37, and the
+// changelog first names PostToolUseFailure in 2.1.119. Before 2.1.101 an
+// unknown event made Claude Code ignore the whole settings file, so the
+// installer adds a gated event only for a version at or past its floor.
+var wakeDialogHookEventFloor = map[string]claudeVersion{
+	"PostToolUseFailure": {2, 1, 119},
+	"Notification":       {2, 0, 37},
+}
+
+// claudeVersion is a Claude Code major.minor.patch.
+type claudeVersion [3]int
+
+func (v claudeVersion) less(floor claudeVersion) bool {
+	for i := range v {
+		if v[i] != floor[i] {
+			return v[i] < floor[i]
+		}
+	}
+	return false
+}
+
+var claudeVersionRe = regexp.MustCompile(`^\s*(\d+)\.(\d+)\.(\d+)`)
+
+// installedClaudeVersion reads `claude --version` from the claude on PATH.
+// ok is false when it is missing, fails, or prints no version.
+func installedClaudeVersion() (claudeVersion, bool) {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return claudeVersion{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return claudeVersion{}, false
+	}
+	match := claudeVersionRe.FindStringSubmatch(string(out))
+	if match == nil {
+		return claudeVersion{}, false
+	}
+	var v claudeVersion
+	for i := range v {
+		if v[i], err = strconv.Atoi(match[i+1]); err != nil {
+			return claudeVersion{}, false
+		}
+	}
+	return v, true
+}
+
+// wakeDialogHookEventsFor is wakeDialogHookEvents without the events the
+// given Claude Code version may not know; an unknown version gets none of
+// the gated events.
+func wakeDialogHookEventsFor(version claudeVersion, known bool) []string {
+	events := make([]string, 0, len(wakeDialogHookEvents))
+	for _, event := range wakeDialogHookEvents {
+		if floor, gated := wakeDialogHookEventFloor[event]; gated && (!known || version.less(floor)) {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
 // wakeDialogHookInput is the part of Claude Code's hook input the receiver
 // reads.
 type wakeDialogHookInput struct {
@@ -68,6 +135,7 @@ type wakeDialogHookInput struct {
 	// that call's PostToolUse or PostToolUseFailure.
 	ToolInput        json.RawMessage `json:"tool_input"`
 	NotificationType string          `json:"notification_type"`
+	TranscriptPath   string          `json:"transcript_path"`
 	Cwd              string          `json:"cwd"`
 	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
 	TurnID       string `json:"turn_id"`
@@ -91,6 +159,9 @@ type wakeDialogMarker struct {
 	// InputDigest is wakeDialogInputDigest of the PermissionRequest that
 	// opened the marker, set only when no other marker was present.
 	InputDigest string `json:"input_digest,omitempty"`
+	// TranscriptPath is the Claude Code session transcript the wake reads
+	// for proof that Esc or a deny closed the dialog.
+	TranscriptPath string `json:"transcript_path,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
 	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -101,15 +172,21 @@ type wakeDialogMarker struct {
 // through the canonical agent directory; a detached directory cannot show
 // the hook's marker, so it reads as unknown, never as closed. A Startup
 // marker reads as closed once the harness has recorded its trust decision,
-// so the doorbell rings without a SessionStart hook.
+// so the doorbell rings without a SessionStart hook. A Claude Code marker
+// reads as closed once its session transcript proves the dialog answered
+// (claudeDialogAnswered); a missing or unreadable transcript keeps it.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
+	var proof claudeDialogProof
 	return func(now time.Time) (wakeDialogState, error) {
 		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil {
 			return wakeDialogUnknown, err
 		}
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
+			return wakeDialogClosed, nil
+		}
+		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime()) {
 			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
@@ -177,8 +254,15 @@ func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir) func(time.Time) string {
 		if harness == "" && marker.Event != wakeDialogStartupEvent {
 			harness = "claude" // Claude Code dialog hooks write no harness
 		}
-		return fmt.Sprintf("marker event=%q kind=%q harness=%q tool=%q age=%s",
-			marker.Event, marker.Kind, harness, marker.Tool, now.Sub(info.ModTime()).Round(time.Second))
+		transcript := "none"
+		if marker.TranscriptPath != "" && harness == "claude" {
+			transcript = "no proof yet"
+			if _, err := claudeDialogAnswered(marker, info.ModTime()); err != nil {
+				transcript = fmt.Sprintf("unreadable, holding: %q", err.Error())
+			}
+		}
+		return fmt.Sprintf("marker event=%q kind=%q harness=%q tool=%q age=%s transcript=%s",
+			marker.Event, marker.Kind, harness, marker.Tool, now.Sub(info.ModTime()).Round(time.Second), transcript)
 	}
 }
 
@@ -375,13 +459,14 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		digest = wakeDialogInputDigest(in)
 	}
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema:      1,
-		Event:       in.Event,
-		Tool:        in.Tool,
-		ToolUseID:   in.ToolUseID,
-		InputDigest: digest,
-		SessionID:   in.SessionID,
-		OpenedAt:    time.Now().UTC().Format(time.RFC3339),
+		Schema:         1,
+		Event:          in.Event,
+		Tool:           in.Tool,
+		ToolUseID:      in.ToolUseID,
+		InputDigest:    digest,
+		TranscriptPath: in.TranscriptPath,
+		SessionID:      in.SessionID,
+		OpenedAt:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
@@ -394,11 +479,12 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 // follows keeps its digest, and a missing one (its hook failed) still holds.
 func openMissingWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema:    1,
-		Event:     in.Event,
-		Kind:      in.NotificationType,
-		SessionID: in.SessionID,
-		OpenedAt:  time.Now().UTC().Format(time.RFC3339),
+		Schema:         1,
+		Event:          in.Event,
+		Kind:           in.NotificationType,
+		TranscriptPath: in.TranscriptPath,
+		SessionID:      in.SessionID,
+		OpenedAt:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
@@ -603,9 +689,9 @@ func wakeDialogHookVerb(event string) string {
 	return "close"
 }
 
-func wakeDialogHooks(bin string) []claude.CommandHook {
-	hooks := make([]claude.CommandHook, 0, len(wakeDialogHookEvents))
-	for _, event := range wakeDialogHookEvents {
+func wakeDialogHooks(bin string, events []string) []claude.CommandHook {
+	hooks := make([]claude.CommandHook, 0, len(events))
+	for _, event := range events {
 		hook := claude.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
@@ -673,7 +759,7 @@ func runWakeInstallDialogHook(args []string) error {
 	if !claudeOn {
 		return nil
 	}
-	hooks := wakeDialogHooks(bin)
+	hooks := wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersion()))
 	if *dryRun {
 		return printDialogHooks(hooks)
 	}
@@ -790,13 +876,17 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 	type installed struct{ event, command string }
 	var commands []installed
 	var missing []string
+	supported := make(map[string]bool)
+	for _, event := range wakeDialogHookEventsFor(installedClaudeVersion()) {
+		supported[event] = true
+	}
 	for _, event := range wakeDialogHookEvents {
 		found, err := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
 		if err != nil {
 			check.Message = fmt.Sprintf("read Claude settings: %v", err)
 			return check, true
 		}
-		if len(found) == 0 {
+		if len(found) == 0 && supported[event] {
 			missing = append(missing, event)
 		}
 		for _, command := range found {

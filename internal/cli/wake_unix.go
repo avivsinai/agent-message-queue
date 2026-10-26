@@ -387,7 +387,7 @@ func acquireWakeLockWithOptionsInDir(
 					options,
 				)
 			}); cleanupErr != nil {
-				_ = writeStderr("amq wake: cleanup failed: %v\n", cleanupErr)
+				_ = writeWakeLogLine("amq wake: cleanup failed: %v\n", cleanupErr)
 			}
 		}
 		return cleanup, nil
@@ -2812,7 +2812,7 @@ func (s *wakeStart) prepareNotifier() error {
 		return fmt.Errorf("clear wake doorbell status: %w", err)
 	}
 	if s.initialNotifierStatus == wakeInjectorUnsupportedStatus {
-		_ = writeStderr("amq wake: warning: %s\n", s.initialNotifierReason)
+		_ = writeWakeLogLine("amq wake: warning: %s\n", s.initialNotifierReason)
 	}
 	return nil
 }
@@ -3129,7 +3129,7 @@ func (s *wakeStart) startReloadTransport() (func(), error) {
 		if !errors.As(startErr, &unavailable) {
 			return nil, startErr
 		}
-		_ = writeStderr(
+		_ = writeWakeLogLine(
 			"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
 			startErr,
 		)

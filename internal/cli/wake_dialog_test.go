@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -45,7 +46,8 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		}
 	}
 
-	hook("open", `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_1","tool_input":{"questions":[]}}`)
+	// The transcript is missing, so it proves nothing and the hold stays.
+	hook("open", `{"hook_event_name":"PreToolUse","session_id":"s1","transcript_path":"/nonexistent/amq-test/session.jsonl","tool_name":"AskUserQuestion","tool_use_id":"toolu_1","tool_input":{"questions":[]}}`)
 	// The dialog opened at the harness clock's now.
 	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
@@ -74,8 +76,8 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	if len(h.injected) != 0 {
 		t.Fatalf("typed %q into an open dialog", h.injected)
 	}
-	if !regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ amq wake: holding the doorbell while a harness dialog is open \(marker event="PreToolUse" kind="" harness="claude" tool="AskUserQuestion" age=0s\)$`).MatchString(stderr) {
-		t.Fatalf("holding diagnostic = %q, want a UTC-stamped line naming the marker event, kind, harness, tool and age", stderr)
+	if !regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ amq wake: holding the doorbell while a harness dialog is open \(marker event="PreToolUse" kind="" harness="claude" tool="AskUserQuestion" age=0s transcript=unreadable, holding: "open transcript: [^"]*"\)$`).MatchString(stderr) {
+		t.Fatalf("holding diagnostic = %q, want a UTC-stamped line naming the marker event, kind, harness, tool, age and the unreadable transcript", stderr)
 	}
 	if len(notices) != 1 || !strings.Contains(notices[0], "AMQ: codex: 1 message waiting") ||
 		!strings.Contains(notices[0], "Claude Code dialog open") {
@@ -116,7 +118,10 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 // PermissionRequest can land before the previous call's PostToolUse.
 // AskUserQuestion gets a PermissionRequest right after its PreToolUse, and
 // its PostToolUse input adds the answers, so the marker keeps the
-// PreToolUse tool_use_id (live, Claude Code 2.1.310).
+// PreToolUse tool_use_id (live, Claude Code 2.1.310). Esc or a deny runs
+// no hook; the wake reads the closed dialog from the session transcript.
+// The Esc and deny records are the ones Claude Code 2.1.310 wrote live,
+// trimmed to the fields read, with the timestamps moved past the marker.
 func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 	const (
 		permission = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"d"}}`
@@ -124,21 +129,36 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		askPerm    = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Color?"}]}}`
 		askPost    = `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}],"answers":{"Color?":"Red"}}}`
 	)
+	const (
+		escPerm = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"Write current date into a.txt"}}`
+		escUse  = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.719Z","message":{"content":[{"type":"tool_use","id":"toolu_01SH6LQuDnMFhg2mcN57xcVp","name":"Bash","input":{"command":"date > a.txt","description":"Write current date into a.txt"},"caller":{"type":"direct"}}]}}`
+		escEnd  = `{"type":"user","timestamp":"AFTER","toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"toolu_01SH6LQuDnMFhg2mcN57xcVp"}]}}
+{"type":"user","timestamp":"AFTER","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
+		denyPerm = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > b.txt","description":"Write current date into b.txt"}}`
+		denyUse  = `{"type":"assistant","timestamp":"2026-10-26T08:14:24.324Z","message":{"content":[{"type":"tool_use","id":"toolu_01Gk4EfCc2fzxVLUcCGda2DJ","name":"Bash","input":{"command":"date > b.txt","description":"Write current date into b.txt"},"caller":{"type":"direct"}}]}}`
+		denyEnd  = `{"type":"user","timestamp":"AFTER","toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"toolu_01Gk4EfCc2fzxVLUcCGda2DJ"}]}}
+{"type":"user","timestamp":"AFTER","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
+	)
 	type step struct{ verb, input string }
 	for _, tc := range []struct {
 		name   string
 		steps  []step
 		closed bool
+		// shown is in the transcript while the dialog shows; answered is
+		// appended when the person answers it.
+		shown, answered string
 	}{
 		{"PostToolUse of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true},
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true, "", ""},
 		{"PostToolUseFailure of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true},
+			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true, "", ""},
 		{"PostToolUse of another call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false},
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false, "", ""},
 		{"idle_prompt", []step{{"open", permission}, {"notify",
-			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true},
-		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true},
+			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true, "", ""},
+		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true, "", ""},
+		{"Esc on a permission dialog", []step{{"open", escPerm}}, true, escUse, escEnd},
+		{"deny on a permission dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -151,22 +171,65 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			clearSendMailboxTestEnv(t)
 			t.Setenv(envMe, "claude")
 			t.Setenv(envRoot, root)
+			transcript := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(transcript, []byte(tc.shown+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			for _, step := range tc.steps {
-				if err := runWakeDialog([]string{step.verb}, strings.NewReader(step.input)); err != nil {
+				input := strings.ReplaceAll(step.input, "TRANSCRIPT", transcript)
+				if err := runWakeDialog([]string{step.verb}, strings.NewReader(input)); err != nil {
 					t.Fatalf("wake dialog %s: %v", step.verb, err)
 				}
 			}
-			_, err := os.Stat(filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName))
-			if closed := os.IsNotExist(err); closed != tc.closed {
-				t.Fatalf("marker closed = %v (stat %v), want %v", closed, err, tc.closed)
+			agentDir, err := openWakeAgentDir(root, "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = agentDir.Close() })
+			closed := func() bool {
+				state, err := wakeDialogSourceInDir(agentDir)(time.Now())
+				return err == nil && state == wakeDialogClosed
+			}
+			if tc.answered != "" {
+				if closed() {
+					t.Fatal("marker reads closed while the dialog shows")
+				}
+				after := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+				file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = file.WriteString(strings.ReplaceAll(tc.answered, "AFTER", after) + "\n")
+				if cerr := file.Close(); err == nil {
+					err = cerr
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := closed(); got != tc.closed {
+				t.Fatalf("marker closed = %v, want %v", got, tc.closed)
 			}
 		})
 	}
 }
 
+// fakeClaudeOnPath puts a claude on PATH that prints version for
+// --version, the boundary install-dialog-hook and doctor read.
+func fakeClaudeOnPath(t *testing.T, version string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho '" + version + " (Claude Code)'\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
 func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	fakeClaudeOnPath(t, "2.1.310")
 	install := func() []byte {
 		t.Helper()
 		if _, err := captureStdout(t, func() error {
@@ -229,6 +292,26 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	if second := install(); string(second) != string(first) {
 		t.Fatalf("second install changed settings:\n%s\nwant:\n%s", second, first)
 	}
+
+	// field: session3/claude doorbell held 13 h (2026-10-26) follow-up.
+	// Before Claude Code 2.1.101 an unknown hook event made it ignore the
+	// whole settings file, so a Claude Code older than an event's first
+	// version gets no entry for it.
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	fakeClaudeOnPath(t, "2.0.36")
+	settings.Hooks = nil
+	if err := json.Unmarshal(install(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{"PostToolUseFailure", "Notification"} {
+		if groups, ok := settings.Hooks[event]; ok {
+			t.Errorf("Claude Code 2.0.36 got a %s entry: %+v", event, groups)
+		}
+	}
+	if len(settings.Hooks["PostToolUse"]) != 1 {
+		t.Errorf("Claude Code 2.0.36 PostToolUse = %+v, want one entry", settings.Hooks["PostToolUse"])
+	}
 }
 
 // Regression: hook audit inventory #7, every Claude Code session started
@@ -277,7 +360,7 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 		{"padded AM_ROOT, marker in the trimmed root", []string{"AM_ME=codex", "AM_ROOT=" + root + " "}, true, true, true},
 		{"AM_ROOT with .. through a symlink", []string{"AM_ME=codex", "AM_ROOT=" + dotted}, true, true, true},
 	} {
-		for _, hook := range wakeDialogHooks(fake) {
+		for _, hook := range wakeDialogHooks(fake, wakeDialogHookEvents) {
 			_ = os.Remove(ran)
 			_ = os.Remove(marker)
 			if tc.marker {
@@ -314,7 +397,7 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldForm := func(bin string) []claude.CommandHook {
-		hooks := wakeDialogHooks(bin)
+		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
 		for i := range hooks {
 			hooks[i].Command = wakeDialogHookMarker + "'" + bin + "' --no-update-check wake dialog " +
 				wakeDialogHookVerb(hooks[i].Event) + " || true"
@@ -327,11 +410,12 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		want  string
 	}{
 		{"old form", oldForm(bin), "stale form"},
-		{"missing binary", wakeDialogHooks(filepath.Join(t.TempDir(), "gone", "amq")), "missing amq binary"},
-		{"current", wakeDialogHooks(bin), "installed"},
+		{"missing binary", wakeDialogHooks(filepath.Join(t.TempDir(), "gone", "amq"), wakeDialogHookEvents), "missing amq binary"},
+		{"current", wakeDialogHooks(bin, wakeDialogHookEvents), "installed"},
 	} {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
+		fakeClaudeOnPath(t, "2.1.310")
 		if err := claude.InstallCommandHooks(home, tc.hooks); err != nil {
 			t.Fatal(err)
 		}

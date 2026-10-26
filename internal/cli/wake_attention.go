@@ -53,6 +53,13 @@ func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
 		wakeUsesAlternateScreenTUI(cfg) {
 		return nil
 	}
+	return writeWakeLogLine(format, args...)
+}
+
+// writeWakeLogLine writes to the wake's stderr, which is .wake.log for a
+// detached wake, after the UTC wall time. It shows the line wherever
+// writeStderr would.
+func writeWakeLogLine(format string, args ...any) error {
 	return writeStderr("%s %s", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }
 
