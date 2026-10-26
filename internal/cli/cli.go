@@ -24,6 +24,9 @@ func Run(args []string, version string) error {
 	if len(args) > 0 && args[0] == "__launch-exec" {
 		return runLaunchExec(args[1:])
 	}
+	if len(args) > 0 && args[0] == "__terminal-relay" {
+		return runTerminalRelayHelper(args[1:])
+	}
 	if len(args) > 0 && args[0] == "__codex-notify" {
 		return runCodexNotify(args[1:])
 	}
