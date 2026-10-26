@@ -23,8 +23,8 @@ var (
 	coopNamedTTYReady = func() bool {
 		return tiocsti.Available() && coopNamedHasControllingTTY()
 	}
-	coopNamedTTYInject = func(me, binaryBase string) error {
-		return injectCoopNamedSlashCommand(me, binaryBase)
+	coopNamedTTYInject = func(me, binaryBase string, inputFree func() bool) error {
+		return injectCoopNamedSlashCommand(me, binaryBase, inputFree)
 	}
 )
 
@@ -34,11 +34,11 @@ func openCoopNamedTTY() (*os.File, error) {
 
 func coopNamedStartupSleep(delay time.Duration) { time.Sleep(delay) }
 
-var startCoopNamedTUIInjector = func(name, cmdName string, execStart time.Time) error {
-	return startCoopNamedTUIInjectorProcess(name, cmdName, execStart)
+var startCoopNamedTUIInjector = func(name, cmdName, root, handle string, execStart time.Time) error {
+	return startCoopNamedTUIInjectorProcess(name, cmdName, root, handle, execStart)
 }
 
-func startCoopNamedTUIInjectorProcess(name, cmdName string, execStart time.Time) error {
+func startCoopNamedTUIInjectorProcess(name, cmdName, root, handle string, execStart time.Time) error {
 	amqExecutable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve amq executable for coop named inject: %w", err)
@@ -55,6 +55,8 @@ func startCoopNamedTUIInjectorProcess(name, cmdName string, execStart time.Time)
 		"--name", name,
 		"--binary", cmdName,
 		"--exec-start-ns", strconv.FormatInt(execStart.UnixNano(), 10),
+		"--root", root,
+		"--me", handle,
 	}
 	if launch.ProviderForExecutable(cmdName) == launch.CodexProvider {
 		target, err := captureCodexNamingTarget(cmdName)
@@ -101,7 +103,8 @@ func coopNamedHasControllingTTY() bool {
 func runCoopNamedInject(args []string) error {
 	fs := flag.NewFlagSet("coop named-inject", flag.ContinueOnError)
 	nameFlag := fs.String("name", "", "Session name to stamp onto the CLI session")
-	meFlag := fs.String("me", "", "Legacy alias for --name")
+	meFlag := fs.String("me", "", "Agent handle whose dialog marker holds the typed command")
+	rootFlag := fs.String("root", "", "Queue root of that agent")
 	binaryFlag := fs.String("binary", "", "Spawned CLI binary basename")
 	delayFlag := fs.Duration("startup-delay", coopNamedTUIStartupDelay, "Delay before terminal injection")
 	execStartFlag := fs.Int64("exec-start-ns", 0, "Internal coop exec start timestamp")
@@ -123,9 +126,6 @@ func runCoopNamedInject(args []string) error {
 		return nil
 	}
 	name := strings.TrimSpace(*nameFlag)
-	if name == "" {
-		name = strings.TrimSpace(*meFlag)
-	}
 	if name == "" {
 		return UsageError("--name is required")
 	}
@@ -178,10 +178,44 @@ func runCoopNamedInject(args []string) error {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "unsupported store"))
 		return nil
 	}
-	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart); err != nil {
+	// The typed command and its Enter would answer an open dialog, so it
+	// waits for the dialog marker exactly as the doorbell does.
+	root, handle := strings.TrimSpace(*rootFlag), strings.TrimSpace(*meFlag)
+	if !waitCoopNamedInputFree(root, handle, wakeDialogQuietHold, wakeDialogRecheck) {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "a harness dialog stayed open"))
+		return nil
+	}
+	inputFree := func() bool { return waitCoopNamedInputFree(root, handle, 0, 0) }
+	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart, inputFree); err != nil {
 		_ = writeStderr("warning: coop named inject: %v\n", err)
 	}
 	return nil
+}
+
+// waitCoopNamedInputFree waits until the agent's dialog marker no longer
+// holds input, reading it as the wake's dialog source does, checking every
+// interval for at most limit. It reports false when the marker still holds
+// at the limit, or when the agent's directory cannot be read.
+func waitCoopNamedInputFree(root, handle string, limit, interval time.Duration) bool {
+	if root == "" || handle == "" {
+		return false
+	}
+	agentDir, err := openWakeAgentDir(root, handle)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = agentDir.Close() }()
+	source := wakeDialogSourceInDir(agentDir)
+	deadline := time.Now().Add(limit)
+	for {
+		if state, err := source(time.Now()); err == nil && state == wakeDialogClosed {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		coopNamedStartupSleep(min(interval, time.Until(deadline)))
+	}
 }
 
 func validateCoopNamedSessionLabel(name string) error {
@@ -201,7 +235,7 @@ func validateCoopNamedSessionLabel(name string) error {
 	}
 }
 
-func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time) error {
+func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time, inputFree func() bool) error {
 	candidate, err := reader.locate(cwd, execStart)
 	if err != nil {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
@@ -210,7 +244,7 @@ func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, 
 	if strings.TrimSpace(candidate.name) != "" {
 		return nil
 	}
-	if err := coopNamedTTYInject(name, binaryBase); err != nil {
+	if err := coopNamedTTYInject(name, binaryBase, inputFree); err != nil {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
 		return nil
 	}
@@ -235,7 +269,14 @@ func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, 
 	return nil
 }
 
-func injectCoopNamedSlashCommand(me, binaryBase string) error {
+// errCoopNamedDialogOpen stops a naming attempt when a dialog marker
+// appears: the typed text and Enter would answer the dialog.
+var errCoopNamedDialogOpen = errors.New("a harness dialog opened")
+
+// injectCoopNamedSlashCommand types the naming command and Enter. inputFree
+// is checked before the command's write and again right before Enter, after
+// the settle delay; a dialog marker then stops the attempt.
+func injectCoopNamedSlashCommand(me, binaryBase string, inputFree func() bool) error {
 	if !coopNamedTTYReady() {
 		if !tiocsti.Available() {
 			return errors.New("TIOCSTI terminal injection is unavailable")
@@ -248,6 +289,9 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 			return fmt.Errorf("coop named command contains non-printable ASCII")
 		}
 	}
+	if inputFree != nil && !inputFree() {
+		return errCoopNamedDialogOpen
+	}
 	if err := tiocstiInject(command); err != nil {
 		return err
 	}
@@ -259,5 +303,8 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 		delay = facts.PasteSubmitDelay
 	}
 	rawInjectSleep(delay)
+	if inputFree != nil && !inputFree() {
+		return errCoopNamedDialogOpen
+	}
 	return tiocstiInject("\r")
 }

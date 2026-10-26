@@ -118,7 +118,8 @@ func TestWakeDiagnosticForegroundInjectViaWakePrints(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if stderr != "amq wake: --inject-via failed: boom\n" {
+	// Diagnostics start with the UTC time (writeWakeDiagnostic).
+	if _, line, ok := strings.Cut(stderr, "Z "); !ok || line != "amq wake: --inject-via failed: boom\n" {
 		t.Fatalf("foreground diagnostic = %q", stderr)
 	}
 }

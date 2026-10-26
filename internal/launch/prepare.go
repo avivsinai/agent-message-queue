@@ -22,8 +22,9 @@ import (
 // it. A machine with an existing <legacy>/launch keeps the legacy root, so old
 // and new binaries share one trust record and a grant is never split across
 // two roots. Otherwise trust lives in ~/.amq/state. The probe looks at the
-// launch subtree, not the legacy root itself: on darwin every wake restart
-// creates <legacy>/wake-stages, so a probe on the root would never flip.
+// launch subtree, not the legacy root itself: on darwin an older release's
+// wake restart creates <legacy>/wake-stages, so a probe on the root would
+// never flip.
 func DefaultLaunchStateDir() (string, error) {
 	legacy, err := LegacyStateDir()
 	if err != nil {
@@ -53,9 +54,9 @@ func DefaultLaunchStateDir() (string, error) {
 }
 
 // LegacyStateDir returns the platform state root that launch trust used before
-// ~/.amq/state, without creating it. Darwin wake restart stages always live
-// here, because a stage path is a crash-recovery record that must not move
-// when the trust root changes.
+// ~/.amq/state, without creating it. Darwin wake restart stages that an older
+// release wrote live here; a wake still validates and prunes them, because a
+// stage path is a crash-recovery record that must not move.
 func LegacyStateDir() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); value != "" {
 		return filepath.Join(value, "amq"), nil
@@ -161,7 +162,7 @@ func trustProjectDirs(launchDir string) (int, error) {
 // ~/.amq/state/launch. DefaultLaunchStateDir probes only <legacy>/launch, so
 // the one rename moves every newer binary to ~/.amq/state at once, and a crash
 // leaves either the old tree or the moved one. The legacy root itself stays:
-// it holds the darwin wake restart stages.
+// it can hold darwin wake restart stages that an older release wrote.
 func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
 	home, err := amqhome.EnsureDir()
 	if err != nil {

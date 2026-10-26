@@ -158,8 +158,15 @@ func runCoopExec(args []string) error {
 	if err := c.selectRoot(); err != nil {
 		return err
 	}
+	if err := managedCodexDumbTerminalRefusal(managedTicket); err != nil {
+		return err
+	}
 	if facts, _ := harness.ForExecutable(c.cmdName); c.managedLaunchNonce == "" && facts.Name == harness.Codex {
-		if _, _, tui := codexLaunchArgs(c.agentArgs); tui {
+		_, _, tui := codexLaunchArgs(c.agentArgs)
+		if err := codexDumbTerminalRefusal(c.agentArgs, os.LookupEnv); err != nil {
+			return err
+		}
+		if tui {
 			var missing []string
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				missing = append(missing, "stdin")
@@ -895,17 +902,41 @@ func (c *coopExecRun) execAgent() error {
 	namedLabel := coopNamedSessionLabel(sessionIdentity, c.agentHandle)
 	execStart := time.Now()
 	recordIdentity := codexThreadIdentityRecorder(env)
-	c.agentArgs, err = applyCoopNamedBeforeExecAt(c.named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
-	if err != nil {
-		return err
-	}
 	c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
 	if err != nil {
 		return err
 	}
-	recorded, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity)
+	codex := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider
+	// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
+	wd, wdErr := syscall.Getwd()
+	named := c.named
+	// The effective resume mode, read once before naming or recording.
+	resumeChoice := "unknown"
+	if codex && c.managedLaunchNonce == "" && wdErr == nil && codexResumeOrForkAt(c.agentArgs) >= 0 {
+		_, selected, unresolved := codexResumeSelection(c.agentArgs)
+		resumeChoice = codexEffectiveResumeCwd(c.binaryPath, c.agentArgs, wd, selected && !unresolved)
+	}
+	var launchDecision codexLaunchDecision
+	if codex && c.wakeOwned && c.managedLaunchNonce == "" && wdErr == nil {
+		if launchDecision, err = decideCodexLaunch(c.binaryPath, c.agentArgs, env, wd, named, resumeChoice); err != nil {
+			return err
+		}
+	}
+	codexMarker, codexHold, codexDecided, embeddedOnly := launchDecision.marker, launchDecision.hold, launchDecision.decided, launchDecision.embeddedOnly
+	named.daemonless = embeddedOnly
+	var startNamer func(root, handle string)
+	c.agentArgs, startNamer, err = applyCoopNamedBeforeExecAt(named, c.binaryPath, c.agentArgs, namedLabel, execStart, recordIdentity)
 	if err != nil {
 		return err
+	}
+	// The thread is recorded only after the Startup marker exists: a
+	// recorded thread lets amq-remote admit turns on it, and its guard
+	// reads that marker. recordResumedCodexThread records exactly the
+	// thread codexResumeSelection selects, or fails the launch.
+	_, selected, unresolved := codexResumeSelection(c.agentArgs)
+	recorded := codex && selected && !unresolved && !embeddedOnly
+	if c.managedLaunchNonce == "" && wdErr == nil {
+		c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded, resumeChoice)
 	}
 	// A managed plan carries the identity overrides as its own dynamic
 	// slots, which the launch wrapper fills.
@@ -930,9 +961,23 @@ func (c *coopExecRun) execAgent() error {
 	// no doorbell is typed before the marker exists: one typed before the
 	// harness starts would wait in the terminal and answer its first prompt.
 	if c.wakeOwned {
-		if err := syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded); err != nil {
+		publish := func() error {
+			if codexDecided {
+				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold)
+			}
+			return syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded)
+		}
+		if err := publish(); err != nil {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
+	}
+	if !embeddedOnly {
+		if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
+			return cleanupAfterError(err)
+		}
+	}
+	if startNamer != nil {
+		startNamer(c.root, c.agentHandle)
 	}
 	if c.wakeStartupHold != nil {
 		if err := c.wakeStartupHold.Close(); err != nil {

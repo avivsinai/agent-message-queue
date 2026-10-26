@@ -222,12 +222,16 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			t.Chdir(repo)
 			watchers := 0
 			original := startCoopNamedTUIInjector
-			startCoopNamedTUIInjector = func(string, string, time.Time) error { watchers++; return nil }
+			startCoopNamedTUIInjector = func(string, string, string, string, time.Time) error { watchers++; return nil }
 			t.Cleanup(func() { startCoopNamedTUIInjector = original })
 			var args []string
 			stdout, stderr, err := captureEnvOutput(t, func() error {
 				var err error
-				args, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now(), func(string) error { return nil })
+				var startNamer func(root, handle string)
+				args, startNamer, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now(), func(string) error { return nil })
+				if startNamer != nil {
+					startNamer("", "")
+				}
 				return err
 			})
 			if err != nil {

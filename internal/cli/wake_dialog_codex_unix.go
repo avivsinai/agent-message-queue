@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -115,7 +116,10 @@ func adoptCodexHookIdentity(sessionID string) error {
 
 // writeTurnDialogMarker opens the hold of a Codex or Cursor guard, whose
 // marker only a turn or session event removes. It records no tool_use_id,
-// so no tool call's close can remove it.
+// so no tool call's close can remove it. It never replaces a Codex Startup
+// marker: a turn of an older daemon session could otherwise swap it for a
+// marker that its own Stop then removes, while this launch's startup screen
+// still shows.
 func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput, harness string) error {
 	turnID := in.TurnID
 	if harness == "cursor" {
@@ -128,18 +132,51 @@ func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if err != nil {
 		return err
 	}
-	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), codexStartupMarkerBytes)
+}
+
+// codexStartupMarkerBytes reports a Codex Startup marker.
+func codexStartupMarkerBytes(raw []byte) bool {
+	var marker wakeDialogMarker
+	return json.Unmarshal(raw, &marker) == nil && marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider
 }
 
 // clearTurnDialogMarker removes the marker at a turn or session event. A
 // tool call's PostToolUse (Codex) or postToolUse (Cursor) keeps it: neither
-// harness ties a prompt to the call that completed.
+// harness ties a prompt to the call that completed. A Codex Startup marker
+// closes only at a UserPromptSubmit of this launch (startupPromptOfLaunch):
+// a Stop, Interrupt or session event can come from a daemon turn admitted
+// before this terminal started, and a prompt from another client shows
+// nothing about this terminal's startup screens.
 func clearTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	if in.Event == "PostToolUse" || in.Event == "postToolUse" {
 		return nil
 	}
 	in.ToolUseID = ""
-	return clearWakeDialogMarker(dirfd, agentDir, in)
+	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
+		var marker wakeDialogMarker
+		if json.Unmarshal(raw, &marker) != nil {
+			return true
+		}
+		switch {
+		case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
+			return startupPromptOfLaunch(marker, in)
+		case marker.Harness == "cursor":
+			return cursorDialogCloseMatches(marker, in)
+		}
+		return true
+	})
+}
+
+// startupPromptOfLaunch reports a UserPromptSubmit typed in the launch a
+// Codex Startup marker records: the hook's identity came from its own
+// environment, not adopted through a thread record, and the hook runs under
+// the marker's launch process with its start time. An embedded Codex runs
+// hooks as its own children; any other client's hook does not match, and
+// the hold stays.
+func startupPromptOfLaunch(marker wakeDialogMarker, in wakeDialogHookInput) bool {
+	return in.Event == "UserPromptSubmit" && in.ownIdentity &&
+		marker.Launch != nil && launch.RunsUnderProcess(*marker.Launch)
 }
 
 // codexHooksPath is the user hooks file Codex reads: $CODEX_HOME/hooks.json.
