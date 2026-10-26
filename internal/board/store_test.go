@@ -783,7 +783,10 @@ func checkIdentityCorrections(t *testing.T, ctx context.Context) {
 // selections to exact source ranges, and requires an explicit owner adoption.
 func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	t.Helper()
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	identity, err := fsq.StableTreeIdentity(base)
 	if err != nil {
 		t.Fatal(err)
