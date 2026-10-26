@@ -77,7 +77,9 @@ type Persistence interface {
 	// SetAsideJournal, called under the lock after LoadJournal reported
 	// ErrCorrupt, renames the journal file aside, keeps only the newest few
 	// such files, and returns the kept path. The next LoadJournal finds no
-	// journal.
+	// journal. A nonempty kept path confirms durable recovery even if err
+	// reports a later cleanup failure; the caller may continue with that
+	// diagnostic. An empty path with an error means recovery failed.
 	SetAsideJournal() (kept string, err error)
 	SaveJournal(Journal) error
 	SaveFacts(usage.Result) error

@@ -224,6 +224,10 @@ type Attempt struct {
 	ExitCode   Field[int]       `json:"exit_code"`
 	// FailureCode is empty for a successful attempt.
 	FailureCode string `json:"failure_code,omitempty"`
+	// Lease names the credential state Key.Remote was proven for, as file
+	// metadata and never content; empty when the attempt proved no account
+	// or the credential changed during the run.
+	Lease string `json:"lease,omitempty"`
 }
 
 // ForHome is the facts of one provider home, in r's order.

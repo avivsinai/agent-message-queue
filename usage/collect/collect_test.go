@@ -79,10 +79,7 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 	if err != nil {
 		t.Fatal(err)
 	}
-	home := filepath.Join(t.TempDir(), "codex-home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	home := codexHome(t)
 	f := &fakeCodex{version: version, stdout: stdout, clock: now}
 	fx := edge.Effects{Clock: f.now, Command: f.run, Store: store}
 	req := collect.Request{
@@ -91,6 +88,29 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 		ClientName: "amq-board", ClientVersion: "test",
 	}
 	return f, fx, req, dir
+}
+
+// codexHome makes a Codex home holding a file login.
+func codexHome(t *testing.T) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "codex-home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	login(t, home, "{}", now)
+	return home
+}
+
+// login rewrites a home's credential file as a Codex login does.
+func login(t *testing.T, home, content string, at time.Time) {
+	t.Helper()
+	path := filepath.Join(home, "auth.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // The null-windows fixtures are real replies of codex 0.163.0 and 0.164.0
@@ -267,6 +287,20 @@ func TestRunDoesNotDispatchPastTheReservedDeadline(t *testing.T) {
 	}
 }
 
+// journalCleanupFailure sets the corrupt journal aside in the real store,
+// then reports that pruning older set-aside journals failed.
+type journalCleanupFailure struct {
+	edge.Persistence
+}
+
+func (s journalCleanupFailure) SetAsideJournal() (string, error) {
+	kept, err := s.Persistence.SetAsideJournal()
+	if err != nil {
+		return kept, err
+	}
+	return kept, errors.New("journal cleanup failed")
+}
+
 // PR #1235 review: a schema-1 journal attempt without its deadline and
 // interval held nothing back, so the next run dispatched at once; and an
 // attempt that finished before it was reserved (a wall clock set back
@@ -284,6 +318,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 		runs    int
 		dropped bool // the attempt is gone from the journal after the pass
 		kept    bool // the journal file was set aside, and the next pass finds a clean one
+		cleanup bool // pruning older set-aside journals fails after the set-aside
 	}{
 		{
 			// post-release review v0.113.2 finding U1: an entry the reader
@@ -304,6 +339,16 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			failure: usage.FailJournal,
 			runs:    1,
 			kept:    true,
+		},
+		{
+			// Takeover review of U1: a cleanup error after the journal
+			// was set aside dropped the pass and its readings.
+			name:    "set-aside journal cleanup failed",
+			journal: func(string) string { return "not json" },
+			failure: usage.FailJournal,
+			runs:    1,
+			kept:    true,
+			cleanup: true,
 		},
 		{
 			name: "deadline before reserved",
@@ -352,6 +397,9 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "coordination-v1.json"), []byte(tc.journal(req.Codex.Homes[0])), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			if tc.cleanup {
+				fx.Store = journalCleanupFailure{Persistence: fx.Store}
+			}
 			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 			if f.runs != tc.runs {
 				t.Fatalf("app-server ran %d times against the journal, want %d", f.runs, tc.runs)
@@ -363,7 +411,13 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			if want := []string{tc.failure}; tc.failure == "" && len(codes) != 0 || tc.failure != "" && !slices.Equal(codes, want) {
 				t.Fatalf("failures = %v, want %q", codes, tc.failure)
 			}
+			if tc.cleanup && !strings.Contains(got.Failures[0].Value.Detail, "journal cleanup failed") {
+				t.Fatalf("journal diagnostic = %q, want the cleanup failure", got.Failures[0].Value.Detail)
+			}
 			if tc.kept {
+				if len(got.Windows) != 2 || len(got.Money) == 0 {
+					t.Fatalf("recovered pass discarded usable readings: %+v", got)
+				}
 				if m, _ := filepath.Glob(filepath.Join(dir, "coordination-v1.json.unreadable-*")); len(m) != 1 {
 					t.Fatalf("kept files = %v, want 1", m)
 				}
@@ -456,30 +510,55 @@ func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
 	}
 }
 
-// post-release review v0.113.2 finding U3: one Codex home was read per
-// interval across every home, so with several homes each reading went stale.
-// Homes that proved distinct accounts are paced apart.
+// Pacing per account: cold homes are read one interval apart, then each
+// home is paced only with the homes proven to share its account.
 func TestRunPacesPerAccount(t *testing.T) {
-	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
-	second := filepath.Join(t.TempDir(), "codex-home")
-	if err := os.Mkdir(second, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	req.Codex.Homes = append(req.Codex.Homes, second)
-	f.perHome = true
-	// An unproven home is paced with the whole provider, so the first two
-	// passes are an interval apart; each proves its home's account.
-	for range 2 {
-		collect.Run(context.Background(), req, collect.Memory{}, fx)
-		f.clock = f.clock.Add(req.Interval + time.Second)
-	}
-	f.runs = 0
-	for range 2 {
-		collect.Run(context.Background(), req, collect.Memory{}, fx)
-		f.clock = f.clock.Add(time.Second)
-	}
-	if f.runs != 2 {
-		t.Fatalf("app-server ran %d times for two homes of distinct accounts, want 2", f.runs)
+	for _, tc := range []struct {
+		name  string
+		homes int
+		relog bool // the last home logs in again, to the account the others now share
+		runs  int  // app-server runs in the passes one second apart after discovery
+	}{
+		{
+			// post-release review v0.113.2 finding U3: one Codex home was
+			// read per interval across every home, so with three homes each
+			// reading aged past LimitsStaleAfter. Each account is read
+			// inside one interval.
+			name: "three homes of distinct accounts", homes: 3, runs: 3,
+		},
+		{
+			// Takeover review of U3: a home's historical account bypassed
+			// pacing after that home logged in to another home's account.
+			// The new login is unproven and paced with the whole provider.
+			name: "home logged in again", homes: 2, relog: true, runs: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+			for range tc.homes - 1 {
+				req.Codex.Homes = append(req.Codex.Homes, codexHome(t))
+			}
+			f.perHome = true
+			for range tc.homes {
+				collect.Run(context.Background(), req, collect.Memory{}, fx)
+				f.clock = f.clock.Add(req.Interval + time.Second)
+			}
+			if f.runs != tc.homes {
+				t.Fatalf("app-server ran %d times while discovering %d homes, want %d", f.runs, tc.homes, tc.homes)
+			}
+			f.runs = 0
+			if tc.relog {
+				f.perHome = false
+				login(t, req.Codex.Homes[tc.homes-1], `{"relogged":true}`, f.clock)
+			}
+			for range tc.homes {
+				collect.Run(context.Background(), req, collect.Memory{}, fx)
+				f.clock = f.clock.Add(time.Second)
+			}
+			if f.runs != tc.runs {
+				t.Fatalf("app-server ran %d times, want %d", f.runs, tc.runs)
+			}
+		})
 	}
 }
 

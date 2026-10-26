@@ -178,7 +178,9 @@ Git worktrees.
   account's home and asks it, over its documented JSON-RPC interface on
   stdio, for `account/read` and `account/rateLimits/read`. The Codex process
   uses its own login and makes its own network call; amq-board reads no
-  credential file, keychain or cookie and passes no credential. Because this
+  credential content, keychain or cookie and passes no credential. It reads
+  only the size and modification time of the home's `auth.json`, to tell
+  when the login changed. Because this
   runs your own Codex CLI, Codex may refresh its own login while it runs, as
   it does in any Codex session. Each window
   shows its percent used and reset time, named by its duration (5 h, weekly),
@@ -197,7 +199,11 @@ Git worktrees.
   killed when the run ends; on a platform without process groups (Windows)
   no Codex CLI is started.
 - One Codex account is read at most once per 5 minutes across every
-  amq-board run and serve. The readings, a journal of reserved runs, and the
+  amq-board run and serve. A home whose last read proved its account, with
+  `auth.json` unchanged since, is paced only with homes of that account, so
+  each account is read every 5 minutes. A home not yet proven, logged in
+  again, or with its login in a keychain waits 5 minutes after any Codex
+  read. The readings, a journal of reserved runs, and the
   collector lock are in `~/.amq/usage/` (mode 0700, files 0600); they hold no
   response body, email, or raw account id. A one-shot run reads the saved
   readings and starts the CLI only when a reading is due, beside the other

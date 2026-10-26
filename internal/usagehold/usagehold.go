@@ -127,13 +127,15 @@ func failureHold(code string, streak int, r Rules) time.Duration {
 
 // Next picks the home of provider to collect at now: among the homes not
 // held, the one whose newest attempt is oldest, a home never attempted
-// first, ties in the given order. A candidate is keyed by the account its
-// home last proved, and unproven when it never has.
-func Next(provider string, homes []string, attempts []usage.Attempt, now time.Time, rules Rules) (string, bool) {
+// first, ties in the given order. leases is each home's current credential
+// lease: a candidate is keyed by the account an attempt proved for that same
+// lease, and unproven otherwise, so a home that logged in again since is
+// paced with its whole provider.
+func Next(provider string, homes []string, leases map[string]string, attempts []usage.Attempt, now time.Time, rules Rules) (string, bool) {
 	best, found := "", false
 	var bestAt time.Time
 	for _, h := range homes {
-		k := usage.Account{Provider: provider, Home: h, Remote: knownRemote(attempts, provider, h)}
+		k := usage.Account{Provider: provider, Home: h, Remote: provenRemote(attempts, provider, h, leases[h])}
 		if now.Before(HeldUntil(attempts, k, now, rules)) {
 			continue
 		}
@@ -150,13 +152,13 @@ func Next(provider string, homes []string, attempts []usage.Attempt, now time.Ti
 	return best, found
 }
 
-// knownRemote is the remote account the newest attempt of home that proved
-// one names, or empty.
-func knownRemote(attempts []usage.Attempt, provider, home string) string {
+// provenRemote is the remote account the newest attempt of home proved for
+// lease, or empty. An empty lease proves nothing.
+func provenRemote(attempts []usage.Attempt, provider, home, lease string) string {
 	var at time.Time
 	remote := ""
 	for _, a := range attempts {
-		if a.Key.Provider == provider && a.Key.Home == home && a.Key.Remote != "" && !a.ReservedAt.Before(at) {
+		if lease != "" && a.Lease == lease && a.Key.Provider == provider && a.Key.Home == home && a.Key.Remote != "" && !a.ReservedAt.Before(at) {
 			at, remote = a.ReservedAt, a.Key.Remote
 		}
 	}

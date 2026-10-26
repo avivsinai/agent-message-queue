@@ -196,9 +196,11 @@ const keptJournals = 3
 
 // SetAsideJournal renames a corrupt journal to <journal>.unreadable-<UTC
 // time> in the same directory, which keeps its mode, syncs the directory,
-// and removes all but the newest keptJournals such files by exact name. A
-// journal only paces read-only reads, so losing one costs at worst one extra
-// read.
+// and removes all but the newest keptJournals such files by exact name.
+// Once the rename is durable, the kept path is returned even if pruning
+// fails; the error then reports cleanup without losing the usable recovery.
+// A journal only paces read-only reads, so losing one costs at worst one
+// extra read.
 func (s Store) SetAsideJournal() (string, error) {
 	prefix := journalFile + ".unreadable-"
 	kept := filepath.Join(s.dir, prefix+time.Now().UTC().Format("20060102T150405.000000000Z"))
@@ -210,7 +212,7 @@ func (s Store) SetAsideJournal() (string, error) {
 	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return kept, nil
+		return kept, fmt.Errorf("list recovered journals: %w", err)
 	}
 	var names []string
 	for _, en := range entries {
@@ -219,12 +221,16 @@ func (s Store) SetAsideJournal() (string, error) {
 		}
 	}
 	sort.Strings(names)
-	for len(names) > keptJournals {
-		_ = os.Remove(filepath.Join(s.dir, names[0]))
-		names = names[1:]
+	var cleanupErr error
+	for _, name := range names[:max(len(names)-keptJournals, 0)] {
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove recovered journal %s: %w", name, err))
+		}
 	}
-	_ = fsq.SyncDir(s.dir)
-	return kept, nil
+	if err := fsq.SyncDir(s.dir); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync recovered journal cleanup: %w", err))
+	}
+	return kept, cleanupErr
 }
 
 func (s Store) save(name string, v any) error {
