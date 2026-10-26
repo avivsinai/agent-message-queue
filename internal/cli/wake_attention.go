@@ -43,12 +43,13 @@ func (err *wakeAttentionDeliveryError) Unwrap() error {
 	return err.err
 }
 
-// writeWakeDiagnostic preserves human-readable logs without writing printable
-// bytes over a Codex or Claude alternate-screen composer on the shared TTY.
+// writeWakeDiagnostic keeps human-readable diagnostics in a log destination
+// (the coop .wake.log). A terminal gets them only from a standalone notifier;
+// any other wake shares that terminal with a harness TUI, so they are dropped.
 func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
 	if cfg != nil &&
 		wakeDiagnosticIsTerminal(cfg) &&
-		wakeUsesAlternateScreenTUI(cfg) {
+		!wakeIsStandaloneNotifier(cfg) {
 		return nil
 	}
 	return writeStderr(format, args...)
