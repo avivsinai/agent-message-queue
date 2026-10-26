@@ -16,9 +16,9 @@ const LimitsStaleAfter = 15 * time.Minute
 
 // WithPlanLimits gives each Codex account the plan limits the Codex
 // app-server reported for the same home: they replace the limits read from
-// rollouts, which are older readings of the same account. A home with no
-// app-server reading keeps its rollout limits and says why the app-server
-// gave none. It is pure; now dates each reading's status.
+// rollouts when the app-server reading is newer. A home with no app-server
+// reading, or only an older one, keeps its rollout limits and says why the
+// app-server gave none. It is pure; now dates each reading's status.
 func WithPlanLimits(rep usage.Report, r facts.Result, now time.Time) usage.Report {
 	out := rep
 	out.Accounts = append([]usage.Account{}, rep.Accounts...)
@@ -44,6 +44,18 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		}
 	}
 	if as.Status == facts.StatusUnknown {
+		if failure == nil {
+			return rollout
+		}
+		return append(append([]usage.Limit{}, rollout...), usage.Limit{
+			Kind: "unknown", Name: "plan limits", Source: appServer,
+			Reason: "plan limits not read (" + failure.Detail + ")",
+		})
+	}
+	if newest := newestAsOf(rollout); !as.ObservedAt.After(newest) {
+		// The rollout readings are the fresher ones: a snapshot that aged
+		// behind them, for example after a failed pass, must not replace
+		// them or carry its old flags onto the account.
 		if failure == nil {
 			return rollout
 		}
@@ -130,6 +142,17 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		out = append(out, l)
 	}
 	return out
+}
+
+// newestAsOf is the newest reading time among limits, zero when none is dated.
+func newestAsOf(limits []usage.Limit) time.Time {
+	var t time.Time
+	for _, l := range limits {
+		if l.AsOf.After(t) {
+			t = l.AsOf
+		}
+	}
+	return t
 }
 
 // bucketName is a limit's bucket when it is not Codex's main one.

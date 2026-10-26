@@ -99,3 +99,27 @@ func TestPlanLimitsReplaceRolloutLimitsOnTheStrip(t *testing.T) {
 		})
 	}
 }
+
+// post-release review v0.113.2 finding U2: a week-old app-server snapshot
+// replaced one-minute-old rollout limits, and its old "reached" flagged the
+// account with no date.
+func TestPlanLimitsKeepNewerRolloutLimits(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	home := "/home/u/.codex"
+	acct := facts.Account{Provider: facts.ProviderCodex, Home: home}
+	ev := facts.Evidence{Source: "codex-app-server", ObservedAt: now.Add(-7 * 24 * time.Hour)}
+	r := facts.Result{
+		Windows: []facts.Fact[facts.Window]{{Account: acct, Evidence: ev, Value: facts.Window{
+			LimitID: "codex", Slot: "primary", Reported: facts.Present, Kind: facts.Window5h,
+			DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(100.0)}}},
+		Buckets: []facts.Fact[facts.Bucket]{{Account: acct, Evidence: ev,
+			Value: facts.Bucket{LimitID: "codex", Reached: facts.Some("primary")}}},
+	}
+	rollout := []usage.Limit{{Kind: "credits", Name: "credits", Balance: "3.0", AsOf: now.Add(-time.Minute), Source: "rollout"}}
+	rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home, Limits: rollout}}}
+	for _, l := range WithPlanLimits(rep, r, now).Accounts[0].Limits {
+		if l.Source == appServer {
+			t.Fatalf("a stale app-server reading replaced newer rollout limits: %+v", l)
+		}
+	}
+}

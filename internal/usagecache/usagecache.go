@@ -88,7 +88,8 @@ type factsFileV1 struct {
 }
 
 // LoadJournal reads the journal. A missing file is an empty journal; an
-// unreadable or corrupt one is an error.
+// unreadable or corrupt file is an error. An incomplete attempt is dropped
+// and named in Dropped.
 func (s Store) LoadJournal() (edge.Journal, error) {
 	var f journalFileV1
 	ok, err := s.load(journalFile, &f)
@@ -98,12 +99,17 @@ func (s Store) LoadJournal() (edge.Journal, error) {
 	if f.Schema != schema {
 		return edge.Journal{}, fmt.Errorf("%s: schema %d, want %d", journalFile, f.Schema, schema)
 	}
+	// A rejected attempt is dropped, never a block: the journal must stay
+	// usable, and the next save removes the entry for good.
+	var j edge.Journal
 	for i, a := range f.Attempts {
 		if err := complete(a); err != nil {
-			return edge.Journal{}, fmt.Errorf("%s: attempt %d: %w", journalFile, i, err)
+			j.Dropped = append(j.Dropped, fmt.Sprintf("%s: attempt %d: %v", journalFile, i, err))
+			continue
 		}
+		j.Attempts = append(j.Attempts, a)
 	}
-	return f.Journal, nil
+	return j, nil
 }
 
 // complete checks that an attempt carries every field its hold is computed

@@ -32,6 +32,7 @@ type fakeCodex struct {
 	mu           sync.Mutex
 	clock        time.Time
 	runs         int
+	perHome      bool // the account id in the reply follows the home
 }
 
 func (f *fakeCodex) now() time.Time {
@@ -56,6 +57,9 @@ func (f *fakeCodex) run(_ context.Context, c edge.Command) edge.CommandReply {
 			}
 			named, _ := json.Marshal(dir)
 			stdout = bytes.ReplaceAll(stdout, []byte(`"/codex-home"`), named)
+			if f.perHome {
+				stdout = bytes.ReplaceAll(stdout, []byte(`"accountId":"`), []byte(`"accountId":"`+filepath.Base(filepath.Dir(dir))))
+			}
 		}
 	}
 	if c.Done == nil || !c.Done(stdout) {
@@ -281,9 +285,24 @@ func TestRunHonorsTheJournal(t *testing.T) {
 		dropped bool // the attempt is gone from the journal after the pass
 	}{
 		{
+			// post-release review v0.113.2 finding U1: an entry the reader
+			// rejects blocked collection for good; it is dropped with a
+			// diagnostic and the pass runs.
 			name:    "incomplete attempt",
 			journal: func(h string) string { return attempt(h, `"reserved_at":"2026-10-25T11:59:00Z"`) },
 			failure: usage.FailJournal,
+			runs:    1,
+			dropped: true,
+		},
+		{
+			name: "deadline before reserved",
+			journal: func(h string) string {
+				return attempt(h, `"reserved_at":"2026-10-25T11:50:10Z","deadline_at":"2026-10-25T11:50:03Z",`+
+					`"interval":300000000000`)
+			},
+			failure: usage.FailJournal,
+			runs:    1,
+			dropped: true,
 		},
 		{
 			name: "finished before reserved",
@@ -340,7 +359,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 				}
 				for _, a := range j.Attempts {
 					if a.ID == "a" {
-						t.Fatalf("journal kept the future attempt: %+v", a)
+						t.Fatalf("journal kept the dropped attempt: %+v", a)
 					}
 				}
 			}
@@ -383,5 +402,80 @@ func TestRunRecordsAFailedSnapshotWrite(t *testing.T) {
 	}
 	if len(j.Attempts) != 1 || j.Attempts[0].FailureCode != usage.FailCacheWrite {
 		t.Fatalf("journal = %+v, want one attempt that failed with %s", j.Attempts, usage.FailCacheWrite)
+	}
+}
+
+// clockStepStore moves the clock forward when the lock is taken, as an NTP
+// step or a sleep between the pass's first clock reading and its reservation.
+type clockStepStore struct {
+	edge.Persistence
+	f    *fakeCodex
+	step time.Duration
+}
+
+func (s clockStepStore) TryLock() (func(), bool, error) {
+	s.f.mu.Lock()
+	s.f.clock = s.f.clock.Add(s.step)
+	s.f.mu.Unlock()
+	return s.Persistence.TryLock()
+}
+
+// post-release review v0.113.2 finding U1: a forward clock step between the
+// pass deadline and the reservation stored a deadline before its own
+// reservation, which the reader refused for good.
+func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	fx.Store = clockStepStore{Persistence: fx.Store, f: f, step: 10 * time.Second}
+	collect.Run(context.Background(), req, collect.Memory{}, fx)
+	j, err := fx.Store.LoadJournal()
+	if err != nil || len(j.Attempts) != 1 {
+		t.Fatalf("journal = %+v, err = %v", j, err)
+	}
+	if f.runs != 1 {
+		t.Fatalf("app-server ran %d times, want 1", f.runs)
+	}
+}
+
+// post-release review v0.113.2 finding U3: one Codex home was read per
+// interval across every home, so with several homes each reading went stale.
+// Homes that proved distinct accounts are paced apart.
+func TestRunPacesPerAccount(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	second := filepath.Join(t.TempDir(), "codex-home")
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req.Codex.Homes = append(req.Codex.Homes, second)
+	f.perHome = true
+	// An unproven home is paced with the whole provider, so the first two
+	// passes are an interval apart; each proves its home's account.
+	for range 2 {
+		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		f.clock = f.clock.Add(req.Interval + time.Second)
+	}
+	f.runs = 0
+	for range 2 {
+		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		f.clock = f.clock.Add(time.Second)
+	}
+	if f.runs != 2 {
+		t.Fatalf("app-server ran %d times for two homes of distinct accounts, want 2", f.runs)
+	}
+}
+
+// post-release review v0.113.2 finding U4: a failed account/read was
+// dropped, so a read with no identity looked complete.
+func TestRunKeepsRateLimitsWhenAccountReadFails(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
+	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
+	f.stdout = bytes.Join(lines, nil)
+	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	if len(got.Windows) != 2 || len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailRPC ||
+		!strings.Contains(got.Failures[0].Value.Detail, "account/read") {
+		t.Fatalf("windows %d, failures %+v", len(got.Windows), got.Failures)
+	}
+	if a := usage.Assess(got, usage.ProviderCodex, req.Codex.Homes[0], now, 15*time.Minute); a.Status != usage.StatusPartial {
+		t.Fatalf("status = %s, want partial", a.Status)
 	}
 }

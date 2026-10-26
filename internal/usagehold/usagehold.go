@@ -34,7 +34,8 @@ var DefaultRules = Rules{
 
 // Conflicts reports whether dispatches keyed a and b share pacing: same
 // provider, and either one's remote account unproven or both the same. An
-// unproven key conflicts with every key of its provider.
+// unproven key conflicts with every key of its provider; homes that proved
+// distinct accounts are paced apart.
 func Conflicts(a, b usage.Account) bool {
 	if a.Provider != b.Provider {
 		return false
@@ -126,13 +127,13 @@ func failureHold(code string, streak int, r Rules) time.Duration {
 
 // Next picks the home of provider to collect at now: among the homes not
 // held, the one whose newest attempt is oldest, a home never attempted
-// first, ties in the given order. Each candidate is keyed unproven, since a
-// new source instance has not yet proven its account.
+// first, ties in the given order. A candidate is keyed by the account its
+// home last proved, and unproven when it never has.
 func Next(provider string, homes []string, attempts []usage.Attempt, now time.Time, rules Rules) (string, bool) {
 	best, found := "", false
 	var bestAt time.Time
 	for _, h := range homes {
-		k := usage.Account{Provider: provider, Home: h}
+		k := usage.Account{Provider: provider, Home: h, Remote: knownRemote(attempts, provider, h)}
 		if now.Before(HeldUntil(attempts, k, now, rules)) {
 			continue
 		}
@@ -147,6 +148,19 @@ func Next(provider string, homes []string, attempts []usage.Attempt, now time.Ti
 		}
 	}
 	return best, found
+}
+
+// knownRemote is the remote account the newest attempt of home that proved
+// one names, or empty.
+func knownRemote(attempts []usage.Attempt, provider, home string) string {
+	var at time.Time
+	remote := ""
+	for _, a := range attempts {
+		if a.Key.Provider == provider && a.Key.Home == home && a.Key.Remote != "" && !a.ReservedAt.Before(at) {
+			at, remote = a.ReservedAt, a.Key.Remote
+		}
+	}
+	return remote
 }
 
 // keep bounds the journal: attempts per home, and how long a finished one

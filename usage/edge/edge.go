@@ -47,6 +47,9 @@ type Runner func(context.Context, Command) CommandReply
 // hold may still apply.
 type Journal struct {
 	Attempts []usage.Attempt `json:"attempts"`
+	// Dropped names each stored attempt the reader rejected and left out.
+	// It describes one load and is never written back.
+	Dropped []string `json:"-"`
 }
 
 // SnapshotReader reads the sanitized fact snapshot. A missing snapshot is an
@@ -57,8 +60,9 @@ type SnapshotReader interface {
 
 // Persistence is the collector's durable state. TryLock takes the one
 // collector lock without waiting: ok is false, with no error, while another
-// holder has it. A missing journal is empty; an unreadable or corrupt one is
-// an error, never an empty journal. Each Save is atomic and durable (data
+// holder has it. A missing journal is empty; an unreadable or corrupt file is
+// an error, never an empty journal. An attempt the reader rejects is dropped
+// and named in Dropped; the others are kept. Each Save is atomic and durable (data
 // and directory synced) before it returns nil.
 type Persistence interface {
 	SnapshotReader

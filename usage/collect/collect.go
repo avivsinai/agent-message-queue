@@ -106,11 +106,10 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 		return usage.Merge(facts, infraFailure(usage.FailReservation, errors.New("interval and deadline must be positive")))
 	}
 	// One deadline bounds the whole pass: the version check, the
-	// reservation and the app-server run with its exit. notAfter is the
-	// same bound on the collector's clock, recorded in the reservation.
+	// reservation and the app-server run with its exit. The reservation
+	// records what is left of it, counted from its own clock reading.
 	ctx, cancel := context.WithTimeout(ctx, req.Deadline)
 	defer cancel()
-	notAfter := fx.Clock().Add(req.Deadline)
 	journal, err := fx.Store.LoadJournal()
 	if err != nil {
 		return usage.Merge(facts, infraFailure(usage.FailJournal, err))
@@ -136,10 +135,18 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	if journal, err = fx.Store.LoadJournal(); err != nil {
 		return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, err)))
 	}
+	problems = usage.Merge(problems, droppedAttempts(journal))
 	now := fx.Clock()
 	home, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, now, usagehold.DefaultRules)
 	if !ok {
 		return usage.Merge(facts, problems)
+	}
+	// The deadline is measured on the monotonic clock and added to the one
+	// reading that is also the reservation time, so a wall clock step cannot
+	// put the deadline before the reservation.
+	notAfter := now
+	if d, ok := ctx.Deadline(); ok {
+		notAfter = now.Add(max(time.Until(d), 0))
 	}
 	return usage.Merge(collectCodex(ctx, req, home, facts, journal, now, notAfter, fx), problems)
 }
@@ -245,6 +252,9 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 		problems = homeFailure(attempt.Key, usage.Evidence{ObservedAt: done}, usage.FailCacheWrite, errText(err))
 	}
 	attempt.FinishedAt = usage.Some(done)
+	if remote := provenRemote(got, attempt.Key); remote != "" {
+		attempt.Key.Remote = remote
+	}
 	switch {
 	case len(got.Failures) > 0:
 		attempt.FailureCode = got.Failures[0].Value.Code
@@ -267,8 +277,34 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 	return usage.Merge(facts, problems)
 }
 
+// droppedAttempts is the diagnostic for journal attempts the reader rejected;
+// the pass goes on without them and its next save removes them.
+func droppedAttempts(j edge.Journal) usage.Result {
+	var out usage.Result
+	for _, d := range j.Dropped {
+		out = usage.Merge(out, infraFailure(usage.FailJournal, errors.New("dropped "+d)))
+	}
+	return out
+}
+
 func homeFailure(acct usage.Account, ev usage.Evidence, code, detail string) usage.Result {
 	return usage.Result{Failures: []usage.Fact[usage.Failure]{{Account: acct, Value: usage.Failure{Code: code, Detail: detail}, Evidence: ev}}}
+}
+
+// provenRemote is the remote account the pass proved for key's home, or
+// empty while the identity is unproven.
+func provenRemote(got usage.Result, key usage.Account) string {
+	for _, f := range got.Identities {
+		if f.Account.Provider == key.Provider && f.Account.Home == key.Home && f.Account.Remote != "" {
+			return f.Account.Remote
+		}
+	}
+	for _, f := range got.Windows {
+		if f.Account.Provider == key.Provider && f.Account.Home == key.Home && f.Account.Remote != "" {
+			return f.Account.Remote
+		}
+	}
+	return ""
 }
 
 // infraFailure is a failure of the collection itself, not of one home: its
