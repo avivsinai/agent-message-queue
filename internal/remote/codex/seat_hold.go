@@ -17,10 +17,10 @@ const (
 	seatDialogMarker = ".wake.dialog"
 	// maxSeatDialogMarkerBytes bounds the marker read.
 	maxSeatDialogMarkerBytes = 64 * 1024
-	// seatStartupBusy and seatHomeUnknownBusy are the busy reasons the
+	// seatStartupBusy and seatMarkerUnreadableBusy are the busy reasons the
 	// attachment gives while it holds a turn for a seat.
-	seatStartupBusy     = "the Codex seat on this thread has not passed its startup screens yet"
-	seatHomeUnknownBusy = "AMQ recorded this thread for a Codex seat, but the daemon did not report a rollout path that names the seat's Codex home, so AMQ cannot check the seat's startup screens"
+	seatStartupBusy          = "the Codex seat on this thread has not passed its startup screens yet"
+	seatMarkerUnreadableBusy = "AMQ cannot read the startup marker of the Codex seat on this thread, so it holds the turn as the seat's wake does"
 )
 
 // seatStartupHeld reports whether the AMQ seat that carries thread still
@@ -31,25 +31,18 @@ const (
 // a Codex Startup marker that only its dialog hook releases; the seat's
 // wake holds its doorbell on the same marker. A daemon seat starts only in a
 // directory Codex trusts, so its marker never waits on a trust record. A
-// marker that cannot be read holds, as it does for the wake. A thread AMQ
-// did not record, or whose record is revoked, damaged or names another
-// home, holds nothing.
+// marker that cannot be read or parsed holds, as it does for the wake. A
+// thread AMQ did not record, or whose record is revoked, damaged or names
+// another home, holds nothing.
 //
-// Without a proven home the marker cannot be found, so a thread that still
-// carries an AMQ seat identity holds until the attachment is replaced. When
-// the identity store cannot be read, the thread holds nothing: that is the
-// limit of this check.
+// Without a proven home (the daemon reported no rollout path of that shape)
+// the thread holds nothing. The identity record can only be read for a
+// known home, and a codexidentity.Binding names the seat by its root
+// identity token and handle, not by the root path where the marker lives;
+// holding without reading the marker would hold for the attachment's whole
+// lifetime. That is the limit of this check.
 func seatStartupHeld(thread, codexHome string) (bool, string) {
 	if codexHome == "" {
-		bindings, err := codexidentity.Bindings()
-		if err != nil {
-			return false, ""
-		}
-		for _, b := range bindings {
-			if b.Thread == thread && b.Revoked.IsZero() {
-				return true, seatHomeUnknownBusy
-			}
-		}
 		return false, ""
 	}
 	rec, err := codexidentity.Lookup(thread, codexHome)
@@ -61,7 +54,7 @@ func seatStartupHeld(thread, codexHome string) (bool, string) {
 		return false, ""
 	}
 	if err != nil {
-		return true, seatStartupBusy
+		return true, seatMarkerUnreadableBusy
 	}
 	var marker struct {
 		Event   string `json:"event"`
@@ -69,7 +62,7 @@ func seatStartupHeld(thread, codexHome string) (bool, string) {
 		Kind    string `json:"kind"`
 	}
 	if json.Unmarshal(raw, &marker) != nil {
-		return true, seatStartupBusy
+		return true, seatMarkerUnreadableBusy
 	}
 	if marker.Event == "Startup" && marker.Harness == "codex" && marker.Kind != "" {
 		return true, seatStartupBusy

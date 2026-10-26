@@ -28,6 +28,9 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 		// serveHome is the CODEX_HOME amq-remote itself runs with; "" is
 		// the seat's own home.
 		serveHome func(t *testing.T) string
+		// noPath leaves the rollout path out of thread/resume, and noMarker
+		// starts the seat with no Startup marker.
+		noPath, noMarker bool
 	}{
 		{name: "amq-remote shares the seat's Codex home"},
 		{
@@ -36,6 +39,14 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 			// started without the seat's home failed open and sent the turn.
 			name:      "amq-remote runs under another Codex home",
 			serveHome: func(t *testing.T) string { return t.TempDir() },
+		},
+		{
+			// Post-release review v0.113.2 finding R3, lead review of
+			// 96fbed29: with no rollout path, a thread with an open AMQ
+			// binding was held for the attachment's lifetime even though its
+			// seat had no Startup marker.
+			name:   "no rollout path and no marker lets the turn through",
+			noPath: true, noMarker: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,11 +72,15 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 			}
 			marker := filepath.Join(fsq.AgentBase(root, "cx"), seatDialogMarker)
 			raw := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
-			if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
-				t.Fatal(err)
+			if !tc.noMarker {
+				if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			sock, srv := startFakeAppServerAt(t, filepath.Join(sockDir, "s.sock"))
-			srv.setResumePath(filepath.Join(codexHome, "sessions", "2026", "10", "26", "rollout-2026-10-26T10-00-00-"+thread+".jsonl"))
+			if !tc.noPath {
+				srv.setResumePath(filepath.Join(codexHome, "sessions", "2026", "10", "26", "rollout-2026-10-26T10-00-00-"+thread+".jsonl"))
+			}
 			att, err := Attach(sock, thread)
 			if err != nil {
 				t.Fatalf("attach: %v", err)
@@ -90,19 +105,21 @@ func TestSubmitIsHeldWhileTheSeatStartupMarkerIsOpen(t *testing.T) {
 				Input:    &protocol.SubmitInput{Text: "say PONG"},
 			}
 			local := core.Source{Host: "local"}
-			out, err := ep.Handle(cmd, local)
-			if err != nil || out.(protocol.Reply).Outcome.Code != protocol.CodeBusy {
-				t.Fatalf("submit during the seat's startup screens = %+v, %v; want busy", out, err)
-			}
-			select {
-			case call := <-srv.calls:
-				t.Fatalf("submit sent %s to the daemon while the seat's marker was open", call.Method)
-			default:
-			}
+			if !tc.noMarker {
+				out, err := ep.Handle(cmd, local)
+				if err != nil || out.(protocol.Reply).Outcome.Code != protocol.CodeBusy {
+					t.Fatalf("submit during the seat's startup screens = %+v, %v; want busy", out, err)
+				}
+				select {
+				case call := <-srv.calls:
+					t.Fatalf("submit sent %s to the daemon while the seat's marker was open", call.Method)
+				default:
+				}
 
-			// The seat's dialog hook closes the marker; the identical resubmit runs.
-			if err := os.Remove(marker); err != nil {
-				t.Fatal(err)
+				// The seat's dialog hook closes the marker; the identical resubmit runs.
+				if err := os.Remove(marker); err != nil {
+					t.Fatal(err)
+				}
 			}
 			key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: id}
 			srv.setTurnStartDelay(func() {

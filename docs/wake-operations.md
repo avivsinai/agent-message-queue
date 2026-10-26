@@ -280,9 +280,8 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   the thread's rollout path, `<home>/sessions/YYYY/MM/DD/...`, must name
   the home the identity record holds. The `CODEX_HOME` of `amq-remote`
   itself and the socket's directory play no part. When the daemon reports
-  no rollout path of that shape, a thread that still carries an AMQ seat
-  identity stays `busy` and says why; when the identity store cannot be
-  read, nothing holds. A busy attachment sends nothing to Codex, and the endpoint keeps
+  no rollout path of that shape, AMQ cannot find the seat's marker and
+  nothing holds. A busy attachment sends nothing to Codex, and the endpoint keeps
   the request re-admittable, so the sender's retry of the same request runs
   it once the marker closes. A retry while the target is offline is `busy`
   too, and a cancel ends the request at once as `cancelled`. A request
