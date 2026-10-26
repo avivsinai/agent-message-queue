@@ -77,14 +77,18 @@ type wakeDialogMarker struct {
 	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	OpenedAt  string `json:"opened_at"`
+	// Probe is a Codex Startup marker's probe plan, for the wake's
+	// startup recheck (wakeStartupRecheck).
+	Probe *codexStartupPlan `json:"probe,omitempty"`
 }
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
 // through the canonical agent directory; a detached directory cannot show
 // the hook's marker, so it reads as unknown, never as closed. A Startup
 // marker reads as closed once the harness has recorded its trust decision,
-// so the doorbell rings without a SessionStart hook.
-func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
+// so the doorbell rings without a SessionStart hook, and a Codex Startup
+// marker closes once recheck proves its screens closed.
+func wakeDialogSourceInDir(agentDir *wakeAgentDir, recheck *wakeStartupRecheck) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	return func(now time.Time) (wakeDialogState, error) {
 		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
@@ -92,6 +96,9 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 			return wakeDialogUnknown, err
 		}
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
+			return wakeDialogClosed, nil
+		}
+		if readErr == nil && exists && recheck.releaseCodexStartup(agentDir, raw, now) {
 			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
@@ -106,11 +113,15 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 // is still present and reads closed only because the harness recorded its
 // trust decision. That record proves the trust dialog is gone, not that
 // the harness accepts input yet: the harness's SessionStart hook removes
-// the marker once the session is ready. Any doubt reads as a trust
+// the marker once the session is ready. A marker recheck removed on
+// Codex's state is the same kind of release. Any doubt reads as a trust
 // release.
-func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir) func() bool {
+func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir, recheck *wakeStartupRecheck) func() bool {
 	var startup startupDialogCache
 	return func() bool {
+		if recheck != nil && recheck.released {
+			return true
+		}
 		raw, _, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil || readErr != nil {
 			return true
@@ -165,7 +176,8 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 	}
 	switch {
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
-		return harness + " startup screen open; type a prompt in that terminal to release"
+		probed := marker.Kind == "" || marker.Probe != nil && marker.Kind != wakeStartupKindTermDumb
+		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy(probed)
 	case marker.Event == wakeDialogStartupEvent:
 		return harness + " startup screen open; answer it in that terminal to release"
 	}
@@ -364,7 +376,8 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 // withWakeDialogMarkerLock runs fn holding the marker lock, so a
 // replacement and a conditional removal never interleave: a writer cannot
 // replace the marker between a remover's read and its unlink. The wake
-// only reads the marker and takes no lock.
+// takes it only to remove a Codex Startup marker its recheck proved closed
+// (wakeStartupRecheck), never while it probes.
 func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
 	fd, err := unix.Openat(dirfd, wakeDialogLockFileName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {

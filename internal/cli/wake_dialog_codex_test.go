@@ -87,6 +87,22 @@ func TestCodexDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 	if held() {
 		t.Fatal("the turn's Stop kept the hold")
 	}
+
+	// post-release review v0.113.2 finding S3: the Stop of a daemon turn
+	// admitted before this terminal started removed its Startup marker.
+	// Only a prompt typed in the session releases it.
+	startup := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(marker, []byte(startup), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hook("close", `{"session_id":"01a165af-5f6d-7270-bb60-671490b46ea1","turn_id":"t-0","hook_event_name":"Stop"}`)
+	if !held() {
+		t.Fatal("an earlier turn's Stop released the Startup hold")
+	}
+	hook("close", `{"session_id":"01a165af-5f6d-7270-bb60-671490b46ea1","turn_id":"t-2","hook_event_name":"UserPromptSubmit"}`)
+	if held() {
+		t.Fatal("the typed prompt kept the Startup hold")
+	}
 }
 
 // Regression: #1181 review (Codex P1), two rounds. Codex gives a prompt no
