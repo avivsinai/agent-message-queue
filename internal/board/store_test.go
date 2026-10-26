@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/avivsinai/agent-message-queue/internal/board/decision"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
@@ -73,6 +74,10 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		nativeID = id
 	}
 	model := first.Project(DefaultConfig(), now, "test")
+	// Live board: relative source ages used the old publication time.
+	if !model.GeneratedAt.Equal(now) || !model.PublishedAt.Equal(first.PublishedAt) {
+		t.Fatal("projection time and snapshot publication time must remain separate")
+	}
 	if len(model.Unresolved) != 1 {
 		t.Fatalf("unadmitted ask count = %d", len(model.Unresolved))
 	}
@@ -205,6 +210,7 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	checkNativeAdmission(t, ctx)
 	checkLegacyIdentityMigration(t, store, ctx)
 	checkIdentityCorrections(t, ctx)
+	checkSuggestionAdoption(t, ctx)
 	// Snapshot capacity reserves room for a coverage-only publication and
 	// leaves all previously acknowledged corrections and IDs intact.
 	oversized := acquisition
@@ -504,7 +510,7 @@ func checkNativeAdmission(t *testing.T, ctx context.Context) {
 	if err = WriteHTML(&page, model, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(page.String(), "Historical; not reported") || !strings.Contains(page.String(), "No context command available") || strings.Contains(page.String(), "Copy context command") {
+	if !strings.Contains(page.String(), "source no longer reports this task") || !strings.Contains(page.String(), "No context command available") || strings.Contains(page.String(), "Copy context command") {
 		t.Fatal("native historical/context status missing from rendered face")
 	}
 	// A home below a symlinked parent remains revocable after it disappears.
@@ -770,5 +776,297 @@ func checkIdentityCorrections(t *testing.T, ctx context.Context) {
 		if !links[ref.ID] || !commands[want.Command] {
 			t.Fatalf("consolidated alias lost exact source link: %s", ref.ID)
 		}
+	}
+}
+
+// The final-wave contract keeps old discoveries outside NEW work, binds model
+// selections to exact source ranges, and requires an explicit owner adoption.
+func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
+	t.Helper()
+	base := t.TempDir()
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported := func(id, kind, body, created string) (Message, []byte) {
+		entry := thread.Entry{ID: id, Thread: "episode-" + id, Kind: kind, Body: body, Created: created}
+		raw, marshalErr := json.Marshal(entry)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		sum := sha256.Sum256(raw)
+		return MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:])), raw
+	}
+	old, oldRaw := exported("old", "todo", "Implement the archived report format.\n\nThis note supplies historical context.", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano))
+	acquisition := Acquisition{ProjectID: initial.ProjectID, Messages: []Message{old}, Evidence: [][]byte{oldRaw}, Input: Input{Results: []NamedResult{{Name: "amq-history", Result: Result{Status: StatusOK, ActionStates: map[string]string{old.Key: "open"}}}}}}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.HistoryBaseline.IsZero() || !baseline.Observations[old.Key].Bootstrap {
+		t.Fatal("complete-history bootstrap was not retained")
+	}
+	current, currentRaw := exported("current", "todo", "Implement a local export command.", baseline.HistoryBaseline.Add(time.Nanosecond).Format(time.RFC3339Nano))
+	acquisition.Messages = append(acquisition.Messages, current)
+	acquisition.Evidence = append(acquisition.Evidence, currentRaw)
+	acquisition.Input.Results[0].Result.ActionStates[current.Key] = "open"
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldUnits, err := unitsFor(state, old.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newEligible(state, oldUnits[0], time.Now()) {
+		t.Fatal("bootstrap history became current NEW work")
+	}
+	units, err := unitsFor(state, current.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Review measured 2,608 unrelated messages in one P2P thread. Exact
+	// reference context keeps the source whole and reports the omitted history.
+	shared := state
+	shared.Messages = make(map[string]Message, len(state.Messages)+1)
+	for k, m := range state.Messages {
+		shared.Messages[k] = m
+	}
+	noise := old
+	noise.Key = base + "#unrelated"
+	noise.ID = "unrelated"
+	noise.Thread = current.Thread
+	shared.Messages[noise.Key] = noise
+	episode, episodeErr := buildEpisode(shared, units)
+	if episodeErr != nil || episode.Included != 1 || episode.Omitted != 1 || !episode.Partial || episode.Messages[0].Body != current.Body || newEligible(shared, units[0], time.Now()) {
+		t.Fatalf("shared thread context was imported or NEW ignored its gap: %v", episodeErr)
+	}
+
+	_, choices := buildDecision(state, units, true, time.Now())
+	if choices["new_0"].Kind != "new" {
+		t.Fatal("current independent ask lacked positive NEW choice")
+	}
+	cfg := decision.Config{}
+	fp := state.SuggestionFingerprint(cfg)
+	proposal := makeSuggestion(fp, units[0], []string{"new_0"}, choices)
+	if err = store.publishSuggestions(ctx, state, cfg, units, true, []Suggestion{proposal}, SuggestionAttempt{Fingerprint: fp, Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.SuggestionFingerprint(cfg) != fp || len(published.Tasks) != 0 || len(published.SuggestionViews()[0].Commands) != 2 {
+		t.Fatal("suggestion publication changed its own fingerprint or admitted work")
+	}
+	adopted, err := store.AdoptSuggestion(ctx, SuggestionAdoption{ID: proposal.ID, Choices: proposal.Selected, ExpectedGeneration: published.Generation, ConfirmIndependent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := after.Tasks[adopted[0]]
+	if len(adopted) != 1 || !task.Inferred || task.Fact.State != StateRequested || len(task.ModelAttachments) != 1 || task.ModelAttachments[0].Unit.Quote != current.Body || len(after.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 2 {
+		t.Fatal("adoption lost exact evidence or hid unsupported source text")
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "cancel", Scope: "task", TaskID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	after, err = store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := store.AdoptSuggestion(ctx, SuggestionAdoption{ID: proposal.ID, Choices: proposal.Selected, ExpectedGeneration: after.Generation, ConfirmIndependent: true})
+	if err != nil || len(replay) != 1 || replay[0] != task.ID {
+		t.Fatalf("adoption replay replaced permanent identity: %v", err)
+	}
+	after, err = store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, choices = buildDecision(after, oldUnits, false, time.Now())
+	first := makeSuggestion(after.SuggestionFingerprint(cfg), oldUnits[0], []string{"t0_evidence"}, choices)
+	second := makeSuggestion(after.SuggestionFingerprint(cfg), oldUnits[1], []string{"non_actionable"}, choices)
+	if err = store.publishSuggestions(ctx, after, cfg, oldUnits, false, []Suggestion{first, second}, SuggestionAttempt{Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err = store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.AdoptSuggestion(ctx, SuggestionAdoption{ID: first.ID, Choices: first.Selected, ExpectedGeneration: published.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	after, err = store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.IgnoreSuggestion(ctx, second.ID, after.Generation); err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Tasks[task.ID].Cancelled || len(final.Tasks[task.ID].ModelAttachments) != 2 || final.Dismissed[old.Key] || !final.SuggestionIgnored[oldUnits[1].ID] {
+		t.Fatal("adoption/ignore changed source disposition or cleared cancellation")
+	}
+	model := final.Project(DefaultConfig(), time.Now(), "test")
+	if len(model.Historical) != 1 || model.Historical[0].HistoryStatus != "owner-cancelled" || len(model.Next) != 0 || len(model.Unresolved) != 2 {
+		t.Fatal("noncurrent inferred task entered current work or hid source remainder")
+	}
+	if err = store.publishSuggestions(ctx, state, cfg, units, true, []Suggestion{proposal}, SuggestionAttempt{}); err == nil {
+		t.Fatal("stale model result published after owner changes")
+	}
+	// Final review: retained redirected donors cannot suppress evidence after a
+	// canonical reopen/detach, or keep an old cancellation effective.
+	destination, err := store.Apply(ctx, OwnerAction{Kind: "admit", MessageKey: old.Key, Anchor: "span-destination", Title: "Independent destination"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCorrection, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Consolidate(ctx, Consolidation{Survivor: destination, Absorb: []string{task.ID}, Authority: "owner", ExpectedGeneration: beforeCorrection.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "reopen", Scope: "task", TaskID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "detach", TaskID: destination, MessageKey: current.Key}); err != nil {
+		t.Fatal(err)
+	}
+	detached, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := unitsFor(detached, current.Key)
+	if err != nil || len(pending) != 1 || !newEligible(detached, pending[0], time.Now()) {
+		t.Fatalf("retained donor still governed detached evidence: %v", err)
+	}
+	_, choices = buildDecision(detached, pending, false, time.Now())
+	attachChoice := ""
+	for id, c := range choices {
+		if c.Kind == "attach" && c.TaskID == destination && c.Role == "evidence" {
+			attachChoice = id
+		}
+	}
+	spanProposal := makeSuggestion(detached.SuggestionFingerprint(cfg), pending[0], []string{attachChoice}, choices)
+	if err = store.publishSuggestions(ctx, detached, cfg, pending, false, []Suggestion{spanProposal}, SuggestionAttempt{Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err = store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.AdoptSuggestion(ctx, SuggestionAdoption{ID: spanProposal.ID, Choices: spanProposal.Selected, ExpectedGeneration: published.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	beadRef, _ := Bead("demo-span")
+	sourceStore := t.TempDir()
+	acquisition.BeadsStore = sourceStore
+	acquisition.Input.Results = append(acquisition.Input.Results, NamedResult{Name: "beads", Result: Result{Status: StatusOK, Items: []Item{{Ref: beadRef, Title: "Native destination", State: StateActive, Structural: true}}}})
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	withNative, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := "beads:" + sourceStore + ":" + beadRef.ID
+	nativeID := withNative.Aliases[alias]
+	// Final review: moving only adopted spans must not create a whole-message
+	// binding and hide its unsupported remainder, through either owner command.
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "move", FromTaskID: destination, TaskID: nativeID, MessageKey: current.Key}); err != nil {
+		t.Fatal(err)
+	}
+	spanMoved, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spanMoved.Tasks[nativeID].Attachments) != 0 || len(spanMoved.Tasks[nativeID].ModelAttachments) != 1 || len(spanMoved.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 1 {
+		t.Fatal("span-only move promoted evidence to whole-message attachment")
+	}
+	if _, err = store.MoveAlias(ctx, AliasMove{Alias: alias, Destination: destination, DonorAuthority: "owner", Attachments: []string{current.Key}, ExpectedGeneration: spanMoved.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	aliasMoved, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range aliasMoved.Tasks[destination].Attachments {
+		if key == current.Key {
+			t.Fatal("alias move promoted span to whole-message attachment")
+		}
+	}
+	if len(aliasMoved.Tasks[nativeID].ModelAttachments) != 0 || len(aliasMoved.Tasks[destination].ModelAttachments) != 2 || len(aliasMoved.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 1 {
+		t.Fatal("alias move lost spans or source remainder")
+	}
+	// Final review: an oversized oldest message retains its source key in a
+	// failed attempt and does not starve the following automatic iteration.
+	large, largeRaw := exported("large", "todo", strings.Repeat("A source paragraph.\n\n", 9), time.Now().UTC().Format(time.RFC3339Nano))
+	acquisition.Messages = append(acquisition.Messages, large)
+	acquisition.Evidence = append(acquisition.Evidence, largeRaw)
+	acquisition.Input.Results[0].Result.ActionStates[large.Key] = "open"
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	beforeFailure, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedUnits, planErr := unitsFor(beforeFailure, "")
+	if planErr == nil || len(failedUnits) != 8 || failedUnits[0].MessageKey != large.Key {
+		t.Fatal("oversized episode lost selected message key")
+	}
+	if err = store.publishSuggestions(ctx, beforeFailure, cfg, failedUnits, false, nil, SuggestionAttempt{Status: "unavailable", Detail: planErr.Error()}); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Suggestions.Attempt.MessageKey != large.Key || failed.Observations[large.Key].AttemptFingerprint != failed.SuggestionFingerprint(cfg) {
+		t.Fatal("failed episode attempt was not recorded")
+	}
+	remaining, nextErr := unitsFor(failed, "")
+	if nextErr != nil || len(remaining) != 0 {
+		t.Fatal("unchanged failed episode stalled the worker")
+	}
+	// Live board: a status message was rejected before the model could attach it.
+	status, statusRaw := exported("status", "status", "The local export command is ready for review.", time.Now().UTC().Format(time.RFC3339Nano))
+	acquisition.Messages = append(acquisition.Messages, status)
+	acquisition.Evidence = append(acquisition.Evidence, statusRaw)
+	acquisition.Input.Results[0].Result.ActionStates[status.Key] = "resolved"
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	withStatus, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusUnits, err := unitsFor(withStatus, status.Key)
+	if err != nil || len(statusUnits) != 1 || statusUnits[0].Quote != status.Body || newEligible(withStatus, statusUnits[0], time.Now()) {
+		t.Fatalf("status evidence must be selectable without becoming NEW work: %v", err)
 	}
 }

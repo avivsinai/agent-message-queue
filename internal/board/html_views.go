@@ -82,7 +82,7 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 			views[i].Coverage = "Incomplete coverage: " + strings.Join(gaps, ", ") + ". Some items may be missing."
 		}
 	}
-	history := pageView{ID: "history", Title: "History", Description: "Tasks no longer reported by a complete source read. Their last recorded facts remain available; they are not counted as current work.", Empty: "No historical tasks recorded."}
+	history := pageView{ID: "history", Title: "History", Description: "Completed, cancelled, and no longer reported tasks. Their evidence remains available; they are outside current work and next actions.", Empty: "No historical tasks recorded."}
 	for _, card := range m.Historical {
 		history.Strips = append(history.Strips, buildStrip(card, now, live))
 	}

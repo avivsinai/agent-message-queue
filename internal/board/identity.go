@@ -18,17 +18,19 @@ type AliasFact struct {
 }
 
 type TaskCatalogueEntry struct {
-	ID               string      `json:"id"`
-	Title            string      `json:"title"`
-	Authority        string      `json:"authority"`
-	State            State       `json:"recorded_state"`
-	Cancelled        bool        `json:"cancelled"`
-	Historical       bool        `json:"historical"`
-	Aliases          []string    `json:"aliases"`
-	Facts            []AliasFact `json:"source_facts"`
-	Attachments      []string    `json:"attachments"`
-	AdmissionAnchors []string    `json:"admission_anchors"`
-	CopiedIDs        []string    `json:"copied_ids"`
+	Inferred         bool              `json:"inferred"`
+	ModelAttachments []ModelAttachment `json:"model_attachments,omitempty"`
+	ID               string            `json:"id"`
+	Title            string            `json:"title"`
+	Authority        string            `json:"authority"`
+	State            State             `json:"recorded_state"`
+	Cancelled        bool              `json:"cancelled"`
+	Historical       bool              `json:"historical"`
+	Aliases          []string          `json:"aliases"`
+	Facts            []AliasFact       `json:"source_facts"`
+	Attachments      []string          `json:"attachments"`
+	AdmissionAnchors []string          `json:"admission_anchors"`
+	CopiedIDs        []string          `json:"copied_ids"`
 }
 
 func (s Snapshot) ResolveTaskID(id string) (string, error) {
@@ -92,7 +94,7 @@ func (s Snapshot) Catalogue() []TaskCatalogueEntry {
 	result := make([]TaskCatalogueEntry, 0, len(ids))
 	for _, id := range ids {
 		task := s.Tasks[id]
-		entry := TaskCatalogueEntry{ID: id, Title: task.Title, Authority: task.Authority, State: task.Fact.State, Cancelled: task.Cancelled, Historical: task.SourceMissing, Aliases: task.Aliases, Attachments: task.Attachments, AdmissionAnchors: task.AdmissionAnchors, Facts: []AliasFact{}, CopiedIDs: []string{}}
+		entry := TaskCatalogueEntry{Inferred: task.Inferred, ModelAttachments: task.ModelAttachments, ID: id, Title: task.Title, Authority: task.Authority, State: task.Fact.State, Cancelled: task.Cancelled, Historical: task.SourceMissing, Aliases: task.Aliases, Attachments: task.Attachments, AdmissionAnchors: task.AdmissionAnchors, Facts: []AliasFact{}, CopiedIDs: []string{}}
 		for _, alias := range task.Aliases {
 			entry.Facts = append(entry.Facts, s.Facts[alias])
 		}

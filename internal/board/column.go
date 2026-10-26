@@ -30,7 +30,7 @@ func (c Column) Title() string {
 	case ColumnRequests:
 		return "Reply due"
 	case ColumnHistorical:
-		return "Historical; not reported"
+		return "History"
 	}
 	return "Hidden"
 }

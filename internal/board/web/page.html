@@ -30,6 +30,7 @@
   <a href="#view-requests" data-view-link="requests">Requests</a>
   </div>
   <details class="secondary-nav" open><summary>More</summary><div>
+    <a href="#view-suggestions" data-view-link="suggestions">Suggestions</a>
     <a href="#view-history" data-view-link="history">History</a>
     <a href="#view-sources" data-view-link="sources">Sources</a>
     <a href="#view-agents" data-view-link="agents">Agents</a>
@@ -52,6 +53,23 @@
   {{if eq .ID "next"}}<button type="button" class="show-all" hidden>Show all known next actions</button>{{end}}
 </section>
 {{end}}
+<section class="view" id="view-suggestions" data-view="suggestions" aria-labelledby="heading-suggestions">
+  <div class="view-heading"><div><h1 id="heading-suggestions">Suggestions</h1><p class="view-description">Optional local-model matches for your review. A suggestion becomes task evidence only when you adopt it in the terminal. Model accuracy has not been measured.</p></div></div>
+  {{if .SuggestionDiagnostic}}<p class="coverage">{{.SuggestionDiagnostic}}</p>{{end}}
+  <div class="suggestion-list">{{range .Suggestions}}
+    <article class="suggestion">
+      <h2>{{.State}}</h2>
+      <blockquote>{{.Quote}}</blockquote>
+      <ul class="interpretations">{{range .Choices}}<li>{{.}}</li>{{end}}</ul>
+      <details class="suggestion-details"><summary>Review evidence and commands</summary><div class="detail-content">
+        <dl><dt>Source message</dt><dd class="token">{{.MessageKey}}</dd><dt>Exact source span</dt><dd>{{.Location}}</dd><dt>Suggestion</dt><dd class="token">{{.ID}}</dd></dl>
+        <p>Adoption applies to this quoted span. Other evidence in the message remains separate. Copying a command does not run it.</p>
+        <p>Line breaks and tabs are preserved in the quote. Other control characters are shown as escapes.</p>
+        {{range .Commands}}{{template "cmd" .}}{{else}}<p>No adoption command is available for this suggestion.</p>{{end}}
+      </div></details>
+    </article>
+  {{else}}<div class="empty"><h2>No suggestions published</h2><p>Requests remain available. To use the local model, run <code>amq-board suggest --help</code> in the terminal and supply its endpoint, model, and digest.</p></div>{{end}}</div>
+</section>
 <section class="view" id="view-sources" data-view="sources" aria-labelledby="heading-sources">
   <div class="view-heading"><div><h1 id="heading-sources">Sources</h1><p class="view-description">What this snapshot covers, and what it could not assess.</p></div></div>
   <div class="source-list">{{range .Sources}}

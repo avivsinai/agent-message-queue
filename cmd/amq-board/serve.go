@@ -74,9 +74,7 @@ func runServe(args []string) int {
 	live := &board.Live{
 		Load: func() (board.FileConfig, []string) { return loadConfig(dir) }, Now: time.Now, Logf: logf, Ctx: ctx,
 		Build: func(ctx context.Context, cfg board.FileConfig, _ bool) board.Model {
-			readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			defer cancel()
-			state, err := store.ReadContext(readCtx)
+			state, err := store.ReadContext(ctx)
 			if err != nil {
 				logf("snapshot not reloaded: %v", err)
 				if errors.Is(err, board.ErrProjectChanged) {

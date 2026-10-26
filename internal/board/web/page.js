@@ -194,7 +194,9 @@
         return;
       }
       if (state.classList.contains("is-error")) { state.classList.remove("is-error"); state.textContent = "Published snapshot is available."; }
-      if (model.generation !== snapshot.generation || model.generated_at !== snapshot.generated_at) {
+      var publication = model.published_at || model.generated_at;
+      var previousPublication = snapshot.published_at || snapshot.generated_at;
+      if (model.generation !== snapshot.generation || publication !== previousPublication) {
         pending = true; update.hidden = false;
         state.classList.remove("is-error"); state.textContent = "New snapshot available. Update when you are ready.";
       }

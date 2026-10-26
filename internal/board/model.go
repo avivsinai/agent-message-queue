@@ -42,26 +42,28 @@ type Input struct {
 
 // Model is the board: what every face renders.
 type Model struct {
-	Catalogue    []TaskCatalogueEntry `json:"catalogue"`
-	Redirects    map[string]string    `json:"redirects"`
-	Historical   []Card               `json:"historical"`
-	ActionStates map[string]string    `json:"action_states,omitempty"`
-	Schema       string               `json:"schema"`
-	Generation   uint64               `json:"generation,omitempty"`
-	PublishedAt  time.Time            `json:"published_at,omitempty"`
-	Unresolved   []Message            `json:"unresolved"`
-	GeneratedAt  time.Time            `json:"generated_at"`
-	Version      string               `json:"version"`
-	Dir          string               `json:"dir"`
-	Project      string               `json:"project,omitempty"`
-	Sessions     []string             `json:"sessions"`
-	Sources      []SourceView         `json:"sources"`
-	Columns      []ColumnView         `json:"columns"`
-	Next         []NextAction         `json:"next"`
-	Gates        []Gate               `json:"operator_gates"`
-	Roster       []RosterSession      `json:"roster"`
-	RosterNote   string               `json:"roster_note,omitempty"`
-	Usage        *UsageView           `json:"usage,omitempty"`
+	Suggestions          []Suggestion         `json:"suggestions"`
+	SuggestionDiagnostic SuggestionAttempt    `json:"suggestion_diagnostic"`
+	Catalogue            []TaskCatalogueEntry `json:"catalogue"`
+	Redirects            map[string]string    `json:"redirects"`
+	Historical           []Card               `json:"historical"`
+	ActionStates         map[string]string    `json:"action_states,omitempty"`
+	Schema               string               `json:"schema"`
+	Generation           uint64               `json:"generation,omitempty"`
+	PublishedAt          time.Time            `json:"published_at,omitempty"`
+	Unresolved           []Message            `json:"unresolved"`
+	GeneratedAt          time.Time            `json:"generated_at"`
+	Version              string               `json:"version"`
+	Dir                  string               `json:"dir"`
+	Project              string               `json:"project,omitempty"`
+	Sessions             []string             `json:"sessions"`
+	Sources              []SourceView         `json:"sources"`
+	Columns              []ColumnView         `json:"columns"`
+	Next                 []NextAction         `json:"next"`
+	Gates                []Gate               `json:"operator_gates"`
+	Roster               []RosterSession      `json:"roster"`
+	RosterNote           string               `json:"roster_note,omitempty"`
+	Usage                *UsageView           `json:"usage,omitempty"`
 	// Conversations are the harness sessions AMQ records tie to agents; they
 	// attribute usage to workers.
 	Conversations []Conversation `json:"-"`
@@ -89,26 +91,30 @@ type ColumnView struct {
 
 // Card is one unit of work with all its evidence.
 type Card struct {
-	Authority        string       `json:"authority,omitempty"`
-	SourceFacts      []AliasFact  `json:"source_facts,omitempty"`
-	Historical       bool         `json:"historical,omitempty"`
-	ID               string       `json:"id"`
-	Aliases          []string     `json:"aliases,omitempty"`
-	Attachments      []Attachment `json:"attachments,omitempty"`
-	Column           Column       `json:"column"`
-	Title            string       `json:"title"`
-	Refs             []Ref        `json:"refs"`
-	Reason           Reason       `json:"reason"`
-	ReasonSource     string       `json:"reason_source"`
-	SourceObservedAt time.Time    `json:"source_observed_at"`
-	Owners           []Owner      `json:"owners"`
-	WaitsOn          []Owner      `json:"waits_on"`
-	Requester        *Owner       `json:"requester,omitempty"`
-	Marks            []string     `json:"marks"`
-	Related          []Token      `json:"related"`
-	Actions          []Action     `json:"actions"`
-	Items            []Item       `json:"items"`
-	UpdatedAt        time.Time    `json:"updated_at"`
+	Inferred         bool              `json:"inferred,omitempty"`
+	Cancelled        bool              `json:"owner_cancelled,omitempty"`
+	HistoryStatus    string            `json:"history_status,omitempty"`
+	ModelAttachments []ModelAttachment `json:"model_attachments,omitempty"`
+	Authority        string            `json:"authority,omitempty"`
+	SourceFacts      []AliasFact       `json:"source_facts,omitempty"`
+	Historical       bool              `json:"historical,omitempty"`
+	ID               string            `json:"id"`
+	Aliases          []string          `json:"aliases,omitempty"`
+	Attachments      []Attachment      `json:"attachments,omitempty"`
+	Column           Column            `json:"column"`
+	Title            string            `json:"title"`
+	Refs             []Ref             `json:"refs"`
+	Reason           Reason            `json:"reason"`
+	ReasonSource     string            `json:"reason_source"`
+	SourceObservedAt time.Time         `json:"source_observed_at"`
+	Owners           []Owner           `json:"owners"`
+	WaitsOn          []Owner           `json:"waits_on"`
+	Requester        *Owner            `json:"requester,omitempty"`
+	Marks            []string          `json:"marks"`
+	Related          []Token           `json:"related"`
+	Actions          []Action          `json:"actions"`
+	Items            []Item            `json:"items"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 	stale            bool
 }
 

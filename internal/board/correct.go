@@ -87,6 +87,9 @@ func (s Store) Consolidate(ctx context.Context, request Consolidation) (string, 
 		for id := range inputs {
 			task := state.Tasks[id]
 			survivor.Cancelled = survivor.Cancelled || task.Cancelled
+			for _, binding := range task.ModelAttachments {
+				survivor.ModelAttachments = appendModelAttachment(survivor.ModelAttachments, binding)
+			}
 			survivor.Attachments = appendUnique(survivor.Attachments, task.Attachments...)
 			survivor.AdmissionAnchors = appendUnique(survivor.AdmissionAnchors, task.AdmissionAnchors...)
 		}
@@ -149,8 +152,15 @@ func (s Store) MoveAlias(ctx context.Context, request AliasMove) (string, error)
 		}
 		for _, key := range request.Attachments {
 			found := false
+			wholeMessage := false
 			for _, attached := range from.Attachments {
 				if attached == key {
+					found = true
+					wholeMessage = true
+				}
+			}
+			for _, binding := range from.ModelAttachments {
+				if binding.Unit.MessageKey == key {
 					found = true
 				}
 			}
@@ -164,7 +174,18 @@ func (s Store) MoveAlias(ctx context.Context, request AliasMove) (string, error)
 				}
 			}
 			from.Attachments = kept
-			to.Attachments = appendUnique(to.Attachments, key)
+			if wholeMessage {
+				to.Attachments = appendUnique(to.Attachments, key)
+			}
+			var keptBindings []ModelAttachment
+			for _, binding := range from.ModelAttachments {
+				if binding.Unit.MessageKey == key {
+					to.ModelAttachments = appendModelAttachment(to.ModelAttachments, binding)
+				} else {
+					keptBindings = append(keptBindings, binding)
+				}
+			}
+			from.ModelAttachments = keptBindings
 		}
 		state.Tasks[donor], state.Tasks[destination] = from, to
 		state.Aliases[request.Alias] = destination

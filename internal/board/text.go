@@ -89,6 +89,17 @@ func WriteText(w io.Writer, m Model) error {
 		}
 	}
 
+	b.WriteString("\n== Suggestions — AMQ quality not yet measured ==\n")
+	fmt.Fprintf(&b, "  %s: %s\n", clean(m.SuggestionDiagnostic.Status), clean(m.SuggestionDiagnostic.Detail))
+	for _, p := range m.Suggestions {
+		fmt.Fprintf(&b, "  %s: %s\n    exact quote: %s\n    selected IDs: %s\n", clean(p.ID), clean(p.Unit.MessageKey), clean(p.Unit.Quote), strings.Join(p.Selected, ", "))
+		for _, c := range p.Choices {
+			fmt.Fprintf(&b, "    %s: %s %s %s\n", clean(c.ID), clean(c.Kind), clean(c.TaskID), clean(c.Role))
+		}
+		for _, a := range p.Commands {
+			fmt.Fprintf(&b, "    %s: %s\n", clean(a.Label), clean(a.Command))
+		}
+	}
 	b.WriteString("\n== Historical tasks (outside current work counts) ==\n")
 	for _, card := range m.Historical {
 		writeCard(&b, card, now, live)
@@ -135,6 +146,12 @@ func WriteText(w io.Writer, m Model) error {
 
 func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]string) {
 	fmt.Fprintf(b, "  * %s\n    Task ID: %s\n", cleanTitle(c.Title), clean(c.ID))
+	if c.HistoryStatus != "" {
+		fmt.Fprintf(b, "    History: %s\n", clean(c.HistoryStatus))
+	}
+	for _, binding := range c.ModelAttachments {
+		fmt.Fprintf(b, "    Inferred attachment (%s), %s [%d:%d]: %s\n", clean(binding.Role), clean(binding.Unit.MessageKey), binding.Unit.Start, binding.Unit.End, clean(binding.Unit.Quote))
+	}
 	var refs []string
 	for _, it := range c.Items {
 		refs = append(refs, refLabel(it))

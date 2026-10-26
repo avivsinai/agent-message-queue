@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/board/decision"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 )
 
 func runSync(args []string) int {
 	flags := flag.NewFlagSet("amq-board sync", flag.ContinueOnError)
 	init := flags.Bool("init", false, "initialize the project store for the first time")
+	suggestions := flags.Bool("suggestions", false, "opt in to provisional suggestions with user-configured provider pins")
 	watch := flags.Bool("watch", false, "acquire and publish once per minute")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -105,6 +107,12 @@ func runSync(args []string) int {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "amq-board sync:", err)
 			return exitGeneral
+		}
+		if *suggestions {
+			cfg = loader.ReloadConfig()
+			if suggestErr := store.Suggest(ctx, cfg.Suggestions, "", false, func() decision.Config { return loader.ReloadConfig().Suggestions }); suggestErr != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "amq-board suggestions:", suggestErr)
+			}
 		}
 		state, readErr = store.ReadContext(ctx)
 		if readErr != nil {

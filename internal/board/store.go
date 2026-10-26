@@ -42,39 +42,46 @@ type Store struct {
 }
 
 type Snapshot struct {
-	Facts           map[string]AliasFact         `json:"source_facts"`
-	ClaudeLists     map[string]ClaudeListBinding `json:"claude_lists,omitempty"`
-	Schema          string                       `json:"schema"`
-	BaseRoot        string                       `json:"base_root"`
-	BaseRootID      string                       `json:"base_root_id"`
-	ProjectID       string                       `json:"project_id"`
-	HostID          string                       `json:"host_id"`
-	Generation      uint64                       `json:"generation"`
-	PublishedAt     time.Time                    `json:"published_at"`
-	Input           Input                        `json:"input"`
-	Usage           *UsageView                   `json:"usage,omitempty"`
-	Tasks           map[string]Task              `json:"tasks"`
-	Anchors         map[string]string            `json:"admission_anchors"`
-	Aliases         map[string]string            `json:"aliases"`
-	Messages        map[string]Message           `json:"messages"`
-	Dismissed       map[string]bool              `json:"dismissed"`
-	ActionCancelled map[string]bool              `json:"action_cancelled"`
-	Withdrawals     map[string]string            `json:"withdrawal_adoptions"`
+	HistoryBaseline   time.Time                     `json:"history_baseline,omitzero"`
+	Observations      map[string]MessageObservation `json:"message_observations,omitempty"`
+	Suggestions       SuggestionState               `json:"suggestions"`
+	SuggestionIgnored map[string]bool               `json:"suggestion_ignored,omitempty"`
+	SuggestionAdopted map[string]string             `json:"suggestion_adopted,omitempty"`
+	Facts             map[string]AliasFact          `json:"source_facts"`
+	ClaudeLists       map[string]ClaudeListBinding  `json:"claude_lists,omitempty"`
+	Schema            string                        `json:"schema"`
+	BaseRoot          string                        `json:"base_root"`
+	BaseRootID        string                        `json:"base_root_id"`
+	ProjectID         string                        `json:"project_id"`
+	HostID            string                        `json:"host_id"`
+	Generation        uint64                        `json:"generation"`
+	PublishedAt       time.Time                     `json:"published_at"`
+	Input             Input                         `json:"input"`
+	Usage             *UsageView                    `json:"usage,omitempty"`
+	Tasks             map[string]Task               `json:"tasks"`
+	Anchors           map[string]string             `json:"admission_anchors"`
+	Aliases           map[string]string             `json:"aliases"`
+	Messages          map[string]Message            `json:"messages"`
+	Dismissed         map[string]bool               `json:"dismissed"`
+	ActionCancelled   map[string]bool               `json:"action_cancelled"`
+	Withdrawals       map[string]string             `json:"withdrawal_adoptions"`
 }
 
 type Task struct {
-	ID               string    `json:"id"`
-	Title            string    `json:"title"`
-	Authority        string    `json:"authority"`
-	Fact             Item      `json:"-"`
-	OwnerFact        Item      `json:"owner_fact,omitzero"`
-	RedirectTo       string    `json:"redirect_to,omitempty"`
-	AdmissionAnchors []string  `json:"admission_anchors,omitempty"`
-	Aliases          []string  `json:"aliases"`
-	Attachments      []string  `json:"attachments"`
-	Cancelled        bool      `json:"owner_cancelled"`
-	ObservedAt       time.Time `json:"-"`
-	SourceMissing    bool      `json:"-"`
+	Inferred         bool              `json:"inferred,omitempty"`
+	ModelAttachments []ModelAttachment `json:"model_attachments,omitempty"`
+	ID               string            `json:"id"`
+	Title            string            `json:"title"`
+	Authority        string            `json:"authority"`
+	Fact             Item              `json:"-"`
+	OwnerFact        Item              `json:"owner_fact,omitzero"`
+	RedirectTo       string            `json:"redirect_to,omitempty"`
+	AdmissionAnchors []string          `json:"admission_anchors,omitempty"`
+	Aliases          []string          `json:"aliases"`
+	Attachments      []string          `json:"attachments"`
+	Cancelled        bool              `json:"owner_cancelled"`
+	ObservedAt       time.Time         `json:"-"`
+	SourceMissing    bool              `json:"-"`
 }
 
 // Message is one exact exported message, scoped to its source root.
@@ -315,6 +322,9 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
 	if err := s.verifyMessages(ctx, &state); err != nil {
 		return Snapshot{}, err
 	}
+	if err := state.validateModelBindings(); err != nil {
+		return Snapshot{}, err
+	}
 	return state, nil
 }
 
@@ -344,6 +354,9 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		}
 		state.hydrateAuthorities()
 		if err = s.verifyMessages(ctx, &state); err != nil {
+			return err
+		}
+		if err = state.validateModelBindings(); err != nil {
 			return err
 		}
 		data, err := snapshotBytes(&state)
@@ -579,6 +592,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			}
 			state.Messages[m.Key] = m
 		}
+		state.observeMessages(time.Now().UTC())
 		for sourceIndex, nr := range a.Input.Results {
 			if nr.Name != "beads" && nr.Name != "codex-goals" && nr.Name != "claude-tasks" || stale[nr.Name] {
 				continue
@@ -712,8 +726,16 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 					}
 				}
 				task.Attachments = kept
+				var keptBindings []ModelAttachment
+				for _, b := range task.ModelAttachments {
+					if b.Unit.MessageKey != a.MessageKey {
+						keptBindings = append(keptBindings, b)
+					}
+				}
+				task.ModelAttachments = keptBindings
 				return task
 			}
+			transferWholeMessage := a.Kind == "attach"
 			if a.Kind == "move" {
 				from, ok := state.Tasks[a.FromTaskID]
 				if !ok || a.FromTaskID == id {
@@ -723,6 +745,13 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 				for _, key := range from.Attachments {
 					if key == a.MessageKey {
 						hasBinding = true
+						transferWholeMessage = true
+					}
+				}
+				for _, b := range from.ModelAttachments {
+					if b.Unit.MessageKey == a.MessageKey {
+						hasBinding = true
+						task.ModelAttachments = appendModelAttachment(task.ModelAttachments, b)
 					}
 				}
 				if !hasBinding {
@@ -732,7 +761,7 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 			}
 			if a.Kind == "detach" {
 				task = remove(task)
-			} else {
+			} else if transferWholeMessage {
 				found := false
 				for _, key := range task.Attachments {
 					if key == a.MessageKey {
@@ -795,7 +824,6 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	m.Usage = s.Usage
 	m.Generation = s.Generation
 	m.PublishedAt = s.PublishedAt
-	m.GeneratedAt = s.PublishedAt
 	for i := range m.Columns {
 		m.Columns[i].Cards = []Card{}
 	}
@@ -803,6 +831,8 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	m.Historical = []Card{}
 	m.Catalogue = s.Catalogue()
 	m.Redirects = s.redirects()
+	m.Suggestions = s.SuggestionViews()
+	m.SuggestionDiagnostic = s.Suggestions.Attempt
 	attached := map[string]bool{}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
@@ -817,9 +847,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		for _, key := range task.Attachments {
 			attached[key] = true
 		}
-		if task.Cancelled {
-			continue
-		}
+
 		it := task.Fact
 		it.Title = task.Title
 		if task.Authority == "operator" {
@@ -831,12 +859,15 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			col = ColumnHistorical
 		}
 		if col == ColumnHidden {
-			continue
+			col = ColumnHistorical
 		}
-		if task.Authority == "operator" {
+		if task.Authority == "operator" && col != ColumnHistorical {
 			col = ColumnUnclaimed
 		}
-		card := Card{ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
+		if task.Cancelled {
+			col = ColumnHistorical
+		}
+		card := Card{Inferred: task.Inferred, Cancelled: task.Cancelled, ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
 		card.SourceObservedAt = task.ObservedAt
 		card.Authority = task.Authority
 		for _, alias := range task.Aliases {
@@ -851,8 +882,26 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 				}
 			}
 		}
+		if task.Inferred {
+			card.Marks = append(card.Marks, "owner-adopted inferred/requested outcome")
+		}
+		card.ModelAttachments = task.ModelAttachments
+		if col == ColumnHistorical {
+			card.Historical = true
+			card.HistoryStatus = "recorded " + string(it.State)
+		}
+		if it.State == StateDone {
+			card.HistoryStatus = "completed"
+		}
+		if task.Cancelled {
+			card.HistoryStatus = "owner-cancelled"
+			card.Marks = append(card.Marks, "owner-cancelled; retained outside current work")
+		}
 		if task.SourceMissing {
 			card.Historical = true
+			if !task.Cancelled {
+				card.HistoryStatus = "not reported"
+			}
 			card.Reason.Text = "Historical; source no longer reports this task. Last recorded: " + card.Reason.Text
 			card.Marks = append(card.Marks, "source no longer reports this task; last recorded state retained")
 		}
@@ -897,7 +946,11 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 			card.Actions = append(card.Actions, newOwnerAction(operation+" this request action", "amq-board", operation, "--scope", "action", "--message", key))
 		}
-		card.Actions = append(card.Actions, newOwnerAction("Cancel this task", "amq-board", "cancel", "--scope", "task", "--task", id))
+		taskOperation := "cancel"
+		if task.Cancelled {
+			taskOperation = "reopen"
+		}
+		card.Actions = append(card.Actions, newOwnerAction(taskOperation+" this task", "amq-board", taskOperation, "--scope", "task", "--task", id))
 		if card.Historical {
 			m.Historical = append(m.Historical, card)
 			continue

@@ -1,9 +1,13 @@
 package board
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/avivsinai/agent-message-queue/internal/board/decision"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +35,7 @@ type Provider struct {
 
 // FileConfig is the merged user and project configuration.
 type FileConfig struct {
+	Suggestions        decision.Config
 	Board              Config
 	BeadsAssignees     []string
 	GitHubLogins       []string
@@ -62,6 +67,11 @@ func DefaultFileConfig() FileConfig {
 }
 
 type rawConfig struct {
+	Suggestions *struct {
+		Endpoint string `json:"endpoint"`
+		Model    string `json:"model"`
+		Digest   string `json:"digest"`
+	} `json:"suggestions"`
 	Humans *struct {
 		BeadsAssignees []string `json:"beads_assignees"`
 		GitHubLogins   []string `json:"github_logins"`
@@ -142,6 +152,16 @@ func readRawConfig(path string, warn func(string, ...any)) (rawConfig, bool) {
 }
 
 func applyUser(cfg *FileConfig, raw rawConfig, path string, warn func(string, ...any)) {
+	if raw.Suggestions != nil {
+		p := raw.Suggestions
+		u, err := url.Parse(p.Endpoint)
+		_, digestErr := hex.DecodeString(p.Digest)
+		if err != nil || u.Scheme != "http" || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || p.Model != "qwen3.5:4b" || len(p.Digest) != 64 || digestErr != nil {
+			warn("%s: suggestions need literal loopback HTTP, qwen3.5:4b and a full digest; refused", path)
+		} else {
+			cfg.Suggestions = decision.Config{Endpoint: p.Endpoint, Model: p.Model, Digest: p.Digest}
+		}
+	}
 	if h := raw.Humans; h != nil {
 		cfg.BeadsAssignees = append([]string(nil), h.BeadsAssignees...)
 		cfg.GitHubLogins = append([]string(nil), h.GitHubLogins...)
@@ -196,6 +216,9 @@ func applyUser(cfg *FileConfig, raw rawConfig, path string, warn func(string, ..
 }
 
 func applyProject(cfg *FileConfig, raw rawConfig, path string, warn func(string, ...any)) {
+	if raw.Suggestions != nil {
+		warn("%s: suggestions provider pins may be set only in the user file; refused", path)
+	}
 	if raw.Humans != nil {
 		warn("%s: humans may be set only in the user file; ignored", path)
 	}

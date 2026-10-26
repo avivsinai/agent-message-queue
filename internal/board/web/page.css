@@ -127,6 +127,17 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .clear-search { margin-left: .5rem; }
 .show-all { margin-top: 1.5rem; }
 .source-list { background: var(--surface); border: 1px solid var(--divider); border-radius: .75rem; }
+.suggestion-list { background: var(--surface); border: 1px solid var(--divider); border-radius: .75rem; }
+.suggestion { padding: 1.25rem 1.5rem; overflow-wrap: anywhere; }
+.suggestion + .suggestion { border-top: 1px solid var(--divider); }
+.suggestion blockquote { margin: 1rem 0; max-width: 66ch; white-space: pre-wrap; }
+.interpretations { max-width: 66ch; }
+.interpretations li + li { margin-top: .5rem; }
+.suggestion-details { margin-top: .75rem; }
+.attach-control { display: grid; gap: .75rem; }
+.attach-control > label:first-child { display: grid; gap: .5rem; }
+.attach-task { width: 100%; min-height: 2.75rem; padding: .625rem .75rem; border: 1px solid var(--control); border-radius: .5rem; background: var(--surface); color: var(--ink); }
+.attach-selection { color: var(--muted); font-size: .875rem; }
 .source, .crew { padding: 1.25rem 1.5rem; overflow-wrap: anywhere; }
 .source + .source, .crew + .crew { border-top: 1px solid var(--divider); }
 .source p, .crew > p { margin-top: .5rem; }
@@ -149,7 +160,6 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .mast-id { flex-basis: 100%; }
   .snapshot { justify-content: flex-start; width: 100%; }
   .mast-gen { flex: 1 1 12rem; }
-  #page-age { display: none; }
   .workspace { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; padding-top: 1rem; }
   .navigation { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: .5rem; }
   .primary-nav { display: flex; flex-wrap: wrap; gap: .25rem; }
@@ -169,7 +179,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .primary-copy { width: auto; }
   .item-details { grid-column: 1; }
   .item-meta { gap: .5rem .875rem; }
-  .source, .crew { padding: 1rem; }
+  .source, .crew, .suggestion { padding: 1rem; }
   .appearance { flex-wrap: wrap; }
   dl { grid-template-columns: minmax(0, 1fr); gap: .25rem; }
   dd + dt { margin-top: .5rem; }

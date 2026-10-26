@@ -143,6 +143,7 @@ Inline disclosures reveal context in place. Color supports written state: warnin
 - Readable titles, body text, and metadata at distinct sizes.
 - Flat surfaces, fine dividers, and restrained cobalt selection.
 - Native inline disclosures and visible keyboard focus.
+- Separate destinations for Suggestions and History.
 
 ## Colors
 
@@ -201,13 +202,16 @@ Outlined surface buttons use accent text. Hover uses the selected tone, active u
 Search has a visible label, surface fill, control border, and full-size body type. Commands use a readonly, resizable monospace textarea with a minimum height of 4.5rem. Both retain visible focus.
 
 ### Navigation
-Primary destinations are Next, Work, Backlog, and Requests. Sources, Agents, and Appearance form secondary context. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts.
+Primary destinations are Next, Work, Backlog, and Requests. Suggestions, History, Sources, Agents, and Appearance sit under More. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts.
 
 ### Cards / Containers
 A shared list surface groups work records; each row holds a title, reason, metadata, copy action, and Details. Secondary source and agent lists use the same surface and divider treatment. Empty states remain inside the list surface; search-empty feedback sits outside it.
 
 ### Inline Disclosure
 Details keep source evidence and selectable commands in the reading flow. The detail body uses subtle fill and 1rem padding. Coverage is a compact warning disclosure above work lists, with its missing scope and source link inside. Header feedback keeps refresh errors and a pending Update snapshot action close to the snapshot time.
+
+### Suggestion Review
+Suggestions use the shared white list surface and fine dividers. Each entry shows its state, quoted source span, and proposed interpretations; native Details reveals the source message, exact span, and available terminal commands. Suggestions remain a separate review surface, outside task counts.
 
 ## Do's and Don'ts
 

@@ -18,7 +18,7 @@ scan mailboxes itself or fall back to a different source.
 
 ## Tasks and unresolved asks
 
-A native Beads task and an explicitly admitted AMQ outcome have a permanent
+A supported native task and an explicitly admitted AMQ outcome have a permanent
 project-local task ID. Each admitted task has one card. Native references and
 exact AMQ messages are evidence on that card. Delivery copies share one logical
 message key: canonical base namespace plus message ID. Root, session, and mailbox
@@ -60,6 +60,20 @@ Detach removes only the named binding; move names both the source and destinatio
 Task cancellation and request/review action cancellation are separate. Source
 sync cannot clear either cancellation. Reopen is an explicit scoped action.
 
+Use `amq-board catalogue` to inspect current, completed, cancelled, and historical
+tasks together. `--task ID` also resolves a copied ID after consolidation.
+Sources keep their own facts; the owner chooses which alias supplies lifecycle
+state when tasks are consolidated or an alias is moved.
+
+```sh
+amq-board consolidate --task kept-ID --absorb duplicate-ID --authority ALIAS --generation N
+amq-board move-alias --alias ALIAS --task destination-ID --donor-authority owner --generation N
+```
+
+Read the catalogue's current generation and authority aliases before either
+command. Absorbed IDs redirect to the survivor. Consolidation preserves owner
+cancellation; reopening requires an explicit owner action.
+
 To adopt recorded withdrawals, run `amq-board adopt --file withdrawals.json`.
 Both messages must already be in the published history. The command is the
 local operator's authorization; a source handle or message body does not grant
@@ -68,6 +82,47 @@ authority. The full batch commits together.
 ```json
 {"withdrawals":[{"message_key":"/root#request-id","withdrawal_key":"/root#withdrawal-id"}]}
 ```
+
+## Local suggestions
+
+Suggestions are optional interpretations of exact quoted message spans. They
+remain outside task and work counts until the owner adopts them. Their accuracy
+on AMQ work has not been measured. Unsupported matches remain unresolved;
+bounded retrieval does not establish that an outcome is new.
+Replies, status updates, and resolved requests can supply attachment evidence;
+they do not establish current work or qualify for a new task.
+
+Each pass handles one whole message with at most eight quoted units. Episode
+context contains whole exact referenced messages and direct replies, with a
+bound of eight messages and 16 KiB. Excess required context is refused, not
+clipped. Omitted shared-thread context is stated and prevents a new-task
+suggestion. The worker skips unchanged attempts and advances through pending
+messages; `--message KEY` selects an exact message for a manual pass.
+
+```sh
+amq-board suggest --endpoint http://127.0.0.1:11434 --model qwen3.5:4b --digest FULL_DIGEST
+amq-board suggestions
+amq-board adopt-suggestion --suggestion ID --choice SELECTED_ID --generation N
+amq-board ignore-suggestion --suggestion ID --generation N
+```
+
+Supply the full model digest from your local installation. The endpoint must
+be literal loopback HTTP. The client checks the pinned Ollama version, model
+digest, and disabled-cloud status; it does not start a server or download a
+model. A failed check leaves tasks unchanged.
+
+Text, JSON, and web views show the selected interpretations, source quotes,
+and owner commands. Adoption requires the current generation and every
+published selected choice ID; repeat `--choice` for multiple selections. A
+new task also requires `--confirm-independent` after the owner reviews existing
+and historical candidates. It is marked inferred/requested, never running.
+Adoption applies to the quoted span, so other evidence in the message remains
+separate. Ignoring a suggestion preserves the source message.
+
+For sync-time processing, explicitly run `amq-board sync --suggestions` and
+set `suggestions.endpoint`, `suggestions.model`, and `suggestions.digest` in
+the user configuration `~/.amq/board.json`. Provider settings are user-only and
+reload with the existing configuration. Ordinary sync does not run inference.
 
 ## Publication and recovery
 
@@ -132,7 +187,8 @@ A single 16 MiB acquisition byte budget covers task payloads and session scope
 reads across all homes. A stopped or incomplete scope preserves prior facts.
 The filesystem adapter cannot certify other backends are empty. Native file
 absence retains the prior task fact; it does not complete or cancel a task.
-Model inference is not supported.
+Native acquisition does not use model inference. Optional local suggestions
+are a separate owner-adopted surface.
 
 Configuration uses `~/.amq/board.json` and `.amq/board.json`. Settings include
 `sources`, `humans`, `forges`, `providers`, `liveness_window`, `stale_after`,

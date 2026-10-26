@@ -35,6 +35,10 @@ const (
 
 const usage = `Usage: amq-board [--json | --html [--out FILE]]
        amq-board sync [--init] [--watch]
+       amq-board suggest --endpoint URL --model qwen3.5:4b --digest HEX [--message KEY]
+       amq-board suggestions
+       amq-board adopt-suggestion --suggestion ID --choice ID --generation N [--confirm-independent]
+       amq-board ignore-suggestion --suggestion ID --generation N
        amq-board serve
        amq-board admit --message KEY --title OUTCOME
        amq-board attach|detach --task ID --message KEY
@@ -49,6 +53,9 @@ const usage = `Usage: amq-board [--json | --html [--out FILE]]
        amq-board move-alias --alias ALIAS --task ID --donor-authority ALIAS|owner --generation N
 
 Views read the published project snapshot. Only sync reads sources.
+Suggestion workers examine one whole message per iteration (up to eight units),
+prefer current messages, and skip unchanged attempts. Select an exact message with
+suggest --message KEY when you need a specific episode.
 First initialization is explicit; an existing or interrupted store needs
 recovery and is never replaced. Native Beads and admitted AMQ outcomes
 have permanent task IDs. Unresolved messages are outside task counts.
@@ -62,6 +69,8 @@ func main() {
 func run(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
+		case "suggest", "suggestions", "adopt-suggestion", "ignore-suggestion":
+			return runSuggestions(args[0], args[1:])
 		case "sync":
 			return runSync(args[1:])
 		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list", "consolidate", "move-alias", "catalogue":

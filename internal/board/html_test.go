@@ -63,6 +63,11 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 			Limits: []usage.Limit{{Kind: "unknown", Name: hostile, Reason: hostile}},
 			Other:  []Usage{{Window: hostile, CostUSD: &cost, CostKind: hostile}}}},
 	}
+	m.Suggestions = []Suggestion{{
+		ID: hostile, Unit: EvidenceUnit{MessageKey: hostile, Field: hostile, Quote: hostile + "\n\tSource continuation"},
+		Choices: []SuggestionChoice{{Kind: "new", Outcome: &EvidenceUnit{Quote: hostile}}},
+	}}
+	m.SuggestionDiagnostic = SuggestionAttempt{Status: "unavailable", Detail: hostile}
 
 	var page strings.Builder
 	if err := WriteHTML(&page, m, Quote([]string{"amq-board", "--html", "--out", hostile})); err != nil {
@@ -96,6 +101,10 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	}
 
 	outside := html[:start] + html[start+end:]
+	// Live Suggestions: terminal sanitization replaced source line breaks with '?'.
+	if !strings.Contains(outside, "\n\tSource continuation</blockquote>") {
+		t.Error("source quote lost its line breaks or tabs")
+	}
 	for _, bad := range []string{"<img", "onerror=alert(1)>", "</script><!--", "<!--", "\u2028"} {
 		if strings.Contains(outside, bad) || strings.Contains(embedded, bad) {
 			t.Errorf("page holds %q unescaped", bad)
@@ -145,11 +154,16 @@ func TestHTMLUnknownStateAgeReadsOnce(t *testing.T) {
 		Reason: Reason{Field: "kind", Text: "todo owed by user"},
 	}}}
 	m := Build(Input{Results: []NamedResult{{Name: "amq", Result: amq}}, Config: DefaultConfig(), Now: now})
+	// Live board: the header must retain publication age when a view is rendered later.
+	m.PublishedAt = now.Add(-time.Hour)
 	var page strings.Builder
 	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
 		t.Fatal(err)
 	}
 	if html := page.String(); strings.Contains(html, "Requested Requested") || strings.Count(html, "Requested unknown") != 2 {
 		t.Error(`the missing request age must read "Requested unknown" once in each view`)
+	}
+	if !strings.Contains(page.String(), `datetime="2026-10-25T11:00:00Z"`) {
+		t.Error("snapshot timestamp became the later view-render time")
 	}
 }

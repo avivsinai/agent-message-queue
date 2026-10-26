@@ -86,6 +86,16 @@ func TestLiveReloadsConfigAndKeepsLastGoodOnRefusedEdit(t *testing.T) {
 	if refused != 1 {
 		t.Fatalf("refused edit reported %d times, want once: %q", refused, logs)
 	}
+	// Suggestion provider pins use this same user-only last-good boundary.
+	write(`{"suggestions":{"endpoint":"http://127.0.0.1:11434","model":"qwen3.5:4b","digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}`)
+	accepted := l.ReloadConfig().Suggestions
+	if accepted.Endpoint != "http://127.0.0.1:11434" {
+		t.Fatal("valid suggestion pins not applied")
+	}
+	write(`{"suggestions":{"endpoint":"http://remote.example:11434","model":"qwen3.5:4b","digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}`)
+	if l.ReloadConfig().Suggestions != accepted {
+		t.Fatal("refused provider edit replaced last-good pins")
+	}
 }
 
 // Design 8 route contract (finding 15): every route needs the token; without
