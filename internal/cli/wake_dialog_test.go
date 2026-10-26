@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -61,10 +62,20 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		notices = append(notices, title+": "+body)
 		return nil
 	}
+	// field: session3/claude doorbell held 13 h (2026-10-26). The wake log
+	// named no marker event, kind or time, so the hold could not be traced;
+	// the holding line now dates itself and names the marker.
+	h.cfg.dialogHoldDetail = wakeDialogHoldDetailInDir(agentDir)
 	h.send("a", format.PriorityNormal)
-	h.scan(h.cfg)
+	_, stderr, _ := captureEnvOutput(t, func() error {
+		h.scan(h.cfg)
+		return nil
+	})
 	if len(h.injected) != 0 {
 		t.Fatalf("typed %q into an open dialog", h.injected)
+	}
+	if !regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ amq wake: holding the doorbell while a harness dialog is open \(marker event="PreToolUse" kind="" harness="claude" tool="AskUserQuestion" age=0s\)$`).MatchString(stderr) {
+		t.Fatalf("holding diagnostic = %q, want a UTC-stamped line naming the marker event, kind, harness, tool and age", stderr)
 	}
 	if len(notices) != 1 || !strings.Contains(notices[0], "AMQ: codex: 1 message waiting") ||
 		!strings.Contains(notices[0], "Claude Code dialog open") {
@@ -93,6 +104,63 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("full doorbells after the dialog closed = %d, want 1", got)
+	}
+}
+
+// field: session3/claude doorbell held 13 h (2026-10-26). A permission
+// marker carries no tool_use_id, so only Stop or a prompt closed it, and a
+// turn interrupted after an approval held the doorbell for hours. The
+// approved call's PostToolUse or PostToolUseFailure, matched by tool_input,
+// and idle_prompt now close it. Another call's PostToolUse does not: Claude
+// Code asks parallel calls one dialog at a time, and the next call's
+// PermissionRequest can land before the previous call's PostToolUse.
+// AskUserQuestion gets a PermissionRequest right after its PreToolUse, and
+// its PostToolUse input adds the answers, so the marker keeps the
+// PreToolUse tool_use_id (live, Claude Code 2.1.310).
+func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
+	const (
+		permission = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"d"}}`
+		askPre     = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}]}}`
+		askPerm    = `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Color?"}]}}`
+		askPost    = `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}],"answers":{"Color?":"Red"}}}`
+	)
+	type step struct{ verb, input string }
+	for _, tc := range []struct {
+		name   string
+		steps  []step
+		closed bool
+	}{
+		{"PostToolUse of the asked call", []step{{"open", permission}, {"close",
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true},
+		{"PostToolUseFailure of the asked call", []step{{"open", permission}, {"close",
+			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true},
+		{"PostToolUse of another call", []step{{"open", permission}, {"close",
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false},
+		{"idle_prompt", []step{{"open", permission}, {"notify",
+			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true},
+		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+				t.Fatal(err)
+			}
+			clearSendMailboxTestEnv(t)
+			t.Setenv(envMe, "claude")
+			t.Setenv(envRoot, root)
+			for _, step := range tc.steps {
+				if err := runWakeDialog([]string{step.verb}, strings.NewReader(step.input)); err != nil {
+					t.Fatalf("wake dialog %s: %v", step.verb, err)
+				}
+			}
+			_, err := os.Stat(filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName))
+			if closed := os.IsNotExist(err); closed != tc.closed {
+				t.Fatalf("marker closed = %v (stat %v), want %v", closed, err, tc.closed)
+			}
+		})
 	}
 }
 
@@ -132,7 +200,13 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	}{
 		{"PreToolUse", "AskUserQuestion|ExitPlanMode", "open", 5},
 		{"PermissionRequest", "", "open", 5},
-		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close", 5},
+		// field: session3/claude doorbell held 13 h (2026-10-26). Every
+		// tool call's PostToolUse or PostToolUseFailure reaches the
+		// receiver, so an approved permission dialog closes at once; and
+		// Notification idle_prompt closes, permission_prompt reopens.
+		{"PostToolUse", "", "close", 5},
+		{"PostToolUseFailure", "", "close", 5},
+		{"Notification", "idle_prompt|permission_prompt", "notify", 5},
 		{"UserPromptSubmit", "", "close", 5},
 		{"Stop", "", "close", 5},
 		{"SessionStart", "", "close", 5},
@@ -221,7 +295,7 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 			_, err := os.Stat(ran)
 			started := err == nil
 			want := tc.shut
-			if wakeDialogHookVerb(hook.Event) == "open" {
+			if wakeDialogHookVerb(hook.Event) != "close" {
 				want = tc.open
 			}
 			if started != want {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -88,7 +89,8 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 		t.Fatalf("%s was not cleared by runWakeWithLoop", envWakeAttentionFD)
 	}
 	descriptorOwnedByTest = false
-	if stderr != "diagnostic-only\n" {
+	// Diagnostics start with the UTC time (writeWakeDiagnostic).
+	if _, line, ok := strings.Cut(stderr, "Z "); !ok || line != "diagnostic-only\n" {
 		t.Fatalf("diagnostic stream = %q, want only diagnostic", stderr)
 	}
 	if inputWrites != 0 {

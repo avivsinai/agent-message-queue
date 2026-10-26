@@ -1568,15 +1568,17 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close|notify
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
 
 open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
 it is present. close removes it; a close with a tool_use_id removes only the marker
-of that tool call, and a close with unreadable input keeps it. A close with empty
-stdin removes it. With --harness codex or cursor only a turn or session event
+of that tool call or of the permission dialog with the same tool_input, and a close
+with unreadable input keeps it. A close with empty stdin removes it. notify reads a
+Claude Code Notification: idle_prompt closes, permission_prompt opens a missing
+marker. With --harness codex or cursor only a turn or session event
 removes it; for codex without AM_* the seat is the one amq coop exec recorded for
 the hook's session_id.
 Always exits 0 once the arguments parse and prints nothing.

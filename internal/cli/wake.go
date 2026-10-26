@@ -71,6 +71,7 @@ type wakeConfig struct {
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	dialogHoldReason              func() (reason string, marker bool)          // why the marker holds input; marker=false when no marker exists; nil = a generic reason
+	dialogHoldDetail              func(now time.Time) string                   // the marker's event, kind, harness, tool and age for the wake log; nil = none
 	desktopNotify                 func(title, body string) error               // the held-doorbell desktop notice; nil = none (direct loop tests)
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
 	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release

@@ -2876,6 +2876,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
 		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir), s.startupHold),
 		dialogHoldReason:        wakeDialogHoldReasonInDir(activeAgentDir),
+		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir),
 		desktopNotify:           wakeDesktopNotifier(),
 		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir),
 		settingsObserved:        startupSettings.observed,

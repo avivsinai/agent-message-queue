@@ -78,13 +78,17 @@ func holdWakeForDialog(
 	now := cfg.wakeDoorbellNow()
 	if cfg.dialogHold != state {
 		cfg.dialogHold = state
+		var detail string
+		if cfg.dialogHoldDetail != nil {
+			detail = " (" + cfg.dialogHoldDetail(now) + ")"
+		}
 		switch {
 		case readErr != nil:
 			_ = writeWakeDiagnostic(cfg, "amq wake: holding input: cannot read the dialog marker: %v\n", readErr)
 		case state == wakeDialogOpen:
-			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open\n")
+			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open%s\n", detail)
 		default:
-			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only\n", wakeDialogQuietHold)
+			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only%s\n", wakeDialogQuietHold, detail)
 		}
 	}
 	if state == wakeDialogOpen {
