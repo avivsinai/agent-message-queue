@@ -23,8 +23,8 @@ import (
 // Request says what one pass may collect.
 type Request struct {
 	Codex Codex
-	// Interval is the minimum time between two dispatches that may reach
-	// the same account.
+	// Interval is the minimum time between two dispatches of the same
+	// home.
 	Interval time.Duration
 	// Deadline bounds one whole pass: the version check, the app-server
 	// run and the child's exit. The command runner may take a further
@@ -106,14 +106,18 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 		return usage.Merge(facts, infraFailure(usage.FailReservation, errors.New("interval and deadline must be positive")))
 	}
 	// One deadline bounds the whole pass: the version check, the
-	// reservation and the app-server run with its exit. notAfter is the
-	// same bound on the collector's clock, recorded in the reservation.
+	// reservation and the app-server run with its exit. The reservation
+	// records what is left of it, counted from its own clock reading.
 	ctx, cancel := context.WithTimeout(ctx, req.Deadline)
 	defer cancel()
-	notAfter := fx.Clock().Add(req.Deadline)
 	journal, err := fx.Store.LoadJournal()
-	if err != nil {
+	if err != nil && !errors.Is(err, edge.ErrCorrupt) {
 		return usage.Merge(facts, infraFailure(usage.FailJournal, err))
+	}
+	// A corrupt journal is set aside below, under the lock; until then it
+	// counts as empty.
+	if err != nil {
+		journal = edge.Journal{}
 	}
 	if _, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, fx.Clock(), usagehold.DefaultRules); !ok {
 		return facts
@@ -134,12 +138,28 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 		facts, problems = usage.Result{}, infraFailure(usage.FailCacheRead, err)
 	}
 	if journal, err = fx.Store.LoadJournal(); err != nil {
-		return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, err)))
+		if !errors.Is(err, edge.ErrCorrupt) {
+			return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, err)))
+		}
+		kept, aside := fx.Store.SetAsideJournal()
+		if aside != nil && kept == "" {
+			return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, errors.Join(err, aside))))
+		}
+		journal = edge.Journal{}
+		problems = usage.Merge(problems, infraFailure(usage.FailJournalRecovered, errors.Join(errors.New(err.Error()+"; kept as "+kept), aside)))
 	}
+	problems = usage.Merge(problems, droppedAttempts(journal))
 	now := fx.Clock()
 	home, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, now, usagehold.DefaultRules)
 	if !ok {
 		return usage.Merge(facts, problems)
+	}
+	// The deadline is measured on the monotonic clock and added to the one
+	// reading that is also the reservation time, so a wall clock step cannot
+	// put the deadline before the reservation.
+	notAfter := now
+	if d, ok := ctx.Deadline(); ok {
+		notAfter = now.Add(max(time.Until(d), 0))
 	}
 	return usage.Merge(collectCodex(ctx, req, home, facts, journal, now, notAfter, fx), problems)
 }
@@ -246,7 +266,9 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 	}
 	attempt.FinishedAt = usage.Some(done)
 	switch {
-	case len(got.Failures) > 0:
+	case len(got.Failures) > 0 && len(got.Windows) == 0 && len(got.Money) == 0:
+		// A pass that read limits backs off nothing: its failure stays a
+		// fact, and the readings keep their interval.
 		attempt.FailureCode = got.Failures[0].Value.Code
 	case len(problems.Failures) > 0:
 		attempt.FailureCode = usage.FailCacheWrite
@@ -265,6 +287,16 @@ func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, jour
 		problems = usage.Merge(problems, homeFailure(attempt.Key, usage.Evidence{ObservedAt: done}, usage.FailCacheWrite, "journal: "+errText(err)))
 	}
 	return usage.Merge(facts, problems)
+}
+
+// droppedAttempts is the diagnostic for journal attempts the reader rejected;
+// the pass goes on without them and its next save removes them.
+func droppedAttempts(j edge.Journal) usage.Result {
+	var out usage.Result
+	for _, d := range j.Dropped {
+		out = usage.Merge(out, infraFailure(usage.FailJournalRecovered, errors.New("dropped "+d)))
+	}
+	return out
 }
 
 func homeFailure(acct usage.Account, ev usage.Evidence, code, detail string) usage.Result {

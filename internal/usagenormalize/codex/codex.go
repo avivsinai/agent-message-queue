@@ -56,6 +56,15 @@ func Normalize(r codexrpc.Replies, home, codexHome string, ev usage.Evidence) us
 
 	var out usage.Result
 	proven := false
+	// The rate limits stand without the account, so a failed account/read
+	// keeps them and makes the result partial.
+	var accountFail usage.Result
+	switch a := r.Account; {
+	case a.Err != nil:
+		accountFail = fail(usage.FailRPC, "account/read error "+strconv.Itoa(a.Err.Code))
+	case a.Presence != usage.Present:
+		accountFail = fail(usage.FailMalformed, "account/read reply not understood")
+	}
 	if a := r.Account; a.Presence == usage.Present {
 		info, ok := a.Value.Account.Get()
 		if a.Value.Account.Presence == usage.Null {
@@ -103,7 +112,7 @@ func Normalize(r codexrpc.Replies, home, codexHome string, ev usage.Evidence) us
 			LimitID: s.LimitID, Plan: s.Plan, Reached: s.Reached,
 		}})
 	}
-	return out
+	return usage.Merge(out, accountFail)
 }
 
 func window(limitID, slot string, f usage.Field[codexrpc.Window]) usage.Window {

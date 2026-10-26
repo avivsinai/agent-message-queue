@@ -2,6 +2,7 @@ package usagecache
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -36,5 +37,72 @@ func TestNewSyncsParentAgainAfterAFailedSync(t *testing.T) {
 	}
 	if synced != 1 {
 		t.Fatalf("parent synced %d times after the failure, want 1", synced)
+	}
+}
+
+// Takeover review of U1: pruning errors were discarded after a corrupt
+// journal was safely set aside. Keep the usable recovery and report the
+// failed cleanup separately.
+func TestSetAsideJournalReportsCleanupFailureAfterRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage")
+	store, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{journalFile,
+		journalFile + ".unreadable-20260101T000000.000000000Z",
+		journalFile + ".unreadable-20260102T000000.000000000Z",
+		journalFile + ".unreadable-20260103T000000.000000000Z"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("corrupt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupErr := errors.New("cleanup directory sync failed")
+	syncs := 0
+	restore := fsq.SyncDirAmbientSwapForTest(func(d string) error {
+		if d == dir {
+			syncs++
+			if syncs == 2 {
+				return cleanupErr
+			}
+		}
+		return nil
+	})
+	defer restore()
+	kept, err := store.SetAsideJournal()
+	if kept == "" || !errors.Is(err, cleanupErr) {
+		t.Fatalf("recovery path %q, error %v; want a kept journal and cleanup diagnostic", kept, err)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := store.LoadJournal(); err != nil || len(j.Attempts) != 0 {
+		t.Fatalf("journal after recovery = %+v, %v; want an empty usable journal", j, err)
+	}
+}
+
+// Codex review of 099225ab: after a wall clock set back, journals set aside
+// earlier sort after the new one, and pruning removed the file it had just
+// reported as kept.
+func TestSetAsideJournalKeepsTheRecoveredFileAfterAClockRollback(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage")
+	store, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", ".unreadable-20990101T000000.000000000Z", ".unreadable-20990102T000000.000000000Z", ".unreadable-20990103T000000.000000000Z"} {
+		if err := os.WriteFile(filepath.Join(dir, journalFile+suffix), []byte("corrupt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept, err := store.SetAsideJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("reported recovered journal is gone: %v", err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, journalFile+".unreadable-*")); len(m) != keptJournals {
+		t.Fatalf("set-aside journals = %v, want %d", m, keptJournals)
 	}
 }

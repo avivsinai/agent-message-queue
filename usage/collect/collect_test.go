@@ -32,6 +32,7 @@ type fakeCodex struct {
 	mu           sync.Mutex
 	clock        time.Time
 	runs         int
+	perHome      bool // the account id in the reply follows the home
 }
 
 func (f *fakeCodex) now() time.Time {
@@ -56,6 +57,9 @@ func (f *fakeCodex) run(_ context.Context, c edge.Command) edge.CommandReply {
 			}
 			named, _ := json.Marshal(dir)
 			stdout = bytes.ReplaceAll(stdout, []byte(`"/codex-home"`), named)
+			if f.perHome {
+				stdout = bytes.ReplaceAll(stdout, []byte(`"accountId":"`), []byte(`"accountId":"`+filepath.Base(filepath.Dir(dir))))
+			}
 		}
 	}
 	if c.Done == nil || !c.Done(stdout) {
@@ -75,10 +79,7 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 	if err != nil {
 		t.Fatal(err)
 	}
-	home := filepath.Join(t.TempDir(), "codex-home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	home := codexHome(t)
 	f := &fakeCodex{version: version, stdout: stdout, clock: now}
 	fx := edge.Effects{Clock: f.now, Command: f.run, Store: store}
 	req := collect.Request{
@@ -87,6 +88,16 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 		ClientName: "amq-board", ClientVersion: "test",
 	}
 	return f, fx, req, dir
+}
+
+// codexHome makes an empty Codex home.
+func codexHome(t *testing.T) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "codex-home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return home
 }
 
 // The null-windows fixtures are real replies of codex 0.163.0 and 0.164.0
@@ -263,6 +274,20 @@ func TestRunDoesNotDispatchPastTheReservedDeadline(t *testing.T) {
 	}
 }
 
+// journalCleanupFailure sets the corrupt journal aside in the real store,
+// then reports that pruning older set-aside journals failed.
+type journalCleanupFailure struct {
+	edge.Persistence
+}
+
+func (s journalCleanupFailure) SetAsideJournal() (string, error) {
+	kept, err := s.Persistence.SetAsideJournal()
+	if err != nil {
+		return kept, err
+	}
+	return kept, errors.New("journal cleanup failed")
+}
+
 // PR #1235 review: a schema-1 journal attempt without its deadline and
 // interval held nothing back, so the next run dispatched at once; and an
 // attempt that finished before it was reserved (a wall clock set back
@@ -279,11 +304,48 @@ func TestRunHonorsTheJournal(t *testing.T) {
 		failure string
 		runs    int
 		dropped bool // the attempt is gone from the journal after the pass
+		kept    bool // the journal file was set aside, and the next pass finds a clean one
+		cleanup bool // pruning older set-aside journals fails after the set-aside
 	}{
 		{
+			// post-release review v0.113.2 finding U1: an entry the reader
+			// rejects blocked collection for good; it is dropped with a
+			// diagnostic and the pass runs.
 			name:    "incomplete attempt",
 			journal: func(h string) string { return attempt(h, `"reserved_at":"2026-10-25T11:59:00Z"`) },
-			failure: usage.FailJournal,
+			failure: usage.FailJournalRecovered,
+			runs:    1,
+			dropped: true,
+		},
+		{
+			// post-release review v0.113.2 finding U1: a journal file that
+			// cannot be parsed blocked collection forever; it is set aside
+			// and the pass starts from an empty journal.
+			name:    "garbage journal",
+			journal: func(string) string { return "not json" },
+			failure: usage.FailJournalRecovered,
+			runs:    1,
+			kept:    true,
+		},
+		{
+			// Takeover review of U1: a cleanup error after the journal
+			// was set aside dropped the pass and its readings.
+			name:    "set-aside journal cleanup failed",
+			journal: func(string) string { return "not json" },
+			failure: usage.FailJournalRecovered,
+			runs:    1,
+			kept:    true,
+			cleanup: true,
+		},
+		{
+			name: "deadline before reserved",
+			journal: func(h string) string {
+				return attempt(h, `"reserved_at":"2026-10-25T11:50:10Z","deadline_at":"2026-10-25T11:50:03Z",`+
+					`"interval":300000000000`)
+			},
+			failure: usage.FailJournalRecovered,
+			runs:    1,
+			dropped: true,
 		},
 		{
 			name: "finished before reserved",
@@ -322,6 +384,9 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "coordination-v1.json"), []byte(tc.journal(req.Codex.Homes[0])), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			if tc.cleanup {
+				fx.Store = journalCleanupFailure{Persistence: fx.Store}
+			}
 			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
 			if f.runs != tc.runs {
 				t.Fatalf("app-server ran %d times against the journal, want %d", f.runs, tc.runs)
@@ -333,6 +398,21 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			if want := []string{tc.failure}; tc.failure == "" && len(codes) != 0 || tc.failure != "" && !slices.Equal(codes, want) {
 				t.Fatalf("failures = %v, want %q", codes, tc.failure)
 			}
+			if tc.cleanup && !strings.Contains(got.Failures[0].Value.Detail, "journal cleanup failed") {
+				t.Fatalf("journal diagnostic = %q, want the cleanup failure", got.Failures[0].Value.Detail)
+			}
+			if tc.kept {
+				if len(got.Windows) != 2 || len(got.Money) == 0 {
+					t.Fatalf("recovered pass discarded usable readings: %+v", got)
+				}
+				if m, _ := filepath.Glob(filepath.Join(dir, "coordination-v1.json.unreadable-*")); len(m) != 1 {
+					t.Fatalf("kept files = %v, want 1", m)
+				}
+				f.clock = f.clock.Add(req.Interval + time.Second)
+				if again, _ := collect.Run(context.Background(), req, collect.Memory{}, fx); len(again.Failures) != 0 {
+					t.Fatalf("next pass failures = %+v", again.Failures)
+				}
+			}
 			if tc.dropped {
 				j, err := fx.Store.LoadJournal()
 				if err != nil {
@@ -340,7 +420,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 				}
 				for _, a := range j.Attempts {
 					if a.ID == "a" {
-						t.Fatalf("journal kept the future attempt: %+v", a)
+						t.Fatalf("journal kept the dropped attempt: %+v", a)
 					}
 				}
 			}
@@ -383,5 +463,108 @@ func TestRunRecordsAFailedSnapshotWrite(t *testing.T) {
 	}
 	if len(j.Attempts) != 1 || j.Attempts[0].FailureCode != usage.FailCacheWrite {
 		t.Fatalf("journal = %+v, want one attempt that failed with %s", j.Attempts, usage.FailCacheWrite)
+	}
+}
+
+// clockStepStore moves the clock forward when the lock is taken, as an NTP
+// step or a sleep between the pass's first clock reading and its reservation.
+type clockStepStore struct {
+	edge.Persistence
+	f    *fakeCodex
+	step time.Duration
+}
+
+func (s clockStepStore) TryLock() (func(), bool, error) {
+	s.f.mu.Lock()
+	s.f.clock = s.f.clock.Add(s.step)
+	s.f.mu.Unlock()
+	return s.Persistence.TryLock()
+}
+
+// post-release review v0.113.2 finding U1: a forward clock step between the
+// pass deadline and the reservation stored a deadline before its own
+// reservation, which the reader refused for good.
+func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	fx.Store = clockStepStore{Persistence: fx.Store, f: f, step: 10 * time.Second}
+	collect.Run(context.Background(), req, collect.Memory{}, fx)
+	j, err := fx.Store.LoadJournal()
+	if err != nil || len(j.Attempts) != 1 {
+		t.Fatalf("journal = %+v, err = %v", j, err)
+	}
+	if f.runs != 1 {
+		t.Fatalf("app-server ran %d times, want 1", f.runs)
+	}
+}
+
+// Each home is paced alone: inside one interval every home is read once,
+// and a further pass finds each held by its own read.
+func TestRunPacesPerHome(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		homes      int
+		sameRemote bool // every home reports one account
+	}{
+		{
+			// post-release review v0.113.2 finding U3: one Codex home was
+			// read per interval across every home, so with three homes
+			// each reading aged past LimitsStaleAfter.
+			name: "three homes of distinct accounts", homes: 3,
+		},
+		{
+			// Codex review of 099225ab, finding 1: an account a home proved
+			// before admitted or held back its next read, although its
+			// login can change unseen. The account plays no part.
+			name: "two homes of one account", homes: 2, sameRemote: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+			for range tc.homes - 1 {
+				req.Codex.Homes = append(req.Codex.Homes, codexHome(t))
+			}
+			f.perHome = !tc.sameRemote
+			for range tc.homes + 1 {
+				collect.Run(context.Background(), req, collect.Memory{}, fx)
+				f.clock = f.clock.Add(time.Second)
+			}
+			if f.runs != tc.homes {
+				t.Fatalf("app-server ran %d times for %d homes inside one interval, want %d", f.runs, tc.homes, tc.homes)
+			}
+		})
+	}
+}
+
+// post-release review v0.113.2 finding U4: a failed account/read was
+// dropped, so a read with no identity looked complete.
+func TestRunKeepsRateLimitsWhenAccountReadFails(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
+	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
+	f.stdout = bytes.Join(lines, nil)
+	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	if len(got.Windows) != 2 || len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailRPC ||
+		!strings.Contains(got.Failures[0].Value.Detail, "account/read") {
+		t.Fatalf("windows %d, failures %+v", len(got.Windows), got.Failures)
+	}
+	if a := usage.Assess(got, usage.ProviderCodex, req.Codex.Homes[0], now, 15*time.Minute); a.Status != usage.StatusPartial {
+		t.Fatalf("status = %s, want partial", a.Status)
+	}
+}
+
+// post-release review v0.113.2 finding U4 follow-up: a failed account/read
+// beside good limits set the attempt's failure code, so pacing backed off to
+// 15 minutes and every reading went stale.
+func TestRunPartialReadKeepsTheInterval(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
+	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
+	f.stdout = bytes.Join(lines, nil)
+	for range 6 {
+		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		f.clock = f.clock.Add(req.Interval + time.Second)
+	}
+	if f.runs != 6 {
+		t.Fatalf("app-server ran %d times in 6 intervals, want 6", f.runs)
 	}
 }

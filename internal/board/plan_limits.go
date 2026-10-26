@@ -1,6 +1,7 @@
 package board
 
 import (
+	"slices"
 	"sort"
 	"time"
 
@@ -15,10 +16,11 @@ const appServer = "app-server"
 const LimitsStaleAfter = 15 * time.Minute
 
 // WithPlanLimits gives each Codex account the plan limits the Codex
-// app-server reported for the same home: they replace the limits read from
-// rollouts, which are older readings of the same account. A home with no
-// app-server reading keeps its rollout limits and says why the app-server
-// gave none. It is pure; now dates each reading's status.
+// app-server reported for the same home. The snapshot wins unless it is
+// stale: its windows replace the rollout limits, and a rollout balance or
+// reached state observed after the snapshot is kept beside them. A home
+// with no usable or only a stale app-server reading keeps its rollout
+// limits. It is pure; now dates each reading's status.
 func WithPlanLimits(rep usage.Report, r facts.Result, now time.Time) usage.Report {
 	out := rep
 	out.Accounts = append([]usage.Account{}, rep.Accounts...)
@@ -39,11 +41,31 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		// A failure of the collection itself names no provider and
 		// concerns every home.
 		for _, x := range r.ForHome("", "").Failures {
+			// A recovered journal is a diagnostic of the collector, not a
+			// failed read: it does not mark readings made in the same pass.
+			// A journal that cannot be read at all stops every pass and
+			// still shows.
+			if x.Value.Code == facts.FailJournalRecovered && as.Status != facts.StatusUnknown {
+				continue
+			}
 			v := x.Value
 			failure = &v
 		}
 	}
 	if as.Status == facts.StatusUnknown {
+		if failure == nil {
+			return rollout
+		}
+		return append(append([]usage.Limit{}, rollout...), usage.Limit{
+			Kind: "unknown", Name: "plan limits", Source: appServer,
+			Reason: "plan limits not read (" + failure.Detail + ")",
+		})
+	}
+	if as.Status == facts.StatusStale && len(rollout) > 0 {
+		// A stale snapshot must not replace the rollout readings or carry
+		// its old flags onto the account. Rollouts hold no windows, so a
+		// snapshot inside the freshness bound is the better reading even
+		// when a rollout reading is newer.
 		if failure == nil {
 			return rollout
 		}
@@ -73,6 +95,7 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 			continue
 		}
 		l := base("window", w.Kind, w.LimitID)
+		l.AsOf = wf.Evidence.ObservedAt
 		if p, ok := w.UsedPercent.Get(); ok {
 			l.UsedPercent = &p
 		}
@@ -91,7 +114,9 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 	}
 	for _, b := range f.Buckets {
 		if reached, ok := b.Value.Reached.Get(); ok {
-			out = append(out, base("reached", reached, b.Value.LimitID))
+			l := base("reached", reached, b.Value.LimitID)
+			l.AsOf = b.Evidence.ObservedAt
+			out = append(out, l)
 		}
 	}
 	for _, mf := range f.Money {
@@ -105,15 +130,18 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 				l = base("unknown", "credits", m.LimitID)
 				l.Reason = "credit balance not reported in the app-server reply"
 			}
+			l.AsOf = mf.Evidence.ObservedAt
 			out = append(out, l)
 		case facts.MoneyCap:
 			if m.Amount.Presence != facts.Present || m.Limit.Presence != facts.Present {
 				l := base("unknown", "spend cap", m.LimitID)
+				l.AsOf = mf.Evidence.ObservedAt
 				l.Reason = "spend cap not reported in the app-server reply"
 				out = append(out, l)
 				continue
 			}
 			l := base("cap", "spend cap", m.LimitID)
+			l.AsOf = mf.Evidence.ObservedAt
 			l.Used, l.Cap = m.Amount.Value, m.Limit.Value
 			if p, ok := m.RemainingPercent.Get(); ok {
 				l.RemainingPercent = &p
@@ -124,9 +152,42 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 			out = append(out, l)
 		}
 	}
+	out = mergeRolloutLimits(out, rollout, f.Buckets)
 	if failure != nil {
 		l := base("unknown", "plan limits", "")
 		l.Reason = "last app-server read failed (" + failure.Detail + ")"
+		out = append(out, l)
+	}
+	return out
+}
+
+// mergeRolloutLimits keeps observations of the same capability and bucket
+// ordered by their own time: an unreported app-server balance replaces only
+// an older balance of its own bucket. A newer bucket reading can clear an earlier
+// rollout reached state even when it reports no reached limit.
+func mergeRolloutLimits(out, rollout []usage.Limit, buckets []facts.Fact[facts.Bucket]) []usage.Limit {
+	for _, l := range rollout {
+		if l.Kind != "credits" && l.Kind != "reached" {
+			continue
+		}
+		i := slices.IndexFunc(out, func(other usage.Limit) bool {
+			kind := other.Kind
+			if kind == "unknown" && other.Name == "credits" {
+				kind = "credits"
+			}
+			return kind == l.Kind && other.Bucket == l.Bucket
+		})
+		if i >= 0 {
+			if l.AsOf.After(out[i].AsOf) {
+				out[i] = l
+			}
+			continue
+		}
+		if l.Kind == "reached" && slices.ContainsFunc(buckets, func(b facts.Fact[facts.Bucket]) bool {
+			return bucketName(b.Value.LimitID) == l.Bucket && !l.AsOf.After(b.Evidence.ObservedAt)
+		}) {
+			continue
+		}
 		out = append(out, l)
 	}
 	return out

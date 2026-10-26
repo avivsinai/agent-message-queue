@@ -32,26 +32,21 @@ var DefaultRules = Rules{
 	Unsupported:  time.Hour,
 }
 
-// Conflicts reports whether dispatches keyed a and b share pacing: same
-// provider, and either one's remote account unproven or both the same. An
-// unproven key conflicts with every key of its provider.
+// Conflicts reports whether dispatches keyed a and b share pacing: the same
+// provider home. Pacing is per home, never per account: a home's login can
+// change between admission and dispatch, or move between credential stores
+// with no visible trace, so no account a home proved earlier identifies the
+// one its next dispatch reaches. One account behind several homes is read
+// at most once per interval per home.
 func Conflicts(a, b usage.Account) bool {
-	if a.Provider != b.Provider {
-		return false
-	}
-	if a.Remote == "" || b.Remote == "" {
-		return true
-	}
-	return a.Remote == b.Remote
+	return a.Provider == b.Provider && a.Home == b.Home
 }
 
 // HeldUntil is the earliest time at now a dispatch keyed k may be
 // reserved. An unfinished attempt holds through its deadline plus its
 // interval, so a crashed or paused dispatch still spends its interval; a
-// finished one holds for its interval after completion. An attempt of k's
-// own home also holds for its failure hold if longer, counted over that
-// home's consecutive failures; a failure of another home does not hold k
-// back. When a finished attempt's times disagree, its completion counts from
+// finished one holds for its interval after completion, or for its failure
+// hold if longer, counted over the home's consecutive failures. When a finished attempt's times disagree, its completion counts from
 // the later of its finish and its deadline. An attempt reserved in the
 // future holds nothing.
 func HeldUntil(attempts []usage.Attempt, k usage.Account, now time.Time, rules Rules) time.Time {
@@ -77,11 +72,9 @@ func HeldUntil(attempts []usage.Attempt, k usage.Account, now time.Time, rules R
 			finished = later(finished, a.DeadlineAt)
 		}
 		t := finished.Add(a.Interval)
-		switch {
-		case a.Key.Provider != k.Provider || a.Key.Home != k.Home:
-		case a.FailureCode == "":
+		if a.FailureCode == "" {
 			streak = 0
-		default:
+		} else {
 			streak++
 			t = later(t, finished.Add(failureHold(a.FailureCode, streak, rules)))
 		}
@@ -126,8 +119,7 @@ func failureHold(code string, streak int, r Rules) time.Duration {
 
 // Next picks the home of provider to collect at now: among the homes not
 // held, the one whose newest attempt is oldest, a home never attempted
-// first, ties in the given order. Each candidate is keyed unproven, since a
-// new source instance has not yet proven its account.
+// first, ties in the given order.
 func Next(provider string, homes []string, attempts []usage.Attempt, now time.Time, rules Rules) (string, bool) {
 	best, found := "", false
 	var bestAt time.Time

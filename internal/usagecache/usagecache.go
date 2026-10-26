@@ -13,6 +13,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -88,7 +91,8 @@ type factsFileV1 struct {
 }
 
 // LoadJournal reads the journal. A missing file is an empty journal; an
-// unreadable or corrupt one is an error.
+// unreadable or corrupt file is an error. An incomplete attempt is dropped
+// and named in Dropped.
 func (s Store) LoadJournal() (edge.Journal, error) {
 	var f journalFileV1
 	ok, err := s.load(journalFile, &f)
@@ -96,14 +100,19 @@ func (s Store) LoadJournal() (edge.Journal, error) {
 		return edge.Journal{}, err
 	}
 	if f.Schema != schema {
-		return edge.Journal{}, fmt.Errorf("%s: schema %d, want %d", journalFile, f.Schema, schema)
+		return edge.Journal{}, fmt.Errorf("%s: %w: schema %d, want %d", journalFile, edge.ErrCorrupt, f.Schema, schema)
 	}
+	// A rejected attempt is dropped, never a block: the journal must stay
+	// usable, and the next save removes the entry for good.
+	var j edge.Journal
 	for i, a := range f.Attempts {
 		if err := complete(a); err != nil {
-			return edge.Journal{}, fmt.Errorf("%s: attempt %d: %w", journalFile, i, err)
+			j.Dropped = append(j.Dropped, fmt.Sprintf("%s: attempt %d: %v", journalFile, i, err))
+			continue
 		}
+		j.Attempts = append(j.Attempts, a)
 	}
-	return f.Journal, nil
+	return j, nil
 }
 
 // complete checks that an attempt carries every field its hold is computed
@@ -174,12 +183,56 @@ func (s Store) load(name string, v any) (bool, error) {
 		return false, err
 	}
 	if len(data) > maxFile {
-		return false, fmt.Errorf("%s: over %d bytes", name, maxFile)
+		return false, fmt.Errorf("%s: %w: over %d bytes", name, edge.ErrCorrupt, maxFile)
 	}
 	if err := json.Unmarshal(data, v); err != nil {
-		return false, fmt.Errorf("%s: %w", name, err)
+		return false, fmt.Errorf("%s: %w: %v", name, edge.ErrCorrupt, err)
 	}
 	return true, nil
+}
+
+// keptJournals bounds the journal files set aside as unreadable.
+const keptJournals = 3
+
+// SetAsideJournal renames a corrupt journal to <journal>.unreadable-<UTC
+// time> in the same directory, which keeps its mode, syncs the directory,
+// and removes the oldest other such files by exact name until keptJournals
+// remain, the one it just set aside always among them: a wall clock set
+// back can name it older than earlier ones.
+// Once the rename is durable, the kept path is returned even if pruning
+// fails; the error then reports cleanup without losing the usable recovery.
+// A journal only paces read-only reads, so losing one costs at worst one
+// extra read.
+func (s Store) SetAsideJournal() (string, error) {
+	prefix := journalFile + ".unreadable-"
+	kept := filepath.Join(s.dir, prefix+time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(filepath.Join(s.dir, journalFile), kept); err != nil {
+		return "", err
+	}
+	if err := fsq.SyncDir(s.dir); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return kept, fmt.Errorf("list recovered journals: %w", err)
+	}
+	var names []string
+	for _, en := range entries {
+		if strings.HasPrefix(en.Name(), prefix) && en.Type().IsRegular() && en.Name() != filepath.Base(kept) {
+			names = append(names, en.Name())
+		}
+	}
+	sort.Strings(names)
+	var cleanupErr error
+	for _, name := range names[:max(len(names)-(keptJournals-1), 0)] {
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove recovered journal %s: %w", name, err))
+		}
+	}
+	if err := fsq.SyncDir(s.dir); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync recovered journal cleanup: %w", err))
+	}
+	return kept, cleanupErr
 }
 
 func (s Store) save(name string, v any) error {

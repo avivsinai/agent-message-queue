@@ -6,6 +6,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/usage"
@@ -47,7 +48,15 @@ type Runner func(context.Context, Command) CommandReply
 // hold may still apply.
 type Journal struct {
 	Attempts []usage.Attempt `json:"attempts"`
+	// Dropped names each stored attempt the reader rejected and left out.
+	// It describes one load and is never written back.
+	Dropped []string `json:"-"`
 }
+
+// ErrCorrupt marks a stored file whose bytes cannot be read as the file it
+// should be: not parseable, over the size bound, or another schema. An
+// unreadable disk is not corrupt.
+var ErrCorrupt = errors.New("corrupt")
 
 // SnapshotReader reads the sanitized fact snapshot. A missing snapshot is an
 // empty Result with no error.
@@ -57,13 +66,21 @@ type SnapshotReader interface {
 
 // Persistence is the collector's durable state. TryLock takes the one
 // collector lock without waiting: ok is false, with no error, while another
-// holder has it. A missing journal is empty; an unreadable or corrupt one is
-// an error, never an empty journal. Each Save is atomic and durable (data
+// holder has it. A missing journal is empty; an unreadable or corrupt file is
+// an error, never an empty journal. An attempt the reader rejects is dropped
+// and named in Dropped; the others are kept. Each Save is atomic and durable (data
 // and directory synced) before it returns nil.
 type Persistence interface {
 	SnapshotReader
 	TryLock() (release func(), ok bool, err error)
 	LoadJournal() (Journal, error)
+	// SetAsideJournal, called under the lock after LoadJournal reported
+	// ErrCorrupt, renames the journal file aside, keeps only the newest few
+	// such files, and returns the kept path. The next LoadJournal finds no
+	// journal. A nonempty kept path confirms durable recovery even if err
+	// reports a later cleanup failure; the caller may continue with that
+	// diagnostic. An empty path with an error means recovery failed.
+	SetAsideJournal() (kept string, err error)
 	SaveJournal(Journal) error
 	SaveFacts(usage.Result) error
 }
