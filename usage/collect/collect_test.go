@@ -497,20 +497,41 @@ func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
 	}
 }
 
-// post-release review v0.113.2 finding U3: one Codex home was read per
-// interval across every home, so with three homes each reading aged past
-// LimitsStaleAfter. Codex review of 099225ab: no account a home proved
-// earlier may admit a dispatch, so each home is paced alone, and every home
-// is read inside one interval.
+// Each home is paced alone: inside one interval every home is read once,
+// and a further pass finds each held by its own read.
 func TestRunPacesPerHome(t *testing.T) {
-	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
-	req.Codex.Homes = append(req.Codex.Homes, codexHome(t), codexHome(t))
-	for range 4 {
-		collect.Run(context.Background(), req, collect.Memory{}, fx)
-		f.clock = f.clock.Add(time.Second)
-	}
-	if f.runs != 3 {
-		t.Fatalf("app-server ran %d times for three homes inside one interval, want 3", f.runs)
+	for _, tc := range []struct {
+		name       string
+		homes      int
+		sameRemote bool // every home reports one account
+	}{
+		{
+			// post-release review v0.113.2 finding U3: one Codex home was
+			// read per interval across every home, so with three homes
+			// each reading aged past LimitsStaleAfter.
+			name: "three homes of distinct accounts", homes: 3,
+		},
+		{
+			// Codex review of 099225ab, finding 1: an account a home proved
+			// before admitted or held back its next read, although its
+			// login can change unseen. The account plays no part.
+			name: "two homes of one account", homes: 2, sameRemote: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+			for range tc.homes - 1 {
+				req.Codex.Homes = append(req.Codex.Homes, codexHome(t))
+			}
+			f.perHome = !tc.sameRemote
+			for range tc.homes + 1 {
+				collect.Run(context.Background(), req, collect.Memory{}, fx)
+				f.clock = f.clock.Add(time.Second)
+			}
+			if f.runs != tc.homes {
+				t.Fatalf("app-server ran %d times for %d homes inside one interval, want %d", f.runs, tc.homes, tc.homes)
+			}
+		})
 	}
 }
 
