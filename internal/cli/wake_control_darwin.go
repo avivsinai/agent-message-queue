@@ -821,7 +821,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	// did not expose cooperative stop to their notification loops. Keep that
 	// cross-version behavior until a lock schema can prove the owner supports
 	// quiescing these modes before claim removal.
-	if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
+	if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste || wakeControlHealthOnly(lock) {
 		exposedStop = nil
 	}
 	return cleanup, exposedStop, markLoopStopped, nil
@@ -856,6 +856,9 @@ func handleDarwinWakeControlConn(
 	if json.Unmarshal([]byte(strings.TrimSpace(line)), &healthRequest) == nil &&
 		healthRequest.Operation == wakeControlHealthOperation {
 		handleDarwinWakeHealthControl(conn, lock, healthRequests, healthRequest)
+		return
+	}
+	if wakeControlHealthOnly(lock) {
 		return
 	}
 	if lock.WakeMode == wakeOwnerWakeMode ||
@@ -985,6 +988,11 @@ func handleDarwinWakeControlConn(
 		return
 	}
 	_, _ = conn.Write([]byte("ACK\n"))
+}
+
+// A standalone health endpoint carries no cooperative lifecycle authority.
+func wakeControlHealthOnly(lock wakeLock) bool {
+	return lock.HealthSchema == wakeHealthSchema && lock.TargetDigest == "" && lock.ResumeSchema == 0
 }
 
 func handleDarwinWakeHealthControl(

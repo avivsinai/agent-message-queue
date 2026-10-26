@@ -767,7 +767,8 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			}
 		}
 	}
-	if runtime.GOOS == "darwin" && lock.ControlSocket != "" {
+	if runtime.GOOS == "darwin" {
+		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
 		lock.HealthSchema = wakeHealthSchema
 	}
 	return lock, nil
