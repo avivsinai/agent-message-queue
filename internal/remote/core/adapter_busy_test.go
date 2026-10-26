@@ -13,17 +13,32 @@ import (
 
 // busyAttachment answers busy while busy is set, the way an adapter does
 // for a turn it cannot start yet; nothingSent says it made no native call.
+// onBusy, when set, runs before a busy answer, and onCancel before
+// CancelExact records the intent the way the Codex adapter does.
 type busyAttachment struct {
 	*fake.Runtime
 	busy        atomic.Bool
 	nothingSent bool
+	onBusy      func()
+	onCancel    func()
 }
 
 func (b *busyAttachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if b.busy.Load() {
+		if b.onBusy != nil {
+			b.onBusy()
+		}
 		return core.Admission{Code: protocol.CodeBusy, Message: "not ready yet", NothingSent: b.nothingSent}, nil
 	}
 	return b.Runtime.Submit(req)
+}
+
+func (b *busyAttachment) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
+	if b.onCancel != nil {
+		b.onCancel()
+		return core.CancelEvidence{Disposition: protocol.CancelRequested}, nil
+	}
+	return b.Runtime.CancelExact(key, epoch)
 }
 
 // Review finding (bead agent-message-queue-uue): adapter busy stored as
@@ -75,6 +90,31 @@ func TestAdapterBusyLeavesARetryableTombstone(t *testing.T) {
 				}
 				if r := out.(protocol.Reply); r.Outcome.Disposition != protocol.CancelConfirmed || r.Snapshot.State != protocol.StateCancelled {
 					t.Fatalf("cancel of a busy tombstone = %s %q, want cancelled, confirmed", r.Snapshot.State, r.Outcome.Disposition)
+				}
+			},
+			want: protocol.StateCancelled, dispatches: 0,
+		},
+		{
+			// Post-release review v0.113.2 finding R2, code-running review
+			// of 27011714: a cancel that saw the retry dispatching relocked
+			// after the busy answer had stored a fresh tombstone, answered
+			// noop_already_terminal, and the next retry ran the prompt.
+			name: "a cancel that races a busy retry makes it final",
+			between: func(t *testing.T, ep *core.Endpoint, att *busyAttachment, id string, _ *time.Time) {
+				entered, release, retried := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				att.onBusy = func() { close(entered); <-release }
+				att.onCancel = func() { close(release); <-retried }
+				go func() {
+					_, _ = ep.Handle(submitCmd(id), local)
+					close(retried)
+				}()
+				<-entered
+				out, err := ep.Handle(cancelCmd(id), local)
+				if err != nil {
+					t.Fatalf("cancel: %v", err)
+				}
+				if r := out.(protocol.Reply); r.Outcome.Disposition != protocol.CancelConfirmed || r.Snapshot.State != protocol.StateCancelled {
+					t.Fatalf("cancel racing a busy retry = %s %q, want cancelled, confirmed", r.Snapshot.State, r.Outcome.Disposition)
 				}
 			},
 			want: protocol.StateCancelled, dispatches: 0,

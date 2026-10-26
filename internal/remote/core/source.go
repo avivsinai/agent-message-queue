@@ -158,6 +158,16 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if err != nil {
 		return protocol.Reply{}, err
 	}
+	if readmittableBusy(rec) {
+		// Submit answered busy with nothing sent while the lock was free:
+		// the cancel ends the tombstone, as it does before a dispatch.
+		e.transitionLocked(rec, causeCancelledBeforeAdmission, nativeEvidence{})
+		if _, err := e.commitLocked(rec, t); err != nil {
+			return protocol.Reply{}, err
+		}
+		e.publishLocked(rec)
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelConfirmed}}, nil
+	}
 	if rec.State.Terminal() {
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
