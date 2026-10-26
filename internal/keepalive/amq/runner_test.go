@@ -141,6 +141,12 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 			wantCalls:    []string{"check", "retire", "start"},
 		},
 		{
+			name:         "outdated image retires then starts",
+			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"outdated","wake_generation":"0123456789abcdef0123456789abcdef"}`,
+			retireOutput: `{"status":"retired","agent":"codex","pid":4242}`,
+			wantCalls:    []string{"check", "retire", "start"},
+		},
+		{
 			name:          "different image without generation preserves wake",
 			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
 			wantCalls:     []string{"check"},

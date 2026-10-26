@@ -139,7 +139,7 @@ func TestWakeCheckReportsLiveStaleRawImageAndRequiresOwningTerminal(t *testing.T
 	if err := json.Unmarshal([]byte(output), &got); err != nil {
 		t.Fatalf("decode wake check JSON: %v\n%s", err, output)
 	}
-	if got.CanStartHere || !got.LiveWake || got.WakeStatus != string(wakeLockValid) ||
+	if got.CanStartHere || !got.LiveWake || got.WakeStatus != "unverified" ||
 		got.WakePID != pid || got.WakeMode != wakeInjectModeRaw || got.OwnerBound {
 		t.Fatalf("live wake = %#v", got)
 	}
@@ -151,7 +151,7 @@ func TestWakeCheckReportsLiveStaleRawImageAndRequiresOwningTerminal(t *testing.T
 			got.StartedAt, got.BaselineAt)
 	}
 	if got.RunningImagePath != runningPath || got.RunningVersion != runningVersion ||
-		got.CurrentVersion != "0.49.14" || got.ImageStatus != "different" {
+		got.CurrentVersion != "0.49.14" || got.ImageStatus != "outdated" {
 		t.Fatalf("image evidence = %#v", got)
 	}
 	if got.RestartCapability != "operator_only" || !got.OperatorTerminalRequired {

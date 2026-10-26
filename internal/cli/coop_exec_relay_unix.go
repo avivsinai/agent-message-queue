@@ -8,25 +8,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/creack/pty"
-	"golang.org/x/term"
-
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/terminalrelay"
 )
 
 const (
 	agyStatusEnv         = "AGY_CLI_OSC7501"
 	agyStatusMessagesEnv = "AGY_CLI_OSC7501_MESSAGES"
-	// agyRelayOutputDrain bounds how long the relay copies output after agy
-	// exits: a background process agy left may hold the terminal open.
-	agyRelayOutputDrain = 200 * time.Millisecond
 )
 
 // agyRelayPlan decides how coop exec starts agy. agy runs no hooks with
@@ -177,88 +169,34 @@ func (s *agyDialogSink) Close() error {
 // unchanged: the wake types into the outer terminal, and the relay forwards
 // every input byte to agy. It returns only when agy cannot start.
 func runAgyRelay(binaryPath string, argv, env []string, sink *agyDialogSink, strip bool) error {
-	cmd := exec.Command(binaryPath, argv[1:]...)
-	cmd.Args[0] = argv[0]
-	cmd.Env = env
-	stdin := int(os.Stdin.Fd())
-	size, sizeErr := pty.GetsizeFull(os.Stdin)
-	if sizeErr != nil {
-		size = nil
-	}
-	master, err := pty.StartWithSize(cmd, size)
-	if err != nil {
-		return fmt.Errorf("start agy on a pty: %w", err)
-	}
-	saved, err := term.MakeRaw(stdin)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("put the terminal in raw mode for agy: %w", err)
-	}
-	restore := func() { _ = term.Restore(stdin, saved) }
-	defer restore()
-
-	signals := make(chan os.Signal, 8)
-	signal.Notify(signals, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(signals)
-	go func() {
-		for sig := range signals {
-			if sig == syscall.SIGWINCH {
-				_ = pty.InheritSize(os.Stdin, master)
-				continue
-			}
-			_ = cmd.Process.Signal(sig)
-		}
-	}()
-
-	go func() { _, _ = io.Copy(master, os.Stdin) }()
-
 	var mu sync.Mutex
 	parser := &osc7501Parser{strip: strip, onState: func(state, kind string) {
 		mu.Lock()
 		defer mu.Unlock()
 		sink.onState(state, kind)
 	}}
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := master.Read(buf)
-			if n > 0 {
-				if _, werr := os.Stdout.Write(parser.feed(buf[:n])); werr != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	_ = cmd.Wait()
-	select {
-	case <-drained:
-	case <-time.After(agyRelayOutputDrain):
-	}
+	code, err := terminalrelay.Run(binaryPath, argv, env, agyRelayWriter{parser: parser})
 	mu.Lock()
 	_ = sink.Close()
 	mu.Unlock()
-	restore()
-	os.Exit(agyExitCode(cmd.ProcessState))
+	if err != nil {
+		return err
+	}
+	os.Exit(code)
 	return nil
 }
 
-// agyExitCode is the status a shell reports for agy.
-func agyExitCode(state *os.ProcessState) int {
-	if state == nil {
-		return ExitError
+type agyRelayWriter struct{ parser *osc7501Parser }
+
+func (w agyRelayWriter) Write(data []byte) (int, error) {
+	_, err := os.Stdout.Write(w.parser.feed(data))
+	if err != nil {
+		return 0, err
 	}
-	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		return 128 + int(status.Signal())
-	}
-	if code := state.ExitCode(); code >= 0 {
-		return code
-	}
-	return ExitError
+	return len(data), nil
+}
+
+func runTerminalRelayHelper(args []string) error {
+	os.Exit(terminalrelay.RunHelper(args))
+	return nil
 }

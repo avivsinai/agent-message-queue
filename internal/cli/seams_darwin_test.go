@@ -61,6 +61,7 @@ func startWakeControlListener(
 		true,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		_ = agentDir.Close()

@@ -767,6 +767,10 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			}
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
+		lock.HealthSchema = wakeHealthSchema
+	}
 	return lock, nil
 }
 
@@ -1858,6 +1862,7 @@ type wakeStart struct {
 	resumePreflight      *wakeResumeBootstrap
 	resumeContext        *wakeResumeBootstrap
 	restartSignals       chan os.Signal
+	healthRequests       chan wakeHealthRequest
 	privateStop          <-chan struct{}
 	attention            *os.File
 	startupHold          <-chan struct{}
@@ -2217,8 +2222,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		return err
 	}
 	if s.currentWake.Lock.ControlSocket != "" {
+		s.healthRequests = make(chan wakeHealthRequest)
 		controlCleanup, stop, markStopped, controlErr := startWakeControlListenerInDirWithRestart(
-			s.activeAgentDir, s.root, s.me, s.currentWake.Lock, s.restartSignals,
+			s.activeAgentDir, s.root, s.me, s.currentWake.Lock, s.restartSignals, s.healthRequests,
 		)
 		if controlErr != nil {
 			return controlErr
@@ -2856,6 +2862,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		debug:               *s.flags.debug,
 		interruptKey:        s.interruptKey,
 		controlStop:         s.controlStop,
+		healthRequests:      s.healthRequests,
 		restartSignals:      s.restartSignals,
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeTerminalGeneration(root, me)
