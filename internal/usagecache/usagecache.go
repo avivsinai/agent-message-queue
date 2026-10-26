@@ -196,7 +196,9 @@ const keptJournals = 3
 
 // SetAsideJournal renames a corrupt journal to <journal>.unreadable-<UTC
 // time> in the same directory, which keeps its mode, syncs the directory,
-// and removes all but the newest keptJournals such files by exact name.
+// and removes the oldest other such files by exact name until keptJournals
+// remain, the one it just set aside always among them: a wall clock set
+// back can name it older than earlier ones.
 // Once the rename is durable, the kept path is returned even if pruning
 // fails; the error then reports cleanup without losing the usable recovery.
 // A journal only paces read-only reads, so losing one costs at worst one
@@ -216,13 +218,13 @@ func (s Store) SetAsideJournal() (string, error) {
 	}
 	var names []string
 	for _, en := range entries {
-		if strings.HasPrefix(en.Name(), prefix) && en.Type().IsRegular() {
+		if strings.HasPrefix(en.Name(), prefix) && en.Type().IsRegular() && en.Name() != filepath.Base(kept) {
 			names = append(names, en.Name())
 		}
 	}
 	sort.Strings(names)
 	var cleanupErr error
-	for _, name := range names[:max(len(names)-keptJournals, 0)] {
+	for _, name := range names[:max(len(names)-(keptJournals-1), 0)] {
 		if err := os.Remove(filepath.Join(s.dir, name)); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove recovered journal %s: %w", name, err))
 		}

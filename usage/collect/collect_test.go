@@ -90,27 +90,14 @@ func setup(t *testing.T, fixture, version string) (*fakeCodex, edge.Effects, col
 	return f, fx, req, dir
 }
 
-// codexHome makes a Codex home holding a file login.
+// codexHome makes an empty Codex home.
 func codexHome(t *testing.T) string {
 	t.Helper()
 	home := filepath.Join(t.TempDir(), "codex-home")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	login(t, home, "{}", now)
 	return home
-}
-
-// login rewrites a home's credential file as a Codex login does.
-func login(t *testing.T, home, content string, at time.Time) {
-	t.Helper()
-	path := filepath.Join(home, "auth.json")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, at, at); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // The null-windows fixtures are real replies of codex 0.163.0 and 0.164.0
@@ -510,55 +497,20 @@ func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
 	}
 }
 
-// Pacing per account: cold homes are read one interval apart, then each
-// home is paced only with the homes proven to share its account.
-func TestRunPacesPerAccount(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		homes int
-		relog bool // the last home logs in again, to the account the others now share
-		runs  int  // app-server runs in the passes one second apart after discovery
-	}{
-		{
-			// post-release review v0.113.2 finding U3: one Codex home was
-			// read per interval across every home, so with three homes each
-			// reading aged past LimitsStaleAfter. Each account is read
-			// inside one interval.
-			name: "three homes of distinct accounts", homes: 3, runs: 3,
-		},
-		{
-			// Takeover review of U3: a home's historical account bypassed
-			// pacing after that home logged in to another home's account.
-			// The new login is unproven and paced with the whole provider.
-			name: "home logged in again", homes: 2, relog: true, runs: 1,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
-			for range tc.homes - 1 {
-				req.Codex.Homes = append(req.Codex.Homes, codexHome(t))
-			}
-			f.perHome = true
-			for range tc.homes {
-				collect.Run(context.Background(), req, collect.Memory{}, fx)
-				f.clock = f.clock.Add(req.Interval + time.Second)
-			}
-			if f.runs != tc.homes {
-				t.Fatalf("app-server ran %d times while discovering %d homes, want %d", f.runs, tc.homes, tc.homes)
-			}
-			f.runs = 0
-			if tc.relog {
-				f.perHome = false
-				login(t, req.Codex.Homes[tc.homes-1], `{"relogged":true}`, f.clock)
-			}
-			for range tc.homes {
-				collect.Run(context.Background(), req, collect.Memory{}, fx)
-				f.clock = f.clock.Add(time.Second)
-			}
-			if f.runs != tc.runs {
-				t.Fatalf("app-server ran %d times, want %d", f.runs, tc.runs)
-			}
-		})
+// post-release review v0.113.2 finding U3: one Codex home was read per
+// interval across every home, so with three homes each reading aged past
+// LimitsStaleAfter. Codex review of 099225ab: no account a home proved
+// earlier may admit a dispatch, so each home is paced alone, and every home
+// is read inside one interval.
+func TestRunPacesPerHome(t *testing.T) {
+	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
+	req.Codex.Homes = append(req.Codex.Homes, codexHome(t), codexHome(t))
+	for range 4 {
+		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		f.clock = f.clock.Add(time.Second)
+	}
+	if f.runs != 3 {
+		t.Fatalf("app-server ran %d times for three homes inside one interval, want 3", f.runs)
 	}
 }
 

@@ -178,9 +178,7 @@ Git worktrees.
   account's home and asks it, over its documented JSON-RPC interface on
   stdio, for `account/read` and `account/rateLimits/read`. The Codex process
   uses its own login and makes its own network call; amq-board reads no
-  credential content, keychain or cookie and passes no credential. It reads
-  only the size and modification time of the home's `auth.json`, to tell
-  when the login changed. Because this
+  credential file, keychain or cookie and passes no credential. Because this
   runs your own Codex CLI, Codex may refresh its own login while it runs, as
   it does in any Codex session. Each window
   shows its percent used and reset time, named by its duration (5 h, weekly),
@@ -198,14 +196,13 @@ Git worktrees.
   CLI runs in its own process group, and whatever is left of that group is
   killed when the run ends; on a platform without process groups (Windows)
   no Codex CLI is started.
-- One Codex account is read at most once per 5 minutes across every
-  amq-board run and serve. A home whose last read proved its account, with
-  `auth.json` unchanged since, is paced only with homes of that account, so
-  each account is read every 5 minutes. A home not yet proven, logged in
-  again, or with its login in a keychain waits 5 minutes after any Codex
-  read. The readings, a journal of reserved runs, and the
-  collector lock are in `~/.amq/usage/` (mode 0700, files 0600); they hold no
-  response body, email, or raw account id. A one-shot run reads the saved
+- Each Codex home is read at most once per 5 minutes across every
+  amq-board run and serve, so every home's reading stays fresh. Pacing is
+  per home, not per account: a home's login can change at any time, so an
+  account behind several homes is read once per home in those 5 minutes.
+  The readings, a journal of reserved runs, and the collector lock are in
+  `~/.amq/usage/` (mode 0700, files 0600); they hold no response body,
+  email, or raw account id. A one-shot run reads the saved
   readings and starts the CLI only when a reading is due, beside the other
   sources. The whole pass (`codex --version`, the app-server run, and the
   app-server's exit after its reply) is bounded by 3 s in a one-shot run and
@@ -213,8 +210,8 @@ Git worktrees.
   failed read
   waits the same 5 minutes, up to 15 minutes after repeated failures, or 1 h
   for an unverified version or a reply not understood, and the strip names
-  the failure. Only the failed home waits that longer hold; other homes are
-  read after the 5 minutes.
+  the failure. Only the failed home waits that longer hold; other homes keep
+  their own 5 minutes.
 - Each reader counts only records of the harness versions it was checked
   against: Claude Code 2.1.267 up to 3, Codex 0.114.0 up to 1, and pi
   session format 3. A record of any other version, or with none, is not

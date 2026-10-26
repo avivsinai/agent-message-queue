@@ -9,8 +9,6 @@ package collect
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -25,8 +23,8 @@ import (
 // Request says what one pass may collect.
 type Request struct {
 	Codex Codex
-	// Interval is the minimum time between two dispatches that may reach
-	// the same account.
+	// Interval is the minimum time between two dispatches of the same
+	// home.
 	Interval time.Duration
 	// Deadline bounds one whole pass: the version check, the app-server
 	// run and the child's exit. The command runner may take a further
@@ -50,10 +48,6 @@ type Memory struct{}
 
 // operation names the Codex dispatch in the journal.
 const operation = "codex.app-server.rate-limits"
-
-// credentialFile is where Codex keeps a file-stored login inside its home.
-// Collection reads only its metadata, never its content.
-const credentialFile = "auth.json"
 
 // versionDeadline bounds `codex --version`, which makes no network call,
 // inside the pass deadline.
@@ -125,7 +119,7 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	if err != nil {
 		journal = edge.Journal{}
 	}
-	if _, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, credentialLeases(req.Codex.Homes), journal.Attempts, fx.Clock(), usagehold.DefaultRules); !ok {
+	if _, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, fx.Clock(), usagehold.DefaultRules); !ok {
 		return facts
 	}
 	release, ok, err := fx.Store.TryLock()
@@ -156,8 +150,7 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	}
 	problems = usage.Merge(problems, droppedAttempts(journal))
 	now := fx.Clock()
-	leases := credentialLeases(req.Codex.Homes)
-	home, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, leases, journal.Attempts, now, usagehold.DefaultRules)
+	home, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, now, usagehold.DefaultRules)
 	if !ok {
 		return usage.Merge(facts, problems)
 	}
@@ -168,13 +161,12 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	if d, ok := ctx.Deadline(); ok {
 		notAfter = now.Add(max(time.Until(d), 0))
 	}
-	return usage.Merge(collectCodex(ctx, req, home, leases[home], facts, journal, now, notAfter, fx), problems)
+	return usage.Merge(collectCodex(ctx, req, home, facts, journal, now, notAfter, fx), problems)
 }
 
 // collectCodex reads one home's limits under the collector lock. ctx and
-// notAfter carry the pass deadline; lease is the home's credential lease
-// pacing was decided on.
-func collectCodex(ctx context.Context, req Request, home, lease string, facts usage.Result, journal edge.Journal, now, notAfter time.Time, fx edge.Effects) usage.Result {
+// notAfter carry the pass deadline.
+func collectCodex(ctx context.Context, req Request, home string, facts usage.Result, journal edge.Journal, now, notAfter time.Time, fx edge.Effects) usage.Result {
 	attempt := usage.Attempt{
 		ID:         usage.ProviderCodex + ":" + home + ":" + strconv.FormatInt(now.UnixNano(), 10),
 		Operation:  operation,
@@ -202,7 +194,7 @@ func collectCodex(ctx context.Context, req Request, home, lease string, facts us
 		got = homeFailure(attempt.Key, ev, usage.FailUnsupportedVersion, "codex "+version+" is not a verified version")
 	}
 	if len(got.Failures) > 0 {
-		return finish(facts, got, attempt, "", fx.Clock(), journal, fx)
+		return finish(facts, got, attempt, fx.Clock(), journal, fx)
 	}
 	ev.ProducerVersion = usage.Some(version)
 
@@ -212,7 +204,7 @@ func collectCodex(ctx context.Context, req Request, home, lease string, facts us
 	codexHome, err := filepath.EvalSymlinks(home)
 	if err != nil {
 		got = homeFailure(attempt.Key, ev, usage.FailNotLoggedIn, "Codex home: "+errText(err))
-		return finish(facts, got, attempt, "", fx.Clock(), journal, fx)
+		return finish(facts, got, attempt, fx.Clock(), journal, fx)
 	}
 
 	journal.Attempts = usagehold.Prune(append(journal.Attempts, attempt), now)
@@ -227,7 +219,7 @@ func collectCodex(ctx context.Context, req Request, home, lease string, facts us
 	if !start.Before(attempt.DeadlineAt) {
 		ev.ObservedAt = start
 		got = homeFailure(attempt.Key, ev, usage.FailTimeout, "pass deadline passed before the app-server started")
-		return finish(facts, got, attempt, "", start, journal, fx)
+		return finish(facts, got, attempt, start, journal, fx)
 	}
 	cctx, cancel := context.WithTimeout(ctx, attempt.DeadlineAt.Sub(start))
 	attempt.StartedAt = usage.Some(start)
@@ -241,27 +233,21 @@ func collectCodex(ctx context.Context, req Request, home, lease string, facts us
 	})
 	cancel()
 	done := fx.Clock()
-	// The account the run proves holds for the lease only when the
-	// credential did not change while the run read it.
-	if credentialLease(home) != lease {
-		lease = ""
-	}
 	attempt.ExitCode = reply.ExitCode
 	ev.ObservedAt = done
 	got = codexnorm.Normalize(codexrpc.Parse(reply.Stdout), home, codexHome, ev)
 	if reply.Failure != "" {
 		got = usage.Merge(homeFailure(attempt.Key, ev, reply.Failure, "codex app-server: "+errText(reply.Err)), got)
 	}
-	return finish(facts, got, attempt, lease, done, journal, fx)
+	return finish(facts, got, attempt, done, journal, fx)
 }
 
-// finish publishes one home's new facts and records the attempt complete,
-// with the account it proved for lease. New windows or money replace the
-// home's previous facts; a pass that read none keeps the previous readings,
-// which then age, beside its failure, and a new identity replaces the
-// previous one. A snapshot that was not written records the attempt as
-// failed.
-func finish(facts, got usage.Result, attempt usage.Attempt, lease string, done time.Time, journal edge.Journal, fx edge.Effects) usage.Result {
+// finish publishes one home's new facts and records the attempt complete.
+// New windows or money replace the home's previous facts; a pass that read
+// none keeps the previous readings, which then age, beside its failure, and
+// a new identity replaces the previous one. A snapshot that was not written
+// records the attempt as failed.
+func finish(facts, got usage.Result, attempt usage.Attempt, done time.Time, journal edge.Journal, fx edge.Effects) usage.Result {
 	home := attempt.Key.Home
 	next := got
 	if len(got.Windows) == 0 && len(got.Money) == 0 {
@@ -279,9 +265,6 @@ func finish(facts, got usage.Result, attempt usage.Attempt, lease string, done t
 		problems = homeFailure(attempt.Key, usage.Evidence{ObservedAt: done}, usage.FailCacheWrite, errText(err))
 	}
 	attempt.FinishedAt = usage.Some(done)
-	if remote := provenRemote(got, attempt.Key); remote != "" {
-		attempt.Key.Remote, attempt.Lease = remote, lease
-	}
 	switch {
 	case len(got.Failures) > 0 && len(got.Windows) == 0 && len(got.Money) == 0:
 		// A pass that read limits backs off nothing: its failure stays a
@@ -318,48 +301,6 @@ func droppedAttempts(j edge.Journal) usage.Result {
 
 func homeFailure(acct usage.Account, ev usage.Evidence, code, detail string) usage.Result {
 	return usage.Result{Failures: []usage.Fact[usage.Failure]{{Account: acct, Value: usage.Failure{Code: code, Detail: detail}, Evidence: ev}}}
-}
-
-// credentialLeases is the credential lease of each home.
-func credentialLeases(homes []string) map[string]string {
-	out := make(map[string]string, len(homes))
-	for _, h := range homes {
-		out[h] = credentialLease(h)
-	}
-	return out
-}
-
-// credentialLease names the login a Codex home holds now by its credential
-// file's canonical path, size and modification time; a login or token
-// refresh rewrites the file and starts a new lease. It is empty when the
-// home keeps no file login (a keyring store), so that home stays unproven.
-func credentialLease(home string) string {
-	canon, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		return ""
-	}
-	path := filepath.Join(canon, credentialFile)
-	fi, err := os.Stat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	return fmt.Sprintf("%s %d %d", path, fi.Size(), fi.ModTime().UnixNano())
-}
-
-// provenRemote is the remote account the pass proved for key's home, or
-// empty while the identity is unproven.
-func provenRemote(got usage.Result, key usage.Account) string {
-	for _, f := range got.Identities {
-		if f.Account.Provider == key.Provider && f.Account.Home == key.Home && f.Account.Remote != "" {
-			return f.Account.Remote
-		}
-	}
-	for _, f := range got.Windows {
-		if f.Account.Provider == key.Provider && f.Account.Home == key.Home && f.Account.Remote != "" {
-			return f.Account.Remote
-		}
-	}
-	return ""
 }
 
 // infraFailure is a failure of the collection itself, not of one home: its
