@@ -54,13 +54,13 @@ func validateWakeRestartStageRequestPlatform(record wakeRestartRecord) error {
 	return validateWakeImageEvidenceForPlatform(record.Candidate, "darwin")
 }
 
-// planWakeRestartStageUnderAMQHomePlatform plans the stage path a later
-// release writes under ~/.amq/state/wake-stages.
-func planWakeRestartStageUnderAMQHomePlatform(record wakeRestartRecord) (string, error) {
+// planWakeRestartStageUnderLegacyRootPlatform plans the stage path an older
+// release wrote under the legacy root, so its restart can finish here.
+func planWakeRestartStageUnderLegacyRootPlatform(record wakeRestartRecord) (string, error) {
 	if err := validateWakeRestartStageRequestPlatform(record); err != nil {
 		return "", err
 	}
-	stateRoot, err := darwinWakeRestartAMQHomeStageRoot()
+	stateRoot, err := darwinWakeRestartLegacyStageRoot()
 	if err != nil {
 		return "", err
 	}
@@ -87,24 +87,25 @@ func planWakeRestartStageUnderRootPlatform(record wakeRestartRecord, stateRoot s
 	), nil
 }
 
-// darwinWakeRestartStageRoot is the root this binary writes new stages under.
+// darwinWakeRestartStageRoot is ~/.amq/state/wake-stages, the root this
+// binary writes new stages under.
 func darwinWakeRestartStageRoot() (string, error) {
-	stateDir, err := launch.LegacyStateDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
-	}
-	return darwinWakeRestartStageRootUnder(stateDir)
-}
-
-// darwinWakeRestartAMQHomeStageRoot is ~/.amq/state/wake-stages. This binary
-// validates and prunes stages there so that a restart staged by a later
-// release can finish here, but it writes no new stage there.
-func darwinWakeRestartAMQHomeStageRoot() (string, error) {
 	home, err := amqhome.Dir()
 	if err != nil {
 		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
 	}
 	return darwinWakeRestartStageRootUnder(filepath.Join(home, "state"))
+}
+
+// darwinWakeRestartLegacyStageRoot is <legacy>/wake-stages. This binary
+// writes no new stage there, but validates and prunes the stages an older
+// release wrote there, so a restart that it started finishes here.
+func darwinWakeRestartLegacyStageRoot() (string, error) {
+	stateDir, err := launch.LegacyStateDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve legacy Darwin wake restart state directory: %w", err)
+	}
+	return darwinWakeRestartStageRootUnder(stateDir)
 }
 
 func darwinWakeRestartStageRootUnder(stateDir string) (string, error) {
@@ -169,11 +170,11 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 	// plan that fails for one root never prevents a match on another root.
 	planned, plannedErr := planWakeRestartStageForRecordPlatform(record)
 	adjacentPlanned, adjacentErr := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
-	amqHomePlanned, amqHomeErr := planWakeRestartStageUnderAMQHomePlatform(record)
+	legacyPlanned, legacyErr := planWakeRestartStageUnderLegacyRootPlatform(record)
 	switch {
 	case plannedErr == nil && record.StagePath == planned:
 	case adjacentErr == nil && record.StagePath == adjacentPlanned:
-	case amqHomeErr == nil && record.StagePath == amqHomePlanned:
+	case legacyErr == nil && record.StagePath == legacyPlanned:
 	case plannedErr != nil:
 		return plannedErr
 	default:
