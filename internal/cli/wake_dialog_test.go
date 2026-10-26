@@ -147,18 +147,23 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		// shown is in the transcript while the dialog shows; answered is
 		// appended when the person answers it.
 		shown, answered string
+		// next is the turn's next PermissionRequest after a transcript close.
+		next string
 	}{
 		{"PostToolUse of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true, "", ""},
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"description":"d","command":"date > a.txt"},"tool_response":{}}`}}, true, "", "", ""},
 		{"PostToolUseFailure of the asked call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true, "", ""},
+			`{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"date > a.txt","description":"d"},"error":"exit 1"}`}}, true, "", "", ""},
 		{"PostToolUse of another call", []step{{"open", permission}, {"close",
-			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false, "", ""},
+			`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"date > b.txt","description":"d"}}`}}, false, "", "", ""},
 		{"idle_prompt", []step{{"open", permission}, {"notify",
-			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true, "", ""},
-		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true, "", ""},
-		{"Esc on a permission dialog", []step{{"open", escPerm}}, true, escUse, escEnd},
-		{"deny on a permission dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd},
+			`{"hook_event_name":"Notification","session_id":"s1","notification_type":"idle_prompt","message":"Claude is waiting for your input"}`}}, true, "", "", ""},
+		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, true, "", "", ""},
+		{"Esc on a permission dialog", []step{{"open", escPerm}}, true, escUse, escEnd, ""},
+		{"deny on a permission dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd, ""},
+		// The wake removes a transcript-proved marker, so the next dialog in
+		// the turn gets a fresh marker with its own digest.
+		{"deny, then the next dialog", []step{{"open", denyPerm}}, true, denyUse, denyEnd, escPerm},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -209,6 +214,25 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			}
 			if got := closed(); got != tc.closed {
 				t.Fatalf("marker closed = %v, want %v", got, tc.closed)
+			}
+			if tc.next == "" {
+				return
+			}
+			markerPath := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
+			if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+				t.Fatalf("transcript-proved marker still on disk: stat %v", err)
+			}
+			next := strings.ReplaceAll(tc.next, "TRANSCRIPT", transcript)
+			if err := runWakeDialog([]string{"open"}, strings.NewReader(next)); err != nil {
+				t.Fatalf("wake dialog open: %v", err)
+			}
+			raw, err := os.ReadFile(markerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var marker wakeDialogMarker
+			if err := json.Unmarshal(raw, &marker); err != nil || marker.InputDigest == "" {
+				t.Fatalf("next dialog's marker = %s (%v), want one with an input digest", raw, err)
 			}
 		})
 	}

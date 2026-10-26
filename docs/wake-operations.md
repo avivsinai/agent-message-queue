@@ -189,12 +189,18 @@ it.
   tool call (`is_error`, "User rejected tool use") and a user record whose
   text starts with `[Request interrupted by user`. The marker keeps the hook's
   `transcript_path`. At each recheck the wake reads, read-only, at most the
-  last 256 KiB of that file (a regular file, no symlink followed). It reads
-  the marker as closed when the tail holds a `tool_result` for the marker's
-  tool call, found by its tool call id or, for a permission marker, by the
-  newest `tool_use` whose name and input match the marker's digest, or an
-  interrupt record dated after the marker. A missing or unreadable transcript
-  proves nothing: the hold stays, and the hold line says so.
+  last 256 KiB of that file (a regular file, no symlink followed). It removes
+  the marker when the tail holds a `tool_result` for the marker's tool call,
+  found by its tool call id or, for a permission marker, by the newest
+  `tool_use` whose name and input match the marker's digest, or an interrupt
+  record dated after the marker. It removes it under the marker lock, without
+  waiting, and only if the marker is still the version it read; otherwise it
+  holds and checks again at the next recheck. The next dialog in the turn then
+  writes a fresh marker with its own digest. A missing or unreadable
+  transcript proves nothing: the hold stays, and the hold line says so. If
+  both the `UserPromptSubmit` and the next `PermissionRequest` hook fail, an
+  interrupt from the previous turn that is newer than the stale marker can
+  remove it while the new dialog shows.
 - **Stale markers.** A marker older than 10 minutes, dated in the future, or
   one the wake cannot read, still blocks input unless the transcript proves
   it closed. The wake then stops the 2-second recheck and retries on the

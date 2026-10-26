@@ -5,7 +5,8 @@ import "time"
 // Dialog guard: a Claude Code hook (amq wake dialog open|close)
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
-// wake only reads the marker. Doorbell text and its CR would answer the
+// wake reads the marker, and removes it only when the Claude Code transcript
+// proves the dialog answered. Doorbell text and its CR would answer the
 // dialog, so no input byte is written while the marker is present.
 
 type wakeDialogState uint8

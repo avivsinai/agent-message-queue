@@ -173,8 +173,10 @@ type wakeDialogMarker struct {
 // the hook's marker, so it reads as unknown, never as closed. A Startup
 // marker reads as closed once the harness has recorded its trust decision,
 // so the doorbell rings without a SessionStart hook. A Claude Code marker
-// reads as closed once its session transcript proves the dialog answered
-// (claudeDialogAnswered); a missing or unreadable transcript keeps it.
+// whose session transcript proves the dialog answered (claudeDialogAnswered)
+// is removed, so the next dialog in the turn writes a fresh marker with its
+// own digest; a missing or unreadable transcript, a busy lock or a changed
+// marker keeps the hold until the next recheck.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
@@ -186,7 +188,8 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
 			return wakeDialogClosed, nil
 		}
-		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime()) {
+		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime()) &&
+			removeAnsweredWakeDialogMarker(agentDir, raw, info) {
 			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
@@ -581,23 +584,66 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 // withWakeDialogMarkerLock runs fn holding the marker lock, so a
 // replacement and a conditional removal never interleave: a writer cannot
 // replace the marker between a remover's read and its unlink. The wake
-// only reads the marker and takes no lock.
+// takes it only to remove a marker the transcript proved answered, and
+// never waits for it.
 func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
+	return lockWakeDialogMarker(dirfd, unix.LOCK_EX, fn)
+}
+
+// errWakeDialogLockBusy is a non-blocking marker lock held by a hook.
+var errWakeDialogLockBusy = errors.New("wake dialog marker lock busy")
+
+func lockWakeDialogMarker(dirfd, how int, fn func() error) error {
 	fd, err := unix.Openat(dirfd, wakeDialogLockFileName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open wake dialog marker lock: %w", err)
 	}
 	defer func() { _ = unix.Close(fd) }()
 	for {
-		err = unix.Flock(fd, unix.LOCK_EX)
+		err = unix.Flock(fd, how)
 		if !errors.Is(err, unix.EINTR) {
 			break
 		}
+	}
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return errWakeDialogLockBusy
 	}
 	if err != nil {
 		return fmt.Errorf("lock wake dialog marker: %w", err)
 	}
 	return fn()
+}
+
+// removeAnsweredWakeDialogMarker removes the marker the wake read as raw
+// with info, only if it is still that version (same bytes, mtime and
+// size), under the marker lock taken without waiting. It reports whether
+// no marker remains.
+func removeAnsweredWakeDialogMarker(agentDir *wakeAgentDir, raw []byte, info os.FileInfo) bool {
+	if validateCanonicalWakeAgentDir(agentDir) != nil {
+		return false
+	}
+	removed := false
+	err := agentDir.withFD(func(dirfd int) error {
+		return lockWakeDialogMarker(dirfd, unix.LOCK_EX|unix.LOCK_NB, func() error {
+			current, now, exists, err := readWakeRepairMetadataAt(
+				dirfd,
+				wakeDialogFileName,
+				"wake dialog marker",
+				filepath.Join(agentDir.path, wakeDialogFileName),
+				maxWakeMetadataFileBytes,
+			)
+			if err != nil || !exists || now == nil || !bytes.Equal(current, raw) ||
+				!now.ModTime().Equal(info.ModTime()) || now.Size() != info.Size() {
+				return err
+			}
+			if err := wakeUnlinkAt(dirfd, wakeDialogFileName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return err
+			}
+			removed = true
+			return nil
+		})
+	})
+	return err == nil && removed
 }
 
 // removeWakeDialogMarkerIf removes the marker when remove accepts its
