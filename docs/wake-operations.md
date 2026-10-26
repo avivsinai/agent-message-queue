@@ -31,6 +31,26 @@ executable action or a safe operator diagnostic. Missing evidence is JSON
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
+`live_wake` (schema 2: `wake.live`) proves that the lock's exact process
+exists; it does not prove delivery. On macOS the check also sends a read-only,
+generation-bound request through the control socket and waits at most one
+second for the notification loop to answer. Schema 1 reports `health_status`
+and `health_detail`; schema 2 reports `health.status` and `health.detail`.
+`healthy` means the loop answered with an armed watcher and no scan retry or
+input recovery pending. `degraded` means the loop is retrying or needs input
+recovery. `unresponsive` means an advertised loop did not return a valid
+answer; restart then requires its owning terminal or supervisor. Older wakes
+without the protocol, and Linux wakes, report `unknown`. An unproven loop
+reports wake status `unverified`, and a failed loop reports `degraded`;
+the live process claim is preserved. This check does not prove that a harness
+received or consumed a doorbell. Use a drained receipt for consumption proof.
+
+`image_status` (schema 2: `image.status`) is `outdated` when the recorded
+running version is older than this installed CLI. `different` reports other
+confirmed image differences, including same-version rebuilds. Installing a
+new CLI does not prove that an existing wake upgraded; inspect `self_upgrade`
+in schema 2 and follow the reported next action.
+
 The co-op Stop hook (`amq coop hook stop`, installed by `amq coop install-hooks`)
 blocks a stop only for mail no wake will ring for. With no live wake, every pending message counts. Under a
 live wake, only mail created at or before `baseline_at` counts, because a wake
@@ -60,7 +80,13 @@ own log. The keepalive launcher's detached variant is in
 ## Hold by priority
 
 Each doorbell can start a full-context turn, and mail comes in bursts. Two
-opt-in settings let a wake hold its first doorbell. For example:
+opt-in settings let a wake hold its first doorbell.
+
+A hold delays even a single message. It is not burst batching. To combine
+arrivals close together, use `debounce` (default `250ms`); keep both holds at
+`0` when a lone message should ring promptly.
+
+For example, to delay the first notification by priority:
 
 ```bash
 amq wake --me claude --hold-normal 5m --hold-low 30m

@@ -42,6 +42,7 @@ type wakeConfig struct {
 	interruptKey              string
 	lastInterrupt             time.Time
 	controlStop               <-chan struct{}
+	healthRequests            <-chan wakeHealthRequest
 	restartSignals            chan os.Signal
 	beforeTerminalWrite       func() error
 	terminalWrite             func(string) error

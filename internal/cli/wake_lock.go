@@ -38,6 +38,7 @@ type wakeLock struct {
 	SourceGeneration     string               `json:"source_generation,omitempty"`      // Dead generation inherited by a repaired wake
 	SourceFloorDigest    string               `json:"source_floor_digest,omitempty"`    // Exact repair floor inherited by a repaired wake
 	ControlSocket        string               `json:"control_socket,omitempty"`         // Generation-derived cooperative control endpoint
+	HealthSchema         int                  `json:"health_schema,omitempty"`          // Read-only notification-loop probe protocol
 	OwnerSchema          int                  `json:"owner_schema,omitempty"`           // Non-zero only for an authoritative owner-bound lock
 	Owner                *wakeOwner           `json:"owner,omitempty"`                  // Exact owner identity for an authoritative owner-bound lock
 	ResumeSchema         int                  `json:"resume_schema,omitempty"`          // Agent-safe self-exec protocol; independent of OwnerSchema

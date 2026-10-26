@@ -17,6 +17,7 @@ const (
 
 	wakeImageCurrent   = "current"
 	wakeImageDifferent = "different"
+	wakeImageOutdated  = "outdated"
 	wakeImageUnknown   = "unknown"
 
 	wakeCheckUnknown      = "unknown"
@@ -82,6 +83,7 @@ type wakeCheckDecision struct {
 	Platform                wakeCheckPlatformDecision
 	Start                   wakeCheckStartDecision
 	Wake                    wakeCheckWakeDecision
+	Health                  wakeHealthDecision
 	Image                   wakeCheckImageDecision
 	Repair                  wakeCheckRepairDecision
 	Reload                  wakeCheckReloadDecision
@@ -190,6 +192,7 @@ type wakeCheckResultV2 struct {
 	Repair            wakeCheckRepairV2      `json:"repair"`
 	Reload            wakeCheckReloadV2      `json:"reload"`
 	SelfUpgrade       wakeCheckSelfUpgradeV2 `json:"self_upgrade"`
+	Health            wakeHealthDecision     `json:"health"`
 	RestartCapability string                 `json:"restart_capability"`
 	Action            wakeCheckActionV2      `json:"action"`
 	// StartupHold is an open trust-dialog hold coop exec placed.
@@ -273,6 +276,10 @@ type wakeCheckActionV2 struct {
 var wakeCheckExecutable = os.Executable
 
 func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
+	health := decision.Health
+	if health.Status == "" {
+		health = wakeHealthDecision{Status: wakeHealthUnknown, Detail: "notification loop was not probed"}
+	}
 	return wakeCheckResultV2{
 		Schema: wakeCheckSchemaV2,
 		Agent:  decision.Agent,
@@ -312,6 +319,7 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			ReasonCode: decision.Reload.ReasonCode,
 		},
 		SelfUpgrade:       renderWakeCheckSelfUpgradeV2(decision.SelfUpgrade),
+		Health:            health,
 		RestartCapability: decision.RestartCapability,
 		Action: wakeCheckActionV2{
 			Kind:             decision.Action.Kind,

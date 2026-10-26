@@ -106,7 +106,7 @@ func TestDarwinControlBindRefusesDetachedDirectoryOnSwap(t *testing.T) {
 	}
 
 	_, _, _, err = startWakeControlListenerInDirOwnedWithRestart(
-		agentDir, root, agent, lock, false, hooks, nil,
+		agentDir, root, agent, lock, false, hooks, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("control listener started despite directory swap (must refuse rather than bind a detached directory)")
