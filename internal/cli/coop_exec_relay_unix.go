@@ -107,13 +107,18 @@ const (
 	agyWorkingKind = "working"
 )
 
+// agyTurnMarker reports a marker of a running agy turn.
+func agyTurnMarker(marker wakeDialogMarker) bool {
+	return marker.Event == agyDialogEvent && marker.Harness == "agy" && marker.Kind == agyWorkingKind
+}
+
 func (s *agyDialogSink) onState(state, kind string) {
 	switch state {
 	case "blocked":
 		if kind != "permission" && kind != "auth" {
 			if !s.logged[kind] && s.log != nil {
 				s.logged[kind] = true
-				_, _ = fmt.Fprintf(s.log, "amq coop exec: agy reports blocked kind %q; the doorbell is not held for it\n", kind)
+				_, _ = fmt.Fprintf(s.log, "amq coop exec: agy reports blocked kind %q; the doorbell hold does not change for it\n", kind)
 			}
 			return
 		}

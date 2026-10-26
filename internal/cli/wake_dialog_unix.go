@@ -229,22 +229,22 @@ func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir, recheck *wakeStartupRe
 }
 
 // wakeDialogHoldReasonInDir says why the agent's marker holds input, for the
-// held-doorbell notice. marker is false when no marker exists. A marker that
-// cannot be read or parsed gives the generic reason.
-func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() (string, bool) {
-	return func() (string, bool) {
+// held-doorbell notice. A marker that cannot be read or parsed gives the
+// generic reason.
+func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() wakeDialogHoldCause {
+	return func() wakeDialogHoldCause {
 		raw, _, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil || readErr != nil {
-			return wakeDialogGenericHoldReason, true
+			return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
 		}
 		if !exists {
-			return "", false
+			return wakeDialogHoldCause{}
 		}
 		var marker wakeDialogMarker
 		if json.Unmarshal(raw, &marker) != nil {
-			return wakeDialogGenericHoldReason, true
+			return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
 		}
-		return wakeDialogHoldReason(marker), true
+		return wakeDialogHoldCause{reason: wakeDialogHoldReason(marker), marker: true, busy: agyTurnMarker(marker)}
 	}
 }
 
@@ -305,7 +305,7 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 		harness = "The harness"
 	}
 	switch {
-	case marker.Event == agyDialogEvent && marker.Harness == "agy" && marker.Kind == agyWorkingKind:
+	case agyTurnMarker(marker):
 		return harness + " is busy; the doorbell rings when the turn ends"
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
 		probed := marker.Kind == "" || marker.Probe != nil && marker.Kind != wakeStartupKindTermDumb

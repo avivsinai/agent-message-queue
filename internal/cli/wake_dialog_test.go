@@ -117,6 +117,62 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	}
 }
 
+// field: agy busy turns showed held notices (2026-10-26). A working marker
+// younger than wakeDialogQuietHold holds without a desktop notice or
+// terminal attention; an older one shows the held notice.
+func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		age     time.Duration
+		notices int
+	}{
+		{"younger than the quiet hold", wakeDialogQuietHold - time.Minute, 0},
+		{"older than the quiet hold", wakeDialogQuietHold, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			agentDir, err := openWakeAgentDir(h.root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = agentDir.Close() })
+			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+			raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
+			if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opened := h.now.Add(-tt.age)
+			if err := os.Chtimes(marker, opened, opened); err != nil {
+				t.Fatal(err)
+			}
+			var notices []string
+			attention := 0
+			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{})
+			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+			h.cfg.settings.heldNotice = true
+			h.cfg.desktopNotify = func(title, body string) error {
+				notices = append(notices, body)
+				return nil
+			}
+			h.cfg.attentionWrite = func(p []byte) (int, error) {
+				attention++
+				return len(p), nil
+			}
+			h.send("a", format.PriorityNormal)
+			h.scan(h.cfg)
+			if len(h.injected) != 0 {
+				t.Fatalf("typed %q into a busy agy", h.injected)
+			}
+			if len(notices) != tt.notices || (attention > 0) != (tt.notices > 0) {
+				t.Fatalf("notices = %q, attention writes = %d, want %d notices", notices, attention, tt.notices)
+			}
+			if tt.notices > 0 && !strings.Contains(notices[0], "Antigravity is busy") {
+				t.Fatalf("notice = %q, want the busy reason", notices[0])
+			}
+		})
+	}
+}
+
 // field: session3/claude doorbell held 13 h (2026-10-26). A permission
 // marker carries no tool_use_id, so only Stop or a prompt closed it, and a
 // turn interrupted after an approval held the doorbell for hours. The

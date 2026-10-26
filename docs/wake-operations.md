@@ -163,7 +163,8 @@ it.
   dialog that opens during a doorbell stops its remaining bytes; the held
   Enter is sent after the dialog closes. Urgent and interrupt mail is held the
   same way.
-- **Held-doorbell notice.** A held doorbell is never silent. At the first
+- **Held-doorbell notice.** A held doorbell is never silent, except during
+  a busy harness turn (below). At the first
   delivery attempt a marker blocks, the wake shows a desktop notification
   titled `AMQ` that names the agent, the number of waiting messages, and why
   input is held, for example `codex: 1 message waiting, doorbell held. Codex
@@ -486,12 +487,14 @@ marker in step with it:
   prompt is answered.
 - **Close.** `done` and `idle` close it, and so does agy's exit. Esc reports
   `idle`. The doorbell rings once, within 2 seconds of the close. A held
-  attempt is not an attempt, so the turn spends no budget. The held notice
-  says that agy is busy.
+  attempt is not an attempt, so the turn spends no budget. A turn hold is
+  quiet: it shows no desktop notice and no terminal attention, and the
+  `.wake.log` hold line says the harness is busy. A permission or sign-in
+  prompt shows the held notice at once.
 - **Not covered.** A turn longer than 10 minutes makes the marker
-  unconfirmed: input stays held, and the doorbell rings on the deferred
-  retry ladder, up to 2 minutes after the close. Another `blocked` kind
-  changes nothing and is logged once.
+  unconfirmed: input stays held, the held notice says that agy is busy, and
+  the doorbell rings on the deferred retry ladder, up to 2 minutes after the
+  close. Another `blocked` kind changes nothing and is logged once.
 
 ## Dialog guard (pi prompts)
 
