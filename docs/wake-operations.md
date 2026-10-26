@@ -92,7 +92,7 @@ running wake. Both write [`.wake.settings`](#live-settings).
   modification time. After the first attempt, holds no longer apply.
 - `urgent` mail skips the priority hold, including when a cohort is parked.
   A distinct urgent message can revive a parked cohort for one further
-  attempt. Ordinary urgent mail still passes through watcher debounce and
+  attempt, also when both holds are 0. Ordinary urgent mail still passes through watcher debounce and
   input-quiet deferral; urgent mail with the configured interrupt label follows
   the interrupt path. Input deferral detects typing activity, so a doorbell can
   join and submit an idle draft after the quiet interval.
@@ -471,6 +471,27 @@ sessions after an install.
 hooks file without a numeric positive integer `version`, unsafe comment
 markers inside strings, a missing binary, or an older command. Reinstall
 repairs AMQ entries; unrelated unsafe content needs an operator edit.
+
+## Dialog guard (agy turns and prompts)
+
+agy runs no hooks with Google Cloud sign-in. `amq coop exec agy` runs agy on
+a pseudo-terminal, turns on its terminal status (OSC 7501), and keeps the
+marker in step with it:
+
+- **Open.** `blocked:kind=permission` and `blocked:kind=auth` open the
+  marker, and so does `working`. agy queues a doorbell typed during a turn
+  and ignores the Enter-only reminders, so without the turn hold the
+  attempt budget ends while agy is busy and nothing rings when it is
+  idle. agy reports `working` once when a turn starts and again after a
+  prompt is answered.
+- **Close.** `done` and `idle` close it, and so does agy's exit. Esc reports
+  `idle`. The doorbell rings once, within 2 seconds of the close. A held
+  attempt is not an attempt, so the turn spends no budget. The held notice
+  says that agy is busy.
+- **Not covered.** A turn longer than 10 minutes makes the marker
+  unconfirmed: input stays held, and the doorbell rings on the deferred
+  retry ladder, up to 2 minutes after the close. Another `blocked` kind
+  changes nothing and is logged once.
 
 ## Dialog guard (pi prompts)
 
