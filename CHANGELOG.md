@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.113.4](https://github.com/avivsinai/agent-message-queue/compare/v0.113.3...v0.113.4) (2026-10-26)
+
+
+### Features
+
+* **remote:** carry the Buzz event id through the pi bridge ([#1254](https://github.com/avivsinai/agent-message-queue/issues/1254)) ([c15e866](https://github.com/avivsinai/agent-message-queue/commit/c15e86612b24d56d0f3640c29946766a6e0dc48b))
+* **wake:** write darwin restart stages under ~/.amq/state ([#1255](https://github.com/avivsinai/agent-message-queue/issues/1255)) ([d51720b](https://github.com/avivsinai/agent-message-queue/commit/d51720b5741c3f9342b3a5a40ecba89f9c540503))
+
+
+### Bug Fixes
+
+* **usage:** keep plan limits fresh and recover collection ([#1253](https://github.com/avivsinai/agent-message-queue/issues/1253)) ([0738093](https://github.com/avivsinai/agent-message-queue/commit/0738093000f333619e52fef129d43c49bdfe07b9))
+* **wake:** hold dialogs safely and bind startup release to its launch ([#1256](https://github.com/avivsinai/agent-message-queue/issues/1256)) ([c10d97c](https://github.com/avivsinai/agent-message-queue/commit/c10d97c43b6b73f794e5487d9e44f3ad548093ab))
+
 ## [0.113.3](https://github.com/avivsinai/agent-message-queue/compare/v0.113.2...v0.113.3) (2026-10-26)
 
 
