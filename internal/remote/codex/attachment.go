@@ -107,6 +107,9 @@ type Attachment struct {
 	cwd      string
 	approve  bool
 	now      func() time.Time
+	// codexHome is the daemon's Codex home that the thread's rollout path
+	// proves, or "" when thread/resume did not report one.
+	codexHome string
 	// confirmTimeout is how long Submit waits for our own userMessage item.
 	// Overridable for tests.
 	confirmTimeout time.Duration
@@ -279,6 +282,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		Thread struct {
 			ID     string `json:"id"`
 			Cwd    string `json:"cwd"`
+			Path   string `json:"path"`
 			Status struct {
 				Type string `json:"type"`
 			} `json:"status"`
@@ -307,6 +311,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// post-Attach, where the store is already visible.
 	a.mu.Lock()
 	a.cwd = resumed.Thread.Cwd
+	a.codexHome = codexHomeFromRollout(resumed.Thread.Path, threadID)
 	if a.activeTurn == "" {
 		a.status = threadStatus(resumed.Thread.Status.Type)
 	}
@@ -439,12 +444,12 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Admitted: true, RunID: id}, nil
 	}
 	busy := a.status == "busy" || a.activeTurn != ""
-	activeTurn := a.activeTurn
+	activeTurn, codexHome := a.activeTurn, a.codexHome
 	a.mu.Unlock()
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
-	if seatStartupHeld(a.threadID) {
-		return core.Admission{Code: protocol.CodeBusy, Message: "the Codex seat on this thread has not passed its startup screens yet", NothingSent: true}, nil
+	if held, why := seatStartupHeld(a.threadID, codexHome); held {
+		return core.Admission{Code: protocol.CodeBusy, Message: why, NothingSent: true}, nil
 	}
 
 	input := []map[string]any{{"type": "text", "text": req.Input.Text}}

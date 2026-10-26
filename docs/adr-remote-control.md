@@ -56,7 +56,9 @@ invariants.
    the record `uncertain` until native evidence arrives.
 4. **Exact cancellation.** Cancel names the original request; the native
    boundary compares the bound run before signalling. A cancel that arrives
-   before its submit leaves a tombstone. A late cancel for one request never
+   before its submit leaves a tombstone. A cancel of a request refused as
+   `busy` with nothing sent ends it `cancelled`, so its identical resubmit
+   never runs. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
    advertise exact cancellation. The local socket, the user's own
    terminal, reads every request. A Buzz share reads and cancels only the

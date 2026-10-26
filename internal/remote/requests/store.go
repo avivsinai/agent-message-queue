@@ -192,7 +192,7 @@ type Store struct {
 	// paths that change a record, reclassify it under mu.
 	//
 	// sweep is the records Record.NeedsSweep selects. compactable is the
-	// terminal records that are not tombstones yet, with their UpdatedAt;
+	// records Record.compactCandidate selects, with their UpdatedAt;
 	// compaction reads its candidates from it, so neither set grows with
 	// the tombstones nothing deletes.
 	sweep       map[Key]struct{}
@@ -329,7 +329,7 @@ func (s *Store) indexLocked(rec *Record) {
 	} else {
 		delete(s.sweep, k)
 	}
-	if rec.State.Terminal() && !rec.Tombstone {
+	if rec.compactCandidate() {
 		s.compactable[k] = rec.UpdatedAt
 	} else {
 		delete(s.compactable, k)
@@ -485,13 +485,14 @@ func (s *Store) Update(rec *Record) error {
 	if rec.NativeDispatches > 1 || rec.NativeDispatches < prev.NativeDispatches && !busyAnswer {
 		return protocol.Refuse(protocol.CodeInvalid, "native dispatch count must be monotonic and at most 1")
 	}
-	if prev.State == protocol.StateRejected && rec.State == protocol.StateDispatching {
+	if prev.State == protocol.StateRejected && rec.State != protocol.StateRejected {
 		// Only a busy tombstone (Code == busy AND Tombstone) that never
-		// dispatched may be re-admitted by an identical resubmit. Expired,
-		// stale_epoch, unshared, storage_full and dispatch-backed rejections
-		// are final; the caller retries with a NEW request id.
+		// dispatched may be re-admitted by an identical resubmit, or
+		// cancelled before that. Expired, stale_epoch, unshared, storage_full
+		// and dispatch-backed rejections are final; the caller retries with a
+		// NEW request id.
 		if prev.NativeDispatches != 0 || prev.Code != protocol.CodeBusy || !prev.Tombstone {
-			return protocol.Refuse(protocol.CodeInvalid, "only a busy tombstone may be re-admitted")
+			return protocol.Refuse(protocol.CodeInvalid, "only a busy tombstone may be re-admitted or cancelled")
 		}
 	}
 	if rec.PublishedRevision < prev.PublishedRevision || rec.PublishedRevision > rec.Revision {
@@ -690,7 +691,8 @@ func (s *Store) ListSweep() []*Record {
 }
 
 // CompactionCandidates returns the keys of terminal records that are not
-// tombstones yet, oldest write first. CompactOne re-reads and re-gates each.
+// tombstones yet or still keep their input, oldest write first. CompactOne
+// re-reads and re-gates each.
 func (s *Store) CompactionCandidates() []Key {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -769,10 +771,10 @@ func normalizeRecord(rec *Record) {
 	}
 }
 
-// CompactOne re-reads a single candidate under s.mu, re-gates (terminal, not
-// a tombstone, old, nothing owed to the runtime or the caller), and writes the
-// tombstone. Returns true if the record was compacted. The endpoint's
-// Reconcile sweep is the only production caller.
+// CompactOne re-reads a single candidate under s.mu, re-gates (Compactable:
+// terminal, not yet compacted, old, nothing owed to the runtime or the
+// caller), and writes the tombstone. Returns true if the record was
+// compacted. The endpoint's Reconcile sweep is the only production caller.
 //
 // The whole read-mutate-write runs under s.mu. The endpoint mutex (e.mu)
 // does not serialize CompactOne against the async ack markers (the endpoint
@@ -1095,21 +1097,21 @@ func allowed(from, to protocol.State) bool {
 		// A busy-rejected tombstone may be re-admitted by an identical
 		// resubmit: the caller was told the request was refused, and the
 		// retry is a NEW admission decision, not a resurrection of a
-		// dispatched request. Only re-admission (rejected -> dispatching) is
-		// permitted; the Code/Tombstone identity guard lives in Update, where
-		// the full record is available, so expired/stale_epoch/unshared/
-		// storage_full rejections are never resurrected even at
-		// NativeDispatches == 0.
-		if to == protocol.StateDispatching {
-			return true
-		}
+		// dispatched request. Only re-admission (rejected -> dispatching) and
+		// a cancel before it (rejected -> cancelled) are permitted; the
+		// Code/Tombstone identity guard lives in Update, where the full
+		// record is available, so expired/stale_epoch/unshared/storage_full
+		// rejections are never resurrected even at NativeDispatches == 0.
+		return to == protocol.StateDispatching || to == protocol.StateCancelled
 	}
 	return false
 }
 
 // Compactable is the compaction gate CompactOne applies: the record is
-// terminal, not a tombstone yet, owes nothing, and was observed before the
-// cutoff. The gate includes settlement: never reap a record we still owe the
+// terminal, not a tombstone yet or a tombstone that still keeps its input,
+// owes nothing, and was observed before the cutoff. A busy tombstone stays
+// re-admittable until its not_after, so it waits for that to pass the cutoff
+// as well. The gate includes settlement: never reap a record we still owe the
 // runtime (bound run, unacked result). Two obligations gate compaction and
 // they are different: OwesAck is what we owe the RUNTIME (release its
 // retained result); an unpublished revision is what we owe the CALLER.
@@ -1119,11 +1121,24 @@ func allowed(from, to protocol.State) bool {
 // and a late exact native resolution still corrects it while the record
 // lives.
 func (r *Record) Compactable(before time.Time) bool {
-	if !r.State.Terminal() || r.Tombstone || r.OwesAck() || r.PublishedRevision < r.Revision || len(r.OwedOutcomes) > 0 {
+	if !r.compactCandidate() || r.OwesAck() || r.PublishedRevision < r.Revision || len(r.OwedOutcomes) > 0 {
 		return false
+	}
+	if r.Tombstone && r.State == protocol.StateRejected {
+		notAfter, err := protocol.ParseTime(r.NotAfter)
+		if err != nil || !notAfter.Before(before) {
+			return false
+		}
 	}
 	observed, err := protocol.ParseTime(r.ObservedAt)
 	return err == nil && observed.Before(before)
+}
+
+// compactCandidate is the time-free half of Compactable that the compaction
+// index keeps: a terminal record that is not a tombstone yet, or a tombstone
+// that still holds its input.
+func (r *Record) compactCandidate() bool {
+	return r.State.Terminal() && (!r.Tombstone || r.Input != nil)
 }
 
 // OwesAck reports whether this record has a result we have not released.

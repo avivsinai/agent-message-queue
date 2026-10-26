@@ -31,6 +31,9 @@ type fakeAppServer struct {
 	turnStartResponseMu sync.Mutex
 	resumeReviewer      string
 	resumeReviewerMu    sync.Mutex
+	// resumePath, when set, is the rollout path thread/resume reports for
+	// the thread; resumeReviewerMu guards it.
+	resumePath string
 	// resumeError, when set, is the JSON-RPC error object thread/resume
 	// answers with.
 	resumeError   string
@@ -146,12 +149,16 @@ func startFakeAppServerAt(t *testing.T, sock string) (string, *fakeAppServer) {
 					continue
 				}
 				srv.resumeReviewerMu.Lock()
-				reviewer := srv.resumeReviewer
+				reviewer, path := srv.resumeReviewer, ""
+				if srv.resumePath != "" {
+					raw, _ := json.Marshal(srv.resumePath)
+					path = `,"path":` + string(raw)
+				}
 				srv.resumeReviewerMu.Unlock()
 				if reviewer == "" {
 					reviewer = "user"
 				}
-				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}},"approvalsReviewer":"` + reviewer + `"}}`))
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}` + path + `},"approvalsReviewer":"` + reviewer + `"}}`))
 			case "turn/start":
 				srv.turnStartDelayMu.Lock()
 				hook := srv.turnStartDelayHook
@@ -222,6 +229,13 @@ func (s *fakeAppServer) setResumeReviewer(v string) {
 	s.resumeReviewerMu.Lock()
 	defer s.resumeReviewerMu.Unlock()
 	s.resumeReviewer = v
+}
+
+// setResumePath sets the rollout path thread/resume reports (default none).
+func (s *fakeAppServer) setResumePath(v string) {
+	s.resumeReviewerMu.Lock()
+	defer s.resumeReviewerMu.Unlock()
+	s.resumePath = v
 }
 
 // setTurnStartDelay installs a hook that fires BEFORE the turn/start RPC

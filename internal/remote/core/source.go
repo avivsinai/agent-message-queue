@@ -124,11 +124,13 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Code: protocol.CodeExpired}}, nil
 	}
-	if rec.State.Terminal() {
+	if rec.State.Terminal() && !readmittableBusy(rec) {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
-	if rec.State == protocol.StateReceived {
+	if rec.State == protocol.StateReceived || readmittableBusy(rec) {
+		// Nothing was sent natively: the cancel is final at once, and a
+		// later identical resubmit returns the cancelled record.
 		e.transitionLocked(rec, causeCancelledBeforeAdmission, nativeEvidence{})
 		if _, err := e.commitLocked(rec, e.targets[targetID]); err != nil {
 			e.mu.Unlock()
