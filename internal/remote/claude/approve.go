@@ -117,11 +117,12 @@ type approvalResolved struct {
 	Option        string                     `json:"option,omitempty"`
 }
 
-// actionHash binds an answer to one exact tool call: SHA-256 over the tool
+// ActionHash binds an answer to one exact tool call: SHA-256 over the tool
 // name and the canonical tool input. The hook hashes its stdin tool_input
 // and the attachment hashes the transcript tool_use input with this same
-// function, so both sides agree byte for byte.
-func actionHash(toolName string, input json.RawMessage) (string, bool) {
+// function, so both sides agree byte for byte. The wake dialog guard
+// matches a permission marker to transcript tool_use records with it.
+func ActionHash(toolName string, input json.RawMessage) (string, bool) {
 	canon, ok := canonicalJSON(input)
 	if !ok {
 		return "", false

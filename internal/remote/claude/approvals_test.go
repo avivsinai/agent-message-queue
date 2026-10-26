@@ -244,7 +244,7 @@ func TestApprovalObserveOnlyShowsAndRefusesAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
+	hash, _ := ActionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
 	if err := createNewJSON(dir, f.id+".json", approvalAnswer{InteractionID: f.id, ActionHash: hash, Option: optionDeny}); err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestApprovalToolResultAndStopInOnePollAgree(t *testing.T) {
 // sees both calls, so it is uncertain, and B's tool_result closes it.
 func TestApprovalRequestAfterSnapshotBindsOnALaterRead(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_A", "make build"))
-	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"make build"}`))
+	hash, _ := ActionHash("Bash", json.RawMessage(`{"command":"make build"}`))
 	id, _ := newInteractionID()
 	f.id = id
 	var once sync.Once
@@ -571,7 +571,7 @@ func (f *approvalFixture) writeClaim(hookPID int) {
 // writeRequest lays down a request a hook with pid hookPID raised.
 func (f *approvalFixture) writeRequest(hookPID int) {
 	f.t.Helper()
-	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
+	hash, _ := ActionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
 	if f.id == "" {
 		f.id, _ = newInteractionID()
 	}

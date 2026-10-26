@@ -210,19 +210,39 @@ version supports it.
   (default `true`) turns the desktop notification off; the terminal floor
   stays. During the moment before `amq coop exec` writes or clears the
   `Startup` marker, the wake holds without a notice.
-- **Whole-turn hold after a permission dialog.** Permission hook input has no
-  tool call id, so only `UserPromptSubmit`, `Stop` or a session event clears
-  a permission marker. A tool call's `PostToolUse` does not: a call that
-  Claude Code allows without asking, with the same tool and input, would
-  close a dialog that still shows. A doorbell that would land mid-turn after
-  a permission dialog lands when the turn ends or the person types.
+- **Permission dialogs.** Permission hook input has no tool call id. The
+  marker keeps the hook's `transcript_path`, the tool name, and a canonical
+  digest of the tool input; the digest only finds candidate calls and never
+  proves which call asked. At each recheck, from 2 seconds after the marker
+  opened, the wake reads the transcript tail (as below) and binds the marker
+  to a tool call id only when exactly one `tool_use` of the main
+  conversation with that name and input was pending when the marker opened
+  (stamped at or before `opened_at`, with no `tool_result` stamped at or
+  before it), and no other equal call is pending then or now. Claude Code
+  2.1.310 writes a subagent's records to their own file with `isSidechain`
+  true and an `agentId`; an equal pending call with either field makes the
+  marker ambiguous, and a `PermissionRequest` with `agent_id` or
+  `agent_type` (a subagent's dialog) is never bound. The binding replaces
+  exactly the marker version the wake read, under the marker lock without
+  waiting, and keeps its mtime, so the hold's age and notice ladder do not
+  change. A bound marker closes only on a `tool_result` for that id in the
+  transcript (Esc, a deny, or an approved call's result) or on
+  `PostToolUse` or `PostToolUseFailure` with that id. A marker that stays
+  unbound (no pending call in the tail, several equal pending calls, a
+  subagent call, or a missing or unreadable transcript) closes only on
+  `UserPromptSubmit`, `Stop`, or a session event, and the hold line says
+  why, for example `transcript=ambiguous: 2 pending calls, holding`. The
+  "[Request interrupted by user for tool use]" record names no call, so it
+  never closes a marker. Limit: an equal pending call older than the
+  256 KiB tail is not seen; when the tail is cut, the bound call must not be
+  its first stamped record.
 - **AskUserQuestion and ExitPlanMode.** A marker that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
   so a marker it writes, also one right after such a `PreToolUse`, is a
   permission marker (below): the `PreToolUse` marker it replaces can belong
   to another call of the same tool. A tool call's open never replaces a
-  present marker without a tool call id; the check and the replacement
+  present permission marker, bound or not; the check and the replacement
   share the marker lock. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
@@ -233,9 +253,7 @@ version supports it.
   waiting, and only if the marker is still the version it read. A missing or
   unreadable transcript proves nothing: the hold stays, and the hold line
   says so.
-- **Esc on a permission dialog, and stale markers.** Esc or a deny on a
-  permission dialog runs no hook, and no transcript record names the marker,
-  so the marker stays until the person's next prompt. A marker older than 10
+- **Stale markers.** A marker older than 10
   minutes, dated in the future, or one the wake cannot read, still blocks
   input. The wake then stops the 2-second recheck and retries on the input
   retry ladder (5 seconds, doubling to 2 minutes), with the held-doorbell

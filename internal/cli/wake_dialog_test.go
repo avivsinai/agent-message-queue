@@ -339,10 +339,30 @@ func TestCoopNamedInjectWaitsForTheDialogMarker(t *testing.T) {
 // tool_use_id to the transcript (Esc runs no hook). Pre-merge review of
 // fix/wake-holds-0113 (Pro findings 1 and 2): an equal call's PostToolUse,
 // or the newest equal tool_use in the transcript, released a permission
-// dialog that still showed. A permission marker has no tool_use_id, so
-// only a turn or session event closes it.
+// dialog that still showed. A permission marker has no tool_use_id; the
+// wake binds it to a call only when exactly one equal main-conversation
+// call was pending when it opened, and only that call's result closes it.
 func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
+	// Live Claude Code 2.1.310 record shapes (Esc and "No" write the same
+	// records). PAST stamps precede the marker; NOW is stamped when the
+	// step runs, after the marker opened.
 	const (
+		liveInput = `{"command":"date > a.txt","description":"Write current date into a.txt"}`
+		// The hook input carries the same input with other key order and
+		// spacing; the digest is canonical.
+		livePermission     = `{"cwd":"/p","effort":{"level":"high"},"hook_event_name":"PermissionRequest","permission_mode":"default","permission_suggestions":[],"prompt_id":"p1","session_id":"s1","tool_input":{ "description":"Write current date into a.txt", "command":"date > a.txt" },"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+		subagentPermission = `{"hook_event_name":"PermissionRequest","session_id":"s1","agent_id":"a1","agent_type":"Explore","tool_input":` + liveInput + `,"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+		liveUse            = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.719Z","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"ID","name":"Bash","input":` + liveInput + `,"caller":{"type":"direct"}}]}}`
+		liveReject         = `{"type":"user","timestamp":"NOW","isSidechain":false,"toolDenialKind":"user-rejected","toolUseResult":"User rejected tool use","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"ID"}]}}
+{"type":"user","timestamp":"NOW","isSidechain":false,"message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+{"type":"system","timestamp":"NOW","subtype":"turn_duration"}`
+		// An api-request-blob repeats tool blocks without a stamp; it is
+		// not another call.
+		liveBlob   = `{"type":"api-request-blob","message":{"content":[{"type":"tool_use","id":"ID","name":"Bash","input":` + liveInput + `}]}}`
+		oldUse     = `{"type":"assistant","timestamp":"2026-10-26T08:00:00.000Z","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"toolu_old","name":"Bash","input":` + liveInput + `,"caller":{"type":"direct"}}]}}`
+		oldResult  = `{"type":"user","timestamp":"2026-10-26T08:00:05.000Z","isSidechain":false,"message":{"content":[{"type":"tool_result","content":"ok","is_error":false,"tool_use_id":"toolu_old"}]}}`
+		oldPost    = `{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_old","tool_input":` + liveInput + `,"tool_response":{}}`
+		sidechain  = `{"type":"assistant","timestamp":"2026-10-26T08:08:29.500Z","isSidechain":true,"agentId":"a1","message":{"content":[{"type":"tool_use","id":"toolu_side","name":"Bash","input":` + liveInput + `,"caller":{"type":"direct"}}]}}`
 		permission = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"Bash","tool_input":{"command":"date > a.txt","description":"d"}}`
 		askPre     = `{"hook_event_name":"PreToolUse","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"AskUserQuestion","tool_use_id":"toolu_q","tool_input":{"questions":[{"question":"Color?"}]}}`
 		askPerm    = `{"hook_event_name":"PermissionRequest","session_id":"s1","transcript_path":"TRANSCRIPT","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Color?"}]}}`
@@ -353,26 +373,62 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 {"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"tool_use_id":"toolu_2"}]}}
 {"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`
 	)
+	use := func(id string) string { return strings.ReplaceAll(liveUse, "ID", id) }
+	reject := func(id string) string { return strings.ReplaceAll(liveReject, "ID", id) }
+	// Steps: open and close run the hook receiver, append adds transcript
+	// lines, and recheck runs one wake recheck that must leave the marker
+	// held.
 	type step struct{ verb, input string }
 	for _, tc := range []struct {
 		name  string
 		steps []step
-		// transcript is the session transcript after the steps.
+		// transcript is the session transcript before the steps.
 		transcript string
 		closed     bool
+		// detail is in the hold line of a marker that stays.
+		detail string
+		// missing names a transcript that does not exist.
+		missing bool
 	}{
-		{"answered AskUserQuestion", []step{{"open", askPre}, {"close", askPost}}, "", true},
-		{"Esc on AskUserQuestion", []step{{"open", askPre}}, askEsc, true},
+		// field: session3/claude doorbell held 13 h (2026-10-26); Pro
+		// findings2 #1. Esc or a deny on a permission dialog runs no hook;
+		// the transcript answer of the one pending call releases it.
+		{name: "Esc on a permission dialog with one pending call",
+			steps: []step{{"append", use("toolu_01SH6LQuDnMFhg2mcN57xcVp") + "\n" +
+				strings.ReplaceAll(liveBlob, "ID", "toolu_01SH6LQuDnMFhg2mcN57xcVp")}, {"open", livePermission}, {"recheck", ""},
+				{"append", reject("toolu_01SH6LQuDnMFhg2mcN57xcVp")}},
+			closed: true},
+		{name: "deny on a permission dialog before the first recheck",
+			steps:  []step{{"append", use("toolu_01Gk4EfCc2fzxVLUcCGda2DJ")}, {"open", livePermission}, {"append", reject("toolu_01Gk4EfCc2fzxVLUcCGda2DJ")}},
+			closed: true},
+		{name: "two pending equal calls",
+			steps:  []step{{"append", use("toolu_a") + "\n" + use("toolu_b")}, {"open", livePermission}, {"recheck", ""}, {"append", reject("toolu_a")}},
+			detail: "transcript=ambiguous: 2 pending calls, holding"},
+		{name: "an equal call answered before the dialog opened",
+			steps: []step{{"append", oldUse + "\n" + oldResult + "\n" + use("toolu_new")}, {"open", livePermission}, {"recheck", ""},
+				{"close", oldPost}, {"recheck", ""}, {"append", oldResult}, {"recheck", ""}, {"append", reject("toolu_new")}},
+			closed: true},
+		{name: "a subagent's equal call",
+			steps:  []step{{"append", sidechain + "\n" + use("toolu_main")}, {"open", livePermission}, {"recheck", ""}, {"append", reject("toolu_main")}},
+			detail: "transcript=ambiguous: a subagent call matches, holding"},
+		{name: "a subagent's permission dialog",
+			steps:  []step{{"append", use("toolu_main")}, {"open", subagentPermission}, {"recheck", ""}, {"append", reject("toolu_main")}},
+			detail: "transcript=subagent call, holding"},
+		{name: "an unreadable transcript",
+			steps:   []step{{"open", livePermission}, {"recheck", ""}},
+			missing: true, detail: `transcript=unreadable, holding: "open transcript: `},
+		{name: "answered AskUserQuestion", steps: []step{{"open", askPre}, {"close", askPost}}, closed: true},
+		{name: "Esc on AskUserQuestion", steps: []step{{"open", askPre}}, transcript: askEsc, closed: true},
 		// W1 review (Pro finding 3, Codex reproducer): a PermissionRequest
 		// took the tool_use_id of the marker it replaced by tool name
 		// alone, so another call's PostToolUse released its dialog.
-		{"another call's PostToolUse after a PermissionRequest", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, "", false},
+		{name: "another call's PostToolUse after a PermissionRequest", steps: []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}},
 		// W1 review (Pro finding 4): a tool call's open replaced a present
 		// permission marker after an unlocked check, so that call's
 		// PostToolUse released the permission dialog.
-		{"a tool call's open after a permission dialog", []step{{"open", permission}, {"open", askPre}, {"close", askPost}}, "", false},
-		{"an equal call's PostToolUse after a permission dialog", []step{{"open", permission}, {"close", equalPost}}, "", false},
-		{"an equal call's result in the transcript after a permission dialog", []step{{"open", permission}}, equalUse, false},
+		{name: "a tool call's open after a permission dialog", steps: []step{{"open", permission}, {"open", askPre}, {"close", askPost}}},
+		{name: "an equal call's PostToolUse after a permission dialog", steps: []step{{"open", permission}, {"close", equalPost}}},
+		{name: "an equal call's result in the transcript after a permission dialog", steps: []step{{"open", permission}}, transcript: equalUse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -386,13 +442,9 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			t.Setenv(envMe, "claude")
 			t.Setenv(envRoot, root)
 			transcript := filepath.Join(t.TempDir(), "session.jsonl")
-			if err := os.WriteFile(transcript, []byte(tc.transcript+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			for _, step := range tc.steps {
-				input := strings.ReplaceAll(step.input, "TRANSCRIPT", transcript)
-				if err := runWakeDialog([]string{step.verb}, strings.NewReader(input)); err != nil {
-					t.Fatalf("wake dialog %s: %v", step.verb, err)
+			if !tc.missing {
+				if err := os.WriteFile(transcript, []byte(tc.transcript+"\n"), 0o600); err != nil {
+					t.Fatal(err)
 				}
 			}
 			agentDir, err := openWakeAgentDir(root, "claude")
@@ -400,9 +452,55 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
-			state, err := wakeDialogSourceInDir(agentDir)(time.Now())
+			source := wakeDialogSourceInDir(agentDir)
+			holdOf := wakeDialogHoldReasonInDir(agentDir)
+			marker := filepath.Join(fsq.AgentBase(root, "claude"), wakeDialogFileName)
+			// A recheck runs a full recheck period after the marker opened.
+			recheckNow := func() time.Time { return time.Now().Add(wakeDialogRecheck) }
+			for _, step := range tc.steps {
+				switch step.verb {
+				case "append":
+					lines := strings.ReplaceAll(step.input, "NOW", time.Now().UTC().Format(time.RFC3339Nano))
+					file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, err = file.WriteString(lines + "\n")
+					if cerr := file.Close(); err == nil {
+						err = cerr
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				case "recheck":
+					// Binding a marker to its call is the same hold: its
+					// notice ladder (generation) and age (mtime) stay.
+					before, beforeErr := os.Stat(marker)
+					hold := holdOf()
+					state, err := source(recheckNow())
+					after, afterErr := os.Stat(marker)
+					if err != nil || state != wakeDialogOpen || beforeErr != nil || afterErr != nil {
+						t.Fatalf("recheck: state %v (%v), marker %v/%v, want an open hold", state, err, beforeErr, afterErr)
+					}
+					if holdOf().generation != hold.generation || !after.ModTime().Equal(before.ModTime()) {
+						t.Fatalf("recheck started a new hold: generation or mtime changed")
+					}
+				default:
+					input := strings.ReplaceAll(step.input, "TRANSCRIPT", transcript)
+					if err := runWakeDialog([]string{step.verb}, strings.NewReader(input)); err != nil {
+						t.Fatalf("wake dialog %s: %v", step.verb, err)
+					}
+				}
+			}
+			state, err := source(recheckNow())
 			if got := err == nil && state == wakeDialogClosed; got != tc.closed {
-				t.Fatalf("marker closed = %v (%v), want %v", got, err, tc.closed)
+				raw, _ := os.ReadFile(marker)
+				t.Fatalf("marker closed = %v (%v), want %v; marker %s", got, err, tc.closed, raw)
+			}
+			if tc.detail != "" {
+				if got := wakeDialogHoldDetailInDir(agentDir)(time.Now()); !strings.Contains(got, tc.detail) {
+					t.Fatalf("hold line detail = %q, want it to contain %q", got, tc.detail)
+				}
 			}
 		})
 	}

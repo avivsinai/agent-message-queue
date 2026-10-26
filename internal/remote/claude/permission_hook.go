@@ -112,7 +112,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.PromptID == "" || !promptIDRe.MatchString(in.PromptID) || !h.awaitRunMarker(in.SessionID, in.PromptID, done) {
 		return 0
 	}
-	hash, ok := actionHash(in.ToolName, in.ToolInput)
+	hash, ok := ActionHash(in.ToolName, in.ToolInput)
 	if !ok {
 		return 0
 	}

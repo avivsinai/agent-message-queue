@@ -167,7 +167,7 @@ type transcriptEntry struct {
 	ToolResults []string
 }
 
-// toolUseRef is one tool_use block: its id, tool name and actionHash of
+// toolUseRef is one tool_use block: its id, tool name and ActionHash of
 // its input.
 type toolUseRef struct {
 	ID, Name, Hash string
@@ -316,7 +316,7 @@ func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUs
 				continue
 			}
 			out = append(out, TranscriptBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
-			if h, ok := actionHash(b.Name, b.Input); ok && b.ID != "" {
+			if h, ok := ActionHash(b.Name, b.Input); ok && b.ID != "" {
 				uses = append(uses, toolUseRef{ID: b.ID, Name: b.Name, Hash: h})
 			}
 		case "tool_result":
