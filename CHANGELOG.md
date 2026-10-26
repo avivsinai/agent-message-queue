@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.113.2](https://github.com/avivsinai/agent-message-queue/compare/v0.113.1...v0.113.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* **coop:** ring Codex seats at once unless a startup screen can show ([#1246](https://github.com/avivsinai/agent-message-queue/issues/1246)) ([676c44c](https://github.com/avivsinai/agent-message-queue/commit/676c44c42458e211dc1495aa501b30d875f78719))
+* **wake:** show a notice at once when a dialog holds the doorbell ([#1247](https://github.com/avivsinai/agent-message-queue/issues/1247)) ([849d3d8](https://github.com/avivsinai/agent-message-queue/commit/849d3d8c4fae68ab6780e776a0486d38df604f1e))
+
 ## [0.113.1](https://github.com/avivsinai/agent-message-queue/compare/v0.113.0...v0.113.1) (2026-10-25)
 
 
