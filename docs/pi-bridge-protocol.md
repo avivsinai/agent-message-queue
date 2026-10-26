@@ -83,6 +83,7 @@ non-empty protocol string instead of guessing its meaning:
 | `created_at` | RFC 3339 publication time; informational. |
 | `bridge_revision` | The bridge revision the adapter requires. Always set. |
 | `origin` | Optional: where the task came from, `{"carrier": "link", "name": "example"}`. `name` is the carrier's own name for the source that sent the task (for a link, the link's name in the AMQ manifest); `carrier` is the AMQ carrier that received it. Both are non-empty, and `name` is at most 64 bytes. The adapter writes `origin` only when both hold, and otherwise leaves the whole object out, so a local, mailbox or Buzz request has none. The extension may show "from <name>"; it is display text, never authority. |
+| `event` | Optional: `nostr:<eventID>`, where `<eventID>` is the lowercase hex id of the owner's Buzz event that caused the request. The adapter writes it only for a request from the Buzz carrier, and the value is the same as the `nostr:<eventID>` label on a Buzz DM's AMQ prompt. See [The Buzz event](#the-buzz-event). |
 
 The adapter publishes create-new: it writes and fsyncs a temporary file in
 `requests/`, hard-links it onto `<ref>.json`, removes the temporary name, and
@@ -98,6 +99,23 @@ a check fails:
   [Bridge revision](#bridge-revision));
 - on first contact, a live generation other than the one the caller's epoch
   names: `stale_epoch`.
+
+### The Buzz event
+
+`event` is a pointer, not proof. The adapter never holds the signed event, and
+any local process that can write `requests/` can write any `event`. The
+adapter never adds the id to `text`, and an extension keeps it out of the
+model's context, so a model cannot forge it as routing. An extension that
+ignores the field works as before, and a request without it is valid.
+
+A layer that must know the owner wrote the request, for example to accept a
+gate answer from a pi session, fetches that event from the relay and checks
+it itself, as the
+[Claude Code approval hook](amq-remote-approvals.md#when-the-hook-answers)
+does: the pinned owner key and signature, the DM channel, the gate message in
+its `e` tags or thread, the gate's nonce in the content, the time window, the
+edit and deletion history, and single use. AMQ verifies nothing for the
+layer.
 
 ## `receipts/<ref>.json`
 
@@ -574,6 +592,7 @@ applies with these differences:
   an agent that exits are `failed`.
 - On start the host appends `uncertain` to every receipt without a terminal
   event.
+- The host ignores a request's `event`.
 - Each `session/request_permission` during a request's turn is an
   `interaction` line with `interaction_id` `tool-<n>`, `options` the names
   of the offered ACP options, `approve_option` the first `allow_once`,

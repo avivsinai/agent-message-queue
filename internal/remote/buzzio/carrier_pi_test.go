@@ -26,7 +26,9 @@ import (
 // needed admitted evidence, which pi never gives. Through the real carrier,
 // endpoint and pi adapter over a revision-4 bridge: a share at submitted
 // evidence submits, the approval posts, a ✅ writes the answer file, and
-// interaction_resolved answered edits the message with the outcome.
+// interaction_resolved answered edits the message with the outcome. The
+// request the extension reads names the DM event as nostr:<eventID>, so a
+// layer can fetch and verify it on the relay (#1178).
 func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	// Synthetic clocks only. The pi
 	// adapter, the endpoint and the liveness record stand at base; the
@@ -130,6 +132,18 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		t.Fatalf("result row = %+v, want a running row that says the start is not proven", sent)
 	}
 	ref := want
+	data, err := os.ReadFile(filepath.Join(bridge, "requests", ref+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Text   string          `json:"text"`
+		Event  string          `json:"event"`
+		Origin json.RawMessage `json:"origin"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil || req.Event != "nostr:"+dm.ID.Hex() || req.Text != "run the tests" || req.Origin != nil {
+		t.Fatalf("request = %s (%v), want event nostr:%s, the DM text verbatim and no origin", data, err, dm.ID.Hex())
+	}
 
 	line := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction","at":"x","interaction_id":"tool-1","kind":"approval","prompt":"run: go test ./...","options":["Allow once","Block"],"approve_option":"Allow once","reject_option":"Block","manifest_hash":"sha256:abc","expires_at":%q,"presence":"remote"}`,
 		pi.ProtocolV1, ref, clock().Add(5*time.Minute).UTC().Format(time.RFC3339))
@@ -157,7 +171,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	if len(answers) != 1 {
 		t.Fatalf("answers = %v, want one answer file", answers)
 	}
-	data, _ := os.ReadFile(filepath.Join(bridge, "answers", answers[0].Name()))
+	data, _ = os.ReadFile(filepath.Join(bridge, "answers", answers[0].Name()))
 	var ans map[string]string
 	if err := json.Unmarshal(data, &ans); err != nil || ans["ref"] != ref || ans["interaction_id"] != "tool-1" || ans["option"] != "Allow once" || ans["manifest_hash"] != "sha256:abc" {
 		t.Fatalf("answer = %s (%v), want Allow once for tool-1 of %s", data, err, ref)

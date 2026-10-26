@@ -109,6 +109,11 @@ type deliverRequest struct {
 	// (protocol: requests). Absent unless the carrier named its
 	// source, so local, mailbox and Buzz requests carry none.
 	Origin *deliverOrigin `json:"origin,omitempty"`
+	// Event is nostr:<eventID>, the owner's Buzz event that caused the
+	// request, so a layer can fetch and verify it on the relay (protocol:
+	// requests). It is a pointer, not proof, and never part of Text. Absent
+	// unless the Buzz carrier named the event.
+	Event string `json:"event,omitempty"`
 }
 
 // deliverOrigin is the request's origin: the record's carrier and the
@@ -132,6 +137,15 @@ func originOf(o map[string]string) *deliverOrigin {
 		return nil
 	}
 	return &deliverOrigin{Carrier: carrier, Name: name}
+}
+
+// eventOf is the request's event label from a record's origin: the Buzz
+// event id the carrier stamped, labelled as on a Buzz DM's AMQ prompt.
+func eventOf(o map[string]string) string {
+	if o["carrier"] != "buzz" || o["event"] == "" || o["channel"] == "" {
+		return ""
+	}
+	return "nostr:" + o["event"]
 }
 
 // receipt is the receipt JSON contract.

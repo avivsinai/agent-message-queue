@@ -1240,6 +1240,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		CreatedAt:      protocol.FormatTime(a.now()),
 		BridgeRevision: MinBridgeRevision,
 		Origin:         originOf(req.Origin),
+		Event:          eventOf(req.Origin),
 	}
 	err := a.dir.publishRequest(preq)
 
