@@ -267,6 +267,7 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 		agent,
 		lock,
 		restartSignals,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -302,6 +303,78 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 	observed, exists := readDarwinWakeRestartRecordForTest(t, root, agent)
 	if !exists || !sameWakeRestartRecord(record, observed) {
 		t.Fatalf("restart control changed pending record: exists=%v record=%#v", exists, observed)
+	}
+}
+
+func TestDarwinWakeHealthForwardsToLoopAndReturnsStatus(t *testing.T) {
+	root, agent, _, lock, _ := testDarwinWakeRestartControlLock(t)
+	lock.HealthSchema = wakeHealthSchema
+	writeWakeLockForTest(t, root, agent, lock)
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	healthRequests := make(chan wakeHealthRequest)
+	cleanup, _, _, err := startWakeControlListenerInDirWithRestart(
+		agentDir,
+		root,
+		agent,
+		lock,
+		nil,
+		healthRequests,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	go func() {
+		request := <-healthRequests
+		request.reply <- wakeHealthHealthy
+	}()
+
+	got := probeWakeHealthPlatform(root, agent, inspectWakeLock(root, agent))
+	if got.Status != wakeHealthHealthy {
+		t.Fatalf("health probe = %#v, want healthy", got)
+	}
+}
+
+// Regression: the 2026-10-26 machine audit reported live/valid for wakes
+// that never acknowledged settings; a listening socket alone proves no loop progress.
+func TestDarwinWakeHealthProbeTimesOutWithoutLoopResponse(t *testing.T) {
+	root, agent, _, lock, _ := testDarwinWakeRestartControlLock(t)
+	lock.HealthSchema = wakeHealthSchema
+	writeWakeLockForTest(t, root, agent, lock)
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	cleanup, _, _, err := startWakeControlListenerInDirWithRestart(
+		agentDir,
+		root,
+		agent,
+		lock,
+		nil,
+		make(chan wakeHealthRequest),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	started := time.Now()
+	decision := inspectWakeCheckDecision(root, agent)
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("health probe timeout took %s, want under 4s", elapsed)
+	}
+	got := renderWakeCheckV1(decision)
+	if !got.LiveWake || got.WakeStatus != "degraded" || got.HealthStatus != wakeHealthUnresponsive ||
+		got.RestartCapability != wakeRestartOperatorOnly {
+		t.Fatalf("unresponsive loop check = %#v", got)
+	}
+	if got := renderWakeCheckV2(decision); got.Health.Status != wakeHealthUnresponsive || got.Action.Actor != wakeActionActorOperator {
+		t.Fatalf("schema 2 unresponsive loop check = %#v", got)
 	}
 }
 
@@ -377,6 +450,7 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 				agent,
 				lock,
 				restartSignals,
+				nil,
 			)
 			if err != nil {
 				t.Fatal(err)

@@ -26,6 +26,8 @@ type wakeCheckResult struct {
 	StartedAt                string `json:"started_at,omitempty"`
 	BaselineAt               string `json:"baseline_at,omitempty"`
 	WakeStatus               string `json:"wake_status"`
+	HealthStatus             string `json:"health_status,omitempty"`
+	HealthDetail             string `json:"health_detail,omitempty"`
 	WakePID                  int    `json:"wake_pid,omitempty"`
 	WakeMode                 string `json:"wake_mode,omitempty"`
 	OwnerBound               bool   `json:"owner_bound"`
@@ -160,8 +162,11 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	}
 	snapshot.Decision.SelfUpgrade = wakeCheckSelfUpgradeDecisionFromObservation(second.SelfUpgrade)
 	snapshot.Decision.Wake.BaselineAt = wakeCheckOptionalString(second.BaselineAt)
-	// Image probing occurs while building the decision. Re-observe afterwards
-	// so a PID reuse or lock generation change cannot inherit that conclusion.
+	if snapshot.Decision.Wake.Live {
+		applyWakeCheckHealth(&snapshot.Decision, probeWakeHealthPlatform(root, me, second.Inspection))
+	}
+	// Image and loop probing can take time. Re-observe afterwards so a PID
+	// reuse or lock generation change cannot inherit either conclusion.
 	third, thirdErr := observeWakeCheck(root, me)
 	if thirdErr != nil || !sameWakeCheckObservation(second, third) {
 		return wakeCheckObservationFailureSnapshot(root, me, third, thirdErr)
@@ -493,7 +498,7 @@ func buildWakeCheckDecision(
 	if decision.Wake.Live {
 		decision.Image.Running.Path = wakeCheckOptionalString(wakeCheckRunningImagePath(inspection))
 		decision.Image.Running.Version = wakeCheckOptionalString(wakeCheckVersion(inspection.Lock.ImageVersion))
-		if opsLock != nil && opsLock.ImageStatus == wakeImageDifferent {
+		if opsLock != nil && (opsLock.ImageStatus == wakeImageDifferent || opsLock.ImageStatus == wakeImageOutdated) {
 			decision.Image.Status = opsLock.ImageStatus
 		} else if probeImage {
 			decision.Image.Status = inspectWakeCheckImageStatus(
@@ -582,6 +587,8 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		StartedAt:                wakeCheckStringValue(decision.Wake.StartedAt, ""),
 		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
 		WakeStatus:               decision.Wake.Status,
+		HealthStatus:             decision.Health.Status,
+		HealthDetail:             decision.Health.Detail,
 		WakePID:                  wakeCheckIntValue(decision.Wake.PID),
 		WakeMode:                 wakeCheckStringValue(decision.Wake.Mode, ""),
 		OwnerBound:               decision.Wake.OwnerBound,
@@ -684,7 +691,7 @@ func decorateOpsWakeLockWithWakeCheck(
 	case runningVersion != wakeCheckUnknown &&
 		currentVersion != wakeCheckUnknown &&
 		runningVersion != currentVersion:
-		lock.ImageStatus = wakeImageDifferent
+		lock.ImageStatus = wakeCheckVersionImageStatus(runningVersion, currentVersion)
 	case staleBinary:
 		lock.ImageStatus = wakeImageDifferent
 	default:
@@ -978,7 +985,7 @@ func inspectWakeCheckImageStatus(
 	if result.RunningVersion != wakeCheckUnknown &&
 		result.CurrentVersion != wakeCheckUnknown &&
 		result.RunningVersion != result.CurrentVersion {
-		return wakeImageDifferent
+		return wakeCheckVersionImageStatus(result.RunningVersion, result.CurrentVersion)
 	}
 	comparison, err := inspectWakeBinaryStaleness(inspection)
 	if err != nil {
@@ -992,6 +999,39 @@ func inspectWakeCheckImageStatus(
 		return wakeImageCurrent
 	}
 	return wakeImageUnknown
+}
+
+func wakeCheckVersionImageStatus(running, current string) string {
+	if wakeSelfUpgradeVersionStrictlyNewer(running, current) {
+		return wakeImageOutdated
+	}
+	return wakeImageDifferent
+}
+
+func applyWakeCheckHealth(decision *wakeCheckDecision, health wakeHealthDecision) {
+	decision.Health = health
+	if health.Status == wakeHealthHealthy {
+		return
+	}
+	decision.Wake.Status = "degraded"
+	if health.Status == wakeHealthUnknown {
+		decision.Wake.Status = "unverified"
+	}
+	if health.Status == wakeHealthUnresponsive {
+		decision.RestartCapability = wakeRestartOperatorOnly
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionPreserveLiveWake,
+			Actor:      wakeActionActorOperator,
+			ReasonCode: "wake_loop_unresponsive",
+			Message:    "the wake process exists but its notification loop did not respond; inspect its log and restart through its owning terminal or supervisor; preserve its claim until the exact process is stopped",
+		}
+	} else {
+		decision.Action.Message = health.Detail + "; " + decision.Action.Message
+		if decision.Action.legacyMessage != "" {
+			decision.Action.legacyMessage = health.Detail + "; " + decision.Action.legacyMessage
+		}
+	}
+	finalizeWakeCheckDecision(decision)
 }
 
 func wakeCheckCurrentImagePath() string {
@@ -1071,6 +1111,7 @@ func writeWakeCheckText(result wakeCheckResult) error {
 			result.RunningVersion,
 			result.ImageStatus,
 		),
+		fmt.Sprintf("  Notification loop: %s (%s)", wakeCheckTextValue(result.HealthStatus), wakeCheckTextValue(result.HealthDetail)),
 		fmt.Sprintf(
 			"  Current image: %s (version=%s)",
 			result.CurrentImagePath,

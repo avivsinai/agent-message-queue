@@ -23,6 +23,11 @@ func startWakeControlListenerInDirWithRestart(
 	me string,
 	lock wakeLock,
 	_ chan<- os.Signal,
+	_ chan<- wakeHealthRequest,
 ) (func(), <-chan struct{}, func(), error) {
 	return startWakeControlListenerInDir(agentDir, root, me, lock)
+}
+
+func probeWakeHealthPlatform(string, string, wakeLockInspection) wakeHealthDecision {
+	return wakeHealthDecision{Status: wakeHealthUnknown, Detail: "wake health protocol is unsupported on Linux"}
 }

@@ -37,6 +37,19 @@ type wakeControlOwnerRequest struct {
 }
 
 const wakeControlRestartOperation = "restart"
+const wakeControlHealthOperation = "health"
+
+type wakeControlHealthRequest struct {
+	Generation string `json:"generation"`
+	Operation  string `json:"operation"`
+}
+
+type wakeControlHealthResponse struct {
+	Generation string `json:"generation"`
+	Status     string `json:"status"`
+}
+
+const wakeControlHealthTimeout = time.Second
 
 func wakeControlSocketPath(root, me, generation string) string {
 	root = canonicalWakeRoot(root)
@@ -673,6 +686,7 @@ func startWakeControlListenerInDirWithRestart(
 	root, me string,
 	lock wakeLock,
 	restartSignals chan<- os.Signal,
+	healthRequests chan<- wakeHealthRequest,
 ) (func(), <-chan struct{}, func(), error) {
 	return startWakeControlListenerInDirOwnedWithRestart(
 		agentDir,
@@ -682,6 +696,7 @@ func startWakeControlListenerInDirWithRestart(
 		false,
 		nil,
 		restartSignals,
+		healthRequests,
 	)
 }
 
@@ -701,6 +716,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	closeAgentDir bool,
 	testHooks *darwinWakeControlTestHooks,
 	restartSignals chan<- os.Signal,
+	healthRequests chan<- wakeHealthRequest,
 ) (func(), <-chan struct{}, func(), error) {
 	path := lock.ControlSocket
 	if path == "" {
@@ -773,7 +789,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 			handlers.Add(1)
 			go func(conn *net.UnixConn) {
 				defer handlers.Done()
-				handleDarwinWakeControlConn(conn, agentDir, root, me, lock, path, stopRequest, loopStopped, restartSignals, testHooks)
+				handleDarwinWakeControlConn(conn, agentDir, root, me, lock, path, stopRequest, loopStopped, restartSignals, healthRequests, testHooks)
 			}(conn)
 		}
 	}()
@@ -805,7 +821,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	// did not expose cooperative stop to their notification loops. Keep that
 	// cross-version behavior until a lock schema can prove the owner supports
 	// quiescing these modes before claim removal.
-	if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
+	if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste || wakeControlHealthOnly(lock) {
 		exposedStop = nil
 	}
 	return cleanup, exposedStop, markLoopStopped, nil
@@ -823,6 +839,7 @@ func handleDarwinWakeControlConn(
 	stopRequest chan struct{},
 	loopStopped chan struct{},
 	restartSignals chan<- os.Signal,
+	healthRequests chan<- wakeHealthRequest,
 	testHooks *darwinWakeControlTestHooks,
 ) {
 	defer func() { _ = conn.Close() }()
@@ -833,6 +850,15 @@ func handleDarwinWakeControlConn(
 	}
 	line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
 	if err != nil || len(line) > 4096 {
+		return
+	}
+	var healthRequest wakeControlHealthRequest
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &healthRequest) == nil &&
+		healthRequest.Operation == wakeControlHealthOperation {
+		handleDarwinWakeHealthControl(conn, lock, healthRequests, healthRequest)
+		return
+	}
+	if wakeControlHealthOnly(lock) {
 		return
 	}
 	if lock.WakeMode == wakeOwnerWakeMode ||
@@ -962,6 +988,44 @@ func handleDarwinWakeControlConn(
 		return
 	}
 	_, _ = conn.Write([]byte("ACK\n"))
+}
+
+// A standalone health endpoint carries no cooperative lifecycle authority.
+func wakeControlHealthOnly(lock wakeLock) bool {
+	return lock.HealthSchema == wakeHealthSchema && lock.TargetDigest == "" && lock.ResumeSchema == 0
+}
+
+func handleDarwinWakeHealthControl(
+	conn *net.UnixConn,
+	lock wakeLock,
+	healthRequests chan<- wakeHealthRequest,
+	request wakeControlHealthRequest,
+) {
+	if healthRequests == nil || lock.HealthSchema != wakeHealthSchema ||
+		request.Generation == "" || request.Generation != lock.Generation {
+		return
+	}
+	response := make(chan string, 1)
+	timer := time.NewTimer(wakeControlHealthTimeout)
+	defer timer.Stop()
+	select {
+	case healthRequests <- wakeHealthRequest{reply: response}:
+	case <-timer.C:
+		return
+	}
+	select {
+	case status := <-response:
+		if status != wakeHealthHealthy && status != wakeHealthDegraded {
+			return
+		}
+		_ = conn.SetDeadline(time.Now().Add(wakeControlHealthTimeout))
+		_ = json.NewEncoder(conn).Encode(wakeControlHealthResponse{
+			Generation: lock.Generation,
+			Status:     status,
+		})
+	case <-timer.C:
+		return
+	}
 }
 
 func cooperativeStopInjectViaInDir(

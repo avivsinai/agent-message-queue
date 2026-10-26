@@ -792,6 +792,12 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 		case <-l.sigCh:
 			// Clean exit on SIGHUP/SIGTERM
 			return nil
+		case request := <-l.cfg.healthRequests:
+			status := l.healthStatus()
+			select {
+			case request.reply <- status:
+			default:
+			}
 		case <-l.restartCh:
 			handleWakeRestartAtLoopBoundary(
 				&l.cfg,
@@ -864,6 +870,20 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 			}
 		}
 	}
+}
+
+func (l *wakeLoop) healthStatus() string {
+	if l.watcher == nil {
+		return wakeHealthDegraded
+	}
+	if err := pendingWakeWatcherError(l.watcher); err != nil {
+		l.retryWatcher("wake inbox watcher failed during health check", err)
+		return wakeHealthDegraded
+	}
+	if l.inboxScanRetryC != nil || l.cfg.inputRecoveryRequired {
+		return wakeHealthDegraded
+	}
+	return wakeHealthHealthy
 }
 
 func (l *wakeLoop) onWatcherEvent(event fsnotify.Event) {

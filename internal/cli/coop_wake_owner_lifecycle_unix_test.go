@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -426,6 +427,11 @@ func TestStandaloneWakeRemainsOwnerless(t *testing.T) {
 			inspection := inspectWakeLock(root, "codex")
 			if inspection.Lock.Owner != nil || inspection.Lock.OwnerSchema != 0 {
 				return fmt.Errorf("standalone wake became owner-bound: %#v", inspection.Lock)
+			}
+			if runtime.GOOS == "darwin" && (cfg.healthRequests == nil ||
+				inspection.Lock.HealthSchema != wakeHealthSchema ||
+				inspection.Lock.ControlSocket != wakeControlSocketPath(root, "codex", inspection.Lock.Generation)) {
+				return fmt.Errorf("standalone wake has no generation-bound loop health endpoint: %#v", inspection.Lock)
 			}
 			return nil
 		},

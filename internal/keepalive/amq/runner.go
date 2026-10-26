@@ -38,6 +38,7 @@ const maxWakeStderrDrainDiagnosticBytes = 4 * 1024
 const (
 	wakeImageCurrent   = "current"
 	wakeImageDifferent = "different"
+	wakeImageOutdated  = "outdated"
 )
 
 type Env struct {
@@ -304,7 +305,7 @@ func (c CLI) refreshWakeImage(ctx context.Context, req StartWakeRequest) error {
 	switch check.ImageStatus {
 	case wakeImageCurrent:
 		return nil
-	case wakeImageDifferent:
+	case wakeImageDifferent, wakeImageOutdated:
 		if check.Generation == "" {
 			return fmt.Errorf("%w: live wake omitted generation", ErrWakeImageIdentityInconclusive)
 		}
