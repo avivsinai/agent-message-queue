@@ -303,7 +303,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     try {
       if (await isSupported($)) {
-        await $.command.register({ name: 'board', description: 'Open the AMQ fleet board in a side panel' })
+        await $.command.register({ name: 'board', description: 'Open or close the AMQ fleet board panel' })
         // Only after a reload can the pane already be open: resume its refresh.
         if ((await $.ui.panes()).some(pane => pane.id === PANE)) start($)
       }
@@ -314,12 +314,18 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'board' }, async ($, e) => {
+    if ((await $.ui.panes()).some(pane => pane.id === PANE)) {
+      await $.ui.close({ id: PANE })
+      return (await $.ui.panes()).some(pane => pane.id === PANE)
+        ? { text: 'AMQ board is still open.' }
+        : { text: 'AMQ board closed.' }
+    }
     const opened = await $.ui.open({ id: PANE, title: 'AMQ board' })
     start($)
     return opened.isPlaced
-      ? { text: 'AMQ board opened; it refreshes every minute while open.' }
+      ? { text: 'AMQ board opened; run /board again to close. It refreshes every minute while open.' }
       : { text: `AMQ board opened; it waits for a surface that can show it (${opened.reason}).` }
-  }).catch(() => ({ text: 'AMQ board could not open.' }))
+  }).catch(() => ({ text: 'AMQ board could not open or close.' }))
 
   // An older engine that refuses these events still loads the two above.
   try {
