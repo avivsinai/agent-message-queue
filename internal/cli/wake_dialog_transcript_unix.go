@@ -90,19 +90,25 @@ func markerToolUseID(marker wakeDialogMarker) string {
 	return marker.BoundToolUseID
 }
 
-// claudeDialogAnswered reports whether the transcript the marker names
-// holds a tool_result for the marker's tool call, from the fold of the
-// whole transcript, so a result that left the tail still counts. A marker
-// without a call is never proven answered. A PreToolUse marker also
-// accepts its result in the tail, for a transcript too large to fold; a
-// bound permission marker relies on the fold that bound it. An error means
-// no proof: the hold stays.
+// claudeDialogAnswered reports whether the marker's dialog is proven gone.
+// A PreToolUse marker is gone once the transcript holds a tool_result for
+// its tool call: in the fold of the whole transcript, so a result that
+// left the tail still counts, or in the tail, for a transcript too large
+// to fold. A bound permission marker is gone only when its call's result
+// is in the inventory and the inventory still selects that call alone
+// (claudeTranscriptFold.bound). Other markers never are. An error means no
+// proof: the hold stays.
 func claudeDialogAnswered(marker wakeDialogMarker, transcripts *claudeTranscriptFold) (bool, error) {
-	id := markerToolUseID(marker)
-	if id == "" {
+	switch {
+	case marker.ToolUseID != "":
+	case marker.BoundToolUseID != "":
+		verdict, _, err := transcripts.bound(marker)
+		return verdict == claudeBoundRelease, err
+	default:
 		return false, nil
 	}
-	if ok, err := transcripts.resulted(marker.TranscriptPath, id); ok || err != nil || marker.ToolUseID == "" {
+	id := marker.ToolUseID
+	if ok, err := transcripts.resulted(marker.TranscriptPath, id); ok || err != nil {
 		return ok, err
 	}
 	tail, err := readClaudeTranscriptTail(marker.TranscriptPath)
@@ -123,13 +129,15 @@ func claudeDialogAnswered(marker wakeDialogMarker, transcripts *claudeTranscript
 	return false, nil
 }
 
-// maxWakeDialogTranscriptBytes bounds the transcript the wake folds for a
-// permission marker; a larger one is never used to bind. Long sessions
-// reach hundreds of MiB.
+// maxWakeDialogTranscriptBytes bounds the transcript the wake starts to
+// fold, and the transcript a permission marker is bound from. A fold that
+// started below it keeps reading what is appended, so a bound call's result
+// is still found. Long sessions reach hundreds of MiB.
 const maxWakeDialogTranscriptBytes = 1 << 30
 
-// maxWakeDialogTranscriptLine bounds one transcript record, as much as a
-// hook input may carry. A longer record leaves the fold incomplete.
+// maxWakeDialogTranscriptLine bounds one transcript record the fold
+// decodes, as much as a hook input may carry. A longer record is skipped
+// to its newline without decoding.
 const maxWakeDialogTranscriptLine = maxWakeDialogHookInputBytes
 
 // claudeTranscriptCall is one main or subagent tool_use the fold has seen.
@@ -143,14 +151,14 @@ type claudeTranscriptCall struct {
 	resultAt time.Time
 }
 
-// claudeTranscriptFold is the wake's complete inventory of the tool calls
-// in one Claude Code transcript: every tool_use from byte 0, and whether
-// and when its tool_result came. Each use reads only the bytes appended
-// since the last one; a file that shrank or was replaced is folded again
-// from byte 0. It lives in wake memory only. The remote attachment's
-// per-run call list cannot stand in for it: that list starts near the end
-// of the file and drops answered calls, so it never proves that no other
-// equal call is pending.
+// claudeTranscriptFold is the wake's inventory of the tool calls in one
+// Claude Code transcript: every tool_use from byte 0, and whether and when
+// its tool_result came. Each use reads only the bytes appended since the
+// last one; a file that shrank or was replaced is folded again from byte
+// 0. It lives in wake memory only. The remote attachment's per-run call
+// list cannot stand in for it: that list starts near the end of the file
+// and drops answered calls, so it never proves that no other equal call is
+// pending.
 type claudeTranscriptFold struct {
 	mu     sync.Mutex
 	path   string
@@ -163,27 +171,40 @@ type claudeTranscriptFold struct {
 	// mean the file was rewritten in place.
 	anchor []byte
 	calls  map[string]*claudeTranscriptCall
-	// incomplete is the fixed reason the inventory cannot be complete; it
-	// holds until the file is replaced.
-	incomplete string
+	// tooLarge is a transcript over maxWakeDialogTranscriptBytes when the
+	// fold would start; it holds until the file is replaced.
+	tooLarge bool
+	// skipping is set inside an over-long record; skipTail keeps its last
+	// bytes so a tool_use mark split across reads is still seen.
+	skipping bool
+	skipTail []byte
+	// hole is an over-long record that may hold a tool_use: the inventory
+	// may miss a call, so it never selects one again until the file is
+	// replaced.
+	hole bool
 }
+
+// claudeToolUseMark is in every record that can hold a tool_use block.
+var claudeToolUseMark = []byte(`"tool_use"`)
 
 // reset starts the fold of path over from byte 0.
 func (fold *claudeTranscriptFold) reset(path string, info os.FileInfo) {
 	fold.path, fold.file, fold.offset, fold.size, fold.anchor = path, info, 0, 0, nil
 	fold.calls = make(map[string]*claudeTranscriptCall)
-	fold.incomplete = ""
+	fold.tooLarge, fold.skipping, fold.skipTail, fold.hole = false, false, nil, false
 }
 
 // advance folds the complete records appended to path since the last call.
 // The open follows no symlink and accepts only a regular file. It streams
 // through one buffer of at most one record, never the whole file, and
-// holds no marker lock: the wake binds under the marker lock only after
-// the fold returns. complete reports that the fold reached the size it
-// observed through whole records; a partial trailing record (one still
-// being written) or a short read leaves it false, and the next call reads
-// that record again. An error means the transcript cannot be read now; the
-// fold keeps what it has.
+// holds no marker lock: the wake changes the marker under its lock only
+// after the fold returns. An over-long record is skipped to its newline
+// without decoding; one that may hold a tool_use leaves a hole. complete
+// reports that the fold reached the size it observed through whole
+// records; a partial trailing record (one still being written) or a short
+// read leaves it false, and the next call reads that record again. An
+// error means the transcript cannot be read now; the fold keeps what it
+// has. The caller holds fold.mu.
 func (fold *claudeTranscriptFold) advance(path string) (complete bool, err error) {
 	if !filepath.IsAbs(path) {
 		return false, fmt.Errorf("transcript path %q is not absolute", path)
@@ -199,11 +220,10 @@ func (fold *claudeTranscriptFold) advance(path string) (complete bool, err error
 		fold.reset(path, info)
 	}
 	fold.file, fold.size = info, size
-	switch {
-	case fold.incomplete != "":
-		return false, nil
-	case size > maxWakeDialogTranscriptBytes:
-		fold.incomplete = fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20)
+	if fold.offset == 0 && !fold.skipping && size > maxWakeDialogTranscriptBytes {
+		fold.tooLarge = true
+	}
+	if fold.tooLarge {
 		return false, nil
 	}
 	var chunk []byte
@@ -217,36 +237,51 @@ func (fold *claudeTranscriptFold) advance(path string) (complete bool, err error
 			return false, fmt.Errorf("read transcript: %w", err)
 		}
 		buf = buf[:n]
-		end := bytes.LastIndexByte(buf, '\n')
-		if end < 0 {
-			if len(buf) > maxWakeDialogTranscriptLine {
-				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
-			}
+		if len(buf) == 0 {
 			return false, nil
 		}
-		for line := range bytes.SplitSeq(buf[:end], []byte{'\n'}) {
-			if len(line) > maxWakeDialogTranscriptLine {
-				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
-				return false, nil
+		var used int
+		switch end := bytes.LastIndexByte(buf, '\n'); {
+		case fold.skipping:
+			used = len(buf)
+			if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+				used = i + 1
 			}
-			fold.add(line)
+			fold.skipped(buf[:used])
+		case end < 0 && len(buf) > maxWakeDialogTranscriptLine:
+			fold.skipping = true
+			used = len(buf)
+			fold.skipped(buf)
+		case end < 0:
+			return false, nil
+		default:
+			used = end + 1
+			for line := range bytes.SplitSeq(buf[:end], []byte{'\n'}) {
+				fold.add(line)
+			}
 		}
-		fold.offset += int64(end) + 1
-		fold.anchor = append([]byte(nil), buf[max(0, end+1-wakeDialogTranscriptAnchor):end+1]...)
+		fold.offset += int64(used)
+		fold.anchor = append([]byte(nil), buf[max(0, used-wakeDialogTranscriptAnchor):used]...)
 	}
-	return true, nil
+	return !fold.skipping, nil
 }
 
-// resulted reports whether the transcript at path holds a tool_result for
-// the call id. Any folded result proves it, also from an incomplete fold.
-func (fold *claudeTranscriptFold) resulted(path, id string) (bool, error) {
-	fold.mu.Lock()
-	defer fold.mu.Unlock()
-	if _, err := fold.advance(path); err != nil {
-		return false, err
+// skipped notes one read of an over-long record: seg ends at its newline
+// or at the read's end.
+func (fold *claudeTranscriptFold) skipped(seg []byte) {
+	keep := len(claudeToolUseMark) - 1
+	seam := append(append([]byte(nil), fold.skipTail...), seg[:min(len(seg), keep)]...)
+	if bytes.Contains(seam, claudeToolUseMark) || bytes.Contains(seg, claudeToolUseMark) {
+		fold.hole = true
 	}
-	call := fold.calls[id]
-	return call != nil && call.resulted, nil
+	if seg[len(seg)-1] == '\n' {
+		fold.skipping, fold.skipTail = false, nil
+		return
+	}
+	if len(seg) < keep {
+		seg = seam
+	}
+	fold.skipTail = append([]byte(nil), seg[max(0, len(seg)-keep):]...)
 }
 
 // wakeDialogTranscriptAnchor is how many folded bytes the fold rechecks.
@@ -288,35 +323,114 @@ func (fold *claudeTranscriptFold) add(line []byte) {
 	}
 }
 
-// permissionCall finds the one tool call an unbound permission marker's
-// dialog stands for, from the complete inventory of its transcript. id is
-// set only when exactly one main conversation call with the marker's input
-// digest was pending at the marker's open time (stamped at or before it,
-// with no tool_result stamped at or before it) and no other equal call is
-// pending at that time or now. Otherwise why says, in fixed text, why the
-// marker stays unbound. err is a transcript that cannot be read.
-func (fold *claudeTranscriptFold) permissionCall(marker wakeDialogMarker) (id, why string, err error) {
-	switch {
-	case marker.Agent != "":
-		return "", "subagent call", nil
-	case marker.InputDigest == "" || marker.Tool == "":
-		return "", "no tool input digest", nil
+// resulted reports whether the transcript at path holds a tool_result for
+// the call id. Any folded result proves it, also from a fold with a hole.
+func (fold *claudeTranscriptFold) resulted(path, id string) (bool, error) {
+	fold.mu.Lock()
+	defer fold.mu.Unlock()
+	if _, err := fold.advance(path); err != nil {
+		return false, err
 	}
-	opened, perr := time.Parse(time.RFC3339Nano, marker.OpenedAt)
-	if perr != nil {
-		return "", "no open time", nil
+	call := fold.calls[id]
+	return call != nil && call.resulted, nil
+}
+
+// permissionCall finds the one tool call an unbound permission marker's
+// dialog stands for (selectLocked). err is a transcript that cannot be
+// read.
+func (fold *claudeTranscriptFold) permissionCall(marker wakeDialogMarker) (id, why string, err error) {
+	if why := claudePermissionIneligible(marker); why != "" {
+		return "", why, nil
 	}
 	fold.mu.Lock()
 	defer fold.mu.Unlock()
 	complete, err := fold.advance(marker.TranscriptPath)
-	switch {
-	case err != nil:
+	if err != nil {
 		return "", "", err
-	case fold.incomplete != "":
-		return "", fold.incomplete, nil
+	}
+	// A fold that started below the limit keeps reading for release, but
+	// binds nothing new past it.
+	if fold.size > maxWakeDialogTranscriptBytes {
+		return "", fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20), nil
+	}
+	id, why = fold.selectLocked(marker, complete)
+	return id, why, nil
+}
+
+// claudeBoundVerdict is what a recheck does with a bound permission marker.
+type claudeBoundVerdict uint8
+
+const (
+	// claudeBoundHold keeps the marker as it is.
+	claudeBoundHold claudeBoundVerdict = iota
+	// claudeBoundRelease removes it: its call has a result and is still
+	// the only one selected.
+	claudeBoundRelease
+	// claudeBoundUnbind clears the binding: the inventory now selects no
+	// call or another one (an equal call published late).
+	claudeBoundUnbind
+)
+
+// bound checks a bound permission marker against the current inventory
+// before any release. A partial record, a read error or a hole holds; a
+// selection other than the bound call unbinds.
+func (fold *claudeTranscriptFold) bound(marker wakeDialogMarker) (claudeBoundVerdict, string, error) {
+	fold.mu.Lock()
+	defer fold.mu.Unlock()
+	complete, err := fold.advance(marker.TranscriptPath)
+	if err != nil {
+		return claudeBoundHold, "", err
+	}
+	id, why := fold.selectLocked(marker, complete)
+	switch {
+	case !complete || fold.hole || fold.tooLarge || marker.Overlap:
+		return claudeBoundHold, why, nil
+	case id != marker.BoundToolUseID:
+		return claudeBoundUnbind, why, nil
+	case fold.calls[id].resulted:
+		return claudeBoundRelease, "", nil
+	}
+	return claudeBoundHold, "", nil
+}
+
+// claudePermissionIneligible is why a permission marker is never bound, or
+// "".
+func claudePermissionIneligible(marker wakeDialogMarker) string {
+	switch {
+	case marker.Overlap:
+		return "several permission requests overlapped"
+	case marker.Agent != "":
+		return "subagent call"
+	case marker.InputDigest == "" || marker.Tool == "":
+		return "no tool input digest"
+	}
+	if _, err := time.Parse(time.RFC3339Nano, marker.OpenedAt); err != nil {
+		return "no open time"
+	}
+	return ""
+}
+
+// selectLocked finds the one tool call a permission marker's dialog stands
+// for, from the complete inventory of its transcript. id is set only when
+// exactly one main conversation call with the marker's input digest was
+// pending at the marker's open time (stamped at or before it, with no
+// tool_result stamped at or before it) and no other equal call is pending
+// at that time or now. Otherwise why says, in fixed text, why no call is
+// selected. A call published only after an equal call's result is not
+// seen in time. The caller holds fold.mu and has advanced the fold.
+func (fold *claudeTranscriptFold) selectLocked(marker wakeDialogMarker, complete bool) (id, why string) {
+	if why := claudePermissionIneligible(marker); why != "" {
+		return "", why
+	}
+	opened, _ := time.Parse(time.RFC3339Nano, marker.OpenedAt)
+	switch {
+	case fold.tooLarge:
+		return "", fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20)
+	case fold.hole:
+		return "", fmt.Sprintf("a transcript record over %d MiB may hold a call", maxWakeDialogTranscriptLine>>20)
 	case !complete:
 		// The record being written can be the dialog's own call.
-		return "", "a transcript record is still being written", nil
+		return "", "a transcript record is still being written"
 	}
 	var pending []string
 	side := false
@@ -339,17 +453,17 @@ func (fold *claudeTranscriptFold) permissionCall(marker wakeDialogMarker) (id, w
 	}
 	switch {
 	case side:
-		return "", "ambiguous: a subagent call matches", nil
+		return "", "ambiguous: a subagent call matches"
 	case len(pending) == 0:
-		return "", "no pending call in the transcript", nil
+		return "", "no pending call in the transcript"
 	case len(pending) > 1:
-		return "", fmt.Sprintf("ambiguous: %d pending calls", len(pending)), nil
+		return "", fmt.Sprintf("ambiguous: %d pending calls", len(pending))
 	}
 	only := fold.calls[pending[0]]
 	if only.at.IsZero() || only.at.After(opened) {
-		return "", "no call pending when the dialog opened", nil
+		return "", "no call pending when the dialog opened"
 	}
-	return pending[0], "", nil
+	return pending[0], ""
 }
 
 // readClaudeTranscriptTail reads at most the last

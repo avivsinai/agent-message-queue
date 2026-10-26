@@ -377,6 +377,11 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 	)
 	use := func(id string) string { return strings.ReplaceAll(liveUse, "ID", id) }
 	reject := func(id string) string { return strings.ReplaceAll(liveReject, "ID", id) }
+	const otherInput = `{"command":"ls","description":"List files"}`
+	otherPermission := `{"hook_event_name":"PermissionRequest","session_id":"s1","tool_input":` + otherInput + `,"tool_name":"Bash","transcript_path":"TRANSCRIPT"}`
+	useOther := func(id string) string {
+		return `{"type":"assistant","timestamp":"2026-10-26T08:08:29.500Z","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"` + id + `","name":"Bash","input":` + otherInput + `}]}}`
+	}
 	approved := func(id string) string {
 		return `{"type":"user","timestamp":"NOW","isSidechain":false,"message":{"content":[{"type":"tool_result","content":"ok","is_error":false,"tool_use_id":"` + id + `"}]}}`
 	}
@@ -470,6 +475,27 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		{name: "a transcript rewritten in place below the size limit",
 			steps: []step{{"append", use("toolu_x")}, {"truncate", "1025"}, {"open", livePermission}, {"recheck", ""},
 				{"replace", use("toolu_x")}, {"append", reject("toolu_x")}},
+			closed: true},
+		// Pro review of 4a534468 (findings7 P1): a second PermissionRequest
+		// replaced A's unanswered marker, and B's result released the hold
+		// while A's dialog stayed open. The second marker is overlapped.
+		{name: "a second permission request while the first is unanswered",
+			steps: []step{{"append", useOther("toolu_A") + "\n" + use("toolu_B")}, {"open", otherPermission}, {"open", livePermission},
+				{"append", approved("toolu_B")}},
+			detail: "transcript=several permission requests overlapped, holding"},
+		// Pro review of 4a534468 (findings7 P1): A's tool_use was published
+		// only after the wake bound the equal B; B's result released A's
+		// dialog. The release re-selects and unbinds.
+		{name: "the dialog's call published after an equal call was bound",
+			steps: []step{{"append", use("toolu_B")}, {"open", livePermission}, {"recheck", ""}, {"append", use("toolu_A")},
+				{"append", approved("toolu_B")}},
+			detail: "transcript=ambiguous: 2 pending calls, holding"},
+		// Pro review of 4a534468 (findings7 P2): an unrelated record over
+		// 8 MiB stopped the fold, so the bound call's later result was never
+		// found. The fold skips that record to its newline.
+		{name: "a deny after an unrelated record over 8 MiB",
+			steps: []step{{"append", use("toolu_A")}, {"open", livePermission}, {"recheck", ""}, {"truncate", "9"}, {"append", ""},
+				{"append", reject("toolu_A")}},
 			closed: true},
 		{name: "answered AskUserQuestion", steps: []step{{"open", askPre}, {"close", askPost}}, closed: true},
 		{name: "Esc on AskUserQuestion", steps: []step{{"open", askPre}}, transcript: askEsc, closed: true},

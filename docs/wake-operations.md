@@ -229,8 +229,11 @@ version supports it.
   seen, was replaced, or no longer holds the bytes last read is folded
   again from byte 0. A trailing record still being written defers the
   binding to the next recheck, because it can be the dialog's own call. A
-  transcript over 1 GiB, or one with a record over 8 MiB, is never used to
-  bind. Claude Code
+  record over 8 MiB is skipped to its newline without decoding; if it may
+  hold a `tool_use`, the transcript binds nothing more until it is
+  replaced. A transcript over 1 GiB is not folded from the start, and a
+  fold that started below 1 GiB keeps reading for release but binds
+  nothing new past it. Claude Code
   2.1.310 writes a subagent's records to their own file with `isSidechain`
   true and an `agentId`; an equal pending call with either field makes the
   marker ambiguous, and a `PermissionRequest` with `agent_id` (a subagent's
@@ -240,11 +243,22 @@ version supports it.
   without waiting, and keeps its mtime, so the hold's age and notice ladder
   do not change. A bound marker closes only on a `tool_result` for that id
   in the inventory (Esc, a deny, or an approved call's result), however far
-  back in the file, or on `PostToolUse` or `PostToolUseFailure` with that
-  id. A marker that stays
-  unbound (no pending call, several equal pending calls, a subagent call, a
-  transcript too large to fold, or a missing or unreadable transcript)
-  closes only on
+  back in the file, and only when the inventory at that moment still
+  selects that call alone; otherwise the wake clears the binding and holds.
+  Transcript writes are asynchronous, so this catches the dialog's own call
+  published after an equal call was bound; a call published only after the
+  equal call's result is still missed. A tool call's `PostToolUse` never
+  closes a bound marker, because the hook cannot check the inventory. A
+  `PermissionRequest` that replaces a permission marker whose dialog is not
+  proven answered (an unbound one, or a bound one without its call's result
+  in the transcript tail) writes an overlapped marker, under the marker
+  lock: another hook, such as an allow hook, can answer the second call
+  while the first dialog still shows. An overlapped marker, and each
+  permission marker that replaces it, is never bound, and the hold line
+  says `several permission requests overlapped`. A marker that stays
+  unbound (no pending call, several equal pending calls, a subagent call,
+  overlapped requests, a transcript too large to fold, or a missing or
+  unreadable transcript) closes only on
   `UserPromptSubmit`, `Stop`, or a session event, and the hold line says
   why, for example `transcript=ambiguous: 2 pending calls, holding`. The
   "[Request interrupted by user for tool use]" record names no call, so it

@@ -172,8 +172,14 @@ type wakeDialogMarker struct {
 	Agent     string `json:"agent,omitempty"`
 	AgentType string `json:"agent_type,omitempty"`
 	// BoundToolUseID is the one call the wake bound a permission marker to
-	// (claudeTranscriptFold.permissionCall); only that call's result closes the marker.
+	// (claudeTranscriptFold.permissionCall); only that call's result closes
+	// the marker, and only while the inventory still selects it alone.
 	BoundToolUseID string `json:"bound_tool_use_id,omitempty"`
+	// Overlap marks a permission marker that replaced another permission
+	// marker whose dialog was not proven answered: two dialogs may be
+	// open, so it is never bound and only a turn or session event closes
+	// it. It carries over to each later permission marker.
+	Overlap bool `json:"overlap,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
 	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -194,7 +200,8 @@ type wakeDialogMarker struct {
 // busy lock or a changed marker keeps the hold until the next recheck. An
 // unbound permission marker is first bound to its one pending call
 // (bindClaudePermissionMarker) from transcripts, the fold it shares with
-// wakeDialogHoldDetailInDir.
+// wakeDialogHoldDetailInDir; a bound one the inventory no longer selects
+// alone is unbound and held.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
@@ -206,7 +213,8 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir, transcripts *claudeTranscript
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
 			return wakeDialogClosed, nil
 		}
-		if readErr == nil && exists && info != nil && bindClaudePermissionMarker(agentDir, transcripts, raw, info, now) {
+		if readErr == nil && exists && info != nil && (bindClaudePermissionMarker(agentDir, transcripts, raw, info, now) ||
+			unbindClaudePermissionMarker(agentDir, transcripts, raw, info)) {
 			if raw, info, exists, readErr, err = readWakeDialogMarkerInDir(agentDir); err != nil {
 				return wakeDialogUnknown, err
 			}
@@ -464,8 +472,11 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 // permission marker closes on a turn or session event, or on the result of
 // the one call the wake bound it to. A PermissionRequest names no tool
 // call, so it never takes the tool_use_id of the marker it replaces: that
-// marker can belong to another call of the same tool. opened_at has
-// sub-second precision: the wake compares it with transcript stamps.
+// marker can belong to another call of the same tool. A PermissionRequest
+// that replaces a permission marker whose dialog is not proven answered
+// writes an overlapped marker (wakeDialogMarker.Overlap); the check and
+// the replacement share the marker lock. opened_at has sub-second
+// precision: the wake compares it with transcript stamps.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	marker := wakeDialogMarker{
 		Schema:         1,
@@ -476,12 +487,28 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		SessionID:      in.SessionID,
 		OpenedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if in.Event == wakeDialogPermissionEvent && in.ToolUseID == "" {
+	permission := in.Event == wakeDialogPermissionEvent && in.ToolUseID == ""
+	if permission {
 		marker.InputDigest, _ = claude.ActionHash(in.Tool, in.ToolInput)
 		marker.Agent, marker.AgentType = in.AgentID, in.AgentType
 	}
 	raw, err := json.Marshal(marker)
 	if err != nil {
+		return err
+	}
+	if permission {
+		marker.Overlap = true
+		overlapped, err := json.Marshal(marker)
+		if err != nil {
+			return err
+		}
+		_, err = installWakeDialogMarkerAt(dirfd, agentDir, [][]byte{append(raw, '\n'), append(overlapped, '\n')}, unix.LOCK_EX, time.Time{},
+			func(current []byte, _ os.FileInfo, exists bool) int {
+				if exists && permissionDialogMayBeOpen(current) {
+					return 1
+				}
+				return 0
+			})
 		return err
 	}
 	if in.ToolUseID == "" {
@@ -496,6 +523,39 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	})
 }
 
+// permissionDialogMayBeOpen reports whether current is a Claude Code
+// permission marker whose dialog may still be open: any one, unless it is
+// not overlapped, is bound, and the transcript tail holds its bound call's
+// result. An unreadable marker or transcript may hide an open dialog.
+func permissionDialogMayBeOpen(current []byte) bool {
+	var marker wakeDialogMarker
+	if json.Unmarshal(current, &marker) != nil {
+		return true
+	}
+	if marker.Harness != "" || marker.Event != wakeDialogPermissionEvent {
+		return false
+	}
+	if marker.Overlap || marker.BoundToolUseID == "" {
+		return true
+	}
+	tail, err := readClaudeTranscriptTail(marker.TranscriptPath)
+	if err != nil {
+		return true
+	}
+	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
+		record, blocks := claudeTranscriptBlocks(line)
+		if record.Type != "user" {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "tool_result" && block.ToolUseID == marker.BoundToolUseID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // replaceWakeDialogMarkerAt installs data as the marker by an exclusive
 // temp file and a rename, without fsync or read-back: the marker is
 // advisory, and a marker lost in a crash leaves the wake as it is without the
@@ -508,90 +568,113 @@ func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) e
 // the present marker when keep accepts its bytes; the read and the
 // replacement share the marker lock.
 func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []byte, keep func(current []byte) bool) error {
-	var keepPresent func([]byte, os.FileInfo, bool) bool
+	var pick func([]byte, os.FileInfo, bool) int
 	if keep != nil {
-		keepPresent = func(current []byte, _ os.FileInfo, exists bool) bool { return exists && keep(current) }
+		pick = func(current []byte, _ os.FileInfo, exists bool) int {
+			if exists && keep(current) {
+				return -1
+			}
+			return 0
+		}
 	}
-	_, err := installWakeDialogMarkerAt(dirfd, agentDir, data, unix.LOCK_EX, time.Time{}, keepPresent)
+	_, err := installWakeDialogMarkerAt(dirfd, agentDir, [][]byte{data}, unix.LOCK_EX, time.Time{}, pick)
 	return err
 }
 
-// installWakeDialogMarkerAt writes data to a temp file, dates it modTime
-// unless that is zero, and under the marker lock (taken with how) renames
-// it over the marker unless keep accepts the current marker (exists is
-// false when there is none). installed reports the rename.
+// installWakeDialogMarkerAt writes each of datas to a temp file, dates them
+// modTime unless that is zero, and under the marker lock (taken with how)
+// renames the one pick names over the marker; pick sees the current marker
+// (exists is false when there is none) and returns -1 to keep it. A nil
+// pick installs datas[0]. installed reports the rename.
 func installWakeDialogMarkerAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
-	data []byte,
+	datas [][]byte,
 	how int,
 	modTime time.Time,
-	keep func(current []byte, info os.FileInfo, exists bool) bool,
+	pick func(current []byte, info os.FileInfo, exists bool) int,
 ) (installed bool, err error) {
 	const label = "wake dialog marker"
-	var nonce [12]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return false, fmt.Errorf("generate %s temp name: %w", label, err)
-	}
-	temp := fmt.Sprintf(".%s.tmp.%d.%s", strings.TrimLeft(wakeDialogFileName, "."), os.Getpid(), hex.EncodeToString(nonce[:]))
-	fd, err := unix.Openat(dirfd, temp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return false, fmt.Errorf("create %s temp: %w", label, err)
-	}
-	file := os.NewFile(uintptr(fd), temp)
-	tempPresent := true
+	temps := make([]string, 0, len(datas))
 	defer func() {
-		_ = file.Close()
-		if tempPresent {
-			_ = wakeUnlinkAt(dirfd, temp, 0)
+		for _, temp := range temps {
+			if temp != "" {
+				_ = wakeUnlinkAt(dirfd, temp, 0)
+			}
 		}
 	}()
-	if n, err := file.Write(data); err != nil {
-		return false, fmt.Errorf("write %s temp: %w", label, err)
-	} else if n != len(data) {
-		return false, fmt.Errorf("write %s temp: %w", label, io.ErrShortWrite)
-	}
-	if err := file.Close(); err != nil {
-		return false, fmt.Errorf("close %s temp: %w", label, err)
-	}
-	if !modTime.IsZero() {
-		ts := unix.NsecToTimespec(modTime.UnixNano())
-		if err := unix.UtimesNanoAt(dirfd, temp, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return false, fmt.Errorf("date %s temp: %w", label, err)
+	for _, data := range datas {
+		temp, err := writeWakeDialogTempAt(dirfd, data, modTime)
+		if err != nil {
+			return false, err
 		}
+		temps = append(temps, temp)
 	}
+	chosen := -1
 	err = lockWakeDialogMarker(dirfd, how, func() error {
 		if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
 			return err
 		}
-		if keep != nil {
+		choice := 0
+		if pick != nil {
 			current, info, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, label,
 				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
 			if err != nil {
 				return err
 			}
-			if keep(current, info, exists) {
+			if choice = pick(current, info, exists); choice < 0 {
 				return nil
 			}
 		}
-		if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
+		if err := wakeRenameAt(dirfd, temps[choice], dirfd, wakeDialogFileName); err != nil {
 			return fmt.Errorf("install %s: %w", label, err)
 		}
-		tempPresent = false
+		temps[choice], chosen = "", choice
 		return nil
 	})
-	return err == nil && !tempPresent, err
+	return err == nil && chosen >= 0, err
+}
+
+// writeWakeDialogTempAt writes data to a new exclusive temp file beside the
+// marker, dated modTime unless that is zero, and returns its name.
+func writeWakeDialogTempAt(dirfd int, data []byte, modTime time.Time) (string, error) {
+	const label = "wake dialog marker"
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generate %s temp name: %w", label, err)
+	}
+	temp := fmt.Sprintf(".%s.tmp.%d.%s", strings.TrimLeft(wakeDialogFileName, "."), os.Getpid(), hex.EncodeToString(nonce[:]))
+	fd, err := unix.Openat(dirfd, temp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create %s temp: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), temp)
+	n, err := file.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if cerr := file.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && !modTime.IsZero() {
+		ts := unix.NsecToTimespec(modTime.UnixNano())
+		err = unix.UtimesNanoAt(dirfd, temp, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	if err != nil {
+		_ = wakeUnlinkAt(dirfd, temp, 0)
+		return "", fmt.Errorf("write %s temp: %w", label, err)
+	}
+	return temp, nil
 }
 
 // bindClaudePermissionMarker binds the unbound Claude Code permission
 // marker the wake read as raw with info to its one pending call
-// (claudeTranscriptFold.permissionCall). The binding replaces exactly that marker
-// version, compare-and-replace under the marker lock taken without
-// waiting, and keeps its mtime, so the marker's age and hold stay the
-// same. It waits wakeDialogRecheck after the marker opened, so Claude
-// Code has written the asked call to the transcript. It reports whether it
-// bound the marker. A call with equal input must never release another
-// call's dialog, so only a unique pending call binds.
+// (claudeTranscriptFold.permissionCall). It waits wakeDialogRecheck after
+// the marker opened, so Claude Code has most likely written the asked call
+// to the transcript; a call published later is caught before release
+// (unbindClaudePermissionMarker). It reports whether it bound the marker.
+// A call with equal input must never release another call's dialog, so
+// only a unique pending call binds.
 func bindClaudePermissionMarker(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold, raw []byte, info os.FileInfo, now time.Time) bool {
 	marker, ok := unboundClaudePermissionMarker(raw)
 	if !ok {
@@ -605,17 +688,47 @@ func bindClaudePermissionMarker(agentDir *wakeAgentDir, transcripts *claudeTrans
 		return false
 	}
 	marker.BoundToolUseID = id
-	bound, err := json.Marshal(marker)
+	return replaceWakeDialogMarkerVersion(agentDir, raw, info, marker)
+}
+
+// unbindClaudePermissionMarker clears the binding of the bound Claude Code
+// permission marker the wake read as raw with info when the inventory no
+// longer selects its call alone, for example when an equal call's record
+// was published after the binding. The marker then holds until a turn or
+// session event, or a later unique binding. It reports whether it unbound
+// the marker.
+func unbindClaudePermissionMarker(agentDir *wakeAgentDir, transcripts *claudeTranscriptFold, raw []byte, info os.FileInfo) bool {
+	var marker wakeDialogMarker
+	if json.Unmarshal(raw, &marker) != nil || marker.Harness != "" || marker.Event != wakeDialogPermissionEvent ||
+		marker.BoundToolUseID == "" {
+		return false
+	}
+	if verdict, _, err := transcripts.bound(marker); err != nil || verdict != claudeBoundUnbind {
+		return false
+	}
+	marker.BoundToolUseID = ""
+	return replaceWakeDialogMarkerVersion(agentDir, raw, info, marker)
+}
+
+// replaceWakeDialogMarkerVersion replaces exactly the marker version the
+// wake read as raw with info by marker, compare-and-replace under the
+// marker lock taken without waiting, and keeps its mtime, so the marker's
+// age and hold stay the same. It reports whether it replaced it.
+func replaceWakeDialogMarkerVersion(agentDir *wakeAgentDir, raw []byte, info os.FileInfo, marker wakeDialogMarker) bool {
+	data, err := json.Marshal(marker)
 	if err != nil || validateCanonicalWakeAgentDir(agentDir) != nil {
 		return false
 	}
 	installed := false
 	err = agentDir.withFD(func(dirfd int) error {
 		var ierr error
-		installed, ierr = installWakeDialogMarkerAt(dirfd, agentDir, append(bound, '\n'), unix.LOCK_EX|unix.LOCK_NB, info.ModTime(),
-			func(current []byte, now os.FileInfo, exists bool) bool {
-				return !exists || now == nil || !bytes.Equal(current, raw) ||
-					!now.ModTime().Equal(info.ModTime()) || now.Size() != info.Size()
+		installed, ierr = installWakeDialogMarkerAt(dirfd, agentDir, [][]byte{append(data, '\n')}, unix.LOCK_EX|unix.LOCK_NB, info.ModTime(),
+			func(current []byte, now os.FileInfo, exists bool) int {
+				if !exists || now == nil || !bytes.Equal(current, raw) ||
+					!now.ModTime().Equal(info.ModTime()) || now.Size() != info.Size() {
+					return -1
+				}
+				return 0
 			})
 		return ierr
 	})
@@ -628,7 +741,7 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 // withWakeDialogMarkerLock runs fn holding the marker lock, so a
 // replacement and a conditional removal never interleave: a writer cannot
 // replace the marker between a remover's read and its unlink, and a guarded
-// writer reads and replaces under it. The wake takes it only to bind a
+// writer reads and replaces under it. The wake takes it only to bind or unbind a
 // Claude Code permission marker to its call or to remove a Claude Code
 // marker whose transcript shows its tool call's result, and never waits
 // for it.
@@ -717,7 +830,8 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 // can queue a prompt during an approval and sends abort/error stop hooks
 // without waiting; neither may release a later turn's hold. A tool call's
 // PostToolUse or PostToolUseFailure closes only the marker of the same
-// tool_use_id, or a permission marker the wake bound to that call.
+// tool_use_id. A bound permission marker is not: its release first checks
+// that the inventory still selects its call alone (claudeTranscriptFold.bound).
 func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
 		var marker wakeDialogMarker
@@ -725,7 +839,7 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		if parsed && marker.Harness == "cursor" {
 			return cursorDialogCloseMatches(marker, in)
 		}
-		return in.ToolUseID == "" || (parsed && markerToolUseID(marker) == in.ToolUseID)
+		return in.ToolUseID == "" || (parsed && marker.ToolUseID == in.ToolUseID)
 	})
 }
 
