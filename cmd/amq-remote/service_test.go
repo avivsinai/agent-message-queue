@@ -35,16 +35,23 @@ func serviceSandbox(t *testing.T) *[]string {
 	}
 	t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	calls := &[]string{}
-	savedRun, savedExe := serviceRun, serviceExecutable
-	t.Cleanup(func() { serviceRun, serviceExecutable = savedRun, savedExe })
+	savedRun, savedRunOutput, savedExe := serviceRun, serviceRunOutput, serviceExecutable
+	t.Cleanup(func() { serviceRun, serviceRunOutput, serviceExecutable = savedRun, savedRunOutput, savedExe })
 	serviceExecutable = func() (string, error) { return exe, nil }
+	// TestMain installs a refusing serviceRun guard; restore the delegating
+	// default so every service manager call flows through the recorded
+	// serviceRunOutput stub below.
 	serviceRun = func(name string, args ...string) error {
+		_, err := serviceRunOutput(name, args...)
+		return err
+	}
+	serviceRunOutput = func(name string, args ...string) (string, error) {
 		call := name + " " + strings.Join(args, " ")
 		*calls = append(*calls, call)
 		if call == "launchctl print "+launchdTarget() {
-			return errors.New("not loaded")
+			return "", errors.New("not loaded")
 		}
-		return nil
+		return "", nil
 	}
 	return calls
 }
@@ -114,5 +121,65 @@ func TestDoctorNotesAMissingServiceForALinkedRoot(t *testing.T) {
 	}
 	if !noted {
 		t.Fatalf("doctor notes %+v; want a service note naming service install --root %s", notes, root)
+	}
+}
+
+// Bead agent-message-queue-3qp: after a graceful stop, launchctl print
+// reported the loaded job as "state = not running" with no pid and still
+// exited 0, so service status said running: true for a stopped endpoint.
+// The status face is the keeper: the observed stopped row and the running
+// happy path, each through text and JSON, with no real service manager.
+func TestServiceStatusReportsAStoppedLoadedJobAsNotRunning(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchctl shape")
+	}
+	cases := []struct {
+		name        string
+		printOut    string
+		wantRunning bool
+	}{
+		{"stopped loaded job as observed", "\tstate = not running\n", false},
+		{"running job", "\tstate = running\n\tpid = 87371\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := serviceSandbox(t)
+			root := canonicalTempDir(t)
+			if code := run([]string{"service", "install", "--root", root}, nil, io.Discard, io.Discard); code != 0 {
+				t.Fatalf("service install exit %d", code)
+			}
+			savedOutput := serviceRunOutput
+			t.Cleanup(func() { serviceRunOutput = savedOutput })
+			serviceRunOutput = func(name string, args ...string) (string, error) {
+				call := name + " " + strings.Join(args, " ")
+				*calls = append(*calls, call)
+				if call == "launchctl print "+launchdTarget() {
+					return tc.printOut, nil
+				}
+				return "", nil
+			}
+			var text bytes.Buffer
+			if code := run([]string{"service", "status", "--root", root}, nil, &text, io.Discard); code != 0 {
+				t.Fatalf("service status exit %d: %s", code, text.String())
+			}
+			want := "(running: false)"
+			if tc.wantRunning {
+				want = "(running: true)"
+			}
+			if !strings.Contains(text.String(), want) {
+				t.Fatalf("service status text %q; want it to contain %q", text.String(), want)
+			}
+			var jsonOut bytes.Buffer
+			if code := run([]string{"service", "status", "--root", root, "--json"}, nil, &jsonOut, io.Discard); code != 0 {
+				t.Fatalf("service status --json exit %d: %s", code, jsonOut.String())
+			}
+			wantJSON := `"running": false`
+			if tc.wantRunning {
+				wantJSON = `"running": true`
+			}
+			if !strings.Contains(jsonOut.String(), wantJSON) {
+				t.Fatalf("service status JSON %s; want %s", jsonOut.String(), wantJSON)
+			}
+		})
 	}
 }
