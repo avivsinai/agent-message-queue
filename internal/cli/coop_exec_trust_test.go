@@ -937,6 +937,10 @@ func TestCodexImagePrefixedForkKeepsTheResumeGuard(t *testing.T) {
 	if at, known := codexResumeOrFork([]string{"-i", "screenshot.png", "--no-daemon", "fork", thread}); !known || at != 3 {
 		t.Fatalf("image-prefixed fork = %d, %v; want index 3, known", at, known)
 	}
+	// Native 0.164 also consumes values after an inline image argument.
+	if at, known := codexResumeOrFork([]string{"--image=first.png", "second.png", "--no-daemon", "fork", thread}); !known || at != 3 {
+		t.Fatalf("inline image-prefixed fork = %d, %v; want index 3, known", at, known)
+	}
 	if _, known := codexResumeOrFork([]string{"--unknown-option", "value", "fork", thread}); known {
 		t.Fatal("an unknown option read as known grammar")
 	}

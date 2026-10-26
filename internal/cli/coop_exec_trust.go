@@ -512,10 +512,7 @@ func codexResumeOrFork(args []string) (at int, known bool) {
 		flag, _, inline := strings.Cut(arg, "=")
 		switch {
 		case flag == "-i" || flag == "--image":
-			if inline {
-				continue
-			}
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+			if !inline && (i+1 >= len(args) || strings.HasPrefix(args[i+1], "-")) {
 				return -1, false
 			}
 			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
