@@ -218,6 +218,52 @@ func TestWakeDialogPromptAfterABusyTurnNoticesAtOnce(t *testing.T) {
 	}
 }
 
+// W1 review (Pro finding 7): a permission prompt that followed a busy turn
+// the wake never sampled kept the previous prompt's notice ladder. A new
+// dialog marker starts a fresh ladder; an unchanged one does not.
+func TestWakeDialogNewPromptMarkerNoticesAtOnce(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	agentDir, err := openWakeAgentDir(h.root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+	write := func(opened string) {
+		t.Helper()
+		raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"permission","opened_at":"` + opened + `"}` + "\n"
+		if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(marker, h.now, h.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var notices []string
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+	h.cfg.settings.heldNotice = true
+	h.cfg.desktopNotify = func(_, body string) error {
+		notices = append(notices, body)
+		return nil
+	}
+	h.cfg.attentionWrite = func(p []byte) (int, error) { return len(p), nil }
+	write("2026-10-26T00:00:00.1Z")
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(notices) != 1 {
+		t.Fatalf("notices for an unchanged prompt = %q, want one", notices)
+	}
+	write("2026-10-26T00:00:09.2Z")
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if len(notices) != 2 {
+		t.Fatalf("notices after a new prompt = %q, want two", notices)
+	}
+}
+
 // Pre-merge review of fix/wake-holds-0113 (lead's W1 brief): the Cursor
 // /rename namer typed its command and Enter after a fixed delay, while a
 // startup or dialog marker could hold the doorbell. It now waits for the
@@ -242,12 +288,10 @@ func TestCoopNamedInjectWaitsForTheDialogMarker(t *testing.T) {
 	}
 }
 
-// field: session3/claude doorbell held 13 h (2026-10-26). AskUserQuestion
-// gets a PermissionRequest right after its PreToolUse, and its PostToolUse
-// input adds the answers, so the marker keeps the PreToolUse tool_use_id
-// and the call's own PostToolUse closes it (live, Claude Code 2.1.310). Esc
-// on that dialog runs no hook; Claude Code writes a tool_result for the
-// tool_use_id to the transcript, which closes it. Pre-merge review of
+// field: session3/claude doorbell held 13 h (2026-10-26). An
+// AskUserQuestion marker its own PreToolUse wrote closes at that call's
+// PostToolUse, or when Claude Code writes a tool_result for its
+// tool_use_id to the transcript (Esc runs no hook). Pre-merge review of
 // fix/wake-holds-0113 (Pro findings 1 and 2): an equal call's PostToolUse,
 // or the newest equal tool_use in the transcript, released a permission
 // dialog that still showed. A permission marker has no tool_use_id, so
@@ -272,8 +316,12 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		transcript string
 		closed     bool
 	}{
-		{"answered AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, "", true},
-		{"Esc on AskUserQuestion", []step{{"open", askPre}, {"open", askPerm}}, askEsc, true},
+		{"answered AskUserQuestion", []step{{"open", askPre}, {"close", askPost}}, "", true},
+		{"Esc on AskUserQuestion", []step{{"open", askPre}}, askEsc, true},
+		// W1 review (Pro finding 3, Codex reproducer): a PermissionRequest
+		// took the tool_use_id of the marker it replaced by tool name
+		// alone, so another call's PostToolUse released its dialog.
+		{"another call's PostToolUse after a PermissionRequest", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, "", false},
 		{"an equal call's PostToolUse after a permission dialog", []step{{"open", permission}, {"close", equalPost}}, "", false},
 		{"an equal call's result in the transcript after a permission dialog", []step{{"open", permission}}, equalUse, false},
 	} {

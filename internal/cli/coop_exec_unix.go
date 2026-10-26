@@ -160,7 +160,7 @@ func runCoopExec(args []string) error {
 	}
 	if facts, _ := harness.ForExecutable(c.cmdName); c.managedLaunchNonce == "" && facts.Name == harness.Codex {
 		_, _, tui := codexLaunchArgs(c.agentArgs)
-		if (tui || codexResumeOrForkAt(c.agentArgs) >= 0) && codexTerminalDumb() {
+		if !codexArgsNonInteractive(c.agentArgs) && codexTerminalDumb() {
 			return UsageError("interactive Codex reads this terminal as dumb (TERM=dumb) and asks \"Continue anyway? [y/N]\" first, which a doorbell would answer; set TERM to your terminal's type (for example TERM=xterm-256color) and run again")
 		}
 		if tui {
@@ -907,9 +907,15 @@ func (c *coopExecRun) execAgent() error {
 	// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
 	wd, wdErr := syscall.Getwd()
 	named := c.named
+	// The effective resume mode, read once before naming or recording.
+	resumeChoice := "unknown"
+	if codex && c.managedLaunchNonce == "" && wdErr == nil && codexResumeOrForkAt(c.agentArgs) >= 0 {
+		_, selected, unresolved := codexResumeSelection(c.agentArgs)
+		resumeChoice = codexEffectiveResumeCwd(c.binaryPath, c.agentArgs, wd, selected && !unresolved)
+	}
 	var launchDecision codexLaunchDecision
 	if codex && c.wakeOwned && c.managedLaunchNonce == "" && wdErr == nil {
-		if launchDecision, err = decideCodexLaunch(c.binaryPath, c.agentArgs, env, wd, named); err != nil {
+		if launchDecision, err = decideCodexLaunch(c.binaryPath, c.agentArgs, env, wd, named, resumeChoice); err != nil {
 			return err
 		}
 	}
@@ -927,7 +933,7 @@ func (c *coopExecRun) execAgent() error {
 	_, selected, unresolved := codexResumeSelection(c.agentArgs)
 	recorded := codex && selected && !unresolved && !embeddedOnly
 	if c.managedLaunchNonce == "" && wdErr == nil {
-		c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded)
+		c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded, resumeChoice)
 	}
 	// A managed plan carries the identity overrides as its own dynamic
 	// slots, which the launch wrapper fills.

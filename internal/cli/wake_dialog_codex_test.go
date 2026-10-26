@@ -325,3 +325,32 @@ func TestCodexStartupMarkerClosesOnlyForAPromptOfItsLaunch(t *testing.T) {
 		})
 	}
 }
+
+// W1 review (Pro finding 2): a PermissionRequest from an older daemon turn
+// replaced this launch's Codex Startup marker, and that turn's Stop then
+// removed it while the startup screen still showed.
+func TestCodexTurnOpenKeepsAStartupMarker(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	clearSendMailboxTestEnv(t)
+	t.Setenv(envMe, "codex")
+	t.Setenv(envRoot, root)
+	marker := filepath.Join(fsq.AgentBase(root, "codex"), wakeDialogFileName)
+	startup := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(marker, []byte(startup), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ verb, input string }{
+		{"open", `{"session_id":"01a165af-5f6d-7270-bb60-671490b46ea1","turn_id":"t-old","hook_event_name":"PermissionRequest"}`},
+		{"close", `{"session_id":"01a165af-5f6d-7270-bb60-671490b46ea1","turn_id":"t-old","hook_event_name":"Stop"}`},
+	} {
+		if err := runWakeDialog([]string{"--harness", "codex", step.verb}, strings.NewReader(step.input)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if raw, err := os.ReadFile(marker); err != nil || string(raw) != startup {
+		t.Fatalf("Startup marker after an older turn's open and Stop = %q, %v", raw, err)
+	}
+}

@@ -6,9 +6,10 @@ import "time"
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
 // wake reads the marker, and removes it only when the Claude Code transcript
-// proves the dialog answered or Codex's state proves its startup screens
-// closed. Doorbell text and its CR would answer the
-// dialog, so no input byte is written while the marker is present.
+// holds the result of the marker's own tool call. No shared state releases a
+// Codex Startup marker: only a prompt hook of its launch does. Doorbell text
+// and its CR would answer the dialog, so no input byte is written while the
+// marker is present.
 
 type wakeDialogState uint8
 
@@ -81,10 +82,14 @@ func holdWakeForDialog(
 ) error {
 	now := cfg.wakeDoorbellNow()
 	cause := cfg.dialogHoldCause()
-	// A dialog that follows a busy turn is a new hold: its notice is due
-	// at once, not on the ladder the earlier hold left.
-	if cfg.dialogHoldBusy && !cause.busy {
-		cfg.doorbell.endHeldNotice()
+	// A new dialog marker is a new hold: its notice is due at once, not on
+	// the ladder the earlier marker left, even when the wake never saw the
+	// busy turn between them. An unchanged marker keeps its ladder.
+	if cause.generation != cfg.dialogHoldGeneration {
+		if cfg.dialogHoldGeneration != "" && !cause.busy {
+			cfg.doorbell.endHeldNotice()
+		}
+		cfg.dialogHoldGeneration = cause.generation
 	}
 	if cfg.dialogHold != state || cfg.dialogHoldBusy != cause.busy {
 		cfg.dialogHold, cfg.dialogHoldBusy = state, cause.busy
@@ -126,6 +131,8 @@ type wakeDialogHoldCause struct {
 	reason string
 	marker bool
 	busy   bool
+	// generation names the marker version (a hash of its bytes), or "".
+	generation string
 }
 
 // dialogHoldCause reads the marker's cause; without a reader it is a

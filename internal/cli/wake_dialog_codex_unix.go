@@ -116,7 +116,10 @@ func adoptCodexHookIdentity(sessionID string) error {
 
 // writeTurnDialogMarker opens the hold of a Codex or Cursor guard, whose
 // marker only a turn or session event removes. It records no tool_use_id,
-// so no tool call's close can remove it.
+// so no tool call's close can remove it. It never replaces a Codex Startup
+// marker: a turn of an older daemon session could otherwise swap it for a
+// marker that its own Stop then removes, while this launch's startup screen
+// still shows.
 func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput, harness string) error {
 	turnID := in.TurnID
 	if harness == "cursor" {
@@ -129,7 +132,13 @@ func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if err != nil {
 		return err
 	}
-	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), codexStartupMarkerBytes)
+}
+
+// codexStartupMarkerBytes reports a Codex Startup marker.
+func codexStartupMarkerBytes(raw []byte) bool {
+	var marker wakeDialogMarker
+	return json.Unmarshal(raw, &marker) == nil && marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider
 }
 
 // clearTurnDialogMarker removes the marker at a turn or session event. A

@@ -87,6 +87,9 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 		// TERM=dumb Codex asks "Continue anyway? [y/N]" before its TUI
 		// starts, and a doorbell's Enter answers No.
 		{"TERM=dumb resume", []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}, "TERM=dumb", true},
+		// W1 review (Pro finding 5): an image launch is interactive, but the
+		// backend parser leaves -i unclassified, so it passed the refusal.
+		{"TERM=dumb image launch", []string{"--no-daemon", "-i", "screenshot.png"}, "TERM=dumb", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			master, terminal, err := pty.Open()

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -162,8 +163,9 @@ type wakeDialogMarker struct {
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
 // through the canonical agent directory; a detached directory cannot show
-// the hook's marker, so it reads as unknown, never as closed. A Startup
-// marker reads as closed once the harness has recorded its trust decision,
+// the hook's marker, so it reads as unknown, never as closed. A Claude Code
+// Startup marker reads as closed once Claude Code has recorded its trust
+// decision (a Codex one never does),
 // so the doorbell rings without a SessionStart hook. A Claude Code marker
 // whose session transcript shows a result for its tool call
 // (claudeDialogAnswered) is removed; a missing or unreadable transcript, a
@@ -224,7 +226,8 @@ func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() wakeDialogHoldCaus
 		if json.Unmarshal(raw, &marker) != nil {
 			return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
 		}
-		return wakeDialogHoldCause{reason: wakeDialogHoldReason(marker), marker: true, busy: agyTurnMarker(marker)}
+		sum := sha256.Sum256(raw)
+		return wakeDialogHoldCause{reason: wakeDialogHoldReason(marker), marker: true, busy: agyTurnMarker(marker), generation: hex.EncodeToString(sum[:])}
 	}
 }
 
@@ -288,7 +291,7 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 	case agyTurnMarker(marker):
 		return harness + " is busy; the doorbell rings when the turn ends"
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
-		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy(marker.Kind == "")
+		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy()
 	case marker.Event == wakeDialogStartupEvent:
 		return harness + " startup screen open; answer it in that terminal to release"
 	}
@@ -410,10 +413,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 // writeWakeDialogMarker writes the marker for in. A marker without a
 // tool_use_id (a permission dialog) stays without one, so a PostToolUse of
 // a later tool call cannot clear the permission dialog's hold: a permission
-// marker closes only on a turn or session event. Claude Code also sends
-// PermissionRequest for AskUserQuestion and ExitPlanMode right after their
-// PreToolUse; that marker keeps the PreToolUse tool_use_id, so the call's
-// own PostToolUse closes it.
+// marker closes only on a turn or session event. A PermissionRequest names
+// no tool call, so it never takes the tool_use_id of the marker it
+// replaces: that marker can belong to another call of the same tool.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	current, _, exists, err := readWakeRepairMetadataAt(
 		dirfd,
@@ -426,10 +428,6 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	parsed := err == nil && exists && json.Unmarshal(current, &marker) == nil
 	if in.ToolUseID != "" && parsed && marker.ToolUseID == "" {
 		in.ToolUseID = ""
-	}
-	if in.Event == "PermissionRequest" && parsed && marker.Event == "PreToolUse" &&
-		marker.ToolUseID != "" && marker.Tool == in.Tool {
-		in.ToolUseID = marker.ToolUseID
 	}
 	raw, err := json.Marshal(wakeDialogMarker{
 		Schema:         1,
@@ -451,6 +449,13 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 // advisory, and a marker lost in a crash leaves the wake as it is without the
 // hook. The open runs as the dialog renders, so it must not wait on the disk.
 func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) error {
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, data, nil)
+}
+
+// replaceWakeDialogMarkerUnlessAt is replaceWakeDialogMarkerAt that keeps
+// the present marker when keep accepts its bytes; the read and the
+// replacement share the marker lock.
+func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []byte, keep func(current []byte) bool) error {
 	const label = "wake dialog marker"
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -481,6 +486,16 @@ func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) e
 		if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
 			return err
 		}
+		if keep != nil {
+			current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, label,
+				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
+			if err != nil {
+				return err
+			}
+			if exists && keep(current) {
+				return nil
+			}
+		}
 		if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
 			return fmt.Errorf("install %s: %w", label, err)
 		}
@@ -497,10 +512,10 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 
 // withWakeDialogMarkerLock runs fn holding the marker lock, so a
 // replacement and a conditional removal never interleave: a writer cannot
-// replace the marker between a remover's read and its unlink. The wake
-// takes it only to remove a marker its own proof closed (a Claude Code
-// transcript or a Codex startup recheck), never while it probes, and never
-// waits for it.
+// replace the marker between a remover's read and its unlink, and a guarded
+// writer reads and replaces under it. The wake takes it only to remove a
+// Claude Code marker whose transcript shows its tool call's result, and
+// never waits for it.
 func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
 	return lockWakeDialogMarker(dirfd, unix.LOCK_EX, fn)
 }

@@ -172,8 +172,10 @@ version supports it.
   notice where the terminal supports one) to the wake's attention output. The
   notice repeats once per attention period (30 seconds, doubling to 15
   minutes) while the hold lasts; new messages do not make it due sooner. A
-  dialog that follows a busy harness turn starts a new hold, so its notice
-  shows at once and the hold line in `.wake.log` names the new cause. On
+  new dialog marker (a changed marker file that is not a busy turn) starts
+  a new ladder, so its notice shows at once, also when the wake never saw
+  the busy turn between two prompts; an unchanged marker keeps its ladder.
+  A change of cause logs one hold line in `.wake.log`. On
   macOS the notification comes from `osascript`; on
   Linux from `notify-send` when it is installed; elsewhere only the terminal
   floor is written. Each notification is one child process with a 2-second
@@ -187,10 +189,12 @@ version supports it.
   Claude Code allows without asking, with the same tool and input, would
   close a dialog that still shows. A doorbell that would land mid-turn after
   a permission dialog lands when the turn ends or the person types.
-- **AskUserQuestion and ExitPlanMode.** Claude Code also sends
-  `PermissionRequest` right after their `PreToolUse`; that marker keeps the
-  `PreToolUse` tool call id, so the call's `PostToolUse` or
-  `PostToolUseFailure` closes it. Esc on such a dialog runs no hook, but
+- **AskUserQuestion and ExitPlanMode.** A marker that the call's own
+  `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
+  `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
+  so a marker it writes, also one right after such a `PreToolUse`, is a
+  permission marker (below): the `PreToolUse` marker it replaces can belong
+  to another call of the same tool. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
   the hook's `transcript_path`. At each recheck the wake reads, read-only, at
@@ -233,26 +237,24 @@ version supports it.
   afterwards, and exec or exit closes it too.
 
   Claude Code's `SessionStart` hook close removes the marker when the hook
-  is installed. Codex runs `SessionStart` hooks only when the first turn
-  starts, so for Codex the dialog hook removes the marker at the first prompt
-  typed in that session. Without a hook close, the wake reads the trust file
-  again on each recheck while a trust marker exists and treats the marker as
-  closed only once the harness records that it trusts the directory, so the
-  doorbell rings within 2 seconds of acceptance. A Codex marker for a
-  possible update prompt or hook review never closes on the trust record:
-  another seat's Codex can record trust for the same root first, and Codex
-  records directory trust before it reviews hooks. The trust record does not prove that the harness accepts input yet, so while
-  the marker stays, a written doorbell does not count as presented: each
+  is installed. Without a hook close, the wake reads Claude Code's trust
+  file again on each recheck while a trust marker exists and treats the
+  marker as closed only once Claude Code records that it trusts the
+  directory, so the doorbell rings within 2 seconds of acceptance. A Codex
+  `Startup` marker never closes on a record, whatever its kind or Codex
+  version: the trust record is shared by every terminal, and another
+  terminal's answer does not close this terminal's screen. Only the dialog
+  hook's prompt close of the same launch releases it (below). The Claude
+  Code trust record does not prove that the harness accepts input yet, so
+  while the marker stays, a written doorbell does not count as presented: each
   retry types the full doorbell again, not only Enter, until the agent
   drains after such a doorbell, which proves that the harness accepts input.
   A drain before the release, such as one from another terminal, and an
   inbox file replaced in place prove nothing. A trust file that becomes
-  unreadable keeps the hold. AMQ reads no Codex decision for a directory
-  the person keeps untrusted or one outside any Git checkout, so that hold
-  stays until the first-turn close of `amq wake install-dialog-hook
-  --harness codex`; without that hook the marker ages as above (input held,
-  with the held-doorbell notice from the first held attempt), and `amq doctor --ops` names the
-  remedy. `amq wake check` reports an open `Startup` marker as
+  unreadable keeps the hold. A Codex hold stays until the first-turn close
+  of `amq wake install-dialog-hook --harness codex`; without that hook the
+  marker ages as above (input held, with the held-doorbell notice from the
+  first held attempt), and `amq doctor --ops` names the remedy. `amq wake check` reports an open `Startup` marker as
   `startup_hold`: the harness, the directory, how long it has been open, and
   what releases it.
 
@@ -306,8 +308,11 @@ version supports it.
   directory AMQ cannot resolve, a `--profile` seat, or a backend AMQ
   cannot tell writes the marker. A marker written for such a release
   releases only through the dialog hook's `UserPromptSubmit` close: the trust
-  record never releases it, and the recheck does not probe again. The marker
-  records the launch process (the pid coop exec execs into Codex, with its
+  record never releases it, and the recheck does not probe again. A
+  turn-level open (a Codex `PermissionRequest`, for example from an older
+  daemon turn) never replaces a Codex `Startup` marker; the replacement
+  reads the marker under the marker lock. The marker records the launch
+  process (the pid coop exec execs into Codex, with its
   start time). A `UserPromptSubmit` releases it only when the hook's
   `AM_ROOT` and `AM_ME` come from its own environment, not from a thread
   identity record, and the hook process descends from that launch process.
@@ -329,16 +334,19 @@ version supports it.
   A `codex resume` or `codex fork` launch asks which directory to resume in
   when the resume mode (`tui.resume_cwd`) is unset and the thread's recorded
   directory differs from the launch directory, and Enter picks one
-  (tui/src/session_resume.rs:35-43 and 84-141 at rust-v0.164.0). When no
-  choice is set (no `-C`/`--cd` or `-c tui.resume_cwd` on the command line,
-  no `--profile`, and no `tui.resume_cwd` in `$CODEX_HOME/config.toml`),
-  coop exec sets the current mode: a seat that runs its own app-server gets
-  `-c tui.resume_cwd="current"`, and a recorded seat on the Codex daemon gets
-  `-C <launch directory>`, because any other `-c` override would take its
-  TUI off the daemon (tui/src/daemon_startup.rs:89-113). A choice that is
-  already set is kept; a `session` choice shows no prompt either. When AMQ
-  cannot read the choice (a `--profile`, or a configuration it cannot
-  parse), the prompt may show, so coop exec writes a `Startup` marker.
+  (tui/src/session_resume.rs:35-43 and 84-141 at rust-v0.164.0). coop exec
+  reads the effective mode from the command line (`-C`/`--cd` is current,
+  `-c tui.resume_cwd=` is its value, `--profile` cannot be read), and
+  otherwise from the launch-time probe's `config/read`, which merges the
+  system, user and trusted project layers. Only when that mode is proven
+  unset does it set the current mode: a seat that runs its own app-server
+  gets `-c tui.resume_cwd="current"`, and a recorded seat on the Codex
+  daemon gets `-C <launch directory>`, because any other `-c` override
+  would take its TUI off the daemon (tui/src/daemon_startup.rs:89-113). A
+  set mode is kept. With `session` Codex resumes in the thread's own
+  directory, whose trust and hooks AMQ does not check, and a mode AMQ cannot
+  read (a `--profile`, or a `config/read` that fails) may still ask, so in
+  both cases coop exec writes a `Startup` marker.
 
   A seat on the Codex daemon runs its hooks in the daemon, not under its
   launch, so no prompt hook could release its `Startup` marker. coop exec
@@ -349,9 +357,16 @@ version supports it.
   with a screen pending runs embedded for that launch, so `amq-remote`
   native attach is not available to it. With `TERM=dumb` (as Codex detects it)
   Codex asks `Continue anyway? [y/N]` before its TUI starts, where the
-  doorbell's Enter answers No; coop exec refuses that interactive Codex
-  launch with a usage error that names the remedy (set `TERM` to the
-  terminal's type). When the AMQ dialog hook is installed but
+  doorbell's Enter answers No; coop exec refuses every Codex launch there
+  with a usage error that names the remedy (set `TERM` to the terminal's
+  type), except help, version, and the subcommands that run no interactive
+  TUI (cli/src/main.rs at rust-v0.164.0: `exec`, `review`, `login`,
+  `logout`, `mcp`, `plugin`, `app-server`, `remote-control`, `app`,
+  `completion`, `update`, `doctor`, `sandbox`, `debug`, `execpolicy`,
+  `apply`, `queue`, `archive`, `delete`, `unarchive`, `migrate-rollouts`,
+  `migrate-nfs-db`, `responses-api-proxy`, `stdio-to-uds`, `exec-server`,
+  `features`, `tcp-tunnel`). An option AMQ does not classify, such as
+  `-i`, refuses too. When the AMQ dialog hook is installed but
   Codex does not trust it, `amq doctor --ops` names the remedy: open
   `/hooks` in Codex and trust the `AMQ_DIALOG_HOOK` entries. A missing hook
   names `amq wake install-dialog-hook --harness codex`.

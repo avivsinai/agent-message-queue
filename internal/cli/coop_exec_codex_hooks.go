@@ -45,6 +45,10 @@ type codexStartupProbe struct {
 	// cloud requirement pins check_for_update_on_startup to true
 	// (codexRequirementsAllowNoUpdateCheck).
 	requirementsClear bool
+	// configRead: config/read answered; resumeCwd is then its effective
+	// tui.resume_cwd, or "" when unset.
+	configRead bool
+	resumeCwd  string
 }
 
 // codexStartupPlan is what one startup probe needs.
@@ -142,11 +146,46 @@ func runCodexStartupProbe(ctx context.Context, plan codexStartupPlan) codexStart
 	if err != nil {
 		return codexStartupProbe{}
 	}
+	resumeCwd, configRead := codexConfigResumeCwd(state.Config)
 	return codexStartupProbe{
 		updateCheckOff:    state.Config != nil && codexConfigUpdateCheckOff(state.Config),
 		hooksClear:        state.Hooks != nil && codexHooksListClear(state.Hooks, plan.Dir),
 		requirementsClear: state.Requirements != nil && codexRequirementsAllowNoUpdateCheck(state.Requirements),
+		configRead:        configRead,
+		resumeCwd:         resumeCwd,
 	}
+}
+
+// codexConfigResumeCwd reads the effective tui.resume_cwd from a config/read
+// result, which merges every layer the TUI loads (system, user, trusted
+// project, and the seat's overrides). ok is false when the result cannot
+// be read; value is "" when the setting is unset.
+func codexConfigResumeCwd(result []byte) (value string, ok bool) {
+	if result == nil {
+		return "", false
+	}
+	var read struct {
+		Config map[string]json.RawMessage `json:"config"`
+	}
+	if json.Unmarshal(result, &read) != nil || read.Config == nil {
+		return "", false
+	}
+	tui := bytes.TrimSpace(read.Config["tui"])
+	if len(tui) == 0 || string(tui) == "null" {
+		return "", true
+	}
+	var table map[string]json.RawMessage
+	if json.Unmarshal(tui, &table) != nil {
+		return "", false
+	}
+	mode := bytes.TrimSpace(table["resume_cwd"])
+	if len(mode) == 0 || string(mode) == "null" {
+		return "", true
+	}
+	if json.Unmarshal(mode, &value) != nil {
+		return "", false
+	}
+	return value, true
 }
 
 // codexEmbeddedStartupState asks hooks/list, configRequirements/read and
