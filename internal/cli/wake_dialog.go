@@ -5,7 +5,9 @@ import "time"
 // Dialog guard: a Claude Code hook (amq wake dialog open|close)
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
-// wake only reads the marker. Doorbell text and its CR would answer the
+// wake reads the marker, and removes it only when the Claude Code transcript
+// proves the dialog answered or Codex's state proves its startup screens
+// closed. Doorbell text and its CR would answer the
 // dialog, so no input byte is written while the marker is present.
 
 type wakeDialogState uint8
@@ -79,13 +81,17 @@ func holdWakeForDialog(
 	now := cfg.wakeDoorbellNow()
 	if cfg.dialogHold != state {
 		cfg.dialogHold = state
+		var detail string
+		if cfg.dialogHoldDetail != nil {
+			detail = " (" + cfg.dialogHoldDetail(now) + ")"
+		}
 		switch {
 		case readErr != nil:
 			_ = writeWakeDiagnostic(cfg, "amq wake: holding input: cannot read the dialog marker: %v\n", readErr)
 		case state == wakeDialogOpen:
-			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open\n")
+			_ = writeWakeDiagnostic(cfg, "amq wake: holding the doorbell while a harness dialog is open%s\n", detail)
 		default:
-			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only\n", wakeDialogQuietHold)
+			_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s; holding input, attention only%s\n", wakeDialogQuietHold, detail)
 		}
 	}
 	if state == wakeDialogOpen {

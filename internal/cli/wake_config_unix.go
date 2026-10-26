@@ -486,7 +486,7 @@ func waitWakeSettingsApplied(
 					if !machineTarget {
 						// The wake applied the agent change; the refused
 						// machine file is not what this command changed.
-						_ = writeStderr("warning: wake refused the machine settings file: %s\n", state.MachineError)
+						_ = writeWakeLogLine("warning: wake refused the machine settings file: %s\n", state.MachineError)
 						return true, nil
 					}
 					return true, fmt.Errorf("wake refused the machine settings file: %s", state.MachineError)
@@ -498,7 +498,7 @@ func waitWakeSettingsApplied(
 				if machineTarget && state.MachineStatus != wakeConfigMachineRefused {
 					// The wake applied the machine change; the refused agent
 					// file is not what this command changed.
-					_ = writeStderr("warning: wake refused the agent settings file: %s\n", state.Error)
+					_ = writeWakeLogLine("warning: wake refused the agent settings file: %s\n", state.Error)
 					return true, nil
 				}
 				return true, fmt.Errorf("wake refused the settings file: %s", state.Error)

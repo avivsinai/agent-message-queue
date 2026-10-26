@@ -115,14 +115,24 @@ Running it again keeps current entries and replaces older forms;
 the change through the settings watcher; if `/hooks` does not list the
 entries, restart the session. `amq doctor` warns when `~/.claude` exists and
 the hook is missing, runs an amq binary that is gone, or has an older form.
+The installer reads `claude --version` from the `claude` on `PATH` and adds
+`Notification` only for Claude Code 2.0.37 or later and `PostToolUseFailure`
+only for 2.1.119 or later, because before 2.1.101 an unknown hook event made
+Claude Code ignore the whole settings file. With no readable version it adds
+neither. Doctor counts an event as missing only when that version supports
+it.
 
-- **Marker.** The hooks run `amq wake dialog open|close`, which writes or
-  removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
-  AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
-  runs on `PostToolUse` for the same two tools (only for the tool call that
-  opened the marker), and on `UserPromptSubmit`, `Stop`, `SessionStart`, and
-  `SessionEnd`. The receiver exits 0 once its arguments parse and prints
-  nothing, so it never decides a tool call or a permission. The marker is
+- **Marker.** The hooks run `amq wake dialog open|close|notify`, which writes
+  or removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse`
+  for AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`.
+  `close` runs on every `PostToolUse` and `PostToolUseFailure` (it removes
+  only the marker of that tool call), and on `UserPromptSubmit`, `Stop`,
+  `SessionStart`, and `SessionEnd`. `notify` runs on `Notification` for
+  `idle_prompt` and `permission_prompt`: `idle_prompt` (Claude finished
+  responding 60 seconds ago and the prompt is idle) closes the marker, and
+  `permission_prompt` (a permission dialog waited 6 seconds) writes a marker
+  when none is present. The receiver exits 0 once its arguments parse and
+  prints nothing, so it never decides a tool call or a permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
   wake as it is without the hook. Every hook has a 5 second timeout, except
   `SessionEnd` at 1 second, so the hook never extends Claude Code's exit.
@@ -164,17 +174,49 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   (default `true`) turns the desktop notification off; the terminal floor
   stays. During the moment before `amq coop exec` writes or clears the
   `Startup` marker, the wake holds without a notice.
-- **Whole-turn hold after a permission dialog.** Permission hook input has no
-  tool call id, so only `Stop` or `UserPromptSubmit` clears a permission
-  marker. A doorbell that would land mid-turn after a permission dialog lands
-  when the turn ends or the person types.
-- **Esc and stale markers.** Esc on a dialog is a user interrupt, and Claude
-  Code runs no `Stop` hook for it. A denied permission is the same. The marker
-  then stays until the person's next prompt. A marker older than 10 minutes,
-  dated in the future, or one the wake cannot read, still blocks input. The
-  wake then stops the 2-second recheck and retries on the input retry ladder
-  (5 seconds, doubling to 2 minutes), with the held-doorbell notice on the
-  attention cadence.
+- **Permission dialogs close with their tool call.** Permission hook input
+  has no tool call id, so the marker records a digest of the tool name and
+  input, which Claude Code repeats in that call's `PostToolUse` or
+  `PostToolUseFailure`. An approved call closes the marker when it finishes.
+  Claude Code asks parallel calls one dialog at a time, and the next call's
+  `PermissionRequest` can run before the previous call's `PostToolUse`, so a
+  marker records the digest only when no other marker is present. A marker
+  without one, or a call whose input changed after the dialog, closes at
+  `Stop` or the next prompt. Claude Code also sends `PermissionRequest` for
+  AskUserQuestion and ExitPlanMode right after their `PreToolUse`; that
+  marker keeps the `PreToolUse` tool call id, so the answered call's
+  `PostToolUse` closes it.
+- **Esc, deny, and the transcript.** Esc or a deny on a dialog is a user
+  interrupt. Claude Code runs no hook for it: no `Stop`, no `PostToolUse`,
+  and no `idle_prompt` notification, which follows only a `Stop`. Claude Code
+  writes it to the session transcript at once: a `tool_result` for the asked
+  tool call (`is_error`, "User rejected tool use") and a user record whose
+  text starts with `[Request interrupted by user`. The marker keeps the hook's
+  `transcript_path`. At each recheck the wake reads, read-only, at most the
+  last 256 KiB of that file (a regular file, no symlink followed). It removes
+  the marker when the tail holds a `tool_result` for the marker's tool call,
+  found by its tool call id or, for a permission marker, by the newest
+  `tool_use` whose name and input match the marker's digest, or an interrupt
+  record dated after the marker. It removes it under the marker lock, without
+  waiting, and only if the marker is still the version it read; otherwise it
+  holds and checks again at the next recheck. The next dialog in the turn then
+  writes a fresh marker with its own digest. A missing or unreadable
+  transcript proves nothing: the hold stays, and the hold line says so. If
+  both the `UserPromptSubmit` and the next `PermissionRequest` hook fail, an
+  interrupt from the previous turn that is newer than the stale marker can
+  remove it while the new dialog shows.
+- **Stale markers.** A marker older than 10 minutes, dated in the future, or
+  one the wake cannot read, still blocks input unless the transcript proves
+  it closed. The wake then stops the 2-second recheck and retries on the
+  input retry ladder (5 seconds, doubling to 2 minutes), with the
+  held-doorbell notice on the attention cadence. No timer releases the
+  hold, because Enter on an open permission dialog approves the tool call.
+  Each hold line in `.wake.log` starts with the UTC time and names the
+  marker's event, kind, harness, tool, age, and transcript state.
+- **Known limitation.** A call that Claude Code allows without asking (for
+  example by the auto-mode classifier) with the same tool and input as a
+  dialog that still shows would close that dialog's marker through its
+  `PostToolUse`.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
   directory before the session starts, and Enter at that dialog ends the

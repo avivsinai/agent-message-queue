@@ -3,9 +3,9 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -31,21 +31,12 @@ type wakeStartupRecheck struct {
 	released bool
 }
 
-// releaseCodexStartup removes the Codex Startup marker raw, through
-// agentDir, when Codex's state proves its startup screens closed. It
-// reports whether it removed it; a marker replaced meanwhile stays.
-func (r *wakeStartupRecheck) releaseCodexStartup(agentDir *wakeAgentDir, raw []byte, now time.Time) bool {
-	if r == nil || !r.codexStartupProven(raw, now) {
-		return false
-	}
-	removed := false
-	err := agentDir.withFD(func(dirfd int) error {
-		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
-			removed = bytes.Equal(current, raw)
-			return removed
-		})
-	})
-	if err != nil || !removed {
+// releaseCodexStartup removes the Codex Startup marker the wake read as
+// raw with info, when Codex's state proves its startup screens closed. It
+// reports whether it removed it; a marker replaced meanwhile, or a marker
+// lock a hook holds, keeps it.
+func (r *wakeStartupRecheck) releaseCodexStartup(agentDir *wakeAgentDir, raw []byte, info os.FileInfo, now time.Time) bool {
+	if r == nil || !r.codexStartupProven(raw, now) || !removeWakeDialogMarkerVersion(agentDir, raw, info) {
 		return false
 	}
 	r.released = true
