@@ -273,16 +273,21 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   names `amq wake install-dialog-hook --harness codex`.
 
   `amq-remote` holds a turn for a Codex seat on the managed daemon whose
-  thread identity coop exec recorded under its `CODEX_HOME` (or
-  `~/.codex`): while that seat has a `Startup` marker that only the dialog
-  hook releases, the attachment refuses the submit as `busy`, so a remote
-  prompt does not end the hold while the TUI shows a startup screen. A busy
-  attachment sends nothing to Codex, and the endpoint keeps the request
-  re-admittable, so the sender's retry of the same request runs it once the
-  marker closes. A request from Buzz or a link keeps its terminal `busy`
-  refusal; sending it again takes a new request. A client other than
-  AMQ that submits a turn on the same daemon thread runs the first-turn hook
-  and can end the hold early.
+  thread identity coop exec recorded: while that seat has a `Startup`
+  marker that only the dialog hook releases, the attachment refuses the
+  submit as `busy`, so a remote prompt does not end the hold while the TUI
+  shows a startup screen. The seat's `CODEX_HOME` comes from the daemon:
+  the thread's rollout path, `<home>/sessions/YYYY/MM/DD/...`, must name
+  the home the identity record holds. The `CODEX_HOME` of `amq-remote`
+  itself and the socket's directory play no part. When the daemon reports
+  no rollout path of that shape, AMQ cannot find the seat's marker and
+  nothing holds. A busy attachment sends nothing to Codex, and the endpoint keeps
+  the request re-admittable, so the sender's retry of the same request runs
+  it once the marker closes. A retry while the target is offline is `busy`
+  too, and a cancel ends the request at once as `cancelled`. A request
+  from Buzz or a link keeps its terminal `busy` refusal; sending it again
+  takes a new request. A client other than AMQ that submits a turn on the
+  same daemon thread runs the first-turn hook and can end the hold early.
 
   A raw doorbell's submit keys wait until the terminal reports that its
   text was read. Queued text or an unavailable queue inspection keeps those

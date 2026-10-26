@@ -178,11 +178,12 @@ func (e *Endpoint) Reconcile() error {
 	// limit), reaps terminal+settled+old records into tombstones. e.mu is
 	// held per-record (CompactOne), never across the sweep.
 	// The candidates are the store's terminal records that are not
-	// tombstones yet, not the sweep's records: a settled record is
+	// compacted yet, not the sweep's records: a settled record is
 	// exactly what compaction wants and the sweep skips, and a full list
 	// would grow with the tombstones nothing deletes. CompactOne re-reads
-	// each candidate under the store lock and re-gates (terminal +
-	// !tombstone + old + !OwesAck + published), so a stale key is harmless.
+	// each candidate under the store lock and re-gates
+	// (Record.Compactable: terminal + not compacted + old + !OwesAck +
+	// published), so a stale key is harmless.
 	if e.shouldCompact() {
 		cutoff := e.now().Add(-e.compactHorizon)
 		compacted := 0

@@ -48,12 +48,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// digest; only a DIFFERENT digest is a conflict. A link request is
 		// never re-admitted: its busy refusal is a terminal record, which
 		// compaction later turns into this same tombstone shape.
-		retryable := rec.Origin["carrier"] != CarrierLink &&
-			rec.Tombstone &&
-			rec.State == protocol.StateRejected &&
-			rec.Code == protocol.CodeBusy &&
-			rec.NativeDispatches == 0 &&
-			rec.InputDigest == digest
+		retryable := readmittableBusy(rec) && rec.InputDigest == digest
 		if !retryable {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
@@ -200,8 +195,11 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 	}
 	if t == nil {
+		// The target is offline and the tombstone stays as it is. An empty
+		// code would read as accepted, yet nothing will admit a terminal
+		// tombstone later: answer busy so the sender keeps the retry.
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}, nil
 	}
 	// A resubmit that names a session is bound to the session its source
 	// proves now, which the dispatching write below stores; one that names
@@ -463,6 +461,19 @@ func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) protocol.Code 
 	return ""
 }
 
+// readmittableBusy reports whether rec is a busy tombstone that an identical
+// resubmit may still run: a local busy refusal with no dispatch behind it and
+// no cancel asked. It is the only terminal record a later submit can execute,
+// so cancel treats it as open.
+func readmittableBusy(rec *requests.Record) bool {
+	return rec.Origin["carrier"] != CarrierLink &&
+		rec.Tombstone &&
+		rec.State == protocol.StateRejected &&
+		rec.Code == protocol.CodeBusy &&
+		rec.NativeDispatches == 0 &&
+		rec.Cancel == nil
+}
+
 // sessionBound reports whether requests that arrived with origin may run in
 // one native session only: a link's signed session or a Buzz share's
 // approved one.
@@ -679,6 +690,11 @@ func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nat
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		return causeCancelledBeforeAdmission, nev
 	case adm.Code == protocol.CodeBusy && adm.NothingSent && !sessionBound(rec.Origin):
+		if rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
+			// A cancel arrived while Submit was out and nothing was sent:
+			// the request ends cancelled, never a tombstone a retry runs.
+			return causeCancelledBeforeAdmission, nev
+		}
 		nev.reason = adm.Message
 		return causeBusyTombstone, nev
 	default:
