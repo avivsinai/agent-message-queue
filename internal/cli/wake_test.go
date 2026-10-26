@@ -181,7 +181,7 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("none mode injected terminal input: %q", injected)
 	}
-	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\r\n" {
 		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }

@@ -46,6 +46,47 @@ func TestWakeAttentionAlternateScreenAgentKeepsSupportedOSCNotification(t *testi
 	}
 }
 
+// field: agy TUI showed staircased doorbell text (2026-10-26). A coop wake
+// shares the harness terminal, whatever the harness, so only non-printing
+// signals reach it.
+func TestWakeAttentionCoopHarnessTerminalWritesNoText(t *testing.T) {
+	var recorded wakeAttentionEmission
+	var written strings.Builder
+	cfg := &wakeConfig{
+		me:             "agy",
+		harness:        "agy",
+		injectMode:     wakeInjectModePaste,
+		wakeOwner:      &wakeOwner{PID: 1},
+		attentionEnv:   func(string) string { return "" },
+		attentionIsTTY: func() bool { return true },
+		attentionWrite: func(data []byte) (int, error) {
+			return written.Write(data)
+		},
+		recordAttention: func(emission wakeAttentionEmission) error {
+			recorded = emission
+			return nil
+		},
+	}
+	payload := wakePayload{
+		text:       "AMQ [collab]: message from claude - W2",
+		provenance: wakePayloadPeerHeaders,
+	}
+
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		t.Fatalf("emit coop attention: %v", err)
+	}
+
+	if got := written.String(); got != "\x1b]0;AMQ attention\a\a" {
+		t.Fatalf("coop harness terminal attention = %q, want title + bell only", got)
+	}
+	if !reflect.DeepEqual(recorded.Effects, []string{
+		wakeAttentionEffectBell,
+		wakeAttentionEffectTitle,
+	}) {
+		t.Fatalf("effects = %#v", recorded.Effects)
+	}
+}
+
 func TestWakeAttentionRedirectedOutputOmitsControls(t *testing.T) {
 	var recorded wakeAttentionEmission
 	cfg := &wakeConfig{

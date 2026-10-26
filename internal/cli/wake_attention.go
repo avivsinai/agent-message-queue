@@ -66,7 +66,7 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // terminal rendered them or that a person observed them.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	isTerminal := wakeAttentionIsTerminal(cfg)
-	writePlainOutput := !isTerminal || cfg == nil || !wakeUsesAlternateScreenTUI(cfg)
+	writePlainOutput := !isTerminal || cfg == nil || wakeIsStandaloneNotifier(cfg)
 	var effects []string
 	if writePlainOutput {
 		effects = append(effects, wakeAttentionEffectOutput)
@@ -77,9 +77,9 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	if isTerminal {
 		effects = append(effects, wakeAttentionEffectBell, wakeAttentionEffectTitle)
 		// OSC 0 and a standalone BEL form the portable terminal-attention floor.
-		// The BEL terminating OSC 0 is not relied on to ring. Do not append plain
-		// text for alternate-screen agent TUIs: stderr shares their raw terminal
-		// and would overwrite or interleave with the active composer.
+		// The BEL terminating OSC 0 is not relied on to ring. Plain text goes to
+		// a terminal only from a standalone notifier: any other wake shares its
+		// terminal with a harness TUI, where printed text lands in the screen.
 		fmt.Fprintf(&output, "\x1b]0;%s\a\a", wakeAttentionTitle)
 
 		oscText := strings.ReplaceAll(safeText, ";", ",")
@@ -94,6 +94,10 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	}
 	if writePlainOutput {
 		output.WriteString(safeText)
+		if isTerminal {
+			// A terminal in raw mode does not map LF to CRLF.
+			output.WriteByte('\r')
+		}
 		output.WriteByte('\n')
 	}
 
@@ -127,6 +131,21 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		}
 	}
 	return nil
+}
+
+// wakeIsStandaloneNotifier reports whether the wake owns its terminal: it
+// does not run under coop exec, does not type into its own terminal, and was
+// asked for notification only. The requested mode decides, because a runtime
+// demotion to output-only leaves the wake in the harness terminal.
+func wakeIsStandaloneNotifier(cfg *wakeConfig) bool {
+	mode := cfg.requestedInjectMode
+	if mode == "" {
+		mode = cfg.injectMode
+	}
+	return cfg.wakeOwner == nil &&
+		cfg.terminalWrite == nil &&
+		cfg.injectVia == "" &&
+		mode == wakeInjectModeNone
 }
 
 func wakeAttentionIsTerminal(cfg *wakeConfig) bool {
