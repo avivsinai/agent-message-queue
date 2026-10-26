@@ -32,11 +32,19 @@ import (
 // serviceRun runs the service manager (launchctl or systemctl). It is a
 // variable so tests record the calls instead.
 var serviceRun = func(name string, args ...string) error {
+	_, err := serviceRunOutput(name, args...)
+	return err
+}
+
+// serviceRunOutput is serviceRun with the command's combined output, so a
+// caller can read state the service manager prints (launchctl print reports
+// a loaded-but-stopped job with exit 0).
+var serviceRunOutput = func(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return string(out), nil
 }
 
 // launchdStopWait bounds the wait for launchd to tear a booted-out job down
@@ -287,9 +295,63 @@ func serviceUnload() error {
 // serviceRunning reports whether the service's process runs now.
 func serviceRunning() error {
 	if runtime.GOOS == "darwin" {
-		return serviceRun("launchctl", "print", launchdTarget())
+		out, err := serviceRunOutput("launchctl", "print", launchdTarget())
+		return launchdJobRunning(out, err)
 	}
 	return serviceRun("systemctl", "--user", "is-active", "--quiet", loginservice.Unit)
+}
+
+// launchdJobRunning decides running from `launchctl print` output. A loaded
+// job prints its state and, when it has one, its pid: a loaded-but-stopped
+// job (state = not running, no pid) also exits 0, so the exit code alone
+// reported stopped services as running. Running requires the job state to
+// be "running" AND a parsed positive pid; any other state, a pidless print,
+// or missing, refused, or unreadable output is an error, never "running".
+func launchdJobRunning(out string, printErr error) error {
+	if printErr != nil {
+		return printErr
+	}
+	state, pid := launchdStateAndPID(out)
+	if state == "running" && launchdPIDPositive(pid) {
+		return nil
+	}
+	if state == "" {
+		return fmt.Errorf("launchctl print %s: no state in output", launchdTarget())
+	}
+	return fmt.Errorf("launchctl print %s: state = %s, pid = %s", launchdTarget(), state, pid)
+}
+
+// launchdPIDPositive reports whether the printed pid parses to a positive
+// integer.
+func launchdPIDPositive(pid string) bool {
+	n, err := strconv.Atoi(pid)
+	return err == nil && n > 0
+}
+
+// launchdStateAndPID reads the job's "state = <x>" and "pid = <n>" lines
+// from `launchctl print` output. Nested per-process states also appear,
+// indented deeper; only the top-level job entries count.
+func launchdStateAndPID(out string) (state, pid string) {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "\t\t") {
+			continue
+		}
+		entry, value, ok := strings.Cut(strings.TrimPrefix(line, "\t"), " = ")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(entry) {
+		case "state":
+			if state == "" {
+				state = strings.TrimSpace(value)
+			}
+		case "pid":
+			if pid == "" {
+				pid = strings.TrimSpace(value)
+			}
+		}
+	}
+	return state, pid
 }
 
 func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
