@@ -42,10 +42,13 @@ func Run(binaryPath string, argv, env []string, output io.Writer) (code int, err
 	defer func() { _ = statusRead.Close() }()
 	defer func() { _ = statusWrite.Close() }()
 	signals := make(chan os.Signal, 8)
-	signal.Notify(signals, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP, syscall.SIGCONT)
+	signal.Notify(signals, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP)
 	defer signal.Stop(signals)
+	continued := make(chan os.Signal, 1)
+	signal.Notify(continued, syscall.SIGCONT)
+	defer signal.Stop(continued)
 	stdin := int(os.Stdin.Fd())
-	if err := awaitForeground(stdin); err != nil {
+	if err := awaitForeground(stdin, continued); err != nil {
 		return 1, err
 	}
 	saved, err := term.MakeRaw(stdin)
@@ -127,7 +130,6 @@ func Run(binaryPath string, argv, env []string, output io.Writer) (code int, err
 			switch sig {
 			case syscall.SIGWINCH:
 				_ = pty.InheritSize(os.Stdin, master)
-			case syscall.SIGCONT:
 			default:
 				if err := commands.Encode(sig.(syscall.Signal)); err != nil {
 					return 1, fmt.Errorf("signal relay target: %w", err)
@@ -150,10 +152,10 @@ func Run(binaryPath string, argv, env []string, output io.Writer) (code int, err
 				}
 				// SIGSTOP cannot be discarded because of an inherited ignored
 				// disposition or an orphaned outer process group.
-				if err := syscall.Kill(-syscall.Getpgrp(), syscall.SIGSTOP); err != nil {
+				if err := suspendJob(continued); err != nil {
 					return 1, err
 				}
-				if err := awaitForeground(stdin); err != nil {
+				if err := awaitForeground(stdin, continued); err != nil {
 					return 1, err
 				}
 				if _, err := term.MakeRaw(stdin); err != nil {
@@ -175,7 +177,7 @@ func Run(binaryPath string, argv, env []string, output io.Writer) (code int, err
 	}
 }
 
-func awaitForeground(fd int) error {
+func awaitForeground(fd int, continued <-chan os.Signal) error {
 	for {
 		foreground, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
 		if err != nil {
@@ -186,10 +188,28 @@ func awaitForeground(fd int) error {
 		}
 		// A bg continuation must not change the shell's terminal or resume
 		// the inner job. Stop again until the shell gives this job the tty.
-		if err := syscall.Kill(-syscall.Getpgrp(), syscall.SIGSTOP); err != nil {
+		if err := suspendJob(continued); err != nil {
 			return err
 		}
 	}
+}
+
+func suspendJob(continued <-chan os.Signal) error {
+	for {
+		select {
+		case <-continued:
+			continue
+		default:
+		}
+		break
+	}
+	if err := syscall.Kill(-syscall.Getpgrp(), syscall.SIGSTOP); err != nil {
+		return err
+	}
+	// Self group-stop delivery can finish after Kill returns on another Go
+	// thread. Only SIGCONT permits terminal changes and target continuation.
+	<-continued
+	return nil
 }
 
 type terminalOutput struct{ file *os.File }
