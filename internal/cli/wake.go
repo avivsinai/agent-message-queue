@@ -70,7 +70,10 @@ type wakeConfig struct {
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
-	dialogHoldReason              func() (reason string, marker bool)          // why the marker holds input; marker=false when no marker exists; nil = a generic reason
+	dialogHoldBusy                bool                                         // the last hold was a busy harness turn, so a change of cause logs once
+	dialogHoldGeneration          string                                       // the marker version the held notice ladder belongs to
+	dialogHoldReason              func() wakeDialogHoldCause                   // why the marker holds input; nil = a generic dialog
+	dialogHoldDetail              func(now time.Time) string                   // the marker's event, kind, harness, tool and age for the wake log; nil = none
 	desktopNotify                 func(title, body string) error               // the held-doorbell desktop notice; nil = none (direct loop tests)
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
 	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release
@@ -606,10 +609,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
-	var holds map[string]wakeHold
-	if cfg.settings.holdPolicy().enabled() {
-		holds = make(map[string]wakeHold)
-	}
+	// Every message gets a hold, priority holds or not: the doorbell reads
+	// an addition's urgency from it. A zero policy makes each hold due at
+	// arrival, which holds nothing.
+	holds := make(map[string]wakeHold)
 	scanTime := cfg.wakeDoorbellNow()
 
 	for _, entry := range entries {
@@ -648,14 +651,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			continue
 		}
 		currentPending[name] = pendingInfo
-		if holds != nil {
-			// A corrupt header has no priority and counts as normal.
-			priority := ""
-			if err == nil {
-				priority = header.Priority
-			}
-			holds[name] = newWakeHold(cfg.settings.holdPolicy(), priority, pendingInfo, scanTime)
+		// A corrupt header has no priority and counts as normal.
+		holdPriority := ""
+		if err == nil {
+			holdPriority = header.Priority
 		}
+		holds[name] = newWakeHold(cfg.settings.holdPolicy(), holdPriority, pendingInfo, scanTime)
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
@@ -1160,7 +1161,7 @@ func deliverNewMessageNotification(
 		if cfg.dialogHold != wakeDialogClosed {
 			cfg.doorbell.endHeldNotice()
 		}
-		cfg.dialogHold = wakeDialogClosed
+		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the

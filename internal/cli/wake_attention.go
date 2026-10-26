@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -45,13 +46,21 @@ func (err *wakeAttentionDeliveryError) Unwrap() error {
 
 // writeWakeDiagnostic keeps human-readable diagnostics in a log destination
 // (the coop .wake.log). A terminal gets them only under wakeMayPrintToTerminal;
-// otherwise a harness TUI owns that terminal and they are dropped.
+// otherwise a harness TUI owns that terminal and they are dropped. Each line
+// starts with the UTC wall time, so the wake log dates every hold.
 func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
 	if wakeDiagnosticIsTerminal(cfg) &&
 		!wakeMayPrintToTerminal(cfg, wakeDiagnosticIsForeground) {
 		return nil
 	}
-	return writeStderr(format, args...)
+	return writeWakeLogLine(format, args...)
+}
+
+// writeWakeLogLine writes to the wake's stderr, which is .wake.log for a
+// detached wake, after the UTC wall time. It shows the line wherever
+// writeStderr would.
+func writeWakeLogLine(format string, args ...any) error {
+	return writeStderr("%s %s", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }
 
 func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {

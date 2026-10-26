@@ -23,7 +23,7 @@ func TestCoopNamedUnknownCLIIsQuietByDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, stderr := captureOutput(t, func() error {
-			_, err := applyCoopNamedBeforeExecAt(named, "downstream-cli", nil, "s1/lead", time.Now(), nil)
+			_, _, err := applyCoopNamedBeforeExecAt(named, "downstream-cli", nil, "s1/lead", time.Now(), nil)
 			return err
 		})
 		if got := strings.Contains(stderr, "manually"); got != tc.wantReminder {

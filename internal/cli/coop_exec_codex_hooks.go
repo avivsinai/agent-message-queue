@@ -45,6 +45,26 @@ type codexStartupProbe struct {
 	// cloud requirement pins check_for_update_on_startup to true
 	// (codexRequirementsAllowNoUpdateCheck).
 	requirementsClear bool
+	// configRead: config/read answered; resumeCwd is then its effective
+	// tui.resume_cwd, or "" when unset.
+	configRead bool
+	resumeCwd  string
+}
+
+// codexStartupPlan is what one startup probe needs.
+type codexStartupPlan struct {
+	// Binary is the absolute path of the Codex executable the seat runs.
+	Binary string
+	// Overrides are the seat's -c, --enable and --disable options, for an
+	// embedded probe.
+	Overrides []string
+	// Dir is the physical cwd the TUI sends hooks/list and config/read
+	// for (codexPhysicalLaunchDir).
+	Dir string
+	// Daemon reports a seat on the shared app-server daemon.
+	Daemon bool
+	// CodexHome is the seat's CODEX_HOME.
+	CodexHome string
 }
 
 // probeCodexStartup asks the app-server the seat's TUI will use for
@@ -54,46 +74,118 @@ type codexStartupProbe struct {
 // reviews every untrusted or modified hook (tui/src/startup_hooks_review.rs:
 // 52-82 and hooks_rpc.rs:23-56 at rust-v0.164.0). A failed, late or
 // unreadable answer, and a backend AMQ cannot tell, prove nothing.
-// recorded reports a resumed thread whose identity coop exec recorded;
+// recorded reports a seat that runs on the Codex daemon when its backend
+// allows: a resumed thread whose identity coop exec records, or a fresh
+// launch that coop exec names on a daemon thread;
 // every other Codex seat carries the identity overrides, which make its TUI
-// run its own app-server (pinCodexShellIdentity).
+// run its own app-server (pinCodexShellIdentity). One deadline covers
+// backend discovery and the probe.
 func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorded bool) codexStartupProbe {
-	codexHome, err := codexHomeDir()
-	if err != nil {
-		return codexStartupProbe{}
-	}
-	codexHome = absPath(filepath.Clean(codexHome))
-	backend := codexEmbedded
-	if recorded {
-		r, ok := parseCodexResume(args)
-		if !ok || r.unparsed {
-			return codexStartupProbe{}
-		}
-		backend, _ = codexLaunchBackend(binaryPath, append(slices.Clone(args[:r.start]), r.opts...), wd, codexHome)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
 	defer cancel()
+	plan, ok := planCodexStartupProbe(ctx, binaryPath, args, wd, dir, recorded)
+	if !ok {
+		return codexStartupProbe{}
+	}
+	return runCodexStartupProbe(ctx, plan)
+}
+
+// planCodexStartupProbe decides the backend, CODEX_HOME and overrides of
+// a probe for a seat started as binaryPath with args in wd. A relative
+// binary path resolves against wd, as the seat's exec resolves it. ok is
+// false for a seat a probe cannot ask: an unknown backend, or options a
+// probe app-server does not take.
+func planCodexStartupProbe(ctx context.Context, binaryPath string, args []string, wd, dir string, recorded bool) (codexStartupPlan, bool) {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return codexStartupPlan{}, false
+	}
+	if !filepath.IsAbs(binaryPath) {
+		binaryPath = filepath.Join(wd, binaryPath)
+	}
+	plan := codexStartupPlan{Binary: filepath.Clean(binaryPath), Dir: dir, CodexHome: absPath(filepath.Clean(codexHome))}
+	if recorded {
+		opts := args
+		if r, ok := parseCodexResume(args); ok {
+			if r.unparsed {
+				return codexStartupPlan{}, false
+			}
+			opts = append(slices.Clone(args[:r.start]), r.opts...)
+		}
+		backend, _ := codexLaunchBackend(ctx, plan.Binary, opts, wd, plan.CodexHome)
+		switch backend {
+		case codexOnDaemon:
+			plan.Daemon = true
+			return plan, true
+		case codexEmbedded:
+		default:
+			return codexStartupPlan{}, false
+		}
+	}
+	overrides, ok := codexHookProbeOverrides(args)
+	if !ok {
+		return codexStartupPlan{}, false
+	}
+	plan.Overrides = overrides
+	return plan, true
+}
+
+// runCodexStartupProbe asks the app-server plan names, within ctx.
+func runCodexStartupProbe(ctx context.Context, plan codexStartupPlan) codexStartupProbe {
 	var state codex.StartupState
-	switch backend {
-	case codexOnDaemon:
-		sock, sockErr := codex.ControlSocket(codexHome)
+	var err error
+	if plan.Daemon {
+		sock, sockErr := codex.ControlSocket(plan.CodexHome)
 		if sockErr != nil {
 			return codexStartupProbe{}
 		}
-		state, err = codex.ReadStartupState(ctx, sock, dir)
-	case codexEmbedded:
-		state, err = codexEmbeddedStartupState(ctx, binaryPath, args, dir, codexHome)
-	default:
-		return codexStartupProbe{}
+		state, err = codex.ReadStartupState(ctx, sock, plan.Dir)
+	} else {
+		state, err = codexEmbeddedStartupState(ctx, plan.Binary, plan.Overrides, plan.Dir, plan.CodexHome)
 	}
 	if err != nil {
 		return codexStartupProbe{}
 	}
+	resumeCwd, configRead := codexConfigResumeCwd(state.Config)
 	return codexStartupProbe{
 		updateCheckOff:    state.Config != nil && codexConfigUpdateCheckOff(state.Config),
-		hooksClear:        state.Hooks != nil && codexHooksListClear(state.Hooks, dir),
+		hooksClear:        state.Hooks != nil && codexHooksListClear(state.Hooks, plan.Dir),
 		requirementsClear: state.Requirements != nil && codexRequirementsAllowNoUpdateCheck(state.Requirements),
+		configRead:        configRead,
+		resumeCwd:         resumeCwd,
 	}
+}
+
+// codexConfigResumeCwd reads the effective tui.resume_cwd from a config/read
+// result, which merges every layer the TUI loads (system, user, trusted
+// project, and the seat's overrides). ok is false when the result cannot
+// be read; value is "" when the setting is unset.
+func codexConfigResumeCwd(result []byte) (value string, ok bool) {
+	if result == nil {
+		return "", false
+	}
+	var read struct {
+		Config map[string]json.RawMessage `json:"config"`
+	}
+	if json.Unmarshal(result, &read) != nil || read.Config == nil {
+		return "", false
+	}
+	tui := bytes.TrimSpace(read.Config["tui"])
+	if len(tui) == 0 || string(tui) == "null" {
+		return "", true
+	}
+	var table map[string]json.RawMessage
+	if json.Unmarshal(tui, &table) != nil {
+		return "", false
+	}
+	mode := bytes.TrimSpace(table["resume_cwd"])
+	if len(mode) == 0 || string(mode) == "null" {
+		return "", true
+	}
+	if json.Unmarshal(mode, &value) != nil {
+		return "", false
+	}
+	return value, true
 }
 
 // codexEmbeddedStartupState asks hooks/list, configRequirements/read and
@@ -102,14 +194,10 @@ func probeCodexStartup(binaryPath string, args []string, wd, dir string, recorde
 // with a read-only sandbox and no approvals. The run is bounded, its
 // process group is killed and reaped, and its stderr is discarded; its
 // stdout stays here. A result is nil when its request got an error reply.
-func codexEmbeddedStartupState(ctx context.Context, binaryPath string, args []string, dir, codexHome string) (codex.StartupState, error) {
-	overrides, ok := codexHookProbeOverrides(args)
-	if !ok {
-		return codex.StartupState{}, errors.New("the seat has options a probe app-server does not take")
-	}
+func codexEmbeddedStartupState(ctx context.Context, binaryPath string, overrides []string, dir, codexHome string) (codex.StartupState, error) {
 	reply := command.Run(ctx, edge.Command{
 		Path:   binaryPath,
-		Args:   append(overrides, "-s", "read-only", "-a", "never", "app-server"),
+		Args:   append(slices.Clone(overrides), "-s", "read-only", "-a", "never", "app-server"),
 		Env:    []string{"CODEX_HOME=" + codexHome},
 		Stdin:  codexStartupProbeRequests(dir),
 		MaxOut: codexHooksProbeMaxOut,
@@ -128,8 +216,11 @@ func codexEmbeddedStartupState(ctx context.Context, binaryPath string, args []st
 // codexHookProbeOverrides returns the seat's -c, --enable and --disable
 // options, which `codex app-server` applies as the TUI does (root
 // config_overrides and feature_toggles, cli/src/main.rs at rust-v0.164.0).
-// --profile does not apply to app-server (profile_v2_for_subcommand), so a
-// seat with one is not probed.
+// --profile does not apply to app-server (profile_v2_for_subcommand at
+// rust-v0.164.0 refuses it there), and -c profile=<name> selects a legacy
+// [profiles] table, not the profile file --profile loads
+// (loader_overrides_for_profile sets user_config_path), so a seat with one
+// is not probed and stays held until its dialog hook runs.
 func codexHookProbeOverrides(args []string) ([]string, bool) {
 	var out []string
 	for i := 0; i < len(args); i++ {

@@ -88,12 +88,12 @@ func TestRunCoopNamedTUISkipsNamedStoreAndConfirmsReadback(t *testing.T) {
 
 	reader := &fakeCoopNamedStoreReader{candidate: coopNamedStoreCandidate{name: "existing"}}
 	injections := 0
-	coopNamedTTYInject = func(string, string) error {
+	coopNamedTTYInject = func(string, string, func() bool) error {
 		injections++
 		return nil
 	}
 	_, stderr, err := captureEnvOutput(t, func() error {
-		return runCoopNamedTUI(reader, "feature/codex", "codex", "/tmp/project", time.Now())
+		return runCoopNamedTUI(reader, "feature/codex", "codex", "/tmp/project", time.Now(), nil)
 	})
 	if err != nil || injections != 0 || stderr != "" {
 		t.Fatalf("named store skip: err=%v injections=%d stderr=%q", err, injections, stderr)
@@ -103,9 +103,33 @@ func TestRunCoopNamedTUISkipsNamedStoreAndConfirmsReadback(t *testing.T) {
 	coopNamedTUIReadbackTimeout = time.Second
 	coopNamedReadbackSleep = func(time.Duration) {}
 	_, stderr, err = captureEnvOutput(t, func() error {
-		return runCoopNamedTUI(reader, "feature/codex", "codex", "/tmp/project", time.Now())
+		return runCoopNamedTUI(reader, "feature/codex", "codex", "/tmp/project", time.Now(), nil)
 	})
 	if err != nil || injections != 1 || !strings.Contains(stderr, "named feature/codex") {
 		t.Fatalf("readback success: err=%v injections=%d stderr=%q", err, injections, stderr)
+	}
+}
+
+// W1 review (Pro finding 5): the Cursor namer checked the dialog marker
+// once, then typed its command and, after the paste delay, Enter, which a
+// dialog opened meanwhile would take. Each write and the Enter check again.
+func TestCoopNamedSlashCommandStopsWhenADialogOpens(t *testing.T) {
+	oldReady, oldInject := coopNamedTTYReady, tiocstiInject
+	t.Cleanup(func() { coopNamedTTYReady, tiocstiInject = oldReady, oldInject })
+	stubRawInjectSleep(t)
+	coopNamedTTYReady = func() bool { return true }
+	var written []string
+	tiocstiInject = func(text string) error {
+		written = append(written, text)
+		return nil
+	}
+	checks := 0
+	inputFree := func() bool {
+		checks++
+		return checks == 1
+	}
+	err := injectCoopNamedSlashCommand("s1/cur", "cursor-agent", inputFree)
+	if err == nil || len(written) != 1 || written[0] != "/rename s1/cur" {
+		t.Fatalf("err = %v, written = %q; want the command typed and no Enter after the dialog opened", err, written)
 	}
 }

@@ -5,7 +5,9 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,9 +17,34 @@ import (
 	"github.com/creack/pty"
 )
 
+// setCodexTerminalForTest gives a test the terminal type term and clears
+// every variable Codex reads to name a terminal before TERM, so a coop exec
+// test does not depend on the shell it runs in (W1 review: a non-TTY CI or
+// agent shell has TERM=dumb).
+func setCodexTerminalForTest(t *testing.T, term string) {
+	t.Helper()
+	for _, key := range append([]string{"TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR"}, codexTerminalDetectionKeys...) {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("TERM", term)
+}
+
+// prewarmExecutableForTest runs a freshly written fake binary once, outside
+// any deadline. The warning's probes run real executables (the boundary
+// under test) inside launchVersionProbeBudget, and the first start of a new
+// file can take longer than that on a loaded or scanned machine.
+func prewarmExecutableForTest(t *testing.T, path string) {
+	t.Helper()
+	cmd := exec.Command(path, "--version")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	_ = cmd.Run()
+}
+
 // Field report: launching Codex selected an older PATH installation that
 // rejected the configured model. Doctor named the files, but launch was silent.
 func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
 	master, terminal, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +71,7 @@ func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
 		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		prewarmExecutableForTest(t, path)
 		paths = append(paths, path)
 	}
 	t.Setenv("PATH", filepath.Dir(paths[0])+string(os.PathListSeparator)+filepath.Dir(paths[1]))
@@ -76,10 +104,20 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
-		tui  bool
+		// refusal is the usage error text, or "" for a launch that runs.
+		refusal string
+		// dumb runs the launch with TERM=dumb.
+		dumb bool
 	}{
-		{"interactive stdout redirected", []string{"-m", "example-model", "explain this project"}, true},
-		{"exec stdout redirected", []string{"exec", "explain this project"}, false},
+		{"interactive stdout redirected", []string{"-m", "example-model", "explain this project"}, "missing: stdout", false},
+		{"exec stdout redirected", []string{"exec", "explain this project"}, "", false},
+		// Pre-merge review of fix/wake-holds-0113 (Pro finding 5): with
+		// TERM=dumb Codex asks "Continue anyway? [y/N]" before its TUI
+		// starts, and a doorbell's Enter answers No.
+		{"TERM=dumb resume", []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}, "TERM=dumb", true},
+		// W1 review (Pro finding 5): an image launch is interactive, but the
+		// backend parser leaves -i unclassified, so it passed the refusal.
+		{"TERM=dumb image launch", []string{"--no-daemon", "-i", "screenshot.png"}, "TERM=dumb", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			master, terminal, err := pty.Open()
@@ -106,6 +144,11 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin)
+			if tc.dumb {
+				setCodexTerminalForTest(t, "dumb")
+			} else {
+				setCodexTerminalForTest(t, "xterm-256color")
+			}
 			root := filepath.Join(secureTempDirForTest(t), "queue")
 			sentinel := errors.New("exec sentinel")
 			oldExec := coopExecProcess
@@ -118,9 +161,9 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 			}
 			args := append([]string{"--root", root, "--me", "coder", "--no-wake", "--named=false", "-y", "codex", "--"}, tc.args...)
 			err = runCoopExec(args)
-			if tc.tui {
-				if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "missing: stdout") {
-					t.Fatalf("redirected Codex error = %v, want usage error naming stdout", err)
+			if tc.refusal != "" {
+				if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), tc.refusal) {
+					t.Fatalf("Codex launch error = %v, want usage error naming %s", err, tc.refusal)
 				}
 				if selected != "" {
 					t.Fatalf("interactive Codex reached exec: %q", selected)
@@ -143,6 +186,7 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 // Pre-merge review found that version diagnostics could run project-owned
 // binaries even though managed launch refuses them as providers.
 func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
 	project, external := t.TempDir(), t.TempDir()
 	unsafe := filepath.Join(project, "bin")
 	newer := filepath.Join(t.TempDir(), "bin")
@@ -162,6 +206,9 @@ func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The project candidate must never run, so only the others are warmed.
+	prewarmExecutableForTest(t, selected)
+	prewarmExecutableForTest(t, filepath.Join(newer, "codex"))
 	t.Setenv("PATH", strings.Join([]string{external, unsafe, newer}, string(os.PathListSeparator)))
 	identity, err := fsq.StableFileIdentity(selected)
 	if err != nil {
@@ -178,5 +225,19 @@ func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
 	}
 	if !strings.Contains(output, filepath.Join(newer, "codex")) || strings.Contains(output, unsafe) {
 		t.Fatalf("warning = %q, want the external newer installation", output)
+	}
+}
+
+// W1 review (Pro finding 3): a managed Codex launch skipped the TERM=dumb
+// refusal, and its environment overlay can carry TERM=dumb.
+func TestManagedCodexLaunchRefusesADumbTerminal(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
+	ticket := &launch.ExecutionTicket{
+		Provider:   launch.CodexProvider,
+		TargetArgv: []string{"codex", "-c", "check_for_update_on_startup=false"},
+		TargetEnv:  map[string]string{"TERM": "dumb"},
+	}
+	if err := managedCodexDumbTerminalRefusal(ticket); GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "TERM=dumb") {
+		t.Fatalf("managed refusal = %v, want a TERM=dumb usage error", err)
 	}
 }

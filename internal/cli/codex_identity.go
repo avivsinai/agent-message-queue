@@ -296,7 +296,9 @@ func resolveCodexResumeLaunch(binaryPath string, args []string) ([]string, error
 		return nil, codexResumeRefusal("cannot resolve CODEX_HOME: %v", err)
 	}
 	opts := append(slices.Clone(args[:r.start]), r.opts...)
-	backend, features := codexLaunchBackend(binaryPath, opts, wd, codexHome)
+	discovery, cancelDiscovery := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	backend, features := codexLaunchBackend(discovery, binaryPath, opts, wd, codexHome)
+	cancelDiscovery()
 	switch backend {
 	case codexEmbedded:
 		return nil, codexResumeRefusal("this Codex runs its own app-server, where AMQ cannot select the thread")

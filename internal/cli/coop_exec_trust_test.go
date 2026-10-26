@@ -68,19 +68,13 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// W1 review (Pro finding 1): the trust record is shared by every
+	// terminal, so another terminal's answer released this terminal's
+	// open trust screen. Only a prompt hook of this launch releases it.
 	h.advance(wakeDialogRecheck)
 	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("full doorbells after trust was recorded = %d, want 1", got)
-	}
-	// Bead agent-message-queue-vd4.3, live on 0.107.0 without the Codex
-	// hook: the doorbell typed on the trust release reached a Codex whose
-	// composer was not ready yet and was lost; the retries were a bare
-	// Enter into an empty composer. The retry rings the full doorbell.
-	h.advance(wakeDoorbellRetryBase)
-	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("full doorbells on the retry after a trust release = %d, want 1", got)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q after the shared trust record changed", h.injected)
 	}
 	// The next launch with trusted input and a known-safe update decision
 	// removes the leftover trust marker.
@@ -105,103 +99,6 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	h.scan(h.cfg)
 	if len(h.injected) != rang || h.cfg.dialogHold != wakeDialogUnknown {
 		t.Fatalf("aged untrusted hold: injected %q, dialog state %v; want held with attention", h.injected[rang:], h.cfg.dialogHold)
-	}
-}
-
-// PR #1204 Codex review: after a trust release, only a drain that follows
-// a doorbell actually typed into Codex proves that Codex accepts input.
-// Each row ends at a retry that must still type the full doorbell.
-func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		run  func(t *testing.T, h *wakeHoldHarness)
-	}{
-		{
-			// An inbox file replaced in place is a new message, not a drain.
-			name: "replacement after the release",
-			run: func(t *testing.T, h *wakeHoldHarness) {
-				h.send("a", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells on the trust release = %d, want 1", got)
-				}
-				h.drain()
-				h.send("a", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells for the replaced message = %d, want 1", got)
-				}
-			},
-		},
-		{
-			// A deferred attempt types nothing, so a drain after it proves
-			// nothing.
-			name: "deferred attempt then a drain",
-			run: func(t *testing.T, h *wakeHoldHarness) {
-				h.cfg.injectVia = "test-hook"
-				h.cfg.injectViaHook = func(string) (string, error) {
-					return "AMQ_INJECT_PROGRESS=deferred\n", errors.New("exit status 1")
-				}
-				h.send("a", format.PriorityUrgent)
-				if err := notifyNewMessages(h.cfg); !isWakeInjectorDeferred(err) {
-					t.Fatalf("release attempt error = %v, want deferred", err)
-				}
-				h.cfg.injectVia, h.cfg.injectViaHook = "", nil
-				h.drain()
-				h.scan(h.cfg)
-				h.send("b", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
-				}
-			},
-		},
-		{
-			// A busy-input deferral types nothing, also when its attention
-			// output is throttled.
-			name: "busy-input deferral with attention throttled then a drain",
-			run: func(t *testing.T, h *wakeHoldHarness) {
-				old := waitForWakeInputQuiet
-				t.Cleanup(func() { waitForWakeInputQuiet = old })
-				waitForWakeInputQuiet = func(*wakeConfig) bool { return false }
-				h.cfg.settings.deferWhileInput = true
-				h.cfg.doorbell.recordTransientAttentionAttempt(h.now)
-				h.send("a", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if len(h.injected) != 0 {
-					t.Fatalf("typed %q while the input was busy", h.injected)
-				}
-				waitForWakeInputQuiet = old
-				h.cfg.settings.deferWhileInput = false
-				h.drain()
-				h.scan(h.cfg)
-				h.send("b", format.PriorityUrgent)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("full doorbells for new mail after the drain = %d, want 1", got)
-				}
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h, config, real, marker := newCodexTrustDialogHarness(t)
-			syncStartupMarkerForTest(t, h.root, []string{"-c", "check_for_update_on_startup=false"})
-			if _, err := os.Lstat(marker); err != nil {
-				t.Fatalf("no Startup marker for an unrecorded checkout: %v", err)
-			}
-			// Codex records trust, but no SessionStart hook removes the
-			// marker: a trust release.
-			trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			tc.run(t, h)
-			h.advance(wakeDoorbellRetryBase)
-			h.scan(h.cfg)
-			if got := h.rings(); got != 1 {
-				t.Fatalf("full doorbells on the retry = %d, want 1", got)
-			}
-		})
 	}
 }
 
@@ -692,8 +589,8 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 		t.Fatalf("startup hold = %#v", hold)
 	}
 
-	// #1180 review: wake check reported a marker as held after Codex had
-	// recorded trust and the wake had released input.
+	// W1 review (Pro finding 1): a recorded trust does not release a Codex
+	// Startup marker, so wake check still reports it.
 	project := secureTempDirForTest(t)
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
 		t.Fatal(err)
@@ -710,8 +607,8 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(accepted), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if hold := inspectWakeStartupHold(root, "codex", time.Now()); hold != nil {
-		t.Fatalf("startup hold after trust was recorded = %#v, want none", hold)
+	if hold := inspectWakeStartupHold(root, "codex", time.Now()); hold == nil {
+		t.Fatal("no startup hold reported after the shared trust record changed")
 	}
 }
 
@@ -831,5 +728,220 @@ func TestMarkerReplacedDuringARemovalSurvives(t *testing.T) {
 	<-replaced
 	if got, err := os.ReadFile(marker); err != nil || string(got) != string(newer) {
 		t.Fatalf("marker after a replacement during removal = %q, %v; want the newer marker", got, err)
+	}
+}
+
+// post-release review v0.113.2 finding S2: the startup probe of a recorded
+// resume discovered the backend through `codex features list` with its own
+// 60 s budget and no process-group kill, so a native child of the npm
+// launcher that kept stdout open held coop exec, and the wake's startup
+// hold, until that child exited. The probe's one deadline now covers
+// discovery, and the child is killed.
+func TestCodexStartupProbeKillsAFeaturesChildThatHoldsStdout(t *testing.T) {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if value, set := os.LookupEnv(key); set {
+			t.Cleanup(func() { _ = os.Setenv(key, value) })
+			_ = os.Unsetenv(key)
+		}
+	}
+	t.Setenv("CODEX_HOME", t.TempDir())
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	script := "#!/bin/sh\nif [ \"$1\" = features ]; then sleep 60 & echo $! > '" + pidFile + "'; exit 0; fi\nexit 1\n"
+	bin := filepath.Join(dir, "codex")
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	childPID := func() int {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return 0
+		}
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+		return pid
+	}
+	t.Cleanup(func() {
+		if pid := childPID(); pid > 0 {
+			_ = unix.Kill(pid, unix.SIGKILL)
+		}
+	})
+	wd := t.TempDir()
+	done := make(chan codexStartupProbe, 1)
+	go func() {
+		done <- probeCodexStartup(bin, []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}, wd, wd, true)
+	}()
+	select {
+	case got := <-done:
+		if got != (codexStartupProbe{}) {
+			t.Fatalf("probe = %+v, want nothing proven", got)
+		}
+	case <-time.After(codexHooksProbeTimeout + 2*time.Second):
+		t.Fatal("the startup probe waited on a features child that kept stdout open")
+	}
+	pid := childPID()
+	if pid <= 0 {
+		t.Fatal("the fake codex recorded no features child")
+	}
+	// init reaps the killed orphan shortly after the kill.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		err := unix.Kill(pid, 0)
+		if errors.Is(err, unix.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the features child %d survived the probe: %v", pid, err)
+		}
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (Pro finding 5 and the lead's
+// W1 ruling): a Codex Startup marker that only the dialog hook releases
+// held the doorbell with no sign before launch when the hook could not
+// run. coop exec now says so on stderr, with the remedy.
+func TestCodexStartupHoldNamesAMissingDialogHookBeforeLaunch(t *testing.T) {
+	h, config, real, _ := newCodexTrustDialogHarness(t)
+	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return syncStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", []string{"-c", "check_for_update_on_startup=false"}, false)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "holds this Codex seat's doorbell until the first prompt") ||
+		!strings.Contains(stderr, "amq wake install-dialog-hook --harness codex") {
+		t.Fatalf("stderr = %q, want the held-doorbell line with the install remedy", stderr)
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (Pro finding 4): Codex asks which
+// directory to resume a thread in when its recorded cwd differs from the
+// launch directory, and Enter picks one. With no choice set, coop exec sets
+// the current mode; a recorded seat gets -C, which keeps it on the daemon.
+func TestCodexResumeLaunchKeepsTheLaunchDirectory(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	const thread = "01a165af-5f6d-7270-bb60-671490b46ea1"
+	for _, tc := range []struct {
+		recorded bool
+		want     []string
+	}{
+		{false, []string{"-c", `tui.resume_cwd="current"`, "resume", thread}},
+		{true, []string{"-C", "/work/repo", "resume", thread}},
+	} {
+		if got := pinCodexResumeLaunchDir("/usr/local/bin/codex", []string{"resume", thread}, "/work/repo", tc.recorded, ""); !slices.Equal(got, tc.want) {
+			t.Fatalf("recorded=%v resume args = %q, want %q", tc.recorded, got, tc.want)
+		}
+	}
+}
+
+// Pre-merge review of fix/wake-holds-0113 (lead's ruling on the daemon
+// hold): a recorded resume runs its hooks in the Codex daemon, so no prompt
+// hook of this launch could release its Startup marker, and the hold never
+// ended. A resume whose screen may show now runs its own app-server for this
+// launch, and the marker names this launch's process.
+func TestCodexResumeWithAStartupScreenLaunchesEmbedded(t *testing.T) {
+	_, config, real, _ := newCodexTrustDialogHarness(t)
+	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
+	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}
+	env := []string{"AM_ME=codex", "AM_ROOT=/q"}
+	decision, err := decideCodexLaunch("/usr/local/bin/codex", args, env, real, coopNamedChoice{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.hold || !decision.embeddedOnly || decision.marker.Launch == nil || decision.marker.Launch.PID != os.Getpid() {
+		t.Fatalf("decision = %+v, want an embedded launch whose marker names this process", decision)
+	}
+	final := pinCodexShellIdentity("/usr/local/bin/codex", args, env, !decision.embeddedOnly)
+	if !strings.Contains(strings.Join(final, " "), "shell_environment_policy") {
+		t.Fatalf("embedded resume args = %q, want the identity overrides", final)
+	}
+}
+
+// W1 review (Pro finding 4, Codex reproducer): with tui.resume_cwd
+// "session" Codex resumes in the thread's own directory, but the startup
+// check read trust and hooks for the launch directory and declared it
+// clear.
+func TestCodexSessionResumeHoldsWithoutItsDirectoryEvidence(t *testing.T) {
+	_, config, launchDir, _ := newCodexTrustDialogHarness(t)
+	trusted := fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", launchDir)
+	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := `{"id":4,"result":{"config":{"check_for_update_on_startup":false,"tui":{"resume_cwd":"session"}}}}`
+	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{
+		"": `{"id":2,"result":{"data":[{"cwd":"` + launchDir + `","hooks":[]}]}}`,
+	}, `{"id":3,"result":{"requirements":null}}`, session)
+	marker, hold := startupDialogMarkerFor(bin, []string{"-c", "check_for_update_on_startup=false", "resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}, launchDir, false)
+	if !hold || marker.Kind != wakeStartupKindResumeDir {
+		t.Fatalf("session resume decision = %+v, %v; want a resume_dir hold", marker, hold)
+	}
+}
+
+// W1 review (Pro finding 6): the resume default was inserted over a
+// project or system tui.resume_cwd that only Codex's effective config/read
+// shows. A setting there, or a config/read that fails, keeps the args.
+func TestCodexResumeDefaultFollowsTheEffectiveConfig(t *testing.T) {
+	_, config, launchDir, _ := newCodexTrustDialogHarness(t)
+	const thread = "01a165af-5f6d-7270-bb60-671490b46ea1"
+	for _, tc := range []struct {
+		name, config, want string
+	}{
+		{"project layer sets session", `{"id":4,"result":{"config":{"tui":{"resume_cwd":"session"}}}}`, "session"},
+		{"config/read fails", `{"id":4,"error":{"code":-32603,"message":"boom"}}`, "unknown"},
+		{"unset", `{"id":4,"result":{"config":{"tui":{}}}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{"": `{"id":2,"result":{"data":[]}}`},
+				`{"id":3,"result":{"requirements":null}}`, tc.config)
+			args := []string{"resume", thread}
+			choice := codexEffectiveResumeCwd(bin, args, launchDir, false)
+			if choice != tc.want {
+				t.Fatalf("effective resume mode = %q, want %q", choice, tc.want)
+			}
+			pinned := pinCodexResumeLaunchDir(bin, args, launchDir, false, choice)
+			if (tc.want == "") == slices.Equal(pinned, args) {
+				t.Fatalf("resume args = %q for mode %q", pinned, choice)
+			}
+		})
+	}
+}
+
+// W1 review (Pro finding 1, Codex reproducer): Codex applies -c overrides in
+// order and the last wins, but AMQ read the first tui.resume_cwd and missed
+// a later "session". The mode comes from the probe's config/read.
+func TestCodexLastResumeOverrideKeepsTheStartupHold(t *testing.T) {
+	_, config, dir, _ := newCodexTrustDialogHarness(t)
+	if err := os.WriteFile(config, []byte(fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", dir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{
+		"": `{"id":2,"result":{"data":[{"cwd":"` + dir + `","hooks":[]}]}}`,
+	}, `{"id":3,"result":{"requirements":null}}`,
+		`{"id":4,"result":{"config":{"check_for_update_on_startup":false,"tui":{"resume_cwd":"session"}}}}`)
+	args := []string{"-c", `tui.resume_cwd="current"`, "-c", `tui.resume_cwd="session"`, "resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}
+	if marker, held := startupDialogMarkerFor(bin, args, dir, false); !held {
+		t.Fatalf("a later session choice was ignored, startup declared clear: %+v", marker)
+	}
+}
+
+// W1 review (Pro finding 2): an image-prefixed fork read as "not a resume",
+// so the resume-directory guard was skipped. -i takes values up to the next
+// option, and arguments AMQ cannot classify keep the hold.
+func TestCodexImagePrefixedForkKeepsTheResumeGuard(t *testing.T) {
+	const thread = "01a165af-5f6d-7270-bb60-671490b46ea1"
+	if at, known := codexResumeOrFork([]string{"-i", "screenshot.png", "--no-daemon", "fork", thread}); !known || at != 3 {
+		t.Fatalf("image-prefixed fork = %d, %v; want index 3, known", at, known)
+	}
+	// Native 0.164 also consumes values after an inline image argument.
+	if at, known := codexResumeOrFork([]string{"--image=first.png", "second.png", "--no-daemon", "fork", thread}); !known || at != 3 {
+		t.Fatalf("inline image-prefixed fork = %d, %v; want index 3, known", at, known)
+	}
+	if _, known := codexResumeOrFork([]string{"--unknown-option", "value", "fork", thread}); known {
+		t.Fatal("an unknown option read as known grammar")
 	}
 }

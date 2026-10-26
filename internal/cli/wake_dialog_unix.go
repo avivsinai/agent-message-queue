@@ -3,7 +3,10 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,8 +14,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +31,7 @@ const (
 	// uninstall and doctor find AMQ's entries by it.
 	wakeDialogHookMarker = "AMQ_DIALOG_HOOK=1 "
 	// wakeDialogHookTools are the tools whose dialog opens in PreToolUse and
-	// closes in PostToolUse.
+	// closes in PostToolUse or PostToolUseFailure.
 	wakeDialogHookTools = "AskUserQuestion|ExitPlanMode"
 	// ExitPlanMode carries the whole plan in its hook input.
 	maxWakeDialogHookInputBytes = 8 << 20
@@ -38,6 +43,7 @@ const (
 // event an older Claude Code does not know could cost every other hook in it.
 var wakeDialogHookEvents = []string{
 	"PostToolUse",
+	"PostToolUseFailure",
 	"UserPromptSubmit",
 	"Stop",
 	"SessionStart",
@@ -46,16 +52,86 @@ var wakeDialogHookEvents = []string{
 	"PermissionRequest",
 }
 
+// wakeDialogHookEventFloor is the first Claude Code version known to have
+// each gated event: the changelog first names PostToolUseFailure in
+// 2.1.119. Before 2.1.101 an unknown event made Claude Code ignore the
+// whole settings file, so the installer adds a gated event only for a
+// version at or past its floor.
+var wakeDialogHookEventFloor = map[string]claudeVersion{
+	"PostToolUseFailure": {2, 1, 119},
+}
+
+// claudeVersion is a Claude Code major.minor.patch.
+type claudeVersion [3]int
+
+func (v claudeVersion) less(floor claudeVersion) bool {
+	for i := range v {
+		if v[i] != floor[i] {
+			return v[i] < floor[i]
+		}
+	}
+	return false
+}
+
+var claudeVersionRe = regexp.MustCompile(`^\s*(\d+)\.(\d+)\.(\d+)`)
+
+// installedClaudeVersion reads `claude --version` from the claude on PATH,
+// through probeHarnessVersion: bounded output, and the process group killed
+// and reaped at the deadline, so a launcher's child that keeps the pipe open
+// cannot stall the installer or doctor. ok is false when it is missing,
+// fails, or prints no version.
+func installedClaudeVersion() (claudeVersion, bool) {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return claudeVersion{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, ok := probeHarnessVersion(ctx, path)
+	if !ok {
+		return claudeVersion{}, false
+	}
+	match := claudeVersionRe.FindStringSubmatch(out)
+	if match == nil {
+		return claudeVersion{}, false
+	}
+	var v claudeVersion
+	for i := range v {
+		if v[i], err = strconv.Atoi(match[i+1]); err != nil {
+			return claudeVersion{}, false
+		}
+	}
+	return v, true
+}
+
+// wakeDialogHookEventsFor is wakeDialogHookEvents without the events the
+// given Claude Code version may not know; an unknown version gets none of
+// the gated events.
+func wakeDialogHookEventsFor(version claudeVersion, known bool) []string {
+	events := make([]string, 0, len(wakeDialogHookEvents))
+	for _, event := range wakeDialogHookEvents {
+		if floor, gated := wakeDialogHookEventFloor[event]; gated && (!known || version.less(floor)) {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
 // wakeDialogHookInput is the part of Claude Code's hook input the receiver
 // reads.
 type wakeDialogHookInput struct {
-	Event     string `json:"hook_event_name"`
-	SessionID string `json:"session_id"`
-	Tool      string `json:"tool_name"`
-	ToolUseID string `json:"tool_use_id"`
-	Cwd       string `json:"cwd"`
+	Event          string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	Tool           string `json:"tool_name"`
+	ToolUseID      string `json:"tool_use_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd"`
 	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
-	TurnID       string `json:"turn_id"`
+	TurnID string `json:"turn_id"`
+	// ownIdentity reports a hook whose AM_ROOT and AM_ME came from its own
+	// environment, not from a thread identity record.
+	ownIdentity  bool
 	GenerationID string `json:"generation_id"`
 	Status       string `json:"status"`
 	emptyInput   bool
@@ -64,7 +140,7 @@ type wakeDialogHookInput struct {
 // wakeDialogMarker is the .wake.dialog content. The wake uses the file's
 // presence and mtime, and for a Startup marker its harness and cwd
 // (startupDialogClosed); tool_use_id scopes a PostToolUse close and the
-// rest is for diagnosis.
+// transcript proof, and the rest is for diagnosis.
 type wakeDialogMarker struct {
 	Schema    int    `json:"schema"`
 	Event     string `json:"event,omitempty"`
@@ -73,25 +149,40 @@ type wakeDialogMarker struct {
 	Cwd       string `json:"cwd,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	// TranscriptPath is the Claude Code session transcript the wake reads
+	// for proof that Esc or a deny closed the tool call's dialog.
+	TranscriptPath string `json:"transcript_path,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
 	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	OpenedAt  string `json:"opened_at"`
+	// Launch is the process amq coop exec execs into for a Codex Startup
+	// marker; only a prompt hook that descends from it releases the marker.
+	Launch *launch.HolderIdentity `json:"launch,omitempty"`
 }
 
 // wakeDialogSourceInDir is the running wake's dialog source. It reads only
 // through the canonical agent directory; a detached directory cannot show
-// the hook's marker, so it reads as unknown, never as closed. A Startup
-// marker reads as closed once the harness has recorded its trust decision,
-// so the doorbell rings without a SessionStart hook.
+// the hook's marker, so it reads as unknown, never as closed. A Claude Code
+// Startup marker reads as closed once Claude Code has recorded its trust
+// decision (a Codex one never does),
+// so the doorbell rings without a SessionStart hook. A Claude Code marker
+// whose session transcript shows a result for its tool call
+// (claudeDialogAnswered) is removed; a missing or unreadable transcript, a
+// busy lock or a changed marker keeps the hold until the next recheck.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
+	var proof claudeDialogProof
 	return func(now time.Time) (wakeDialogState, error) {
 		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil {
 			return wakeDialogUnknown, err
 		}
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
+			return wakeDialogClosed, nil
+		}
+		if readErr == nil && exists && info != nil && proof.answered(raw, info.ModTime()) &&
+			removeWakeDialogMarkerVersion(agentDir, raw, info) {
 			return wakeDialogClosed, nil
 		}
 		var modTime time.Time
@@ -120,22 +211,55 @@ func wakeStartupTrustReleaseInDir(agentDir *wakeAgentDir) func() bool {
 }
 
 // wakeDialogHoldReasonInDir says why the agent's marker holds input, for the
-// held-doorbell notice. marker is false when no marker exists. A marker that
-// cannot be read or parsed gives the generic reason.
-func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() (string, bool) {
-	return func() (string, bool) {
+// held-doorbell notice. A marker that cannot be read or parsed gives the
+// generic reason.
+func wakeDialogHoldReasonInDir(agentDir *wakeAgentDir) func() wakeDialogHoldCause {
+	return func() wakeDialogHoldCause {
 		raw, _, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil || readErr != nil {
-			return wakeDialogGenericHoldReason, true
+			return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
 		}
 		if !exists {
-			return "", false
+			return wakeDialogHoldCause{}
 		}
 		var marker wakeDialogMarker
 		if json.Unmarshal(raw, &marker) != nil {
-			return wakeDialogGenericHoldReason, true
+			return wakeDialogHoldCause{reason: wakeDialogGenericHoldReason, marker: true}
 		}
-		return wakeDialogHoldReason(marker), true
+		sum := sha256.Sum256(raw)
+		return wakeDialogHoldCause{reason: wakeDialogHoldReason(marker), marker: true, busy: agyTurnMarker(marker), generation: hex.EncodeToString(sum[:])}
+	}
+}
+
+// wakeDialogHoldDetailInDir names the marker that holds input for the wake
+// log: its event, kind, harness, tool and age by mtime. Marker fields are
+// quoted, so no hook input reaches the log raw.
+func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir) func(time.Time) string {
+	return func(now time.Time) string {
+		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
+		switch {
+		case err != nil || readErr != nil:
+			return "marker unreadable"
+		case !exists:
+			return "no marker"
+		}
+		var marker wakeDialogMarker
+		if json.Unmarshal(raw, &marker) != nil {
+			return "marker unparsable"
+		}
+		harness := marker.Harness
+		if harness == "" && marker.Event != wakeDialogStartupEvent {
+			harness = "claude" // Claude Code dialog hooks write no harness
+		}
+		transcript := "none"
+		if marker.TranscriptPath != "" && marker.ToolUseID != "" && harness == "claude" {
+			transcript = "no proof yet"
+			if _, err := claudeDialogAnswered(marker); err != nil {
+				transcript = fmt.Sprintf("unreadable, holding: %q", err.Error())
+			}
+		}
+		return fmt.Sprintf("marker event=%q kind=%q harness=%q tool=%q age=%s transcript=%s",
+			marker.Event, marker.Kind, harness, marker.Tool, now.Sub(info.ModTime()).Round(time.Second), transcript)
 	}
 }
 
@@ -164,8 +288,10 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 		harness = "The harness"
 	}
 	switch {
+	case agyTurnMarker(marker):
+		return harness + " is busy; the doorbell rings when the turn ends"
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
-		return harness + " startup screen open; type a prompt in that terminal to release"
+		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy()
 	case marker.Event == wakeDialogStartupEvent:
 		return harness + " startup screen open; answer it in that terminal to release"
 	}
@@ -236,6 +362,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	if !open && inputErr != nil {
 		return nil
 	}
+	_, ownRoot := os.LookupEnv(envRoot)
+	_, ownMe := os.LookupEnv(envMe)
+	in.ownIdentity = ownRoot && ownMe
 	if codex && adoptCodexHookIdentity(in.SessionID) != nil {
 		return nil
 	}
@@ -281,35 +410,35 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	return nil
 }
 
-// writeWakeDialogMarker writes the marker for in. A marker without a
-// tool_use_id (a permission dialog) stays without one, so a PostToolUse of
-// a later tool call cannot clear the permission dialog's hold.
+// writeWakeDialogMarker writes the marker for in. A present marker without
+// a tool_use_id (a permission dialog) stays as it is when a tool call opens,
+// so a PostToolUse of that call cannot clear the permission dialog's hold: a
+// permission marker closes only on a turn or session event. A PermissionRequest names
+// no tool call, so it never takes the tool_use_id of the marker it
+// replaces: that marker can belong to another call of the same tool.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
-	if in.ToolUseID != "" {
-		current, _, exists, err := readWakeRepairMetadataAt(
-			dirfd,
-			wakeDialogFileName,
-			"wake dialog marker",
-			filepath.Join(agentDir.path, wakeDialogFileName),
-			maxWakeMetadataFileBytes,
-		)
-		var marker wakeDialogMarker
-		if err == nil && exists && json.Unmarshal(current, &marker) == nil && marker.ToolUseID == "" {
-			in.ToolUseID = ""
-		}
-	}
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema:    1,
-		Event:     in.Event,
-		Tool:      in.Tool,
-		ToolUseID: in.ToolUseID,
-		SessionID: in.SessionID,
-		OpenedAt:  time.Now().UTC().Format(time.RFC3339),
+		Schema:         1,
+		Event:          in.Event,
+		Tool:           in.Tool,
+		ToolUseID:      in.ToolUseID,
+		TranscriptPath: in.TranscriptPath,
+		SessionID:      in.SessionID,
+		OpenedAt:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
 	}
-	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	if in.ToolUseID == "" {
+		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	}
+	// A tool call's open keeps a present marker without a tool_use_id: that
+	// hold closes only on a turn or session event, and the decision shares
+	// the marker lock with the replacement.
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte) bool {
+		var marker wakeDialogMarker
+		return json.Unmarshal(current, &marker) == nil && marker.ToolUseID == ""
+	})
 }
 
 // replaceWakeDialogMarkerAt installs data as the marker by an exclusive
@@ -317,6 +446,13 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 // advisory, and a marker lost in a crash leaves the wake as it is without the
 // hook. The open runs as the dialog renders, so it must not wait on the disk.
 func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) error {
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, data, nil)
+}
+
+// replaceWakeDialogMarkerUnlessAt is replaceWakeDialogMarkerAt that keeps
+// the present marker when keep accepts its bytes; the read and the
+// replacement share the marker lock.
+func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []byte, keep func(current []byte) bool) error {
 	const label = "wake dialog marker"
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -347,6 +483,16 @@ func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) e
 		if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, wakeDialogFileName, label); err != nil {
 			return err
 		}
+		if keep != nil {
+			current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, label,
+				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
+			if err != nil {
+				return err
+			}
+			if exists && keep(current) {
+				return nil
+			}
+		}
 		if err := wakeRenameAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
 			return fmt.Errorf("install %s: %w", label, err)
 		}
@@ -363,24 +509,68 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 
 // withWakeDialogMarkerLock runs fn holding the marker lock, so a
 // replacement and a conditional removal never interleave: a writer cannot
-// replace the marker between a remover's read and its unlink. The wake
-// only reads the marker and takes no lock.
+// replace the marker between a remover's read and its unlink, and a guarded
+// writer reads and replaces under it. The wake takes it only to remove a
+// Claude Code marker whose transcript shows its tool call's result, and
+// never waits for it.
 func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
+	return lockWakeDialogMarker(dirfd, unix.LOCK_EX, fn)
+}
+
+// errWakeDialogLockBusy is a non-blocking marker lock held by a hook.
+var errWakeDialogLockBusy = errors.New("wake dialog marker lock busy")
+
+func lockWakeDialogMarker(dirfd, how int, fn func() error) error {
 	fd, err := unix.Openat(dirfd, wakeDialogLockFileName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open wake dialog marker lock: %w", err)
 	}
 	defer func() { _ = unix.Close(fd) }()
 	for {
-		err = unix.Flock(fd, unix.LOCK_EX)
+		err = unix.Flock(fd, how)
 		if !errors.Is(err, unix.EINTR) {
 			break
 		}
+	}
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return errWakeDialogLockBusy
 	}
 	if err != nil {
 		return fmt.Errorf("lock wake dialog marker: %w", err)
 	}
 	return fn()
+}
+
+// removeWakeDialogMarkerVersion removes the marker the wake read as raw
+// with info, only if it is still that version (same bytes, mtime and
+// size), under the marker lock taken without waiting. It reports whether
+// it removed it.
+func removeWakeDialogMarkerVersion(agentDir *wakeAgentDir, raw []byte, info os.FileInfo) bool {
+	if validateCanonicalWakeAgentDir(agentDir) != nil {
+		return false
+	}
+	removed := false
+	err := agentDir.withFD(func(dirfd int) error {
+		return lockWakeDialogMarker(dirfd, unix.LOCK_EX|unix.LOCK_NB, func() error {
+			current, now, exists, err := readWakeRepairMetadataAt(
+				dirfd,
+				wakeDialogFileName,
+				"wake dialog marker",
+				filepath.Join(agentDir.path, wakeDialogFileName),
+				maxWakeMetadataFileBytes,
+			)
+			if err != nil || !exists || now == nil || !bytes.Equal(current, raw) ||
+				!now.ModTime().Equal(info.ModTime()) || now.Size() != info.Size() {
+				return err
+			}
+			if err := wakeUnlinkAt(dirfd, wakeDialogFileName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return err
+			}
+			removed = true
+			return nil
+		})
+	})
+	return err == nil && removed
 }
 
 // removeWakeDialogMarkerIf removes the marker when remove accepts its
@@ -406,7 +596,9 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 
 // clearWakeDialogMarker checks the current marker under its lock. Cursor
 // can queue a prompt during an approval and sends abort/error stop hooks
-// without waiting; neither may release a later turn's hold.
+// without waiting; neither may release a later turn's hold. A tool call's
+// PostToolUse or PostToolUseFailure closes only the marker of the same
+// tool_use_id.
 func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
 		var marker wakeDialogMarker
@@ -460,9 +652,9 @@ func wakeDialogHookVerb(event string) string {
 	return "close"
 }
 
-func wakeDialogHooks(bin string) []claude.CommandHook {
-	hooks := make([]claude.CommandHook, 0, len(wakeDialogHookEvents))
-	for _, event := range wakeDialogHookEvents {
+func wakeDialogHooks(bin string, events []string) []claude.CommandHook {
+	hooks := make([]claude.CommandHook, 0, len(events))
+	for _, event := range events {
 		hook := claude.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
@@ -470,7 +662,7 @@ func wakeDialogHooks(bin string) []claude.CommandHook {
 			Timeout: 5,
 		}
 		switch event {
-		case "PreToolUse", "PostToolUse":
+		case "PreToolUse", "PostToolUse", "PostToolUseFailure":
 			hook.Matcher = wakeDialogHookTools
 		case "SessionEnd":
 			// SessionEnd hooks share a 1.5 s exit budget that a longer
@@ -528,7 +720,7 @@ func runWakeInstallDialogHook(args []string) error {
 	if !claudeOn {
 		return nil
 	}
-	hooks := wakeDialogHooks(bin)
+	hooks := wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersion()))
 	if *dryRun {
 		return printDialogHooks(hooks)
 	}
@@ -645,13 +837,17 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 	type installed struct{ event, command string }
 	var commands []installed
 	var missing []string
+	supported := make(map[string]bool)
+	for _, event := range wakeDialogHookEventsFor(installedClaudeVersion()) {
+		supported[event] = true
+	}
 	for _, event := range wakeDialogHookEvents {
 		found, err := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
 		if err != nil {
 			check.Message = fmt.Sprintf("read Claude settings: %v", err)
 			return check, true
 		}
-		if len(found) == 0 {
+		if len(found) == 0 && supported[event] {
 			missing = append(missing, event)
 		}
 		for _, command := range found {

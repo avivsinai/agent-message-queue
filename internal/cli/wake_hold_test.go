@@ -233,36 +233,49 @@ func TestWakeHoldUrgentRingsAtOnceDuringAHold(t *testing.T) {
 // cap allows. Urgent mail must ring even when the budget is used up, and the
 // same urgent message seen again must not ring again.
 func TestWakeHoldUrgentRingsBehindParkedCohortWithExhaustedBudget(t *testing.T) {
-	h := newWakeHoldHarness(t, wakeHoldRecommended)
-	h.send("old", format.PriorityUrgent)
-	h.scan(h.cfg)
-	h.rings()
-	// Park the cohort, then spend the whole lifetime budget on additions.
-	for i := uint(0); h.cfg.doorbell.phase != wakeDoorbellParked && i < 20; i++ {
-		h.advance(wakeDoorbellRetryMax)
-		h.scan(h.cfg)
-		h.rings()
-	}
-	if h.cfg.doorbell.phase != wakeDoorbellParked {
-		t.Fatalf("setup: phase = %v, want parked", h.cfg.doorbell.phase)
-	}
-	h.cfg.doorbell.attemptBudget = wakeDoorbellLifetimeAttemptCap
+	for _, tc := range []struct {
+		name   string
+		policy wakeHoldPolicy
+	}{
+		{"recommended holds", wakeHoldRecommended},
+		// field: urgent mail did not re-ring a parked agy doorbell
+		// (2026-10-26): with both holds 0 (the default) the wake did not
+		// see the addition as urgent.
+		{"holds off", wakeHoldPolicy{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWakeHoldHarness(t, tc.policy)
+			h.send("old", format.PriorityUrgent)
+			h.scan(h.cfg)
+			h.rings()
+			// Park the cohort, then spend the whole lifetime budget on additions.
+			for i := uint(0); h.cfg.doorbell.phase != wakeDoorbellParked && i < 20; i++ {
+				h.advance(wakeDoorbellRetryMax)
+				h.scan(h.cfg)
+				h.rings()
+			}
+			if h.cfg.doorbell.phase != wakeDoorbellParked {
+				t.Fatalf("setup: phase = %v, want parked", h.cfg.doorbell.phase)
+			}
+			h.cfg.doorbell.attemptBudget = wakeDoorbellLifetimeAttemptCap
 
-	h.advance(time.Second)
-	h.send("fresh", format.PriorityUrgent)
-	h.scan(h.cfg)
-	if got := h.rings(); got != 1 {
-		t.Fatalf("rings for urgent behind an exhausted parked cohort = %d, want 1", got)
-	}
-	for i := 0; i < 20; i++ {
-		h.advance(wakeDoorbellRetryMax)
-		h.scan(h.cfg)
-	}
-	if got := h.rings(); got > 1 {
-		t.Fatalf("a re-seen urgent message rang %d more times, want at most its one ladder retry", got)
-	}
-	if h.cfg.doorbell.phase != wakeDoorbellParked {
-		t.Fatalf("phase after the ladder = %v, want parked again", h.cfg.doorbell.phase)
+			h.advance(time.Second)
+			h.send("fresh", format.PriorityUrgent)
+			h.scan(h.cfg)
+			if got := h.rings(); got != 1 {
+				t.Fatalf("rings for urgent behind an exhausted parked cohort = %d, want 1", got)
+			}
+			for i := 0; i < 20; i++ {
+				h.advance(wakeDoorbellRetryMax)
+				h.scan(h.cfg)
+			}
+			if got := h.rings(); got > 1 {
+				t.Fatalf("a re-seen urgent message rang %d more times, want at most its one ladder retry", got)
+			}
+			if h.cfg.doorbell.phase != wakeDoorbellParked {
+				t.Fatalf("phase after the ladder = %v, want parked again", h.cfg.doorbell.phase)
+			}
+		})
 	}
 }
 
