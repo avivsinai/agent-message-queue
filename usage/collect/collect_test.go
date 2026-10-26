@@ -283,6 +283,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 		failure string
 		runs    int
 		dropped bool // the attempt is gone from the journal after the pass
+		kept    bool // the journal file was set aside, and the next pass finds a clean one
 	}{
 		{
 			// post-release review v0.113.2 finding U1: an entry the reader
@@ -293,6 +294,16 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			failure: usage.FailJournal,
 			runs:    1,
 			dropped: true,
+		},
+		{
+			// post-release review v0.113.2 finding U1: a journal file that
+			// cannot be parsed blocked collection forever; it is set aside
+			// and the pass starts from an empty journal.
+			name:    "garbage journal",
+			journal: func(string) string { return "not json" },
+			failure: usage.FailJournal,
+			runs:    1,
+			kept:    true,
 		},
 		{
 			name: "deadline before reserved",
@@ -351,6 +362,15 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			}
 			if want := []string{tc.failure}; tc.failure == "" && len(codes) != 0 || tc.failure != "" && !slices.Equal(codes, want) {
 				t.Fatalf("failures = %v, want %q", codes, tc.failure)
+			}
+			if tc.kept {
+				if m, _ := filepath.Glob(filepath.Join(dir, "coordination-v1.json.unreadable-*")); len(m) != 1 {
+					t.Fatalf("kept files = %v, want 1", m)
+				}
+				f.clock = f.clock.Add(req.Interval + time.Second)
+				if again, _ := collect.Run(context.Background(), req, collect.Memory{}, fx); len(again.Failures) != 0 {
+					t.Fatalf("next pass failures = %+v", again.Failures)
+				}
 			}
 			if tc.dropped {
 				j, err := fx.Store.LoadJournal()

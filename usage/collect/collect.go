@@ -111,8 +111,13 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	ctx, cancel := context.WithTimeout(ctx, req.Deadline)
 	defer cancel()
 	journal, err := fx.Store.LoadJournal()
-	if err != nil {
+	if err != nil && !errors.Is(err, edge.ErrCorrupt) {
 		return usage.Merge(facts, infraFailure(usage.FailJournal, err))
+	}
+	// A corrupt journal is set aside below, under the lock; until then it
+	// counts as empty.
+	if err != nil {
+		journal = edge.Journal{}
 	}
 	if _, ok := usagehold.Next(usage.ProviderCodex, req.Codex.Homes, journal.Attempts, fx.Clock(), usagehold.DefaultRules); !ok {
 		return facts
@@ -133,7 +138,15 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 		facts, problems = usage.Result{}, infraFailure(usage.FailCacheRead, err)
 	}
 	if journal, err = fx.Store.LoadJournal(); err != nil {
-		return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, err)))
+		if !errors.Is(err, edge.ErrCorrupt) {
+			return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, err)))
+		}
+		kept, aside := fx.Store.SetAsideJournal()
+		if aside != nil {
+			return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, errors.Join(err, aside))))
+		}
+		journal = edge.Journal{}
+		problems = usage.Merge(problems, infraFailure(usage.FailJournal, errors.New(err.Error()+"; kept as "+kept)))
 	}
 	problems = usage.Merge(problems, droppedAttempts(journal))
 	now := fx.Clock()

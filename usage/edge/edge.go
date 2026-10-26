@@ -6,6 +6,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/usage"
@@ -52,6 +53,11 @@ type Journal struct {
 	Dropped []string `json:"-"`
 }
 
+// ErrCorrupt marks a stored file whose bytes cannot be read as the file it
+// should be: not parseable, over the size bound, or another schema. An
+// unreadable disk is not corrupt.
+var ErrCorrupt = errors.New("corrupt")
+
 // SnapshotReader reads the sanitized fact snapshot. A missing snapshot is an
 // empty Result with no error.
 type SnapshotReader interface {
@@ -68,6 +74,11 @@ type Persistence interface {
 	SnapshotReader
 	TryLock() (release func(), ok bool, err error)
 	LoadJournal() (Journal, error)
+	// SetAsideJournal, called under the lock after LoadJournal reported
+	// ErrCorrupt, renames the journal file aside, keeps only the newest few
+	// such files, and returns the kept path. The next LoadJournal finds no
+	// journal.
+	SetAsideJournal() (kept string, err error)
 	SaveJournal(Journal) error
 	SaveFacts(usage.Result) error
 }
