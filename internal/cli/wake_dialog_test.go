@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -437,6 +438,11 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			steps: []step{{"append", use("toolu_x") + "\n" + use("toolu_y")}, {"open", livePermission}, {"recheck", ""},
 				{"replace", use("toolu_y")}, {"recheck", ""}, {"append", reject("toolu_y")}},
 			closed: true},
+		// Pre-merge measurement: the field session's transcript is 75 MB
+		// and over the first 64 MiB fold cap, so its hold never bound.
+		{name: "a transcript over 64 MiB still binds",
+			steps:  []step{{"append", use("toolu_big")}, {"pad", "72"}, {"open", livePermission}, {"append", reject("toolu_big")}},
+			closed: true},
 		{name: "answered AskUserQuestion", steps: []step{{"open", askPre}, {"close", askPost}}, closed: true},
 		{name: "Esc on AskUserQuestion", steps: []step{{"open", askPre}}, transcript: askEsc, closed: true},
 		// W1 review (Pro finding 3, Codex reproducer): a PermissionRequest
@@ -480,6 +486,27 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 			recheckNow := func() time.Time { return time.Now().Add(wakeDialogRecheck) }
 			for _, step := range tc.steps {
 				switch step.verb {
+				case "pad":
+					// Sparse filler: input MiB of 4 MiB unrelated records,
+					// each a hole that ends in a newline.
+					mib, err := strconv.Atoi(step.input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					file, err := os.OpenFile(transcript, os.O_WRONLY, 0o600)
+					if err != nil {
+						t.Fatal(err)
+					}
+					info, err := file.Stat()
+					for end := int64(4 << 20); err == nil && end <= int64(mib)<<20; end += 4 << 20 {
+						_, err = file.WriteAt([]byte{'\n'}, info.Size()+end-1)
+					}
+					if cerr := file.Close(); err == nil {
+						err = cerr
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
 				case "replace":
 					if err := os.WriteFile(transcript, []byte(step.input+"\n"), 0o600); err != nil {
 						t.Fatal(err)

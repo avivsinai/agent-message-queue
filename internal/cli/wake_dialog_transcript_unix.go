@@ -117,8 +117,9 @@ func claudeDialogAnswered(marker wakeDialogMarker) (bool, error) {
 }
 
 // maxWakeDialogTranscriptBytes bounds the transcript the wake folds for a
-// permission marker; a larger one is never used to bind.
-const maxWakeDialogTranscriptBytes = 64 << 20
+// permission marker; a larger one is never used to bind. Long sessions
+// reach hundreds of MiB.
+const maxWakeDialogTranscriptBytes = 1 << 30
 
 // maxWakeDialogTranscriptLine bounds one transcript record, as much as a
 // hook input may carry. A longer record leaves the fold incomplete.
@@ -165,9 +166,12 @@ func (fold *claudeTranscriptFold) reset(path string, info os.FileInfo) {
 }
 
 // advance folds the complete records appended to path since the last call.
-// The open follows no symlink and accepts only a regular file. A partial
-// trailing record is read again next time. An error means the transcript
-// cannot be read now; the fold keeps what it has.
+// The open follows no symlink and accepts only a regular file. It streams
+// through one buffer of at most one record, never the whole file, and
+// holds no marker lock: the wake binds under the marker lock only after
+// the fold returns. A partial trailing record is read again next time. An
+// error means the transcript cannot be read now; the fold keeps what it
+// has.
 func (fold *claudeTranscriptFold) advance(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("transcript path %q is not absolute", path)
@@ -190,8 +194,12 @@ func (fold *claudeTranscriptFold) advance(path string) error {
 		fold.incomplete = fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20)
 		return nil
 	}
+	var chunk []byte
 	for fold.offset < size {
-		buf := make([]byte, min(size-fold.offset, maxWakeDialogTranscriptLine+1))
+		if chunk == nil {
+			chunk = make([]byte, min(size-fold.offset, maxWakeDialogTranscriptLine+1))
+		}
+		buf := chunk[:min(size-fold.offset, int64(len(chunk)))]
 		n, err := file.ReadAt(buf, fold.offset)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return fmt.Errorf("read transcript: %w", err)

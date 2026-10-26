@@ -221,11 +221,13 @@ version supports it.
   (stamped at or before `opened_at`, with no `tool_result` stamped at or
   before it), and no other equal call is pending then or now. A tail alone
   cannot show this, because the dialog's own call can sit before it. The
-  wake keeps the inventory in memory per transcript: the first recheck reads
-  the file from byte 0 (a regular file, no symlink followed), and each later
-  one reads only the bytes appended since; a file that shrank, was replaced,
-  or no longer holds the bytes last read is folded again from byte 0. A
-  transcript over 64 MiB, or one with a record over 8 MiB, is never used to
+  wake builds the inventory only when a permission marker needs a binding
+  and keeps it in memory per transcript: the first read streams the file
+  from byte 0 (a regular file, no symlink followed) through one buffer of
+  at most one record, outside the marker lock, and each later recheck reads
+  only the bytes appended since; a file that shrank, was replaced, or no
+  longer holds the bytes last read is folded again from byte 0. A
+  transcript over 1 GiB, or one with a record over 8 MiB, is never used to
   bind. Claude Code
   2.1.310 writes a subagent's records to their own file with `isSidechain`
   true and an `agentId`; an equal pending call with either field makes the
