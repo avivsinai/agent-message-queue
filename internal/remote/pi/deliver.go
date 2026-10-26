@@ -139,8 +139,9 @@ func originOf(o map[string]string) *deliverOrigin {
 	return &deliverOrigin{Carrier: carrier, Name: name}
 }
 
-// eventOf is the request's event label from a record's origin: the Buzz
-// event id the carrier stamped, labelled as on a Buzz DM's AMQ prompt.
+// eventOf is the event label from an origin: the Buzz event id the carrier
+// stamped, labelled as on a Buzz DM's AMQ prompt. For a request it is the
+// DM; for an answer, the gesture that answered.
 func eventOf(o map[string]string) string {
 	if o["carrier"] != "buzz" || o["event"] == "" || o["channel"] == "" {
 		return ""
@@ -182,7 +183,8 @@ type event struct {
 }
 
 // answerRecord is the answers/<hash>.json contract (see answerName). Subject
-// is reserved: revision 4 never checks it, and this adapter leaves it out.
+// is nostr:<eventID> of the Buzz gesture that answered, or empty; the
+// extension never checks it.
 type answerRecord struct {
 	Protocol      string `json:"protocol"`
 	Ref           string `json:"ref"`

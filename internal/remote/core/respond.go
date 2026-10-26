@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 
@@ -160,6 +161,8 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		if errors.As(rerr, &refusal) {
 			code, reason, rerr = refusal.Code, refusal.Message, nil
 		}
+	} else if or, ok := t.att.(OriginResponder); ok {
+		code, rerr = or.RespondFrom(key, cmd.Epoch, cmd.InteractionID, cmd.Option, maps.Clone(src.Origin))
 	} else {
 		code, rerr = t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
 	}

@@ -28,7 +28,8 @@ import (
 // evidence submits, the approval posts, a ✅ writes the answer file, and
 // interaction_resolved answered edits the message with the outcome. The
 // request the extension reads names the DM event as nostr:<eventID>, so a
-// layer can fetch and verify it on the relay (#1178).
+// layer can fetch and verify it on the relay, and the answer file names the
+// ✅ reaction the same way (#1178).
 func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	// Synthetic clocks only. The pi
 	// adapter, the endpoint and the liveness record stand at base; the
@@ -173,8 +174,9 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	}
 	data, _ = os.ReadFile(filepath.Join(bridge, "answers", answers[0].Name()))
 	var ans map[string]string
-	if err := json.Unmarshal(data, &ans); err != nil || ans["ref"] != ref || ans["interaction_id"] != "tool-1" || ans["option"] != "Allow once" || ans["manifest_hash"] != "sha256:abc" {
-		t.Fatalf("answer = %s (%v), want Allow once for tool-1 of %s", data, err, ref)
+	if err := json.Unmarshal(data, &ans); err != nil || ans["ref"] != ref || ans["interaction_id"] != "tool-1" || ans["option"] != "Allow once" || ans["manifest_hash"] != "sha256:abc" ||
+		ans["subject"] != "nostr:"+react.ID.Hex() {
+		t.Fatalf("answer = %s (%v), want Allow once for tool-1 of %s with subject nostr:%s", data, err, ref, react.ID.Hex())
 	}
 
 	appendLine(t, filepath.Join(bridge, "events", ref+".jsonl"),

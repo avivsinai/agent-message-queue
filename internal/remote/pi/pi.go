@@ -1464,6 +1464,17 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 // applies it to exactly that tool call. The endpoint owns first-answer-wins;
 // the extension reports which answer applied through interaction_resolved.
 func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option string) (protocol.Code, error) {
+	return a.respond(key, epoch, interactionID, option, "")
+}
+
+// RespondFrom implements core.OriginResponder: Respond, with the answer's
+// subject set to the Buzz gesture event that answered (protocol: answers),
+// so a layer can fetch and verify it. A replay matches without the subject.
+func (a *Attachment) RespondFrom(key requests.Key, epoch, interactionID, option string, origin map[string]string) (protocol.Code, error) {
+	return a.respond(key, epoch, interactionID, option, eventOf(origin))
+}
+
+func (a *Attachment) respond(key requests.Key, epoch, interactionID, option, subject string) (protocol.Code, error) {
 	a.consume()     // 9a: seam reads outside a.mu; apply under it
 	a.lateBind(key) // 9a: same, for a key not yet bound
 	a.mu.Lock()
@@ -1478,7 +1489,7 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	}
 	ans := answerRecord{
 		Protocol: a.dir.names.protocol, Ref: r.ref, InteractionID: interactionID,
-		ManifestHash: oi.manifestHash, Option: option, At: protocol.FormatTime(a.now()),
+		ManifestHash: oi.manifestHash, Option: option, Subject: subject, At: protocol.FormatTime(a.now()),
 	}
 	a.mu.Unlock()
 	// Recognizing a publication is not authorizing a new one: a replay of

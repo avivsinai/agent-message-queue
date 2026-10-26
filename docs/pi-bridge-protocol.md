@@ -102,15 +102,19 @@ a check fails:
 
 ### The Buzz event
 
-`event` is a pointer, not proof. The adapter never holds the signed event, and
-any local process that can write `requests/` can write any `event`. The
-adapter never adds the id to `text`, and an extension keeps it out of the
-model's context, so a model cannot forge it as routing. An extension that
-ignores the field works as before, and a request without it is valid.
+A request's `event` and an answer's `subject` name the owner's Buzz event
+that caused them: the DM for a request, and the reaction or typed reply for
+an answer. The adapter writes them only for the Buzz carrier, with the value
+`nostr:<eventID>`. Each is a pointer, not proof. The adapter never holds the
+signed event, and any local process that can write `requests/` or `answers/`
+can write any value. The adapter never adds the id to `text`, and an
+extension keeps it out of the model's context, so a model cannot forge it as
+routing. An extension that ignores either field works as before, and a
+record without it is valid.
 
-A layer that must know the owner wrote the request, for example to accept a
-gate answer from a pi session, fetches that event from the relay and checks
-it itself, as the
+A layer that must know the owner wrote the request or the answer, for
+example to accept a gate answer from a pi session, fetches that event from
+the relay and checks it itself, as the
 [Claude Code approval hook](amq-remote-approvals.md#when-the-hook-answers)
 does: the pinned owner key and signature, the DM channel, the gate message in
 its `e` tags or thread, the gate's nonce in the content, the time window, the
@@ -376,6 +380,7 @@ the ref and the interaction id.
   "interaction_id": "tool-1",
   "manifest_hash": "sha256:...",
   "option": "Allow once",
+  "subject": "nostr:4f1c...",
   "at": "2026-01-01T00:01:00Z"
 }
 ```
@@ -384,11 +389,12 @@ the ref and the interaction id.
 | --- | --- |
 | `ref`, `interaction_id`, `manifest_hash` | Copied from the `interaction` line. |
 | `option` | The answer: one of the options the adapter offered. |
-| `subject` | Optional and reserved. Revision 4 never checks it, and the adapter does not write it. |
+| `subject` | Optional: `nostr:<eventID>` of the owner's Buzz reaction or typed reply that answered. The adapter writes it only for an answer from the Buzz carrier. The extension never checks it. See [The Buzz event](#the-buzz-event). |
 | `at` | RFC 3339 answer time; informational. |
 
 An answer file already on disk with the same `protocol`, `ref`,
-`interaction_id`, `manifest_hash` and `option` is delivered: a replay of it
+`interaction_id`, `manifest_hash` and `option` is delivered, whatever its
+`subject`: a replay of it
 succeeds whatever the bridge state is now, and whether it applied is for
 `interaction_resolved` to say. For a fresh answer the adapter writes only for
 the approval it shows for that ref, only with an offered option, and only
@@ -592,7 +598,7 @@ applies with these differences:
   an agent that exits are `failed`.
 - On start the host appends `uncertain` to every receipt without a terminal
   event.
-- The host ignores a request's `event`.
+- The host ignores a request's `event` and an answer's `subject`.
 - Each `session/request_permission` during a request's turn is an
   `interaction` line with `interaction_id` `tool-<n>`, `options` the names
   of the offered ACP options, `approve_option` the first `allow_once`,

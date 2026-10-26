@@ -214,6 +214,14 @@ type EvidenceResponder interface {
 	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
 }
 
+// OriginResponder is an Attachment that tells the harness where an answer
+// came from: a copy of the answering source's origin, as BoundRequest
+// carries the record's. The endpoint has already decided the source may
+// answer; the origin adds no authority.
+type OriginResponder interface {
+	RespondFrom(key requests.Key, epoch, interactionID, option string, origin map[string]string) (protocol.Code, error)
+}
+
 // AnswerRetirer is an Attachment that can report that the runtime refused a
 // recorded answer intent: the answer never applied, so a different answer
 // may replace it.
