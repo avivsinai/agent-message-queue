@@ -161,22 +161,36 @@ func TestPlanLimitsReplaceRolloutOnlyWhenTheSnapshotIsNotStale(t *testing.T) {
 
 // post-release review v0.113.2 finding U1 follow-up: a recovered journal
 // marked every account "last app-server read failed" beside readings made in
-// the same pass.
-func TestPlanLimitsIgnoreARecoveredJournalBesideFreshReadings(t *testing.T) {
+// the same pass. Usage re-check of d19eaa3a: the skip also hid a journal
+// that cannot be read, which stops every pass.
+func TestPlanLimitsShowOnlyBlockingJournalFailures(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	home := "/home/u/.codex"
 	acct := facts.Account{Provider: facts.ProviderCodex, Home: home}
 	ev := facts.Evidence{Source: "codex-app-server", ObservedAt: now.Add(-time.Minute)}
-	r := facts.Result{
-		Windows: []facts.Fact[facts.Window]{{Account: acct, Evidence: ev, Value: facts.Window{
-			LimitID: "codex", Slot: "primary", Reported: facts.Present, Kind: facts.Window5h,
-			DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(42.0)}}},
-		Failures: []facts.Fact[facts.Failure]{{Value: facts.Failure{Code: facts.FailJournal, Detail: "kept as x"}}},
-	}
-	rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home}}}
-	for _, l := range WithPlanLimits(rep, r, now).Accounts[0].Limits {
-		if strings.Contains(l.Reason, "failed") {
-			t.Fatalf("limit %+v carries the journal diagnostic", l)
-		}
+	for _, tc := range []struct {
+		name  string
+		code  string
+		shown bool
+	}{
+		{"recovered journal", facts.FailJournalRecovered, false},
+		{"unreadable journal", facts.FailJournal, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := facts.Result{
+				Windows: []facts.Fact[facts.Window]{{Account: acct, Evidence: ev, Value: facts.Window{
+					LimitID: "codex", Slot: "primary", Reported: facts.Present, Kind: facts.Window5h,
+					DurationMinutes: facts.Some[int64](300), UsedPercent: facts.Some(42.0)}}},
+				Failures: []facts.Fact[facts.Failure]{{Value: facts.Failure{Code: tc.code, Detail: "journal detail"}}},
+			}
+			rep := usage.Report{Now: now, Accounts: []usage.Account{{Key: "codex:~/.codex", Harness: usage.Codex, Home: home}}}
+			shown := false
+			for _, l := range WithPlanLimits(rep, r, now).Accounts[0].Limits {
+				shown = shown || strings.Contains(l.Reason, "journal detail")
+			}
+			if shown != tc.shown {
+				t.Fatalf("journal failure shown = %v, want %v", shown, tc.shown)
+			}
+		})
 	}
 }

@@ -16,10 +16,11 @@ const appServer = "app-server"
 const LimitsStaleAfter = 15 * time.Minute
 
 // WithPlanLimits gives each Codex account the plan limits the Codex
-// app-server reported for the same home. Windows come from the app-server;
-// overlapping balances and reached states keep the newer observation. A
-// home with no usable app-server reading keeps its rollout limits. It is
-// pure; now dates each reading's status.
+// app-server reported for the same home. The snapshot wins unless it is
+// stale: its windows replace the rollout limits, and a rollout balance or
+// reached state observed after the snapshot is kept beside them. A home
+// with no usable or only a stale app-server reading keeps its rollout
+// limits. It is pure; now dates each reading's status.
 func WithPlanLimits(rep usage.Report, r facts.Result, now time.Time) usage.Report {
 	out := rep
 	out.Accounts = append([]usage.Account{}, rep.Accounts...)
@@ -42,7 +43,9 @@ func planLimits(rollout []usage.Limit, r facts.Result, home string, now time.Tim
 		for _, x := range r.ForHome("", "").Failures {
 			// A recovered journal is a diagnostic of the collector, not a
 			// failed read: it does not mark readings made in the same pass.
-			if x.Value.Code == facts.FailJournal && as.Status != facts.StatusUnknown {
+			// A journal that cannot be read at all stops every pass and
+			// still shows.
+			if x.Value.Code == facts.FailJournalRecovered && as.Status != facts.StatusUnknown {
 				continue
 			}
 			v := x.Value

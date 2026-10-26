@@ -152,7 +152,7 @@ func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 			return usage.Merge(facts, usage.Merge(problems, infraFailure(usage.FailJournal, errors.Join(err, aside))))
 		}
 		journal = edge.Journal{}
-		problems = usage.Merge(problems, infraFailure(usage.FailJournal, errors.Join(errors.New(err.Error()+"; kept as "+kept), aside)))
+		problems = usage.Merge(problems, infraFailure(usage.FailJournalRecovered, errors.Join(errors.New(err.Error()+"; kept as "+kept), aside)))
 	}
 	problems = usage.Merge(problems, droppedAttempts(journal))
 	now := fx.Clock()
@@ -311,7 +311,7 @@ func finish(facts, got usage.Result, attempt usage.Attempt, lease string, done t
 func droppedAttempts(j edge.Journal) usage.Result {
 	var out usage.Result
 	for _, d := range j.Dropped {
-		out = usage.Merge(out, infraFailure(usage.FailJournal, errors.New("dropped "+d)))
+		out = usage.Merge(out, infraFailure(usage.FailJournalRecovered, errors.New("dropped "+d)))
 	}
 	return out
 }

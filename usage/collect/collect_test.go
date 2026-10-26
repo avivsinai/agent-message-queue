@@ -326,7 +326,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			// diagnostic and the pass runs.
 			name:    "incomplete attempt",
 			journal: func(h string) string { return attempt(h, `"reserved_at":"2026-10-25T11:59:00Z"`) },
-			failure: usage.FailJournal,
+			failure: usage.FailJournalRecovered,
 			runs:    1,
 			dropped: true,
 		},
@@ -336,7 +336,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			// and the pass starts from an empty journal.
 			name:    "garbage journal",
 			journal: func(string) string { return "not json" },
-			failure: usage.FailJournal,
+			failure: usage.FailJournalRecovered,
 			runs:    1,
 			kept:    true,
 		},
@@ -345,7 +345,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			// was set aside dropped the pass and its readings.
 			name:    "set-aside journal cleanup failed",
 			journal: func(string) string { return "not json" },
-			failure: usage.FailJournal,
+			failure: usage.FailJournalRecovered,
 			runs:    1,
 			kept:    true,
 			cleanup: true,
@@ -356,7 +356,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 				return attempt(h, `"reserved_at":"2026-10-25T11:50:10Z","deadline_at":"2026-10-25T11:50:03Z",`+
 					`"interval":300000000000`)
 			},
-			failure: usage.FailJournal,
+			failure: usage.FailJournalRecovered,
 			runs:    1,
 			dropped: true,
 		},

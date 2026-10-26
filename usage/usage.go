@@ -192,10 +192,13 @@ const (
 	FailNotLoggedIn         = "not_logged_in"
 	FailHomeMismatch        = "home_mismatch"
 	FailJournal             = "journal_unreadable"
-	FailReservation         = "reservation_failed"
-	FailCacheRead           = "cache_unreadable"
-	FailCacheWrite          = "cache_write_failed"
-	FailLock                = "lock_unavailable"
+	// FailJournalRecovered is a diagnostic, not a stop: the pass set a
+	// corrupt journal aside or dropped attempts it rejected, and went on.
+	FailJournalRecovered = "journal_recovered"
+	FailReservation      = "reservation_failed"
+	FailCacheRead        = "cache_unreadable"
+	FailCacheWrite       = "cache_write_failed"
+	FailLock             = "lock_unavailable"
 )
 
 // Result is the facts of one read or collection pass.
