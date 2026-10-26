@@ -57,7 +57,9 @@ the owner adopts them.
 - Free text does not by itself place or merge task records. Suggestions can
   quote an exact message span for owner review and adoption.
 - Suggestions are optional local-model interpretations tied to exact source
-  spans. Adoption is an explicit terminal action; model accuracy is unmeasured.
+  spans. Quotes preserve line breaks and tabs; other control characters appear
+  as escapes. Adoption is an explicit terminal action; model accuracy is
+  unmeasured.
 - History shows completed, cancelled, and no-longer-reported tasks outside
   current work and next actions. Requests remain distinct from tasks.
 - Terminology: owner, worker/agent, handle, session, source, card, evidence,

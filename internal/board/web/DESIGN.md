@@ -136,7 +136,7 @@ components:
 
 The Work Navigator uses a cool neutral canvas, a clear list surface, and restrained cobalt selection. A system sans supports reading; monospace identifies commands and references. Fine dividers and generous rows keep separate records easy to scan.
 
-Inline disclosures reveal context in place. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.
+Inline disclosures reveal context in place. Suggestion quotes preserve line breaks and tabs; other control characters appear as escapes. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.
 
 **Key Characteristics:**
 - One reading lane with a secondary navigation rail.
@@ -179,7 +179,7 @@ The type is plain and readable. View headings lead; record titles support scanni
 
 The shell is centered and bounded at 75rem, with 2rem side gutters on wide screens. A two-column workspace uses an 11rem navigation rail and a 2rem gap. The main column is one reading lane. A view heading and search wrap when space runs out. Search is bounded at 20rem on wide screens.
 
-At 959px and below, gutters become 1rem, navigation moves above the content, secondary destinations and Appearance use More, and search fills its row. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
+At 959px and below, gutters become 1rem, navigation moves above the content, secondary destinations and Appearance use More, and search fills its row. Snapshot age remains visible at compact widths. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
 
 Without script, all views remain readable in document order. With script, one destination is shown at a time. Print shows all views and removes navigation and controls.
 
@@ -211,7 +211,7 @@ A shared list surface groups work records; each row holds a title, reason, metad
 Details keep source evidence and selectable commands in the reading flow. The detail body uses subtle fill and 1rem padding. Coverage is a compact warning disclosure above work lists, with its missing scope and source link inside. Header feedback keeps refresh errors and a pending Update snapshot action close to the snapshot time.
 
 ### Suggestion Review
-Suggestions use the shared white list surface and fine dividers. Each entry shows its state, quoted source span, and proposed interpretations; native Details reveals the source message, exact span, and available terminal commands. Suggestions remain a separate review surface, outside task counts.
+Suggestions use the shared white list surface and fine dividers. Each entry shows its state, quoted source span, and proposed interpretations; line breaks and tabs remain in the quote, while other control characters appear as escapes. Native Details reveals the source message, exact span, and available terminal commands. Suggestions remain a separate review surface, outside task counts.
 
 ## Do's and Don'ts
 

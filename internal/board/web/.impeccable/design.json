@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-26T23:38:39Z",
+  "generatedAt": "2026-10-26T23:47:32Z",
   "title": "Design System: AMQ Work Navigator",
   "extensions": {
     "colorMeta": {
@@ -447,13 +447,13 @@
       "name": "Suggestion Review",
       "kind": "custom",
       "description": "A quoted source span with interpretations and provenance on demand.",
-      "html": "<article class=\"ds-suggestion\"><h2>Review interpretation</h2><blockquote>Quoted source text</blockquote><ul><li>Attach to an existing task</li></ul><details><summary>Review evidence and commands</summary><p>Exact source span and available terminal commands.</p></details></article>",
+      "html": "<article class=\"ds-suggestion\"><h2>Review interpretation</h2><blockquote>Quoted source text</blockquote><ul><li>Attach to an existing task</li></ul><details><summary>Review evidence and commands</summary><p>Line breaks and tabs stay in the quote; other control characters appear as escapes. Exact source span and available terminal commands.</p></details></article>",
       "css": ".ds-suggestion{font-family:var(--font-ui);padding:1.25rem 1.5rem;overflow-wrap:anywhere;color:var(--ink)}.ds-suggestion h2{margin:0;font-size:1.125rem;font-weight:600;line-height:1.4445}.ds-suggestion blockquote{margin:1rem 0;max-width:66ch;white-space:pre-wrap}.ds-suggestion ul{padding-left:1.25rem}.ds-suggestion li+li{margin-top:.5rem}.ds-suggestion details{margin-top:.75rem}.ds-suggestion summary{cursor:pointer;display:block;width:fit-content;min-height:2.75rem;padding-block:.625rem;color:var(--accent);font-size:.9375rem;line-height:1.5}.ds-suggestion summary:hover{text-decoration:underline;text-underline-offset:.2em}.ds-suggestion summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px;}.ds-suggestion details[open]>p{margin-top:.75rem;padding:1rem;border-radius:.5rem;background:var(--subtle)}"
     }
   ],
   "narrative": {
     "northStar": "The Work Navigator",
-    "overview": "The Work Navigator uses a cool neutral canvas, a clear list surface, and restrained cobalt selection. A system sans supports reading; monospace identifies commands and references. Fine dividers and generous rows keep separate records easy to scan.\n\nInline disclosures reveal context in place. Suggestions show quoted source spans and interpretations separately from tasks; Details exposes provenance and available terminal commands. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.",
+    "overview": "The Work Navigator uses a cool neutral canvas, a clear list surface, and restrained cobalt selection. A system sans supports reading; monospace identifies commands and references. Fine dividers and generous rows keep separate records easy to scan.\n\nInline disclosures reveal context in place. Suggestion quotes preserve line breaks and tabs; other control characters appear as escapes. Suggestions show quoted source spans and interpretations separately from tasks; Details exposes provenance and available terminal commands. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.",
     "keyCharacteristics": [
       "One reading lane with a secondary navigation rail.",
       "Readable titles, body text, and metadata at distinct sizes.",
