@@ -44,12 +44,11 @@ func (err *wakeAttentionDeliveryError) Unwrap() error {
 }
 
 // writeWakeDiagnostic keeps human-readable diagnostics in a log destination
-// (the coop .wake.log). A terminal gets them only from a standalone notifier;
-// any other wake shares that terminal with a harness TUI, so they are dropped.
+// (the coop .wake.log). A terminal gets them only under wakeMayPrintToTerminal;
+// otherwise a harness TUI owns that terminal and they are dropped.
 func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
-	if cfg != nil &&
-		wakeDiagnosticIsTerminal(cfg) &&
-		!wakeIsStandaloneNotifier(cfg) {
+	if wakeDiagnosticIsTerminal(cfg) &&
+		!wakeMayPrintToTerminal(cfg, wakeDiagnosticIsForeground) {
 		return nil
 	}
 	return writeStderr(format, args...)
@@ -67,7 +66,7 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // terminal rendered them or that a person observed them.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	isTerminal := wakeAttentionIsTerminal(cfg)
-	writePlainOutput := !isTerminal || cfg == nil || wakeIsStandaloneNotifier(cfg)
+	writePlainOutput := !isTerminal || wakeMayPrintToTerminal(cfg, wakeAttentionIsForeground)
 	var effects []string
 	if writePlainOutput {
 		effects = append(effects, wakeAttentionEffectOutput)
@@ -79,8 +78,8 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		effects = append(effects, wakeAttentionEffectBell, wakeAttentionEffectTitle)
 		// OSC 0 and a standalone BEL form the portable terminal-attention floor.
 		// The BEL terminating OSC 0 is not relied on to ring. Plain text goes to
-		// a terminal only from a standalone notifier: any other wake shares its
-		// terminal with a harness TUI, where printed text lands in the screen.
+		// a terminal only under wakeMayPrintToTerminal: otherwise a harness TUI
+		// owns the screen and printed text lands in it.
 		fmt.Fprintf(&output, "\x1b]0;%s\a\a", wakeAttentionTitle)
 
 		oscText := strings.ReplaceAll(safeText, ";", ",")
@@ -134,19 +133,27 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	return nil
 }
 
-// wakeIsStandaloneNotifier reports whether the wake owns its terminal: it
-// does not run under coop exec, does not type into its own terminal, and was
-// asked for notification only. The requested mode decides, because a runtime
-// demotion to output-only leaves the wake in the harness terminal.
-func wakeIsStandaloneNotifier(cfg *wakeConfig) bool {
-	mode := cfg.requestedInjectMode
-	if mode == "" {
-		mode = cfg.injectMode
+// wakeMayPrintToTerminal reports whether the wake may print text to a
+// terminal destination: only as that terminal's foreground process group, so
+// a wake running behind a harness (a background job, or a coop child that the
+// harness replaced in the foreground) never prints into its screen. A wake
+// under coop exec never prints, because it may share the harness's group.
+func wakeMayPrintToTerminal(cfg *wakeConfig, isForeground func(*wakeConfig) bool) bool {
+	return (cfg == nil || cfg.wakeOwner == nil) && isForeground(cfg)
+}
+
+func wakeAttentionIsForeground(cfg *wakeConfig) bool {
+	if cfg != nil && cfg.attentionIsForeground != nil {
+		return cfg.attentionIsForeground()
 	}
-	return cfg.wakeOwner == nil &&
-		cfg.terminalWrite == nil &&
-		cfg.injectVia == "" &&
-		mode == wakeInjectModeNone
+	return wakeFileIsForeground(os.Stderr)
+}
+
+func wakeDiagnosticIsForeground(cfg *wakeConfig) bool {
+	if cfg != nil && cfg.diagnosticIsForeground != nil {
+		return cfg.diagnosticIsForeground()
+	}
+	return wakeFileIsForeground(os.Stderr)
 }
 
 func wakeAttentionIsTerminal(cfg *wakeConfig) bool {

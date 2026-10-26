@@ -10,9 +10,10 @@ func TestWakeAttentionAlternateScreenAgentKeepsSupportedOSCNotification(t *testi
 	var recorded wakeAttentionEmission
 	var written strings.Builder
 	cfg := &wakeConfig{
-		me:             "codex",
-		attentionEnv:   func(key string) string { return map[string]string{"TERM_PROGRAM": "ghostty"}[key] },
-		attentionIsTTY: func() bool { return true },
+		me:                    "codex",
+		attentionEnv:          func(key string) string { return map[string]string{"TERM_PROGRAM": "ghostty"}[key] },
+		attentionIsTTY:        func() bool { return true },
+		attentionIsForeground: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			return written.Write(data)
 		},
@@ -46,44 +47,79 @@ func TestWakeAttentionAlternateScreenAgentKeepsSupportedOSCNotification(t *testi
 	}
 }
 
-// field: agy TUI showed staircased doorbell text (2026-10-26). A coop wake
-// shares the harness terminal, whatever the harness, so only non-printing
-// signals reach it.
-func TestWakeAttentionCoopHarnessTerminalWritesNoText(t *testing.T) {
-	var recorded wakeAttentionEmission
-	var written strings.Builder
+// A wake prints doorbell text into a terminal only as its foreground process
+// group and never under coop exec; otherwise only non-printing signals go out.
+func TestWakeAttentionTerminalTextNeedsForegroundOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        wakeConfig
+		foreground bool
+		want       string
+	}{
+		{
+			// field: agy TUI showed staircased doorbell text (2026-10-26).
+			// The coop child may share the harness's foreground group.
+			name:       "coop-agy",
+			cfg:        wakeConfig{me: "agy", harness: "agy", injectMode: wakeInjectModePaste, wakeOwner: &wakeOwner{PID: 1}},
+			foreground: true,
+			want:       "\x1b]0;AMQ attention\a\a",
+		},
+		{
+			// field: agy TUI showed staircased doorbell text (2026-10-26);
+			// review: the COOP.md notify-only recipe runs as a background job
+			// behind the Claude composer.
+			name:       "background-notify-only-claude",
+			cfg:        wakeConfig{me: "claude", injectMode: wakeInjectModeNone, requestedInjectMode: wakeInjectModeNone},
+			foreground: false,
+			want:       "\x1b]0;AMQ attention\a\a",
+		},
+		{
+			name:       "foreground-notify-only",
+			cfg:        wakeConfig{me: "claude", injectMode: wakeInjectModeNone, requestedInjectMode: wakeInjectModeNone},
+			foreground: true,
+			want:       "\x1b]0;AMQ attention\a\aAMQ [collab]: message from claude - W2\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var written strings.Builder
+			cfg := tt.cfg
+			cfg.attentionEnv = func(string) string { return "" }
+			cfg.attentionIsTTY = func() bool { return true }
+			cfg.attentionIsForeground = func() bool { return tt.foreground }
+			cfg.attentionWrite = func(data []byte) (int, error) { return written.Write(data) }
+			payload := wakePayload{
+				text:       "AMQ [collab]: message from claude - W2",
+				provenance: wakePayloadPeerHeaders,
+			}
+			if err := emitWakeAttention(&cfg, payload); err != nil {
+				t.Fatalf("emit attention: %v", err)
+			}
+			if got := written.String(); got != tt.want {
+				t.Fatalf("terminal attention = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// review: a foreground --inject-via wake in its own pane lost its failure
+// diagnostics, which have no other destination there.
+func TestWakeDiagnosticForegroundInjectViaWakePrints(t *testing.T) {
 	cfg := &wakeConfig{
-		me:             "agy",
-		harness:        "agy",
-		injectMode:     wakeInjectModePaste,
-		wakeOwner:      &wakeOwner{PID: 1},
-		attentionEnv:   func(string) string { return "" },
-		attentionIsTTY: func() bool { return true },
-		attentionWrite: func(data []byte) (int, error) {
-			return written.Write(data)
-		},
-		recordAttention: func(emission wakeAttentionEmission) error {
-			recorded = emission
-			return nil
-		},
+		me:                     "pi",
+		injectVia:              "/bin/true",
+		injectMode:             wakeInjectModeAuto,
+		requestedInjectMode:    wakeInjectModeAuto,
+		diagnosticIsTTY:        func() bool { return true },
+		diagnosticIsForeground: func() bool { return true },
 	}
-	payload := wakePayload{
-		text:       "AMQ [collab]: message from claude - W2",
-		provenance: wakePayloadPeerHeaders,
-	}
-
-	if err := emitWakeAttention(cfg, payload); err != nil {
-		t.Fatalf("emit coop attention: %v", err)
-	}
-
-	if got := written.String(); got != "\x1b]0;AMQ attention\a\a" {
-		t.Fatalf("coop harness terminal attention = %q, want title + bell only", got)
-	}
-	if !reflect.DeepEqual(recorded.Effects, []string{
-		wakeAttentionEffectBell,
-		wakeAttentionEffectTitle,
-	}) {
-		t.Fatalf("effects = %#v", recorded.Effects)
+	stderr := captureWakeStderr(t, func() {
+		if err := writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: boom\n"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if stderr != "amq wake: --inject-via failed: boom\n" {
+		t.Fatalf("foreground diagnostic = %q", stderr)
 	}
 }
 

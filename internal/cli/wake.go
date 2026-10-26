@@ -114,8 +114,10 @@ type wakeConfig struct {
 	recordAttention               func(wakeAttentionEmission) error
 	attentionEnv                  func(string) string
 	attentionIsTTY                func() bool
+	attentionIsForeground         func() bool // the wake leads the attention terminal's foreground group
 	attentionWrite                func([]byte) (int, error)
 	diagnosticIsTTY               func() bool
+	diagnosticIsForeground        func() bool // the wake leads the stderr terminal's foreground group
 }
 
 type wakeNotifierStatus struct {
