@@ -185,7 +185,8 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   names the harness and directory when the harness has not recorded that it
   trusts the directory, including a Codex directory saved as untrusted,
   which opens on a restricted dialog. For Codex it also writes one when the
-  update prompt is not ruled out (see below). Otherwise it removes a
+  update prompt or, on a release that reviews hooks, the hook review is not
+  ruled out (see below). Otherwise it removes a
   `Startup` marker an earlier launch left. A Claude Code trust file AMQ
   cannot read writes no marker. Until coop exec has done this, its wake
   types nothing: coop exec passes the wake a startup-hold pipe and closes it
@@ -198,8 +199,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   again on each recheck while a trust marker exists and treats the marker as
   closed only once the harness records that it trusts the directory, so the
   doorbell rings within 2 seconds of acceptance. A Codex marker for a
-  possible update prompt never closes on the trust record, since another
-  seat's Codex can record trust for the same root first. The trust record does not prove that the harness accepts input yet, so while
+  possible update prompt or hook review never closes on the trust record:
+  another seat's Codex can record trust for the same root first, and Codex
+  records directory trust before it reviews hooks. The trust record does not prove that the harness accepts input yet, so while
   the marker stays, a written doorbell does not count as presented: each
   retry types the full doorbell again, not only Enter, until the agent
   drains after such a doorbell, which proves that the harness accepts input.
@@ -217,19 +219,70 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   Codex's "Not now" on the update prompt records nothing, so an update
   prompt marker releases only through the dialog hook's first-turn close.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
-  identity overrides with `-c check_for_update_on_startup=false`. Managed
-  or cloud requirements can override that setting, so the flag is not
-  evidence that the prompt cannot show. A Codex seat gets no update prompt
-  marker only when `$CODEX_HOME/version.json` was checked less than 19 hours
-  ago and its `latest_version` is not newer than the installed version, or
-  is the dismissed version, for a codex-cli
-  version AMQ has checked. This proof applies only to the verified releases
-  `0.145.0`, `0.161.0`, and `0.163.0`; another release or patch keeps the
-  hold. Anything missing or unreadable keeps the hold until the dialog
-  hook runs at the first turn. Setting `check_for_update_on_startup = false`
-  in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) prevents
-  ordinary update prompts, but does not release this hold by itself. AMQ
-  does not edit that file.
+  identity overrides with `-c check_for_update_on_startup=false`. Codex
+  shows the prompt only when that setting is in effect, a legacy managed
+  configuration layer ranks above `-c`, and managed or cloud requirements
+  can pin the setting on, so the flag alone is not evidence. The update
+  prompt is ruled out in either of two ways. In the probe below, Codex's
+  `config/read` for the launch directory returns an effective
+  `check_for_update_on_startup` of exactly `false`, and its
+  `configRequirements/read` returns no requirements, or requirements whose
+  `checkForUpdateOnStartup` is absent, null or false; an absent or true
+  value, an error, a timeout or an unreadable reply proves nothing. Or, on
+  the verified releases `0.145.0`, `0.161.0`, `0.163.0`, and `0.164.0`,
+  `$CODEX_HOME/version.json` was checked less than 19 hours ago and its
+  `latest_version` is not newer than the installed version, or is the
+  dismissed version. Otherwise the seat gets an update prompt marker, and
+  anything missing or unreadable keeps the hold until the dialog hook runs
+  at the first turn. A seat on the managed daemon carries no `-c` override,
+  so there the effective value comes from the configuration files: setting
+  `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
+  (default `~/.codex/config.toml`) releases a daemon seat too, when no
+  managed layer or requirement turns it on. The probe runs only for
+  releases that review hooks (below), so on `0.145.0`, `0.161.0` and
+  `0.163.0` only the version cache rules the prompt out. AMQ does not edit
+  `config.toml`.
+
+  Directory trust and native hook review are separate startup screens.
+  Codex `0.164.0` and later reviews new or changed hooks after its trust
+  screen and before the session starts, and records that review in
+  `[hooks.state]`, apart from `[projects]`. For every release other than
+  the verified releases before `0.164.0`, an unknown or newer one included,
+  coop exec writes no `Startup` marker only when all three are ruled out:
+  the update prompt (as above), the directory trust (Codex records that it trusts the
+  directory), and the hook review. The hook review is ruled out only when
+  Codex's own `hooks/list` for the launch directory, spelled as the TUI
+  spells it (the physical working directory with symlinks resolved; a
+  `-C` directory resolved against it to its real path, unless it lies below
+  a symlink that is not at the top level, which keeps the given spelling),
+  asked on the backend the TUI uses, lists every hook as trusted or
+  managed, or none (Codex
+  reviews only untrusted and modified hooks): the managed daemon for
+  a seat on the daemon, or a stdio `codex app-server` started with the
+  seat's `CODEX_HOME`, directory, and `-c`, `--enable` and `--disable`
+  options for any other seat. The probe is bounded to 5 seconds, and its
+  output stays out of AMQ diagnostics. An error, a timeout, an unreadable
+  reply, an untrusted, modified, missing or unknown trust status, a working
+  directory AMQ cannot resolve, a `--profile` seat, or a backend AMQ
+  cannot tell writes the marker. A marker written for such a release
+  releases only through the dialog
+  hook's first-turn close: the trust record never releases it, and the
+  recheck does not probe again. When the AMQ dialog hook is installed but
+  Codex does not trust it, `amq doctor --ops` names the remedy: open
+  `/hooks` in Codex and trust the `AMQ_DIALOG_HOOK` entries. A missing hook
+  names `amq wake install-dialog-hook --harness codex`.
+
+  `amq-remote` holds a turn for a Codex seat on the managed daemon whose
+  thread identity coop exec recorded under its `CODEX_HOME` (or
+  `~/.codex`): while that seat has a `Startup` marker that only the dialog
+  hook releases, the attachment refuses the submit as `busy`, so a remote
+  prompt does not end the hold while the TUI shows a startup screen. A busy
+  attachment sends nothing to Codex, and the endpoint keeps the request
+  re-admittable, so the sender's retry of the same request runs it once the
+  marker closes. A request from Buzz or a link keeps its terminal `busy`
+  refusal; sending it again takes a new request. A client other than
+  AMQ that submits a turn on the same daemon thread runs the first-turn hook
+  and can end the hold early.
 
   A raw doorbell's submit keys wait until the terminal reports that its
   text was read. Queued text or an unavailable queue inspection keeps those

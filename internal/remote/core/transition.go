@@ -454,12 +454,15 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		rec.RefusalReason = protocol.BoundReason(ev.reason)
 		rec.Interaction = nil
 	case causeBusyTombstone:
+		// Busy, at the reservation or from the attachment, dispatched
+		// nothing natively.
 		rec.State = protocol.StateRejected
 		rec.Code = protocol.CodeBusy
-		rec.RefusalReason = ""
+		rec.RefusalReason = protocol.BoundReason(ev.reason)
 		rec.Tombstone = true
 		rec.NativeRun = nil
 		rec.Interaction = nil
+		rec.NativeDispatches = 0
 	}
 	// Cancel rule: Cancel is written iff ev.cancel != nil or the
 	// cause is a cancelled_* cause (handled in-case above). Non-cancel causes

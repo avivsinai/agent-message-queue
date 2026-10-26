@@ -31,6 +31,8 @@ type Admission struct {
 	RunID    string
 	Code     protocol.Code
 	Message  string
+	// NothingSent: the adapter made no native call for this request.
+	NothingSent bool
 }
 
 // Evidence is what Lookup returns about a request the attachment may have
