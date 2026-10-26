@@ -18,10 +18,10 @@ import (
 
 // codexGoalOwners reads project-scoped structural bindings through AMQ only.
 // An ambiguous binding remains eligible but never claims an agent owner.
-func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner, map[string]bool, map[board.Owner]string, error) {
+func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner, map[string]bool, error) {
 	out, err := env.Run.Run(ctx, env.Dir, []string{"amq", "session", "list", "--json"})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("codex goal mapping: %w", err)
+		return nil, nil, fmt.Errorf("codex goal mapping: %w", err)
 	}
 	var listing struct {
 		Sessions []struct {
@@ -30,10 +30,9 @@ func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner
 		} `json:"sessions"`
 	}
 	if err := json.Unmarshal(out, &listing); err != nil {
-		return nil, nil, nil, fmt.Errorf("codex goal mapping: %w", err)
+		return nil, nil, fmt.Errorf("codex goal mapping: %w", err)
 	}
 	owners, known := map[string]board.Owner{}, map[string]bool{}
-	kinds := map[board.Owner]string{}
 	for _, session := range listing.Sessions {
 		for _, c := range session.Conversations {
 			if c.State != "ready" || fsq.ValidateHandle(c.Handle) != nil {
@@ -42,12 +41,10 @@ func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner
 			if session.Name != "" && fsq.ValidateHandle(session.Name) != nil {
 				continue
 			}
-			candidate := board.Owner{Kind: board.OwnerAgent, Session: session.Name, Handle: c.Handle, Display: c.Handle}
-			kinds[candidate] = c.Provider
 			if c.Provider != "codex" {
 				continue
 			}
-			if _, ok := board.CodexGoal(c.ID); !ok {
+			if !board.ValidHarnessID(c.ID) {
 				continue
 			}
 			o := board.Owner{Kind: board.OwnerAgent, Session: session.Name, Handle: c.Handle, Display: c.Handle}
@@ -57,10 +54,10 @@ func codexGoalOwners(ctx context.Context, env board.Env) (map[string]board.Owner
 			owners[c.ID], known[c.ID] = o, true
 		}
 	}
-	return owners, known, kinds, nil
+	return owners, known, nil
 }
 
-func codexGoalSessions(ctx context.Context, env board.Env, home string, owners map[string]board.Owner, known map[string]bool, kinds map[board.Owner]string) (map[string]codexGoalSession, board.Coverage, error) {
+func codexGoalSessions(ctx context.Context, env board.Env, home string, owners map[string]board.Owner, known map[string]bool) (map[string]codexGoalSession, board.Coverage, error) {
 	eligible := map[string]codexGoalSession{}
 	coverage := board.Coverage{}
 	worktrees, err := projectWorktrees(ctx, env)
@@ -73,7 +70,6 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		o := owners[id]
 		eligible[id] = codexGoalSession{Owner: o, Structural: o.Kind == board.OwnerAgent}
 	}
-	cutoff := env.Now().Add(-board.DefaultConfig().StaleAfter)
 	err = filepath.WalkDir(filepath.Join(home, "sessions"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -92,7 +88,7 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 			return nil
 		}
 		id := name[len(name)-42 : len(name)-6]
-		if _, ok := board.CodexGoal(id); !ok {
+		if !board.ValidHarnessID(id) {
 			return nil
 		}
 		if known[id] {
@@ -105,10 +101,7 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if info.ModTime().Before(cutoff) {
-			coverage.Skipped++
-			return nil
-		}
+
 		f, err := os.Open(path)
 		if err != nil {
 			return err
@@ -136,53 +129,9 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		eligible[id] = codexGoalSession{Owner: board.Owner{Kind: board.OwnerUnmapped, Display: "codex session " + id + " in " + cwd}}
 		return nil
 	})
-	if err == nil {
-		hint, ok, hintErr := codexGoalOwnerHint(ctx, env, kinds)
-		if hintErr != nil {
-			return eligible, coverage, hintErr
-		}
-		if ok {
-			for id, sess := range eligible {
-				if !known[id] {
-					sess.Owner = hint
-					eligible[id] = sess
-				}
-			}
-		}
-	}
+
 	if coverage.Skipped > 0 || coverage.Unresolved > 0 {
-		coverage.Detail = fmt.Sprintf("%d inactive rollouts outside the 36h discovery window; %d incomplete or unreadable session headers", coverage.Skipped, coverage.Unresolved)
+		coverage.Detail = fmt.Sprintf("%d skipped rollouts; %d incomplete or unreadable session headers", coverage.Skipped, coverage.Unresolved)
 	}
 	return eligible, coverage, err
-}
-
-// A cwd join is inferred only with one live candidate of the right harness,
-// or one live agent total when AMQ has no harness fact for that agent.
-func codexGoalOwnerHint(ctx context.Context, env board.Env, kinds map[board.Owner]string) (board.Owner, bool, error) {
-	out, err := env.Run.Run(ctx, env.Dir, []string{"amq", "who", "--json"})
-	if err != nil {
-		return board.Owner{}, false, fmt.Errorf("codex goal owner hints: %w", err)
-	}
-	rows, err := parseWho(out)
-	if err != nil {
-		return board.Owner{}, false, fmt.Errorf("codex goal owner hints: %w", err)
-	}
-	var live, codex []board.Owner
-	for key, agent := range rows {
-		if !agent.Active || key[1] == reservedHuman || fsq.ValidateHandle(key[1]) != nil {
-			continue
-		}
-		owner := board.Owner{Kind: board.OwnerAgent, Session: key[0], Handle: key[1], Display: key[1]}
-		live = append(live, owner)
-		if kinds[owner] == "codex" {
-			codex = append(codex, owner)
-		}
-	}
-	if len(codex) == 1 {
-		return codex[0], true, nil
-	}
-	if len(codex) == 0 && len(live) == 1 && kinds[live[0]] == "" {
-		return live[0], true, nil
-	}
-	return board.Owner{}, false, nil
 }

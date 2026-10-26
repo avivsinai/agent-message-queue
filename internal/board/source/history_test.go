@@ -30,7 +30,7 @@ func (r captureRunner) RunLimited(ctx context.Context, dir string, argv []string
 func TestHistoryVerifiesEachRootAndNormalizesEvidence(t *testing.T) {
 	metadata := `{"schema":"amq/thread-list/v1","generated_at":"first","base_root":"/base","threads":[{"thread_id":"work","message_ids":["ask"],"roots":[{"root":"/base","session":"","agents":["user"],"message_ids":["ask"]},{"root":"/base/session","session":"session","agents":["worker"],"message_ids":["ask"]}]}],"coverage":{"complete":true}}`
 	body := `[{"id":"ask","thread":"work","from":"user","to":["worker"],"kind":"review_request","body":"Exact request","labels":["review"],"refs":["prior"],"reply_to":"user","reply_project":"peer","from_project":"origin","context":{"path":"file.go"}}]`
-	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user --include-body --json --root /base": []byte(`[]`), "amq thread --id work --agents worker --include-body --json --root /base/session": []byte(body)}
+	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user --message-ids ask --include-body --json --root /base": []byte(`[]`), "amq thread --id work --agents worker --message-ids ask --include-body --json --root /base/session": []byte(body)}
 	env := board.Env{Dir: "/project", Now: time.Now, Run: runner}
 	result, messages, evidence := ReadHistory(context.Background(), env, "/base")
 	if !result.Coverage.Partial() || !strings.Contains(result.Coverage.Detail, "/base: ask") || len(messages) != 1 {
@@ -82,7 +82,7 @@ func checkHistoryLogicalIdentity(t *testing.T) {
 	}
 	command := "amq thread open --all-sessions --include-base --max-age 0 --json"
 	closed := `[{"opener_id":"ask","key":"session/ask/worker","state":"closed"}]`
-	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user,other --include-body --json --root /base": []byte(body), "amq thread --id work --agents worker --include-body --json --root /base/session": []byte(body), command: fold(closed)}
+	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user,other --message-ids ask --include-body --json --root /base": []byte(body), "amq thread --id work --agents worker --message-ids ask --include-body --json --root /base/session": []byte(body), command: fold(closed)}
 	env := board.Env{Dir: "/project", Now: time.Now, Run: runner}
 	result, messages, _ := ReadHistory(context.Background(), env, "/base")
 	if len(messages) != 1 || messages[0].Key != "/base#ask" || len(messages[0].Copies) != 2 || len(messages[0].Copies[0].Agents) != 0 || result.ActionStates["/base#ask"] != "resolved" {

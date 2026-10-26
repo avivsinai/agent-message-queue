@@ -37,22 +37,23 @@ type Store struct {
 }
 
 type Snapshot struct {
-	Schema          string             `json:"schema"`
-	BaseRoot        string             `json:"base_root"`
-	BaseRootID      string             `json:"base_root_id"`
-	ProjectID       string             `json:"project_id"`
-	HostID          string             `json:"host_id"`
-	Generation      uint64             `json:"generation"`
-	PublishedAt     time.Time          `json:"published_at"`
-	Input           Input              `json:"input"`
-	Usage           *UsageView         `json:"usage,omitempty"`
-	Tasks           map[string]Task    `json:"tasks"`
-	Anchors         map[string]string  `json:"admission_anchors"`
-	Aliases         map[string]string  `json:"aliases"`
-	Messages        map[string]Message `json:"messages"`
-	Dismissed       map[string]bool    `json:"dismissed"`
-	ActionCancelled map[string]bool    `json:"action_cancelled"`
-	Withdrawals     map[string]string  `json:"withdrawal_adoptions"`
+	ClaudeLists     map[string]ClaudeListBinding `json:"claude_lists,omitempty"`
+	Schema          string                       `json:"schema"`
+	BaseRoot        string                       `json:"base_root"`
+	BaseRootID      string                       `json:"base_root_id"`
+	ProjectID       string                       `json:"project_id"`
+	HostID          string                       `json:"host_id"`
+	Generation      uint64                       `json:"generation"`
+	PublishedAt     time.Time                    `json:"published_at"`
+	Input           Input                        `json:"input"`
+	Usage           *UsageView                   `json:"usage,omitempty"`
+	Tasks           map[string]Task              `json:"tasks"`
+	Anchors         map[string]string            `json:"admission_anchors"`
+	Aliases         map[string]string            `json:"aliases"`
+	Messages        map[string]Message           `json:"messages"`
+	Dismissed       map[string]bool              `json:"dismissed"`
+	ActionCancelled map[string]bool              `json:"action_cancelled"`
+	Withdrawals     map[string]string            `json:"withdrawal_adoptions"`
 }
 
 type Task struct {
@@ -256,6 +257,14 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
 	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || state.BaseRootID != s.BaseRootID || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil {
 		return Snapshot{}, errors.New("board identity or state invalid; recovery required")
 	}
+	if state.ClaudeLists == nil {
+		state.ClaudeLists = map[string]ClaudeListBinding{}
+	}
+	for key, binding := range state.ClaudeLists {
+		if key != ClaudeListKey(binding.Home, binding.List) || binding.Revision == "" {
+			return Snapshot{}, errors.New("claude list binding invalid; recovery required")
+		}
+	}
 	for anchor, id := range state.Anchors {
 		if _, ok := state.Tasks[id]; !ok || anchor == "" {
 			return Snapshot{}, errors.New("board admission identity invalid; recovery required")
@@ -444,6 +453,38 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			}
 			return nil
 		}
+		for i := range a.Input.Results {
+			nr := &a.Input.Results[i]
+			if nr.Name != "claude-tasks" {
+				continue
+			}
+			var admitted []Item
+			for _, it := range nr.Result.Items {
+				if it.BindingRevision != "" {
+					binding, ok := state.ClaudeLists[it.Namespace]
+					if !ok || binding.Revision != it.BindingRevision {
+						nr.Result.Status = StatusDegraded
+						nr.Result.Coverage.Unresolved++
+						nr.Result.Coverage.Detail = "Claude list binding changed during acquisition"
+						scope := nr.Result.NativeScopes[it.Namespace]
+						scope.Complete = false
+						nr.Result.NativeScopes[it.Namespace] = scope
+						continue
+					}
+				}
+				admitted = append(admitted, it)
+			}
+			for namespace, scope := range nr.Result.NativeScopes {
+				if scope.BindingRevision != "" {
+					binding, ok := state.ClaudeLists[namespace]
+					if !ok || binding.Revision != scope.BindingRevision {
+						scope.Complete = false
+						nr.Result.NativeScopes[namespace] = scope
+					}
+				}
+			}
+			nr.Result.Items = admitted
+		}
 		previous := map[string]NamedResult{}
 		for _, nr := range state.Input.Results {
 			previous[nr.Name] = nr
@@ -495,14 +536,32 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			}
 			state.Messages[m.Key] = m
 		}
-		for _, nr := range a.Input.Results {
-			if nr.Name != "beads" || stale[nr.Name] {
+		for sourceIndex, nr := range a.Input.Results {
+			if nr.Name != "beads" && nr.Name != "codex-goals" && nr.Name != "claude-tasks" || stale[nr.Name] {
 				continue
+			}
+			scopes := nr.Result.NativeScopes
+			if nr.Name == "beads" {
+				scopes = map[string]NativeScope{a.BeadsStore: {Complete: nr.Result.Status == StatusOK && !nr.Result.Coverage.Partial()}}
 			}
 			present := map[string]bool{}
 			for _, it := range nr.Result.Items {
-				present[it.Ref.ID] = true
-				alias := "beads:" + a.BeadsStore + ":" + it.Ref.ID
+				it.Source = nr.Name
+				if nr.Name == "beads" {
+					it.Namespace = a.BeadsStore
+				}
+				alias, ok := nativeAlias(nr.Name, it)
+				_, scoped := scopes[it.Namespace]
+				if !ok || !scoped {
+					a.Input.Results[sourceIndex].Result.Status = StatusDegraded
+					a.Input.Results[sourceIndex].Result.Coverage.Skipped++
+					a.Input.Results[sourceIndex].Result.Coverage.Detail = "native fact identity or scope rejected"
+					scope := scopes[it.Namespace]
+					scope.Complete = false
+					scopes[it.Namespace] = scope
+					continue
+				}
+				present[alias] = true
 				id := state.Aliases[alias]
 				if id == "" {
 					var err error
@@ -518,14 +577,15 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 				task.ObservedAt = nr.Result.ObservedAt
 				task.SourceMissing = false
 				task.Fact = it
-				task.Fact.Source = "beads"
-				task.Fact.Namespace = a.BeadsStore
 				task.Title = it.Title
 				state.Tasks[id] = task
 			}
-			if nr.Result.Status == StatusOK && !nr.Result.Coverage.Partial() {
+			for namespace, scope := range scopes {
+				if !scope.Complete {
+					continue
+				}
 				for id, task := range state.Tasks {
-					if strings.HasPrefix(task.Authority, "beads:"+a.BeadsStore+":") && !present[task.Fact.Ref.ID] {
+					if taskInScope(task, nr.Name, namespace) && !present[task.Authority] {
 						task.SourceMissing = true
 						state.Tasks[id] = task
 					}
@@ -676,6 +736,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		m.Columns[i].Cards = []Card{}
 	}
 	m.Unresolved = []Message{}
+	m.Historical = []Card{}
 	attached := map[string]bool{}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
@@ -697,6 +758,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		}
 		it.Mentions = nil
 		col, _ := Place([]Item{it})
+		if task.SourceMissing {
+			col = ColumnHistorical
+		}
 		if col == ColumnHidden {
 			continue
 		}
@@ -706,10 +770,21 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		card := Card{ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
 		card.SourceObservedAt = task.ObservedAt
 		if task.SourceMissing {
+			card.Historical = true
+			card.Reason.Text = "Historical; source no longer reports this task. Last recorded: " + card.Reason.Text
 			card.Marks = append(card.Marks, "source no longer reports this task; last recorded state retained")
 		}
 		if it.Owner.Kind != OwnerNone {
 			card.Owners = append(card.Owners, it.Owner)
+		}
+		if it.HostAttribution != nil {
+			card.Marks = append(card.Marks, "container attribution: "+ownerLabel(*it.HostAttribution, nil))
+		}
+		if it.NativeOwner != "" {
+			card.Marks = append(card.Marks, "native owner: "+it.NativeOwner)
+		}
+		if it.Container != "" {
+			card.Related = append(card.Related, Token{Ref: Ref{Kind: "container", ID: it.Container}, Basis: "native context"})
 		}
 		if it.State == StateActive {
 			card.Marks = append(card.Marks, "tracker progress; execution not observed")
@@ -732,14 +807,18 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 			card.Attachments = append(card.Attachments, Attachment{Message: message, Cancelled: s.ActionCancelled[key]})
 			card.Actions = append(card.Actions, messageActions(message)...)
-			card.Actions = append(card.Actions, newAction("Detach this evidence from this task", "amq-board", "detach", "--task", id, "--message", key))
+			card.Actions = append(card.Actions, newOwnerAction("Detach this evidence from this task", "amq-board", "detach", "--task", id, "--message", key))
 			operation := "cancel"
 			if s.ActionCancelled[key] {
 				operation = "reopen"
 			}
-			card.Actions = append(card.Actions, newAction(operation+" this request action", "amq-board", operation, "--scope", "action", "--message", key))
+			card.Actions = append(card.Actions, newOwnerAction(operation+" this request action", "amq-board", operation, "--scope", "action", "--message", key))
 		}
-		card.Actions = append(card.Actions, newAction("Cancel this task", "amq-board", "cancel", "--scope", "task", "--task", id))
+		card.Actions = append(card.Actions, newOwnerAction("Cancel this task", "amq-board", "cancel", "--scope", "task", "--task", id))
+		if card.Historical {
+			m.Historical = append(m.Historical, card)
+			continue
+		}
 		for i := range m.Columns {
 			if m.Columns[i].ID == col {
 				m.Columns[i].Cards = append(m.Columns[i].Cards, card)

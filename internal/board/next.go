@@ -115,7 +115,7 @@ func isKnownParent(card Card, parents map[taskRef]bool) bool {
 
 func hasCopyAction(card Card) bool {
 	for _, action := range card.Actions {
-		if len(action.Argv) > 0 && action.Command != "" {
+		if action.IsContext() {
 			return true
 		}
 	}

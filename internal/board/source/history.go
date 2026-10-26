@@ -71,6 +71,7 @@ func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result,
 		}
 	}
 	used := len(raw)
+acquire:
 	for n, record := range index.Threads {
 		if n >= 1000 || used >= 64<<20 {
 			result.Coverage.Truncated += len(index.Threads) - n
@@ -96,43 +97,54 @@ func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result,
 				gap("history root has no agents")
 				continue
 			}
-			body, err := env.Run.RunLimited(ctx, env.Dir, []string{"amq", "thread", "--id", record.ID, "--agents", strings.Join(root.Agents, ","), "--include-body", "--json", "--root", root.Root}, 8<<20)
+			batches, err := historyBatches(root.MessageIDs)
 			if err != nil {
-				gap("history export failed: " + errLine(err))
+				gap(err.Error())
 				continue
 			}
-			var entries []thread.Entry
-			if err = json.Unmarshal(body, &entries); err != nil {
-				gap("history export unreadable")
-				continue
-			}
-			if used+len(body) > 64<<20 {
-				gap("history body bound reached")
-				continue
-			}
-			used += len(body)
-			for _, entry := range entries {
-				if entry.ID == "" || entry.Thread != record.ID || !expected[entry.ID] {
-					gap("history message identity not accepted")
+			for _, batch := range batches {
+				if ctx.Err() != nil {
+					gap("history acquisition deadline reached")
+					break acquire
+				}
+				body, err := env.Run.RunLimited(ctx, env.Dir, []string{"amq", "thread", "--id", record.ID, "--agents", strings.Join(root.Agents, ","), "--message-ids", strings.Join(batch, ","), "--include-body", "--json", "--root", root.Root}, 8<<20)
+				if err != nil {
+					gap("history export failed: " + errLine(err))
 					continue
 				}
-				content, _ := json.Marshal(entry)
-				fingerprint := sha256.Sum256(content)
-				contentHash := hex.EncodeToString(fingerprint[:])
-				if previous, ok := contentByID[entry.ID]; ok && previous != contentHash {
-					gap("conflicting content for message ID: " + entry.ID)
+				var entries []thread.Entry
+				if err = json.Unmarshal(body, &entries); err != nil {
+					gap("history export unreadable")
 					continue
 				}
-				contentByID[entry.ID] = contentHash
-				blobs = append(blobs, content)
-				seen[entry.ID] = true
-				message, exists := messagesByID[entry.ID]
-				if !exists {
-					message = board.MessageFromEntry(base, root.Root, root.Session, entry, contentHash)
-					message.Copies = nil
+				if used+len(body) > 64<<20 {
+					gap("history body bound reached")
+					break acquire
 				}
-				message.Copies = copyFacts[entry.ID]
-				messagesByID[entry.ID] = message
+				used += len(body)
+				for _, entry := range entries {
+					if entry.ID == "" || entry.Thread != record.ID || !expected[entry.ID] {
+						gap("history message identity not accepted")
+						continue
+					}
+					content, _ := json.Marshal(entry)
+					fingerprint := sha256.Sum256(content)
+					contentHash := hex.EncodeToString(fingerprint[:])
+					if previous, ok := contentByID[entry.ID]; ok && previous != contentHash {
+						gap("conflicting content for message ID: " + entry.ID)
+						continue
+					}
+					contentByID[entry.ID] = contentHash
+					blobs = append(blobs, content)
+					seen[entry.ID] = true
+					message, exists := messagesByID[entry.ID]
+					if !exists {
+						message = board.MessageFromEntry(base, root.Root, root.Session, entry, contentHash)
+						message.Copies = nil
+					}
+					message.Copies = copyFacts[entry.ID]
+					messagesByID[entry.ID] = message
+				}
 			}
 			for _, id := range root.MessageIDs {
 				if !seen[id] {
@@ -255,4 +267,27 @@ func readActionStates(ctx context.Context, env board.Env, base string, messages 
 		}
 	}
 	return states, gaps
+}
+
+// Bound both argument count and UTF-8 bytes below platform command-line limits.
+func historyBatches(ids []string) ([][]string, error) {
+	var batches [][]string
+	var batch []string
+	size := 0
+	for _, id := range ids {
+		n := len(id) + 1
+		if n > 8<<10 {
+			return nil, fmt.Errorf("history message identity exceeds argument bound")
+		}
+		if len(batch) >= 128 || size+n > 8<<10 {
+			batches = append(batches, batch)
+			batch, size = nil, 0
+		}
+		batch = append(batch, id)
+		size += n
+	}
+	if len(batch) > 0 {
+		batches = append(batches, batch)
+	}
+	return batches, nil
 }

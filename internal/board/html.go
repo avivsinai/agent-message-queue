@@ -33,16 +33,18 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{"st
 type stripCall struct {
 	ID string
 	S  pageStrip
-	// Shown are the commands on the strip itself (the first one in Waiting
-	// on you); More are the rest, under the strip's details.
-	Shown, More []Action
+	// Shown contains context only. Owner corrections remain in Details.
+	Shown []Action
 }
 
 func stripArgs(bay string, s pageStrip) stripCall {
 	sum := sha256.Sum256([]byte(s.Key))
-	c := stripCall{ID: "item-" + bay + "-" + base64.RawURLEncoding.EncodeToString(sum[:12]), S: s, More: s.Actions}
-	if len(s.Actions) > 0 {
-		c.Shown, c.More = s.Actions[:1], s.Actions[1:]
+	c := stripCall{ID: "item-" + bay + "-" + base64.RawURLEncoding.EncodeToString(sum[:12]), S: s}
+	for _, action := range s.Actions {
+		if action.IsContext() {
+			c.Shown = []Action{action}
+			break
+		}
 	}
 	return c
 }
@@ -126,23 +128,23 @@ type pageBay struct {
 }
 
 type pageStrip struct {
-	Key, State, NextReason, AgeLabel, CopyLabel string
-	TaskID                                      string
-	AttachKey                                   string
-	Kind, ID, Title                             string
-	Refs                                        []string
-	Reason, Since                               string
-	SinceAt                                     string
-	Checked                                     string
-	Owner                                       string
-	People                                      []string
-	Marks                                       []string
-	Cocked                                      bool
-	Related                                     []string
-	Evidence                                    []pageEvidence
-	Actions                                     []Action
-	HasDetail                                   bool
-	ReasonField, Priority                       string
+	Key, State, NextReason, AgeLabel string
+	TaskID                           string
+	AttachKey                        string
+	Kind, ID, Title                  string
+	Refs                             []string
+	Reason, Since                    string
+	SinceAt                          string
+	Checked                          string
+	Owner                            string
+	People                           []string
+	Marks                            []string
+	Cocked                           bool
+	Related                          []string
+	Evidence                         []pageEvidence
+	Actions                          []Action
+	HasDetail                        bool
+	ReasonField, Priority            string
 }
 
 type pageEvidence struct {
@@ -253,7 +255,7 @@ func buildPage(m Model, regenerate string) pageData {
 }
 
 func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
-	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded", CopyLabel: "Copy context command"}
+	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded"}
 	if s.Title == "" {
 		s.Title = clean(c.ID)
 	}
@@ -270,20 +272,20 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.Kind, s.ID = refCell(placing)
 	switch placing.Ref.Kind {
 	case RefBead:
-		s.CopyLabel = "Copy task command"
 		if c.Column == ColumnUnclaimed {
 			s.AgeLabel = "Tracker updated"
 		}
 	case RefObligation:
-		s.CopyLabel, s.AgeLabel = "Copy thread command", "Requested"
-	case RefForge:
-		s.CopyLabel = "Copy issue command"
+		s.AgeLabel = "Requested"
 	}
 	if c.Column == ColumnInFlight && placing.Ref.Kind != RefBead {
 		s.State = "Declared work"
 	}
 	if placing.Source == "codex-goals" {
 		s.State, s.AgeLabel = "Declared goal", "Goal updated"
+	}
+	if c.Historical {
+		s.State = "Historical; not reported"
 	}
 	for _, it := range c.Items {
 		s.Refs = append(s.Refs, clean(it.Source+" · "+refLabel(it)))
@@ -360,9 +362,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	}
 	s.Evidence = ev
 	s.Actions = c.Actions
-	if len(s.Actions) > 0 {
-		s.CopyLabel = "Copy " + strings.ToLower(s.Actions[0].Label)
-	}
+
 	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
 }

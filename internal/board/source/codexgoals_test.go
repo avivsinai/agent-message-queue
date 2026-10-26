@@ -55,6 +55,10 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(home, "sessions", "rollout-test-019f0000-0000-7000-8000-000000000001.jsonl"), append(meta, '\n'), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			old := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+			if err = os.Chtimes(filepath.Join(home, "sessions", "rollout-test-019f0000-0000-7000-8000-000000000001.jsonl"), old, old); err != nil {
+				t.Fatal(err)
+			}
 			var conversations []map[string]string
 			if name == "project goals" || name == "busy database" {
 				for i := 2; i <= 6; i++ {
@@ -85,7 +89,7 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 						t.Fatal("query must use a live read-only connection")
 					}
 					query := argv[len(argv)-1]
-					if !strings.Contains(query, "SELECT thread_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (") {
+					if !strings.Contains(query, "SELECT thread_id, goal_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (") {
 						t.Fatal("query must project named fields for eligible threads")
 					}
 					sqlite, err := exec.LookPath("sqlite3")
@@ -142,7 +146,7 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 				t.Fatalf("queries=%d items=%+v", queries, got.Items)
 			}
 			for i, it := range got.Items {
-				if it.State != want[i] || it.Owner.Handle != "codex" || it.Owner.Session != "s1" || it.Structural != (i > 0) || it.Ref.String() != fmt.Sprintf("codex-goal:019f0000-0000-7000-8000-%012d", i+1) {
+				if it.State != want[i] || (i > 0 && (it.Owner.Handle != "codex" || it.Owner.Session != "s1")) || (i == 0 && it.Owner.Kind != board.OwnerUnmapped) || it.Structural != (i > 0) || it.Ref.String() != fmt.Sprintf("codex-goal:119f0000-0000-4000-8000-%012d", i+1) || it.Container != fmt.Sprintf("019f0000-0000-7000-8000-%012d", i+1) {
 					t.Errorf("item %d: %+v", i, it)
 				}
 			}

@@ -48,19 +48,23 @@ const (
 
 // Item is one unit of work as a source reports it.
 type Item struct {
-	Namespace  string     `json:"namespace,omitempty"`
-	Source     string     `json:"source"`
-	Ref        Ref        `json:"ref"`
-	Title      string     `json:"title"`
-	State      State      `json:"state"`
-	Owner      Owner      `json:"owner"`
-	Requester  *Owner     `json:"requester,omitempty"`
-	WaitsOn    []Owner    `json:"waits_on"`
-	Reason     Reason     `json:"reason"`
-	Relations  []Relation `json:"relations"`
-	Evidence   []Evidence `json:"evidence"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	Structural bool       `json:"structural"`
+	HostAttribution *Owner     `json:"host_attribution,omitempty"`
+	NativeOwner     string     `json:"native_owner,omitempty"`
+	Container       string     `json:"container,omitempty"`
+	BindingRevision string     `json:"binding_revision,omitempty"`
+	Namespace       string     `json:"namespace,omitempty"`
+	Source          string     `json:"source"`
+	Ref             Ref        `json:"ref"`
+	Title           string     `json:"title"`
+	State           State      `json:"state"`
+	Owner           Owner      `json:"owner"`
+	Requester       *Owner     `json:"requester,omitempty"`
+	WaitsOn         []Owner    `json:"waits_on"`
+	Reason          Reason     `json:"reason"`
+	Relations       []Relation `json:"relations"`
+	Evidence        []Evidence `json:"evidence"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	Structural      bool       `json:"structural"`
 
 	// Mentions are candidate tokens from free text. The core keeps only those
 	// that resolve to a verified ref, and only as related references.
@@ -219,9 +223,15 @@ type AMQContext struct {
 }
 
 // Result is one source read.
+type NativeScope struct {
+	Complete        bool   `json:"complete"`
+	BindingRevision string `json:"binding_revision,omitempty"`
+}
+
 type Result struct {
-	ActionStates map[string]string `json:"action_states,omitempty"`
-	Namespace    string            `json:"namespace,omitempty"`
+	NativeScopes map[string]NativeScope `json:"native_scopes,omitempty"`
+	ActionStates map[string]string      `json:"action_states,omitempty"`
+	Namespace    string                 `json:"namespace,omitempty"`
 	Items        []Item
 	Roster       []RosterEntry
 	AMQ          *AMQContext

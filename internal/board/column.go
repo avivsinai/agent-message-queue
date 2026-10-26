@@ -4,12 +4,13 @@ package board
 type Column string
 
 const (
-	ColumnWaiting   Column = "waiting_on_you"
-	ColumnInFlight  Column = "in_flight"
-	ColumnBlocked   Column = "blocked"
-	ColumnUnclaimed Column = "unclaimed"
-	ColumnRequests  Column = "requests"
-	ColumnHidden    Column = "hidden"
+	ColumnWaiting    Column = "waiting_on_you"
+	ColumnInFlight   Column = "in_flight"
+	ColumnBlocked    Column = "blocked"
+	ColumnUnclaimed  Column = "unclaimed"
+	ColumnRequests   Column = "requests"
+	ColumnHidden     Column = "hidden"
+	ColumnHistorical Column = "historical"
 )
 
 // Columns is the display order.
@@ -28,6 +29,8 @@ func (c Column) Title() string {
 		return "Backlog"
 	case ColumnRequests:
 		return "Reply due"
+	case ColumnHistorical:
+		return "Historical; not reported"
 	}
 	return "Hidden"
 }

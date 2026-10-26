@@ -89,7 +89,7 @@ func TestThreadListIncludesRetainedHistoryAndHydrationMetadata(t *testing.T) {
 	}
 
 	stdout, stderr = captureOutput(t, func() error {
-		return runThread([]string{"--id", threadID, "--include-body", "--json", "--root", base, "--agents", "owner,reviewer"})
+		return runThread([]string{"--id", threadID, "--message-ids", baseMessageID, "--include-body", "--json", "--root", base, "--agents", "owner,reviewer"})
 	})
 	var hydrated []thread.Entry
 	if err := json.Unmarshal([]byte(stdout), &hydrated); err != nil {

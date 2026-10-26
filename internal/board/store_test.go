@@ -197,6 +197,7 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 			t.Fatal("face omitted unified task or exact attachment")
 		}
 	}
+	checkNativeAdmission(t, ctx)
 	// Snapshot capacity reserves room for a coverage-only publication and
 	// leaves all previously acknowledged corrections and IDs intact.
 	oversized := acquisition
@@ -327,5 +328,169 @@ func TestMissingPublishedStateRequiresRecovery(t *testing.T) {
 	}
 	if err = store.Init(context.Background()); err == nil {
 		t.Fatal("initialized store silently reset")
+	}
+}
+
+// Native-wave review: a grant removed during acquisition cannot admit tasks;
+// goal replacement and identical task IDs in separate lists keep identities.
+func checkNativeAdmission(t *testing.T, ctx context.Context) {
+	t.Helper()
+	base := t.TempDir()
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	key, err := store.BindClaudeList(ctx, home, "team", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := before.ClaudeLists[key]
+	item := Item{Ref: Ref{Kind: "claude-task", ID: "1"}, Namespace: key, Container: "team", BindingRevision: grant.Revision, Title: "Deliver Claude task", State: StateActive, Owner: Owner{Kind: OwnerUnmapped, Display: "native-owner"}, Structural: true}
+	acquisition := Acquisition{Input: Input{Results: []NamedResult{{Name: "claude-tasks", Result: Result{Status: StatusOK, Items: []Item{item}, NativeScopes: map[string]NativeScope{key: {Complete: true, BindingRevision: grant.Revision}}}}}}}
+	if _, err = store.BindClaudeList(ctx, home, "team", true); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejected.Tasks) != 0 {
+		t.Fatal("removed native binding admitted task")
+	}
+	if _, err = store.BindClaudeList(ctx, home, "team", false); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.BindingRevision = bound.ClaudeLists[key].Revision
+	acquisition.Input.Results[0].Result.Items = []Item{item}
+	acquisition.Input.Results[0].Result.NativeScopes[key] = NativeScope{Complete: true, BindingRevision: item.BindingRevision}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	goal := Item{Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Namespace: home, Title: "Deliver Codex goal", State: StateActive, Structural: true}
+	native := Acquisition{Input: Input{Results: []NamedResult{{Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}, {Name: "amq", Result: Result{Status: StatusOK, Items: []Item{{Ref: Ref{Kind: "bead", ID: "fake-a1"}, Namespace: home, Title: "Unadmitted request", Structural: true}}}}}}}
+	if err = store.Commit(ctx, native); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Tasks) != 2 {
+		t.Fatal("native allowlist admitted a generic structural row")
+	}
+	var goalID string
+	for id, task := range first.Tasks {
+		if task.Fact.Source == "codex-goals" {
+			goalID = id
+		}
+	}
+	goal.Ref.ID = "119f0000-0000-4000-8000-000000000002"
+	native.Input.Results[0].Result.Items = []Item{goal}
+	if err = store.Commit(ctx, native); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.Tasks) != 3 || replaced.Tasks[goalID].Cancelled || !replaced.Tasks[goalID].SourceMissing {
+		t.Fatal("goal replacement changed permanent identity or cancellation")
+	}
+	model := replaced.Project(DefaultConfig(), time.Now(), "test")
+	if len(model.Historical) != 1 || model.Historical[0].ID != goalID || model.Historical[0].Items[0].State != StateActive {
+		t.Fatal("uncancelled replaced goal did not retain its historical source fact")
+	}
+	for _, column := range model.Columns {
+		for _, card := range column.Cards {
+			if card.ID == goalID {
+				t.Fatal("historical goal counted as current work")
+			}
+		}
+	}
+	for _, next := range model.Next {
+		if next.CardID == goalID {
+			t.Fatal("historical goal selected as Next")
+		}
+	}
+	// A pending task with only owner corrections does not offer cancellation as
+	// a context action or promote itself into Next.
+	item.State = StateOpenUnowned
+	acquisition.Input.Results[0].Result.Items = []Item{item}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model = pending.Project(DefaultConfig(), time.Now(), "test")
+	for _, column := range model.Columns {
+		for _, card := range column.Cards {
+			if card.Items[0].Source != "claude-tasks" {
+				continue
+			}
+			if hasCopyAction(card) {
+				t.Fatal("owner-only correction treated as useful context")
+			}
+			for _, next := range model.Next {
+				if next.CardID == card.ID {
+					t.Fatal("mutation-only pending native task selected as Next")
+				}
+			}
+		}
+	}
+	var page bytes.Buffer
+	if err = WriteHTML(&page, model, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page.String(), "Historical; not reported") || !strings.Contains(page.String(), "No context command available") || strings.Contains(page.String(), "Copy context command") {
+		t.Fatal("native historical/context status missing from rendered face")
+	}
+	// A home below a symlinked parent remains revocable after it disappears.
+	parent := t.TempDir()
+	actual := filepath.Join(parent, "actual")
+	alias := filepath.Join(parent, "alias")
+	homePath := filepath.Join(alias, "missing-home")
+	if err = os.MkdirAll(filepath.Join(actual, "missing-home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(actual, alias); err != nil {
+		t.Fatal(err)
+	}
+	storedKey, err := store.BindClaudeList(ctx, homePath, "missing", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(actual, "missing-home")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.BindClaudeList(ctx, homePath, "missing", true); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := revoked.ClaudeLists[storedKey]; ok {
+		t.Fatal("canonical missing-home binding survived revocation")
 	}
 }

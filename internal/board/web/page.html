@@ -30,6 +30,7 @@
   <a href="#view-requests" data-view-link="requests">Requests</a>
   </div>
   <details class="secondary-nav" open><summary>More</summary><div>
+    <a href="#view-history" data-view-link="history">History</a>
     <a href="#view-sources" data-view-link="sources">Sources</a>
     <a href="#view-agents" data-view-link="agents">Agents</a>
     <label class="appearance">Appearance <select id="appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
@@ -91,7 +92,7 @@
     <div class="item-meta"><span class="item-state">{{.S.State}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}<span class="c-owner">{{.S.Owner}}</span><span>{{.S.AgeLabel}} {{if .S.SinceAt}}<time datetime="{{.S.SinceAt}}">{{.S.Since}} ago</time>{{else}}unknown{{end}}</span></div>
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
   </div>
-  <div class="item-action">{{if .Shown}}{{range .Shown}}<button type="button" class="copy primary-copy" id="{{$.ID}}-copy" data-command="{{.Command}}">{{$.S.CopyLabel}}</button>{{end}}{{else}}<p class="command-unavailable">No copy command available. Check the source details.</p>{{end}}</div>
+  <div class="item-action">{{if .Shown}}{{range .Shown}}<button type="button" class="copy primary-copy" id="{{$.ID}}-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{else}}<p class="command-unavailable">No context command available. Owner corrections are in Details.</p>{{end}}</div>
   <details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">
     <p>{{.S.Reason}}</p>{{range .S.People}}<p>{{.}}</p>{{end}}
     <dl>{{if .S.TaskID}}<dt>Task ID</dt><dd class="token">{{.S.TaskID}}</dd>{{end}}<dt>Reference</dt><dd class="token">{{.S.Kind}} {{.S.ID}}</dd>{{if .S.Checked}}<dt>Source observation</dt><dd>{{.S.Checked}}</dd>{{end}}</dl>

@@ -89,6 +89,10 @@ func WriteText(w io.Writer, m Model) error {
 		}
 	}
 
+	b.WriteString("\n== Historical tasks (outside current work counts) ==\n")
+	for _, card := range m.Historical {
+		writeCard(&b, card, now, live)
+	}
 	b.WriteString("\n== Unresolved historical asks (outside task counts) ==\n")
 	for _, message := range m.Unresolved {
 		fmt.Fprintf(&b, "  %s: %s\n    %s\n    %s\n", clean(message.Key), cleanTitle(message.Subject), clean(message.Body), clean(Quote([]string{"amq-board", "admit", "--message", message.Key, "--title", message.Subject})))

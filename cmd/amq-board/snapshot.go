@@ -63,7 +63,12 @@ func runSync(args []string) int {
 		}
 		cfg := loader.ReloadConfig()
 		runner := env.Run.(execRunner)
-		opt := sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits}
+		state, readErr := store.ReadContext(ctx)
+		if readErr != nil {
+			fmt.Fprintln(os.Stderr, readErr)
+			return exitGeneral
+		}
+		opt := sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits, claudeLists: state.ClaudeLists}
 		if *watch {
 			opt.limits = limits.run
 		}
@@ -96,7 +101,7 @@ func runSync(args []string) int {
 			fmt.Fprintln(os.Stderr, "amq-board sync:", err)
 			return exitGeneral
 		}
-		state, readErr := store.ReadContext(ctx)
+		state, readErr = store.ReadContext(ctx)
 		if readErr != nil {
 			fmt.Fprintln(os.Stderr, readErr)
 			return exitGeneral
@@ -124,6 +129,9 @@ func runOwner(kind string, args []string) int {
 	anchor := flags.String("anchor", "", "stable operator admission anchor")
 	scope := flags.String("scope", "", "task or action")
 	file := flags.String("file", "", "explicit withdrawal adoption JSON")
+	home := flags.String("home", "", "canonical native home")
+	list := flags.String("list", "", "exact native task list ID")
+	bindingKey := flags.String("binding-key", "", "exact stored Claude list binding key for revocation")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -145,9 +153,21 @@ func runOwner(kind string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return exitGeneral
 	}
-	if kind == "adopt" {
+	switch kind {
+	case "bind-claude-list", "unbind-claude-list":
+		var key string
+		if kind == "unbind-claude-list" && *bindingKey != "" {
+			key = *bindingKey
+			err = store.UnbindClaudeListKey(ctx, key)
+		} else {
+			key, err = store.BindClaudeList(ctx, *home, *list, kind == "unbind-claude-list")
+		}
+		if err == nil {
+			fmt.Println(key)
+		}
+	case "adopt":
 		err = adoptWithdrawals(ctx, store, *file)
-	} else {
+	default:
 		var id string
 		id, err = store.Apply(ctx, board.OwnerAction{Kind: kind, TaskID: *task, FromTaskID: *fromTask, MessageKey: *message, Title: *title, Anchor: *anchor, Scope: *scope})
 		if err == nil && id != "" {

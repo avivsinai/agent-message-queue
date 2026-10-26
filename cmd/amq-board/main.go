@@ -43,6 +43,7 @@ const usage = `Usage: amq-board [--json | --html [--out FILE]]
        amq-board cancel|reopen --scope task --task ID
        amq-board cancel|reopen --scope action --message KEY
        amq-board adopt --file FILE
+       amq-board bind-claude-list|unbind-claude-list --home HOME --list LIST
 
 Views read the published project snapshot. Only sync reads sources.
 First initialization is explicit; an existing or interrupted store needs
@@ -60,7 +61,7 @@ func run(args []string) int {
 		switch args[0] {
 		case "sync":
 			return runSync(args[1:])
-		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt":
+		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list":
 			return runOwner(args[0], args[1:])
 		}
 	}
@@ -190,7 +191,8 @@ type sourceOptions struct {
 	// refresh.
 	provider func(source.External) board.Source
 	// limits returns the Codex plan limit facts; nil reads none.
-	limits limitsFunc
+	limits      limitsFunc
+	claudeLists map[string]board.ClaudeListBinding
 }
 
 // boardModel reads every source cfg enables, under its own deadline, and
@@ -218,7 +220,7 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 	} else {
 		sources = append(sources, board.Disabled{SourceName: "beads"})
 	}
-	sources = append(sources, board.Disabled{SourceName: "claude-native"}, board.Disabled{SourceName: "codex-native"})
+	sources = append(sources, source.CodexGoals{}, source.ClaudeTasks{Bindings: opt.claudeLists})
 	if cfg.SourceGitHub {
 		if home, err := amqhome.EnsureDir(); err == nil {
 			gh.Cache = source.DirCache{Dir: filepath.Join(home, "board", "cache")}

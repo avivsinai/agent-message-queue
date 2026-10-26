@@ -396,6 +396,8 @@ Options:
         Limit number of messages (0 = no limit)
   -me string
         Agent handle (or AM_ME)
+  -message-ids string
+        Comma-separated exact message IDs; read only these files
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict

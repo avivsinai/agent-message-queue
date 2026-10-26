@@ -38,12 +38,12 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 	for _, message := range m.Unresolved {
 		commands := messageActions(message)
 		if !hasControl(message.Subject) && !hasControl(message.Key) {
-			commands = append(commands, newAction("Admit task (edit outcome title first)", "amq-board", "admit", "--message", message.Key, "--title", message.Subject))
+			commands = append(commands, newOwnerAction("Admit task (edit outcome title first)", "amq-board", "admit", "--message", message.Key, "--title", message.Subject))
 		}
 		if !hasControl(message.Key) {
-			commands = append(commands, newAction("Dismiss unresolved ask", "amq-board", "dismiss", "--message", message.Key))
+			commands = append(commands, newOwnerAction("Dismiss unresolved ask", "amq-board", "dismiss", "--message", message.Key))
 		}
-		strip := pageStrip{AttachKey: message.Key, Key: message.Key, Kind: "unresolved", ID: clean(message.ID), Title: clean(message.Subject), State: "Current status unresolved", Reason: "Historical ask; no task admission or current work evidence", Owner: clean(message.From), AgeLabel: "Message recorded", CopyLabel: "Copy thread command", Actions: commands, Evidence: []pageEvidence{{Source: "amq", Field: message.Kind, Value: clean(message.Key), Text: message.Body}}, HasDetail: true}
+		strip := pageStrip{AttachKey: message.Key, Key: message.Key, Kind: "unresolved", ID: clean(message.ID), Title: clean(message.Subject), State: "Current status unresolved", Reason: "Historical ask; no task admission or current work evidence", Owner: clean(message.From), AgeLabel: "Message recorded", Actions: commands, Evidence: []pageEvidence{{Source: "amq", Field: message.Kind, Value: clean(message.Key), Text: message.Body}}, HasDetail: true}
 
 		if m.ActionStates[message.Key] == "open" {
 			strip.State = "Open request action"
@@ -82,5 +82,9 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 			views[i].Coverage = "Incomplete coverage: " + strings.Join(gaps, ", ") + ". Some items may be missing."
 		}
 	}
-	return views
+	history := pageView{ID: "history", Title: "History", Description: "Tasks no longer reported by a complete source read. Their last recorded facts remain available; they are not counted as current work.", Empty: "No historical tasks recorded."}
+	for _, card := range m.Historical {
+		history.Strips = append(history.Strips, buildStrip(card, now, live))
+	}
+	return append(views, history)
 }

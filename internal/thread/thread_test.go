@@ -85,6 +85,18 @@ func TestCollectThread(t *testing.T) {
 	if entries[0].ID != "msg-1" || entries[1].ID != "msg-2" {
 		t.Fatalf("unexpected order: %v, %v", entries[0].ID, entries[1].ID)
 	}
+	// The real board sync exhausted its deadline because each export parsed
+	// all mailbox bodies. Named hydration must not read unrelated messages.
+	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), "unrelated.md"), []byte("invalid message"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentOutboxSent(root, "codex"), "msg-1.md"), data1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	named, err := CollectNamed(root, "p2p/claude__codex", []string{"codex", "claude"}, []string{"msg-2", "msg-1"}, true)
+	if err != nil || len(named) != 2 || named[0].Body != "First\n" || named[1].Body != "Second\n" {
+		t.Fatalf("named message hydration: %+v, %v", named, err)
+	}
 }
 
 func TestCollectThreadCorruptMessage(t *testing.T) {

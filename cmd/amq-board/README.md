@@ -27,8 +27,8 @@ or mentioned bead ID does not merge tasks or admit new work.
 
 Recorded `in_progress` is tracker progress. The board does not treat assignment,
 a live notifier, or a recent session as proof that a task is running. Source
-disappearance keeps the last task state and marks the missing source fact;
-it never completes a task.
+disappearance keeps the last task state in History, outside current work counts
+and Next; it never completes a task.
 
 AMQ's native full-history lifecycle fold classifies request actions independently
 from tasks. Explicit native recipient outcomes resolve an action. An open recipient action
@@ -38,7 +38,9 @@ source lifecycle status. Historical questions, review requests, and todos
 that remain open or unknown enter the unresolved inbox,
 outside task and work counts. Their current status is unknown until the local
 operator attaches, admits, or dismisses them. Copy commands in the page run
-only when the user runs them in a terminal.
+only when the user runs them in a terminal. Source/context commands can appear
+on a card; owner corrections remain explicitly labelled in Details and do not
+make a task a Next action.
 
 ```sh
 amq-board admit --message '/canonical/base#message-id' --title 'Deliver an outcome'
@@ -105,8 +107,32 @@ Its namespace is the canonical `database_path` returned by `bd --readonly
 Closed task identities remain known. The board never changes source records.
 
 Roster, usage, GitHub, and configured provider coverage remain secondary facts.
-Native Claude task and Codex goal reconciliation and model inference are not
-supported by this slice.
+Codex goal aliases use canonical `CODEX_HOME` plus the native goal UUID; the
+thread UUID is container context. A replacement goal keeps a distinct permanent
+task. Explicit AMQ bindings can attribute a container; cwd alone does not name
+an owner. Active status records source progress, never observed execution.
+
+Claude filesystem tasks support the installed 2.1.310 producer schema. Their
+identity includes canonical home, list ID and task ID. Default UUID lists need
+a matching session transcript in that exact home with a project cwd. Team and
+custom lists need an explicit project-local snapshot binding:
+
+```sh
+amq-board bind-claude-list --home /absolute/claude-home --list native-list
+amq-board unbind-claude-list --home /absolute/claude-home --list native-list
+amq-board unbind-claude-list --binding-key '["/absolute/claude-home","native-list"]'
+```
+
+Binding changes share the serialized owner path. Revocation accepts the exact
+stored key even when the native home or its path alias has disappeared. Acquisition with a removed
+or replaced binding cannot admit tasks at commit. Native task owners remain
+separate from AMQ container attribution. Unsupported producer versions, unbound
+lists, unreadable files and storageV5 scopes are reported as incomplete coverage.
+A single 16 MiB acquisition byte budget covers task payloads and session scope
+reads across all homes. A stopped or incomplete scope preserves prior facts.
+The filesystem adapter cannot certify other backends are empty. Native file
+absence retains the prior task fact; it does not complete or cancel a task.
+Model inference is not supported.
 
 Configuration uses `~/.amq/board.json` and `.amq/board.json`. Settings include
 `sources`, `humans`, `forges`, `providers`, `liveness_window`, `stale_after`,

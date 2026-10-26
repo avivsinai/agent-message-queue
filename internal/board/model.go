@@ -42,6 +42,7 @@ type Input struct {
 
 // Model is the board: what every face renders.
 type Model struct {
+	Historical   []Card            `json:"historical"`
 	ActionStates map[string]string `json:"action_states,omitempty"`
 	Schema       string            `json:"schema"`
 	Generation   uint64            `json:"generation,omitempty"`
@@ -86,6 +87,7 @@ type ColumnView struct {
 
 // Card is one unit of work with all its evidence.
 type Card struct {
+	Historical       bool         `json:"historical,omitempty"`
 	ID               string       `json:"id"`
 	Aliases          []string     `json:"aliases,omitempty"`
 	Attachments      []Attachment `json:"attachments,omitempty"`
