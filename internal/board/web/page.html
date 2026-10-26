@@ -78,7 +78,7 @@
 </div>
 <footer>AMQ {{.Version}}<span>Commands are copied, never run by this page.</span></footer>
 </div>
-<datalist id="board-tasks">{{range .TaskChoices}}<option value="{{.ID}}">{{.Title}}</option>{{end}}</datalist>
+<datalist id="board-tasks">{{range .TaskChoices}}<option value="{{.Label}}" data-task-id="{{.ID}}">{{.Title}}</option>{{end}}</datalist>
 <p class="sr-only" id="announce" aria-live="polite"></p>
 <script type="application/json" id="model">{{.Model}}</script>
 <script>{{.JS}}</script>
@@ -99,7 +99,7 @@
     {{if .S.Marks}}<p class="marks">{{range .S.Marks}}<span>{{.}}</span>{{end}}</p>{{end}}
     {{if .S.Related}}<details><summary>Related records</summary><ul>{{range .S.Related}}<li>{{.}}</li>{{end}}</ul></details>{{end}}
     {{if .S.Evidence}}<details><summary>Source evidence</summary><ul class="evidence">{{range .S.Evidence}}<li><span>{{.Source}}: {{.Field}} = {{if .URL}}<a href="{{.URL}}" rel="noreferrer noopener">{{.Value}}</a>{{else}}{{.Value}}{{end}}{{if .Age}} ({{.Age}}){{end}}</span>{{if .Text}}<p>{{.Text}}</p>{{end}}</li>{{end}}</ul></details>{{end}}
-    {{if .S.AttachKey}}<div class="attach-control" data-message="{{.S.AttachKey}}"><label>Attach to task <input type="text" list="board-tasks" autocomplete="off" class="attach-task" placeholder="Choose a permanent task ID"></label><label class="cmd-label">Attach command<textarea readonly rows="2" spellcheck="false"></textarea></label><button type="button" class="copy" disabled>Copy attach command</button></div>{{end}}
+    {{if .S.AttachKey}}<div class="attach-control" data-message="{{.S.AttachKey}}"><label>Find a task <input type="text" list="board-tasks" autocomplete="off" class="attach-task" placeholder="Search by task title"></label><p class="attach-selection" aria-live="polite">Current, completed, and historical tasks are available.</p><label class="cmd-label">Attach command<textarea readonly rows="2" spellcheck="false"></textarea></label><button type="button" class="copy" disabled>Copy attach command</button></div>{{end}}
     {{range .S.Actions}}{{template "cmd" .}}{{end}}
   </div></details>
 </article>

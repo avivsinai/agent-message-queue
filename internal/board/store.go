@@ -20,9 +20,12 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
-const SnapshotSchema = "amq/board-state/v1"
+const SnapshotSchema = "amq/board-state/v2"
+const legacySnapshotSchema = "amq/board-state/v1"
 const snapshotLimit = 64 << 20
 const snapshotReserve = 1 << 20
+
+var ErrProjectChanged = errors.New("board project identity changed; restart required")
 
 var errSnapshotBound = errors.New("board snapshot capacity reached; ingestion stopped")
 
@@ -34,9 +37,12 @@ var errEvidenceBound = errors.New("board evidence bound reached; ingestion stopp
 // It never repairs an existing store or restores a backup implicitly.
 type Store struct {
 	Dir, BaseRoot, BaseRootID, HostID string
+	// ProjectID pins a published project for a long-lived reader or acquisition.
+	ProjectID string
 }
 
 type Snapshot struct {
+	Facts           map[string]AliasFact         `json:"source_facts"`
 	ClaudeLists     map[string]ClaudeListBinding `json:"claude_lists,omitempty"`
 	Schema          string                       `json:"schema"`
 	BaseRoot        string                       `json:"base_root"`
@@ -57,15 +63,18 @@ type Snapshot struct {
 }
 
 type Task struct {
-	ID            string    `json:"id"`
-	Title         string    `json:"title"`
-	Authority     string    `json:"authority"`
-	Fact          Item      `json:"source_fact"`
-	Aliases       []string  `json:"aliases"`
-	Attachments   []string  `json:"attachments"`
-	Cancelled     bool      `json:"owner_cancelled"`
-	ObservedAt    time.Time `json:"source_observed_at"`
-	SourceMissing bool      `json:"source_missing"`
+	ID               string    `json:"id"`
+	Title            string    `json:"title"`
+	Authority        string    `json:"authority"`
+	Fact             Item      `json:"-"`
+	OwnerFact        Item      `json:"owner_fact,omitzero"`
+	RedirectTo       string    `json:"redirect_to,omitempty"`
+	AdmissionAnchors []string  `json:"admission_anchors,omitempty"`
+	Aliases          []string  `json:"aliases"`
+	Attachments      []string  `json:"attachments"`
+	Cancelled        bool      `json:"owner_cancelled"`
+	ObservedAt       time.Time `json:"-"`
+	SourceMissing    bool      `json:"-"`
 }
 
 // Message is one exact exported message, scoped to its source root.
@@ -102,6 +111,7 @@ type Message struct {
 // Acquisition is fetched without a store lock. Commit reloads the current
 // generation so an owner correction made during acquisition is retained.
 type Acquisition struct {
+	ProjectID  string
 	Input      Input
 	Usage      *UsageView
 	Messages   []Message
@@ -161,7 +171,7 @@ func (s Store) Init(ctx context.Context) error {
 			return err
 		}
 
-		state := Snapshot{Schema: SnapshotSchema, BaseRoot: s.BaseRoot, BaseRootID: s.BaseRootID, ProjectID: project, HostID: s.HostID, Tasks: map[string]Task{}, Anchors: map[string]string{}, Aliases: map[string]string{}, Messages: map[string]Message{}, Dismissed: map[string]bool{}, ActionCancelled: map[string]bool{}, Withdrawals: map[string]string{}}
+		state := Snapshot{Facts: map[string]AliasFact{}, Schema: SnapshotSchema, BaseRoot: s.BaseRoot, BaseRootID: s.BaseRootID, ProjectID: project, HostID: s.HostID, Tasks: map[string]Task{}, Anchors: map[string]string{}, Aliases: map[string]string{}, Messages: map[string]Message{}, Dismissed: map[string]bool{}, ActionCancelled: map[string]bool{}, Withdrawals: map[string]string{}}
 		return s.publish(&state)
 	})
 }
@@ -254,8 +264,16 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
 	if err = json.Unmarshal(data, &state); err != nil {
 		return state, fmt.Errorf("board snapshot recovery required: %w", err)
 	}
-	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || state.BaseRootID != s.BaseRootID || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil {
+	if state.Schema == legacySnapshotSchema {
+		if err := state.migrateLegacy(data); err != nil {
+			return Snapshot{}, err
+		}
+	}
+	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || state.BaseRootID != s.BaseRootID || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil || state.Facts == nil {
 		return Snapshot{}, errors.New("board identity or state invalid; recovery required")
+	}
+	if s.ProjectID != "" && state.ProjectID != s.ProjectID {
+		return Snapshot{}, ErrProjectChanged
 	}
 	if state.ClaudeLists == nil {
 		state.ClaudeLists = map[string]ClaudeListBinding{}
@@ -290,6 +308,10 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
 			return Snapshot{}, errors.New("board message identity invalid; recovery required")
 		}
 	}
+	if err := state.validateIdentityRecords(); err != nil {
+		return Snapshot{}, err
+	}
+	state.hydrateAuthorities()
 	if err := s.verifyMessages(ctx, &state); err != nil {
 		return Snapshot{}, err
 	}
@@ -317,6 +339,10 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err = change(&state); err != nil {
 			return err
 		}
+		if err = state.validateIdentityRecords(); err != nil {
+			return err
+		}
+		state.hydrateAuthorities()
 		if err = s.verifyMessages(ctx, &state); err != nil {
 			return err
 		}
@@ -375,14 +401,14 @@ func (s Store) publish(state *Snapshot) error {
 	return nil
 }
 
-func (s Store) saveEvidence(blobs [][]byte) error {
+func (s Store) saveEvidence(ctx context.Context, blobs [][]byte) error {
 	dir := filepath.Join(s.Dir, "evidence")
 	if info, err := os.Lstat(dir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 		return errors.New("unsafe board evidence directory")
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
 		return err
 	}
 	entries, err := os.ReadDir(dir)
@@ -398,6 +424,12 @@ func (s Store) saveEvidence(blobs [][]byte) error {
 		used += info.Size()
 	}
 	for _, b := range blobs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := s.safeDirectory(); err != nil {
+			return err
+		}
 		sum := sha256.Sum256(b)
 		name := hex.EncodeToString(sum[:]) + ".json"
 		if previous, err := readBounded(filepath.Join(dir, name), snapshotLimit); err == nil {
@@ -420,6 +452,17 @@ func (s Store) saveEvidence(blobs [][]byte) error {
 }
 
 func (s Store) Commit(ctx context.Context, a Acquisition) error {
+	if a.ProjectID == "" {
+		return errors.New("acquisition requires the published project identity captured before source reads")
+	}
+	if s.ProjectID != "" && s.ProjectID != a.ProjectID {
+		return ErrProjectChanged
+	}
+	s.ProjectID = a.ProjectID
+	stageErr := s.stageEvidence(ctx, a.Evidence)
+	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
+		return stageErr
+	}
 	stopped := false
 	err := s.update(ctx, func(state *Snapshot) error {
 		if a.BeadsStore == "" {
@@ -429,7 +472,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 				}
 			}
 		}
-		if err := s.saveEvidence(a.Evidence); err != nil {
+		if err := stageErr; err != nil {
 			if !errors.Is(err, errEvidenceBound) {
 				return err
 			}
@@ -571,25 +614,30 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 					}
 					state.Anchors[alias] = id
 					state.Aliases[alias] = id
-					state.Tasks[id] = Task{ID: id, Title: it.Title, Authority: alias, Aliases: []string{alias}}
+					state.Tasks[id] = Task{ID: id, Title: it.Title, Authority: alias, Aliases: []string{alias}, AdmissionAnchors: []string{alias}}
 				}
-				task := state.Tasks[id]
-				task.ObservedAt = nr.Result.ObservedAt
-				task.SourceMissing = false
-				task.Fact = it
-				task.Title = it.Title
-				state.Tasks[id] = task
+				canonical, err := state.ResolveTaskID(id)
+				if err != nil {
+					return err
+				}
+				state.Aliases[alias] = canonical
+				old := state.Facts[alias]
+				if !nr.Result.ObservedAt.Before(old.ObservedAt) {
+					state.Facts[alias] = AliasFact{Alias: alias, Fact: it, ObservedAt: nr.Result.ObservedAt}
+				}
+
 			}
 			for namespace, scope := range scopes {
 				if !scope.Complete {
 					continue
 				}
-				for id, task := range state.Tasks {
-					if taskInScope(task, nr.Name, namespace) && !present[task.Authority] {
-						task.SourceMissing = true
-						state.Tasks[id] = task
+				for alias, fact := range state.Facts {
+					if fact.Fact.Source == nr.Name && fact.Fact.Namespace == namespace && !present[alias] {
+						fact.Missing = true
+						state.Facts[alias] = fact
 					}
 				}
+
 			}
 		}
 		return nil
@@ -607,6 +655,20 @@ type OwnerAction struct{ Kind, TaskID, FromTaskID, MessageKey, Anchor, Title, Sc
 func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 	id := a.TaskID
 	err := s.update(ctx, func(state *Snapshot) error {
+		if id != "" {
+			var err error
+			id, err = state.ResolveTaskID(id)
+			if err != nil {
+				return err
+			}
+		}
+		if a.FromTaskID != "" {
+			var err error
+			a.FromTaskID, err = state.ResolveTaskID(a.FromTaskID)
+			if err != nil {
+				return err
+			}
+		}
 		switch a.Kind {
 		case "admit":
 			m, ok := state.Messages[a.MessageKey]
@@ -619,8 +681,9 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 			}
 			anchor = "operator:" + anchor
 			if existing := state.Anchors[anchor]; existing != "" {
-				id = existing
-				return nil
+				var err error
+				id, err = state.ResolveTaskID(existing)
+				return err
 			}
 			if strings.TrimSpace(a.Title) == "" || hasControl(a.Title) || len(a.Title) > 4096 || hasControl(anchor) || len(anchor) > 4096 {
 				return errors.New("admission needs an explicit outcome title")
@@ -631,7 +694,7 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 				return err
 			}
 			state.Anchors[anchor] = id
-			state.Tasks[id] = Task{ID: id, Title: a.Title, Authority: "operator", Fact: Item{Title: a.Title, State: StateRequested, Owner: Owner{Kind: OwnerNone}, Structural: true, Source: "operator", UpdatedAt: time.Now().UTC(), Reason: Reason{Field: "admission", Text: "Explicitly admitted; next action needs owner assignment", Since: time.Now().UTC()}}, Attachments: []string{m.Key}}
+			state.Tasks[id] = Task{ID: id, Title: a.Title, Authority: "operator", AdmissionAnchors: []string{anchor}, OwnerFact: Item{Title: a.Title, State: StateRequested, Owner: Owner{Kind: OwnerNone}, Structural: true, Source: "operator", UpdatedAt: time.Now().UTC(), Reason: Reason{Field: "admission", Text: "Explicitly admitted; next action needs owner assignment", Since: time.Now().UTC()}}, Attachments: []string{m.Key}}
 			state.Dismissed[m.Key] = false
 		case "attach", "detach", "move":
 			task, ok := state.Tasks[id]
@@ -719,6 +782,7 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 // Project is pure: one admitted task produces one card, regardless of source
 // link graphs. Unadmitted asks remain outside task and WIP counts.
 func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
+	s = s.projectionSnapshot()
 	input := s.Input
 	input.Results = append([]NamedResult(nil), s.Input.Results...)
 	input.Config = cfg
@@ -737,6 +801,8 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	}
 	m.Unresolved = []Message{}
 	m.Historical = []Card{}
+	m.Catalogue = s.Catalogue()
+	m.Redirects = s.redirects()
 	attached := map[string]bool{}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
@@ -745,6 +811,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	sort.Strings(ids)
 	for _, id := range ids {
 		task := s.Tasks[id]
+		if task.RedirectTo != "" {
+			continue
+		}
 		for _, key := range task.Attachments {
 			attached[key] = true
 		}
@@ -769,6 +838,19 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		}
 		card := Card{ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
 		card.SourceObservedAt = task.ObservedAt
+		card.Authority = task.Authority
+		for _, alias := range task.Aliases {
+			fact := s.Facts[alias]
+			card.SourceFacts = append(card.SourceFacts, fact)
+			if alias != task.Authority {
+				secondary := fact.Fact
+				secondary.Evidence = append(append([]Evidence{}, secondary.Evidence...), Evidence{Field: "source_title", Value: secondary.Title}, Evidence{Field: "authority", Value: "secondary alias", Text: alias})
+				card.Items = append(card.Items, secondary)
+				if fact.Fact.State != it.State {
+					card.Marks = append(card.Marks, "source disagreement: "+alias+" reports "+string(fact.Fact.State))
+				}
+			}
+		}
 		if task.SourceMissing {
 			card.Historical = true
 			card.Reason.Text = "Historical; source no longer reports this task. Last recorded: " + card.Reason.Text
@@ -791,10 +873,11 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		}
 		for _, alias := range task.Aliases {
 			if strings.HasPrefix(alias, "beads:") {
-				card.Refs = append(card.Refs, task.Fact.Ref)
-				if action, ok := ShowBead(task.Fact.Ref.ID, input.Known); ok {
-					if task.Fact.Namespace != "" && !hasControl(task.Fact.Namespace) {
-						action = newAction("show bead", "bd", "--readonly", "--sandbox", "--db", task.Fact.Namespace, "show", task.Fact.Ref.ID)
+				fact := s.Facts[alias].Fact
+				card.Refs = append(card.Refs, fact.Ref)
+				if action, ok := ShowBead(fact.Ref.ID, input.Known); ok {
+					if fact.Namespace != "" && !hasControl(fact.Namespace) {
+						action = newAction("show bead", "bd", "--readonly", "--sandbox", "--db", fact.Namespace, "show", fact.Ref.ID)
 					}
 					card.Actions = append(card.Actions, action)
 				}

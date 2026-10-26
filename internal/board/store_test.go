@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	if err = store.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	ref, _ := Bead("demo-a1b")
 	ask := Message{Namespace: base, Copies: []MessageCopy{{Root: base}}, Key: base + "#ask", Root: base, ID: "ask", Thread: "feature", Subject: "Review feature", Kind: "review_request", Body: "Review the result"}
@@ -52,7 +57,7 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		target.EvidenceHash = hex.EncodeToString(sum[:])
 		evidence = append(evidence, raw)
 	}
-	acquisition := Acquisition{Evidence: evidence, Input: Input{Dir: base, Known: map[string]string{"demo-a1b": "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{{Ref: ref, Title: "Deliver feature", State: StateActive, Owner: Owner{Kind: OwnerAgent, Handle: "worker"}, Structural: true}}}}}}, BeadsStore: filepath.Join(base, ".beads"), Messages: []Message{ask, withdrawal}}
+	acquisition := Acquisition{ProjectID: initial.ProjectID, Evidence: evidence, Input: Input{Dir: base, Known: map[string]string{"demo-a1b": "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{{Ref: ref, Title: "Deliver feature", State: StateActive, Owner: Owner{Kind: OwnerAgent, Handle: "worker"}, Structural: true}}}}}}, BeadsStore: filepath.Join(base, ".beads"), Messages: []Message{ask, withdrawal}}
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +203,8 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		}
 	}
 	checkNativeAdmission(t, ctx)
+	checkLegacyIdentityMigration(t, store, ctx)
+	checkIdentityCorrections(t, ctx)
 	// Snapshot capacity reserves room for a coverage-only publication and
 	// leaves all previously acknowledged corrections and IDs intact.
 	oversized := acquisition
@@ -303,6 +310,41 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	if _, err = store.Read(); err != nil {
 		t.Fatal(err)
 	}
+	// Authority review: a captured acquisition and long-lived reader must stop
+	// when an explicitly initialized replacement has a different project ID.
+	pinned := store
+	pinned.ProjectID = initial.ProjectID
+	preserved := store.Dir + "-preserved"
+	if err = os.Rename(store.Dir, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pinned.ReadContext(ctx); !errors.Is(err, ErrProjectChanged) {
+		t.Fatalf("pinned reader accepted replacement project: %v", err)
+	}
+	if err = store.Commit(ctx, acquisition); !errors.Is(err, ErrProjectChanged) {
+		t.Fatalf("old evidence acquisition accepted replacement project: %v", err)
+	}
+	withoutEvidence := acquisition
+	withoutEvidence.Evidence = nil
+	if err = store.Commit(ctx, withoutEvidence); !errors.Is(err, ErrProjectChanged) {
+		t.Fatalf("old acquisition committed into replacement project: %v", err)
+	}
+	replacement, err := store.ReadContext(ctx)
+	if err != nil || replacement.ProjectID == initial.ProjectID || replacement.Generation != 1 || len(replacement.Tasks) != 0 {
+		t.Fatalf("replacement project changed after rejected acquisition: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(store.Dir, "evidence")); !os.IsNotExist(err) {
+		t.Fatal("old acquisition staged evidence into replacement project")
+	}
+	preservedStore := store
+	preservedStore.Dir = preserved
+	prior, err := preservedStore.ReadContext(ctx)
+	if err != nil || len(prior.Tasks) != 4 || !prior.ActionCancelled[ask.Key] {
+		t.Fatalf("replacement lost preserved task identities or correction: %v", err)
+	}
 }
 
 // The ratified design review observed that cache loss would allocate fresh
@@ -358,7 +400,7 @@ func checkNativeAdmission(t *testing.T, ctx context.Context) {
 	}
 	grant := before.ClaudeLists[key]
 	item := Item{Ref: Ref{Kind: "claude-task", ID: "1"}, Namespace: key, Container: "team", BindingRevision: grant.Revision, Title: "Deliver Claude task", State: StateActive, Owner: Owner{Kind: OwnerUnmapped, Display: "native-owner"}, Structural: true}
-	acquisition := Acquisition{Input: Input{Results: []NamedResult{{Name: "claude-tasks", Result: Result{Status: StatusOK, Items: []Item{item}, NativeScopes: map[string]NativeScope{key: {Complete: true, BindingRevision: grant.Revision}}}}}}}
+	acquisition := Acquisition{ProjectID: before.ProjectID, Input: Input{Results: []NamedResult{{Name: "claude-tasks", Result: Result{Status: StatusOK, Items: []Item{item}, NativeScopes: map[string]NativeScope{key: {Complete: true, BindingRevision: grant.Revision}}}}}}}
 	if _, err = store.BindClaudeList(ctx, home, "team", true); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +428,7 @@ func checkNativeAdmission(t *testing.T, ctx context.Context) {
 		t.Fatal(err)
 	}
 	goal := Item{Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Namespace: home, Title: "Deliver Codex goal", State: StateActive, Structural: true}
-	native := Acquisition{Input: Input{Results: []NamedResult{{Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}, {Name: "amq", Result: Result{Status: StatusOK, Items: []Item{{Ref: Ref{Kind: "bead", ID: "fake-a1"}, Namespace: home, Title: "Unadmitted request", Structural: true}}}}}}}
+	native := Acquisition{ProjectID: before.ProjectID, Input: Input{Results: []NamedResult{{Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}, {Name: "amq", Result: Result{Status: StatusOK, Items: []Item{{Ref: Ref{Kind: "bead", ID: "fake-a1"}, Namespace: home, Title: "Unadmitted request", Structural: true}}}}}}}
 	if err = store.Commit(ctx, native); err != nil {
 		t.Fatal(err)
 	}
@@ -492,5 +534,241 @@ func checkNativeAdmission(t *testing.T, ctx context.Context) {
 	}
 	if _, ok := revoked.ClaudeLists[storedKey]; ok {
 		t.Fatal("canonical missing-home binding survived revocation")
+	}
+}
+
+// The authority slice migrates the published v1 shape without replacing any
+// identity, cancellation, action disposition, attachment or native-list grant.
+func checkLegacyIdentityMigration(t *testing.T, store Store, ctx context.Context) {
+	t.Helper()
+	if _, err := store.BindClaudeList(ctx, t.TempDir(), "migration-list", false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := snapshotBytes(&before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err = json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["schema"] = json.RawMessage(`"amq/board-state/v1"`)
+	delete(document, "source_facts")
+	var tasks map[string]map[string]json.RawMessage
+	if err = json.Unmarshal(document["tasks"], &tasks); err != nil {
+		t.Fatal(err)
+	}
+	for id, fields := range tasks {
+		task := before.Tasks[id]
+		fields["source_fact"], _ = json.Marshal(task.Fact)
+		fields["source_observed_at"], _ = json.Marshal(task.ObservedAt)
+		fields["source_missing"], _ = json.Marshal(task.SourceMissing)
+		delete(fields, "owner_fact")
+		delete(fields, "admission_anchors")
+	}
+	document["tasks"], _ = json.Marshal(tasks)
+	legacy, _ := json.Marshal(document)
+	if _, err = fsq.WriteFileAtomic(store.Dir, "snapshot.json", legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Schema != SnapshotSchema || migrated.Generation != before.Generation || migrated.ProjectID != before.ProjectID || migrated.HostID != before.HostID || !reflect.DeepEqual(migrated.Tasks, before.Tasks) || !reflect.DeepEqual(migrated.Anchors, before.Anchors) || !reflect.DeepEqual(migrated.ActionCancelled, before.ActionCancelled) || !reflect.DeepEqual(migrated.Withdrawals, before.Withdrawals) || !reflect.DeepEqual(migrated.ClaudeLists, before.ClaudeLists) {
+		t.Fatal("v1 migration changed durable identity or owner decisions")
+	}
+	for id, task := range migrated.Tasks {
+		kind := "reopen"
+		if task.Cancelled {
+			kind = "cancel"
+		}
+		if _, err = store.Apply(ctx, OwnerAction{Kind: kind, Scope: "task", TaskID: id}); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	upgraded, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.Schema != SnapshotSchema || len(upgraded.Tasks) != len(before.Tasks) {
+		t.Fatal("migration publication replaced tasks")
+	}
+}
+
+// Review found that task-owned source facts made authority depend on source
+// order. Explicit consolidation/movement must preserve dispositions and replay.
+func checkIdentityCorrections(t *testing.T, ctx context.Context) {
+	t.Helper()
+	base := t.TempDir()
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadRef, _ := Bead("demo-authority")
+	home := t.TempDir()
+	bead := Item{Ref: beadRef, Title: "Bead outcome", State: StateActive, Structural: true}
+	goal := Item{Namespace: home, Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Title: "Chosen outcome", State: StateDone, Structural: true}
+	acquisition := Acquisition{ProjectID: project.ProjectID, BeadsStore: home, Input: Input{Known: map[string]string{beadRef.ID: "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, Items: []Item{bead}}}, {Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}}}}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadAlias := "beads:" + home + ":" + bead.Ref.ID
+	goalAlias := "codex-goals:" + home + ":" + goal.Ref.ID
+	beadID, goalID := initial.Aliases[beadAlias], initial.Aliases[goalAlias]
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "cancel", Scope: "task", TaskID: beadID}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Consolidate(ctx, Consolidation{Survivor: goalID, Absorb: []string{beadID}, Authority: beadAlias, ExpectedGeneration: state.Generation - 1}); err == nil {
+		t.Fatal("stale identity correction accepted")
+	}
+	canonical, err := store.Consolidate(ctx, Consolidation{Survivor: goalID, Absorb: []string{beadID}, Authority: beadAlias, ExpectedGeneration: state.Generation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consolidated, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical != goalID || consolidated.Tasks[beadID].RedirectTo != goalID || !consolidated.Tasks[goalID].Cancelled || len(consolidated.Facts) != 2 || len(consolidated.Catalogue()) != 1 {
+		t.Fatal("consolidation lost source facts, copied IDs or cancellation")
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "reopen", Scope: "task", TaskID: beadID}); err != nil {
+		t.Fatal(err)
+	}
+	// Reverse source order and change the secondary source; chosen authority
+	// and outcome text remain owned by the task.
+	acquisition.Input.Results[0], acquisition.Input.Results[1] = acquisition.Input.Results[1], acquisition.Input.Results[0]
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.Tasks[goalID].Authority != beadAlias || replay.Tasks[goalID].Title != "Chosen outcome" || replay.Tasks[goalID].Fact.State != StateActive || replay.Tasks[goalID].Cancelled {
+		t.Fatal("source replay changed chosen authority, title or explicit reopen")
+	}
+	model := replay.Project(DefaultConfig(), time.Now(), "test")
+	found := false
+	for _, column := range model.Columns {
+		for _, card := range column.Cards {
+			if card.ID == goalID {
+				found = len(card.SourceFacts) == 2 && len(card.Items) == 2 && len(card.Marks) > 0
+			}
+		}
+	}
+	if !found {
+		t.Fatal("source disagreements unavailable to common projection")
+	}
+	// Add a closed destination. Moving the chosen alias requires replacement,
+	// keeps the donor task, and does not copy its cancellation to another outcome.
+	otherRef, _ := Bead("demo-destination")
+	other := Item{Ref: otherRef, Title: "Destination outcome", State: StateDone, Structural: true}
+	for i := range acquisition.Input.Results {
+		if acquisition.Input.Results[i].Name == "beads" {
+			acquisition.Input.Results[i].Result.Items = []Item{bead, other}
+		}
+	}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	moveState, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := moveState.Aliases["beads:"+home+":"+otherRef.ID]
+	if _, err = store.MoveAlias(ctx, AliasMove{Alias: beadAlias, Destination: destination, ExpectedGeneration: moveState.Generation}); err == nil {
+		t.Fatal("moving authority accepted without replacement")
+	}
+	if _, err = store.MoveAlias(ctx, AliasMove{Alias: beadAlias, Destination: destination, DonorAuthority: "owner", DestinationAuthority: beadAlias, ExpectedGeneration: moveState.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Tasks[goalID].RedirectTo != "" || moved.Tasks[goalID].Authority != "operator" || moved.Tasks[goalID].Fact.State == StateDone || moved.Aliases[beadAlias] != destination || moved.Anchors[beadAlias] != destination {
+		t.Fatal("alias move deleted/completed donor or failed to update replay binding")
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "cancel", Scope: "task", TaskID: goalID}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Consolidate(ctx, Consolidation{Survivor: destination, Absorb: []string{goalID}, Authority: beadAlias, ExpectedGeneration: next.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Tasks[beadID].RedirectTo != destination || final.Tasks[goalID].RedirectTo != destination {
+		t.Fatal("redirects were not flattened")
+	}
+	if _, err = store.Apply(ctx, OwnerAction{Kind: "reopen", Scope: "task", TaskID: beadID}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Commit(ctx, acquisition); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Tasks[destination].Cancelled || len(reopened.Catalogue()) != 1 || len(reopened.Tasks) != 3 {
+		t.Fatal("historical redirected cancellation overrode canonical reopen")
+	}
+	// Authority review: source links belong to each alias, not the selected
+	// task fact. Consolidated Beads must keep both exact source commands.
+	reopened.Input.Known[otherRef.ID] = "closed"
+	links := map[string]bool{}
+	commands := map[string]bool{}
+	for _, column := range reopened.Project(DefaultConfig(), time.Now(), "test").Columns {
+		for _, card := range column.Cards {
+			if card.ID != destination {
+				continue
+			}
+			for _, ref := range card.Refs {
+				links[ref.ID] = true
+			}
+			for _, action := range card.Actions {
+				if action.Purpose == ActionContext && action.Command != "" {
+					commands[action.Command] = true
+				}
+			}
+		}
+	}
+	for _, ref := range []Ref{beadRef, otherRef} {
+		want := newAction("show bead", "bd", "--readonly", "--sandbox", "--db", home, "show", ref.ID)
+		if !links[ref.ID] || !commands[want.Command] {
+			t.Fatalf("consolidated alias lost exact source link: %s", ref.ID)
+		}
 	}
 }

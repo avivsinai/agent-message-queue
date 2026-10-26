@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,10 +48,12 @@ func runSync(args []string) int {
 			return exitGeneral
 		}
 	}
-	if _, err = store.ReadContext(ctx); err != nil {
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitGeneral
 	}
+	store.ProjectID = initial.ProjectID
 	// Reuse the view's last-good configuration rule, without running a view.
 	loader := &board.Live{Load: func() (board.FileConfig, []string) { return loadConfig(dir) }, Now: time.Now, Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
 	var token ghToken
@@ -83,7 +86,9 @@ func runSync(args []string) int {
 			}
 			return memoProvider{External: e, memo: memo}
 		}
+		projectID := state.ProjectID
 		acquisition := acquireBoard(ctx, newEnv(dir, runner), cfg, opt)
+		acquisition.ProjectID = projectID
 		history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot)
 		acquisition.Input.Results = append(acquisition.Input.Results, board.NamedResult{Name: "amq-history", Result: history})
 		acquisition.Messages, acquisition.Evidence = messages, evidence
@@ -132,6 +137,14 @@ func runOwner(kind string, args []string) int {
 	home := flags.String("home", "", "canonical native home")
 	list := flags.String("list", "", "exact native task list ID")
 	bindingKey := flags.String("binding-key", "", "exact stored Claude list binding key for revocation")
+	generation := flags.Uint64("generation", 0, "expected published generation for identity correction")
+	authority := flags.String("authority", "", "explicit lifecycle authority alias or owner")
+	alias := flags.String("alias", "", "exact source alias to move")
+	donorAuthority := flags.String("donor-authority", "", "replacement authority for donor")
+	destinationAuthority := flags.String("destination-authority", "", "optional explicit replacement authority for destination")
+	var absorbed, attachments repeatedStrings
+	flags.Var(&absorbed, "absorb", "task ID to consolidate; repeat for more tasks")
+	flags.Var(&attachments, "attachment", "exact attachment to move with alias; repeat for more attachments")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -154,6 +167,46 @@ func runOwner(kind string, args []string) int {
 		return exitGeneral
 	}
 	switch kind {
+	case "catalogue":
+		state, readErr := store.ReadContext(ctx)
+		if readErr != nil {
+			err = readErr
+			break
+		}
+		catalogue := state.Catalogue()
+		canonical := ""
+		if *task != "" {
+			canonical, err = state.ResolveTaskID(*task)
+			if err != nil {
+				break
+			}
+			var selected []board.TaskCatalogueEntry
+			for _, entry := range catalogue {
+				if entry.ID == canonical {
+					selected = append(selected, entry)
+				}
+			}
+			catalogue = selected
+		}
+		err = json.NewEncoder(os.Stdout).Encode(struct {
+			Generation  uint64                     `json:"generation"`
+			Tasks       []board.TaskCatalogueEntry `json:"tasks"`
+			RequestedID string                     `json:"requested_id,omitempty"`
+			CanonicalID string                     `json:"canonical_id,omitempty"`
+			Redirects   map[string]string          `json:"redirects"`
+		}{state.Generation, catalogue, *task, canonical, state.Redirects()})
+	case "consolidate":
+		var id string
+		id, err = store.Consolidate(ctx, board.Consolidation{Survivor: *task, Absorb: absorbed, Authority: *authority, ExpectedGeneration: *generation})
+		if err == nil {
+			fmt.Println(id)
+		}
+	case "move-alias":
+		var id string
+		id, err = store.MoveAlias(ctx, board.AliasMove{Alias: *alias, Destination: *task, DonorAuthority: *donorAuthority, DestinationAuthority: *destinationAuthority, Attachments: attachments, ExpectedGeneration: *generation})
+		if err == nil {
+			fmt.Println(id)
+		}
 	case "bind-claude-list", "unbind-claude-list":
 		var key string
 		if kind == "unbind-claude-list" && *bindingKey != "" {
@@ -199,3 +252,8 @@ func adoptWithdrawals(ctx context.Context, store board.Store, path string) error
 	}
 	return store.Adopt(ctx, input.Withdrawals)
 }
+
+type repeatedStrings []string
+
+func (v *repeatedStrings) String() string         { return strings.Join(*v, ", ") }
+func (v *repeatedStrings) Set(value string) error { *v = append(*v, value); return nil }

@@ -42,24 +42,26 @@ type Input struct {
 
 // Model is the board: what every face renders.
 type Model struct {
-	Historical   []Card            `json:"historical"`
-	ActionStates map[string]string `json:"action_states,omitempty"`
-	Schema       string            `json:"schema"`
-	Generation   uint64            `json:"generation,omitempty"`
-	PublishedAt  time.Time         `json:"published_at,omitempty"`
-	Unresolved   []Message         `json:"unresolved"`
-	GeneratedAt  time.Time         `json:"generated_at"`
-	Version      string            `json:"version"`
-	Dir          string            `json:"dir"`
-	Project      string            `json:"project,omitempty"`
-	Sessions     []string          `json:"sessions"`
-	Sources      []SourceView      `json:"sources"`
-	Columns      []ColumnView      `json:"columns"`
-	Next         []NextAction      `json:"next"`
-	Gates        []Gate            `json:"operator_gates"`
-	Roster       []RosterSession   `json:"roster"`
-	RosterNote   string            `json:"roster_note,omitempty"`
-	Usage        *UsageView        `json:"usage,omitempty"`
+	Catalogue    []TaskCatalogueEntry `json:"catalogue"`
+	Redirects    map[string]string    `json:"redirects"`
+	Historical   []Card               `json:"historical"`
+	ActionStates map[string]string    `json:"action_states,omitempty"`
+	Schema       string               `json:"schema"`
+	Generation   uint64               `json:"generation,omitempty"`
+	PublishedAt  time.Time            `json:"published_at,omitempty"`
+	Unresolved   []Message            `json:"unresolved"`
+	GeneratedAt  time.Time            `json:"generated_at"`
+	Version      string               `json:"version"`
+	Dir          string               `json:"dir"`
+	Project      string               `json:"project,omitempty"`
+	Sessions     []string             `json:"sessions"`
+	Sources      []SourceView         `json:"sources"`
+	Columns      []ColumnView         `json:"columns"`
+	Next         []NextAction         `json:"next"`
+	Gates        []Gate               `json:"operator_gates"`
+	Roster       []RosterSession      `json:"roster"`
+	RosterNote   string               `json:"roster_note,omitempty"`
+	Usage        *UsageView           `json:"usage,omitempty"`
 	// Conversations are the harness sessions AMQ records tie to agents; they
 	// attribute usage to workers.
 	Conversations []Conversation `json:"-"`
@@ -87,6 +89,8 @@ type ColumnView struct {
 
 // Card is one unit of work with all its evidence.
 type Card struct {
+	Authority        string       `json:"authority,omitempty"`
+	SourceFacts      []AliasFact  `json:"source_facts,omitempty"`
 	Historical       bool         `json:"historical,omitempty"`
 	ID               string       `json:"id"`
 	Aliases          []string     `json:"aliases,omitempty"`

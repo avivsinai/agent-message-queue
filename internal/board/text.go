@@ -171,6 +171,9 @@ func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]str
 		}
 		fmt.Fprintf(b, "    related: %s\n", clean(strings.Join(rel, " · ")))
 	}
+	for _, fact := range c.SourceFacts {
+		fmt.Fprintf(b, "    source %s: %s; %s\n", clean(fact.Alias), clean(string(fact.Fact.State)), cleanTitle(fact.Fact.Title))
+	}
 	for _, alias := range c.Aliases {
 		fmt.Fprintf(b, "    alias: %s\n", clean(alias))
 	}

@@ -44,6 +44,9 @@ const usage = `Usage: amq-board [--json | --html [--out FILE]]
        amq-board cancel|reopen --scope action --message KEY
        amq-board adopt --file FILE
        amq-board bind-claude-list|unbind-claude-list --home HOME --list LIST
+       amq-board catalogue [--task ID]
+       amq-board consolidate --task ID --absorb ID --authority ALIAS|owner --generation N
+       amq-board move-alias --alias ALIAS --task ID --donor-authority ALIAS|owner --generation N
 
 Views read the published project snapshot. Only sync reads sources.
 First initialization is explicit; an existing or interrupted store needs
@@ -61,7 +64,7 @@ func run(args []string) int {
 		switch args[0] {
 		case "sync":
 			return runSync(args[1:])
-		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list":
+		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list", "consolidate", "move-alias", "catalogue":
 			return runOwner(args[0], args[1:])
 		}
 	}

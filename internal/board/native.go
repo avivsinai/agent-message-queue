@@ -58,6 +58,3 @@ func nativeAlias(source string, item Item) (string, bool) {
 	}
 	return source + ":" + item.Namespace + ":" + item.Ref.ID, true
 }
-func taskInScope(task Task, source, namespace string) bool {
-	return task.Fact.Source == source && task.Fact.Namespace == namespace && strings.HasPrefix(task.Authority, source+":")
-}

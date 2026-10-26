@@ -69,6 +69,7 @@ func runServe(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
 		return exitGeneral
 	}
+	store.ProjectID = initial.ProjectID
 	last := initial
 	live := &board.Live{
 		Load: func() (board.FileConfig, []string) { return loadConfig(dir) }, Now: time.Now, Logf: logf, Ctx: ctx,
@@ -78,6 +79,9 @@ func runServe(args []string) int {
 			state, err := store.ReadContext(readCtx)
 			if err != nil {
 				logf("snapshot not reloaded: %v", err)
+				if errors.Is(err, board.ErrProjectChanged) {
+					stop()
+				}
 			} else {
 				last = state
 			}

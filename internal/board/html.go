@@ -104,7 +104,7 @@ type pageData struct {
 	Views       []pageView
 }
 
-type pageTaskChoice struct{ ID, Title string }
+type pageTaskChoice struct{ ID, Title, Label string }
 
 type pageView struct {
 	ID, Title, Description, Empty, Coverage, CoverageTitle string
@@ -246,11 +246,32 @@ func buildPage(m Model, regenerate string) pageData {
 		p.Roster = append(p.Roster, buildSession(rs, now))
 	}
 	p.Views = buildViews(m, now, live)
+	seen := map[string]bool{}
+	addTask := func(id, title string) {
+		if id == "" || seen[id] || hasControl(id) {
+			return
+		}
+		seen[id] = true
+		title = clean(title)
+		p.TaskChoices = append(p.TaskChoices, pageTaskChoice{ID: id, Title: title, Label: title + " [" + id + "]"})
+	}
+	for _, task := range m.Catalogue {
+		addTask(task.ID, task.Title)
+	}
 	for _, column := range m.Columns {
 		for _, card := range column.Cards {
-			p.TaskChoices = append(p.TaskChoices, pageTaskChoice{ID: card.ID, Title: clean(card.Title)})
+			addTask(card.ID, card.Title)
 		}
 	}
+	for _, card := range m.Historical {
+		addTask(card.ID, card.Title)
+	}
+	sort.Slice(p.TaskChoices, func(i, j int) bool {
+		if p.TaskChoices[i].Title != p.TaskChoices[j].Title {
+			return p.TaskChoices[i].Title < p.TaskChoices[j].Title
+		}
+		return p.TaskChoices[i].ID < p.TaskChoices[j].ID
+	})
 	return p
 }
 

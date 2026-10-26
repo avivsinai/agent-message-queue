@@ -133,15 +133,32 @@
     }, function () { manualCopy(button, command); });
   });
 
-  var attachableTasks = new Set();
-  (snapshot.columns || []).forEach(function (column) { (column.cards || []).forEach(function (card) { attachableTasks.add(card.id); }); });
+  var attachableTasks = new Map();
+  function addTask(task) { if (task && task.id) { attachableTasks.set(task.id, task); } }
+  (snapshot.catalogue || []).forEach(addTask);
+  (snapshot.columns || []).forEach(function (column) { (column.cards || []).forEach(function (card) { if (!attachableTasks.has(card.id)) { addTask(card); } }); });
+  (snapshot.historical || []).forEach(function (card) { if (!attachableTasks.has(card.id)) { addTask(card); } });
+  var taskLabels = new Map();
+  document.querySelectorAll("#board-tasks option").forEach(function (option) {
+    if (attachableTasks.has(option.dataset.taskId)) { taskLabels.set(option.value, option.dataset.taskId); }
+  });
   function quoteArg(value) { return "'" + value.replace(/'/g, "'\\''") + "'"; }
   document.addEventListener("input", function (event) {
     if (!event.target.matches(".attach-task")) { return; }
     var control = event.target.closest(".attach-control");
     var button = control.querySelector("button.copy"), field = control.querySelector("textarea");
-    var taskID = event.target.value, key = control.dataset.message;
-    if (!attachableTasks.has(taskID) || /[\u0000-\u001f\u007f]/.test(taskID + key)) { button.disabled = true; button.removeAttribute("data-command"); field.value = ""; return; }
+    var value = event.target.value, taskID = taskLabels.get(value) || value.trim(), key = control.dataset.message;
+    taskID = (snapshot.redirects || {})[taskID] || taskID;
+    var task = attachableTasks.get(taskID), selection = control.querySelector(".attach-selection");
+    if (!task || /[\u0000-\u001f\u007f]/.test(taskID + key)) {
+      button.disabled = true; button.removeAttribute("data-command"); field.value = "";
+      selection.textContent = "Select a task from the list, or paste a task ID.";
+      return;
+    }
+    var note = "Attach evidence to " + task.title + ".";
+    if (task.cancelled) { note += " This task is cancelled; attaching evidence will not reopen it."; }
+    else if (task.historical || task.recorded_state === "done") { note += " Its historical state will stay the same."; }
+    selection.textContent = note;
     var command = "amq-board attach --task " + quoteArg(taskID) + " --message " + quoteArg(key);
     field.value = command; button.setAttribute("data-command", command); button.disabled = false;
   });
