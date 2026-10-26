@@ -65,9 +65,13 @@ func lookupEnv(env []string, key string) (string, bool) {
 }
 
 // agyDialogSink keeps the wake dialog marker in step with agy's status:
-// blocked:kind=permission and blocked:kind=auth write it, idle, working and
-// done remove it. Another blocked kind changes nothing and is logged once,
-// so a new kind is seen, never guessed. The sink removes only the exact
+// blocked:kind=permission and blocked:kind=auth write it, and so does
+// working, with kind "working": agy queues a doorbell typed during a turn
+// and ignores the Enter-only reminders, so the doorbell waits for the end
+// of the turn, as it does for Cursor. done and idle remove it. agy reports
+// working once when a turn starts and again after a prompt is answered.
+// Another blocked kind changes nothing and is logged once, so a new kind is
+// seen, never guessed. The sink removes only the exact
 // marker it wrote: a marker another writer put in its place stays. coop
 // exec creates a sink only when this launch's wake owns the agent's wake.
 type agyDialogSink struct {
@@ -96,8 +100,12 @@ func newAgyDialogSink(root, handle string, log io.Writer) (*agyDialogSink, error
 	return sink, nil
 }
 
-// agyDialogEvent marks a dialog marker an agy relay wrote.
-const agyDialogEvent = "OSC7501"
+const (
+	// agyDialogEvent marks a dialog marker an agy relay wrote.
+	agyDialogEvent = "OSC7501"
+	// agyWorkingKind is the marker kind of a running agy turn.
+	agyWorkingKind = "working"
+)
 
 func (s *agyDialogSink) onState(state, kind string) {
 	switch state {
@@ -112,21 +120,30 @@ func (s *agyDialogSink) onState(state, kind string) {
 		if s.open == kind {
 			return
 		}
-		raw, err := json.Marshal(wakeDialogMarker{
-			Schema: 1, Event: agyDialogEvent, Harness: "agy", Kind: kind,
-			OpenedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		})
-		if err != nil {
-			return
-		}
-		raw = append(raw, '\n')
-		if s.agentDir.withFD(func(dirfd int) error {
-			return replaceWakeDialogMarkerAt(dirfd, s.agentDir, raw)
-		}) == nil {
-			s.open, s.written = kind, raw
-		}
-	case "idle", "working", "done":
+		s.write(kind)
+	case "working":
+		// Written each time, so the marker's age is the time since agy last
+		// reported the turn.
+		s.write(agyWorkingKind)
+	case "idle", "done":
 		s.clear()
+	}
+}
+
+// write replaces the marker with one of kind.
+func (s *agyDialogSink) write(kind string) {
+	raw, err := json.Marshal(wakeDialogMarker{
+		Schema: 1, Event: agyDialogEvent, Harness: "agy", Kind: kind,
+		OpenedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return
+	}
+	raw = append(raw, '\n')
+	if s.agentDir.withFD(func(dirfd int) error {
+		return replaceWakeDialogMarkerAt(dirfd, s.agentDir, raw)
+	}) == nil {
+		s.open, s.written = kind, raw
 	}
 }
 

@@ -604,10 +604,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
-	var holds map[string]wakeHold
-	if cfg.settings.holdPolicy().enabled() {
-		holds = make(map[string]wakeHold)
-	}
+	// Every message gets a hold, priority holds or not: the doorbell reads
+	// an addition's urgency from it. A zero policy makes each hold due at
+	// arrival, which holds nothing.
+	holds := make(map[string]wakeHold)
 	scanTime := cfg.wakeDoorbellNow()
 
 	for _, entry := range entries {
@@ -646,14 +646,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			continue
 		}
 		currentPending[name] = pendingInfo
-		if holds != nil {
-			// A corrupt header has no priority and counts as normal.
-			priority := ""
-			if err == nil {
-				priority = header.Priority
-			}
-			holds[name] = newWakeHold(cfg.settings.holdPolicy(), priority, pendingInfo, scanTime)
+		// A corrupt header has no priority and counts as normal.
+		holdPriority := ""
+		if err == nil {
+			holdPriority = header.Priority
 		}
+		holds[name] = newWakeHold(cfg.settings.holdPolicy(), holdPriority, pendingInfo, scanTime)
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})

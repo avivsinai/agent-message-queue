@@ -164,6 +164,8 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 		harness = "The harness"
 	}
 	switch {
+	case marker.Event == agyDialogEvent && marker.Harness == "agy" && marker.Kind == agyWorkingKind:
+		return harness + " is busy; the doorbell rings when the turn ends"
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
 		return harness + " startup screen open; type a prompt in that terminal to release"
 	case marker.Event == wakeDialogStartupEvent:
