@@ -78,6 +78,10 @@ function engine(on: On) {
     world.isOpen = true
     return { value: { isPlaced: true } }
   })
+  on('ui.close', () => {
+    world.isOpen = false
+    return { value: undefined }
+  })
   on('ui.panes', () => ({
     value: world.isOpen ? [{ id: 'amq-board', title: 'AMQ board', isShown: true, isFocused: false, isPlaced: true }] : [],
   }))
@@ -138,7 +142,8 @@ test('/board draws the board a running serve publishes, escapes as plain text', 
   expect(world.boardRuns).toBe(0)
 })
 
-test('/board runs amq-board --json in the session directory when no serve runs', async ($, on) => {
+// Installed check for agent-message-queue-868.10: /board had no terminal close path.
+test('/board opens and closes the panel and stops its refresh runs', async ($, on) => {
   const { world, clock } = engine(on)
   on('fs.read', () => ({ deny: 'ENOENT: no such file' }))
 
@@ -149,6 +154,13 @@ test('/board runs amq-board --json in the session directory when no serve runs',
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /Waiting on you/ }))?.text).toBe('Waiting on you (1)')
   await ui.unmount()
+  expect(world.boardRuns).toBe(1)
+
+  await $.command.run(BOARD)
+  await clock.settle()
+  expect(world.isOpen).toBe(false)
+  expect(world.statuses.at(-1)).toBeUndefined()
+  await clock.advance(180_000)
   expect(world.boardRuns).toBe(1)
 })
 
