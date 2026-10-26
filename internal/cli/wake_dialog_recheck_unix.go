@@ -71,7 +71,13 @@ func (r *wakeStartupRecheck) codexStartupProven(raw []byte, now time.Time) bool 
 		return false
 	}
 	installed, known := parseCodexVersion(plan.Version)
-	cacheRuledOut := known && codexUpdateVersionVerified(installed) && codexVersionCacheRulesOutPrompt(plan.CodexHome, installed)
+	verified := known && codexUpdateVersionVerified(installed)
+	cacheRuledOut := verified && codexVersionCacheRulesOutPrompt(plan.CodexHome, installed)
+	// A verified release before hook review shows no hook review.
+	preReview := verified && codexVersionNewer(codexHookReviewSince, installed)
+	if preReview && cacheRuledOut {
+		return true
+	}
 	if !r.lastProbe.IsZero() && !now.Before(r.lastProbe) && now.Sub(r.lastProbe) < codexStartupRecheckEvery {
 		return false
 	}
@@ -79,5 +85,5 @@ func (r *wakeStartupRecheck) codexStartupProven(raw []byte, now time.Time) bool 
 	ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
 	defer cancel()
 	probe := runCodexStartupProbe(ctx, plan)
-	return probe.hooksClear && (cacheRuledOut || probe.updateCheckOff && probe.requirementsClear)
+	return (preReview || probe.hooksClear) && (cacheRuledOut || probe.updateCheckOff && probe.requirementsClear)
 }

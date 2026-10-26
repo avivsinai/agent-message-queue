@@ -222,7 +222,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   what releases it.
 
   Codex's "Not now" on the update prompt records nothing, so an update
-  prompt marker releases only through the dialog hook's first-turn close.
+  prompt marker releases through the dialog hook's first-turn close, or
+  through the wake's startup recheck (below) once Codex's state rules the
+  prompt out.
   coop exec and `amq launch` start a Codex seat that carries AMQ's `-c`
   identity overrides with `-c check_for_update_on_startup=false`. Codex
   shows the prompt only when that setting is in effect, a legacy managed
@@ -243,9 +245,10 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   so there the effective value comes from the configuration files: setting
   `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
   (default `~/.codex/config.toml`) releases a daemon seat too, when no
-  managed layer or requirement turns it on. The probe runs only for
-  releases that review hooks (below), so on `0.145.0`, `0.161.0` and
-  `0.163.0` only the version cache rules the prompt out. AMQ does not edit
+  managed layer or requirement turns it on. At launch the probe runs only
+  for releases that review hooks (below), so on `0.145.0`, `0.161.0` and
+  `0.163.0` coop exec rules the prompt out by the version cache alone; the
+  wake's recheck also asks their probe. AMQ does not edit
   `config.toml`.
 
   Directory trust and native hook review are separate startup screens.
@@ -274,7 +277,14 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   the wake repeats the same bounded probe at most once every 10 seconds,
   after Codex records the directory trust, and removes the marker once the
   probe shows no hook to review and the update prompt ruled out. That
-  release needs no hook, and nothing releases on a timer. The dialog hook's
+  release needs no hook, and nothing releases on a timer. On the verified
+  releases before `0.164.0` an update prompt marker keeps the plan too, and
+  the recheck releases it once the trust is recorded and the version cache
+  or the probe rules the prompt out. The plan leaves out the seat's
+  `shell_environment_policy.set` identity overrides. Known limit: Codex's
+  resume directory prompt (`codex resume <id>` from another directory,
+  tui/src/lib.rs:1003-1037 at rust-v0.164.0) records no answer, so AMQ does
+  not model it, and a recheck release can ring while it shows. The dialog hook's
   `UserPromptSubmit` close releases it too; a `Stop`, `Interrupt` or session
   event does not, because a daemon turn admitted before this terminal
   started sends them. `codex app-server` refuses `--profile`, and

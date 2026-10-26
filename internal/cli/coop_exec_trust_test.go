@@ -224,6 +224,31 @@ func TestCodexTrustReleaseRetypesTheDoorbellUntilInputIsProven(t *testing.T) {
 				}
 			},
 		},
+		{
+			// post-release review v0.113.2 (lead ruling on finding S1):
+			// an update prompt marker of a verified release before hook
+			// review kept no probe plan, so only the dialog hook released
+			// it. Codex 0.163's app-server answers config/read and
+			// configRequirements/read, which rule the prompt out.
+			name: "0.163 startup probe rules the update prompt out",
+			run: func(t *testing.T, h *wakeHoldHarness) {
+				// The version cache names 0.164.0, newer than 0.163.0.
+				bin := fakeCodexForTest(t, os.Getenv("CODEX_HOME"), "0.163.0",
+					map[string]string{"": `{"id":2,"result":{"data":[]}}`}, `{"id":3,"result":{"requirements":null}}`, "")
+				if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+				if err := os.Chtimes(marker, h.now, h.now); err != nil {
+					t.Fatalf("no Startup marker for a possible update prompt: %v", err)
+				}
+				h.send("a", format.PriorityUrgent)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("full doorbells once the probe rules the update prompt out = %d, want 1", got)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, config, real, marker := newCodexTrustDialogHarness(t)
@@ -387,7 +412,8 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 				t.Setenv("TERM", tc.term)
 			}
 			byCwd := map[string]string{"": fmt.Sprintf(tc.hooks, real)}
-			args := []string{"-c", "check_for_update_on_startup=false"}
+			// coop exec gives the seat its identity as overrides.
+			args := pinCodexShellIdentity("/usr/local/bin/codex", nil, []string{"AM_ME=codex", "AM_TOKEN=tok-secret"}, false)
 			switch {
 			case tc.cdTopLevel:
 				// /var is a top-level symlink to /private/var on macOS.
@@ -440,6 +466,12 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			var got wakeDialogMarker
 			if err != nil || json.Unmarshal(raw, &got) != nil || got.Kind != tc.kind {
 				t.Fatalf("Startup marker %q, %v; want kind %s", raw, err, tc.kind)
+			}
+			// post-release review v0.113.2 (lead ruling): the stored probe
+			// plan kept the seat's AM_* identity overrides, a token among
+			// them.
+			if strings.Contains(string(raw), "AM_") || strings.Contains(string(raw), "tok-secret") {
+				t.Fatalf("Startup marker %q holds the seat's identity", raw)
 			}
 		})
 	}

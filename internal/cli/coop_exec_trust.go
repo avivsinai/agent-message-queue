@@ -33,9 +33,9 @@ const wakeDialogStartupEvent = "Startup"
 
 // wakeStartupKindUpdate marks a Codex Startup marker written only because
 // the update prompt could not be ruled out (startupDialogMarkerFor). The
-// dialog hook releases it. On a release that reviews hooks, or one AMQ
-// cannot verify, the marker keeps a probe plan, and the wake's startup
-// recheck also releases it once Codex's own state rules the prompt out.
+// dialog hook releases it, and so does the wake's startup recheck once
+// Codex's own state rules the prompt out, when the marker keeps a probe
+// plan.
 const wakeStartupKindUpdate = "update_prompt"
 
 // wakeStartupKindReview marks a Codex Startup marker for a release that
@@ -262,9 +262,23 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 	installed, known := codexInstalledVersion(binaryPath)
 	cacheRuledOut := codexUpdatePromptRuledOut(installed, known)
 	// The verified releases before hook review keep the trust and version
-	// cache decision.
+	// cache decision. Their app-server answers config/read and
+	// configRequirements/read too (app-server-protocol common.rs at
+	// rust-v0.145.0, 0.161.0 and 0.163.0), so an update prompt marker keeps
+	// the probe's plan for the wake's startup recheck.
 	if known && codexUpdateVersionVerified(installed) && codexVersionNewer(codexHookReviewSince, installed) && !codexTerminalDumb() {
-		return startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
+		marker, hold := startupDialogMarkerDecision(harness, dir, trust, cacheRuledOut)
+		if hold && marker.Kind == wakeStartupKindUpdate {
+			if physical, ok := codexPhysicalLaunchDir(args, wd); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), codexHooksProbeTimeout)
+				plan, planned := planCodexStartupProbe(ctx, binaryPath, args, wd, physical, recorded)
+				cancel()
+				if planned {
+					marker.Probe = withCodexVersion(plan, installed, known)
+				}
+			}
+		}
+		return marker, hold
 	}
 	// Any other release may review hooks after its trust screen. It starts
 	// clear only when Codex records that it trusts the directory, its

@@ -56,7 +56,7 @@ type codexStartupPlan struct {
 	// Binary is the Codex executable the seat runs.
 	Binary string `json:"binary"`
 	// Overrides are the seat's -c, --enable and --disable options, for an
-	// embedded probe.
+	// embedded probe, without its identity overrides.
 	Overrides []string `json:"overrides,omitempty"`
 	// Dir is the physical cwd the TUI sends hooks/list and config/read
 	// for (codexPhysicalLaunchDir).
@@ -122,8 +122,24 @@ func planCodexStartupProbe(ctx context.Context, binaryPath string, args []string
 	if !ok {
 		return codexStartupPlan{}, false
 	}
-	plan.Overrides = overrides
+	plan.Overrides = withoutCodexIdentityOverrides(overrides)
 	return plan, true
+}
+
+// withoutCodexIdentityOverrides drops the shell_environment_policy.set
+// overrides, which carry the seat's AM_* identity (a token among them):
+// the plan is stored in the Startup marker, and those values change
+// neither the update check, the hooks, nor the trust a probe reads.
+func withoutCodexIdentityOverrides(overrides []string) []string {
+	var out []string
+	for i := 0; i+1 < len(overrides); i += 2 {
+		key, _, _ := strings.Cut(overrides[i+1], "=")
+		if overrides[i] != "--enable" && overrides[i] != "--disable" && strings.HasPrefix(strings.TrimSpace(key), "shell_environment_policy.set") {
+			continue
+		}
+		out = append(out, overrides[i], overrides[i+1])
+	}
+	return out
 }
 
 // runCodexStartupProbe asks the app-server plan names, within ctx.
