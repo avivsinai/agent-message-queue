@@ -67,6 +67,7 @@ func init() {
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	codexDaemonPID = func(string) (int, error) { return 0, errors.New("tests dial no app-server") }
 	serviceRun = func(string, ...string) error { return errors.New("tests run no service manager") }
+	serviceRunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
 	claudeStopHookState = func() (string, error) { return "", errors.New("tests read no Claude settings") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
