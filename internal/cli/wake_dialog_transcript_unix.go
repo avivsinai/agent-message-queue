@@ -187,7 +187,7 @@ func (fold *claudeTranscriptFold) advance(path string) error {
 	case fold.incomplete != "":
 		return nil
 	case size > maxWakeDialogTranscriptBytes:
-		fold.incomplete = "transcript over 64 MiB"
+		fold.incomplete = fmt.Sprintf("transcript over %d MiB", maxWakeDialogTranscriptBytes>>20)
 		return nil
 	}
 	for fold.offset < size {
@@ -200,13 +200,13 @@ func (fold *claudeTranscriptFold) advance(path string) error {
 		end := bytes.LastIndexByte(buf, '\n')
 		if end < 0 {
 			if len(buf) > maxWakeDialogTranscriptLine {
-				fold.incomplete = "a transcript record over 8 MiB"
+				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
 			}
 			return nil // a record still being written
 		}
 		for line := range bytes.SplitSeq(buf[:end], []byte{'\n'}) {
 			if len(line) > maxWakeDialogTranscriptLine {
-				fold.incomplete = "a transcript record over 8 MiB"
+				fold.incomplete = fmt.Sprintf("a transcript record over %d MiB", maxWakeDialogTranscriptLine>>20)
 				return nil
 			}
 			fold.add(line)
