@@ -708,7 +708,8 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   time-critical unblocking requests or verdicts.
 
 Settings (hold, debounce, preview, bell, input deferral, interrupt notice,
-  inject timeout, self-upgrade) live in <root>/agents/<me>/.wake.settings,
+  inject timeout, self-upgrade, held-doorbell notice) live in
+  <root>/agents/<me>/.wake.settings,
   over the machine file ~/.amq/wake.settings (every wake of this user on this
   machine), over the built-in defaults, key by key. Explicit settings flags on
   a fresh start write their keys to the agent file. A resume (self-upgrade or
@@ -758,6 +759,8 @@ Options:
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
   -harness string
         Program the wake types into (claude, codex, agy, pi, cursor, grok, or other for generic behavior); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing
+  -held-notice
+        Show a desktop notification at once when a harness dialog holds the doorbell (macOS osascript, Linux notify-send) (default true)
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
@@ -1407,6 +1410,8 @@ Options:
         Debounce window for batching messages (default 250ms)
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -held-notice
+        Show a desktop notification at once when a harness dialog holds the doorbell (macOS osascript, Linux notify-send) (default true)
   -hold-low duration
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration

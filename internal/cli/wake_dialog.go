@@ -14,8 +14,9 @@ const (
 	wakeDialogClosed wakeDialogState = iota
 	wakeDialogOpen
 	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
-	// the future, or one that cannot be read. It may still hide an open dialog, so input stays
-	// held, but the wake emits attention output instead of waiting silently.
+	// the future, or one that cannot be read. It may still hide an open
+	// dialog, so input stays held; held attempts follow the attention retry
+	// ladder instead of the 2-second recheck.
 	wakeDialogUnknown
 )
 
@@ -26,7 +27,7 @@ const (
 	wakeDialogRecheck = 2 * time.Second
 	// After this long a marker no longer proves a dialog: a closing hook may
 	// not have fired (Esc is a user interrupt with no Stop event). Input
-	// stays held; only attention output is added.
+	// stays held; the wake stops the 2-second recheck.
 	wakeDialogQuietHold = 10 * time.Minute
 )
 
@@ -65,12 +66,14 @@ func classifyWakeDialogMarker(
 // before the notification attempt starts, so it writes no ledger record and
 // records no input attempt: the reminder budget and presentation state stay
 // as they are, and the next ring after the dialog closes is the full
-// doorbell. The message stays in the inbox.
+// doorbell. The message stays in the inbox. The hold is never silent: each
+// held attempt goes through presentWakeDialogHold.
 func holdWakeForDialog(
 	cfg *wakeConfig,
 	state wakeDialogState,
 	readErr error,
 	output wakePayload,
+	pending int,
 ) error {
 	now := cfg.wakeDoorbellNow()
 	if cfg.dialogHold != state {
@@ -87,12 +90,44 @@ func holdWakeForDialog(
 	if state == wakeDialogOpen {
 		cfg.doorbell.recordDialogHold(now, wakeDialogRecheck)
 		persistWakeDoorbellStatusBestEffort(cfg)
-		return nil
+		return presentWakeDialogHold(cfg, output, pending)
 	}
-	if err := deliverWakeTransientAttention(cfg, output, nil); err != nil {
+	if err := presentWakeDialogHold(cfg, output, pending); err != nil {
 		return err
 	}
 	cfg.doorbell.recordDeferredInputAttempt(now)
 	persistWakeDoorbellStatusBestEffort(cfg)
 	return nil
+}
+
+// presentWakeDialogHold shows a held doorbell to the owner: the desktop
+// notice (held_notice) and the terminal attention floor, at the first held
+// attempt, then once per attention period, and again at once when more
+// messages wait than the last notice named. Input stays held throughout.
+func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int) error {
+	if err := authorizePeerWakeAttention(cfg, output); err != nil {
+		return err
+	}
+	reason := wakeDialogGenericHoldReason
+	if cfg.dialogHoldReason != nil {
+		text, marker := cfg.dialogHoldReason()
+		if !marker {
+			// No marker: coop exec's startup hold has not written or
+			// cleared the Startup marker yet, or the dialog just closed.
+			return nil
+		}
+		reason = text
+	}
+	now := cfg.wakeDoorbellNow()
+	if !cfg.doorbell.heldNoticeDue(now, pending) {
+		cfg.doorbell.heldNoticeCount = min(cfg.doorbell.heldNoticeCount, pending)
+		return nil
+	}
+	cfg.doorbell.recordHeldNotice(now, pending)
+	if cfg.settings.heldNotice && cfg.desktopNotify != nil {
+		if err := cfg.desktopNotify(wakeDesktopNoticeTitle, wakeHeldNoticeBody(cfg.me, pending, reason)); err != nil {
+			_ = writeWakeDiagnostic(cfg, "amq wake: held-doorbell desktop notice failed: %v\n", err)
+		}
+	}
+	return emitWakeAttention(cfg, output)
 }

@@ -392,8 +392,8 @@ func startupTrustFileStamp(harness string) string {
 // codexStartupHoldHint reports a Codex Startup marker for handle that still
 // holds input (startupDialogClosed, as the wake decides). Without a Codex
 // record of the answer the hold releases only through the Codex dialog
-// hook at the session's first turn, or by aging: input held, attention
-// output after wakeDialogQuietHold.
+// hook at the session's first turn; while it holds, the wake shows the
+// held-doorbell notice.
 func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName), maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
@@ -532,10 +532,11 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 		startupDialogClosed(raw, &startupDialogCache{}) {
 		return nil
 	}
-	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; input stays held, with attention output after %s",
-		marker.Harness, wakeDialogQuietHold)
+	const held = "input stays held, and the wake shows the held-doorbell notice at once"
+	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; %s",
+		marker.Harness, held)
 	if marker.Harness == launch.CodexProvider {
-		release = fmt.Sprintf("%s; input stays held, with attention output after %s", codexStartupHoldRelease(marker), wakeDialogQuietHold)
+		release = codexStartupHoldRelease(marker) + "; " + held
 	}
 	return &wakeStartupHoldStatus{
 		Harness: marker.Harness, Dir: marker.Cwd,

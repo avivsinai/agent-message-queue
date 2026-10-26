@@ -144,6 +144,22 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   dialog that opens during a doorbell stops its remaining bytes; the held
   Enter is sent after the dialog closes. Urgent and interrupt mail is held the
   same way.
+- **Held-doorbell notice.** A held doorbell is never silent. At the first
+  delivery attempt a marker blocks, the wake shows a desktop notification
+  titled `AMQ` that names the agent, the number of waiting messages, and why
+  input is held, for example `codex: 1 message waiting, doorbell held. Codex
+  startup screen open; type a prompt in that terminal to release`. It also
+  writes the terminal attention floor (title, bell, and an OSC 9 or OSC 777
+  notice where the terminal supports one) to the wake's attention output. The
+  notice repeats once per attention period (30 seconds, doubling to 15
+  minutes) while the hold lasts, and at once when more messages wait than the
+  last notice named. On macOS the notification comes from `osascript`; on
+  Linux from `notify-send` when it is installed; elsewhere only the terminal
+  floor is written. Each notification is one child process with a 2-second
+  limit, and a failure is one diagnostic line. The live setting `held_notice`
+  (default `true`) turns the desktop notification off; the terminal floor
+  stays. During the moment before `amq coop exec` writes or clears the
+  `Startup` marker, the wake holds without a notice.
 - **Whole-turn hold after a permission dialog.** Permission hook input has no
   tool call id, so only `Stop` or `UserPromptSubmit` clears a permission
   marker. A doorbell that would land mid-turn after a permission dialog lands
@@ -151,9 +167,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
 - **Esc and stale markers.** Esc on a dialog is a user interrupt, and Claude
   Code runs no `Stop` hook for it. A denied permission is the same. The marker
   then stays until the person's next prompt. A marker older than 10 minutes,
-  dated in the future, or one the wake cannot read, still blocks input. When
-  it blocks a delivery attempt, the wake adds attention output (title, bell,
-  desktop notice) on the attention cadence instead of waiting silently.
+  dated in the future, or one the wake cannot read, still blocks input. The
+  wake then stops the 2-second recheck and retries on the attention cadence,
+  with the held-doorbell notice.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
   directory before the session starts, and Enter at that dialog ends the
@@ -195,7 +211,7 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   the person keeps untrusted or one outside any Git checkout, so that hold
   stays until the first-turn close of `amq wake install-dialog-hook
   --harness codex`; without that hook the marker ages as above (input held,
-  attention output after 10 minutes), and `amq doctor --ops` names the
+  with the held-doorbell notice from the first held attempt), and `amq doctor --ops` names the
   remedy. `amq wake check` reports an open `Startup` marker as
   `startup_hold`: the harness, the directory, how long it has been open, and
   what releases it.
@@ -405,8 +421,12 @@ A running wake has two kinds of input.
   `hold_normal`, `hold_low`, `preview_len`, `bell`, `defer_while_input`,
   `input_quiet_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
-  `interrupt_cooldown`, `inject_timeout`, and `self_upgrade`. Each has a flag
-  of the same name with `-` in place of `_`.
+  `interrupt_cooldown`, `inject_timeout`, `self_upgrade`, and `held_notice`.
+  Each has a flag of the same name with `-` in place of `_`.
+- `held_notice` (default `true`) shows the desktop notification of a
+  dialog-held doorbell (see [Held-doorbell notice](#dialog-guard-claude-code)).
+  `false` stops it at the next held attempt; the terminal attention floor
+  stays.
 - `self_upgrade` (default `true`) is the self-upgrade kill switch. `false`
   stops new self-upgrade candidates at the next maintenance tick (every 30
   seconds) without a restart; a restart request already published finishes.
