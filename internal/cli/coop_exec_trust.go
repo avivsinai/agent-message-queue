@@ -540,18 +540,13 @@ func codexResumeOrForkAt(args []string) int {
 	return at
 }
 
-// codexTerminalDumb reports whether Codex reads this terminal as dumb and
-// so asks "Continue anyway? [y/N]" before its TUI starts
-// (cli/src/main.rs:2518-2533 at rust-v0.164.0), where the doorbell's Enter
-// answers No and no record shows the answer: TERM_PROGRAM (other than tmux)
-// names dumb, or none of the terminal variables Codex checks before TERM is
-// set and TERM is dumb (terminal-detection/src/lib.rs:254-330 at
-// rust-v0.164.0).
-func codexTerminalDumb() bool {
-	return codexTerminalDumbIn(os.LookupEnv)
-}
-
-// codexTerminalDumbIn is codexTerminalDumb for the environment lookup reads.
+// codexTerminalDumbIn reports whether Codex reads the terminal of the
+// environment lookup reads as dumb and so asks "Continue anyway? [y/N]"
+// before its TUI starts (cli/src/main.rs:2518-2533 at rust-v0.164.0), where
+// the doorbell's Enter answers No and no record shows the answer:
+// TERM_PROGRAM (other than tmux) names dumb, or none of the terminal
+// variables Codex checks before TERM is set and TERM is dumb
+// (terminal-detection/src/lib.rs:254-330 at rust-v0.164.0).
 func codexTerminalDumbIn(lookup func(string) (string, bool)) bool {
 	get := func(key string) string { value, _ := lookup(key); return strings.TrimSpace(value) }
 	if program := get("TERM_PROGRAM"); program != "" && !strings.EqualFold(program, "tmux") {
