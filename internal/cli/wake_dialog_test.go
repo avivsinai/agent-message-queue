@@ -36,7 +36,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, &wakeStartupRecheck{})
 	hook := func(verb, input string) {
 		t.Helper()
 		if err := runWakeDialog([]string{verb}, strings.NewReader(input)); err != nil {
@@ -75,10 +75,18 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	if len(notices) != 1 {
 		t.Fatalf("notices within the attention period = %q, want still one", notices)
 	}
+	// post-release review v0.113.2 finding W1: each new message showed
+	// another notice at once, with no cap. Only the attention ladder paces
+	// the notice.
 	h.send("b", format.PriorityNormal)
 	h.scan(h.cfg)
+	if len(notices) != 1 {
+		t.Fatalf("notices after a new message within the attention period = %q, want still one", notices)
+	}
+	h.advance(wakeDoorbellAttentionRetryBase)
+	h.scan(h.cfg)
 	if len(notices) != 2 || !strings.Contains(notices[1], "2 messages waiting") {
-		t.Fatalf("notices after a new message = %q, want a second for 2 messages", notices)
+		t.Fatalf("notices once the attention period ends = %q, want a second for 2 messages", notices)
 	}
 	if h.cfg.doorbell.reminderAttempts != 0 || h.cfg.doorbell.presentationConfirmed {
 		t.Fatalf("hold spent the doorbell: reminderAttempts=%d presentationConfirmed=%v",

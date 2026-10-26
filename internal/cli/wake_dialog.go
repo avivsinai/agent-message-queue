@@ -15,8 +15,9 @@ const (
 	wakeDialogOpen
 	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
 	// the future, or one that cannot be read. It may still hide an open
-	// dialog, so input stays held; held attempts follow the attention retry
-	// ladder instead of the 2-second recheck.
+	// dialog, so input stays held; held attempts follow the input retry
+	// ladder (5 s doubling to 2 min) instead of the 2-second recheck, and
+	// the held notice follows the attention ladder.
 	wakeDialogUnknown
 )
 
@@ -102,8 +103,7 @@ func holdWakeForDialog(
 
 // presentWakeDialogHold shows a held doorbell to the owner: the desktop
 // notice (held_notice) and the terminal attention floor, at the first held
-// attempt, then once per attention period, and again at once when more
-// messages wait than the last notice named. Input stays held throughout.
+// attempt, then once per attention period. Input stays held throughout.
 func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int) error {
 	if err := authorizePeerWakeAttention(cfg, output); err != nil {
 		return err
@@ -119,11 +119,10 @@ func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int) err
 		reason = text
 	}
 	now := cfg.wakeDoorbellNow()
-	if !cfg.doorbell.heldNoticeDue(now, pending) {
-		cfg.doorbell.heldNoticeCount = min(cfg.doorbell.heldNoticeCount, pending)
+	if !cfg.doorbell.heldNoticeDue(now) {
 		return nil
 	}
-	cfg.doorbell.recordHeldNotice(now, pending)
+	cfg.doorbell.recordHeldNotice(now)
 	if cfg.settings.heldNotice && cfg.desktopNotify != nil {
 		if err := cfg.desktopNotify(wakeDesktopNoticeTitle, wakeHeldNoticeBody(cfg.me, pending, reason)); err != nil {
 			_ = writeWakeDiagnostic(cfg, "amq wake: held-doorbell desktop notice failed: %v\n", err)

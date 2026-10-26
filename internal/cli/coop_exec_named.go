@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -313,7 +312,7 @@ func codexLaunchArgs(args []string) (embedded, unknown, tui bool) {
 // effective features for its directory. A Codex that reports no
 // daemon_auto_start feature predates the daemon and runs embedded; a
 // failed feature probe establishes nothing.
-func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
+func codexLaunchBackend(ctx context.Context, cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
 	envEmbedded := false
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
@@ -328,7 +327,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 		return codexEmbedded, nil
 	}
 	dir := codexLaunchDir(args, wd)
-	features, err := codexEffectiveFeatures(cmdName, dir)
+	features, err := codexEffectiveFeatures(ctx, cmdName, dir)
 	if err != nil {
 		return codexBackendUnknown, nil
 	}
@@ -338,7 +337,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 	// The Bedrock wizard can exclude a signed-out TUI from the daemon.
 	// A successful login-status probe rules out that exclusion; a failed
 	// probe cannot distinguish missing auth from an unreadable configuration.
-	if features["bedrock_setup_wizard"] && !codexLoginConfigured(cmdName, wd, dir, codexHome) {
+	if features["bedrock_setup_wizard"] && !codexLoginConfigured(ctx, cmdName, wd, dir, codexHome) {
 		return codexBackendUnknown, features
 	}
 	if _, err := codex.ControlSocket(codexHome); err != nil && !features["daemon_auto_start"] {
@@ -392,7 +391,9 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if err != nil {
 		return nil, false
 	}
-	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
+	discovery, cancelDiscovery := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	backend, features := codexLaunchBackend(discovery, cmdName, agentArgs, wd, codexHome)
+	cancelDiscovery()
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
 		// coop exec then gives the seat its identity through configuration
@@ -465,12 +466,9 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 // `codex features list` prints them: one "<name> <stage> <true|false>" row
 // per feature, from the same layers the TUI loads (codex-cli 0.160
 // cli/src/main.rs FeaturesSubcommand::List, cloud_config::load_config).
-func codexEffectiveFeatures(cmdName, dir string) (map[string]bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
-	defer cancel()
-	list := exec.CommandContext(ctx, cmdName, "features", "list")
-	list.Dir = dir
-	output, err := list.Output()
+// The listing runs in dir within the caller's deadline.
+func codexEffectiveFeatures(ctx context.Context, cmdName, dir string) (map[string]bool, error) {
+	output, err := codexFeaturesListOutput(ctx, cmdName, dir)
 	if err != nil {
 		return nil, fmt.Errorf("codex features list: %w", err)
 	}

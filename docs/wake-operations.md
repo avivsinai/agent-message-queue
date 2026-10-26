@@ -148,12 +148,16 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   delivery attempt a marker blocks, the wake shows a desktop notification
   titled `AMQ` that names the agent, the number of waiting messages, and why
   input is held, for example `codex: 1 message waiting, doorbell held. Codex
-  startup screen open; type a prompt in that terminal to release`. It also
+  startup screen open; answer it in that terminal; the doorbell rings once
+  Codex's state shows the screen closed; a prompt typed there releases it
+  too`.
+  When the Codex dialog hook cannot run, the reason names its remedy instead
+  of a typed prompt. It also
   writes the terminal attention floor (title, bell, and an OSC 9 or OSC 777
   notice where the terminal supports one) to the wake's attention output. The
   notice repeats once per attention period (30 seconds, doubling to 15
-  minutes) while the hold lasts, and at once when more messages wait than the
-  last notice named. On macOS the notification comes from `osascript`; on
+  minutes) while the hold lasts; new messages do not make it due sooner. On
+  macOS the notification comes from `osascript`; on
   Linux from `notify-send` when it is installed; elsewhere only the terminal
   floor is written. Each notification is one child process with a 2-second
   limit, and a failure is one diagnostic line. The live setting `held_notice`
@@ -168,8 +172,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   Code runs no `Stop` hook for it. A denied permission is the same. The marker
   then stays until the person's next prompt. A marker older than 10 minutes,
   dated in the future, or one the wake cannot read, still blocks input. The
-  wake then stops the 2-second recheck and retries on the attention cadence,
-  with the held-doorbell notice.
+  wake then stops the 2-second recheck and retries on the input retry ladder
+  (5 seconds, doubling to 2 minutes), with the held-doorbell notice on the
+  attention cadence.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
   directory before the session starts, and Enter at that dialog ends the
@@ -264,10 +269,22 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
   output stays out of AMQ diagnostics. An error, a timeout, an unreadable
   reply, an untrusted, modified, missing or unknown trust status, a working
   directory AMQ cannot resolve, a `--profile` seat, or a backend AMQ
-  cannot tell writes the marker. A marker written for such a release
-  releases only through the dialog
-  hook's first-turn close: the trust record never releases it, and the
-  recheck does not probe again. When the AMQ dialog hook is installed but
+  cannot tell writes the marker. The marker keeps the probe's plan (binary,
+  options, directory, backend, `CODEX_HOME` and version). While it is open
+  the wake repeats the same bounded probe at most once every 10 seconds,
+  after Codex records the directory trust, and removes the marker once the
+  probe shows no hook to review and the update prompt ruled out. That
+  release needs no hook, and nothing releases on a timer. The dialog hook's
+  `UserPromptSubmit` close releases it too; a `Stop`, `Interrupt` or session
+  event does not, because a daemon turn admitted before this terminal
+  started sends them. `codex app-server` refuses `--profile`, and
+  `-c profile=<name>` selects a legacy `[profiles]` table rather than the
+  profile file `--profile` loads, so a `--profile` seat cannot be probed and
+  its marker releases only through the dialog hook. With `TERM=dumb` (as
+  Codex detects it) Codex asks `Continue anyway? [y/N]` first, so coop exec
+  writes a marker that only the dialog hook releases. As after a trust
+  release, a written doorbell does not count as presented until a drain
+  that follows it. When the AMQ dialog hook is installed but
   Codex does not trust it, `amq doctor --ops` names the remedy: open
   `/hooks` in Codex and trust the `AMQ_DIALOG_HOOK` entries. A missing hook
   names `amq wake install-dialog-hook --harness codex`.
