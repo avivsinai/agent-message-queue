@@ -82,11 +82,12 @@ func holdWakeForDialog(
 ) error {
 	now := cfg.wakeDoorbellNow()
 	cause := cfg.dialogHoldCause()
-	// A new dialog marker is a new hold: its notice is due at once, not on
-	// the ladder the earlier marker left, even when the wake never saw the
-	// busy turn between them. An unchanged marker keeps its ladder.
+	// A new marker is a new hold: its notice is due at once, not on the
+	// ladder the earlier marker left, even when the wake never saw the busy
+	// turn between them; a new busy turn stays quiet for its first
+	// wakeDialogQuietHold all the same. An unchanged marker keeps its ladder.
 	if cause.generation != cfg.dialogHoldGeneration {
-		if cfg.dialogHoldGeneration != "" && !cause.busy {
+		if cfg.dialogHoldGeneration != "" {
 			cfg.doorbell.endHeldNotice()
 		}
 		cfg.dialogHoldGeneration = cause.generation

@@ -334,9 +334,10 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 		return startupDialogMarkerDecision(harness, dir, trust, true)
 	}
 	// The trust and hooks evidence below is for the launch directory. A
-	// resume in the thread's own directory ("session") has none, and a mode
-	// AMQ cannot read may still ask which directory to use.
-	if codexResumeOrForkAt(args) >= 0 && codexEffectiveResumeCwd(binaryPath, args, wd, recorded) != "current" {
+	// resume in the thread's own directory ("session") has none, a mode AMQ
+	// cannot read may still ask which directory to use, and arguments AMQ
+	// cannot parse may be a resume or fork.
+	if at, known := codexResumeOrFork(args); !known || at >= 0 && codexEffectiveResumeCwd(binaryPath, args, wd, recorded) != "current" {
 		return wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: harness, Cwd: dir, Kind: wakeStartupKindResumeDir}, true
 	}
 	installed, known := codexInstalledVersion(binaryPath)
@@ -393,8 +394,8 @@ func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorde
 // tui/src/daemon_startup.rs:89-113), so it gets -C <wd>, which makes the
 // mode current too. A set or unknown choice keeps the args.
 func pinCodexResumeLaunchDir(binaryPath string, args []string, wd string, recorded bool, choice string) []string {
-	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider || codexArgsHaveRemote(args) ||
-		codexResumeOrForkAt(args) < 0 || choice != "" {
+	if at, known := codexResumeOrFork(args); launch.ProviderForExecutable(binaryPath) != launch.CodexProvider ||
+		codexArgsHaveRemote(args) || !known || at < 0 || choice != "" {
 		return args
 	}
 	if recorded {
@@ -404,14 +405,16 @@ func pinCodexResumeLaunchDir(binaryPath string, args []string, wd string, record
 }
 
 // codexEffectiveResumeCwd is the resume directory mode a Codex launch runs
-// with: "current" for -C/--cd, the value of -c tui.resume_cwd, "unknown"
-// for a profile or a [tui] override AMQ does not read, and otherwise the
-// effective tui.resume_cwd from the launch-time probe's config/read, which
-// merges system, user and trusted project layers ("" when unset). A probe
-// that cannot run or answer gives "unknown".
+// with: "current" for -C/--cd, and otherwise the effective tui.resume_cwd
+// from the launch-time probe's config/read ("" when unset). That probe runs
+// with the seat's whole -c, --enable and --disable sequence, which Codex
+// applies in order, the last one winning (config/src/overrides.rs:9-13 and
+// 31-65 at rust-v0.164.0), and merges system, user and trusted project
+// layers. A probe that cannot run or answer, as for a --profile seat,
+// gives "unknown".
 func codexEffectiveResumeCwd(binaryPath string, args []string, wd string, recorded bool) string {
-	if choice := codexResumeCwdChoice(args); choice != "" {
-		return choice
+	if codexArgsHaveCd(args) {
+		return "current"
 	}
 	physical, ok := codexPhysicalLaunchDir(args, wd)
 	if !ok {
@@ -430,37 +433,19 @@ func codexEffectiveResumeCwd(binaryPath string, args []string, wd string, record
 	return probe.resumeCwd
 }
 
-// codexResumeCwdChoice is the resume directory mode a Codex launch's
-// command line sets: "current" for -C/--cd, the value of -c
-// tui.resume_cwd, "unknown" for a profile or a [tui] override AMQ does not
-// read, or "" when the command line sets none.
-func codexResumeCwdChoice(args []string) string {
-	for i := 0; i < len(args) && args[i] != "--"; i++ {
-		flag, value, inline := strings.Cut(args[i], "=")
-		switch {
-		case flag == "-C" || flag == "--cd":
-			return "current"
-		case flag == "-p" || flag == "--profile":
-			return "unknown"
-		case flag != "-c" && flag != "--config":
-			if codexValueOptions[flag] && !inline {
-				i++
-			}
-			continue
+// codexArgsHaveCd reports a -C/--cd before the prompt, which makes Codex's
+// resume mode current whatever the configuration says
+// (effective_resume_cwd_mode, tui/src/session_resume.rs:35-43).
+func codexArgsHaveCd(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
 		}
-		if !inline && i+1 < len(args) {
-			i++
-			value = args[i]
-		}
-		key, raw, _ := strings.Cut(value, "=")
-		switch strings.TrimSpace(key) {
-		case "tui.resume_cwd":
-			return strings.Trim(strings.TrimSpace(raw), `"'`)
-		case "tui":
-			return "unknown"
+		if flag, _, _ := strings.Cut(arg, "="); flag == "-C" || flag == "--cd" {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // codexNonInteractiveSubcommands are the Codex subcommands that run no
@@ -506,25 +491,53 @@ func codexArgsNonInteractive(args []string) bool {
 	return false
 }
 
-// codexResumeOrForkAt is the index of a Codex launch's resume or fork
-// subcommand (its first positional), or -1 for any other launch.
-func codexResumeOrForkAt(args []string) int {
+// codexResumeOrFork reads a Codex launch's grammar up to its first
+// positional: at is the index of a resume or fork subcommand, or -1. known
+// is false for arguments AMQ cannot classify (an option it does not know),
+// which may still be a resume or fork. -i/--image takes one or more values,
+// up to the next option, as Codex's num_args(1..) does
+// (utils/cli/src/shared_options.rs at rust-v0.164.0).
+func codexResumeOrFork(args []string) (at int, known bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			return -1
+			return -1, true
 		}
 		if !strings.HasPrefix(arg, "-") {
 			if arg == "resume" || arg == "fork" {
-				return i
+				return i, true
 			}
-			return -1
+			return -1, true
 		}
-		if flag, _, inline := strings.Cut(arg, "="); codexValueOptions[flag] && !inline {
-			i++
+		flag, _, inline := strings.Cut(arg, "=")
+		switch {
+		case flag == "-i" || flag == "--image":
+			if inline {
+				continue
+			}
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return -1, false
+			}
+			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case (codexFlagOptions[flag] || codexEmbeddedFlags[flag]) && !inline:
+		case codexValueOptions[flag]:
+			if !inline {
+				i++
+			}
+		default:
+			return -1, false
 		}
 	}
-	return -1
+	return -1, true
+}
+
+// codexResumeOrForkAt is the index of a Codex launch's resume or fork
+// subcommand, or -1 when it is not one or AMQ cannot tell.
+func codexResumeOrForkAt(args []string) int {
+	at, _ := codexResumeOrFork(args)
+	return at
 }
 
 // codexTerminalDumb reports whether Codex reads this terminal as dumb and
@@ -535,20 +548,63 @@ func codexResumeOrForkAt(args []string) int {
 // set and TERM is dumb (terminal-detection/src/lib.rs:254-330 at
 // rust-v0.164.0).
 func codexTerminalDumb() bool {
-	nonEmpty := func(key string) bool { return strings.TrimSpace(os.Getenv(key)) != "" }
-	if program := strings.TrimSpace(os.Getenv("TERM_PROGRAM")); program != "" && !strings.EqualFold(program, "tmux") {
+	return codexTerminalDumbIn(os.LookupEnv)
+}
+
+// codexTerminalDumbIn is codexTerminalDumb for the environment lookup reads.
+func codexTerminalDumbIn(lookup func(string) (string, bool)) bool {
+	get := func(key string) string { value, _ := lookup(key); return strings.TrimSpace(value) }
+	if program := get("TERM_PROGRAM"); program != "" && !strings.EqualFold(program, "tmux") {
 		return strings.EqualFold(program, "dumb")
 	}
-	if nonEmpty("GHOSTTY_RESOURCES_DIR") {
+	if get("GHOSTTY_RESOURCES_DIR") != "" {
 		return false
 	}
-	for _, key := range []string{"WEZTERM_VERSION", "ITERM_SESSION_ID", "ITERM_PROFILE", "ITERM_PROFILE_NAME", "KITTY_WINDOW_ID",
-		"ALACRITTY_SOCKET", "KONSOLE_VERSION", "GNOME_TERMINAL_SCREEN", "VTE_VERSION", "WT_SESSION"} {
-		if _, set := os.LookupEnv(key); set {
+	for _, key := range codexTerminalDetectionKeys {
+		if _, set := lookup(key); set {
 			return false
 		}
 	}
-	return strings.TrimSpace(os.Getenv("TERM")) == "dumb"
+	return get("TERM") == "dumb"
+}
+
+// codexTerminalDetectionKeys are the variables whose presence Codex reads
+// as a known terminal before it looks at TERM.
+var codexTerminalDetectionKeys = []string{"WEZTERM_VERSION", "ITERM_SESSION_ID", "ITERM_PROFILE", "ITERM_PROFILE_NAME", "KITTY_WINDOW_ID",
+	"ALACRITTY_SOCKET", "KONSOLE_VERSION", "GNOME_TERMINAL_SCREEN", "VTE_VERSION", "WT_SESSION"}
+
+// codexDumbTerminalRefusal refuses a Codex launch with args whose terminal,
+// read through lookup, Codex reads as dumb, unless the launch runs no
+// interactive TUI (codexArgsNonInteractive).
+func codexDumbTerminalRefusal(args []string, lookup func(string) (string, bool)) error {
+	if codexArgsNonInteractive(args) || !codexTerminalDumbIn(lookup) {
+		return nil
+	}
+	return UsageError("interactive Codex reads this terminal as dumb (TERM=dumb) and asks \"Continue anyway? [y/N]\" first, which a doorbell would answer; set TERM to your terminal's type (for example TERM=xterm-256color) and run again")
+}
+
+// managedCodexDumbTerminalRefusal applies codexDumbTerminalRefusal to a
+// managed launch: the ticket's provider and target arguments, with its
+// environment overlay over this process's environment.
+func managedCodexDumbTerminalRefusal(ticket *launch.ExecutionTicket) error {
+	if ticket == nil || ticket.Provider != launch.CodexProvider {
+		return nil
+	}
+	index := 0
+	if ticket.Wrapper != nil {
+		index = len(ticket.Wrapper.Args) + 1
+	}
+	var args []string
+	if index < len(ticket.TargetArgv) {
+		args = ticket.TargetArgv[index+1:]
+	}
+	lookup := func(key string) (string, bool) {
+		if value, ok := ticket.TargetEnv[key]; ok {
+			return value, true
+		}
+		return os.LookupEnv(key)
+	}
+	return codexDumbTerminalRefusal(args, lookup)
 }
 
 // codexPhysicalLaunchDir is the cwd a Codex TUI started with args in wd

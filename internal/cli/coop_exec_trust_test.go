@@ -910,3 +910,34 @@ func TestCodexResumeDefaultFollowsTheEffectiveConfig(t *testing.T) {
 		})
 	}
 }
+
+// W1 review (Pro finding 1, Codex reproducer): Codex applies -c overrides in
+// order and the last wins, but AMQ read the first tui.resume_cwd and missed
+// a later "session". The mode comes from the probe's config/read.
+func TestCodexLastResumeOverrideKeepsTheStartupHold(t *testing.T) {
+	_, config, dir, _ := newCodexTrustDialogHarness(t)
+	if err := os.WriteFile(config, []byte(fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", dir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{
+		"": `{"id":2,"result":{"data":[{"cwd":"` + dir + `","hooks":[]}]}}`,
+	}, `{"id":3,"result":{"requirements":null}}`,
+		`{"id":4,"result":{"config":{"check_for_update_on_startup":false,"tui":{"resume_cwd":"session"}}}}`)
+	args := []string{"-c", `tui.resume_cwd="current"`, "-c", `tui.resume_cwd="session"`, "resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}
+	if marker, held := startupDialogMarkerFor(bin, args, dir, false); !held {
+		t.Fatalf("a later session choice was ignored, startup declared clear: %+v", marker)
+	}
+}
+
+// W1 review (Pro finding 2): an image-prefixed fork read as "not a resume",
+// so the resume-directory guard was skipped. -i takes values up to the next
+// option, and arguments AMQ cannot classify keep the hold.
+func TestCodexImagePrefixedForkKeepsTheResumeGuard(t *testing.T) {
+	const thread = "01a165af-5f6d-7270-bb60-671490b46ea1"
+	if at, known := codexResumeOrFork([]string{"-i", "screenshot.png", "--no-daemon", "fork", thread}); !known || at != 3 {
+		t.Fatalf("image-prefixed fork = %d, %v; want index 3, known", at, known)
+	}
+	if _, known := codexResumeOrFork([]string{"--unknown-option", "value", "fork", thread}); known {
+		t.Fatal("an unknown option read as known grammar")
+	}
+}

@@ -158,10 +158,13 @@ func runCoopExec(args []string) error {
 	if err := c.selectRoot(); err != nil {
 		return err
 	}
+	if err := managedCodexDumbTerminalRefusal(managedTicket); err != nil {
+		return err
+	}
 	if facts, _ := harness.ForExecutable(c.cmdName); c.managedLaunchNonce == "" && facts.Name == harness.Codex {
 		_, _, tui := codexLaunchArgs(c.agentArgs)
-		if !codexArgsNonInteractive(c.agentArgs) && codexTerminalDumb() {
-			return UsageError("interactive Codex reads this terminal as dumb (TERM=dumb) and asks \"Continue anyway? [y/N]\" first, which a doorbell would answer; set TERM to your terminal's type (for example TERM=xterm-256color) and run again")
+		if err := codexDumbTerminalRefusal(c.agentArgs, os.LookupEnv); err != nil {
+			return err
 		}
 		if tui {
 			var missing []string

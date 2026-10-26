@@ -17,7 +17,21 @@ import (
 
 // Field report: launching Codex selected an older PATH installation that
 // rejected the configured model. Doctor named the files, but launch was silent.
+// setCodexTerminalForTest gives a test the terminal type term and clears
+// every variable Codex reads to name a terminal before TERM, so a coop exec
+// test does not depend on the shell it runs in (W1 review: a non-TTY CI or
+// agent shell has TERM=dumb).
+func setCodexTerminalForTest(t *testing.T, term string) {
+	t.Helper()
+	for _, key := range append([]string{"TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR"}, codexTerminalDetectionKeys...) {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("TERM", term)
+}
+
 func TestCoopExecWarnsWhenPATHSelectsOlderHarness(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
 	master, terminal, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -117,12 +131,9 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 			}
 			t.Setenv("PATH", bin)
 			if tc.dumb {
-				for _, key := range []string{"TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR", "WEZTERM_VERSION", "ITERM_SESSION_ID", "ITERM_PROFILE", "ITERM_PROFILE_NAME",
-					"KITTY_WINDOW_ID", "ALACRITTY_SOCKET", "KONSOLE_VERSION", "GNOME_TERMINAL_SCREEN", "VTE_VERSION", "WT_SESSION"} {
-					t.Setenv(key, "")
-					_ = os.Unsetenv(key)
-				}
-				t.Setenv("TERM", "dumb")
+				setCodexTerminalForTest(t, "dumb")
+			} else {
+				setCodexTerminalForTest(t, "xterm-256color")
 			}
 			root := filepath.Join(secureTempDirForTest(t), "queue")
 			sentinel := errors.New("exec sentinel")
@@ -161,6 +172,7 @@ func TestCoopExecChecksCodexTerminalsBeforeStartup(t *testing.T) {
 // Pre-merge review found that version diagnostics could run project-owned
 // binaries even though managed launch refuses them as providers.
 func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
 	project, external := t.TempDir(), t.TempDir()
 	unsafe := filepath.Join(project, "bin")
 	newer := filepath.Join(t.TempDir(), "bin")
@@ -196,5 +208,19 @@ func TestManagedLaunchWarningSkipsProjectExecutables(t *testing.T) {
 	}
 	if !strings.Contains(output, filepath.Join(newer, "codex")) || strings.Contains(output, unsafe) {
 		t.Fatalf("warning = %q, want the external newer installation", output)
+	}
+}
+
+// W1 review (Pro finding 3): a managed Codex launch skipped the TERM=dumb
+// refusal, and its environment overlay can carry TERM=dumb.
+func TestManagedCodexLaunchRefusesADumbTerminal(t *testing.T) {
+	setCodexTerminalForTest(t, "xterm-256color")
+	ticket := &launch.ExecutionTicket{
+		Provider:   launch.CodexProvider,
+		TargetArgv: []string{"codex", "-c", "check_for_update_on_startup=false"},
+		TargetEnv:  map[string]string{"TERM": "dumb"},
+	}
+	if err := managedCodexDumbTerminalRefusal(ticket); GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "TERM=dumb") {
+		t.Fatalf("managed refusal = %v, want a TERM=dumb usage error", err)
 	}
 }

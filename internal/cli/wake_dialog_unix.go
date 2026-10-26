@@ -410,25 +410,13 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	return nil
 }
 
-// writeWakeDialogMarker writes the marker for in. A marker without a
-// tool_use_id (a permission dialog) stays without one, so a PostToolUse of
-// a later tool call cannot clear the permission dialog's hold: a permission
-// marker closes only on a turn or session event. A PermissionRequest names
+// writeWakeDialogMarker writes the marker for in. A present marker without
+// a tool_use_id (a permission dialog) stays as it is when a tool call opens,
+// so a PostToolUse of that call cannot clear the permission dialog's hold: a
+// permission marker closes only on a turn or session event. A PermissionRequest names
 // no tool call, so it never takes the tool_use_id of the marker it
 // replaces: that marker can belong to another call of the same tool.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
-	current, _, exists, err := readWakeRepairMetadataAt(
-		dirfd,
-		wakeDialogFileName,
-		"wake dialog marker",
-		filepath.Join(agentDir.path, wakeDialogFileName),
-		maxWakeMetadataFileBytes,
-	)
-	var marker wakeDialogMarker
-	parsed := err == nil && exists && json.Unmarshal(current, &marker) == nil
-	if in.ToolUseID != "" && parsed && marker.ToolUseID == "" {
-		in.ToolUseID = ""
-	}
 	raw, err := json.Marshal(wakeDialogMarker{
 		Schema:         1,
 		Event:          in.Event,
@@ -441,7 +429,16 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if err != nil {
 		return err
 	}
-	return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	if in.ToolUseID == "" {
+		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+	}
+	// A tool call's open keeps a present marker without a tool_use_id: that
+	// hold closes only on a turn or session event, and the decision shares
+	// the marker lock with the replacement.
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte) bool {
+		var marker wakeDialogMarker
+		return json.Unmarshal(current, &marker) == nil && marker.ToolUseID == ""
+	})
 }
 
 // replaceWakeDialogMarkerAt installs data as the marker by an exclusive

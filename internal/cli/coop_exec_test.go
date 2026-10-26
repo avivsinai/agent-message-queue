@@ -122,7 +122,7 @@ func TestInjectCoopNamedSlashCommand(t *testing.T) {
 	}
 	for _, tc := range tests {
 		injected = nil
-		if err := injectCoopNamedSlashCommand("coder1", tc.binary); err != nil {
+		if err := injectCoopNamedSlashCommand("coder1", tc.binary, nil); err != nil {
 			t.Fatalf("%s: injectCoopNamedSlashCommand: %v", tc.binary, err)
 		}
 		if !reflect.DeepEqual(injected, tc.want) {

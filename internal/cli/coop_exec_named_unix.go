@@ -23,8 +23,8 @@ var (
 	coopNamedTTYReady = func() bool {
 		return tiocsti.Available() && coopNamedHasControllingTTY()
 	}
-	coopNamedTTYInject = func(me, binaryBase string) error {
-		return injectCoopNamedSlashCommand(me, binaryBase)
+	coopNamedTTYInject = func(me, binaryBase string, inputFree func() bool) error {
+		return injectCoopNamedSlashCommand(me, binaryBase, inputFree)
 	}
 )
 
@@ -180,11 +180,13 @@ func runCoopNamedInject(args []string) error {
 	}
 	// The typed command and its Enter would answer an open dialog, so it
 	// waits for the dialog marker exactly as the doorbell does.
-	if !waitCoopNamedInputFree(strings.TrimSpace(*rootFlag), strings.TrimSpace(*meFlag), wakeDialogQuietHold, wakeDialogRecheck) {
+	root, handle := strings.TrimSpace(*rootFlag), strings.TrimSpace(*meFlag)
+	if !waitCoopNamedInputFree(root, handle, wakeDialogQuietHold, wakeDialogRecheck) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "a harness dialog stayed open"))
 		return nil
 	}
-	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart); err != nil {
+	inputFree := func() bool { return waitCoopNamedInputFree(root, handle, 0, 0) }
+	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart, inputFree); err != nil {
 		_ = writeStderr("warning: coop named inject: %v\n", err)
 	}
 	return nil
@@ -233,7 +235,7 @@ func validateCoopNamedSessionLabel(name string) error {
 	}
 }
 
-func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time) error {
+func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time, inputFree func() bool) error {
 	candidate, err := reader.locate(cwd, execStart)
 	if err != nil {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
@@ -242,7 +244,7 @@ func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, 
 	if strings.TrimSpace(candidate.name) != "" {
 		return nil
 	}
-	if err := coopNamedTTYInject(name, binaryBase); err != nil {
+	if err := coopNamedTTYInject(name, binaryBase, inputFree); err != nil {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
 		return nil
 	}
@@ -267,7 +269,14 @@ func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, 
 	return nil
 }
 
-func injectCoopNamedSlashCommand(me, binaryBase string) error {
+// errCoopNamedDialogOpen stops a naming attempt when a dialog marker
+// appears: the typed text and Enter would answer the dialog.
+var errCoopNamedDialogOpen = errors.New("a harness dialog opened")
+
+// injectCoopNamedSlashCommand types the naming command and Enter. inputFree
+// is checked before the command's write and again right before Enter, after
+// the settle delay; a dialog marker then stops the attempt.
+func injectCoopNamedSlashCommand(me, binaryBase string, inputFree func() bool) error {
 	if !coopNamedTTYReady() {
 		if !tiocsti.Available() {
 			return errors.New("TIOCSTI terminal injection is unavailable")
@@ -280,6 +289,9 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 			return fmt.Errorf("coop named command contains non-printable ASCII")
 		}
 	}
+	if inputFree != nil && !inputFree() {
+		return errCoopNamedDialogOpen
+	}
 	if err := tiocstiInject(command); err != nil {
 		return err
 	}
@@ -291,5 +303,8 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 		delay = facts.PasteSubmitDelay
 	}
 	rawInjectSleep(delay)
+	if inputFree != nil && !inputFree() {
+		return errCoopNamedDialogOpen
+	}
 	return tiocstiInject("\r")
 }

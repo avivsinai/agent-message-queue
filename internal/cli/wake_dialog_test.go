@@ -264,6 +264,51 @@ func TestWakeDialogNewPromptMarkerNoticesAtOnce(t *testing.T) {
 	}
 }
 
+// W1 review (Pro finding 6): a new busy turn kept the notice ladder of the
+// prompt before it, so once the turn passed its quiet hold the notice still
+// waited for the earlier, longer deadline.
+func TestWakeDialogNewBusyTurnStartsAFreshNoticeLadder(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	agentDir, err := openWakeAgentDir(h.root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+	write := func(kind string) {
+		t.Helper()
+		raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"` + kind + `","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
+		if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(marker, h.now, h.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var notices []string
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+	h.cfg.settings.heldNotice = true
+	h.cfg.desktopNotify = func(_, body string) error {
+		notices = append(notices, body)
+		return nil
+	}
+	h.cfg.attentionWrite = func(p []byte) (int, error) { return len(p), nil }
+	write("permission")
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	// The prompt has reached the longest notice interval.
+	h.cfg.doorbell.nextHeldNotice = h.now.Add(wakeDoorbellAttentionRetryMax)
+	write("working")
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	h.advance(wakeDialogQuietHold)
+	h.scan(h.cfg)
+	if len(notices) != 2 || !strings.Contains(notices[1], "busy") {
+		t.Fatalf("notices = %q, want the busy notice once the turn passes its quiet hold", notices)
+	}
+}
+
 // Pre-merge review of fix/wake-holds-0113 (lead's W1 brief): the Cursor
 // /rename namer typed its command and Enter after a fixed delay, while a
 // startup or dialog marker could hold the doorbell. It now waits for the
@@ -322,6 +367,10 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 		// took the tool_use_id of the marker it replaced by tool name
 		// alone, so another call's PostToolUse released its dialog.
 		{"another call's PostToolUse after a PermissionRequest", []step{{"open", askPre}, {"open", askPerm}, {"close", askPost}}, "", false},
+		// W1 review (Pro finding 4): a tool call's open replaced a present
+		// permission marker after an unlocked check, so that call's
+		// PostToolUse released the permission dialog.
+		{"a tool call's open after a permission dialog", []step{{"open", permission}, {"open", askPre}, {"close", askPost}}, "", false},
 		{"an equal call's PostToolUse after a permission dialog", []step{{"open", permission}, {"close", equalPost}}, "", false},
 		{"an equal call's result in the transcript after a permission dialog", []step{{"open", permission}}, equalUse, false},
 	} {
