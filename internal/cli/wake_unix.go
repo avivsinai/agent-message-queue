@@ -2901,6 +2901,9 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		cfg.attentionIsTTY = func() bool {
 			return wakeAttentionFileIsTerminal(attention)
 		}
+		cfg.attentionIsForeground = func() bool {
+			return wakeFileIsForeground(attention)
+		}
 	}
 	if s.terminalAuthority != nil {
 		cfg.beforeTerminalWrite = s.terminalAuthority.BeforeWrite
