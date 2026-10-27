@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -33,30 +34,60 @@ func writeTeamJSON(t *testing.T, home, teamName string, cfg TeamConfig) {
 	}
 }
 
-func TestLoadTeam(t *testing.T) {
-	home := setupTeamDir(t)
+// claudeNativeTeamConfig has the key set of a Claude Code 2.1.311 team config
+// with invented values.
+const claudeNativeTeamConfig = `{"name":"test-team","description":"demo","createdAt":1761580800000,` +
+	`"leadAgentId":"lead-1","leadSessionId":"00000000-0000-4000-8000-000000000001",` +
+	`"members":[{"agentId":"cc-123","agentType":"team-lead","name":"claude",` +
+	`"cwd":"/work/demo","joinedAt":1761580800001,"model":"demo-model","backendType":"in-process",` +
+	`"tmuxPaneId":"%7","subscriptions":["demo-topic"]}]}`
 
-	cfg := TeamConfig{
-		Name: "test-team",
-		Lead: "lead-1",
-		Members: []Member{
-			{Name: "claude", AgentID: "cc-123", AgentType: AgentTypeClaudeCode},
+func writeRawTeamConfig(t *testing.T, home, teamName, raw string) string {
+	t.Helper()
+	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, teamName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, teamConfigFile)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadTeam(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		wantType string
+	}{
+		// field: Claude 2.1.311 team configs use camelCase (2026-10-27)
+		{name: "claude native camelCase", raw: claudeNativeTeamConfig, wantType: "team-lead"},
+		{
+			name:     "legacy AMQ snake_case",
+			raw:      `{"name":"test-team","lead":"lead-1","members":[{"name":"claude","agent_id":"cc-123","agent_type":"claude-code"}]}`,
+			wantType: AgentTypeClaudeCode,
 		},
 	}
-	writeTeamJSON(t, home, "test-team", cfg)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := setupTeamDir(t)
+			writeRawTeamConfig(t, home, "test-team", tt.raw)
 
-	got, err := LoadTeam("test-team")
-	if err != nil {
-		t.Fatalf("LoadTeam: %v", err)
-	}
-	if got.Name != "test-team" {
-		t.Errorf("Name = %q, want %q", got.Name, "test-team")
-	}
-	if len(got.Members) != 1 {
-		t.Fatalf("len(Members) = %d, want 1", len(got.Members))
-	}
-	if got.Members[0].AgentID != "cc-123" {
-		t.Errorf("Members[0].AgentID = %q, want %q", got.Members[0].AgentID, "cc-123")
+			got, err := LoadTeam("test-team")
+			if err != nil {
+				t.Fatalf("LoadTeam: %v", err)
+			}
+			if got.Name != "test-team" || got.Lead != "lead-1" {
+				t.Errorf("Name, Lead = %q, %q, want test-team, lead-1", got.Name, got.Lead)
+			}
+			if len(got.Members) != 1 {
+				t.Fatalf("len(Members) = %d, want 1", len(got.Members))
+			}
+			if got.Members[0].AgentID != "cc-123" || got.Members[0].AgentType != tt.wantType {
+				t.Errorf("Members[0] = %+v, want AgentID cc-123, AgentType %q", got.Members[0], tt.wantType)
+			}
+		})
 	}
 }
 
@@ -304,20 +335,15 @@ func TestFindMemberLookups(t *testing.T) {
 	}
 }
 
-// field: Claude 2.1.311 team configs use camelCase (2026-10-27)
-func TestClaudeCamelCaseTeamListJoinLeave(t *testing.T) {
+// field: Claude 2.1.311 team configs use camelCase (2026-10-27). Without a
+// readable agentId, claim/complete/fail/block and bridge cannot resolve the
+// agent's id by name, join cannot see duplicates, and leave cannot find a
+// native member; join must also keep Claude's fields and write camelCase.
+func TestClaudeNativeTeamJoinLeave(t *testing.T) {
 	home := setupTeamDir(t)
-	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, "demo-team")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, teamConfigFile)
-	native := `{"name":"demo-team","description":"demo","createdAt":1761580800000,` +
-		`"leadAgentId":"team-lead@demo-team","leadSessionId":"00000000-0000-4000-8000-000000000001",` +
-		`"members":[{"agentId":"team-lead@demo-team","agentType":"team-lead","name":"team-lead",` +
-		`"cwd":"/work/demo","joinedAt":1761580800001,"model":"demo-model","backendType":"in-process",` +
-		`"tmuxPaneId":"%7","subscriptions":["demo-topic"]}]}`
-	if err := os.WriteFile(path, []byte(native), 0o600); err != nil {
+	path := writeRawTeamConfig(t, home, "test-team", claudeNativeTeamConfig)
+	var original map[string]any
+	if err := json.Unmarshal([]byte(claudeNativeTeamConfig), &original); err != nil {
 		t.Fatal(err)
 	}
 	readRaw := func() map[string]any {
@@ -332,56 +358,55 @@ func TestClaudeCamelCaseTeamListJoinLeave(t *testing.T) {
 		}
 		return m
 	}
-	nativeKeys := func(stage string) {
-		t.Helper()
-		m := readRaw()
-		for _, k := range []string{"description", "createdAt", "leadAgentId", "leadSessionId"} {
-			if _, ok := m[k]; !ok {
-				t.Errorf("%s dropped top-level %q", stage, k)
-			}
-		}
-		members, _ := m["members"].([]any)
-		lead, _ := members[0].(map[string]any)
-		for _, k := range []string{"cwd", "joinedAt", "model", "backendType", "tmuxPaneId", "subscriptions"} {
-			if _, ok := lead[k]; !ok {
-				t.Errorf("%s dropped member %q", stage, k)
-			}
-		}
-	}
 
-	// list
-	got, err := LoadTeam("demo-team")
-	if err != nil {
-		t.Fatalf("LoadTeam: %v", err)
+	if err := RegisterMember("test-team", Member{Name: "claude", AgentID: "cc-123"}); err == nil {
+		t.Error("join accepted a duplicate of a native agentId")
 	}
-	if got.Lead != "team-lead@demo-team" || len(got.Members) != 1 ||
-		got.Members[0].AgentID != "team-lead@demo-team" || got.Members[0].AgentType != "team-lead" {
-		t.Fatalf("LoadTeam = %+v, want leadAgentId and member agentId/agentType", got)
-	}
-
-	// join
-	if err := RegisterMember("demo-team", Member{Name: "team-lead", AgentID: "team-lead@demo-team"}); err == nil {
-		t.Error("join accepted a duplicate of a camelCase agentId")
-	}
-	if err := RegisterMember("demo-team", Member{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex}); err != nil {
+	if err := RegisterMember("test-team", Member{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex}); err != nil {
 		t.Fatalf("RegisterMember: %v", err)
 	}
-	nativeKeys("join")
-	members, _ := readRaw()["members"].([]any)
+	joined := readRaw()
+	members, _ := joined["members"].([]any)
 	if len(members) != 2 {
 		t.Fatalf("len(members) = %d, want 2", len(members))
 	}
-	added, _ := members[1].(map[string]any)
-	if added["agentId"] != "ext-1" || added["agentType"] != AgentTypeCodex || added["agent_id"] != nil {
-		t.Errorf("joined member = %v, want camelCase agentId/agentType only", added)
+	for k, v := range original {
+		if k != "members" && !reflect.DeepEqual(joined[k], v) {
+			t.Errorf("join changed %q: got %v, want %v", k, joined[k], v)
+		}
+	}
+	origMembers, _ := original["members"].([]any)
+	if !reflect.DeepEqual(members[0], origMembers[0]) {
+		t.Errorf("join changed the native member: got %v, want %v", members[0], origMembers[0])
+	}
+	wantAdded := map[string]any{"name": "codex", "agentId": "ext-1", "agentType": AgentTypeCodex}
+	if !reflect.DeepEqual(members[1], wantAdded) {
+		t.Errorf("joined member = %v, want %v", members[1], wantAdded)
 	}
 
-	// leave
-	if err := UnregisterMember("demo-team", "ext-1"); err != nil {
+	if err := UnregisterMember("test-team", "ext-1"); err != nil {
 		t.Fatalf("UnregisterMember: %v", err)
 	}
-	nativeKeys("leave")
-	if members, _ := readRaw()["members"].([]any); len(members) != 1 {
-		t.Errorf("len(members) after leave = %d, want 1", len(members))
+	if left := readRaw(); !reflect.DeepEqual(left, original) {
+		t.Errorf("leave did not restore the native config:\ngot  %v\nwant %v", left, original)
+	}
+}
+
+// Review finding on d37580ea: a non-string agentId was ignored, so the legacy
+// agent_id became the identity and leave deleted the entry.
+func TestUnregisterMember_RefusesNonStringIdentity(t *testing.T) {
+	home := setupTeamDir(t)
+	raw := `{"name":"test-team","members":[{"name":"odd","agentId":123,"agent_id":"ext-1"}]}`
+	path := writeRawTeamConfig(t, home, "test-team", raw)
+
+	if err := UnregisterMember("test-team", "ext-1"); err == nil {
+		t.Error("UnregisterMember accepted a non-string agentId")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != raw {
+		t.Errorf("config changed after refusal: %s", data)
 	}
 }

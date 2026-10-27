@@ -34,15 +34,17 @@ type Member struct {
 func (m *Member) UnmarshalJSON(data []byte) error {
 	var aux struct {
 		Name            string `json:"name"`
-		AgentID         string `json:"agentId"`
 		AgentType       string `json:"agentType"`
-		LegacyAgentID   string `json:"agent_id"`
 		LegacyAgentType string `json:"agent_type"`
 	}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	id, err := memberIdentity(aux.AgentID, aux.LegacyAgentID)
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	id, err := memberAgentID(raw)
 	if err != nil {
 		return err
 	}
@@ -54,10 +56,25 @@ func (m *Member) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// memberIdentity resolves a member's agent ID from the camelCase and legacy
-// snake_case keys. An entry that carries both with different values has no
-// single identity, so it is refused rather than guessed.
-func memberIdentity(agentID, legacyAgentID string) (string, error) {
+// memberAgentID is the single identity parser for typed loads and raw
+// rewrites. It reads the camelCase agentId and falls back to the legacy
+// agent_id. A present key whose value is not a string, or an entry whose two
+// keys disagree, has no trustworthy identity and is refused rather than
+// guessed.
+func memberAgentID(m map[string]any) (string, error) {
+	ids := make([]string, 2)
+	for i, key := range []string{"agentId", "agent_id"} {
+		v, present := m[key]
+		if !present {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("team member %s is %T, not a string", key, v)
+		}
+		ids[i] = s
+	}
+	agentID, legacyAgentID := ids[0], ids[1]
 	if agentID != "" && legacyAgentID != "" && agentID != legacyAgentID {
 		return "", fmt.Errorf("team member has conflicting agentId %q and agent_id %q", agentID, legacyAgentID)
 	}
@@ -203,7 +220,7 @@ func RegisterMember(teamName string, member Member) error {
 			if !ok {
 				continue
 			}
-			id, err := rawMemberAgentID(m)
+			id, err := memberAgentID(m)
 			if err != nil {
 				return err
 			}
@@ -246,7 +263,7 @@ func UnregisterMember(teamName, agentID string) error {
 				filtered = append(filtered, item)
 				continue
 			}
-			id, err := rawMemberAgentID(m)
+			id, err := memberAgentID(m)
 			if err != nil {
 				return err
 			}
@@ -285,14 +302,6 @@ func NewExternalAgentID(handle string) string {
 		os.Getpid(),
 		hex.EncodeToString(b[:]),
 	)
-}
-
-// rawMemberAgentID reads a member's agent ID from its camelCase key and falls
-// back to the legacy snake_case key.
-func rawMemberAgentID(m map[string]any) (string, error) {
-	id, _ := m["agentId"].(string)
-	legacy, _ := m["agent_id"].(string)
-	return memberIdentity(id, legacy)
 }
 
 func readTeamConfigRaw(teamName string) (map[string]any, error) {
