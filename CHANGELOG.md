@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.115.2](https://github.com/avivsinai/agent-message-queue/compare/v0.115.1...v0.115.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **bridge:** send Bearer ring key for grokbot ([#1275](https://github.com/avivsinai/agent-message-queue/issues/1275)) ([7f4ea33](https://github.com/avivsinai/agent-message-queue/commit/7f4ea3343040aa7c337dd4589e6a6b369356e0db))
+
 ## [0.115.1](https://github.com/avivsinai/agent-message-queue/compare/v0.115.0...v0.115.1) (2026-10-27)
 
 
