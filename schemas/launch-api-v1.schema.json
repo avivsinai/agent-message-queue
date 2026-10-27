@@ -103,6 +103,10 @@
         {
           "if": {"properties": {"wake": {"properties": {"mode": {"const": "disabled"}}}}},
           "then": {"properties": {"require_wake": {"const": false}}}
+        },
+        {
+          "if": {"properties": {"wake": {"required": ["injector"], "properties": {"injector": {"required": ["mode"], "properties": {"mode": {"const": "claude-native"}}}}}}},
+          "then": {"properties": {"require_wake": {"const": true}}}
         }
       ]
     },
@@ -135,7 +139,7 @@
       "additionalProperties": false,
       "required": ["mode"],
       "properties": {
-        "mode": {"enum": ["auto", "raw", "paste", "none"]},
+        "mode": {"enum": ["auto", "raw", "paste", "none", "claude-native"]},
         "via": {"type": "string", "minLength": 1},
         "args": {"type": "array", "items": {"type": "string"}}
       },
@@ -146,6 +150,10 @@
         },
         {
           "if": {"properties": {"mode": {"const": "none"}}, "required": ["mode"]},
+          "then": {"not": {"anyOf": [{"required": ["via"]}, {"required": ["args"]}]}}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "claude-native"}}, "required": ["mode"]},
           "then": {"not": {"anyOf": [{"required": ["via"]}, {"required": ["args"]}]}}
         }
       ]

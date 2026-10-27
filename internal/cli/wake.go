@@ -32,6 +32,8 @@ type wakeConfig struct {
 	strict        bool
 	fallbackWarn  bool
 	injectMode    string // auto, raw, paste
+	native        wakeNativeNotifier
+	nativeScanAt  time.Time
 	// harness is the program the wake types into, as coop exec named it
 	// (--harness). Empty for a bare amq wake, which guesses from the handle.
 	harness                   string
@@ -191,6 +193,14 @@ func (state wakeInputDeliveryState) blocksDemotion() bool {
 
 type wakeAdmissionWatcher interface {
 	Errors() <-chan error
+}
+
+// wakeNativeNotifier sends advisory doorbells through the bound harness queue.
+// It never grants terminal input authority.
+type wakeNativeNotifier interface {
+	Notify(map[string]os.FileInfo, time.Time) (bool, error)
+	Observe() (bool, error)
+	Close() error
 }
 
 type wakeRetainedAgent interface {
@@ -356,12 +366,13 @@ type wakeTerminalAcceptedProgress interface {
 
 const defaultInjectTimeout = 5 * time.Second
 const (
-	wakeInjectModeAuto     = "auto"
-	wakeInjectModeRaw      = "raw"
-	wakeInjectModePaste    = "paste"
-	wakeInjectModeNone     = "none"
-	wakeRetryUntilDrained  = "drained"
-	wakeRetryUntilInjected = "injected"
+	wakeInjectModeAuto         = "auto"
+	wakeInjectModeRaw          = "raw"
+	wakeInjectModePaste        = "paste"
+	wakeInjectModeNone         = "none"
+	wakeInjectModeClaudeNative = "claude-native"
+	wakeRetryUntilDrained      = "drained"
+	wakeRetryUntilInjected     = "injected"
 
 	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
 
@@ -615,6 +626,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	// arrival, which holds nothing.
 	holds := make(map[string]wakeHold)
 	scanTime := cfg.wakeDoorbellNow()
+	cfg.nativeScanAt = scanTime
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -689,6 +701,18 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 
+	if cfg.injectMode == wakeInjectModeClaudeNative {
+		if cfg.native == nil {
+			return errors.New("native wake transport is unavailable; terminal fallback is prohibited")
+		}
+		consumed, err := cfg.native.Observe()
+		if err != nil {
+			return err
+		}
+		if consumed {
+			cfg.doorbell.reset()
+		}
+	}
 	cfg.holds = holds
 	if cfg.holdPolicyChanged {
 		// A live hold change re-times a held cohort from the same scan's holds,
@@ -716,7 +740,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
 
-	if cfg.settings.interrupt && len(interruptMessages) > 0 {
+	if cfg.injectMode != wakeInjectModeClaudeNative && cfg.settings.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.settings.previewLen, cfg.settings.interruptNotice)
 		notice := peerWakeNotification(interruptText)
 		if cfg.settings.interruptNotice != "" {
@@ -840,6 +864,10 @@ func deliverWithNotificationLedger(
 	deferForInput bool,
 	currentPending map[string]os.FileInfo,
 ) error {
+	if cfg.injectMode == wakeInjectModeClaudeNative {
+		// Native delivery owns its strict pre-write uncertainty record.
+		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	}
 	if len(messageIDs) == 0 {
 		// No message IDs (e.g. an operator-injected command with no parsed
 		// messages) — deliver without recording. The ledger records attempts
@@ -1151,6 +1179,23 @@ func deliverNewMessageNotification(
 		if cfg.inputDelivery.pending() {
 			return nil
 		}
+	}
+	if cfg.injectMode == wakeInjectModeClaudeNative {
+		if cfg.native == nil {
+			return errors.New("native wake transport is unavailable; terminal fallback is prohibited")
+		}
+		if shouldDeferBeforeInject(cfg, deferForInput) && !waitForWakeInputQuiet(cfg) {
+			cfg.doorbell.recordDialogHold(now, wakeDialogRecheck)
+			return nil
+		}
+		outstanding, err := cfg.native.Notify(currentPending, cfg.nativeScanAt)
+		if outstanding {
+			cfg.doorbell.parkCurrentCohort()
+		} else {
+			cfg.doorbell.recordDialogHold(now, wakeDialogRecheck)
+		}
+		persistWakeDoorbellStatusBestEffort(cfg)
+		return err
 	}
 	if cfg.injectMode != wakeInjectModeNone {
 		// Hold before the attempt starts, so a hold is neither a
@@ -1666,14 +1711,17 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 		mode = wakeInjectModeAuto
 	}
 	switch mode {
-	case wakeInjectModeAuto, wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone:
+	case wakeInjectModeAuto, wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone, wakeInjectModeClaudeNative:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("invalid injection mode %q (supported: auto, raw, paste, none)", raw)
+		return "", fmt.Errorf("invalid injection mode %q (supported: auto, raw, paste, none, claude-native)", raw)
 	}
 }
 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
+	if cfg.injectMode == wakeInjectModeClaudeNative {
+		return errors.New("native wake cannot use terminal delivery")
+	}
 	cfg.lastAttemptAttention = false
 	cfg.lastAttemptTransientAttention = false
 	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone

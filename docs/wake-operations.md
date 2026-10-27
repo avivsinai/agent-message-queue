@@ -134,6 +134,30 @@ Ordinary review responses remain normal by default.
 
 ## Dialog guard (Claude Code)
 
+### Native delivery
+
+The opt-in `claude-native` injector sends the fixed AMQ doorbell through the
+launched Claude process's own inbox socket. It supports fresh managed Claude
+Code 2.1.311 launches on macOS, without a wrapper. Set the participant's
+`execution.require_wake` to `true` and
+`execution.wake.injector.mode` to `claude-native` in the Launch API intent.
+Existing AMQ dialog hooks are required. A SessionStart or UserPromptSubmit
+hook must confirm the launch's session ID and process ancestry before delivery.
+
+The original direct-child wake checks the connected peer PID and pins the
+session and socket. A detected destination change disables native delivery
+until a new launch. Native delivery retains startup and unknown dialog holds;
+it can enqueue behind a known permission or question dialog without changing
+the selected option. It never types terminal input or reads native auth keys.
+One durable unconfirmed attempt suppresses replay until AMQ drain or DLQ
+receipts close its message cohort. A successful socket write alone is not
+consumption. Before any write, unavailable endpoints are rechecked at the
+dialog-hold cadence without spending the input attempt budget.
+Resume, `/clear`, wake repair, and self-upgrade are unsupported;
+already queued native prompts cannot be retracted after a session change.
+
+### Terminal delivery
+
 Doorbell text and its Enter answer whatever has focus. When Claude Code shows
 AskUserQuestion, ExitPlanMode, or a permission dialog, injected input picks an
 option the person did not choose. The terminal gives no signal that tells an

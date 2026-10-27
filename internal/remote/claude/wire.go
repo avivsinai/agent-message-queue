@@ -1,182 +1,45 @@
 package claude
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"regexp"
-	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/claudepeer"
 )
 
-// Wire constants pinned by docs/research/r0-03-cc-socket-wire-capture.md;
-// the adapter implements exactly this wire.
+// Pure peer framing lives in internal/claudepeer; these aliases preserve
+// the Remote-facing symbols. Key-file discovery below stays Remote-owned.
 
 // Frame is one peer message frame (capture §3).
-type Frame struct {
-	MsgV            int       `json:"msgV"`
-	MsgID           string    `json:"msg_id"`
-	Type            string    `json:"type"`
-	Message         frameBody `json:"message"`
-	Priority        string    `json:"priority"`
-	From            string    `json:"from,omitempty"`
-	FileAttachments []any     `json:"file_attachments,omitempty"`
-}
+type Frame = claudepeer.Frame
 
-type frameBody struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// authLine is the optional first line (capture §2).
-type authLine struct {
-	Type  string `json:"type"`
-	Token string `json:"token"`
-}
-
-// peerTokenRe is the pinned token shape: exactly 32 lowercase hex.
-var peerTokenRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
-
-// BuildCrossSessionEnvelope mirrors the capture's pQe builder (§3.1):
-// `^<cross-session-message[^>]*>\n<body>\n</cross-session-message>$` —
-// exactly one \n after the open tag and before the close tag; attribute
-// order from, from-session, hop-chain, from-name, from-mode; from/
-// from-name restricted to the safe class [a-z0-9-]. The receiver re-
-// serializes and compares byte-for-byte, so any drift silently drops the
-// frame — the builder is total over its inputs and refuses unsafe ones
-// rather than emitting a frame the receiver would discard.
+// BuildCrossSessionEnvelope mirrors the capture's pQe builder (§3.1).
 func BuildCrossSessionEnvelope(from, fromSession, body, hopChain, fromName, fromMode string) (string, error) {
-	for name, v := range map[string]string{"from": from, "from-name": fromName} {
-		if !safeAttr(v) {
-			return "", fmt.Errorf("envelope attr %s %q contains characters outside [a-z0-9-]", name, v)
-		}
-	}
-	if strings.ContainsAny(body, "\x00") || strings.Contains(body, "</cross-session-message>") {
-		return "", fmt.Errorf("envelope body contains a terminator sequence")
-	}
-	var b strings.Builder
-	b.WriteString("<cross-session-message")
-	if from != "" {
-		b.WriteString(` from="` + from + `"`)
-	}
-	if fromSession != "" {
-		b.WriteString(` from-session="` + fromSession + `"`)
-	}
-	if hopChain != "" {
-		b.WriteString(` hop-chain="` + hopChain + `"`)
-	}
-	if fromName != "" {
-		b.WriteString(` from-name="` + fromName + `"`)
-	}
-	if fromMode != "" {
-		b.WriteString(` from-mode="` + fromMode + `"`)
-	}
-	b.WriteString(">\n")
-	b.WriteString(body)
-	b.WriteString("\n</cross-session-message>")
-	return b.String(), nil
+	return claudepeer.BuildCrossSessionEnvelope(from, fromSession, body, hopChain, fromName, fromMode)
 }
 
 // crossSessionBodies is the inverse of BuildCrossSessionEnvelope for the
-// transcript: the body of each envelope in text, joined by newlines, without
-// the tag and without the harness prose around it. ok is false when text
-// holds no complete envelope.
+// transcript.
 func crossSessionBodies(text string) (string, bool) {
-	const openTag, closeTag = "<cross-session-message", "\n</cross-session-message>"
-	var bodies []string
-	for {
-		i := strings.Index(text, openTag)
-		if i < 0 {
-			break
-		}
-		rest := text[i+len(openTag):]
-		// The tag ends at its first '>' and the newline the builder writes.
-		// Text that does not match is left as it is.
-		end := strings.IndexByte(rest, '>')
-		if end < 0 || !strings.HasPrefix(rest[end+1:], "\n") {
-			break
-		}
-		rest = rest[end+2:]
-		j := strings.Index(rest, closeTag)
-		if j < 0 {
-			break
-		}
-		bodies = append(bodies, rest[:j])
-		text = rest[j+len(closeTag):]
-	}
-	if len(bodies) == 0 {
-		return "", false
-	}
-	return strings.Join(bodies, "\n"), true
-}
-
-func safeAttr(s string) bool {
-	if s == "" {
-		return true
-	}
-	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-			return false
-		}
-	}
-	return true
+	return claudepeer.CrossSessionBodies(text)
 }
 
 // NewMsgID returns a fresh random v4-formatted UUID for msg_id.
 func NewMsgID() (string, error) {
-	var u [16]byte
-	if _, err := rand.Read(u[:]); err != nil {
-		return "", err
-	}
-	u[6] = (u[6] & 0x0f) | 0x40
-	u[8] = (u[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), nil
+	return claudepeer.NewMsgID()
 }
 
 // BuildFrame assembles the deliverable frame (capture §3).
 func BuildFrame(from, body string) (*Frame, error) {
-	env, err := BuildCrossSessionEnvelope(from, "amq", body, "", "amq-remote", "code")
-	if err != nil {
-		return nil, err
-	}
-	id, err := NewMsgID()
-	if err != nil {
-		return nil, err
-	}
-	return &Frame{
-		MsgV:     1,
-		MsgID:    id,
-		Type:     "user",
-		Message:  frameBody{Role: "user", Content: env},
-		Priority: "next",
-		From:     from,
-	}, nil
+	return claudepeer.BuildFrame(from, body)
 }
 
 // EncodeFrames renders the mandatory auth line and the frame line with
 // compact separators, each \n-terminated — the pinned line-delimited JSON.
 func EncodeFrames(token string, f *Frame) ([]byte, error) {
-	var out []byte
-	// The auth line is mandatory: an empty token is a fail-open shape —
-	// frames with no auth line must never be emitted, so an empty token is
-	// refused, not skipped.
-	if !peerTokenRe.MatchString(token) {
-		return nil, fmt.Errorf("peer token does not match the pinned [0-9a-f]{32} shape")
-	}
-	a, err := json.Marshal(authLine{Type: "auth", Token: token})
-	if err != nil {
-		return nil, err
-	}
-	out = append(out, a...)
-	out = append(out, '\n')
-	line, err := json.Marshal(f)
-	if err != nil {
-		return nil, err
-	}
-	out = append(out, line...)
-	out = append(out, '\n')
-	return out, nil
+	return claudepeer.EncodeFrames(token, f)
 }
 
 // peerKeyFile resolves the target's key-file name (capture §2):
@@ -219,7 +82,7 @@ func readPeerToken(home string, pid int, sockPath string) (string, error) {
 	if err := json.Unmarshal(raw, &k); err != nil {
 		return "", fmt.Errorf("peer key %s: %w", p, err)
 	}
-	if !peerTokenRe.MatchString(k.PeerToken) {
+	if !claudepeer.PeerTokenValid(k.PeerToken) {
 		return "", fmt.Errorf("peer key %s: peerToken does not match the pinned shape", p)
 	}
 	return k.PeerToken, nil

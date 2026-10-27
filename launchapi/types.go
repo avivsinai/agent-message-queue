@@ -63,10 +63,11 @@ const (
 type InjectorMode string
 
 const (
-	InjectorAuto  InjectorMode = "auto"
-	InjectorRaw   InjectorMode = "raw"
-	InjectorPaste InjectorMode = "paste"
-	InjectorNone  InjectorMode = "none"
+	InjectorAuto         InjectorMode = "auto"
+	InjectorRaw          InjectorMode = "raw"
+	InjectorPaste        InjectorMode = "paste"
+	InjectorNone         InjectorMode = "none"
+	InjectorClaudeNative InjectorMode = "claude-native"
 )
 
 type SymphonyEvent string

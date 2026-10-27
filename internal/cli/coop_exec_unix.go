@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -56,6 +57,7 @@ func openCoopWakeAttention(output *os.File) (*os.File, error) {
 // coopExecRun is the state of one coop exec invocation, shared by its phases.
 type coopExecRun struct {
 	managedLaunchNonce           string
+	nativeLaunch                 *claudeNativeLaunch
 	fs                           *flag.FlagSet
 	rootFlag                     *string
 	sessionFlag                  *string
@@ -155,6 +157,12 @@ func runCoopExec(args []string) error {
 		}
 	}
 
+	if c.wakeInjectMode == wakeInjectModeClaudeNative {
+		c.nativeLaunch, err = prepareClaudeNativeLaunch(managedTicket)
+		if err != nil {
+			return ActionRequiredError("%v", err)
+		}
+	}
 	if err := c.selectRoot(); err != nil {
 		return err
 	}
@@ -282,6 +290,14 @@ func runCoopExec(args []string) error {
 			if wakeEnvErr != nil {
 				return wakeEnvErr
 			}
+			wakeEnv = unsetEnvVar(wakeEnv, envClaudeNativeLaunch)
+			if c.nativeLaunch != nil {
+				encoded, err := json.Marshal(c.nativeLaunch)
+				if err != nil {
+					return err
+				}
+				wakeEnv = setEnvVar(wakeEnv, envClaudeNativeLaunch, string(encoded))
+			}
 			wakeCmd.Env = wakeEnv
 			wakeCmd.Stdin = os.Stdin
 			wakeOutput, outputErr := openCoopWakeOutput(c.root, c.agentHandle)
@@ -336,7 +352,7 @@ func (c *coopExecRun) defineFlags(args []string) ([]string, func()) {
 	c.noGitignoreFlag = c.fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
 	c.noWakeFlag = c.fs.Bool("no-wake", false, "Don't start amq wake in background")
 	c.requireWakeFlag = c.fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
-	c.wakeInjectModeFlag = c.fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none")
+	c.wakeInjectModeFlag = c.fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none, claude-native")
 	c.wakeInjectViaFlag = c.fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
 	c.fs.Var(&c.wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
 	c.managedNoWakeReasonFlag = c.fs.String("managed-no-wake-reason", "", "")
@@ -427,6 +443,10 @@ func (c *coopExecRun) validateFlags() error {
 	c.wakeInjectMode, err = normalizeWakeInjectMode(*c.wakeInjectModeFlag)
 	if err != nil {
 		return UsageError("--wake-inject-mode: %v", err)
+	}
+	if c.wakeInjectMode == wakeInjectModeClaudeNative &&
+		(c.managedLaunchNonce == "" || *c.noWakeFlag || !*c.requireWakeFlag || c.wakeInjectVia != "" || len(c.wakeInjectArgFlags) != 0) {
+		return UsageError("claude-native requires a fresh managed launch with --require-wake and no external injector")
 	}
 	if *c.wakeInjectViaFlag != "" && c.wakeInjectVia == "" {
 		return UsageError("--wake-inject-via must not be blank")
@@ -962,6 +982,12 @@ func (c *coopExecRun) execAgent() error {
 	// harness starts would wait in the terminal and answer its first prompt.
 	if c.wakeOwned {
 		publish := func() error {
+			if c.nativeLaunch != nil {
+				marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: launch.ClaudeProvider,
+					Kind: claudeNativeStartupKind, Cwd: c.nativeLaunch.Cwd, SessionID: c.nativeLaunch.SessionID,
+					Launch: &c.nativeLaunch.Launch}
+				return publishStartupDialogMarker(c.root, c.agentHandle, marker, true)
+			}
 			if codexDecided {
 				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold)
 			}
@@ -1011,6 +1037,14 @@ func (c *coopExecRun) execAgent() error {
 		return cleanupAfterError(fmt.Errorf("encode final wake owner: %w", ownerErr))
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
+	env = unsetEnvVar(env, envClaudeNativeLaunch)
+	if c.nativeLaunch != nil {
+		encoded, err := json.Marshal(c.nativeLaunch)
+		if err != nil {
+			return cleanupAfterError(err)
+		}
+		env = setEnvVar(env, envClaudeNativeLaunch, string(encoded))
+	}
 	if c.managedLaunchNonce == "" {
 		env = codexDaemonSeatEnv(c.binaryPath, env, recorded)
 	}

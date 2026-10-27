@@ -1216,6 +1216,19 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 	var plan AgentPlan
 	var actions []PrepareRequiredAction
 	useResume := participant.ResumePolicy == ResumeEnabled && hasConversation && conversation.State == CaptureReady
+	if execution.InjectorMode == "claude-native" {
+		if runtime.GOOS != "darwin" || participant.Provider != ClaudeProvider || participant.Wrapper != nil ||
+			useResume || adapter.Mode() != AdapterModeMint {
+			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires a fresh unwrapped Claude launch on macOS")
+		}
+		capabilities := adapter.Capabilities(ctx)
+		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
+			return prepared, observation, nil, nil, err
+		}
+		if !capabilities.Available || !capabilities.Fresh || capabilities.ProviderVersion != "2.1.311" {
+			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires Claude Code 2.1.311")
+		}
+	}
 	if useResume {
 		plan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
 		prepared.PlannedOutcome = "resume"
