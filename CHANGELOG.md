@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.115.0](https://github.com/avivsinai/agent-message-queue/compare/v0.114.2...v0.115.0) (2026-10-27)
+
+
+### Features
+
+* **wake:** queue Claude doorbells through its native inbox ([#1270](https://github.com/avivsinai/agent-message-queue/issues/1270)) ([0f5086c](https://github.com/avivsinai/agent-message-queue/commit/0f5086ca80837abdb9964f6127589fd5604486df))
+
+
+### Bug Fixes
+
+* **board:** read Claude 2.1.311 filesystem tasks ([#1271](https://github.com/avivsinai/agent-message-queue/issues/1271)) ([00b1d46](https://github.com/avivsinai/agent-message-queue/commit/00b1d46de655ee206d29586aff78f11eac5a5d50))
+
 ## [0.114.2](https://github.com/avivsinai/agent-message-queue/compare/v0.114.1...v0.114.2) (2026-10-27)
 
 
