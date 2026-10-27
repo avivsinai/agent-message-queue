@@ -56,11 +56,6 @@ func Place(items []Item) (Column, int) {
 	}); i >= 0 {
 		return ColumnWaiting, i
 	}
-	if i := first(items, func(it Item) bool {
-		return it.State == StateBlocked && it.Owner.Kind == OwnerNone && len(it.WaitsOn) == 0
-	}); i >= 0 {
-		return ColumnWaiting, i
-	}
 	if i := first(items, func(it Item) bool { return it.State == StateBlocked }); i >= 0 {
 		return ColumnBlocked, i
 	}
