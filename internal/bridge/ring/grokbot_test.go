@@ -73,6 +73,49 @@ func TestGrokbotWebhookDefersOnServerError(t *testing.T) {
 	}
 }
 
+// The grokbot ring POST must send Authorization: Bearer <key> and keep
+// X-AMQ-Ring-Key. Existing coverage only checked the custom header.
+func TestGrokbotWebhookSendsBearerAndRingKey(t *testing.T) {
+	const key = "ring-test-key-unique"
+	var gotAuth, gotRingKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotRingKey = r.Header.Get(RingKeyHeader)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	path := writeKeyFile(t, map[string]string{"url": server.URL, "key": key})
+	if err := RingGrokbot(path, "grok", "1", server.Client(), io.Discard); err != nil {
+		t.Fatalf("RingGrokbot: %v", err)
+	}
+	if gotAuth != "Bearer "+key {
+		t.Fatal("Authorization header was not Bearer <key>")
+	}
+	if gotRingKey != key {
+		t.Fatal("X-AMQ-Ring-Key was missing or wrong")
+	}
+}
+
+// A non-2xx ring response must not write the key to stderr or the error text.
+func TestGrokbotWebhookNon2xxOmitsKeyFromLogsAndError(t *testing.T) {
+	const key = "ring-key-must-not-appear"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	path := writeKeyFile(t, map[string]string{"url": server.URL, "key": key})
+	var stderr bytes.Buffer
+	err := RingGrokbot(path, "grok", "1", server.Client(), &stderr)
+	if err == nil {
+		t.Fatal("expected defer")
+	}
+	if strings.Contains(err.Error(), key) || strings.Contains(stderr.String(), key) {
+		t.Fatal("ring key appeared in error text or logs")
+	}
+}
+
 func writeKeyFile(t *testing.T, fields map[string]string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ring.json")
