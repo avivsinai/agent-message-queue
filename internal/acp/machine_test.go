@@ -324,6 +324,55 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	}
 }
 
+// Regression (PR #1279 review): a slot whose removal was not yet durable
+// can come back after a stop, holding the record as it was when it was
+// retired. Its recovery saved that stale copy over the retired record and
+// lost the confirmed archive, so the same session came back without an
+// unarchive. This starts from the two records such a stop can leave; it is
+// not a proof of live crash behavior.
+func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
+	s, rec := machineServer(t)
+	alpha := liveSession(t, "alpha")
+	stale := channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, ChannelID: machineChanA, Name: "alpha",
+		Identity: alpha.SessionIdentity(), Label: sessionAgentName(alpha), Reg: "reg-alpha", State: channelRetired,
+		RetiredBy: retiredEnded, RetiredFrom: channelActive, OwnerAdded: true, Welcomed: true, Creates: 1}
+	raw, _ := json.Marshal(stale)
+	if err := os.MkdirAll(s.channelDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.slotPath("alpha"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	progressed := stale
+	progressed.SaidEnded, progressed.ArchiveSent, progressed.Archived = true, true, true
+	if err := s.save(&progressed, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tick(s, now)
+	if r := onlyRetired(t, s); !r.Archived || !r.ArchiveSent || len(rec.list()) != 0 {
+		t.Fatalf("recovery lost the confirmed archive: %+v, calls %q", r, rec.list())
+	}
+	if _, found, _ := loadChannelRecord(s.slotPath("alpha")); found {
+		t.Fatal("the stale slot was not removed")
+	}
+
+	if err := binding.WriteNamed(alpha); err != nil { // the same session again
+		t.Fatal(err)
+	}
+	tick(s, now.Add(time.Minute))
+	want := []string{
+		"channels unarchive --channel " + machineChanA,
+		"messages send --channel " + machineChanA + " --content Connected again: " + alpha.Label + ".",
+	}
+	if got := rec.list(); !slices.Equal(got, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", got, want)
+	}
+}
+
 // Regression (contract review): the buzz CLI makes a fresh channel id on
 // each create, so a create whose outcome is unknown must never be sent
 // again. The leader looks for the channel instead and adopts the one it

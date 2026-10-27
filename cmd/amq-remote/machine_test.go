@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
@@ -68,6 +69,18 @@ func TestAttachReportsTheMachineChannel(t *testing.T) {
 	}
 	if got["machine"] != "running" || got["channel"] != "active" || got["channel_name"] != "claude · p/session3 @ box" {
 		t.Fatalf("attach JSON = %v", got)
+	}
+
+	// Regression (PR #1279 review): with the machine agent stopped, an
+	// uncertain or failed channel told the owner that AMQ keeps looking or
+	// tries again, although no worker runs. Starting the agent comes first.
+	for _, ch := range []acp.MachineChannel{{State: "uncertain", Error: "relay timeout"}, {State: "failed", Error: "refused", Retry: true}} {
+		var text bytes.Buffer
+		connected(&text, attachView{name: "claude-p-session3", label: "claude · p/session3 @ box", agent: agentInfo{State: agentMissing},
+			machine: agentInfo{State: agentOffline, Display: "AMQ Remote @ box"}, served: true, channel: &ch})
+		if out := text.String(); !strings.Contains(out, `Start "AMQ Remote @ box"`) || strings.Contains(out, "keeps looking") || strings.Contains(out, "tries again") {
+			t.Fatalf("%s channel with the machine agent offline: %q", ch.State, out)
+		}
 	}
 }
 

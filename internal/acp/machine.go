@@ -323,7 +323,7 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 		return
 	}
 	if ok && r.State == channelRetired {
-		if !s.finishRetire(r, now) {
+		if _, moved := s.finishRetire(r, now); !moved {
 			return
 		}
 		ok = false
@@ -591,7 +591,8 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 // starts its remote cleanup. It reports whether r is durably in the retired
 // store, so its name may take a new record.
 func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
-	if r.State != channelRetired {
+	fromSlot := r.State != channelRetired
+	if fromSlot {
 		r.RetiredFrom = r.State
 	}
 	r.State, r.RetiredBy = channelRetired, by
@@ -599,33 +600,67 @@ func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
+	// A retired copy of this reg beside a record that is not retired is the
+	// leftover of a restore that stopped half way: the record in the slot is
+	// newer, so the leftover goes before the move. After that, a retired
+	// copy of the reg can only be the move's own, at least as new as the
+	// slot (finishRetire).
+	if fromSlot {
+		if err := s.removeDurably(filepath.Join(s.retiredDir(), r.Reg+".json")); err != nil {
+			return false
+		}
+	}
 	// The active slot says retired first, so routing stops before anything
 	// else happens.
 	slot := s.slotPath(r.Name)
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(slot), filepath.Base(slot), append(raw, '\n'), 0o600); err != nil {
 		return false
 	}
-	if !s.finishRetire(r, now) {
+	moved, ok := s.finishRetire(r, now)
+	if !ok {
 		return false
 	}
-	s.cleanRetired(r, now)
+	s.cleanRetired(moved, now)
 	return true
 }
 
 // finishRetire moves a retired record from its name's slot to the retired
-// store, so the name can take a new record. The slot is removed only after
-// the retired copy is written.
-func (s *Server) finishRetire(r channelRecord, now time.Time) bool {
-	if s.save(&r, now) != nil {
-		return false
+// store, so the name can take a new record, and returns the retired record.
+// When the retired store already holds the reg, that copy is the newer one
+// (the slot came back after a stop before its removal was durable), so it
+// is kept and only the slot is removed. The slot's removal is synced before
+// it reports success.
+func (s *Server) finishRetire(r channelRecord, now time.Time) (channelRecord, bool) {
+	stored, found, err := loadChannelRecord(filepath.Join(s.retiredDir(), r.Reg+".json"))
+	switch {
+	case err != nil:
+		return channelRecord{}, false
+	case found && stored.Reg == r.Reg && stored.State == channelRetired:
+		r = stored
+	default:
+		if s.save(&r, now) != nil {
+			return channelRecord{}, false
+		}
 	}
 	slot := s.slotPath(r.Name)
 	if cur, ok := readChannelRecord(slot); ok && cur.Reg == r.Reg {
-		if err := os.Remove(slot); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return false
+		if s.removeDurably(slot) != nil {
+			return channelRecord{}, false
 		}
 	}
-	return true
+	return r, true
+}
+
+// removeDurably removes path, if it exists, and syncs its directory.
+func (s *Server) removeDurably(path string) error {
+	err := os.Remove(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	}
+	return fsq.SyncDir(filepath.Dir(path))
 }
 
 // retireGone retires each record whose binding is proven gone or ended, and
@@ -769,7 +804,7 @@ func (s *Server) sweepRetired(now time.Time) {
 			return
 		}
 		if active[r.Reg] {
-			_ = os.Remove(s.recordPath(r))
+			_ = s.removeDurably(s.recordPath(r))
 			continue
 		}
 		s.cleanRetired(r, now)
@@ -853,7 +888,9 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	if s.save(&r, now) != nil {
 		return true
 	}
-	_ = os.Remove(retiredPath)
+	// A leftover retired copy (a stop before this removal is durable) is
+	// dropped by sweepRetired: the active record of its reg supersedes it.
+	_ = s.removeDurably(retiredPath)
 	_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", "Connected again: "+r.Label+"."))
 	return true
 }
