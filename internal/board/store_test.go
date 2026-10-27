@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/avivsinai/agent-message-queue/internal/board/decision"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -783,6 +784,7 @@ func checkIdentityCorrections(t *testing.T, ctx context.Context) {
 // selections to exact source ranges, and requires an explicit owner adoption.
 func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	t.Helper()
+	checkReferencedSuggestionCandidates(t)
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1071,5 +1073,56 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	statusUnits, err := unitsFor(withStatus, status.Key)
 	if err != nil || len(statusUnits) != 1 || statusUnits[0].Quote != status.Body || newEligible(withStatus, statusUnits[0], time.Now()) {
 		t.Fatalf("status evidence must be selectable without becoming NEW work: %v", err)
+	}
+}
+
+func checkReferencedSuggestionCandidates(t *testing.T) {
+	t.Helper()
+	// Board pilot from agent-message-queue-yok: literal task IDs and a direct
+	// review reply lost their tasks outside the initial eight model choices.
+	for _, tc := range []struct {
+		name, body string
+		targets    map[string]string
+		opener     string
+	}{
+		{"continuation", "Start demo-611.45 now, as briefed earlier.", map[string]string{"demo-611.45": "Persist owed outcomes"}, ""},
+		{"compound", "Fix demo-lfd.\n\nThen fix demo-4sc.", map[string]string{"demo-lfd": "Sanitize refusal text", "demo-4sc": "Shorten PTY tests"}, ""},
+		{"docs", "New work: demo-docs. Edit the CLI skills README.", map[string]string{"demo-docs": "Codex invokes dollar skills"}, ""},
+		{"review reply", "GO. Waiting for final CI.", map[string]string{"demo-g4": "Hold the doorbell while agy shows a permission or sign-in prompt"}, "Hold the doorbell while agy shows a permission or sign-in prompt. Review it."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := Snapshot{Tasks: map[string]Task{}, Facts: map[string]AliasFact{}, Messages: map[string]Message{}}
+			addTask := func(id, title string) {
+				alias := "beads:/scope:" + id
+				state.Tasks[id] = Task{ID: id, Title: title, Authority: alias, Aliases: []string{alias}, Cancelled: true}
+				state.Facts[alias] = AliasFact{Alias: alias, Fact: Item{Ref: Ref{Kind: RefBead, ID: id}, Title: title, State: StateDone}}
+			}
+			for i := range 10 {
+				addTask(fmt.Sprintf("noise-%d", i), "Start now as briefed earlier fix then new work edit CLI skills README GO waiting final CI")
+			}
+			for id, title := range tc.targets {
+				addTask(id, title)
+			}
+			message := Message{Key: "source#reply", ID: "reply", Namespace: "source", Kind: "review_response", Body: tc.body}
+			if tc.opener != "" {
+				message.Refs = []string{"opener"}
+				state.Messages["source#opener"] = Message{Key: "source#opener", ID: "opener", Namespace: "source", Body: tc.opener}
+			}
+			state.Messages[message.Key] = message
+			units, err := unitsFor(state, message.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, choices := buildDecision(state, units, false, time.Now())
+			for id := range tc.targets {
+				found := false
+				for _, choice := range choices {
+					found = found || choice.Kind == "attach" && choice.TaskID == id
+				}
+				if !found {
+					t.Errorf("referenced task %s is absent from the initial model choices", id)
+				}
+			}
+		})
 	}
 }
