@@ -7,7 +7,8 @@ an explicit sync command. A view refresh only reads the published snapshot.
 amq-board sync --init              # first initialization and acquisition
 amq-board sync --watch             # acquire and publish once per minute
 amq-board                         # text
-amq-board --json                  # schema amq/board/v2
+amq-board --json                  # complete model, schema amq/board/v2
+amq-board --pane-json             # bounded native pane, amq/board-pane/v1
 amq-board --html --out board.html  # one self-contained page
 amq-board serve                   # live view on 127.0.0.1
 ```
@@ -210,5 +211,17 @@ It shows publication freshness and source coverage. A failed reload retains the
 last rendered snapshot with a visible source error. `~/.amq/board/serve.json`
 (mode 0600) lets local clients find the view; shutdown removes its own record.
 
-The optional `amq-board` Claude Code panel reads the same published JSON, either
-from the live server or from `amq-board --json`. It starts no source acquisition.
+The optional `amq-board` Claude Code panel reads `amq/board-pane/v1` from the
+live server's token-protected `pane.json` or `amq-board --pane-json`. Both use
+one bounded projection of the published model. Full `--json` and `model.json`
+remain complete evidence exports.
+
+The pane shows all current task totals and up to 100 waiting tasks, with omitted
+row counts. It includes up to 32 source summaries and states any omissions.
+History and unresolved messages are outside its task counts. Commands are exact
+context commands only; the pane does not copy owner mutations. Publication time
+controls freshness, and recorded progress does not mean observed execution.
+
+Both pane transports retain a 4 MiB encoded JSON limit. An unexpected overflow
+fails visibly instead of clipping JSON. The panel starts no source acquisition,
+initialization, or worker. Run `amq-board sync --watch` separately for updates.

@@ -26,32 +26,37 @@ const BOARD = {
 
 const SERVE_JSON = JSON.stringify({ url: 'http://127.0.0.1:4242', token: 'abc123', pid: 7, started_at: '' })
 
-// A model as amq-board --json prints it, cut to what the pane reads. The
+// The dedicated DTO printed by --pane-json and cached at pane.json. The
 // title carries an ANSI escape that must reach the pane as plain text.
 const MODEL = {
-  schema: 'amq/board/v1',
-  generated_at: '2026-10-25T09:00:00Z',
+  schema: 'amq/board-pane/v1',
+  generation: 7,
+  generated_at: '2026-10-25T09:01:00Z',
+  published_at: '2026-10-25T08:50:00Z',
   dir: '/work/proj',
   project: 'proj',
   sources: [
     { name: 'amq', status: 'ok', partial: false },
     { name: 'github', status: 'degraded', partial: false },
   ],
+  sources_omitted: 0,
   columns: [
-    {
-      id: 'waiting_on_you',
-      cards: [
-        {
-          title: '\x1b[31mReview the parser\x1b[0m',
-          reason: { text: 'review requested', since: '2026-10-25T08:00:00Z' },
-          actions: [{ command: 'amq reply --id m1' }],
-        },
-      ],
-    },
-    { id: 'in_flight', cards: [{}, {}] },
-    { id: 'blocked', cards: [{}] },
-    { id: 'unclaimed', cards: [] },
+    { id: 'waiting_on_you', total: 1 },
+    { id: 'in_flight', total: 2 },
+    { id: 'blocked', total: 1 },
+    { id: 'unclaimed', total: 0 },
+    { id: 'requests', total: 3 },
   ],
+  current_total: 7,
+  waiting_total: 1,
+  waiting_omitted: 0,
+  waiting: [{
+    task_id: 'task-parser',
+    title: '\x1b[31mReview the parser\x1b[0m',
+    reason: 'review requested',
+    since: '2026-10-25T08:00:00Z',
+    command: "amq thread --id 'm 1'",
+  }],
 }
 
 type World = {
@@ -91,7 +96,7 @@ function engine(on: On) {
   })
   on('http.fetch', (_, e) => {
     world.fetches++
-    expect(e.url).toBe('http://127.0.0.1:4242/abc123/model.json')
+    expect(e.url).toBe('http://127.0.0.1:4242/abc123/pane.json')
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(MODEL) } }
   })
   on('process.run', (_, e) => {
@@ -105,7 +110,7 @@ function engine(on: On) {
   const clock = mock.clock(on, { now: NOW })
   on('process.spawn', async function* (_, e) {
     world.boardRuns++
-    expect(e.argv).toEqual(['amq-board', '--json'])
+    expect(e.argv).toEqual(['amq-board', '--pane-json'])
     expect(e.cwd).toBe('/work/proj')
     if (world.hangMs > 0) await clock.sleep(world.hangMs)
     yield { stream: 'stdout' as const, text: JSON.stringify(MODEL) }
@@ -129,12 +134,15 @@ test('/board draws the board a running serve publishes, escapes as plain text', 
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /parser/ }))?.text).toBe('[31mReview the parser[0m')
     expect((await ui.find({ type: 'Text', text: /review requested/ }))?.text).toBe('review requested · 1h ago')
-    expect((await ui.find({ type: 'Text', text: /In flight/ }))?.text).toBe('In flight 2 · Blocked 1 · Unclaimed 0')
+    expect((await ui.find({ type: 'Text', text: /Recorded progress/ }))?.text).toBe('Recorded progress 2 · Blocked 1 · Unclaimed 0 · Reply due 3')
     expect((await ui.find({ type: 'Text', text: /sources/ }))?.text).toBe('sources: amq ok · github degraded')
-    expect((await ui.find({ type: 'Text', text: /generated/ }))?.text).toBe('generated 2026-10-25T09:00:00Z')
+    expect((await ui.find({ type: 'Text', text: /Current tasks/ }))?.text).toBe('Current tasks 7')
+    expect((await ui.find({ type: 'Text', text: /Task ID/ }))?.text).toBe('Task ID: task-parser')
+    expect((await ui.find({ type: 'Text', text: /Published data only/ }))?.text).toBe('Published data only. Run amq-board sync --watch for updates.')
+    expect((await ui.find({ type: 'Text', text: /published 2026/ }))?.text).toBe('published 2026-10-25T08:50:00Z (stale)')
     await ui.unmount()
   }
-  expect(world.statuses.at(-1)).toBe('board: 1 waiting · 2 in flight')
+  expect(world.statuses.at(-1)).toBe('board: 1 waiting · 2 marked in progress')
 
   // Refreshes every minute while open.
   await clock.advance(60_000)

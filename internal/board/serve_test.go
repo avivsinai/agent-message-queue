@@ -1,7 +1,9 @@
 package board
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // liveFixture is a Live whose one source is an AMQ roster with alpha last
@@ -26,7 +29,10 @@ func liveFixture(t *testing.T, userPath string, logs *[]string, builds *int) *Li
 		Load: func() (FileConfig, []string) { return LoadConfig(userPath, "") },
 		Build: func(_ context.Context, cfg FileConfig, _ bool) Model {
 			*builds++
-			return Build(Input{Results: []NamedResult{{Name: "amq", Result: amq}}, Config: cfg.Board, Now: now})
+			model := Build(Input{Results: []NamedResult{{Name: "amq", Result: amq}}, Config: cfg.Board, Now: now, Dir: "/work/proj"})
+			model.Generation = 1
+			model.PublishedAt = now.Add(-time.Minute)
+			return model
 		},
 		Now:  func() time.Time { return now },
 		Logf: func(format string, args ...any) { *logs = append(*logs, format) },
@@ -113,10 +119,13 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 		want int
 	}{
 		{"/model.json", http.StatusNotFound},
+		{"/pane.json", http.StatusNotFound},
+		{"/0123456789abcdef0123456789abcdee/pane.json", http.StatusNotFound},
 		{"/refresh", http.StatusNotFound},
 		{"/0123456789abcdef0123456789abcdee/model.json", http.StatusNotFound},
 		{"/0123456789abcdef0123456789abcdee/refresh", http.StatusNotFound},
 		{"/" + token + "/model.json", http.StatusOK},
+		{"/" + token + "/pane.json", http.StatusOK},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "http://"+host+tc.path, nil)
 		rec := httptest.NewRecorder()
@@ -127,6 +136,48 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 	}
 	if builds != 1 {
 		t.Fatalf("a request without the token started a refresh: %d builds, want 1", builds)
+	}
+	// Native-pane acceptance found the full export above 4 MiB. The cached
+	// route and CLI encoder share a thin DTO and never include retained evidence.
+	want, err := PaneJSON(l.Model())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+"/"+token+"/pane.json", nil))
+	if !bytes.Equal(rec.Body.Bytes(), want) || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("pane route did not serve the shared cached projection")
+	}
+	model := Model{Generation: 7, GeneratedAt: time.Now(), PublishedAt: time.Now().Add(-time.Hour), Dir: "/work/" + strings.Repeat("long-project/", 30), Project: "project", Columns: []ColumnView{{ID: ColumnWaiting}, {ID: ColumnInFlight, Cards: make([]Card, 2)}, {ID: ColumnRequests, Cards: make([]Card, 3)}}, Unresolved: []Message{{Body: strings.Repeat("retained evidence ", 300000)}}, Historical: []Card{{ID: "historical"}}}
+	const exact = "amq thread --id 'a b'"
+	for i := 0; i < 101; i++ {
+		model.Columns[0].Cards = append(model.Columns[0].Cards, Card{ID: "task-a", Title: strings.Repeat("title", 50), Reason: Reason{Text: strings.Repeat("reason", 50)}, Actions: []Action{{Purpose: ActionOwnerMutation, Command: "amq-board cancel --task task-a"}, {Purpose: ActionContext, Command: exact}}})
+	}
+	model.Columns[0].Cards[1].Actions = []Action{{Purpose: ActionContext, Command: "read\nmutate"}, {Purpose: ActionContext, Command: exact}}
+	model.Columns[0].Cards[2].Actions = []Action{{Purpose: ActionContext, Command: strings.Repeat("a", 4097)}}
+	for i := 0; i < 34; i++ {
+		model.Sources = append(model.Sources, SourceView{Name: strings.Repeat("source", 20), Status: StatusOK})
+	}
+	full, err := json.Marshal(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) <= PaneJSONLimit {
+		t.Fatal("fixture did not reproduce the oversized full export")
+	}
+	data, err := PaneJSON(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pane PaneModel
+	if err = json.Unmarshal(data, &pane); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) >= PaneJSONLimit || bytes.Contains(data, []byte("retained evidence")) || pane.CurrentTotal != 106 || pane.WaitingTotal != 101 || len(pane.Waiting) != 100 || pane.WaitingOmitted != 1 || len(pane.Sources) != 32 || pane.SourcesOmitted != 2 || pane.Dir != model.Dir || !pane.PublishedAt.Equal(model.PublishedAt) {
+		t.Fatal("pane lost accurate counts, identity, freshness or display bounds")
+	}
+	if pane.Waiting[0].Command != exact || pane.Waiting[1].Command != "" || pane.Waiting[2].Command != "" || utf8.RuneCountInString(pane.Waiting[0].Title) > 160 || utf8.RuneCountInString(pane.Waiting[0].Reason) > 160 {
+		t.Fatal("pane offered an owner mutation, changed a command or exceeded display bounds")
 	}
 }
 
