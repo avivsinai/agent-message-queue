@@ -91,6 +91,28 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	s.late.kick = kick
 	s.mu.Unlock()
 	done, quit := make(chan struct{}), make(chan struct{})
+	// A machine agent's leader reads the bindings every machineScanInterval
+	// in its own worker, so a new session gets its channel without waiting
+	// behind the sweep's posts. That one worker makes every relay call of
+	// the machine lifecycle, one at a time, and stops with this one.
+	machineDone := make(chan struct{})
+	if s.cfg.Machine {
+		go func() {
+			defer close(machineDone)
+			tick := time.NewTicker(machineScanInterval)
+			defer tick.Stop()
+			for {
+				s.machineTick(time.Now())
+				select {
+				case <-quit:
+					return
+				case <-tick.C:
+				}
+			}
+		}()
+	} else {
+		close(machineDone)
+	}
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
@@ -112,6 +134,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	return func() {
 		close(quit)
 		<-done
+		<-machineDone
 		s.resign()
 		s.mu.Lock()
 		s.late.kick = nil

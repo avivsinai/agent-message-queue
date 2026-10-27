@@ -134,6 +134,8 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			case errors.As(err, &unpinned):
 				r.meta.State = "not_pinned"
 				text = s.unpinnedReply(unpinned)
+			case errors.Is(err, errChannelNotConnected):
+				text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
@@ -328,10 +330,15 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 // (lifecycle.go), else the model the session selected (session/set_model),
 // else the only binding there is. A selection that disagrees with the pin
 // refuses. An unpinned agent with several bindings never guesses, and the
-// helper never delivers: both answer with the bound sessions instead.
+// helper never delivers: both answer with the bound sessions instead. A
+// machine agent resolves only through its channel route (machineBinding),
+// before any of these.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if s.cfg.PinErr != nil {
 		return binding.Binding{}, s.cfg.PinErr
+	}
+	if s.cfg.Machine {
+		return s.machineBinding(sessionID)
 	}
 	s.mu.Lock()
 	name := ""
@@ -439,7 +446,7 @@ func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
 	switch {
 	case c.Agent != "":
 		return c.Agent == buzzSelf
-	case s.cfg.Helper:
+	case s.cfg.Helper, s.cfg.Machine:
 		return false
 	case c.Name != "":
 		return s.cfg.Pin != "" && c.Name == s.cfg.Pin

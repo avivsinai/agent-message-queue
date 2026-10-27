@@ -322,15 +322,22 @@ func (a *approvals) close() {
 // pending (observe closes stop).
 func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, stop chan struct{}) {
 	defer a.wg.Done()
-	if allowable(in, a.channel) {
+	// A machine agent's channel offers deny only: a Desktop pin names one
+	// agent and one DM, and never widens to a channel.
+	machine := a.r.s.cfg.Machine
+	if !machine && allowable(in, a.channel) {
 		w := &allowWatch{a: a, snap: snap, in: in, text: buzzio.DesktopApprovalText(in.Prompt), tried: map[string]bool{}}
 		defer w.drop()
 		a.poll(stop, w.post, w.poll)
 		return
 	}
 	posted, allowAnswered, denyFailed := "", false, false
+	hint := ""
+	if !machine {
+		hint = desktopHint(a.channel)
+	}
 	post := func(budget time.Duration) bool {
-		id, err := postAnswer(a.channel, approvalText(in.Prompt, desktopHint(a.channel)), budget)
+		id, err := postAnswer(a.channel, approvalText(in.Prompt, hint), budget)
 		posted = id
 		return err == nil
 	}

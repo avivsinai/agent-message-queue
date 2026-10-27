@@ -40,6 +40,7 @@ func PrepareWorkerEnv() error {
 	// child and no AMQ message sees it.
 	captureBuzzIdentity()
 	captureBuzzAgent()
+	captureWorkerIdentity()
 	stripBuzzSecrets()
 	return nil
 }

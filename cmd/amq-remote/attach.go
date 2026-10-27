@@ -217,15 +217,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		sayWarning(stdout, hookWarning)
 		return 0, nil
 	}
-	now := time.Now()
-	agent, helper := agentOf(nb.Name, now), helperOf(now)
-	draft := helperDrafts(nb, helper)
+	v := viewOf(nb, nb.Name, reused)
 	if c.json {
 		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
-		emitJSON(stdout, withWarning(connectedJSON(out, nb.Name, nb.Label, reused, agent, helper, draft), hookWarning))
+		emitJSON(stdout, withWarning(connectedJSON(out, v), hookWarning))
 		return 0, nil
 	}
-	connected(stdout, nb.Name, nb.Label, agent, helper, draft)
+	connected(stdout, v)
 	sayWarning(stdout, hookWarning)
 	return 0, nil
 }
@@ -329,15 +327,13 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 	}
 	pruneAfterAttach(inspect)
 	recordAttachIdentity(stderr, root, handle, h.Kind)
-	now := time.Now()
-	agent, helper := agentOf(name, now), helperOf(now)
-	draft := helperDrafts(b, helper)
+	v := viewOf(b, name, reused)
 	if asJSON {
 		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
-		emitJSON(stdout, connectedJSON(out, name, b.Label, reused, agent, helper, draft))
+		emitJSON(stdout, connectedJSON(out, v))
 		return 0, nil
 	}
-	connected(stdout, name, b.Label, agent, helper, draft)
+	connected(stdout, v)
 	return 0, nil
 }
 
@@ -756,6 +752,10 @@ type bindingRow struct {
 	Handle   string        `json:"handle,omitempty"`
 	Target   string        `json:"target,omitempty"`
 	Agent    string        `json:"agent"`
+	// Channel and ChannelName are the machine agent's channel for the
+	// session, when it has a record of one.
+	Channel     string `json:"channel,omitempty"`
+	ChannelName string `json:"channel_name,omitempty"`
 }
 
 // bindings lists the bound sessions with their liveness and their Buzz
@@ -780,14 +780,18 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		return protocol.ExitActionRequired, err
 	}
 	now := time.Now()
-	helper := helperOf(now)
+	helper, machine := helperOf(now), machineOf(now)
 	rows := make([]bindingRow, 0, len(all))
 	var unknown []string
 	width := 0
 	for _, b := range all {
 		state, evidence := inspect(b)
-		rows = append(rows, bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
-			Agent: agentOf(b.Name, now).State})
+		row := bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
+			Agent: agentOf(b.Name, now).State}
+		if ch, ok := acp.MachineChannelOf(b); ok {
+			row.Channel, row.ChannelName = ch.State, ch.Name
+		}
+		rows = append(rows, row)
 		if state == binding.Unknown {
 			unknown = append(unknown, b.Name)
 		}
@@ -801,8 +805,11 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		if legacy == nil {
 			legacy = []string{}
 		}
-		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "legacy_agents": legacy})
+		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "machine": machine.State, "legacy_agents": legacy})
 		return 0, nil
+	}
+	if machine.State != agentMissing {
+		say(stdout, "Machine agent: %s (%s)", nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()), machine.State)
 	}
 	if helper.State != agentMissing {
 		say(stdout, "Helper: %s (%s)", nonEmpty(helper.Display, "AMQ Remote helper"), helper.State)
@@ -814,6 +821,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		line := fmt.Sprintf("%-*s  %-7s  agent %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Agent, r.Name)
 		if r.State != binding.Live {
 			line += ": " + r.Evidence
+		}
+		if r.Channel != "" {
+			line += fmt.Sprintf("  channel %s %q", r.Channel, r.ChannelName)
 		}
 		say(stdout, "%s", line)
 	}
@@ -890,7 +900,18 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
-	removed, err := binding.Retire(match)
+	// A session the machine agent serves stops taking messages in its
+	// channel as soon as the binding is gone; the machine agent archives the
+	// channel after that.
+	channel := false
+	removed, err := binding.Retire(func(b binding.Binding) bool {
+		if !match(b) {
+			return false
+		}
+		_, has := acp.MachineChannelOf(b)
+		channel = channel || has
+		return true
+	})
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -903,6 +924,10 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	if len(removed) == 0 {
 		say(stdout, "Not connected.")
+		return 0, nil
+	}
+	if channel {
+		say(stdout, "Disconnected. The session keeps running; its channel stops taking messages now.")
 		return 0, nil
 	}
 	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")

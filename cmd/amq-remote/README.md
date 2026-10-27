@@ -564,7 +564,7 @@ accepts a bare request id that is still in the sender spool.
 
 `wait` interrupted by SIGINT exits 130. The request keeps running.
 
-### `attach`, `detach`, `bindings`
+### `attach`, `detach`, `bindings`, `channel reset`
 
 | Flag | Command | Default | Meaning |
 | --- | --- | --- | --- |
@@ -616,48 +616,77 @@ to it. The bindings live
 in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
 are created 0700 below an existing ancestor that has no symlink on its path,
 is owned by you, and is not group- or world-writable. Several sessions can be
-connected at once. Each has its own Buzz agent, pinned to its binding by the
-system prompt line `AMQ Remote session: <name>`, which `amq-acp setup
---session <name>` writes into its import file. An agent may instead pin with
-the model `amq-remote:<name>`.
+connected at once. The machine agent (`amq-acp setup --machine`, imported
+once per machine) makes a private Buzz channel for each live session that
+has no Buzz agent of its own that runs or is idle, adds the owner and
+mentions them, and runs each owner message in that channel in that session
+only (see the [amq-acp README](../amq-acp/README.md#binding-mode)). Attach
+writes only the binding and holds no Buzz key. A session may instead keep its
+own Buzz agent, pinned to its binding by the system prompt line `AMQ Remote
+session: <name>`, which `amq-acp setup --session <name>` writes into its
+import file, or by the model `amq-remote:<name>`; such a session keeps its DM
+while its agent runs or is idle.
 
 Attach tells the owner only what is still needed. It prints `Connected:
 <label>`, the session's label (`<harness> · <project>/<session> @
-<machine>`), then one line from the agent's markers, which amq-acp rewrites
-under `~/.amq/remote/acp/agents/<name>/` while the agent runs:
+<machine>`), then one line from the markers amq-acp writes under
+`~/.amq/remote/acp/agents/` and the machine agent's channel record. While the
+machine agent runs and serves the session, attach waits up to 15 s for the
+channel to become active. The line is the first that applies:
 
-- the agent ran in the last 10 minutes: `DM "<agent>" in Buzz.`;
-- it has markers but none that recent: start it in Buzz Desktop, or, if it
-  was deleted, run `amq-acp setup --session <name>` and import the file;
-- it has none, the helper agent runs with its control channel set up, and
-  the session is proven live: the helper opens Buzz Desktop's Create agent
-  dialog for it;
-- it has none otherwise: run `amq-acp setup --session <name>` once and
-  import the file. With no helper on this machine, attach also suggests
-  importing the helper once (`amq-acp setup --helper`), so that later
-  sessions need only the Create agent dialog.
+- the session's own agent runs: `DM "<agent>" in Buzz.`; it is idle: DM it,
+  and Buzz starts it on the next message;
+- the machine agent runs and the channel is active: open that channel in
+  Buzz;
+- the machine agent runs and the channel is being made: it appears within a
+  minute;
+- the channel is uncertain: Buzz did not confirm the create; AMQ keeps
+  looking for it and never makes a second one, and `amq-remote channel reset
+  <name>` gives it up;
+- the channel failed: the error, and that AMQ tries again in 10 minutes, or,
+  after the third refusal, `amq-remote channel reset <name>`;
+- the session's own agent is offline and there is no machine agent: DM it
+  first, and start it in Buzz Desktop if it does not answer within a minute;
+- there is no machine agent: the helper's Create agent dialog, or
+  `amq-acp setup --session <name>`, when this machine runs the helper;
+  otherwise `amq-acp setup --machine`, once per machine;
+- the machine agent is offline: start it in Buzz Desktop.
 
 `--json` reports `name`, `label`, `reused` (this session already held the
-name, as a binding or a tombstone, so its agent comes back), `agent` and
-`helper` (`running`, `offline` or `missing`), `draft` (the helper opens the
-Create agent dialog), and `agent_name` (the marker's display name, else the
-label, else `AMQ: <name>`) whenever there is an agent. A link share prints
-its own lines; a link has no Buzz agent.
+name, as a binding or a tombstone, so its agent or channel comes back),
+`agent`, `helper` and `machine` (`running`, `idle`, `offline` or `missing`),
+`draft` (the helper opens the Create agent dialog), `agent_name` (the
+marker's display name, else the label, else `AMQ: <name>`) whenever there is
+an agent, and `machine_name` whenever there is a machine agent. When the
+machine agent serves the session, it also reports `channel` (`active`,
+`creating`, `uncertain` or `failed`), `channel_name`, and, when uncertain or
+failed, `channel_error` and `channel_retry` (AMQ creates again by itself). A
+link share prints its own lines; a link has no Buzz agent.
+
+`amq-remote channel reset <name>` gives up the machine agent's channel of
+session `<name>`. It is the only way to allow a new create after one that
+Buzz never confirmed. The machine agent applies it on its next scan: the old
+record is retired, a channel that create made is still looked for and
+archived, and a new channel is made. A lost channel may be left over in
+Buzz.
 
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
-ended, then lists each binding with its label, `live` or `unknown`, its
-agent's state and its name, with `amq-remote detach --name <name>` for the
-unknown ones. It names, once, the agents of removed bindings that carry no
-label: those agents never archive themselves, so delete them in Buzz Desktop
-and hide their DMs. The text output records them as named;
-`--json` lists them without recording. `--json` reports `bindings`, `pruned`,
-`helper` and `legacy_agents`.
+ended, then lists the machine agent and each binding with its label, `live`
+or `unknown`, its agent's state, its name and its channel, with `amq-remote
+detach --name <name>` for the unknown ones. It names, once, each per-session
+Buzz agent whose binding is removed, in one line: "Delete these in Buzz
+Desktop (Agents, the agent, Delete): ...". Archiving does not remove an agent
+from Desktop's list. The text output records them as named; `--json` lists
+them without recording. `--json` reports `bindings` (with `channel` and
+`channel_name`), `pruned`, `helper`, `machine` and `legacy_agents`.
 
 `amq-remote detach` needs one scope: `--self` removes the binding that names
 this session, `--name <name>` removes the binding of that name, and `--all`
-removes every binding. The session and the endpoint keep running. The
-session's agent then archives itself, and it unarchives when the same session
-attaches again.
+removes every binding. The session and the endpoint keep running. A session
+the machine agent serves stops taking messages in its channel at once, and
+the machine agent archives the channel; attaching the same session again
+brings the channel back. A session's own agent archives itself, and it
+unarchives when the same session attaches again.
 
 A defaulted name that another session holds, or held before it was detached
 or ended, is never taken: the session gets the next free `<name>-N`.

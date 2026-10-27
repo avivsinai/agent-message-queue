@@ -16,20 +16,30 @@ import (
 const setupUsage = `amq-acp setup writes the AMQ Remote Buzz harness and the Desktop import file.
 
 Usage:
+  amq-acp setup --machine [--out <file>]
   amq-acp setup [--out <file>]
   amq-acp setup --session <name> [--out <file>]
   amq-acp setup --helper [--out <file>]
 
-The harness is ~/Library/Application Support/xyz.block.buzz.app/custom_harnesses/amq_remote.json
+With --machine it writes the machine agent, the one Buzz agent of this
+machine: each session that runs /amq-remote then gets a private Buzz channel
+that this agent makes, with the owner added. Import it once per machine. Its
+harness is custom_harnesses/amq_remote_machine.json, whose env keeps every
+worker running (BUZZ_ACP_LAZY_POOL=false) and makes every owner message in
+its channels a prompt (BUZZ_ACP_SUBSCRIBE=all, BUZZ_ACP_KINDS=9). The import
+file is "AMQ Remote @ <machine>.agent.json".
+
+Without --machine the harness is
+~/Library/Application Support/xyz.block.buzz.app/custom_harnesses/amq_remote.json
 with mode 0600. Its env is only AMQ_ACP_REMOTE=binding. A file this command did
 not write is left unchanged.
 
 The import file is "AMQ Remote.agent.json" in the current directory, or --out.
 With --session it is "AMQ <name>.agent.json", an agent for that one session.
 With --helper it is "AMQ Remote helper.agent.json", the per-machine helper
-that asks Buzz Desktop to create each new session's agent; import it once per
-machine. Import the file in Buzz Desktop, then Start; turn on Auto-start. A
-Desktop that is open sees a new harness after Settings, Agents, Check again.
+that asks Buzz Desktop to create each new session's agent. Import the file in
+Buzz Desktop, then Start; turn on Auto-start. A Desktop that is open sees a
+new harness after Settings, Agents, Check again.
 `
 
 const (
@@ -43,6 +53,13 @@ const (
 	// helperLine makes an imported agent the per-machine helper
 	// (internal/acp lifecycle.go).
 	helperLine = "AMQ Remote helper"
+	// machineHarnessID, machineLine and machineParallelism make the machine
+	// agent (internal/acp machine.go): one agent per machine with a private
+	// channel per session. Its workers run eagerly, so parallelism bounds
+	// the concurrent turns across all sessions.
+	machineHarnessID   = "amq_remote_machine"
+	machineLine        = "AMQ Remote machine"
+	machineParallelism = 4
 )
 
 type agentSnapshot struct {
@@ -76,6 +93,7 @@ func runSetup(args []string) int {
 	out := flags.String("out", "", "Import file path (default: ./AMQ Remote.agent.json, or ./AMQ <session>.agent.json)")
 	session := flags.String("session", "", "binding name from amq-remote attach; the agent is \"AMQ: <session>\" and drives only that session")
 	helper := flags.Bool("helper", false, "write the per-machine helper, which asks Buzz Desktop to create each new session's agent")
+	machine := flags.Bool("machine", false, "write the machine agent, which gives each session a private Buzz channel")
 	flags.Usage = func() { fmt.Fprint(os.Stderr, setupUsage) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -108,9 +126,15 @@ func runSetup(args []string) int {
 			return exitUsage
 		}
 	}
+	if *machine && (*helper || name != "") {
+		fmt.Fprintln(os.Stderr, "amq-acp setup: --machine serves every session; give it without --session or --helper")
+		return exitUsage
+	}
 	snapshotPath := *out
 	if snapshotPath == "" {
 		switch {
+		case *machine:
+			snapshotPath = machineAgentName() + ".agent.json"
 		case *helper:
 			snapshotPath = helperSnapshotName
 		case name != "":
@@ -124,12 +148,17 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	harnessPath := filepath.Join(buzzHarnessDir(home), remoteHarnessID+".json")
-	if err := writeHarness(harnessPath, remoteHarness(command)); err != nil {
+	harness := remoteHarness(command)
+	body, err := remoteSnapshotBody(name, *helper)
+	if *machine {
+		harness = machineHarness(command)
+		body, err = snapshotBody(machineAgentName(), machineLine, machineHarnessID, machineParallelism)
+	}
+	harnessPath := filepath.Join(buzzHarnessDir(home), harness.ID+".json")
+	if err := writeHarness(harnessPath, harness); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	body, err := remoteSnapshotBody(name, *helper)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
@@ -139,6 +168,9 @@ func runSetup(args []string) int {
 		return exitGeneral
 	}
 	fmt.Print(setupSteps(snapshotPath))
+	if *machine {
+		fmt.Println("Do this once per machine: each session that runs /amq-remote then gets its own private channel in Buzz.")
+	}
 	if *helper {
 		fmt.Println("Do this once per machine: the helper then asks Buzz Desktop to create the agent of each new session.")
 	}
@@ -187,15 +219,50 @@ func remoteSnapshotBody(session string, helper bool) ([]byte, error) {
 	case session != "":
 		agentName, systemPrompt = "AMQ: "+session, "AMQ Remote session: "+session
 	}
+	return snapshotBody(agentName, systemPrompt, remoteHarnessID, 1)
+}
+
+// machineHarness is the machine agent's harness. Buzz applies its env to
+// the parent buzz-acp: workers start with Desktop and never sleep, and every
+// ordinary message in a channel the agent belongs to is a prompt, not only
+// a mention.
+func machineHarness(command string) buzzHarness {
+	return buzzHarness{
+		ID:      machineHarnessID,
+		Label:   "AMQ Remote machine",
+		Command: command,
+		Args:    []string{},
+		Env: map[string]string{
+			"AMQ_ACP_REMOTE":     "binding",
+			"BUZZ_ACP_LAZY_POOL": "false",
+			"BUZZ_ACP_SUBSCRIBE": "all",
+			"BUZZ_ACP_KINDS":     "9",
+		},
+		InstallInstructionsURL: harnessDocsURL,
+		InstallHint:            harnessHintPrefix + " AMQ Remote machine gives each session a private channel.",
+	}
+}
+
+// machineAgentName is "AMQ Remote @ <machine>", or "AMQ Remote machine"
+// when the host name is unknown.
+func machineAgentName() string {
+	if machine := binding.Machine(); machine != "" {
+		return "AMQ Remote @ " + machine
+	}
+	return "AMQ Remote machine"
+}
+
+// snapshotBody is one Import file: an owner-only agent on runtime.
+func snapshotBody(agentName, systemPrompt, runtime string, parallelism int) ([]byte, error) {
 	body, err := json.MarshalIndent(agentSnapshot{
 		Format:  "buzz-agent-snapshot",
 		Version: 1,
 		Definition: agentSnapshotDefinition{
 			Name:         agentName,
 			SystemPrompt: systemPrompt,
-			Runtime:      remoteHarnessID,
+			Runtime:      runtime,
 			Model:        remoteModelID,
-			Parallelism:  1,
+			Parallelism:  parallelism,
 			RespondTo:    ownerOnlyRespondTo,
 		},
 		Profile: agentSnapshotProfile{DisplayName: agentName},

@@ -49,6 +49,8 @@ Commands:
   detach --self|--name N|--all
                            Unbind; the session keeps running
   bindings                 Bound sessions: live, unknown, or ended (pruned)
+  channel reset NAME       Give up session NAME's Buzz channel; the machine
+                           agent makes a new one
   service install|uninstall|status [--root R]
                            Start amq-remote up for R (default the machine
                            root) at login: launchd on macOS, systemd on Linux
@@ -261,6 +263,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = detach(rest, stdout, stderr, probe)
 	case "bindings":
 		code, err = bindings(rest, stdout, probe)
+	case "channel":
+		code, err = channelCommand(rest, stdout, probe)
 	case "service":
 		code, err = service(rest, stdout, probe)
 	case "doctor":
