@@ -303,3 +303,85 @@ func TestFindMemberLookups(t *testing.T) {
 		t.Fatal("FindMemberByName should return nil for nonexistent")
 	}
 }
+
+// field: Claude 2.1.311 team configs use camelCase (2026-10-27)
+func TestClaudeCamelCaseTeamListJoinLeave(t *testing.T) {
+	home := setupTeamDir(t)
+	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, "demo-team")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, teamConfigFile)
+	native := `{"name":"demo-team","description":"demo","createdAt":1761580800000,` +
+		`"leadAgentId":"team-lead@demo-team","leadSessionId":"00000000-0000-4000-8000-000000000001",` +
+		`"members":[{"agentId":"team-lead@demo-team","agentType":"team-lead","name":"team-lead",` +
+		`"cwd":"/work/demo","joinedAt":1761580800001,"model":"demo-model","backendType":"in-process",` +
+		`"tmuxPaneId":"%7","subscriptions":["demo-topic"]}]}`
+	if err := os.WriteFile(path, []byte(native), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readRaw := func() map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	nativeKeys := func(stage string) {
+		t.Helper()
+		m := readRaw()
+		for _, k := range []string{"description", "createdAt", "leadAgentId", "leadSessionId"} {
+			if _, ok := m[k]; !ok {
+				t.Errorf("%s dropped top-level %q", stage, k)
+			}
+		}
+		members, _ := m["members"].([]any)
+		lead, _ := members[0].(map[string]any)
+		for _, k := range []string{"cwd", "joinedAt", "model", "backendType", "tmuxPaneId", "subscriptions"} {
+			if _, ok := lead[k]; !ok {
+				t.Errorf("%s dropped member %q", stage, k)
+			}
+		}
+	}
+
+	// list
+	got, err := LoadTeam("demo-team")
+	if err != nil {
+		t.Fatalf("LoadTeam: %v", err)
+	}
+	if got.Lead != "team-lead@demo-team" || len(got.Members) != 1 ||
+		got.Members[0].AgentID != "team-lead@demo-team" || got.Members[0].AgentType != "team-lead" {
+		t.Fatalf("LoadTeam = %+v, want leadAgentId and member agentId/agentType", got)
+	}
+
+	// join
+	if err := RegisterMember("demo-team", Member{Name: "team-lead", AgentID: "team-lead@demo-team"}); err == nil {
+		t.Error("join accepted a duplicate of a camelCase agentId")
+	}
+	if err := RegisterMember("demo-team", Member{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	nativeKeys("join")
+	members, _ := readRaw()["members"].([]any)
+	if len(members) != 2 {
+		t.Fatalf("len(members) = %d, want 2", len(members))
+	}
+	added, _ := members[1].(map[string]any)
+	if added["agentId"] != "ext-1" || added["agentType"] != AgentTypeCodex || added["agent_id"] != nil {
+		t.Errorf("joined member = %v, want camelCase agentId/agentType only", added)
+	}
+
+	// leave
+	if err := UnregisterMember("demo-team", "ext-1"); err != nil {
+		t.Fatalf("UnregisterMember: %v", err)
+	}
+	nativeKeys("leave")
+	if members, _ := readRaw()["members"].([]any); len(members) != 1 {
+		t.Errorf("len(members) after leave = %d, want 1", len(members))
+	}
+}

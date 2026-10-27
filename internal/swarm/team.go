@@ -20,19 +20,83 @@ const (
 	AgentTypeExternal   = "external"
 )
 
-// Member represents a teammate in a Claude Code Agent Team.
+// Member represents a teammate in a Claude Code Agent Team. Claude Code
+// writes camelCase keys; configs written by older AMQ releases use snake_case,
+// which UnmarshalJSON still reads.
 type Member struct {
 	Name      string `json:"name"`
-	AgentID   string `json:"agent_id"`
-	AgentType string `json:"agent_type"`
+	AgentID   string `json:"agentId"`
+	AgentType string `json:"agentType"`
+}
+
+// UnmarshalJSON reads the camelCase keys first and falls back to the legacy
+// snake_case keys.
+func (m *Member) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		Name            string `json:"name"`
+		AgentID         string `json:"agentId"`
+		AgentType       string `json:"agentType"`
+		LegacyAgentID   string `json:"agent_id"`
+		LegacyAgentType string `json:"agent_type"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	id, err := memberIdentity(aux.AgentID, aux.LegacyAgentID)
+	if err != nil {
+		return err
+	}
+	*m = Member{
+		Name:      aux.Name,
+		AgentID:   id,
+		AgentType: firstNonEmpty(aux.AgentType, aux.LegacyAgentType),
+	}
+	return nil
+}
+
+// memberIdentity resolves a member's agent ID from the camelCase and legacy
+// snake_case keys. An entry that carries both with different values has no
+// single identity, so it is refused rather than guessed.
+func memberIdentity(agentID, legacyAgentID string) (string, error) {
+	if agentID != "" && legacyAgentID != "" && agentID != legacyAgentID {
+		return "", fmt.Errorf("team member has conflicting agentId %q and agent_id %q", agentID, legacyAgentID)
+	}
+	return firstNonEmpty(agentID, legacyAgentID), nil
 }
 
 // TeamConfig represents the team configuration stored at
-// ~/.claude/teams/{team-name}/config.json.
+// ~/.claude/teams/{team-name}/config.json. Lead is Claude Code's leadAgentId;
+// legacy AMQ-written configs store it as lead.
 type TeamConfig struct {
 	Name    string   `json:"name"`
-	Lead    string   `json:"lead,omitempty"`
+	Lead    string   `json:"leadAgentId,omitempty"`
 	Members []Member `json:"members"`
+}
+
+// UnmarshalJSON reads leadAgentId first and falls back to the legacy lead key.
+func (tc *TeamConfig) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		Name       string   `json:"name"`
+		Lead       string   `json:"leadAgentId"`
+		LegacyLead string   `json:"lead"`
+		Members    []Member `json:"members"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*tc = TeamConfig{
+		Name:    aux.Name,
+		Lead:    firstNonEmpty(aux.Lead, aux.LegacyLead),
+		Members: aux.Members,
+	}
+	return nil
+}
+
+func firstNonEmpty(primary, fallback string) string {
+	if primary != "" {
+		return primary
+	}
+	return fallback
 }
 
 // TeamSummary provides a brief overview of a team for listing.
@@ -119,8 +183,9 @@ func (tc *TeamConfig) FindMemberByName(name string) *Member {
 }
 
 // RegisterMember adds a new member to the team config and writes it back.
-// Returns an error if a member with the same agent_id already exists.
-// Uses raw JSON round-tripping to preserve unknown fields in CC's config.
+// Returns an error if a member with the same agent ID already exists.
+// Uses raw JSON round-tripping to preserve unknown fields in CC's config, and
+// writes the new member with Claude Code's camelCase keys.
 func RegisterMember(teamName string, member Member) error {
 	// Lock on a stable sidecar file; the config is updated via atomic rename.
 	lockPath := TeamConfigPath(teamName) + ".lock"
@@ -138,17 +203,21 @@ func RegisterMember(teamName string, member Member) error {
 			if !ok {
 				continue
 			}
-			if id, _ := m["agent_id"].(string); id == member.AgentID {
+			id, err := rawMemberAgentID(m)
+			if err != nil {
+				return err
+			}
+			if id == member.AgentID {
 				name, _ := m["name"].(string)
-				return fmt.Errorf("member with agent_id %q already registered (name=%q)", member.AgentID, name)
+				return fmt.Errorf("member with agent ID %q already registered (name=%q)", member.AgentID, name)
 			}
 		}
 
 		// Append new member as raw map
 		newMember := map[string]any{
-			"name":       member.Name,
-			"agent_id":   member.AgentID,
-			"agent_type": member.AgentType,
+			"name":      member.Name,
+			"agentId":   member.AgentID,
+			"agentType": member.AgentType,
 		}
 		raw["members"] = append(members, newMember)
 
@@ -156,7 +225,7 @@ func RegisterMember(teamName string, member Member) error {
 	})
 }
 
-// UnregisterMember removes a member by agent_id from the team config.
+// UnregisterMember removes a member by agent ID from the team config.
 // Uses raw JSON round-tripping to preserve unknown fields in CC's config.
 func UnregisterMember(teamName, agentID string) error {
 	// Lock on a stable sidecar file; the config is updated via atomic rename.
@@ -177,14 +246,18 @@ func UnregisterMember(teamName, agentID string) error {
 				filtered = append(filtered, item)
 				continue
 			}
-			if id, _ := m["agent_id"].(string); id == agentID {
+			id, err := rawMemberAgentID(m)
+			if err != nil {
+				return err
+			}
+			if id == agentID {
 				found = true
 				continue
 			}
 			filtered = append(filtered, item)
 		}
 		if !found {
-			return fmt.Errorf("member with agent_id %q not found in team %q", agentID, teamName)
+			return fmt.Errorf("member with agent ID %q not found in team %q", agentID, teamName)
 		}
 
 		raw["members"] = filtered
@@ -212,6 +285,14 @@ func NewExternalAgentID(handle string) string {
 		os.Getpid(),
 		hex.EncodeToString(b[:]),
 	)
+}
+
+// rawMemberAgentID reads a member's agent ID from its camelCase key and falls
+// back to the legacy snake_case key.
+func rawMemberAgentID(m map[string]any) (string, error) {
+	id, _ := m["agentId"].(string)
+	legacy, _ := m["agent_id"].(string)
+	return memberIdentity(id, legacy)
 }
 
 func readTeamConfigRaw(teamName string) (map[string]any, error) {
