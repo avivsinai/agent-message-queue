@@ -651,16 +651,22 @@ func (s *Server) finishRetire(r channelRecord, now time.Time) (channelRecord, bo
 	return r, true
 }
 
-// removeDurably removes path, if it exists, and syncs its directory.
+// removeDurably removes path, if it exists, and syncs its directory. An
+// absent path is synced too: an earlier unlink whose sync failed is not yet
+// durable, and a stop could bring the file back. Only a directory that was
+// never created needs no sync.
 func (s *Server) removeDurably(path string) error {
 	err := os.Remove(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return nil
-	case err != nil:
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return fsq.SyncDir(filepath.Dir(path))
+	dir := filepath.Dir(path)
+	if err != nil {
+		if _, statErr := os.Stat(dir); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+	}
+	return fsq.SyncDir(dir)
 }
 
 // retireGone retires each record whose binding is proven gone or ended, and

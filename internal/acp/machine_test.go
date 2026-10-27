@@ -322,6 +322,26 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	if r := channelState(t, s, "alpha"); r.State != channelActive || r.ChannelID != machineChanA || r.Archived {
 		t.Fatalf("restored record = %+v", r)
 	}
+
+	// Regression (PR #1279 review): the restore unlinked the retired copy,
+	// and if that unlink's sync failed, the next retirement saw the copy
+	// absent and wrote the retired slot without syncing, so a stop could
+	// bring the stale copy back as the newer one. The absence must be
+	// synced before the slot says retired.
+	var synced []string
+	defer fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		if strings.HasPrefix(dir, s.channelDir()) {
+			synced = append(synced, dir)
+		}
+		return nil
+	})()
+	if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, now.Add(3*time.Minute))
+	if len(synced) == 0 || synced[0] != s.retiredDir() {
+		t.Fatalf("directory syncs on retirement = %q; want the retired store synced first", synced)
+	}
 }
 
 // Regression (PR #1279 review): a slot whose removal was not yet durable
