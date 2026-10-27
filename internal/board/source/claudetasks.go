@@ -15,7 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// ClaudeTasks supports the filesystem task producer shipped in 2.1.310.
+// ClaudeTasks supports version-pinned filesystem task producers.
 // Other storage backends are not inferred from an empty filesystem listing.
 type ClaudeTasks struct {
 	Home     string
@@ -24,8 +24,13 @@ type ClaudeTasks struct {
 
 func (ClaudeTasks) Name() string                      { return "claude-tasks" }
 func (ClaudeTasks) Discover(board.Env) (bool, string) { return true, "" }
+
+func supportedClaudeTaskVersion(version string) bool {
+	return version == "2.1.310" || version == "2.1.311"
+}
+
 func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *claudeReadBudget) board.Result {
-	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Version: "Claude Code 2.1.310 filesystem", Feeds: []board.Column{board.ColumnUnclaimed, board.ColumnInFlight, board.ColumnBlocked}, NativeScopes: map[string]board.NativeScope{}}
+	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Version: "Claude filesystem tasks", Feeds: []board.Column{board.ColumnUnclaimed, board.ColumnInFlight, board.ColumnBlocked}, NativeScopes: map[string]board.NativeScope{}}
 	gap := func(text string) {
 		result.Status = board.StatusDegraded
 		result.Coverage.Unresolved++
@@ -60,11 +65,13 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	home = real
 	result.Namespace = home
-	version, err := env.Run.Run(ctx, env.Dir, []string{"claude", "--version"})
-	if err != nil || strings.TrimSpace(string(version)) != "2.1.310 (Claude Code)" {
+	versionOutput, err := env.Run.Run(ctx, env.Dir, []string{"claude", "--version"})
+	version, valid := strings.CutSuffix(strings.TrimSpace(string(versionOutput)), " (Claude Code)")
+	if err != nil || !valid || !supportedClaudeTaskVersion(version) {
 		gap("Claude task producer version unsupported")
 		return result
 	}
+	result.Version = "Claude Code " + version + " filesystem"
 	worktrees, err := projectWorktrees(ctx, env)
 	if err != nil {
 		gap("project scope unavailable: " + err.Error())
@@ -262,7 +269,7 @@ func claudeDefaultList(ctx context.Context, home, list string, worktrees map[str
 			}
 			if record.SessionID == list && record.Cwd != "" {
 				cwd, err := filepath.EvalSymlinks(record.Cwd)
-				if err != nil || !worktrees[cwd] || record.Version != "2.1.310" {
+				if err != nil || !worktrees[cwd] || !supportedClaudeTaskVersion(record.Version) {
 					_ = f.Close()
 					return false
 				}
