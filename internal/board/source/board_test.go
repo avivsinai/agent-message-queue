@@ -134,8 +134,10 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 
 	// Each rule of the column table, from real row shapes.
 	want := map[string]board.Column{
-		refT5:           board.ColumnWaiting,      // rule 1: obligation owed by user
-		"bead:demo-b1":  board.ColumnWaiting,      // rule 2: blocked, no owner, nothing to wait on
+		refT5: board.ColumnWaiting, // rule 1: obligation owed by user
+		// Installed board: five blocked approval features with no assignee or
+		// named blocker appeared as owner questions after the owner declined them.
+		"bead:demo-b1":  board.ColumnBlocked,
 		"bead:demo-b2":  board.ColumnBlocked,      // rule 3: blocks dependency on an open bead
 		"bead:demo-b10": board.ColumnBlocked,      // a deferred blocker still blocks
 		"bead:demo-b3":  board.ColumnInFlight,     // rule 4: in progress
@@ -157,6 +159,11 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 		}
 		if card.Column != col {
 			t.Errorf("%s: column %s, want %s", ref, card.Column, col)
+		}
+	}
+	for _, action := range m.Next {
+		if action.CardID == "bead:demo-b1" {
+			t.Error("unassigned blocked work appears in Next without a named blocker")
 		}
 	}
 	if _, ok := cards["bead:demo-b9"]; ok {
@@ -197,7 +204,7 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 
 	// Waiting on you sorts oldest reason first and keeps the unread-for-user
 	// counts apart from its cards.
-	if first := column(m, board.ColumnWaiting).Cards[0].ID; first != "bead:demo-b1" {
+	if first := column(m, board.ColumnWaiting).Cards[0].ID; first != "bead:demo-b6" {
 		t.Errorf("first waiting card = %s", first)
 	}
 	if len(m.Gates) != 2 || m.Gates[0].Session != "s1" || m.Gates[0].OpenCount != 1 {
