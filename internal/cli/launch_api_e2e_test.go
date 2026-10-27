@@ -168,6 +168,8 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 		if applied.Outcome != "applied" || len(applied.Commands) != 0 {
 			t.Fatalf("tmux Apply = %#v", applied)
 		}
+		// CI run 40430733603: the child replaces its ticket before exec.
+		waitForProviderLog(t, fixture.providerLog, "--session-id ")
 		rootIdentity, err := fsq.SnapshotDeliveryRoot(fixture.sessionRoot)
 		if err != nil {
 			t.Fatal(err)
@@ -182,7 +184,6 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 			ticket.Execution.AuditReason != "hermetic tmux matrix row" {
 			t.Fatalf("tmux execution options = %#v, err=%v", ticket.Execution, err)
 		}
-		waitForProviderLog(t, fixture.providerLog, "--session-id ")
 
 		stdout, stderr, exit = runRealAMQWithExit(t, amqBinary, fixture.project, env,
 			"launch", "--plan", intentPath, "--prepare", "--json", "--launcher", "tmux")
