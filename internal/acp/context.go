@@ -80,8 +80,12 @@ type Config struct {
 	// Helper marks the per-machine helper (system prompt line "AMQ Remote
 	// helper"). It serves no session and never delivers.
 	Helper bool
-	// PinErr refuses every prompt: the two pin sources disagree, or the name
-	// is not a binding name.
+	// Machine marks the machine agent (system prompt line "AMQ Remote
+	// machine"). It routes each prompt by the private channel it came from
+	// and never by a pin, a selected model or the only binding.
+	Machine bool
+	// PinErr refuses every prompt: the pin sources or role lines disagree,
+	// or the name is not a binding name.
 	PinErr            error
 	StateDir          string
 	TurnTimeout       time.Duration
@@ -179,7 +183,7 @@ func loadBindingConfig() (Config, error) {
 		return Config{}, contextError("%v", err)
 	}
 	cfg := Config{RemoteBinding: true, StateDir: filepath.Join(filepath.Dir(path), "acp")}
-	cfg.Pin, cfg.Helper, cfg.PinErr = sessionPin(buzzAgent.systemPrompt, buzzAgent.model)
+	cfg.Pin, cfg.Helper, cfg.Machine, cfg.PinErr = sessionPin(buzzAgent.systemPrompt, buzzAgent.model)
 	if cfg.TurnTimeout, err = durationEnv(EnvTurnTimeout, defaultTurnTimeout); err != nil {
 		return Config{}, err
 	}

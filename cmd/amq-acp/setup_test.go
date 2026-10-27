@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,34 @@ func TestSetupHelperWritesTheHelperAgent(t *testing.T) {
 	}
 	if snapshot.Definition.SystemPrompt != "AMQ Remote helper" || snapshot.Definition.Model != remoteModelID ||
 		snapshot.Definition.RespondTo != ownerOnlyRespondTo || !strings.HasPrefix(snapshot.Profile.DisplayName, "AMQ Remote helper") {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+// setup --machine writes the machine agent once per machine: a harness
+// whose env keeps every worker running and makes each owner message in its
+// channels a prompt, and an import file with the machine role line.
+func TestSetupMachineWritesTheMachineAgent(t *testing.T) {
+	home, _, _ := pinInstallShell(t)
+	out := filepath.Join(t.TempDir(), "machine.agent.json")
+	captureStdout(t, func() int { return run([]string{"setup", "--machine", "--out", out}) })
+
+	harness := readHarness(t, harnessPath(home, machineHarnessID+".json"))
+	want := map[string]string{"AMQ_ACP_REMOTE": "binding", "BUZZ_ACP_LAZY_POOL": "false", "BUZZ_ACP_SUBSCRIBE": "all", "BUZZ_ACP_KINDS": "9"}
+	if harness.ID != machineHarnessID || !maps.Equal(harness.Env, want) {
+		t.Fatalf("harness id=%q env=%#v", harness.ID, harness.Env)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot agentSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	d := snapshot.Definition
+	if d.SystemPrompt != "AMQ Remote machine" || d.Runtime != machineHarnessID || d.RespondTo != ownerOnlyRespondTo ||
+		d.Parallelism != 4 || !strings.HasPrefix(d.Name, "AMQ Remote") {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }

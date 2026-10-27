@@ -167,7 +167,23 @@ DM. No wake and no Stop hook are required.
 `--native` drives the exact native session through `amq-remote`. Claude needs
 the Stop hook on that path.
 
-One Buzz agent serves one session:
+One Buzz agent per machine serves every session, each through its own
+private channel:
+
+- **Machine agent.** The agent with the system prompt line `AMQ Remote
+  machine` makes a private channel for each live session that has no agent
+  of its own that runs or is idle, adds the owner, and mentions them. A
+  prompt reaches a session only from that session's active channel, read
+  from buzz-acp's host context block by structure. The route is relay,
+  machine key and channel; the first prompt of an ACP session fixes it, and
+  the session the channel names must still have the identity the channel was
+  made for. A create whose outcome is unknown is never repeated, because the
+  Buzz CLI makes a new channel id on every create; the owner's `amq-remote
+  channel reset` is the only way to allow another. When a binding is gone
+  or its session ended, its channel stops taking messages before it is
+  archived.
+
+A session may instead keep a Buzz agent of its own:
 
 - **Pin.** The agent names its binding with the system prompt line
   `AMQ Remote session: <name>`, or, for an agent made before that line

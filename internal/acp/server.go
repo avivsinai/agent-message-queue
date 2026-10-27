@@ -96,6 +96,9 @@ type sessionState struct {
 	// binding is the named binding this session's model selected ("" means
 	// none selected); binding mode only.
 	binding string
+	// route is the channel of the first prompt of a machine agent's session
+	// that carried a host context; every later prompt must carry the same.
+	route string
 }
 
 // turnState is one prompt turn. Its terminal outcome is decided exactly once,
@@ -135,6 +138,9 @@ type turnState struct {
 	// mailboxSteer is set once a mailbox turn's prompt is published; a
 	// follow-up DM steers the turn only then.
 	mailboxSteer *mailboxSteerTarget
+	// route is the channel this prompt's host context names (machine agent
+	// only; "" when it has none).
+	route string
 }
 
 // settleLocked decides the turn's outcome if it is still open; it reports
@@ -174,8 +180,12 @@ type Server struct {
 	// the leader falls back to its own value when that file is unreadable.
 	lastChannel string
 	// leader releases the lifecycle lead of this worker's Buzz identity, or
-	// is nil. Only the sweep worker sets it; its stop releases it.
+	// is nil. Only the sweep worker sets it (the machine worker for a machine
+	// agent); its stop releases it.
 	leader func()
+	// machine is the machine leader's pacing, used only by the machine
+	// worker.
+	machine machineState
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -517,7 +527,8 @@ const bindingModelPrefix = "amq-remote:"
 // model selects nothing: the agent's pin decides, and an unpinned agent
 // drives the only binding or refuses.
 func (s *Server) models() []modelInfo {
-	if !s.cfg.RemoteBinding {
+	// A machine agent routes by channel, so it offers no per-session model.
+	if !s.cfg.RemoteBinding || s.cfg.Machine {
 		return []modelInfo{s.model()}
 	}
 	out := []modelInfo{s.model()}
@@ -755,8 +766,19 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		return nil, disconnectedRefusal(), nil
 	}
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
-	if turn != nil {
+	if turn != nil && s.cfg.Machine {
+		// A machine agent reads its channel from the host context block
+		// alone: it is the route (machineBinding) and the reply destination.
+		// The first prompt that carries one fixes the session's route.
+		turn.route = hostContext(parsed.Prompt)
+		turn.channel = turn.route
+		if session.route == "" {
+			session.route = turn.route
+		}
+	} else if turn != nil {
 		turn.channel = buzzChannel(text)
+	}
+	if turn != nil {
 		if s.cfg.RemoteBinding {
 			turn.mailboxEvent = eventID
 		}

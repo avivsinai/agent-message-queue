@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -79,6 +80,93 @@ func buzzChannel(prompt string) string {
 	return ""
 }
 
+// uuidRe is a channel UUID as buzz-acp writes it.
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// hostScopes are the values buzz-acp writes on the Scope and Session scope
+// lines of its <context> section (queue.rs format_context_hints).
+var hostScopes = []struct {
+	prefix  string
+	allowed []string
+}{
+	{"Scope: ", []string{"dm", "thread", "channel"}},
+	{"Session scope: ", []string{"dm conversation", "thread", "channel"}},
+}
+
+// hostContext returns the channel UUID of the prompt's host context, the
+// <context> section buzz-acp emits as its own content block, or "" when the
+// prompt has no usable one. It examines the blocks one by one, never the
+// joined text, so a Channel line inside conversation context or an event
+// cannot become the route. The section must be the only text block that
+// starts with the line <context> and ends with the line </context>, and
+// must hold exactly one column-0 Channel line and at most one of each scope
+// line, every one well formed. buzz-acp indents and escapes descriptions, so
+// only a channel name with a line break can add a structural line; such a
+// prompt is refused, never resolved. The UUID is the one at the end of the
+// Channel line, so a name that contains "(#...)" cannot move it.
+func hostContext(blocks []contentBlock) string {
+	var section []string
+	found := false
+	for _, b := range blocks {
+		if b.Type != "text" {
+			continue
+		}
+		lines := strings.Split(b.Text, "\n")
+		if len(lines) < 2 || lines[0] != "<context>" || lines[len(lines)-1] != "</context>" {
+			continue
+		}
+		if found {
+			return ""
+		}
+		found, section = true, lines[1:len(lines)-1]
+	}
+	channel, channels := "", 0
+	seen := make([]bool, len(hostScopes))
+	for _, line := range section {
+		if strings.HasPrefix(line, "Channel:") {
+			channels++
+			if channel = hostChannel(line); channel == "" {
+				return ""
+			}
+			continue
+		}
+		for i, scope := range hostScopes {
+			if !strings.HasPrefix(line, strings.TrimSuffix(scope.prefix, " ")) {
+				continue
+			}
+			value, ok := strings.CutPrefix(line, scope.prefix)
+			if seen[i] || !ok || !slices.Contains(scope.allowed, value) {
+				return ""
+			}
+			seen[i] = true
+		}
+	}
+	if channels != 1 {
+		return ""
+	}
+	return channel
+}
+
+// hostChannel parses one Channel line: "Channel: <name> (#<uuid>)", or
+// "Channel: <uuid>" when buzz-acp has no channel info.
+func hostChannel(line string) string {
+	rest, ok := strings.CutPrefix(line, "Channel: ")
+	if !ok {
+		return ""
+	}
+	if uuidRe.MatchString(rest) {
+		return strings.ToLower(rest)
+	}
+	open := strings.LastIndex(rest, " (#")
+	if open < 0 || !strings.HasSuffix(rest, ")") {
+		return ""
+	}
+	if id := rest[open+3 : len(rest)-1]; uuidRe.MatchString(id) {
+		return strings.ToLower(id)
+	}
+	return ""
+}
+
 // buzzSelf is the managed agent's own public key (64 lowercase hex), or ""
 // when the secret is absent or unreadable. The agent archives and unarchives
 // itself under it (lifecycle.go).
@@ -101,6 +189,7 @@ func captureBuzzIdentity() {
 	}
 	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
 	buzzRelay = agentRelay(os.Getenv("BUZZ_RELAY_URL"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+	buzzRelayURL, buzzRelayKey = strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), relayKey(os.Getenv("BUZZ_RELAY_URL"))
 }
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
@@ -123,11 +212,21 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) (string, err
 // runBuzzCLI runs the buzz CLI with only the agent identity and a minimal
 // environment and returns its stdout.
 func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
+	return runBuzzCLIContext(context.Background(), budget, stdin, args...)
+}
+
+// runBuzzCLIContext is runBuzzCLI that also stops when parent ends. A run
+// that never started is a notSentError: it cannot have reached the relay.
+func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
 	if len(buzzIdentity) == 0 {
 		return nil, errNoBuzzIdentity
 	}
 	bin, err := buzzCLI()
 	if err != nil {
+		var notSent *notSentError
+		if !errors.As(err, &notSent) {
+			err = &notSentError{err}
+		}
 		return nil, err
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
@@ -135,7 +234,7 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 	// past the budget. A CLI that keeps sending after its budget is outside
 	// the status/final ordering (README).
 	waitDelay := budget / 10
-	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
+	ctx, cancel := context.WithTimeout(parent, budget-waitDelay)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.WaitDelay = waitDelay
@@ -152,10 +251,26 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return nil, fmt.Errorf("buzz %s: %v: %s", strings.Join(args[:2], " "), err, msg)
+		code := -1
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && ctx.Err() == nil {
+			code = exit.ExitCode()
+		}
+		return nil, &buzzExitError{code: code, err: fmt.Errorf("buzz %s: %v: %s", strings.Join(args[:2], " "), err, msg)}
 	}
 	return stdout.Bytes(), nil
 }
+
+// buzzExitError is a buzz CLI run that started and failed. code is the
+// CLI's exit status: 1 bad input, 2 relay or network, 3 auth, 4 other, 5
+// write conflict; -1 when the run was cut off (a timeout or a signal).
+type buzzExitError struct {
+	code int
+	err  error
+}
+
+func (e *buzzExitError) Error() string { return e.err.Error() }
+func (e *buzzExitError) Unwrap() error { return e.err }
 
 // buzzCLI finds the buzz binary that receives the managed agent's key:
 // AMQ_ACP_BUZZ_CLI, else the CLI inside Buzz.app under /Applications or the

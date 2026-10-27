@@ -136,7 +136,25 @@ and `AM_SESSION` are written only when this shell has them. `--remove` deletes
 only the file this command wrote. A harness file this command did not write is
 left unchanged.
 
-Once per Mac, write the harness. Each session then gets its own Desktop agent:
+Once per Mac, write the machine agent. Each session that runs `/amq-remote`
+then gets its own private Buzz channel:
+
+```sh
+amq-acp setup --machine
+```
+
+`setup --machine` writes `custom_harnesses/amq_remote_machine.json` (mode
+0600) with env `AMQ_ACP_REMOTE=binding`, `BUZZ_ACP_LAZY_POOL=false`,
+`BUZZ_ACP_SUBSCRIBE=all` and `BUZZ_ACP_KINDS=9`, and the import file
+`AMQ Remote @ <machine>.agent.json`: runtime `amq_remote_machine`, the system
+prompt line `AMQ Remote machine`, `respondTo` `owner-only`, parallelism 4.
+Buzz applies the env to the agent's buzz-acp: its workers start with Desktop
+and never sleep, and every ordinary message in a channel the agent belongs to
+is a prompt, not only a mention. Import it once, Start it, and turn on
+Auto-start. `/amq-remote` runs `setup --machine` itself when this machine has
+no machine agent and no helper.
+
+The per-session agents and the helper remain:
 
 ```sh
 amq-acp setup
@@ -164,16 +182,17 @@ Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
 then Start, and turn on Auto-start in the agent's menu. Desktop caches its
 harness list: if AMQ Remote is new and Desktop was open, click Settings,
 then Agents, then Check again first (setup always prints this step). No
-restart is needed. `/amq-remote` runs `setup --helper` or `setup --session`
-itself when the session has no agent yet. A harness file this command did not
-write is left unchanged.
+restart is needed. `/amq-remote` suggests only `setup --machine`; the helper
+and per-session agents keep working where they exist. A harness file this
+command did not write is left unchanged.
 An `amq_remote` agent runs at any parallelism, so an agent made from the
 helper's draft (Desktop's default, 10) starts as is. Buzz starts that many
 identical workers with one identity. Each turn decides through per-event file
 locks, and one worker leads the agent's lifecycle (archive, unarchive,
 "Connected again", the helper's control channel and drafts) through the lock
-`agents/<pin or _helper>/<pubkey>.lock` in the state directory. When the
-leader exits, another worker takes over within 30 s. Without advisory locks
+`agents/<pin, _helper or _machine>/<pubkey>.lock` in the state directory.
+When the leader exits, another worker takes over within 30 s (2 s for the
+machine agent). Without advisory locks
 (not macOS or Linux), parallelism must be 1.
 
 ## Buzz BYOH
@@ -329,16 +348,80 @@ machine's helper: it never runs a prompt and answers with the list of
 sessions and the agent to DM for each. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET`
 and `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
 
+The system prompt line `AMQ Remote machine` makes the agent this machine's
+machine agent, one agent for every session. It never uses a pin, a selected
+model or the only binding; a role line beside a session pin or beside the
+helper line refuses every prompt. Its lifecycle leader reads the bindings
+every 2 s and makes a private channel for each named binding whose session
+is proven live and that has no agent of its own that runs or is idle:
+`channels create` (type stream, visibility private, the session's label as
+its name, and `amq-remote <reg>` as its description), then `channels
+add-member` for the owner as an admin, then a welcome that mentions the
+owner, so the phone pushes, and then the channel is active. Records live
+under `~/.amq/remote/acp/channels/<relay key>/<machine pubkey>/`, one per
+binding name, written only by the leader; the relay key is the sha256 of the
+normalized `BUZZ_RELAY_URL`. Each step counts only on exit 0 with
+`accepted:true`; an event id alone is not acceptance. A record that exists
+but cannot be read stops all work on that session's name, and a name takes a
+new record only after its old one is safely in the retired store. When the
+worker stops, its relay call in flight is cut off and no new step starts.
+
+- A create refused by the relay (exit 1 or 3, or `accepted:false`), or one
+  whose CLI never started, is tried again after 10 minutes, at most 3 times.
+  A create whose outcome is unknown (a relay or network error, another exit,
+  a timeout, a stopped worker, output that does not parse, or a result that
+  was never written because the worker stopped while it ran) is never sent
+  again for that session, also after a detach, reset or restart: every 10
+  minutes the leader
+  looks for a private channel it owns with the session's name and the
+  record's `<reg>` in its description, and adopts it when there is exactly
+  one. Two such channels are both refused. `amq-remote channel reset <name>`
+  is the only way to allow a new create; a channel Buzz made but never
+  confirmed may then be left over, and the leader archives it if it finds it.
+- A prompt reaches a session only from that session's active channel. The
+  channel comes from buzz-acp's host context: the one prompt block that
+  starts with the line `<context>` and ends with `</context>`, with exactly
+  one `Channel:` line, read by structure and never from message text. The
+  first prompt of an ACP session fixes its channel, and every later prompt
+  must carry the same; a steer follows the open turn. The binding the record
+  names must still have the record's session identity, or the prompt is
+  refused with "this channel's session is not connected". A prompt with no
+  host context, from an unknown or retired channel, or from the agent's DM
+  reaches no session; the answer lists each live session and its channel.
+- When the binding is gone (`/amq-remote off`) or its session is proven
+  ended, the channel stops taking messages at once. The leader posts
+  "Session ended" in a channel that was active, then archives it; a failed
+  archive is retried every 10 minutes. A binding name that another session
+  identity takes gets a new channel, and the old one is archived. When the
+  same session attaches again, its channel is unarchived (when an archive
+  was ever sent) and becomes active only after the unarchive is accepted and
+  the session is still attached; then it posts "Connected again". An
+  archived channel stays in Buzz history.
+- A tool approval in a channel can only be denied (❌); allow stays in the
+  terminal. A Desktop approval pin names one agent and one DM, and never
+  widens to a channel.
+
 A pinned agent keeps its Buzz identity in step with its binding. On each
-tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`,
-which `amq-remote attach` and `bindings` read to report the agent as
-running (rewritten in the last 10 minutes), offline or missing. When the
+tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`
+(`agents/_machine/` for the machine agent), written at worker start before
+any relay call. The marker records the process identity (pid, start time,
+boot id) of the worker and of its parent buzz-acp. Only the worker that
+leads writes it, and it never overwrites the marker of a newer worker that
+still runs; a newer worker that left is replaced. `amq-remote attach`
+and `bindings` read it to report the agent as `running` (its worker runs),
+`idle` (the worker is gone but its buzz-acp runs, so a DM starts it),
+`offline` (neither runs, or the marker is older than 10 minutes and records
+no process), or `missing` (no marker). After a Desktop restart, a lazy
+per-session agent reads `offline` until its first DM, because its marker
+names the previous buzz-acp; a DM still starts it. When the
 binding is gone (`/amq-remote off`, or a session proven ended), the agent
 archives itself (kind 9035, signed with its own key) and sets the status
 "session ended"; when the same session binds that name again, it unarchives
 itself (kind 9036) and clears the status. Archiving hides the agent from
 pickers, mentions, member lists and the Agents library in Buzz Desktop; its
-DM stays listed until the owner hides it.
+DM stays listed until the owner hides it. Archiving is a relay request: the
+agent stays in Desktop's own agent list until the owner deletes it there,
+and `amq-remote bindings` names each such agent once.
 
 ### Posting answers into Buzz
 
@@ -371,8 +454,9 @@ the key in memory, strips it from its own environment, and passes it only to
 the Buzz CLI child that posts, reads reactions, and archives. amq-acp
 receives no owner private key, only the owner's signed grant
 (`BUZZ_AUTH_TAG`). Desktop signs a grant with no kind limit
-and no expiry. Archiving the agent hides it and removes Desktop's local key;
-it does not invalidate a copied key and grant. Only removing the agent's relay
+and no expiry. Archiving the agent is a relay request that hides it; it does
+not remove Desktop's local record or key, and it does not invalidate a copied
+key and grant. Only removing the agent's relay
 access does that. Buzz's owner-only setting also admits the owner's other
 agents. The strict per-kind, expiring path is `amq-remote` with a `relay`
 manifest block.
@@ -385,6 +469,11 @@ manifest block.
   arrive later on the thread; read it with `amq thread` and re-prompt if the
   work must run.
 - No audit copy is written to the sender's `outbox/sent`, unlike `amq send`.
+- The machine agent runs 4 workers, and a mailbox turn holds one until its
+  final reply. A fifth concurrent turn across all sessions waits inside
+  buzz-acp, where AMQ cannot see or bound it.
+- A tool approval in a machine agent's channel offers deny only; allow it in
+  the terminal.
 
 ## Host mode
 
