@@ -130,14 +130,18 @@ type attachView struct {
 	// served is whether the machine agent serves the session: no agent of
 	// its own runs or is idle.
 	served bool
+	// unproven is the liveness evidence of a session that is not proven
+	// live, which the machine agent makes no channel for; "" when it is.
+	unproven string
 	// channel is the machine agent's record of the session's channel; nil
 	// when it has none.
 	channel *acp.MachineChannel
 }
 
 // viewOf reads what attach reports for the binding called name. While the
-// machine agent runs and serves the session, it waits up to channelWait for
-// the channel to leave creating.
+// machine agent runs and serves the session, and the session is proven live
+// (the machine agent's own rule), it waits up to channelWait for the
+// channel to leave creating.
 func viewOf(b binding.Binding, name string, reused bool) attachView {
 	now := time.Now()
 	v := attachView{name: name, label: b.Label, reused: reused, agent: agentOf(name, now), helper: helperOf(now), machine: machineOf(now)}
@@ -149,12 +153,15 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 	if bound, err := binding.ReadNamed(name); err == nil {
 		b = bound
 	}
+	if state, evidence := b.Liveness(); state != binding.Live {
+		v.unproven = string(state) + ": " + evidence
+	}
 	deadline := now.Add(channelWait)
 	for {
 		if c, ok := acp.MachineChannelOf(b); ok {
 			v.channel = &c
 		}
-		if v.machine.State != agentRunning || (v.channel != nil && v.channel.State != "creating") || !time.Now().Before(deadline) {
+		if v.machine.State != agentRunning || v.unproven != "" || (v.channel != nil && v.channel.State != "creating") || !time.Now().Before(deadline) {
 			return v
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -162,14 +169,15 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 }
 
 // channelState is the channel state attach reports: the record's, or
-// creating while the machine agent runs and has not written one yet.
+// creating while the machine agent runs, the session is proven live, and no
+// record is written yet.
 func (v attachView) channelState() string {
 	switch {
 	case !v.served:
 		return ""
 	case v.channel != nil:
 		return v.channel.State
-	case v.machine.State == agentRunning:
+	case v.machine.State == agentRunning && v.unproven == "":
 		return "creating"
 	}
 	return ""
@@ -191,6 +199,8 @@ func connected(w io.Writer, v attachView) {
 		say(w, "Open the %q channel in Buzz.", v.channel.Name)
 	case v.machine.State == agentRunning && state == "creating":
 		say(w, "Buzz is making the channel; it appears within a minute.")
+	case v.machine.State != agentMissing && state == "" && v.unproven != "":
+		say(w, "%s makes a channel only for a session proven live, and this session is not (%s).", machine, v.unproven)
 	case state == "uncertain":
 		say(w, "Buzz did not confirm the channel (%s). AMQ keeps looking for it and will not make a second one. If it never appears, run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case state == "failed" && v.channel.Retry:
@@ -219,6 +229,9 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 	}
 	if v.machine.State != agentMissing {
 		out["machine_name"] = nonEmpty(v.machine.Display, "AMQ Remote @ "+binding.Machine())
+	}
+	if v.served && v.channel == nil && v.unproven != "" {
+		out["unproven"] = v.unproven
 	}
 	if state := v.channelState(); state != "" {
 		out["channel"] = state

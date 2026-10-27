@@ -68,6 +68,9 @@ command's own message. Do not work around a refusal.
      **<channel_name>** channel in Buzz." Nothing else is needed.
    - `machine` is `running` and `channel` is `creating`: "Buzz is making the
      channel; it appears within a minute."
+   - `machine` is not `missing` and the JSON has `unproven`: "The machine
+     agent makes a channel only for a session proven live, and this session
+     is not (<unproven>)."
    - `channel` is `uncertain`: "Buzz did not confirm the channel
      (<channel_error>). AMQ keeps looking for it and will not make a second
      one. If it never appears, run `amq-remote channel reset <name>`."

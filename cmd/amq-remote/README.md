@@ -631,8 +631,9 @@ Attach tells the owner only what is still needed. It prints `Connected:
 <label>`, the session's label (`<harness> · <project>/<session> @
 <machine>`), then one line from the markers amq-acp writes under
 `~/.amq/remote/acp/agents/` and the machine agent's channel record. While the
-machine agent runs and serves the session, attach waits up to 15 s for the
-channel to become active. The line is the first that applies:
+machine agent runs and serves the session, and the session is proven live,
+attach waits up to 15 s for the channel to become active. The line is the
+first that applies:
 
 - the session's own agent runs: `DM "<agent>" in Buzz.`; it is idle: DM it,
   and Buzz starts it on the next message;
@@ -640,6 +641,9 @@ channel to become active. The line is the first that applies:
   Buzz;
 - the machine agent runs and the channel is being made: it appears within a
   minute;
+- the session is not proven live and has no channel: the machine agent makes
+  a channel only for a session proven live, with the liveness evidence (JSON
+  `unproven`);
 - the channel is uncertain: Buzz did not confirm the create; AMQ keeps
   looking for it and never makes a second one, and `amq-remote channel reset
   <name>` gives it up;
