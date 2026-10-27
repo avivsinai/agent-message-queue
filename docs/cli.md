@@ -773,7 +773,7 @@ Options:
   -inject-cmd string
         Command to inject (power user mode)
   -inject-mode string
-        Injection mode: auto, raw, paste, none (auto detects CLI type) (default "auto")
+        Injection mode: auto, raw, paste, none, claude-native (auto detects CLI type) (default "auto")
   -inject-timeout duration
         Timeout for one --inject-via command (default 5s)
   -inject-via string
@@ -1758,7 +1758,7 @@ Options:
   -wake-inject-arg value
         Fixed argument for wake --inject-via before the payload (repeatable)
   -wake-inject-mode string
-        Wake injection mode: auto, raw, paste, none (default "auto")
+        Wake injection mode: auto, raw, paste, none, claude-native (default "auto")
   -wake-inject-via string
         Start wake with this absolute --inject-via executable, enabling later amq wake repair
   -y    Skip confirmation prompts (including clearing a blocking wake)

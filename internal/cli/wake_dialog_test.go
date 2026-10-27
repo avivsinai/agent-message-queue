@@ -542,6 +542,9 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 	}{
 		{"no AM_ME", nil, true, false, false},
 		{"participant without marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, false, true, false},
+		// Native startup needs its positive hook even if another handler
+		// removed the marker before this handler runs.
+		{"native launch without marker", []string{"AM_ME=codex", "AM_ROOT=" + root, envClaudeNativeLaunch + "=bound"}, false, true, true},
 		{"participant with marker", []string{"AM_ME=codex", "AM_ROOT=" + root}, true, true, true},
 		{"participant without AM_ROOT", []string{"AM_ME=codex"}, false, true, true},
 		{"padded AM_ROOT, marker in the trimmed root", []string{"AM_ME=codex", "AM_ROOT=" + root + " "}, true, true, true},

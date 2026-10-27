@@ -41,11 +41,17 @@ func ValidatePrepareExecutionOptionsGrammar(options PrepareExecutionOptions, pre
 	}
 
 	if injectorConfigured {
-		if !slices.Contains([]string{"auto", "raw", "paste", "none"}, options.InjectorMode) {
+		if !slices.Contains([]string{"auto", "raw", "paste", "none", "claude-native"}, options.InjectorMode) {
 			return fmt.Errorf("invalid injector mode %q", options.InjectorMode)
 		}
 		if options.InjectorMode == "none" && (options.InjectorVia != "" || len(options.InjectorArgs) != 0) {
 			return fmt.Errorf("injector mode none forbids via and args")
+		}
+		if options.InjectorMode == "claude-native" && (options.InjectorVia != "" || len(options.InjectorArgs) != 0) {
+			return fmt.Errorf("injector mode claude-native forbids via and args")
+		}
+		if options.InjectorMode == "claude-native" && !options.RequireWake {
+			return fmt.Errorf("injector mode claude-native requires require_wake")
 		}
 		if options.InjectorVia != "" {
 			if !filepath.IsAbs(options.InjectorVia) || filepath.Clean(options.InjectorVia) != options.InjectorVia || strings.ContainsRune(options.InjectorVia, 0) {

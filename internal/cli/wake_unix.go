@@ -1890,6 +1890,7 @@ type wakeStart struct {
 
 	requestedOwner   *wakeOwner
 	ownerObservation wakeOwnerObservation
+	nativeLaunch     *claudeNativeLaunch
 
 	initialNotifierStatus string
 	initialNotifierMode   string
@@ -1950,7 +1951,7 @@ func newWakeStartFlags() *wakeStartFlags {
 	f.injectVia = fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
 	fs.Var(&f.injectArgs, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
 	f.retryUntil = fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
-	f.injectMode = fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
+	f.injectMode = fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none, claude-native (auto detects CLI type)")
 	f.harness = fs.String("harness", "", "Program the wake types into (claude, codex, agy, pi, cursor, grok, or other for generic behavior); amq coop exec sets it. Without it, a handle containing claude or codex picks raw typing")
 	f.interruptCmd = fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
 	f.readyFile = fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
@@ -2144,6 +2145,21 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	s.interruptKey, err = parseInterruptKey(*s.flags.interruptCmd)
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	if s.injectMode == wakeInjectModeClaudeNative {
+		if s.harness != "claude" || s.requestedOwner == nil || s.resumeContext != nil ||
+			s.resumePreflight != nil || s.repairHandoffPresent || s.repairGeneration != "" ||
+			s.injectVia != "" || len(s.flags.injectArgs) != 0 || *s.flags.injectCmd != "" || s.interruptKey != "" {
+			return UsageError("claude-native requires the original managed Claude wake without terminal injection or recovery")
+		}
+		s.nativeLaunch, err = readClaudeNativeLaunch()
+		if err != nil {
+			return err
+		}
+	}
 	if s.resumePreflight != nil {
 		return s.runResumePreflight()
 	}
@@ -2171,11 +2187,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if err := s.checkTerminalInjection(); err != nil {
 		return err
 	}
-	s.interruptKey, err = parseInterruptKey(*s.flags.interruptCmd)
-	if err != nil {
-		return UsageError("%v", err)
-	}
-
 	if s.injectVia != "" {
 		if err := s.bindTarget(); err != nil {
 			return err
@@ -2246,6 +2257,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		defer func() { _ = s.terminalAuthority.Close() }()
 	}
 	cfg := s.newLoopConfig()
+	cfg.native, err = newWakeClaudeNative(s, &cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.native != nil {
+		defer func() { returnErr = errors.Join(returnErr, cfg.native.Close()) }()
+	}
 
 	stopReloadTransport, err := s.startReloadTransport()
 	if err != nil {
@@ -2403,7 +2421,7 @@ func (s *wakeStart) runResumePreflight() error {
 // notifier, while absence, read errors, and every other value remain unknown
 // and do not block startup.
 func (s *wakeStart) checkTerminalInjection() error {
-	if s.injectVia != "" || s.injectMode == wakeInjectModeNone {
+	if s.injectVia != "" || s.injectMode == wakeInjectModeNone || s.injectMode == wakeInjectModeClaudeNative {
 		return nil
 	}
 	if !wakeTIOCSTIAvailable() {
@@ -3586,6 +3604,12 @@ func wakeInjectionPreconditionCheck(
 	cfg *wakeConfig,
 	controllingTerminalOpenableFn func() bool,
 ) error {
+	if cfg.injectMode == wakeInjectModeClaudeNative {
+		if cfg.native == nil {
+			return errors.New("native wake transport is unavailable")
+		}
+		return nil
+	}
 	if cfg.injectMode == wakeInjectModeNone {
 		if !cfg.legacyTIOCSTIDemoted ||
 			cfg.requestedInjectMode == "" ||

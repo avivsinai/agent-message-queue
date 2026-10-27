@@ -397,6 +397,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	}
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
+		if !open && !turn {
+			acknowledgeClaudeNativeHook(dirfd, agentDir, in)
+		}
 		switch {
 		case turn && open:
 			return writeTurnDialogMarker(dirfd, agentDir, in, *harness)
@@ -602,7 +605,11 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	return removeWakeDialogMarkerIf(dirfd, agentDir, func(raw []byte) bool {
 		var marker wakeDialogMarker
-		if json.Unmarshal(raw, &marker) == nil && marker.Harness == "cursor" {
+		decoded := json.Unmarshal(raw, &marker) == nil
+		if decoded && marker.Kind == claudeNativeStartupKind {
+			return acknowledgeClaudeNativeStartup(dirfd, agentDir, marker, in)
+		}
+		if decoded && marker.Harness == "cursor" {
 			return cursorDialogCloseMatches(marker, in)
 		}
 		return in.ToolUseID == "" || marker.ToolUseID == in.ToolUseID
@@ -626,7 +633,7 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 func wakeDialogHookCommand(bin, harnessFlag, verb string) string {
 	gate := `[ -z "${AM_ME-}" ] || `
 	if verb == "close" {
-		gate += wakeDialogNoMarkerTest + ` || `
+		gate += `{ [ -z "${AMQ_CLAUDE_NATIVE_LAUNCH-}" ] && ` + wakeDialogNoMarkerTest + `; } || `
 	}
 	return wakeDialogHookMarker + gate + singleQuote(bin) +
 		" --no-update-check wake dialog " + harnessFlag + verb + " || true"
