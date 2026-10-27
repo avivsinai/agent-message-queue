@@ -73,8 +73,6 @@ func TestGrokbotWebhookDefersOnServerError(t *testing.T) {
 	}
 }
 
-// The grokbot ring POST must send Authorization: Bearer <key> and keep
-// X-AMQ-Ring-Key. Existing coverage only checked the custom header.
 func TestGrokbotWebhookSendsBearerAndRingKey(t *testing.T) {
 	const key = "ring-test-key-unique"
 	var gotAuth, gotRingKey string
@@ -97,7 +95,6 @@ func TestGrokbotWebhookSendsBearerAndRingKey(t *testing.T) {
 	}
 }
 
-// A non-2xx ring response must not write the key to stderr or the error text.
 func TestGrokbotWebhookNon2xxOmitsKeyFromLogsAndError(t *testing.T) {
 	const key = "ring-key-must-not-appear"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
