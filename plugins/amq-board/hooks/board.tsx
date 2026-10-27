@@ -7,7 +7,7 @@ import type { BoardStrip, BoardView } from '../types'
 const PANE = 'amq-board'
 const EVERY_MS = 60_000
 const RUN_TIMEOUT_MS = 90_000
-// More than any board prints: a run past it is stopped.
+// The dedicated pane DTO and both transports share this encoded-byte ceiling.
 const MAX_OUTPUT = 4 * 1024 * 1024
 const STALE_MS = 5 * 60_000
 // The first Claude Code whose plugin API this module is written against.
@@ -17,13 +17,17 @@ const EMPTY: BoardView = {
   status: 'loading the board…',
   strips: [],
   waiting: 0,
-  inFlight: 0,
+  recordedProgress: 0,
   blocked: 0,
   unclaimed: 0,
   sources: '',
   project: '',
-  generatedAt: '',
+  publishedAt: '',
   isStale: false,
+  requested: 0,
+  total: 0,
+  waitingOmitted: 0,
+  sourcesOmitted: 0,
 }
 
 const view = atom({ plugin: 'amq-board', key: 'view' } as const, EMPTY)
@@ -39,14 +43,21 @@ let isRunning = false
 let killRun: (() => void) | undefined
 let last: BoardModel | undefined
 
-// The parts of the amq/board/v1 model the pane reads. Every field is
-// optional: the model comes from another process and is checked here.
+// Only the dedicated bounded projection is accepted; full model JSON is not a pane payload.
 type BoardModel = {
-  generated_at?: unknown
-  dir?: unknown
-  project?: unknown
-  sources?: unknown
-  columns?: unknown
+  schema: 'amq/board-pane/v1'
+  generation: number
+  generated_at: string
+  published_at: string
+  dir: string
+  project: string
+  columns: { id: string; total: number }[]
+  current_total: number
+  waiting: { task_id: string; title: string; reason: string; since: string; command: string }[]
+  waiting_total: number
+  waiting_omitted: number
+  sources: { name: string; status: string; partial: boolean }[]
+  sources_omitted: number
 }
 
 /**
@@ -63,11 +74,6 @@ export function clean(value: unknown, limit = 160): string {
   return chars.length > limit ? chars.slice(0, limit - 1).join('') + '…' : text
 }
 
-function list(value: unknown): Record<string, unknown>[] {
-  return Array.isArray(value)
-    ? value.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
-    : []
-}
 
 function field(value: unknown, key: string): unknown {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined
@@ -87,35 +93,84 @@ function age(ms: number): string {
   return `${Math.floor(ms / 86_400_000)}d`
 }
 
-/** Projects a model onto what the pane draws; ages are as of generation. */
+function count(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+// Copy commands are either exact and safe, or absent. Never edit shell text.
+function validCommand(value: unknown): value is string {
+  if (typeof value !== 'string' || Array.from(value).length > 4096 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value)) return false
+  for (const char of value) {
+    const point = char.codePointAt(0)!
+    if (point >= 0xd800 && point <= 0xdfff) return false
+  }
+  return true
+}
+
+function utf8Bytes(text: string): number {
+  let bytes = 0
+  for (const char of text) {
+    const n = char.codePointAt(0)!
+    bytes += n < 0x80 ? 1 : n < 0x800 ? 2 : n < 0x10000 ? 3 : 4
+  }
+  return bytes
+}
+
+function parseModel(text: string): BoardModel | undefined {
+  if (utf8Bytes(text) > MAX_OUTPUT) return undefined
+  let raw: unknown
+  try { raw = JSON.parse(text) } catch { return undefined }
+  if (field(raw, 'schema') !== 'amq/board-pane/v1') return undefined
+  const model = raw as BoardModel
+  if (!count(model.generation) || model.generation === 0 || typeof model.generated_at !== 'string' || typeof model.published_at !== 'string' || !Number.isFinite(Date.parse(model.generated_at)) || !Number.isFinite(Date.parse(model.published_at)) || typeof model.dir !== 'string' || model.dir === '' || typeof model.project !== 'string') return undefined
+  if (!Array.isArray(model.columns) || !Array.isArray(model.waiting) || !Array.isArray(model.sources) || model.waiting.length > 100 || model.sources.length > 32 || !count(model.current_total) || !count(model.waiting_total) || !count(model.waiting_omitted) || !count(model.sources_omitted)) return undefined
+  let total = 0
+  let waiting = 0
+  const ids = new Set<string>()
+  for (const column of model.columns) {
+    if (!column || typeof column.id !== 'string' || column.id === '' || ids.has(column.id) || !count(column.total)) return undefined
+    ids.add(column.id)
+    total += column.total
+    if (column.id === 'waiting_on_you') waiting = column.total
+  }
+  if (!count(total) || total !== model.current_total || waiting !== model.waiting_total || model.waiting.length + model.waiting_omitted !== waiting) return undefined
+  for (const strip of model.waiting) {
+    if (!strip || typeof strip.task_id !== 'string' || strip.task_id === '' || Array.from(strip.task_id).length > 256 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(strip.task_id) || typeof strip.title !== 'string' || typeof strip.reason !== 'string' || typeof strip.since !== 'string' || !Number.isFinite(Date.parse(strip.since)) || !validCommand(strip.command)) return undefined
+  }
+  for (const source of model.sources) {
+    if (!source || typeof source.name !== 'string' || typeof source.status !== 'string' || typeof source.partial !== 'boolean') return undefined
+  }
+  return model
+}
+
+/** Ages use the refresh clock; freshness belongs to the published snapshot. */
 export function project(model: BoardModel, now: number): BoardView {
-  const generated = time(model.generated_at)
-  const columns = list(model.columns)
-  const cards = (id: string) => list(columns.find(c => c.id === id)?.cards)
-  const strips: BoardStrip[] = cards('waiting_on_you').map(card => {
-    const since = time(field(card.reason, 'since'))
-    const command = list(card.actions)[0]?.command
+  const published = time(model.published_at)
+  const column = (id: string) => model.columns.find(c => c.id === id)?.total ?? 0
+  const strips: BoardStrip[] = model.waiting.map(strip => {
+    const since = time(strip.since)
     return {
-      title: clean(card.title),
-      reason: clean(field(card.reason, 'text')),
-      age: since !== undefined && generated !== undefined ? `${age(generated - since)} ago` : 'since unknown',
-      command: clean(command, 4096),
+      taskID: strip.task_id,
+      title: clean(strip.title),
+      reason: clean(strip.reason),
+      age: since !== undefined ? `${age(Math.max(0, now - since))} ago` : 'since unknown',
+      command: strip.command,
     }
   })
-  const sources = list(model.sources)
-    .map(s => `${clean(s.name, 40)} ${clean(s.status, 20)}${s.partial === true ? ' (partial)' : ''}`)
-    .join(' · ')
   return {
-    status: '',
-    strips,
-    waiting: strips.length,
-    inFlight: cards('in_flight').length,
-    blocked: cards('blocked').length,
-    unclaimed: cards('unclaimed').length,
-    sources,
+    status: '', strips,
+    waiting: model.waiting_total,
+    waitingOmitted: model.waiting_omitted,
+    recordedProgress: column('in_flight'),
+    blocked: column('blocked'),
+    unclaimed: column('unclaimed'),
+    requested: column('requests'),
+    total: model.current_total,
+    sources: model.sources.map(s => `${clean(s.name, 40)} ${clean(s.status, 20)}${s.partial ? ' (partial)' : ''}`).join(' · '),
+    sourcesOmitted: model.sources_omitted,
     project: clean(model.project) || clean(model.dir),
-    generatedAt: clean(model.generated_at, 40),
-    isStale: generated === undefined || now - generated > STALE_MS,
+    publishedAt: clean(model.published_at, 40),
+    isStale: published === undefined || now - published > STALE_MS,
   }
 }
 
@@ -157,9 +212,10 @@ async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | 
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined
   if (!(await isAlive($, pid))) return undefined
   try {
-    const res = await $.http.fetch(`${url}/${token}/model.json`)
+    const res = await $.http.fetch(`${url}/${token}/pane.json`)
     if (!res.ok) return undefined
-    const model = JSON.parse(res.text) as BoardModel
+    const model = parseModel(res.text)
+    if (!model) return undefined
     // serve reads one project; another project's board is not this one's.
     return within(cwd, model.dir) ? model : undefined
   } catch {
@@ -168,12 +224,12 @@ async function fromServe($: EngineInterface, cwd: string): Promise<BoardModel | 
 }
 
 /**
- * Runs amq-board --json. stop() or the 90 s deadline ends the refresh at
+ * Runs amq-board --pane-json. stop() or the 90 s deadline ends the refresh at
  * once and asks the engine to kill the run; the refresh never waits on a
  * child that does not answer.
  */
 async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | string> {
-  const run = $.process.spawn({ argv: ['amq-board', '--json'], cwd })
+  const run = $.process.spawn({ argv: ['amq-board', '--pane-json'], cwd })
   let abort: (why: string) => void = () => {}
   const aborted = new Promise<never>((_, reject) => {
     abort = why => reject(new Error(why))
@@ -187,15 +243,27 @@ async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | st
   const stopped = () => kill('amq-board: stopped')
   killRun = stopped
   let stdout = ''
+  let outputBytes = 0
+  let trailingHighSurrogate = false
   let stderr = ''
   try {
     let step = await Promise.race([run.next(), aborted])
     while (!step.done) {
-      if (step.value.stream === 'stdout') stdout += step.value.text
+      if (step.value.stream === 'stdout') {
+        const text = step.value.text
+        outputBytes += utf8Bytes(text)
+        if (text.length > 0) {
+          const first = text.charCodeAt(0)
+          if (trailingHighSurrogate && first >= 0xdc00 && first <= 0xdfff) outputBytes -= 2
+          const last = text.charCodeAt(text.length - 1)
+          trailingHighSurrogate = last >= 0xd800 && last <= 0xdbff
+        }
+        stdout += text
+      }
       else if (stderr.length < 4096) stderr += step.value.text
-      if (stdout.length > MAX_OUTPUT) {
-        kill('amq-board: --json printed more than 4 MiB')
-        return 'amq-board: --json printed more than 4 MiB'
+      if (outputBytes > MAX_OUTPUT) {
+        kill('amq-board: --pane-json printed more than 4 MiB')
+        return 'amq-board: --pane-json printed more than 4 MiB'
       }
       step = await Promise.race([run.next(), aborted])
     }
@@ -212,11 +280,7 @@ async function fromRun($: EngineInterface, cwd: string): Promise<BoardModel | st
     deadline.cancel()
     if (killRun === stopped) killRun = undefined
   }
-  try {
-    return JSON.parse(stdout) as BoardModel
-  } catch {
-    return 'amq-board: --json printed no JSON'
-  }
+  return parseModel(stdout) ?? 'amq-board: --pane-json printed no valid amq/board-pane/v1 JSON'
 }
 
 /**
@@ -258,7 +322,7 @@ async function tick($: EngineInterface): Promise<void> {
     }
     await update($, view, () => next)
     if (!(await isCurrent($, gen))) return
-    $.ui.status(`board: ${next.waiting} waiting · ${next.inFlight} in flight`)
+    $.ui.status(`board: ${next.waiting} waiting · ${next.recordedProgress} marked in progress`)
   } catch (err) {
     if (gen === generation && timer) {
       await update($, view, old => ({ ...(old ?? EMPTY), status: `amq-board: ${clean(String(err))}` }))
@@ -350,10 +414,11 @@ function registerPane(on: Parameters<Register>[0]): void {
         {v.project !== '' && <Text weight="bold">{v.project}</Text>}
         {v.status !== '' && <Text color="warning">{v.status}</Text>}
         <Text weight="bold">Waiting on you ({v.waiting})</Text>
-        {v.generatedAt !== '' && v.strips.length === 0 && <Text dimColor>nothing waits on you</Text>}
+        {v.publishedAt !== '' && v.strips.length === 0 && <Text dimColor>nothing waits on you</Text>}
         {v.strips.map((strip, i) => (
           <Box flexDirection="column" marginBottom={1}>
             <Text>{strip.title}</Text>
+            <Text dimColor>Task ID: {strip.taskID}</Text>
             <Text dimColor>
               {strip.reason} · {strip.age}
             </Text>
@@ -364,13 +429,17 @@ function registerPane(on: Parameters<Register>[0]): void {
             )}
           </Box>
         ))}
+        {v.waitingOmitted > 0 && <Text dimColor>{v.waitingOmitted} more waiting tasks omitted from this pane</Text>}
         <Text>
-          In flight {v.inFlight} · Blocked {v.blocked} · Unclaimed {v.unclaimed}
+          Recorded progress {v.recordedProgress} · Blocked {v.blocked} · Unclaimed {v.unclaimed} · Reply due {v.requested}
         </Text>
+        <Text dimColor>Current tasks {v.total}</Text>
         {v.sources !== '' && <Text dimColor>sources: {v.sources}</Text>}
-        {v.generatedAt !== '' && (
+        {v.sourcesOmitted > 0 && <Text dimColor>{v.sourcesOmitted} more source summaries omitted</Text>}
+        <Text dimColor>Published data only. Run amq-board sync --watch for updates.</Text>
+        {v.publishedAt !== '' && (
           <Text dimColor={!v.isStale} color={v.isStale ? 'warning' : undefined}>
-            generated {v.generatedAt}
+            published {v.publishedAt}
             {v.isStale ? ' (stale)' : ''}
           </Text>
         )}

@@ -33,7 +33,7 @@ const (
 	exitUsage   = 2
 )
 
-const usage = `Usage: amq-board [--json | --html [--out FILE]]
+const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
        amq-board sync [--init] [--watch]
        amq-board suggest --endpoint URL --model qwen3.5:4b --digest HEX [--message KEY]
        amq-board suggestions
@@ -83,6 +83,7 @@ func run(args []string) int {
 	flags := flag.NewFlagSet("amq-board", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	asPaneJSON := flags.Bool("pane-json", false, "print the bounded native-pane projection as JSON")
 	asJSON := flags.Bool("json", false, "print the board model as JSON")
 	showVersion := flags.Bool("version", false, "print the version")
 	refresh := flags.Bool("refresh", false, "ignore the GitHub cache and fetch once")
@@ -98,8 +99,8 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "amq-board: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
 		return exitUsage
 	}
-	if *asJSON && *asHTML {
-		fmt.Fprintln(os.Stderr, "amq-board: --json and --html are exclusive")
+	if (*asJSON && *asHTML) || (*asPaneJSON && (*asJSON || *asHTML)) {
+		fmt.Fprintln(os.Stderr, "amq-board: --json, --pane-json and --html are exclusive")
 		return exitUsage
 	}
 	if *out != "" && !*asHTML {
@@ -136,6 +137,12 @@ func run(args []string) int {
 	model := state.Project(cfg.Board, time.Now(), version)
 
 	switch {
+	case *asPaneJSON:
+		var data []byte
+		data, err = board.PaneJSON(model)
+		if err == nil {
+			_, err = os.Stdout.Write(data)
+		}
 	case *asJSON:
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

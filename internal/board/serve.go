@@ -47,6 +47,7 @@ type Live struct {
 	lastForce time.Time
 	model     Model
 	modelJSON []byte
+	paneJSON  []byte
 	page      []byte
 
 	// Touched only by the one running refresh.
@@ -147,13 +148,18 @@ func (l *Live) run(ctx context.Context, force bool) {
 		return
 	}
 	data = append(data, '\n')
+	paneData, err := PaneJSON(m)
+	if err != nil {
+		l.Logf("refresh: pane not encoded: %v", err)
+		return
+	}
 	var page bytes.Buffer
 	if err := WriteLiveHTML(&page, m); err != nil {
 		l.Logf("refresh: page not rendered: %v", err)
 		return
 	}
 	l.mu.Lock()
-	l.model, l.modelJSON, l.page = m, data, page.Bytes()
+	l.model, l.modelJSON, l.paneJSON, l.page = m, data, paneData, page.Bytes()
 	l.mu.Unlock()
 	how := "refresh"
 	if force {
@@ -206,7 +212,8 @@ func set(xs []string) map[string]bool {
 
 // Handler serves the live view. Every route lives under the token:
 // /<token>/ (the page), /<token>/model.json (the last built model, the same
-// JSON as `amq-board --json`), and /<token>/refresh (a press of refresh). A
+// JSON as `amq-board --json`), /<token>/pane.json (the bounded pane DTO),
+// and /<token>/refresh (a press of refresh). A
 // path without the exact token is 404, a Host other than host (the address
 // the view listens on) is refused against DNS rebinding, and any method but
 // GET is 405. No request runs a source read except through Request.
@@ -244,6 +251,13 @@ func (l *Live) Handler(token, host string) http.Handler {
 			h.Set("Content-Security-Policy", liveCSP+"; frame-ancestors 'none'")
 			h.Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write(page)
+		case "pane.json":
+			l.mu.Lock()
+			data := l.paneJSON
+			l.mu.Unlock()
+			h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+			h.Set("Content-Type", "application/json")
+			_, _ = w.Write(data)
 		case "model.json":
 			l.mu.Lock()
 			data := l.modelJSON
