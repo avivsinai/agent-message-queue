@@ -2257,11 +2257,11 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		defer func() { _ = s.terminalAuthority.Close() }()
 	}
 	cfg := s.newLoopConfig()
-	if s.injectMode == wakeInjectModeClaudeNative {
-		cfg.native, err = newWakeClaudeNative(s, &cfg)
-		if err != nil {
-			return err
-		}
+	cfg.native, err = newWakeClaudeNative(s, &cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.native != nil {
 		defer func() { returnErr = errors.Join(returnErr, cfg.native.Close()) }()
 	}
 

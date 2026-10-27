@@ -57,6 +57,9 @@ type claudeNativeNotifier struct {
 }
 
 func newWakeClaudeNative(s *wakeStart, cfg *wakeConfig) (wakeNativeNotifier, error) {
+	if s.injectMode != wakeInjectModeClaudeNative {
+		return nil, nil
+	}
 	if s.nativeLaunch == nil || s.requestedOwner == nil || s.resumeContext != nil || s.repairHandoffPresent ||
 		s.startupHold == nil || os.Getppid() != s.requestedOwner.PID || s.nativeLaunch.Launch.PID != s.requestedOwner.PID {
 		return nil, fmt.Errorf("claude-native requires its original managed launch child")
