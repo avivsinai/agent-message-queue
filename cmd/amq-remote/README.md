@@ -644,6 +644,10 @@ first that applies:
 - the session is not proven live and has no channel: the machine agent makes
   a channel only for a session proven live, with the liveness evidence (JSON
   `unproven`);
+- the machine agent is offline or idle and the channel is uncertain or
+  failed: start the machine agent in Buzz Desktop, with the channel's state
+  and error; nothing looks for the channel or tries again while no worker
+  runs;
 - the channel is uncertain: Buzz did not confirm the create; AMQ keeps
   looking for it and never makes a second one, and `amq-remote channel reset
   <name>` gives it up;

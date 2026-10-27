@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,8 +35,10 @@ import (
 // Only the leader writes records, under its lock, one step at a time: each
 // outcome is written before the next step, and each step first re-reads the
 // record. The buzz CLI makes a fresh channel id on every create and takes no
-// idempotency key, so a create whose outcome is unknown is never sent again
-// for that record; the leader looks for the channel it may have made instead.
+// idempotency key, so a create whose outcome is unknown, including one whose
+// worker stopped before it wrote the result, is never sent again for that
+// record; the leader looks for the channel it may have made instead. A
+// record that exists but cannot be read stops all work on its name.
 
 // machineName is the machine agent's marker directory under agents/. It is
 // not a valid binding name, so it never meets a session's.
@@ -117,9 +120,16 @@ type channelRecord struct {
 	OwnerAdded bool   `json:"owner_added"`
 	Welcomed   bool   `json:"welcomed"`
 	Creates    int    `json:"creates"`
+	// Pending is written before a create is sent and cleared with its
+	// result, so a create whose worker stopped in between stays unresolved.
+	Pending bool `json:"pending,omitempty"`
 	// Doubted records that a create outcome was once unknown: no create is
 	// ever sent again for this record.
 	Doubted bool `json:"doubted,omitempty"`
+	// ArchiveSent is written before the channel's archive is sent, so a
+	// restore unarchives a channel that may be archived although no archive
+	// was confirmed.
+	ArchiveSent bool `json:"archive_sent,omitempty"`
 	// Orphans are channels found for Reg that are not used: both of an
 	// ambiguous match. A retired record archives them.
 	Orphans     []string `json:"orphans,omitempty"`
@@ -134,7 +144,7 @@ type channelRecord struct {
 // inDoubt reports whether a create of r may have made a channel that is not
 // known yet.
 func (r channelRecord) inDoubt() bool {
-	return r.Doubted && r.ChannelID == "" && len(r.Orphans) == 0
+	return (r.Doubted || r.Pending) && r.ChannelID == "" && len(r.Orphans) == 0
 }
 
 // prunable reports whether a retired record may be removed: every channel it
@@ -151,13 +161,27 @@ func (s *Server) channelDir() string { return channelDirFor(s.cfg.StateDir, buzz
 
 func (s *Server) retiredDir() string { return filepath.Join(s.channelDir(), "retired") }
 
-func readChannelRecord(path string) (channelRecord, bool) {
-	var r channelRecord
+// loadChannelRecord reads one record. found is false only when there is no
+// file; a file that cannot be read or parsed is an error, never first use.
+func loadChannelRecord(path string) (r channelRecord, found bool, err error) {
 	raw, err := readSmallRegular(path)
-	if err != nil || json.Unmarshal(raw, &r) != nil || r.Reg == "" {
-		return channelRecord{}, false
+	if errors.Is(err, os.ErrNotExist) {
+		return channelRecord{}, false, nil
 	}
-	return r, true
+	if err != nil {
+		return channelRecord{}, true, err
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || r.Reg == "" {
+		return channelRecord{}, true, fmt.Errorf("unreadable channel record %s", path)
+	}
+	return r, true, nil
+}
+
+// readChannelRecord is loadChannelRecord for readers that act only on a
+// good record.
+func readChannelRecord(path string) (channelRecord, bool) {
+	r, found, err := loadChannelRecord(path)
+	return r, found && err == nil
 }
 
 // recordPath is where r lives: the active slot of its name, or the retired
@@ -166,8 +190,10 @@ func (s *Server) recordPath(r channelRecord) string {
 	if r.State == channelRetired {
 		return filepath.Join(s.retiredDir(), r.Reg+".json")
 	}
-	return filepath.Join(s.channelDir(), r.Name+".json")
+	return s.slotPath(r.Name)
 }
+
+func (s *Server) slotPath(name string) string { return filepath.Join(s.channelDir(), name+".json") }
 
 // save writes r atomically where it lives.
 func (s *Server) save(r *channelRecord, now time.Time) error {
@@ -201,13 +227,36 @@ func newReg() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// errMachineStopped refuses a relay call after the machine worker stopped.
+var errMachineStopped = errors.New("the machine agent's worker stopped")
+
+// stopped reports whether the machine worker is stopping: no new step and no
+// new record starts then.
+func (s *Server) stopped() bool {
+	return s.machine.ctx != nil && s.machine.ctx.Err() != nil
+}
+
+// call runs one buzz command for the machine lifecycle. A call cut off by
+// the worker's stop fails like a timeout: its outcome is unknown.
+func (s *Server) call(args ...string) ([]byte, error) {
+	ctx := s.machine.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil, &notSentError{errMachineStopped}
+	}
+	return machineCall(ctx, s.cfg.PostTimeout, args...)
+}
+
 // machineTick runs every machineScanInterval in the worker that leads the
-// machine identity. It writes the marker first, before any relay call, then
-// applies reset requests, retires the records of bindings that are gone,
-// provisions the live sessions, and every lateReplyInterval works through
-// the retired store.
-func (s *Server) machineTick(now time.Time) {
-	if !s.cfg.Machine || buzzSelf == "" || !s.lead(machineName) {
+// machine identity, until ctx ends. It writes the marker first, before any
+// relay call, then applies reset requests, retires the records of bindings
+// that are gone, provisions the live sessions, and every lateReplyInterval
+// works through the retired store.
+func (s *Server) machineTick(ctx context.Context, now time.Time) {
+	s.machine.ctx = ctx
+	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
 		return
 	}
 	if due(s.machine.marked, lateReplyInterval, now) {
@@ -225,19 +274,23 @@ func (s *Server) machineTick(now time.Time) {
 	all, err := binding.List()
 	if err == nil {
 		for _, b := range all {
+			if s.stopped() {
+				return
+			}
 			if s.provisionable(b) {
 				s.provision(b, now)
 			}
 		}
 	}
-	if due(s.machine.swept, lateReplyInterval, now) {
+	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
 }
 
-// machineState is the leader's own pacing, kept by the machine worker.
+// machineState is the machine worker's own state: its context and pacing.
 type machineState struct {
+	ctx           context.Context
 	marked, swept string
 }
 
@@ -261,19 +314,28 @@ func (s *Server) provisionable(b binding.Binding) bool {
 	return true
 }
 
-// provision moves b's record one or more steps toward active.
+// provision moves b's record one or more steps toward active. A record that
+// cannot be read, or one that could not be moved to the retired store,
+// stops it: a new record never replaces state it could not keep.
 func (s *Server) provision(b binding.Binding, now time.Time) {
-	r, ok := readChannelRecord(filepath.Join(s.channelDir(), b.Name+".json"))
+	r, ok, err := loadChannelRecord(s.slotPath(b.Name))
+	if err != nil {
+		return
+	}
 	if ok && r.State == channelRetired {
-		s.finishRetire(r, now)
+		if !s.finishRetire(r, now) {
+			return
+		}
 		ok = false
 	}
 	if ok && r.Identity != b.SessionIdentity() {
-		s.retire(r, retiredReplaced, now)
+		if !s.retire(r, retiredReplaced, now) {
+			return
+		}
 		ok = false
 	}
 	if !ok {
-		if s.restore(b, now) {
+		if s.restore(b, now) || s.stopped() {
 			return
 		}
 		reg, err := newReg()
@@ -286,17 +348,17 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 			return
 		}
 	}
+	if r.Pending {
+		// A create was sent and its result never written: the worker
+		// stopped while it ran.
+		r.State, r.Pending, r.Doubted, r.LastError = channelUncertain, false, true, "the outcome of a create was not recorded"
+		_ = s.save(&r, now)
+		return
+	}
 	switch r.State {
 	case channelActive:
 		return
 	case channelCreating:
-		if r.ChannelID == "" && r.Creates > 0 {
-			// A create was sent and its outcome never written: the worker
-			// stopped while it ran.
-			r.State, r.Doubted, r.LastError = channelUncertain, true, "the outcome of a create was not recorded"
-			_ = s.save(&r, now)
-			return
-		}
 	case channelFailed:
 		if r.Doubted || r.Creates >= channelCreateTries || !due(r.LastTry, channelRetryGap, now) {
 			return
@@ -316,9 +378,10 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 
 // stillServes re-reads r and its binding before a step. A binding proven gone
 // or ended retires r; another identity under the name replaces it; any other
-// read error proves nothing and only skips the step.
+// read error proves nothing and only skips the step. Nothing starts once the
+// worker stops.
 func (s *Server) stillServes(r channelRecord, now time.Time) bool {
-	if !s.unchanged(r) {
+	if s.stopped() || !s.unchanged(r) {
 		return false
 	}
 	b, err := binding.ReadNamed(r.Name)
@@ -379,20 +442,23 @@ func classifyCreate(out []byte, err error) (createOutcome, string, string) {
 	return createAccepted, strings.ToLower(created.ChannelID), ""
 }
 
-// create counts and sends one channels create, writing the count before the
-// call and the outcome after it. It reports whether a channel id is known.
+// create counts and sends one channels create. The count and the pending
+// mark are written before the call, and the outcome after it, so a worker
+// that stops in between leaves the create unresolved. It reports whether a
+// channel id is known.
 func (s *Server) create(r *channelRecord, now time.Time) bool {
 	if r.Doubted || r.Creates >= channelCreateTries || !s.stillServes(*r, now) {
 		return false
 	}
 	r.Creates++
-	r.State, r.LastTry = channelCreating, now.UTC().Format(time.RFC3339)
+	r.State, r.Pending, r.LastTry = channelCreating, true, now.UTC().Format(time.RFC3339)
 	if s.save(r, now) != nil {
 		return false
 	}
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", r.Label, "--type", "stream",
+	out, err := s.call("channels", "create", "--name", r.Label, "--type", "stream",
 		"--visibility", "private", "--description", "amq-remote "+r.Reg)
 	outcome, id, reason := classifyCreate(out, err)
+	r.Pending = false
 	switch outcome {
 	case createAccepted:
 		r.ChannelID, r.LastError = id, ""
@@ -432,7 +498,7 @@ func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 // r.Reg. The list does not promise a description, so each candidate is read
 // with channels get. ok is false when any read failed, which proves nothing.
 func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "list", "--member", "--visibility", "private")
+	out, err := s.call("channels", "list", "--member", "--visibility", "private")
 	var listed []struct {
 		ChannelID string `json:"channel_id"`
 		Name      string `json:"name"`
@@ -444,7 +510,7 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 		if c.Name != r.Label || !uuidRe.MatchString(c.ChannelID) {
 			continue
 		}
-		out, err := buzzCall(s.cfg.PostTimeout, "channels", "get", "--channel", c.ChannelID)
+		out, err := s.call("channels", "get", "--channel", c.ChannelID)
 		var got struct {
 			Description string `json:"description"`
 		}
@@ -454,7 +520,7 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 		if !strings.Contains(got.Description, r.Reg) {
 			continue
 		}
-		owner, known := s.channelOwner(c.ChannelID)
+		owner, known := ownerOf(s.call("channels", "members", "--channel", c.ChannelID))
 		if !known {
 			return nil, false
 		}
@@ -466,16 +532,16 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 }
 
 // accepted reports whether a write command succeeded: exit 0 and the relay
-// accepted it (or, for a message, an event id came back).
+// said accepted:true. An event id alone is no acceptance: the CLI prints the
+// event id of a write the relay refused too.
 func accepted(out []byte, err error) error {
 	if err != nil {
 		return err
 	}
 	var res struct {
-		Accepted bool   `json:"accepted"`
-		EventID  string `json:"event_id"`
+		Accepted bool `json:"accepted"`
 	}
-	if json.Unmarshal(out, &res) != nil || (!res.Accepted && res.EventID == "") {
+	if json.Unmarshal(out, &res) != nil || !res.Accepted {
 		return fmt.Errorf("not accepted: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -499,7 +565,7 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 			return false
 		}
 		r.LastTry = now.UTC().Format(time.RFC3339)
-		if err := accepted(buzzCall(s.cfg.PostTimeout, args...)); err != nil {
+		if err := accepted(s.call(args...)); err != nil {
 			r.LastError = err.Error()
 			_ = s.save(r, now)
 			return false
@@ -522,36 +588,40 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 }
 
 // retire stops routing to r at once, moves it to the retired store, and
-// starts its remote cleanup.
-func (s *Server) retire(r channelRecord, by string, now time.Time) {
+// starts its remote cleanup. It reports whether r is durably in the retired
+// store, so its name may take a new record.
+func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
 	if r.State != channelRetired {
 		r.RetiredFrom = r.State
 	}
-	active := filepath.Join(s.channelDir(), r.Name+".json")
 	r.State, r.RetiredBy = channelRetired, by
 	raw, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
-		return
+		return false
 	}
 	// The active slot says retired first, so routing stops before anything
 	// else happens.
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(active), filepath.Base(active), append(raw, '\n'), 0o600); err != nil {
-		return
+	slot := s.slotPath(r.Name)
+	if _, err := fsq.WriteFileAtomic(filepath.Dir(slot), filepath.Base(slot), append(raw, '\n'), 0o600); err != nil {
+		return false
 	}
-	if s.finishRetire(r, now) {
-		s.cleanRetired(r, now)
+	if !s.finishRetire(r, now) {
+		return false
 	}
+	s.cleanRetired(r, now)
+	return true
 }
 
 // finishRetire moves a retired record from its name's slot to the retired
-// store, so the name can take a new record.
+// store, so the name can take a new record. The slot is removed only after
+// the retired copy is written.
 func (s *Server) finishRetire(r channelRecord, now time.Time) bool {
 	if s.save(&r, now) != nil {
 		return false
 	}
-	active := filepath.Join(s.channelDir(), r.Name+".json")
-	if cur, ok := readChannelRecord(active); ok && cur.Reg == r.Reg {
-		if err := os.Remove(active); err != nil && !errors.Is(err, os.ErrNotExist) {
+	slot := s.slotPath(r.Name)
+	if cur, ok := readChannelRecord(slot); ok && cur.Reg == r.Reg {
+		if err := os.Remove(slot); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false
 		}
 	}
@@ -562,6 +632,9 @@ func (s *Server) finishRetire(r channelRecord, now time.Time) bool {
 // finishes the move of a record a stopped worker left half retired.
 func (s *Server) retireGone(now time.Time) {
 	for _, r := range s.activeRecords() {
+		if s.stopped() {
+			return
+		}
 		if r.State == channelRetired {
 			s.finishRetire(r, now)
 			continue
@@ -577,7 +650,7 @@ func (s *Server) retireGone(now time.Time) {
 	}
 }
 
-// activeRecords reads every record in the name slots.
+// activeRecords reads every good record in the name slots.
 func (s *Server) activeRecords() []channelRecord {
 	entries, _ := os.ReadDir(s.channelDir())
 	var out []channelRecord
@@ -606,13 +679,13 @@ func (s *Server) retiredRecords() []channelRecord {
 }
 
 // cleanRetired works on one retired record: it finds a channel an uncertain
-// create made, says "Session ended" in a channel that was active for a
-// session that ended, and archives every channel the record made. archived
-// is written only after the archive is confirmed; a failure is retried after
-// channelRetryGap without limit. A retired record never gets add-member, a
-// welcome or activation.
+// or unfinished create made, says "Session ended" in a channel that was
+// active for a session that ended, and archives every channel the record
+// made. archived is written only after the archive is confirmed; a failure
+// is retried after channelRetryGap without limit. A retired record never
+// gets add-member, a welcome or activation.
 func (s *Server) cleanRetired(r channelRecord, now time.Time) {
-	if r.Archived || (r.LastTry != "" && r.LastError != "" && !due(r.LastTry, channelRetryGap, now)) {
+	if r.Archived || s.stopped() || (r.LastTry != "" && r.LastError != "" && !due(r.LastTry, channelRetryGap, now)) {
 		return
 	}
 	if r.ChannelID == "" && len(r.Orphans) == 0 && !r.inDoubt() {
@@ -637,21 +710,24 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 			_ = s.save(&r, now)
 			return
 		}
-		r.ChannelID, r.Orphans = ids[0], ids[1:]
+		r.ChannelID, r.Orphans, r.Pending, r.Doubted = ids[0], ids[1:], false, true
 		if s.save(&r, now) != nil {
 			return
 		}
 	}
-	if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && !r.SaidEnded && r.ChannelID != "" {
+	if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && !r.SaidEnded && r.ChannelID != "" && !s.stopped() {
 		r.SaidEnded = true
 		if s.save(&r, now) != nil {
 			return
 		}
-		_ = accepted(buzzCall(s.cfg.PostTimeout, "messages", "send", "--channel", r.ChannelID, "--content",
+		_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content",
 			"Session ended: "+r.Label+". This channel no longer reaches it."))
 	}
 	for len(r.Orphans) > 0 {
-		if err := accepted(buzzCall(s.cfg.PostTimeout, "channels", "archive", "--channel", r.Orphans[0])); err != nil {
+		if s.stopped() {
+			return
+		}
+		if err := accepted(s.call("channels", "archive", "--channel", r.Orphans[0])); err != nil {
 			fail(err)
 			return
 		}
@@ -661,7 +737,14 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 		}
 	}
 	if r.ChannelID != "" {
-		if err := accepted(buzzCall(s.cfg.PostTimeout, "channels", "archive", "--channel", r.ChannelID)); err != nil {
+		if s.stopped() {
+			return
+		}
+		r.ArchiveSent = true
+		if s.save(&r, now) != nil {
+			return
+		}
+		if err := accepted(s.call("channels", "archive", "--channel", r.ChannelID)); err != nil {
 			fail(err)
 			return
 		}
@@ -682,6 +765,9 @@ func (s *Server) sweepRetired(now time.Time) {
 	}
 	retired := s.retiredRecords()
 	for _, r := range retired {
+		if s.stopped() {
+			return
+		}
 		if active[r.Reg] {
 			_ = os.Remove(s.recordPath(r))
 			continue
@@ -706,11 +792,30 @@ func (s *Server) sweepRetired(now time.Time) {
 	}
 }
 
+// restorable re-reads what a restore of r for b needs: the binding still
+// names b's session and is not proven ended, the retired record is
+// unchanged, and no record holds the name's slot.
+func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
+	if s.stopped() || !s.unchanged(r) {
+		return false
+	}
+	cur, err := binding.ReadNamed(b.Name)
+	if err != nil || cur.SessionIdentity() != r.Identity {
+		return false
+	}
+	if state, _ := cur.Liveness(); state == binding.Ended {
+		return false
+	}
+	_, held, err := loadChannelRecord(s.slotPath(b.Name))
+	return err == nil && !held
+}
+
 // restore brings back the channel of the same session attaching again: the
 // newest retired record of b's name and identity that was active and ended
-// with its session. An archived channel is unarchived first. It reports
-// whether such a record exists, so no new channel is made while it is
-// being brought back.
+// with its session. A channel whose archive was sent is unarchived first,
+// and only a confirmed unarchive lets it become active. It reports whether
+// such a record exists, so no new channel is made while it is being brought
+// back.
 func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
@@ -723,18 +828,23 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 		return false
 	}
 	r := *found
-	if r.Archived {
+	if !s.restorable(b, r) {
+		return true
+	}
+	if r.Archived || r.ArchiveSent {
 		if r.LastError != "" && !due(r.LastTry, channelStepGap, now) {
 			return true
 		}
 		r.LastTry = now.UTC().Format(time.RFC3339)
-		if err := accepted(buzzCall(s.cfg.PostTimeout, "channels", "unarchive", "--channel", r.ChannelID)); err != nil {
+		if err := accepted(s.call("channels", "unarchive", "--channel", r.ChannelID)); err != nil {
 			r.LastError = err.Error()
 			_ = s.save(&r, now)
 			return true
 		}
-		r.Archived = false
-		if s.save(&r, now) != nil {
+		// The channel is unarchived now; if the session left meanwhile, the
+		// retired record archives it again.
+		r.Archived, r.ArchiveSent, r.LastError = false, false, ""
+		if s.save(&r, now) != nil || !s.restorable(b, r) {
 			return true
 		}
 	}
@@ -744,7 +854,7 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 		return true
 	}
 	_ = os.Remove(retiredPath)
-	_ = accepted(buzzCall(s.cfg.PostTimeout, "messages", "send", "--channel", r.ChannelID, "--content", "Connected again: "+r.Label+"."))
+	_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", "Connected again: "+r.Label+"."))
 	return true
 }
 
@@ -755,19 +865,27 @@ type resetRequest struct {
 }
 
 // applyResets retires each record named by a reset request whose reg still
-// matches it, then drops the request. The next provisioning makes a new
-// record with a new reg; the retired one keeps being reconciled and
-// archived, so a late channel of an uncertain create is archived as an
-// orphan.
+// matches it. The next provisioning makes a new record with a new reg; the
+// retired one keeps being reconciled and archived, so a late channel of an
+// uncertain create is archived as an orphan. A request is dropped once it is
+// applied or names no current record; one whose request or record cannot be
+// read, or whose retirement failed, stays for the next scan.
 func (s *Server) applyResets(now time.Time) {
 	matches, _ := filepath.Glob(filepath.Join(s.channelDir(), "*.reset"))
 	for _, path := range matches {
 		name := strings.TrimSuffix(filepath.Base(path), ".reset")
 		var req resetRequest
 		raw, err := readSmallRegular(path)
-		if err == nil && json.Unmarshal(raw, &req) == nil {
-			if r, ok := readChannelRecord(filepath.Join(s.channelDir(), name+".json")); ok && r.Reg == req.Reg && r.State != channelRetired {
-				s.retire(r, retiredReset, now)
+		if err != nil || json.Unmarshal(raw, &req) != nil {
+			continue
+		}
+		r, found, err := loadChannelRecord(s.slotPath(name))
+		switch {
+		case err != nil:
+			continue
+		case found && r.Reg == req.Reg && r.State != channelRetired:
+			if !s.retire(r, retiredReset, now) {
+				continue
 			}
 		}
 		_ = os.Remove(path)

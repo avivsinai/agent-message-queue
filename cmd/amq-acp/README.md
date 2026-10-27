@@ -360,12 +360,19 @@ add-member` for the owner as an admin, then a welcome that mentions the
 owner, so the phone pushes, and then the channel is active. Records live
 under `~/.amq/remote/acp/channels/<relay key>/<machine pubkey>/`, one per
 binding name, written only by the leader; the relay key is the sha256 of the
-normalized `BUZZ_RELAY_URL`.
+normalized `BUZZ_RELAY_URL`. Each step counts only on exit 0 with
+`accepted:true`; an event id alone is not acceptance. A record that exists
+but cannot be read stops all work on that session's name, and a name takes a
+new record only after its old one is safely in the retired store. When the
+worker stops, its relay call in flight is cut off and no new step starts.
 
-- A create refused by the relay (exit 1 or 3, or `accepted:false`) is tried
-  again after 10 minutes, at most 3 times. A create whose outcome is unknown
-  (a relay or network error, another exit, a timeout, or output that does not
-  parse) is never sent again for that session: every 10 minutes the leader
+- A create refused by the relay (exit 1 or 3, or `accepted:false`), or one
+  whose CLI never started, is tried again after 10 minutes, at most 3 times.
+  A create whose outcome is unknown (a relay or network error, another exit,
+  a timeout, a stopped worker, output that does not parse, or a result that
+  was never written because the worker stopped while it ran) is never sent
+  again for that session, also after a detach, reset or restart: every 10
+  minutes the leader
   looks for a private channel it owns with the session's name and the
   record's `<reg>` in its description, and adopts it when there is exactly
   one. Two such channels are both refused. `amq-remote channel reset <name>`
@@ -386,8 +393,10 @@ normalized `BUZZ_RELAY_URL`.
   "Session ended" in a channel that was active, then archives it; a failed
   archive is retried every 10 minutes. A binding name that another session
   identity takes gets a new channel, and the old one is archived. When the
-  same session attaches again, its channel is unarchived and posts
-  "Connected again". An archived channel stays in Buzz history.
+  same session attaches again, its channel is unarchived (when an archive
+  was ever sent) and becomes active only after the unarchive is accepted and
+  the session is still attached; then it posts "Connected again". An
+  archived channel stays in Buzz history.
 - A tool approval in a channel can only be denied (❌); allow stays in the
   terminal. A Desktop approval pin names one agent and one DM, and never
   widens to a channel.
@@ -396,8 +405,9 @@ A pinned agent keeps its Buzz identity in step with its binding. On each
 tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`
 (`agents/_machine/` for the machine agent), written at worker start before
 any relay call. The marker records the process identity (pid, start time,
-boot id) of the worker and of its parent buzz-acp, and a worker never
-overwrites the marker of a worker that started after it. `amq-remote attach`
+boot id) of the worker and of its parent buzz-acp. Only the worker that
+leads writes it, and it never overwrites the marker of a newer worker that
+still runs; a newer worker that left is replaced. `amq-remote attach`
 and `bindings` read it to report the agent as `running` (its worker runs),
 `idle` (the worker is gone but its buzz-acp runs, so a DM starts it),
 `offline` (neither runs, or the marker is older than 10 minutes and records

@@ -201,6 +201,10 @@ func connected(w io.Writer, v attachView) {
 		say(w, "Buzz is making the channel; it appears within a minute.")
 	case v.machine.State != agentMissing && state == "" && v.unproven != "":
 		say(w, "%s makes a channel only for a session proven live, and this session is not (%s).", machine, v.unproven)
+	case v.machine.State != agentRunning && v.machine.State != agentMissing && (state == "uncertain" || state == "failed"):
+		// No worker runs, so nothing looks for the channel or tries again
+		// until the machine agent is started.
+		say(w, "Start %q in Buzz Desktop (Agents, the agent, Start). This session's channel is %s (%s); nothing is done about it while the machine agent is stopped.", machine, state, v.channel.Error)
 	case state == "uncertain":
 		say(w, "Buzz did not confirm the channel (%s). AMQ keeps looking for it and will not make a second one. If it never appears, run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case state == "failed" && v.channel.Retry:

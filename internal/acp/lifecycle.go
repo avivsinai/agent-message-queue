@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -332,6 +333,13 @@ var buzzCall = func(budget time.Duration, args ...string) ([]byte, error) {
 	return runBuzzCLI(budget, nil, args...)
 }
 
+// machineCall is buzzCall for the machine agent's lifecycle: it stops when
+// the worker's context ends. A variable so tests can record calls without a
+// relay.
+var machineCall = func(ctx context.Context, budget time.Duration, args ...string) ([]byte, error) {
+	return runBuzzCLIContext(ctx, budget, nil, args...)
+}
+
 // buzzRun is buzzCall when only the outcome matters.
 func buzzRun(budget time.Duration, args ...string) error {
 	_, err := buzzCall(budget, args...)
@@ -446,7 +454,11 @@ func (s *Server) recordDM(channel string) {
 // the marker of a worker that started after it.
 func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	if old, ok := readAgentMarker(filepath.Join(dir, buzzSelf+".json")); ok && newerWorker(old.Worker, workerIdentity.self) {
-		return
+		// Holding the lead is the authority to write: a newer worker that
+		// left is replaced, and only a newer one still running is kept.
+		if state, _ := launch.InspectHolder(old.Worker); state == launch.LeaseValid {
+			return
+		}
 	}
 	m.PubKey, m.PID = buzzSelf, os.Getpid()
 	m.Worker, m.Parent = workerIdentity.self, workerIdentity.parent
@@ -634,7 +646,12 @@ func (s *Server) ownsChannel(channel string) bool {
 // channelOwner reports whether the helper owns channel; ok is false when
 // the members could not be read, which proves nothing.
 func (s *Server) channelOwner(channel string) (owner, ok bool) {
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel)
+	return ownerOf(buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel))
+}
+
+// ownerOf reads a channels members result: whether this agent is the
+// channel's owner, and whether the members could be read at all.
+func ownerOf(out []byte, err error) (owner, ok bool) {
 	var members []struct {
 		PubKey string `json:"pubkey"`
 		Role   string `json:"role"`

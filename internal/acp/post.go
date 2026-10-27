@@ -212,11 +212,21 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) (string, err
 // runBuzzCLI runs the buzz CLI with only the agent identity and a minimal
 // environment and returns its stdout.
 func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
+	return runBuzzCLIContext(context.Background(), budget, stdin, args...)
+}
+
+// runBuzzCLIContext is runBuzzCLI that also stops when parent ends. A run
+// that never started is a notSentError: it cannot have reached the relay.
+func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
 	if len(buzzIdentity) == 0 {
 		return nil, errNoBuzzIdentity
 	}
 	bin, err := buzzCLI()
 	if err != nil {
+		var notSent *notSentError
+		if !errors.As(err, &notSent) {
+			err = &notSentError{err}
+		}
 		return nil, err
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
@@ -224,7 +234,7 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 	// past the budget. A CLI that keeps sending after its budget is outside
 	// the status/final ordering (README).
 	waitDelay := budget / 10
-	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
+	ctx, cancel := context.WithTimeout(parent, budget-waitDelay)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.WaitDelay = waitDelay

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -94,15 +95,17 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	// A machine agent's leader reads the bindings every machineScanInterval
 	// in its own worker, so a new session gets its channel without waiting
 	// behind the sweep's posts. That one worker makes every relay call of
-	// the machine lifecycle, one at a time, and stops with this one.
+	// the machine lifecycle, one at a time. Stop cancels its context: a call
+	// in flight is cut off (an unknown outcome), and no new step starts.
 	machineDone := make(chan struct{})
+	machineCtx, cancelMachine := context.WithCancel(context.Background())
 	if s.cfg.Machine {
 		go func() {
 			defer close(machineDone)
 			tick := time.NewTicker(machineScanInterval)
 			defer tick.Stop()
 			for {
-				s.machineTick(time.Now())
+				s.machineTick(machineCtx, time.Now())
 				select {
 				case <-quit:
 					return
@@ -133,6 +136,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	}()
 	return func() {
 		close(quit)
+		cancelMachine()
 		<-done
 		<-machineDone
 		s.resign()
