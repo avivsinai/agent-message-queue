@@ -38,6 +38,7 @@ func postJSON(client Poster, rawURL, key string, body []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		req.Header.Set(RingKeyHeader, key)
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

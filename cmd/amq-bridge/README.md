@@ -157,7 +157,8 @@ missing, symlinked, or non-0600 config before reading stdin.
 adapters never receive message bytes.
 
 - `grokbot` POSTs `{"handle","pending"}` to the URL in a mode-0600 JSON
-  file `{"url","key"}`. The key is sent as `X-AMQ-Ring-Key`.
+  file `{"url","key"}`. The key is sent as `Authorization: Bearer <key>`
+  and as `X-AMQ-Ring-Key`.
 - `slack` POSTs `{"text":"AMQ mail waiting."}` to the URL in a mode-0600
   JSON file `{"url"}`. The body does not name the handle or the peer.
 
