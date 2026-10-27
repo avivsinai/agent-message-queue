@@ -33,15 +33,18 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{"st
 type stripCall struct {
 	ID string
 	S  pageStrip
-	// Shown are the commands on the strip itself (the first one in Waiting
-	// on you); More are the rest, under the strip's details.
-	Shown, More []Action
+	// Shown contains context only. Owner corrections remain in Details.
+	Shown []Action
 }
 
-func stripArgs(bay string, i int, s pageStrip, inline bool) stripCall {
-	c := stripCall{ID: "s-" + bay + "-" + strconv.Itoa(i), S: s, More: s.Actions}
-	if inline && len(s.Actions) > 0 {
-		c.Shown, c.More = s.Actions[:1], s.Actions[1:]
+func stripArgs(bay string, s pageStrip) stripCall {
+	sum := sha256.Sum256([]byte(s.Key))
+	c := stripCall{ID: "item-" + bay + "-" + base64.RawURLEncoding.EncodeToString(sum[:12]), S: s}
+	for _, action := range s.Actions {
+		if action.IsContext() {
+			c.Shown = []Action{action}
+			break
+		}
 	}
 	return c
 }
@@ -78,25 +81,42 @@ func WriteLiveHTML(w io.Writer, m Model) error {
 }
 
 type pageData struct {
-	Model      Model
-	CSS        template.CSS
-	JS         template.JS
-	CSP        string
-	Project    string
-	Generated  string
-	Clock      string
-	Sessions   string
-	Fleet      string
-	Sources    []pageSource
-	Limits     []pageLimit
-	Waiting    pageBay
-	Bays       []pageBay
-	Roster     []pageSession
-	RosterNote string
-	Regenerate string
-	Version    string
-	Dir        string
-	Live       bool
+	Model                Model
+	CSS                  template.CSS
+	JS                   template.JS
+	CSP                  string
+	Project              string
+	Generated            string
+	Clock                string
+	Sessions             string
+	Fleet                string
+	Sources              []pageSource
+	Limits               []pageLimit
+	Waiting              pageBay
+	Bays                 []pageBay
+	Roster               []pageSession
+	RosterNote           string
+	Regenerate           string
+	Version              string
+	Dir                  string
+	Live                 bool
+	TaskChoices          []pageTaskChoice
+	Views                []pageView
+	Suggestions          []pageSuggestion
+	SuggestionDiagnostic string
+}
+
+type pageSuggestion struct {
+	ID, Quote, MessageKey, Location, State string
+	Choices                                []string
+	Commands                               []Action
+}
+
+type pageTaskChoice struct{ ID, Title, Label string }
+
+type pageView struct {
+	ID, Title, Description, Empty, Coverage, CoverageTitle string
+	Strips                                                 []pageStrip
 }
 
 type pageSource struct {
@@ -116,20 +136,23 @@ type pageBay struct {
 }
 
 type pageStrip struct {
-	Kind, ID, Title       string
-	Refs                  []string
-	Reason, Since         string
-	SinceAt               string
-	Checked               string
-	Owner                 string
-	People                []string
-	Marks                 []string
-	Cocked                bool
-	Related               []string
-	Evidence              []pageEvidence
-	Actions               []Action
-	HasDetail             bool
-	ReasonField, Priority string
+	Key, State, NextReason, AgeLabel string
+	TaskID                           string
+	AttachKey                        string
+	Kind, ID, Title                  string
+	Refs                             []string
+	Reason, Since                    string
+	SinceAt                          string
+	Checked                          string
+	Owner                            string
+	People                           []string
+	Marks                            []string
+	Cocked                           bool
+	Related                          []string
+	Evidence                         []pageEvidence
+	Actions                          []Action
+	HasDetail                        bool
+	ReasonField, Priority            string
 }
 
 type pageEvidence struct {
@@ -152,6 +175,10 @@ type pageAgent struct {
 
 func buildPage(m Model, regenerate string) pageData {
 	now := m.GeneratedAt
+	published := m.PublishedAt
+	if published.IsZero() {
+		published = now
+	}
 	project := m.Project
 	if project == "" {
 		project = m.Dir
@@ -162,8 +189,8 @@ func buildPage(m Model, regenerate string) pageData {
 		JS:         template.JS(pageJS),
 		CSP:        pageCSP,
 		Project:    clean(project),
-		Generated:  now.Format(time.RFC3339),
-		Clock:      now.Local().Format("Jan 2 15:04"),
+		Generated:  published.Format(time.RFC3339),
+		Clock:      published.Local().Format("Jan 2, 15:04 MST"),
 		Sessions:   pluralize(len(m.Sessions), "session"),
 		RosterNote: clean(m.RosterNote),
 		Regenerate: regenerate,
@@ -230,15 +257,85 @@ func buildPage(m Model, regenerate string) pageData {
 	for _, rs := range m.Roster {
 		p.Roster = append(p.Roster, buildSession(rs, now))
 	}
+	p.Views = buildViews(m, now, live)
+	if m.SuggestionDiagnostic.Status != "" {
+		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)
+	}
+	for _, suggestion := range m.Suggestions {
+		ps := pageSuggestion{ID: clean(suggestion.ID), Quote: quoteText(suggestion.Unit.Quote), MessageKey: clean(suggestion.Unit.MessageKey), Location: clean(suggestion.Unit.Field) + " bytes " + strconv.Itoa(suggestion.Unit.Start) + "–" + strconv.Itoa(suggestion.Unit.End), State: "Needs your review", Commands: suggestion.Commands}
+		switch {
+		case suggestion.Adopted:
+			ps.State = "Adopted"
+		case suggestion.Ignored:
+			ps.State = "Ignored; source evidence retained"
+		case suggestion.Stale:
+			ps.State = "Outdated; run suggestions again before adoption"
+		}
+		for _, choice := range suggestion.Choices {
+			switch choice.Kind {
+			case "attach":
+				title := choice.TaskID
+				for _, candidate := range suggestion.Candidates {
+					if candidate.ID == choice.TaskID {
+						title = candidate.Title
+						break
+					}
+				}
+				ps.Choices = append(ps.Choices, "Attach as "+strings.ReplaceAll(choice.Role, "_", " ")+" to “"+clean(title)+"” ("+clean(choice.TaskID)+")")
+			case "new":
+				text := "Create an inferred task; confirm this is an independent outcome"
+				if choice.Outcome != nil {
+					text += ": “" + clean(choice.Outcome.Quote) + "”"
+				}
+				ps.Choices = append(ps.Choices, text)
+			case "non_actionable":
+				ps.Choices = append(ps.Choices, "No action identified in this span")
+			case "unresolved":
+				ps.Choices = append(ps.Choices, "No supported match; keep this span unresolved")
+			default:
+				ps.Choices = append(ps.Choices, clean(choice.Kind))
+			}
+		}
+		p.Suggestions = append(p.Suggestions, ps)
+	}
+	seen := map[string]bool{}
+	addTask := func(id, title string) {
+		if id == "" || seen[id] || hasControl(id) {
+			return
+		}
+		seen[id] = true
+		title = clean(title)
+		p.TaskChoices = append(p.TaskChoices, pageTaskChoice{ID: id, Title: title, Label: title + " [" + id + "]"})
+	}
+	for _, task := range m.Catalogue {
+		addTask(task.ID, task.Title)
+	}
+	for _, column := range m.Columns {
+		for _, card := range column.Cards {
+			addTask(card.ID, card.Title)
+		}
+	}
+	for _, card := range m.Historical {
+		addTask(card.ID, card.Title)
+	}
+	sort.Slice(p.TaskChoices, func(i, j int) bool {
+		if p.TaskChoices[i].Title != p.TaskChoices[j].Title {
+			return p.TaskChoices[i].Title < p.TaskChoices[j].Title
+		}
+		return p.TaskChoices[i].ID < p.TaskChoices[j].ID
+	})
 	return p
 }
 
 func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
-	s := pageStrip{Title: cleanTitle(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field)}
+	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded"}
 	if s.Title == "" {
 		s.Title = clean(c.ID)
 	}
 	placing := Item{Ref: Ref{Kind: c.ID}}
+	if len(c.Items) > 0 {
+		placing = c.Items[0]
+	}
 	for _, it := range c.Items {
 		if it.Ref.String() == c.ID {
 			placing = it
@@ -246,6 +343,26 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		}
 	}
 	s.Kind, s.ID = refCell(placing)
+	switch placing.Ref.Kind {
+	case RefBead:
+		if c.Column == ColumnUnclaimed {
+			s.AgeLabel = "Tracker updated"
+		}
+	case RefObligation:
+		s.AgeLabel = "Requested"
+	}
+	if c.Column == ColumnInFlight && placing.Ref.Kind != RefBead {
+		s.State = "Declared work"
+	}
+	if placing.Source == "codex-goals" {
+		s.State, s.AgeLabel = "Declared goal", "Goal updated"
+	}
+	if c.Historical {
+		s.State = clean(c.HistoryStatus)
+		if s.State == "" {
+			s.State = "Historical; not reported"
+		}
+	}
 	for _, it := range c.Items {
 		s.Refs = append(s.Refs, clean(it.Source+" · "+refLabel(it)))
 		for _, e := range it.Evidence {
@@ -268,7 +385,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	default:
 		var names []string
 		for _, o := range c.Owners {
-			names = append(names, ownerLabel(o, live))
+			names = append(names, ownerLabel(o, nil))
 		}
 		s.Owner = clean(strings.Join(names, ", "))
 	}
@@ -276,7 +393,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		if owns(c.Owners, o) {
 			continue
 		}
-		s.People = append(s.People, clean("waits on "+ownerLabel(o, live)))
+		s.People = append(s.People, clean("waits on "+ownerLabel(o, nil)))
 	}
 	if c.Requester != nil {
 		s.People = append(s.People, clean("requested by "+ownerLabel(*c.Requester, nil)))
@@ -289,6 +406,9 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	}
 	for _, t := range c.Related {
 		s.Related = append(s.Related, clean(tokenLabel(t)))
+	}
+	for _, alias := range c.Aliases {
+		s.Related = append(s.Related, clean(alias))
 	}
 	var ev []pageEvidence
 	type dated struct {
@@ -309,10 +429,36 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	for _, d := range all {
 		ev = append(ev, d.e)
 	}
+	for _, attachment := range c.Attachments {
+		status := "attached " + attachment.Message.Kind
+		if attachment.Cancelled {
+			status += " (owner cancelled action)"
+		}
+		ev = append(ev, pageEvidence{Source: "amq", Field: status, Value: clean(attachment.Message.Key), Text: attachment.Message.Body})
+	}
+	for _, attachment := range c.ModelAttachments {
+		ev = append(ev, pageEvidence{Source: "amq", Field: "owner-adopted " + clean(attachment.Role), Value: clean(attachment.Unit.MessageKey), Text: quoteText(attachment.Unit.Quote)})
+	}
 	s.Evidence = ev
 	s.Actions = c.Actions
+
 	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
+}
+
+// quoteText preserves reading structure while making other controls visible.
+// The template still escapes this plain string for its HTML context.
+func quoteText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if isControl(r) && r != '\n' && r != '\t' {
+			quoted := strconv.QuoteRuneToASCII(r)
+			b.WriteString(quoted[1 : len(quoted)-1])
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // owns reports whether o is one of the card's owners, so "waits on" is

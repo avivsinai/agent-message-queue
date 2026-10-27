@@ -13,12 +13,18 @@ import (
 )
 
 func runThread(args []string) error {
-	if len(args) > 0 && args[0] == "open" {
-		return runThreadOpen(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "open":
+			return runThreadOpen(args[1:])
+		case "list":
+			return runThreadList(args[1:])
+		}
 	}
 	fs := flag.NewFlagSet("thread", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Thread id")
+	messageIDs := fs.String("message-ids", "", "Comma-separated exact message IDs; read only these files")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (optional)")
 	includeBody := fs.Bool("include-body", false, "Include body in output")
 	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
@@ -35,6 +41,18 @@ func runThread(args []string) error {
 	}
 	if *limitFlag < 0 {
 		return UsageError("--limit must be >= 0")
+	}
+	var namedIDs []string
+	if flagWasVisited(fs, "message-ids") {
+		for _, id := range strings.Split(*messageIDs, ",") {
+			if id == "" || strings.TrimSpace(id) != id {
+				return UsageError("--message-ids requires nonempty exact message IDs")
+			}
+			if err := fsq.ValidateMessageFilename(id + ".md"); err != nil {
+				return UsageError("--message-ids: %v", err)
+			}
+			namedIDs = append(namedIDs, id)
+		}
 	}
 	root := resolveRoot(common.Root)
 
@@ -60,9 +78,14 @@ func runThread(args []string) error {
 		return fmt.Errorf("no agents found; provide --agents")
 	}
 
-	entries, err := thread.Collect(root, threadID, agents, *includeBody, func(path string, parseErr error) error {
-		return writeStderr("warning: skipping corrupt message %s: %v\n", filepath.Base(path), parseErr)
-	})
+	var entries []thread.Entry
+	if namedIDs != nil {
+		entries, err = thread.CollectNamed(root, threadID, agents, namedIDs, *includeBody)
+	} else {
+		entries, err = thread.Collect(root, threadID, agents, *includeBody, func(path string, parseErr error) error {
+			return writeStderr("warning: skipping corrupt message %s: %v\n", filepath.Base(path), parseErr)
+		})
+	}
 	if err != nil {
 		return err
 	}

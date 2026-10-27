@@ -9,7 +9,7 @@ import (
 )
 
 // Schema names the JSON face.
-const Schema = "amq/board/v1"
+const Schema = "amq/board/v2"
 
 // Config holds the board's display settings.
 type Config struct {
@@ -42,18 +42,28 @@ type Input struct {
 
 // Model is the board: what every face renders.
 type Model struct {
-	Schema      string          `json:"schema"`
-	GeneratedAt time.Time       `json:"generated_at"`
-	Version     string          `json:"version"`
-	Dir         string          `json:"dir"`
-	Project     string          `json:"project,omitempty"`
-	Sessions    []string        `json:"sessions"`
-	Sources     []SourceView    `json:"sources"`
-	Columns     []ColumnView    `json:"columns"`
-	Gates       []Gate          `json:"operator_gates"`
-	Roster      []RosterSession `json:"roster"`
-	RosterNote  string          `json:"roster_note,omitempty"`
-	Usage       *UsageView      `json:"usage,omitempty"`
+	Suggestions          []Suggestion         `json:"suggestions"`
+	SuggestionDiagnostic SuggestionAttempt    `json:"suggestion_diagnostic"`
+	Catalogue            []TaskCatalogueEntry `json:"catalogue"`
+	Redirects            map[string]string    `json:"redirects"`
+	Historical           []Card               `json:"historical"`
+	ActionStates         map[string]string    `json:"action_states,omitempty"`
+	Schema               string               `json:"schema"`
+	Generation           uint64               `json:"generation,omitempty"`
+	PublishedAt          time.Time            `json:"published_at,omitempty"`
+	Unresolved           []Message            `json:"unresolved"`
+	GeneratedAt          time.Time            `json:"generated_at"`
+	Version              string               `json:"version"`
+	Dir                  string               `json:"dir"`
+	Project              string               `json:"project,omitempty"`
+	Sessions             []string             `json:"sessions"`
+	Sources              []SourceView         `json:"sources"`
+	Columns              []ColumnView         `json:"columns"`
+	Next                 []NextAction         `json:"next"`
+	Gates                []Gate               `json:"operator_gates"`
+	Roster               []RosterSession      `json:"roster"`
+	RosterNote           string               `json:"roster_note,omitempty"`
+	Usage                *UsageView           `json:"usage,omitempty"`
 	// Conversations are the harness sessions AMQ records tie to agents; they
 	// attribute usage to workers.
 	Conversations []Conversation `json:"-"`
@@ -62,6 +72,7 @@ type Model struct {
 // SourceView is one token of the sources strip.
 type SourceView struct {
 	Name       string       `json:"name"`
+	Feeds      []Column     `json:"feeds,omitempty"`
 	Status     SourceStatus `json:"status"`
 	Detail     string       `json:"detail,omitempty"`
 	Partial    bool         `json:"partial"`
@@ -80,21 +91,30 @@ type ColumnView struct {
 
 // Card is one unit of work with all its evidence.
 type Card struct {
-	ID               string    `json:"id"`
-	Column           Column    `json:"column"`
-	Title            string    `json:"title"`
-	Refs             []Ref     `json:"refs"`
-	Reason           Reason    `json:"reason"`
-	ReasonSource     string    `json:"reason_source"`
-	SourceObservedAt time.Time `json:"source_observed_at"`
-	Owners           []Owner   `json:"owners"`
-	WaitsOn          []Owner   `json:"waits_on"`
-	Requester        *Owner    `json:"requester,omitempty"`
-	Marks            []string  `json:"marks"`
-	Related          []Token   `json:"related"`
-	Actions          []Action  `json:"actions"`
-	Items            []Item    `json:"items"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Inferred         bool              `json:"inferred,omitempty"`
+	Cancelled        bool              `json:"owner_cancelled,omitempty"`
+	HistoryStatus    string            `json:"history_status,omitempty"`
+	ModelAttachments []ModelAttachment `json:"model_attachments,omitempty"`
+	Authority        string            `json:"authority,omitempty"`
+	SourceFacts      []AliasFact       `json:"source_facts,omitempty"`
+	Historical       bool              `json:"historical,omitempty"`
+	ID               string            `json:"id"`
+	Aliases          []string          `json:"aliases,omitempty"`
+	Attachments      []Attachment      `json:"attachments,omitempty"`
+	Column           Column            `json:"column"`
+	Title            string            `json:"title"`
+	Refs             []Ref             `json:"refs"`
+	Reason           Reason            `json:"reason"`
+	ReasonSource     string            `json:"reason_source"`
+	SourceObservedAt time.Time         `json:"source_observed_at"`
+	Owners           []Owner           `json:"owners"`
+	WaitsOn          []Owner           `json:"waits_on"`
+	Requester        *Owner            `json:"requester,omitempty"`
+	Marks            []string          `json:"marks"`
+	Related          []Token           `json:"related"`
+	Actions          []Action          `json:"actions"`
+	Items            []Item            `json:"items"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 	stale            bool
 }
 
@@ -139,7 +159,7 @@ func Build(in Input) Model {
 	for _, nr := range in.Results {
 		r := nr.Result
 		m.Sources = append(m.Sources, SourceView{
-			Name: nr.Name, Status: r.Status, Detail: r.Detail, Partial: r.Coverage.Partial(),
+			Name: nr.Name, Feeds: r.Feeds, Status: r.Status, Detail: r.Detail, Partial: r.Coverage.Partial(),
 			Coverage: r.Coverage, ObservedAt: r.ObservedAt, Version: r.Version,
 		})
 		observed[nr.Name] = r.ObservedAt
@@ -226,6 +246,7 @@ func Build(in Input) Model {
 	}
 
 	m.Roster = buildRoster(amqCtx, roster, items, in.Config)
+	m.Next = selectNext(m.Columns)
 	return m
 }
 
@@ -363,9 +384,10 @@ func sortCards(col Column, cards []Card) {
 
 var emptyTeach = map[Column]string{
 	ColumnWaiting:   "Nothing waits on you. Requests sent to user appear here.",
-	ColumnInFlight:  "Nothing in flight.",
+	ColumnInFlight:  "No work is marked in progress. This is tracker state, not proof of a running worker.",
 	ColumnBlocked:   "Nothing blocked.",
-	ColumnUnclaimed: "Nothing unclaimed.",
+	ColumnUnclaimed: "No queued work.",
+	ColumnRequests:  "No unanswered requests.",
 }
 
 // emptyText says "nothing" only when every source that feeds the column read
@@ -374,14 +396,14 @@ func emptyText(col Column, results []NamedResult) string {
 	var gaps []string
 	for _, nr := range results {
 		r := nr.Result
-		if !feeds(r.Feeds, col) {
+		if !feeds(r.Feeds, col) && (r.Status != StatusUnavailable || len(r.Feeds) != 0) {
 			continue
 		}
 		// A degraded source names itself here; its error detail stays in
 		// the source strip. Its coverage gap is a separate fact and shows
 		// whether or not the source also degraded.
-		if r.Status == StatusDegraded {
-			gaps = append(gaps, nr.Name+" degraded (see sources)")
+		if r.Status == StatusDegraded || r.Status == StatusUnavailable {
+			gaps = append(gaps, nr.Name+" "+string(r.Status)+" (see sources)")
 		}
 		if (r.Status == StatusOK || r.Status == StatusDegraded) && r.Coverage.Partial() {
 			detail := r.Coverage.Detail

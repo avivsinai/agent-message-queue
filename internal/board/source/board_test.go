@@ -134,13 +134,14 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 
 	// Each rule of the column table, from real row shapes.
 	want := map[string]board.Column{
-		refT5:           board.ColumnWaiting,   // rule 1: obligation owed by user
-		"bead:demo-b1":  board.ColumnWaiting,   // rule 2: blocked, no owner, nothing to wait on
-		"bead:demo-b2":  board.ColumnBlocked,   // rule 3: blocks dependency on an open bead
-		"bead:demo-b10": board.ColumnBlocked,   // a deferred blocker still blocks
-		"bead:demo-b3":  board.ColumnInFlight,  // rule 4: in progress
-		refR1:           board.ColumnInFlight,  // rule 4: obligation owed by an agent
-		"bead:demo-b5":  board.ColumnUnclaimed, // rule 5: open, no assignee
+		refT5:           board.ColumnWaiting,      // rule 1: obligation owed by user
+		"bead:demo-b1":  board.ColumnWaiting,      // rule 2: blocked, no owner, nothing to wait on
+		"bead:demo-b2":  board.ColumnBlocked,      // rule 3: blocks dependency on an open bead
+		"bead:demo-b10": board.ColumnBlocked,      // a deferred blocker still blocks
+		"bead:demo-b3":  board.ColumnInFlight,     // rule 4: in progress
+		refR1:           board.Column("requests"), // an unanswered request does not prove work started
+		"bead:demo-b5":  board.ColumnUnclaimed,    // rule 5: open, no assignee
+		"bead:demo-b8":  board.ColumnUnclaimed,    // assigned open work has not started
 		// Pro finding 5: an agent item waiting on the human, and a
 		// human-owned blocked bead, are both the human's queue.
 		"bead:demo-b7": board.ColumnWaiting,

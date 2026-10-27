@@ -18,6 +18,16 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
 		t.Setenv(key, "")
 	}
+	messageID := func(t *testing.T, names map[string]string, label string) string {
+		t.Helper()
+		for id, name := range names {
+			if name == label {
+				return id
+			}
+		}
+		t.Fatalf("missing fixture message %q", label)
+		return ""
+	}
 
 	type check func(t *testing.T, result threadOpenResult, names map[string]string)
 	cases := []struct {
@@ -88,6 +98,25 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 				{name: "dec", from: "beta@s2", to: "alpha@s2", kind: format.KindDecision},
 			},
 			want: []string{"s1/t1/beta pending agent"},
+			check: func(t *testing.T, result threadOpenResult, names map[string]string) {
+				t1, t2 := messageID(t, names, "t1"), messageID(t, names, "t2")
+				want := []threadOpenActionOutcome{
+					{OpenerID: t1, Key: "s1/" + t1 + "/beta", OwedBy: participant{Session: "s1", Handle: "beta"}, State: "open"},
+					{OpenerID: t2, Key: "s2/" + t2 + "/beta", OwedBy: participant{Session: "s2", Handle: "beta"}, State: "closed"},
+				}
+				if !slices.Equal(result.Coverage.ActionOutcomes, want) {
+					t.Fatalf("action_outcomes = %+v, want %+v", result.Coverage.ActionOutcomes, want)
+				}
+			},
+		},
+		{
+			name: "include base root with all sessions",
+			messages: []threadOpenMessage{
+				{name: "base", from: "alpha@", to: "beta@", kind: format.KindTodo},
+				{name: "child", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
+			},
+			args: []string{"--include-base"},
+			want: []string{"/base/beta pending agent", "s1/child/beta pending agent"},
 		},
 		{
 			// Pro review finding 2 (trace T1): a second unreferenced todo in
@@ -177,11 +206,19 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// outbox copy, which carries no target metadata.
 			name: "routed send without an inbox copy is counted, not owned",
 			messages: []threadOpenMessage{
+				{name: "q", from: "alpha@s1", to: "beta@s1", kind: format.KindQuestion},
+				{name: "answer", from: "beta@s1", to: "alpha@s1", kind: format.KindAnswer, refs: []string{"q"}},
 				{name: "m", from: "alpha@s1", to: "beta", kind: format.KindTodo, replyTo: "alpha@s1", replyProject: "proj-a", noInbox: true},
 			},
-			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
+			check: func(t *testing.T, result threadOpenResult, names map[string]string) {
 				if want := []threadOpenCount{{Session: "s1", Count: 1}}; !slices.Equal(result.Coverage.OutboundRouted, want) {
 					t.Fatalf("outbound_routed = %+v, want %+v", result.Coverage.OutboundRouted, want)
+				}
+				if want := []threadOpenRoutedOpener{{ID: messageID(t, names, "m"), Session: "s1"}}; !slices.Equal(result.Coverage.OutboundOpeners, want) {
+					t.Fatalf("outbound_routed_openers = %+v, want %+v", result.Coverage.OutboundOpeners, want)
+				}
+				if len(result.Obligations) != 0 {
+					t.Fatalf("answered local question remained open beside the outbound opener: %+v", result.Obligations)
 				}
 			},
 		},

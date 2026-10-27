@@ -18,6 +18,8 @@ type State string
 const (
 	StateNeedsHuman  State = "needs_human"
 	StateActive      State = "active"
+	StateRequested   State = "requested"
+	StateQueued      State = "queued"
 	StateBlocked     State = "blocked"
 	StateOpenUnowned State = "open_unowned"
 	StatePlanned     State = "planned"
@@ -46,26 +48,31 @@ const (
 
 // Item is one unit of work as a source reports it.
 type Item struct {
-	Source     string     `json:"source"`
-	Ref        Ref        `json:"ref"`
-	Title      string     `json:"title"`
-	State      State      `json:"state"`
-	Owner      Owner      `json:"owner"`
-	Requester  *Owner     `json:"requester,omitempty"`
-	WaitsOn    []Owner    `json:"waits_on"`
-	Reason     Reason     `json:"reason"`
-	Relations  []Relation `json:"relations"`
-	Evidence   []Evidence `json:"evidence"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	Structural bool       `json:"structural"`
+	HostAttribution *Owner     `json:"host_attribution,omitempty"`
+	NativeOwner     string     `json:"native_owner,omitempty"`
+	Container       string     `json:"container,omitempty"`
+	BindingRevision string     `json:"binding_revision,omitempty"`
+	Namespace       string     `json:"namespace,omitempty"`
+	Source          string     `json:"source"`
+	Ref             Ref        `json:"ref"`
+	Title           string     `json:"title"`
+	State           State      `json:"state"`
+	Owner           Owner      `json:"owner"`
+	Requester       *Owner     `json:"requester,omitempty"`
+	WaitsOn         []Owner    `json:"waits_on"`
+	Reason          Reason     `json:"reason"`
+	Relations       []Relation `json:"relations"`
+	Evidence        []Evidence `json:"evidence"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	Structural      bool       `json:"structural"`
 
 	// Mentions are candidate tokens from free text. The core keeps only those
 	// that resolve to a verified ref, and only as related references.
-	Mentions []Mention `json:"-"`
+	Mentions []Mention `json:",omitempty"`
 	// Thread groups AMQ obligations of one session and thread as related.
-	Thread *Ref `json:"-"`
+	Thread *Ref `json:",omitempty"`
 	// Obligation carries the typed fields AMQ actions are built from.
-	Obligation *ObligationFacts `json:"-"`
+	Obligation *ObligationFacts `json:",omitempty"`
 }
 
 // Ref is a canonical identity; build it only with the constructors in ref.go.
@@ -216,15 +223,23 @@ type AMQContext struct {
 }
 
 // Result is one source read.
+type NativeScope struct {
+	Complete        bool   `json:"complete"`
+	BindingRevision string `json:"binding_revision,omitempty"`
+}
+
 type Result struct {
-	Items      []Item
-	Roster     []RosterEntry
-	AMQ        *AMQContext
-	Status     SourceStatus
-	Detail     string
-	Coverage   Coverage
-	ObservedAt time.Time
-	Version    string
+	NativeScopes map[string]NativeScope `json:"native_scopes,omitempty"`
+	ActionStates map[string]string      `json:"action_states,omitempty"`
+	Namespace    string                 `json:"namespace,omitempty"`
+	Items        []Item
+	Roster       []RosterEntry
+	AMQ          *AMQContext
+	Status       SourceStatus
+	Detail       string
+	Coverage     Coverage
+	ObservedAt   time.Time
+	Version      string
 	// BeadIDs is the bead vocabulary (beads source only): every non-closed
 	// bead id -> its stored status.
 	BeadIDs map[string]string

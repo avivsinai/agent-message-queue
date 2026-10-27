@@ -849,7 +849,7 @@ func (m githubMapper) issue(slug string, is ghIssue) (board.Item, bool) {
 	}
 	if a := is.Assignees.Nodes; len(a) > 0 {
 		it.Owner = m.owner(a[0].Login)
-		it.State = board.StateActive
+		it.State = board.StateQueued
 		it.Reason = board.Reason{Field: "assignees", Text: "issue assigned"}
 	} else {
 		it.State = board.StateOpenUnowned

@@ -11,10 +11,18 @@ import (
 // Action is a copy-only command. The board never runs it. Argv is built only
 // by the constructors below from validated values; a value that fails
 // validation yields no action, never a weakened one.
+type ActionPurpose string
+
+const (
+	ActionContext       ActionPurpose = "context"
+	ActionOwnerMutation ActionPurpose = "owner_mutation"
+)
+
 type Action struct {
-	Label   string   `json:"label"`
-	Argv    []string `json:"argv"`
-	Command string   `json:"command"`
+	Purpose ActionPurpose `json:"purpose"`
+	Label   string        `json:"label"`
+	Argv    []string      `json:"argv"`
+	Command string        `json:"command"`
 }
 
 // userLiteral is the fixed shell expansion ClaimBead appends unquoted. It is
@@ -30,7 +38,7 @@ var (
 )
 
 func newAction(label string, argv ...string) Action {
-	return Action{Label: label, Argv: argv, Command: Quote(argv)}
+	return Action{Purpose: ActionContext, Label: label, Argv: argv, Command: Quote(argv)}
 }
 
 // Quote renders argv as one POSIX shell line. Elements outside a safe
@@ -164,5 +172,14 @@ func ClaimBead(id string, known map[string]string) (Action, bool) {
 		return Action{}, false
 	}
 	argv := []string{"bd", "update", id, "--assignee"}
-	return Action{Label: "claim bead", Argv: append(argv, userLiteral), Command: Quote(argv) + " " + userLiteral}, true
+	return Action{Purpose: ActionContext, Label: "claim bead", Argv: append(argv, userLiteral), Command: Quote(argv) + " " + userLiteral}, true
+}
+
+func newOwnerAction(label string, argv ...string) Action {
+	action := newAction(label, argv...)
+	action.Purpose = ActionOwnerMutation
+	return action
+}
+func (a Action) IsContext() bool {
+	return a.Purpose == ActionContext && len(a.Argv) > 0 && a.Command != ""
 }

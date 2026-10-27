@@ -39,6 +39,7 @@ options not repeated here.
 - [amq shell-setup](#amq-shell-setup)
 - [amq completion](#amq-completion)
 - [amq thread open](#amq-thread-open)
+- [amq thread list](#amq-thread-list)
 - [amq presence set](#amq-presence-set)
 - [amq presence list](#amq-presence-list)
 - [amq dlq list](#amq-dlq-list)
@@ -395,6 +396,8 @@ Options:
         Limit number of messages (0 = no limit)
   -me string
         Agent handle (or AM_ME)
+  -message-ids string
+        Comma-separated exact message IDs; read only these files
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
@@ -1164,7 +1167,7 @@ Examples:
 ```text
 $ amq thread open --help
 Usage:
-  amq thread open [--all-sessions] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]
+  amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]
 
 List open review requests, questions, and todos per thread.
 An obligation closes when its owner replies with the expected kind or a closing label.
@@ -1173,6 +1176,8 @@ Read-only: it never moves a message, writes a receipt, or reads a body.
 Options:
   -all-sessions
         Scan every canonical session under the base root
+  -include-base
+        Include base-root mailboxes with --all-sessions
   -json
         Emit JSON output
   -json-schema int
@@ -1189,6 +1194,29 @@ Options:
         Comma-separated handles that owe a reply
   -owed-to string
         Comma-separated handles that are owed a reply
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -strict
+        Error on unknown handles (default: send and reply warn)
+```
+
+## amq thread list
+
+```text
+$ amq thread list --help
+Usage:
+  amq thread list [--all-sessions] [options]
+
+List retained thread IDs and their message IDs.
+Read-only: scans inbox/new, inbox/cur, and outbox/sent message headers. It includes closed and withdrawn messages. Use 'amq thread --id <thread_id> --include-body --json' to read message bodies.
+
+Options:
+  -all-sessions
+        Scan every canonical session under the base root
+  -json
+        Emit JSON output
+  -me string
+        Agent handle (or AM_ME)
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict

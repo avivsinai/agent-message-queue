@@ -17,7 +17,7 @@ import (
 
 // CodexGoals reads the versioned Codex goals store in place. Objectives are
 // selected only after the thread has passed project eligibility.
-type CodexGoals struct{}
+type CodexGoals struct{ Home string }
 
 func (CodexGoals) Name() string { return "codex-goals" }
 
@@ -30,10 +30,18 @@ func (CodexGoals) Discover(env board.Env) (bool, string) {
 
 var codexGoalsFeeds = []board.Column{board.ColumnInFlight, board.ColumnBlocked}
 
-func (CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
+func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	res := board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Version: "goals_1.sqlite", Feeds: codexGoalsFeeds}
-	fail := func(err error) board.Result { res.Status = board.StatusDegraded; res.Detail = err.Error(); return res }
-	home := os.Getenv("CODEX_HOME")
+	fail := func(err error) board.Result {
+		res.Status = board.StatusDegraded
+		res.Detail = err.Error()
+		res.Coverage.Unresolved++
+		return res
+	}
+	home := source.Home
+	if home == "" {
+		home = os.Getenv("CODEX_HOME")
+	}
 	if home == "" {
 		userHome, err := os.UserHomeDir()
 		if err != nil {
@@ -45,10 +53,22 @@ func (CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	if err != nil {
 		return fail(err)
 	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		return fail(err)
+	}
+	res.Namespace = home
+	if override := os.Getenv("CODEX_SQLITE_HOME"); override != "" {
+		real, err := filepath.EvalSymlinks(override)
+		if err != nil || real != home {
+			return fail(fmt.Errorf("codex sqlite home override is outside the supported home scope"))
+		}
+	}
 	db := filepath.Join(home, "goals_1.sqlite")
 	fresh, err := codexGoalsReadable(db)
 	if os.IsNotExist(err) {
 		res.Status, res.Detail = board.StatusUnavailable, "goals_1.sqlite not found"
+		res.Coverage.Unresolved++
 		if versions, _ := filepath.Glob(filepath.Join(home, "goals_*.sqlite")); len(versions) > 0 {
 			res.Status, res.Detail = board.StatusDegraded, "format "+filepath.Base(versions[0])+" not supported"
 		}
@@ -58,17 +78,20 @@ func (CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 		return fail(err)
 	}
 	res.Detail = "database freshness " + fresh.UTC().Format(time.RFC3339Nano)
-	owners, known, kinds, err := codexGoalOwners(ctx, env)
+	owners, known, err := codexGoalOwners(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
-	eligible, coverage, err := codexGoalSessions(ctx, env, home, owners, known, kinds)
+	eligible, coverage, err := codexGoalSessions(ctx, env, home, owners, known)
 	res.Coverage = coverage
 	if err != nil {
 		return fail(err)
 	}
 	res.Status = board.StatusOK
 	if len(eligible) == 0 {
+		res.Coverage.Unresolved++
+		res.Coverage.Detail = "no eligible native goal containers; payload scope not assessed"
+		res.NativeScopes = map[string]board.NativeScope{home: {Complete: false}}
 		return res
 	}
 	ids := make([]string, 0, len(eligible))
@@ -78,7 +101,7 @@ func (CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	sort.Strings(ids)
 	// IDs came through CodexGoal's UUID shape check. No payload field, path,
 	// or free text is interpolated into SQL.
-	query := "PRAGMA query_only=ON; BEGIN; SELECT thread_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (" + strings.Join(ids, ",") + ") ORDER BY thread_id; COMMIT;"
+	query := "PRAGMA query_only=ON; BEGIN; SELECT thread_id, goal_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (" + strings.Join(ids, ",") + ") ORDER BY thread_id; COMMIT;"
 	uri := (&url.URL{Scheme: "file", Path: db, RawQuery: "mode=ro"}).String()
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -90,7 +113,11 @@ func (CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	if err != nil {
 		return fail(err)
 	}
+	for i := range items {
+		items[i].Namespace = home
+	}
 	res.Items = items
+	res.NativeScopes = map[string]board.NativeScope{home: {Complete: res.Status == board.StatusOK && !res.Coverage.Partial()}}
 	return res
 }
 
@@ -152,6 +179,7 @@ func parseCodexGoals(out []byte, eligible map[string]codexGoalSession) ([]board.
 	}
 	var rows []struct {
 		Thread    string `json:"thread_id"`
+		Goal      string `json:"goal_id"`
 		Objective string `json:"objective"`
 		Status    string `json:"status"`
 		Updated   int64  `json:"updated_at_ms"`
@@ -162,12 +190,12 @@ func parseCodexGoals(out []byte, eligible map[string]codexGoalSession) ([]board.
 	items := make([]board.Item, 0, len(rows))
 	for _, row := range rows {
 		session, ok := eligible[row.Thread]
-		if !ok {
+		if !ok || !board.ValidHarnessID(row.Thread) {
 			return nil, fmt.Errorf("goals query returned an ineligible thread")
 		}
-		ref, ok := board.CodexGoal(row.Thread)
+		ref, ok := board.CodexGoal(row.Goal)
 		if !ok {
-			return nil, fmt.Errorf("goals query returned an invalid thread")
+			return nil, fmt.Errorf("goals query returned an invalid goal UUID")
 		}
 		state := board.State("")
 		switch row.Status {
@@ -183,7 +211,7 @@ func parseCodexGoals(out []byte, eligible map[string]codexGoalSession) ([]board.
 			return nil, fmt.Errorf("goals_1.sqlite status %q not supported", row.Status)
 		}
 		at := time.UnixMilli(row.Updated).UTC()
-		items = append(items, board.Item{Ref: ref, Title: row.Objective, State: state, Owner: session.Owner, Structural: session.Structural,
+		items = append(items, board.Item{Container: row.Thread, Ref: ref, Title: row.Objective, State: state, Owner: session.Owner, Structural: session.Structural,
 			UpdatedAt: at, Reason: board.Reason{Field: "status", Text: "Codex goal " + row.Status, Since: at},
 			WaitsOn: []board.Owner{}, Relations: []board.Relation{}, Evidence: []board.Evidence{{Field: "status", Value: row.Status, At: at}}})
 	}

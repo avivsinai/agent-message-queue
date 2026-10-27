@@ -4,27 +4,33 @@ package board
 type Column string
 
 const (
-	ColumnWaiting   Column = "waiting_on_you"
-	ColumnInFlight  Column = "in_flight"
-	ColumnBlocked   Column = "blocked"
-	ColumnUnclaimed Column = "unclaimed"
-	ColumnHidden    Column = "hidden"
+	ColumnWaiting    Column = "waiting_on_you"
+	ColumnInFlight   Column = "in_flight"
+	ColumnBlocked    Column = "blocked"
+	ColumnUnclaimed  Column = "unclaimed"
+	ColumnRequests   Column = "requests"
+	ColumnHidden     Column = "hidden"
+	ColumnHistorical Column = "historical"
 )
 
 // Columns is the display order.
-var Columns = []Column{ColumnWaiting, ColumnInFlight, ColumnBlocked, ColumnUnclaimed}
+var Columns = []Column{ColumnWaiting, ColumnInFlight, ColumnBlocked, ColumnUnclaimed, ColumnRequests}
 
 // Title is the column heading.
 func (c Column) Title() string {
 	switch c {
 	case ColumnWaiting:
-		return "Waiting on you"
+		return "Needs you"
 	case ColumnInFlight:
-		return "In flight"
+		return "Marked in progress"
 	case ColumnBlocked:
 		return "Blocked"
 	case ColumnUnclaimed:
-		return "Unclaimed"
+		return "Backlog"
+	case ColumnRequests:
+		return "Reply due"
+	case ColumnHistorical:
+		return "History"
 	}
 	return "Hidden"
 }
@@ -61,8 +67,11 @@ func Place(items []Item) (Column, int) {
 	if i := first(items, func(it Item) bool { return it.State == StateActive }); i >= 0 {
 		return ColumnInFlight, i
 	}
-	if i := first(items, func(it Item) bool { return it.State == StateOpenUnowned }); i >= 0 {
+	if i := first(items, func(it Item) bool { return it.State == StateOpenUnowned || it.State == StateQueued }); i >= 0 {
 		return ColumnUnclaimed, i
+	}
+	if i := first(items, func(it Item) bool { return it.State == StateRequested }); i >= 0 {
+		return ColumnRequests, i
 	}
 	return ColumnHidden, -1
 }

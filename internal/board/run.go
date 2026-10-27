@@ -18,6 +18,11 @@ const maxBeadLookups = 200
 // boundary, resolves bead mentions, and builds the model. One failing source
 // never empties another source's cards.
 func Run(ctx context.Context, env Env, sources []Source, cfg Config, version string) Model {
+	return Build(Acquire(ctx, env, sources, cfg, version))
+}
+
+// Acquire reads source facts without assigning canonical task identities.
+func Acquire(ctx context.Context, env Env, sources []Source, cfg Config, version string) Input {
 	results := make([]NamedResult, len(sources))
 	var wg sync.WaitGroup
 	for i, s := range sources {
@@ -76,7 +81,7 @@ func Run(ctx context.Context, env Env, sources []Source, cfg Config, version str
 		}
 	}
 
-	return Build(Input{Results: results, Known: known, Config: cfg, Now: env.Now(), Version: version, Dir: env.Dir})
+	return Input{Results: results, Known: known, Config: cfg, Now: env.Now(), Version: version, Dir: env.Dir}
 }
 
 // Disabled stands in for a source the configuration turns off, so the

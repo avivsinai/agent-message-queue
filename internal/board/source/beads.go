@@ -18,6 +18,7 @@ import (
 // --readonly blocks writes and --sandbox disables Dolt auto-push. The board
 // never writes a bead.
 type Beads struct {
+	IncludeClosed bool
 	// Humans are assignee names that belong to the board owner.
 	Humans []string
 	// GitHubRepo is the single configured "owner/repo"; with none, a bead's
@@ -32,19 +33,62 @@ var beadsListArgv = []string{"bd", "--readonly", "--sandbox", "list", "--json", 
 
 func (Beads) Name() string { return "beads" }
 
-func (Beads) Discover(env board.Env) (bool, string) {
+func (b Beads) Discover(env board.Env) (bool, string) {
 	if _, err := env.LookPath("bd"); err != nil {
 		return false, "bd not on PATH"
 	}
-	if !env.IsDir(filepath.Join(env.Dir, ".beads")) {
+	if !b.IncludeClosed && !env.IsDir(filepath.Join(env.Dir, ".beads")) {
 		return false, "no .beads directory in the project"
 	}
 	return true, ""
 }
 
 func (b Beads) Read(ctx context.Context, env board.Env) board.Result {
-	out, err := env.Run.Run(ctx, env.Dir, beadsListArgv)
-	return b.Build(out, err, env.Now())
+	argv := beadsListArgv
+	namespace := ""
+	if b.IncludeClosed {
+		var err error
+		namespace, err = beadsNamespace(ctx, env)
+		if err != nil {
+			return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
+		}
+		argv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--brief", "--all", "--limit", "0"}
+	}
+	out, err := env.Run.Run(ctx, env.Dir, argv)
+	result := b.Build(out, err, env.Now())
+	if b.IncludeClosed && err == nil {
+		after, err := beadsNamespace(ctx, env)
+		if err != nil || after != namespace {
+			result.Status = board.StatusDegraded
+			result.Detail = "beads backend changed during acquisition"
+			result.Items = nil
+			result.Coverage.Unresolved++
+			return result
+		}
+		result.Namespace = namespace
+	}
+	return result
+}
+
+func beadsNamespace(ctx context.Context, env board.Env) (string, error) {
+	raw, err := env.Run.Run(ctx, env.Dir, []string{"bd", "--readonly", "--sandbox", "info", "--json"})
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		DatabasePath string `json:"database_path"`
+	}
+	if err = json.Unmarshal(raw, &info); err != nil {
+		return "", err
+	}
+	if info.DatabasePath == "" {
+		return "", fmt.Errorf("database_path missing")
+	}
+	path, err := filepath.Abs(info.DatabasePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(path)
 }
 
 // ResolveBeads looks up bead ids that are not in the open set, so a closed
@@ -74,6 +118,7 @@ type beadRow struct {
 	ID           string `json:"id"`
 	Title        string `json:"title"`
 	Status       string `json:"status"`
+	IssueType    string `json:"issue_type"`
 	Priority     *int   `json:"priority"`
 	Assignee     string `json:"assignee"`
 	UpdatedAt    string `json:"updated_at"`
@@ -155,6 +200,9 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 	if r.Priority != nil {
 		it.Evidence = append(it.Evidence, board.Evidence{Field: "priority", Value: "P" + strconv.Itoa(*r.Priority), At: updated})
 	}
+	if r.IssueType != "" {
+		it.Evidence = append(it.Evidence, board.Evidence{Field: "issue_type", Value: r.IssueType, At: updated})
+	}
 
 	var blockers []string
 	for _, d := range r.Dependencies {
@@ -187,6 +235,9 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 			text = "blocked by " + strings.Join(blockers, ", ")
 		}
 		it.Reason = board.Reason{Field: "status", Text: text, Since: since}
+	case r.Status == "closed":
+		it.State = board.StateDone
+		it.Reason = board.Reason{Field: "status", Text: "bead closed", Since: since}
 	case r.Status == "in_progress":
 		it.State = board.StateActive
 		if !started.IsZero() {
@@ -194,7 +245,7 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 		}
 		it.Reason = board.Reason{Field: "status", Text: "bead in progress", Since: since}
 	case r.Status == "open" && owner.Kind != board.OwnerNone:
-		it.State = board.StateActive
+		it.State = board.StateQueued
 		it.Reason = board.Reason{Field: "assignee", Text: "bead assigned, not started", Since: since}
 	case r.Status == "open":
 		it.State = board.StateOpenUnowned

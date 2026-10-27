@@ -55,6 +55,25 @@ func WriteText(w io.Writer, m Model) error {
 		}
 	}
 
+	if len(m.Next) > 0 {
+		b.WriteString("\n== Next ==\n")
+		byID := map[string]Card{}
+		for _, column := range m.Columns {
+			for _, card := range column.Cards {
+				byID[card.ID] = card
+			}
+		}
+		for i, next := range m.Next {
+			if i == 5 {
+				break
+			}
+			fmt.Fprintf(&b, "  %s: %s\n", clean(next.Reason), cleanTitle(byID[next.CardID].Title))
+			if actions := byID[next.CardID].Actions; len(actions) > 0 {
+				fmt.Fprintf(&b, "    copy command: %s\n", actions[0].Command)
+			}
+		}
+	}
+
 	for _, c := range m.Columns {
 		fmt.Fprintf(&b, "\n== %s (%d) ==\n", c.Title, len(c.Cards))
 		if c.ID == ColumnWaiting {
@@ -70,6 +89,25 @@ func WriteText(w io.Writer, m Model) error {
 		}
 	}
 
+	b.WriteString("\n== Suggestions — AMQ quality not yet measured ==\n")
+	fmt.Fprintf(&b, "  %s: %s\n", clean(m.SuggestionDiagnostic.Status), clean(m.SuggestionDiagnostic.Detail))
+	for _, p := range m.Suggestions {
+		fmt.Fprintf(&b, "  %s: %s\n    exact quote: %s\n    selected IDs: %s\n", clean(p.ID), clean(p.Unit.MessageKey), clean(p.Unit.Quote), strings.Join(p.Selected, ", "))
+		for _, c := range p.Choices {
+			fmt.Fprintf(&b, "    %s: %s %s %s\n", clean(c.ID), clean(c.Kind), clean(c.TaskID), clean(c.Role))
+		}
+		for _, a := range p.Commands {
+			fmt.Fprintf(&b, "    %s: %s\n", clean(a.Label), clean(a.Command))
+		}
+	}
+	b.WriteString("\n== Historical tasks (outside current work counts) ==\n")
+	for _, card := range m.Historical {
+		writeCard(&b, card, now, live)
+	}
+	b.WriteString("\n== Unresolved historical asks (outside task counts) ==\n")
+	for _, message := range m.Unresolved {
+		fmt.Fprintf(&b, "  %s: %s\n    %s\n    %s\n", clean(message.Key), cleanTitle(message.Subject), clean(message.Body), clean(Quote([]string{"amq-board", "admit", "--message", message.Key, "--title", message.Subject})))
+	}
 	b.WriteString("\n== Roster ==\n")
 	if m.RosterNote != "" {
 		fmt.Fprintf(&b, "  %s\n", clean(m.RosterNote))
@@ -107,7 +145,13 @@ func WriteText(w io.Writer, m Model) error {
 }
 
 func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]string) {
-	fmt.Fprintf(b, "  * %s\n", cleanTitle(c.Title))
+	fmt.Fprintf(b, "  * %s\n    Task ID: %s\n", cleanTitle(c.Title), clean(c.ID))
+	if c.HistoryStatus != "" {
+		fmt.Fprintf(b, "    History: %s\n", clean(c.HistoryStatus))
+	}
+	for _, binding := range c.ModelAttachments {
+		fmt.Fprintf(b, "    Inferred attachment (%s), %s [%d:%d]: %s\n", clean(binding.Role), clean(binding.Unit.MessageKey), binding.Unit.Start, binding.Unit.End, clean(binding.Unit.Quote))
+	}
 	var refs []string
 	for _, it := range c.Items {
 		refs = append(refs, refLabel(it))
@@ -143,6 +187,19 @@ func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]str
 			rel = append(rel, tokenLabel(t))
 		}
 		fmt.Fprintf(b, "    related: %s\n", clean(strings.Join(rel, " · ")))
+	}
+	for _, fact := range c.SourceFacts {
+		fmt.Fprintf(b, "    source %s: %s; %s\n", clean(fact.Alias), clean(string(fact.Fact.State)), cleanTitle(fact.Fact.Title))
+	}
+	for _, alias := range c.Aliases {
+		fmt.Fprintf(b, "    alias: %s\n", clean(alias))
+	}
+	for _, attachment := range c.Attachments {
+		state := "attached"
+		if attachment.Cancelled {
+			state = "action cancelled by owner"
+		}
+		fmt.Fprintf(b, "    %s: %s\n      %s\n", state, clean(attachment.Message.Key), clean(attachment.Message.Body))
 	}
 	for _, a := range c.Actions {
 		fmt.Fprintf(b, "    %s: %s\n", a.Label, a.Command)
