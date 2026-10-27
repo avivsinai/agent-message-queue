@@ -651,9 +651,7 @@ first that applies:
   after the third refusal, `amq-remote channel reset <name>`;
 - the session's own agent is offline and there is no machine agent: DM it
   first, and start it in Buzz Desktop if it does not answer within a minute;
-- there is no machine agent: the helper's Create agent dialog, or
-  `amq-acp setup --session <name>`, when this machine runs the helper;
-  otherwise `amq-acp setup --machine`, once per machine;
+- there is no machine agent: `amq-acp setup --machine`, once per machine;
 - the machine agent is offline: start it in Buzz Desktop.
 
 `--json` reports `name`, `label`, `reused` (this session already held the

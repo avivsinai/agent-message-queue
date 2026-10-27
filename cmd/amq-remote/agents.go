@@ -209,10 +209,6 @@ func connected(w io.Writer, v attachView) {
 		say(w, "Buzz refused the channel (%s). Run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case v.agent.State == agentOffline && v.machine.State == agentMissing:
 		say(w, "Its Buzz agent %q is offline: DM it first; if it does not answer within a minute, start it in Buzz Desktop (Agents, the agent, Start).", display)
-	case v.machine.State == agentMissing && v.draft:
-		say(w, "Buzz Desktop opens \"Create agent\" for it: pick AMQ Remote, then Create and start.")
-	case v.machine.State == agentMissing && v.helper.State != agentMissing:
-		say(w, "This session has no Buzz agent yet: run amq-acp setup --session %s and import the file in Buzz Desktop.", v.name)
 	case v.machine.State == agentMissing:
 		say(w, "This machine has no AMQ Remote agent yet: run amq-acp setup --machine and import the file in Buzz Desktop, once per machine. Each session then gets its own private channel.")
 	default:

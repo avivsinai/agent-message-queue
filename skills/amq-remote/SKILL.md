@@ -80,11 +80,6 @@ command's own message. Do not work around a refusal.
    - `agent` is `offline` and `machine` is `missing`: "DM **<agent_name>**
      first; if it does not answer within a minute, start it in Buzz Desktop
      (Agents, the agent, Start)."
-   - `machine` is `missing` and `draft` is true: "Buzz Desktop opens Create
-     agent for it: pick AMQ Remote, then Create and start."
-   - `machine` is `missing` and `helper` is not `missing`: run
-     `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
-     and show its printed steps as they are.
    - `machine` is `missing`: this machine's one-time setup. Run
      `amq-acp setup --machine --out "$HOME/Downloads/AMQ Remote machine.agent.json"`
      once, and show its printed steps as they are (Buzz Desktop: Agents,

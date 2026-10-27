@@ -182,9 +182,9 @@ Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
 then Start, and turn on Auto-start in the agent's menu. Desktop caches its
 harness list: if AMQ Remote is new and Desktop was open, click Settings,
 then Agents, then Check again first (setup always prints this step). No
-restart is needed. `/amq-remote` runs `setup --helper` or `setup --session`
-itself when the session has no agent yet and this machine runs the helper. A
-harness file this command did not write is left unchanged.
+restart is needed. `/amq-remote` suggests only `setup --machine`; the helper
+and per-session agents keep working where they exist. A harness file this
+command did not write is left unchanged.
 An `amq_remote` agent runs at any parallelism, so an agent made from the
 helper's draft (Desktop's default, 10) starts as is. Buzz starts that many
 identical workers with one identity. Each turn decides through per-event file

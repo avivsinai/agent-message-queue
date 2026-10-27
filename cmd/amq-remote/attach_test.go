@@ -469,8 +469,8 @@ func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
 	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
 		t.Fatalf("attach: code=%d err=%v", code, err)
 	}
-	if !strings.Contains(out.String(), "amq-acp setup --session claude-p-session3") || strings.Contains(out.String(), "Create agent") {
-		t.Fatalf("attach printed %q; want the setup step, not the create dialog, for a session whose liveness is unknown", out.String())
+	if !strings.Contains(out.String(), "amq-acp setup --machine") || strings.Contains(out.String(), "Create agent") {
+		t.Fatalf("attach printed %q; want the machine setup step, not the create dialog, for a session whose liveness is unknown", out.String())
 	}
 }
 
