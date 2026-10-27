@@ -339,25 +339,65 @@ func words(text string) map[string]bool {
 }
 func candidates(s Snapshot, units []EvidenceUnit, limit int) []TaskCatalogueEntry {
 	type ranked struct {
-		Task  TaskCatalogueEntry
-		Score int
+		Task              TaskCatalogueEntry
+		Explicit, Context bool
+		Score             int
+	}
+	textWords, directIDs, contextIDs := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	directRefs, contextRefs := map[string]bool{}, map[string]bool{}
+	directMessages := map[string]bool{}
+	addText := func(text string, ids map[string]bool) {
+		for word := range words(text) {
+			textWords[word] = true
+		}
+		for id := range exactBeadTokens(text) {
+			ids[id] = true
+		}
+	}
+	for _, u := range units {
+		m := s.Messages[u.MessageKey]
+		directMessages[m.Key] = true
+		addText(u.Quote+" "+m.Subject, directIDs)
+		for _, ref := range m.Refs {
+			directRefs[ref] = true
+		}
+	}
+	if episode, err := buildEpisode(s, units); err == nil {
+		for _, m := range episode.Messages {
+			if directMessages[m.Key] {
+				continue
+			}
+			addText(m.Body+" "+m.Subject, contextIDs)
+			for _, ref := range m.Refs {
+				contextRefs[ref] = true
+			}
+		}
 	}
 	rows := []ranked{}
 	for _, task := range s.Catalogue() {
 		score := 0
+		explicit, context := false, false
 		tw := words(task.Title)
 		for _, fact := range task.Facts {
 			for w := range words(fact.Fact.Title) {
 				tw[w] = true
 			}
+			if fact.Fact.Ref.Kind != "claude-task" {
+				explicit = explicit || directRefs[fact.Fact.Ref.ID]
+				context = context || contextRefs[fact.Fact.Ref.ID]
+			}
+			if fact.Fact.Ref.Kind == RefBead {
+				explicit = explicit || directIDs[fact.Fact.Ref.ID]
+				context = context || contextIDs[fact.Fact.Ref.ID]
+			}
+		}
+		for w := range textWords {
+			if tw[w] {
+				score++
+			}
 		}
 		for _, u := range units {
 			m := s.Messages[u.MessageKey]
-			for w := range words(u.Quote + " " + m.Subject) {
-				if tw[w] {
-					score++
-				}
-			}
 			for _, a := range task.Attachments {
 				am := s.Messages[a]
 				if a == m.Key {
@@ -370,17 +410,16 @@ func candidates(s Snapshot, units []EvidenceUnit, limit int) []TaskCatalogueEntr
 					score += 40
 				}
 			}
-			for _, ref := range m.Refs {
-				for _, fact := range task.Facts {
-					if ref == fact.Fact.Ref.ID {
-						score += 80
-					}
-				}
-			}
 		}
-		rows = append(rows, ranked{task, score})
+		rows = append(rows, ranked{task, explicit, context, score})
 	}
 	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Explicit != rows[j].Explicit {
+			return rows[i].Explicit
+		}
+		if rows[i].Context != rows[j].Context {
+			return rows[i].Context
+		}
 		if rows[i].Score != rows[j].Score {
 			return rows[i].Score > rows[j].Score
 		}
@@ -391,6 +430,36 @@ func candidates(s Snapshot, units []EvidenceUnit, limit int) []TaskCatalogueEntr
 		out = append(out, rows[i].Task)
 	}
 	return out
+}
+
+// Exact references rank candidates; they never establish task identity.
+func exactBeadTokens(text string) map[string]bool {
+	text = strings.ToLower(text)
+	ids := map[string]bool{}
+	identifier := func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
+	}
+	for _, span := range beadTokenRe.FindAllStringIndex(text, -1) {
+		start, end := span[0], span[1]
+		if start > 0 {
+			before, _ := utf8.DecodeLastRuneInString(text[:start])
+			if identifier(before) {
+				continue
+			}
+		}
+		if end < len(text) {
+			after, size := utf8.DecodeRuneInString(text[end:])
+			next, _ := utf8.DecodeRuneInString(text[end+size:])
+			if after == '.' && !identifier(next) {
+				after = ' '
+			}
+			if identifier(after) {
+				continue
+			}
+		}
+		ids[text[start:end]] = true
+	}
+	return ids
 }
 func buildDecision(s Snapshot, units []EvidenceUnit, expanded bool, now time.Time) (decision.Request, map[string]SuggestionChoice) {
 	limit := 8
