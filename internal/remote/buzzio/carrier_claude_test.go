@@ -229,13 +229,26 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 			"message": map[string]any{"role": "assistant", "content": []map[string]any{
 				{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": map[string]any{"command": command}}}}})
 
+	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
+	// CI run 40579102358: these approval tests need an already claimed
+	// run. The hook's inflight-marker handoff is covered in claude.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(e.dir, "runs", "p-1")); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the attachment wrote no run marker")
+		}
+	}
+
 	stdin, _ := json.Marshal(map[string]any{"session_id": sid, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
 	go func() {
 		defer close(e.exited)
 		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, hookAllow)
 	}()
-	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
 	for deadline := time.Now().Add(5 * time.Second); e.iid == ""; time.Sleep(time.Millisecond) {
 		entries, _ := os.ReadDir(filepath.Join(e.dir, "requests"))
 		for _, ent := range entries {
