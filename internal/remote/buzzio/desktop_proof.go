@@ -204,12 +204,81 @@ func OwnerReactions(ctx context.Context, conn *relay.Conn, messageID, owner stri
 	return out, nil
 }
 
+// relayDriftWindow is how far from its own clock the Buzz relay accepts an
+// event's created_at (ingest MAX_TIMESTAMP_DRIFT_SECS). The relay accepted
+// the approval message, dated by this machine's clock, so this clock is
+// within the window of the relay's; a deletion stored after the read is
+// therefore dated no earlier than twice the window before this clock read.
+const relayDriftWindow = 900 * time.Second
+
+// maxAgentDeletions bounds one read of the agent's deletions in that
+// window, below the relay's page clamp. A full page may hide one, so it is
+// an unknown history.
+const maxAgentDeletions = 500
+
+// AgentDeletions is the agent's deletions stored just before an approval was
+// posted: every one dated at or after Since. buzz-acp signs with the agent
+// key and deletes its own 👀 and 💬 reactions after each turn, with a
+// deletion that names only the reaction's id, and the relay hides what a
+// deletion names from every read. So an older deletion by the agent cannot
+// be told from one that hid an edit; only a deletion stored after the
+// message was posted can have hidden an edit of it.
+type AgentDeletions struct {
+	Since nostr.Timestamp
+	IDs   map[nostr.ID]bool
+}
+
+// ReadAgentDeletions reads the agent's deletions dated within twice the
+// relay's drift window before now, this machine's clock. Read before the
+// approval message is posted, it holds no deletion that can name the
+// message or an edit of it.
+func ReadAgentDeletions(ctx context.Context, conn *relay.Conn, agent string, now time.Time) (AgentDeletions, error) {
+	pk, err := nostr.PubKeyFromHex(agent)
+	if err != nil {
+		return AgentDeletions{}, fmt.Errorf("agent pubkey: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	since := nostr.Timestamp(now.Add(-2 * relayDriftWindow).Unix())
+	got, err := readAgentDeletions(ctx, conn, pk, since)
+	if err != nil {
+		return AgentDeletions{}, err
+	}
+	ids := make(map[nostr.ID]bool, len(got))
+	for _, d := range got {
+		ids[d.ID] = true
+	}
+	return AgentDeletions{Since: since, IDs: ids}, nil
+}
+
+// Covers reports whether d reaches back far enough for msg, as the relay
+// accepted it: twice the drift window before msg's own created_at. A clock
+// that stepped back between the read and the post leaves it short.
+func (d AgentDeletions) Covers(msg nostr.Event) bool {
+	return d.Since <= msg.CreatedAt-nostr.Timestamp(2*relayDriftWindow/time.Second)
+}
+
+func readAgentDeletions(ctx context.Context, conn *relay.Conn, agent nostr.PubKey, since nostr.Timestamp) ([]nostr.Event, error) {
+	got, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindDeletion, KindGroupDeletion}, Authors: []nostr.PubKey{agent}, Since: since, Limit: maxAgentDeletions})
+	if err != nil {
+		return nil, fmt.Errorf("read the agent's deletions: %w", err)
+	}
+	if len(got) >= maxAgentDeletions {
+		return nil, fmt.Errorf("the agent has %d or more deletions since %d; its history is not known", maxAgentDeletions, since)
+	}
+	return got, nil
+}
+
 // CheckDesktopHistory reads a Desktop approval message's history from the
 // relay, within historyTimeout. The Desktop agent never edits or deletes an
 // approval message, so any edit naming it, any deletion naming it, any
-// deletion by the agent, and any deletion by the owner since the message is
-// ErrAltered. A read that errors or times out is another error.
-func CheckDesktopHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, owner string) error {
+// deletion by the owner since the message, and any deletion by the agent
+// that was not stored before the message was posted (before) is ErrAltered.
+// An edit can name the message only after it was posted, so a deletion that
+// hid one was stored after before was read and is dated no earlier than
+// before.Since (ReadAgentDeletions). A read that errors, times out or fills
+// its page is another error.
+func CheckDesktopHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, owner string, before AgentDeletions) error {
 	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
 	defer cancel()
 	pk, err := nostr.PubKeyFromHex(owner)
@@ -223,7 +292,6 @@ func CheckDesktopHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event,
 	}{
 		{"an edit of the message", nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}, Limit: 1}},
 		{"a deletion of the message", nostr.Filter{Kinds: deletionKinds, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}, Limit: 1}},
-		{"a deletion by the agent", nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{msg.PubKey}, Limit: 1}},
 		{"a deletion by the owner since the message", nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{pk}, Since: msg.CreatedAt, Limit: 1}},
 	}
 	for _, r := range reads {
@@ -233,6 +301,15 @@ func CheckDesktopHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event,
 		}
 		if len(got) > 0 {
 			return fmt.Errorf("%w: %s", ErrAltered, r.what)
+		}
+	}
+	got, err := readAgentDeletions(ctx, conn, msg.PubKey, before.Since)
+	if err != nil {
+		return err
+	}
+	for _, d := range got {
+		if !before.IDs[d.ID] {
+			return fmt.Errorf("%w: a deletion by the agent since the message was posted", ErrAltered)
 		}
 	}
 	return nil

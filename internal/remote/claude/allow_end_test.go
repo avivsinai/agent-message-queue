@@ -60,6 +60,11 @@ func TestApprovalHookNeverAllowsAfterItsEnd(t *testing.T) {
 			if err := readApprovalJSON(filepath.Join(approveDir(f.home, approvalSession), "requests", f.id+".json"), &req); err != nil || !req.Approvable {
 				t.Fatalf("request = %+v (%v), want an approvable call", req, err)
 			}
+			// Before the answer is written: the tick raiseWith sent runs a
+			// loop iteration that may read it at once (macOS CI, PR #1284).
+			if tc.before != nil {
+				tc.before(f, &clock)
+			}
 			dir, err := ensureApproveSubdir(f.home, approvalSession, "answers")
 			if err != nil {
 				t.Fatal(err)
@@ -67,9 +72,6 @@ func TestApprovalHookNeverAllowsAfterItsEnd(t *testing.T) {
 			ans, _ := json.Marshal(approvalAnswer{InteractionID: f.id, ActionHash: req.ActionHash, Option: optionAllow, Evidence: json.RawMessage(`{}`)})
 			if err := os.WriteFile(filepath.Join(dir, f.id+".json"), ans, 0o600); err != nil {
 				t.Fatal(err)
-			}
-			if tc.before != nil {
-				tc.before(f, &clock)
 			}
 			select {
 			case ticks <- time.Now():

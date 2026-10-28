@@ -436,6 +436,8 @@ type allowWatch struct {
 	text string
 
 	posted     string
+	before     buzzio.AgentDeletions // the agent's deletions read just before the post
+	unproven   bool                  // that read failed: deny-only
 	conn       *relay.Conn
 	msg        *nostr.Event
 	mismatch   bool            // the relay stored another message: deny-only
@@ -444,10 +446,36 @@ type allowWatch struct {
 	denyFailed bool
 }
 
+// post reads the agent's recent deletions, then posts the approval. A
+// deletion stored after that read is one the history check refuses. When
+// the read fails the approval is still posted, so ❌ still denies, but no
+// ✅ on it can allow.
 func (w *allowWatch) post(budget time.Duration) bool {
-	id, err := postAnswer(w.a.channel, w.text, budget)
-	w.posted = id
-	return err == nil
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), budget/2)
+	before, err := buzzio.AgentDeletions{}, errors.New("no relay connection")
+	if w.connect(ctx) {
+		if before, err = buzzio.ReadAgentDeletions(ctx, w.conn, buzzSelf, start); err != nil {
+			w.drop()
+		}
+	}
+	cancel()
+	id, perr := postAnswer(w.a.channel, w.text, max(budget/2, budget-time.Since(start)))
+	w.posted, w.before, w.unproven = id, before, err != nil
+	return perr == nil
+}
+
+// connect signs in to the agent's relay unless a connection is open.
+func (w *allowWatch) connect(ctx context.Context) bool {
+	if w.conn != nil {
+		return true
+	}
+	conn, err := relay.Connect(ctx, *buzzRelay)
+	if err != nil {
+		return false
+	}
+	w.conn = conn
+	return true
 }
 
 // drop closes the relay connection; the next poll signs in again.
@@ -470,12 +498,8 @@ func (w *allowWatch) drop() {
 func (w *allowWatch) poll(budget time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if w.conn == nil {
-		conn, err := relay.Connect(ctx, *buzzRelay)
-		if err != nil {
-			return false
-		}
-		w.conn = conn
+	if !w.connect(ctx) {
+		return false
 	}
 	if w.msg == nil && !w.mismatch {
 		m, found, err := buzzio.ReadEvent(ctx, w.conn, w.posted)
@@ -489,6 +513,11 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 			w.a.r.s.publish(w.a.channel, mismatchText)
 		default:
 			w.msg = &m
+			// The relay accepted the message as dated; a read that does not
+			// reach back far enough from that date proves nothing.
+			if !w.before.Covers(m) {
+				w.unproven = true
+			}
 		}
 	}
 	rs, err := buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
@@ -510,7 +539,12 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 	if approve == nil || w.msg == nil || w.altered {
 		return false
 	}
-	if err := buzzio.CheckDesktopHistory(ctx, w.conn, *w.msg, buzzOwner); err != nil {
+	if w.unproven {
+		w.tried[approve.ID.Hex()] = true
+		w.a.r.s.publish(w.a.channel, allowRefusedText)
+		return false
+	}
+	if err := buzzio.CheckDesktopHistory(ctx, w.conn, *w.msg, buzzOwner, w.before); err != nil {
 		if errors.Is(err, buzzio.ErrAltered) {
 			w.altered = true
 			w.a.r.s.publish(w.a.channel, alteredText)
