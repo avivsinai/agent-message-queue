@@ -483,6 +483,8 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
+	// Holder is the exact identity captured while proving a Codex ancestor.
+	Holder launch.HolderIdentity
 	// AppServer is a Codex session's thread, which proves its liveness in
 	// place of a process.
 	AppServer binding.AppServerThread
@@ -491,6 +493,9 @@ type harnessSession struct {
 // holder is the recorded identity of the harness process, or zero when it
 // cannot be read, which leaves the session's liveness unknown.
 func (h harnessSession) holder() launch.HolderIdentity {
+	if h.Holder.PID > 0 {
+		return h.Holder
+	}
 	if h.PID <= 0 {
 		return launch.HolderIdentity{}
 	}
@@ -538,6 +543,8 @@ var (
 	codexDefaultSocket = codex.DefaultControlSocket
 	codexDaemonPID     = codex.DaemonPID
 	processHolder      = launch.HolderOf
+	processExecutable  = launch.ProcessExecutable
+	processArgs        = launch.ProcessArgs
 )
 
 // codexView asks each Codex app-server daemon at most once per command:
@@ -712,18 +719,49 @@ func linkShared(stateDir string, b binding.Binding) bool {
 }
 
 // detectHarness finds the harness a mailbox attach runs in: Codex by
-// CODEX_THREAD_ID, Claude by the registry entry of an ancestor process. A
+// CODEX_THREAD_ID and its daemon or invoking process, Claude by the registry
+// entry of an ancestor process. A
 // session it cannot detect is still attached, with no harness or holder. It
 // is a variable because it runs ps and reads the Claude registry; tests
 // replace it.
-var detectHarness = func(codexes *codexView) harnessSession {
+var detectHarness = currentHarness
+
+func currentHarness(codexes *codexView) harnessSession {
 	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
 		h := harnessSession{Kind: "codex"}
 		if sock, err := codexDefaultSocket(); err == nil {
 			h.AppServer = loadedThread(codexes, sock, thread)
 			if h.AppServer.Thread != "" {
 				h.Cwd, _ = codexThreadCwd(sock, thread)
+				return h
 			}
+		}
+		ancestors, err := ancestorPIDs(os.Getpid())
+		if err != nil {
+			return h
+		}
+		for _, pid := range ancestors {
+			holder, err := processHolder(pid)
+			if err != nil {
+				continue
+			}
+			executable, err := processExecutable(pid)
+			if err != nil {
+				continue
+			}
+			facts, known := harness.ForExecutable(executable)
+			if !known || facts.Name != harness.Codex {
+				continue
+			}
+			// A shared app-server may outlive every thread it hosted. Its
+			// command can follow global flags, so reject that argv token
+			// anywhere rather than mistake the daemon for one session.
+			args, err := processArgs(pid)
+			if err != nil || len(args) == 0 || slices.Contains(args[1:], "app-server") || !launch.RunsUnderProcess(holder) {
+				continue
+			}
+			h.PID, h.Holder = pid, holder
+			return h
 		}
 		return h
 	}

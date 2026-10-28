@@ -683,6 +683,80 @@ func TestNativeHarnessRecordsOnlyALoadedCodexThread(t *testing.T) {
 	}
 }
 
+// Regression: agent-message-queue-1uk G2, mailbox attach from a Codex TUI
+// recorded neither a daemon thread nor a holder, so Buzz made no channel.
+// A loaded daemon thread stays first; an embedded TUI uses its ancestor.
+func TestDetectHarnessFindsCodexSession(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process ancestry is unavailable on this platform")
+	}
+	parent, err := launch.HolderOf(os.Getppid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_THREAD_ID", "this-thread")
+	savedAncestors, savedExecutable, savedArgs, savedHolder := ancestorPIDs, processExecutable, processArgs, processHolder
+	savedSocket, savedPID, savedLoaded, savedCwd := codexDefaultSocket, codexDaemonPID, codexLoadedThreads, codexThreadCwd
+	t.Cleanup(func() {
+		ancestorPIDs, processExecutable, processArgs, processHolder = savedAncestors, savedExecutable, savedArgs, savedHolder
+		codexDefaultSocket, codexDaemonPID, codexLoadedThreads, codexThreadCwd = savedSocket, savedPID, savedLoaded, savedCwd
+	})
+	codexDefaultSocket = func() (string, error) { return "/daemon.sock", nil }
+	codexDaemonPID = func(string) (int, error) { return 42, nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		if pid == parent.PID {
+			return parent, nil
+		}
+		return launch.HolderIdentity{PID: pid, ProcessStart: "daemon"}, nil
+	}
+	codexThreadCwd = func(string, string) (string, error) { return "/project", nil }
+	for _, row := range []struct {
+		name   string
+		loaded []string
+		args   []string
+		daemon bool
+		holder bool
+	}{
+		{"shared daemon", []string{"this-thread"}, nil, true, false},
+		{"embedded TUI", []string{"another-thread"}, []string{"codex", "-c", "model=local"}, false, true},
+		// Review of 1uk G2: another app-server (observed PID 4664) can
+		// be an ancestor, but its lifetime does not identify one thread.
+		{"another daemon", []string{"another-thread"}, []string{"codex", "app-server", "--listen", "unix://"}, false, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			codexLoadedThreads = func(string) ([]string, error) { return row.loaded, nil }
+			ancestorPIDs = func(pid int) ([]int, error) {
+				if row.daemon || pid != os.Getpid() {
+					t.Fatalf("ancestor lookup for pid %d with daemon=%v", pid, row.daemon)
+				}
+				return []int{parent.PID}, nil
+			}
+			processExecutable = func(pid int) (string, error) {
+				if pid != parent.PID {
+					t.Fatalf("executable lookup for %d, want invoking ancestor %d", pid, parent.PID)
+				}
+				return "/opt/codex/bin/codex", nil
+			}
+			processArgs = func(int) ([]string, error) { return row.args, nil }
+			got := currentHarness(newCodexView())
+			if got.Kind != "codex" {
+				t.Fatalf("harness = %+v, want Codex", got)
+			}
+			if row.daemon {
+				if got.AppServer.Thread != "this-thread" || got.AppServer.Daemon.PID != 42 || got.PID != 0 || got.Cwd != "/project" {
+					t.Fatalf("harness = %+v, want the loaded daemon thread", got)
+				}
+			} else if row.holder {
+				if got.AppServer.Thread != "" || got.PID != parent.PID || got.holder() != parent {
+					t.Fatalf("harness = %+v, holder = %+v; want invoking Codex ancestor %+v", got, got.holder(), parent)
+				}
+			} else if got.PID != 0 || got.AppServer.Thread != "" || got.holder().PID != 0 {
+				t.Fatalf("harness = %+v, want unknown session liveness", got)
+			}
+		})
+	}
+}
+
 // Review-s2 P2-8: a plain native attach in a link's own root kept the name of
 // the share's binding and rewrote it with a cwd identity, so the share named
 // a binding that another session could take. attach keeps the target
