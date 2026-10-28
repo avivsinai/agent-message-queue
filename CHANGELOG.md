@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.116.1](https://github.com/avivsinai/agent-message-queue/compare/v0.116.0...v0.116.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **ci:** synchronize remote approval fixtures ([#1281](https://github.com/avivsinai/agent-message-queue/issues/1281)) ([0b36d4a](https://github.com/avivsinai/agent-message-queue/commit/0b36d4ac91c124fe029b32da7b909121fcddda99))
+* **remote:** prove Codex TUI mailbox session liveness ([#1282](https://github.com/avivsinai/agent-message-queue/issues/1282)) ([26a7bf5](https://github.com/avivsinai/agent-message-queue/commit/26a7bf5cc590498d5aa8d54115f02fa7603559d7))
+
 ## [0.116.0](https://github.com/avivsinai/agent-message-queue/compare/v0.115.3...v0.116.0) (2026-10-27)
 
 
