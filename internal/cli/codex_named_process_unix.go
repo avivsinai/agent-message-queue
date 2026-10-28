@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const (
@@ -170,7 +172,7 @@ func validateCodexNamingTarget(target codexNamingTarget) (bool, error) {
 	if base != "node" && base != "nodejs" {
 		return false, fmt.Errorf("spawned process executable %q is not the pinned Codex binary", executable)
 	}
-	args, err := readCodexProcessArgs(target.PID)
+	args, err := launch.ProcessArgs(target.PID)
 	if err != nil {
 		return false, fmt.Errorf("inspect Codex Node launcher arguments: %w", err)
 	}

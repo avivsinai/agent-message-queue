@@ -584,6 +584,13 @@ answer; a `kind: status` reply is progress. No endpoint, hook, or wake is
 needed; noticing the message is the handle owner's business. A session that
 is not on AMQ is refused and pointed at `--native`.
 
+For a Codex mailbox session, attach first checks whether the app-server daemon
+has its thread loaded. Otherwise it records the nearest invoking ancestor whose
+kernel executable is Codex, with its process start identity checked against the
+current ancestry. An ancestor with an `app-server` argument cannot prove one
+session. This supports a TUI with an embedded app-server. If
+neither path proves the session is live, its binding stays unknown.
+
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
 is found by the command's process ancestry. A pi chat is found the
