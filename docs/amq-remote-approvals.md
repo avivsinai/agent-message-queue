@@ -144,8 +144,15 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
   checked, dated in the approval's window. The
   agent signs it only after its own read of the relay finds the message
   stored exactly as it was posted, no edit of it at all (the agent never
-  edits an approval message), no deletion of it, no deletion by the agent,
-  no deletion by the owner since the message, and no owner ❌ on it.
+  edits an approval message), no deletion of it, no deletion by the agent
+  stored after it read the agent's deletions just before posting, no
+  deletion by the owner since the message, and no owner ❌ on it.
+  buzz-acp signs with the same key and deletes its own 👀 and 💬 after each
+  turn; the relay hides what a deletion names, so an earlier deletion
+  cannot be told from one that hid an edit, but only one stored after the
+  post can have hidden an edit of it. That read covers the relay's ±900 s
+  timestamp window, so a backdated deletion is still seen; a window with
+  100 or more deletions allows nothing.
 
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only

@@ -436,6 +436,7 @@ type allowWatch struct {
 	text string
 
 	posted     string
+	before     buzzio.AgentDeletions // the agent's deletions read just before the post
 	conn       *relay.Conn
 	msg        *nostr.Event
 	mismatch   bool            // the relay stored another message: deny-only
@@ -444,10 +445,35 @@ type allowWatch struct {
 	denyFailed bool
 }
 
+// post reads the agent's recent deletions, then posts the approval. A
+// deletion stored after that read is one the history check refuses.
 func (w *allowWatch) post(budget time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if !w.connect(ctx) {
+		return false
+	}
+	before, err := buzzio.ReadAgentDeletions(ctx, w.conn, buzzSelf, time.Now())
+	if err != nil {
+		w.drop()
+		return false
+	}
 	id, err := postAnswer(w.a.channel, w.text, budget)
-	w.posted = id
+	w.posted, w.before = id, before
 	return err == nil
+}
+
+// connect signs in to the agent's relay unless a connection is open.
+func (w *allowWatch) connect(ctx context.Context) bool {
+	if w.conn != nil {
+		return true
+	}
+	conn, err := relay.Connect(ctx, *buzzRelay)
+	if err != nil {
+		return false
+	}
+	w.conn = conn
+	return true
 }
 
 // drop closes the relay connection; the next poll signs in again.
@@ -470,12 +496,8 @@ func (w *allowWatch) drop() {
 func (w *allowWatch) poll(budget time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if w.conn == nil {
-		conn, err := relay.Connect(ctx, *buzzRelay)
-		if err != nil {
-			return false
-		}
-		w.conn = conn
+	if !w.connect(ctx) {
+		return false
 	}
 	if w.msg == nil && !w.mismatch {
 		m, found, err := buzzio.ReadEvent(ctx, w.conn, w.posted)
@@ -510,7 +532,7 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 	if approve == nil || w.msg == nil || w.altered {
 		return false
 	}
-	if err := buzzio.CheckDesktopHistory(ctx, w.conn, *w.msg, buzzOwner); err != nil {
+	if err := buzzio.CheckDesktopHistory(ctx, w.conn, *w.msg, buzzOwner, w.before); err != nil {
 		if errors.Is(err, buzzio.ErrAltered) {
 			w.altered = true
 			w.a.r.s.publish(w.a.channel, alteredText)
