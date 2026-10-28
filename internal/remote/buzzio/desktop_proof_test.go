@@ -57,3 +57,17 @@ func TestDesktopHistorySeesABackdatedAgentDeletionUnderClockSkew(t *testing.T) {
 		t.Fatalf("CheckDesktopHistory = %v; want ErrAltered for a backdated deletion stored after the read", err)
 	}
 }
+
+// Pre-merge review of bead 611.42.12.1 (P2): a clock that steps back between
+// the read before the post and the post leaves the read short of the
+// message's own date. Such a read must not cover the message.
+func TestAgentDeletionsReadBeforeAClockStepDoNotCoverTheMessage(t *testing.T) {
+	msg := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Unix())}
+	stepped := AgentDeletions{Since: msg.CreatedAt + 1200 - 1800}
+	if stepped.Covers(msg) {
+		t.Fatal("a read taken 20 min ahead of the message's date covers it; want not covered")
+	}
+	if !(AgentDeletions{Since: msg.CreatedAt - 1800}).Covers(msg) {
+		t.Fatal("a read taken at the message's date does not cover it")
+	}
+}

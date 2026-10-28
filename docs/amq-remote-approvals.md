@@ -153,8 +153,10 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
   post can have hidden an edit of it. That read reaches back 1800 s: the
   relay accepts a created_at up to 900 s from its clock, and it accepted
   the approval dated by this machine's clock, so a backdated deletion is
-  still seen when the clocks differ. A read with 500 or more deletions,
-  or one that fails, leaves the approval deny-only.
+  still seen when the clocks differ; a read that does not reach 1800 s
+  before the stored message's own date proves nothing. When the read
+  before the post finds 500 or more deletions, fails, or falls short, the
+  approval is deny-only.
 
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only

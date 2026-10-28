@@ -251,6 +251,13 @@ func ReadAgentDeletions(ctx context.Context, conn *relay.Conn, agent string, now
 	return AgentDeletions{Since: since, IDs: ids}, nil
 }
 
+// Covers reports whether d reaches back far enough for msg, as the relay
+// accepted it: twice the drift window before msg's own created_at. A clock
+// that stepped back between the read and the post leaves it short.
+func (d AgentDeletions) Covers(msg nostr.Event) bool {
+	return d.Since <= msg.CreatedAt-nostr.Timestamp(2*relayDriftWindow/time.Second)
+}
+
 func readAgentDeletions(ctx context.Context, conn *relay.Conn, agent nostr.PubKey, since nostr.Timestamp) ([]nostr.Event, error) {
 	got, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindDeletion, KindGroupDeletion}, Authors: []nostr.PubKey{agent}, Since: since, Limit: maxAgentDeletions})
 	if err != nil {

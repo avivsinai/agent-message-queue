@@ -460,7 +460,7 @@ func (w *allowWatch) post(budget time.Duration) bool {
 		}
 	}
 	cancel()
-	id, perr := postAnswer(w.a.channel, w.text, budget-time.Since(start))
+	id, perr := postAnswer(w.a.channel, w.text, max(budget/2, budget-time.Since(start)))
 	w.posted, w.before, w.unproven = id, before, err != nil
 	return perr == nil
 }
@@ -513,6 +513,11 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 			w.a.r.s.publish(w.a.channel, mismatchText)
 		default:
 			w.msg = &m
+			// The relay accepted the message as dated; a read that does not
+			// reach back far enough from that date proves nothing.
+			if !w.before.Covers(m) {
+				w.unproven = true
+			}
 		}
 	}
 	rs, err := buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
