@@ -47,11 +47,11 @@ func ProcessArgs(pid int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data) < 4 {
-		return nil, fmt.Errorf("process %d argument count is unavailable", pid)
+	if len(data) < 4 || len(data) > maxProcessArgsBytes {
+		return nil, fmt.Errorf("process %d arguments have an invalid size", pid)
 	}
 	argc := int(binary.LittleEndian.Uint32(data[:4]))
-	if argc <= 0 || argc > len(data) {
+	if argc <= 0 || argc > 4096 {
 		return nil, fmt.Errorf("process %d argument count is invalid", pid)
 	}
 	data = data[4:]

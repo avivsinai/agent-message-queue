@@ -3,8 +3,8 @@
 package launch
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -22,12 +22,24 @@ func ProcessArgs(pid int) ([]string, error) {
 	if pid <= 0 {
 		return nil, fmt.Errorf("invalid process id %d", pid)
 	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	file, err := os.Open(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) == 0 || data[len(data)-1] != 0 {
-		return nil, fmt.Errorf("process %d arguments are unavailable", pid)
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxProcessArgsBytes+1))
+	if err != nil {
+		return nil, err
 	}
-	return strings.Split(string(bytes.TrimSuffix(data, []byte{0})), "\x00"), nil
+	if len(data) > maxProcessArgsBytes {
+		return nil, fmt.Errorf("process %d arguments exceed the safety limit", pid)
+	}
+	parts := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	args := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			args = append(args, part)
+		}
+	}
+	return args, nil
 }
