@@ -437,6 +437,7 @@ type allowWatch struct {
 
 	posted     string
 	before     buzzio.AgentDeletions // the agent's deletions read just before the post
+	unproven   bool                  // that read failed: deny-only
 	conn       *relay.Conn
 	msg        *nostr.Event
 	mismatch   bool            // the relay stored another message: deny-only
@@ -446,21 +447,22 @@ type allowWatch struct {
 }
 
 // post reads the agent's recent deletions, then posts the approval. A
-// deletion stored after that read is one the history check refuses.
+// deletion stored after that read is one the history check refuses. When
+// the read fails the approval is still posted, so ❌ still denies, but no
+// ✅ on it can allow.
 func (w *allowWatch) post(budget time.Duration) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	if !w.connect(ctx) {
-		return false
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), budget/2)
+	before, err := buzzio.AgentDeletions{}, errors.New("no relay connection")
+	if w.connect(ctx) {
+		if before, err = buzzio.ReadAgentDeletions(ctx, w.conn, buzzSelf, start); err != nil {
+			w.drop()
+		}
 	}
-	before, err := buzzio.ReadAgentDeletions(ctx, w.conn, buzzSelf, time.Now())
-	if err != nil {
-		w.drop()
-		return false
-	}
-	id, err := postAnswer(w.a.channel, w.text, budget)
-	w.posted, w.before = id, before
-	return err == nil
+	cancel()
+	id, perr := postAnswer(w.a.channel, w.text, budget-time.Since(start))
+	w.posted, w.before, w.unproven = id, before, err != nil
+	return perr == nil
 }
 
 // connect signs in to the agent's relay unless a connection is open.
@@ -530,6 +532,11 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 		}
 	}
 	if approve == nil || w.msg == nil || w.altered {
+		return false
+	}
+	if w.unproven {
+		w.tried[approve.ID.Hex()] = true
+		w.a.r.s.publish(w.a.channel, allowRefusedText)
 		return false
 	}
 	if err := buzzio.CheckDesktopHistory(ctx, w.conn, *w.msg, buzzOwner, w.before); err != nil {

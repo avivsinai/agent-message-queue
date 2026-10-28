@@ -150,9 +150,11 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
   buzz-acp signs with the same key and deletes its own 👀 and 💬 after each
   turn; the relay hides what a deletion names, so an earlier deletion
   cannot be told from one that hid an edit, but only one stored after the
-  post can have hidden an edit of it. That read covers the relay's ±900 s
-  timestamp window, so a backdated deletion is still seen; a window with
-  100 or more deletions allows nothing.
+  post can have hidden an edit of it. That read reaches back 1800 s: the
+  relay accepts a created_at up to 900 s from its clock, and it accepted
+  the approval dated by this machine's clock, so a backdated deletion is
+  still seen when the clocks differ. A read with 500 or more deletions,
+  or one that fails, leaves the approval deny-only.
 
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only
