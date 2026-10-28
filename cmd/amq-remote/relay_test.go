@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,48 +16,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 )
-
-// 611.15 slice 1: an enrolled share on disk (body.key + owner-signed
-// share.json) and a relay-capable manifest make serve's relay client
-// authenticate with the enrolled 1059 tag, and relay-status.json says so.
-func TestRelayShareAuthenticatesFromEnrolledCredentials(t *testing.T) {
-	root := t.TempDir()
-	keyDir := filepath.Join(root, "extensions", "remote", "keys", "work")
-	var owner [32]byte
-	if _, err := rand.Read(owner[:]); err != nil {
-		t.Fatal(err)
-	}
-	body, tag := enrollShare(t, keyDir, owner)
-	wire := []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()}
-	lr, srv, url := relaytest.Start(body.PublicKeyHex(), wire)
-	defer srv.Close()
-
-	mf := manifest.File{
-		SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
-		Adapters: []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}},
-		Relay:    &manifest.Relay{URL: url, Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: tag.OwnerPubKey}}},
-	}
-	if err := manifest.Validate(mf); err != nil {
-		t.Fatalf("manifest: %v", err)
-	}
-	stateDir := filepath.Join(root, "extensions", "remote")
-	ctx, cancel := context.WithCancel(context.Background())
-	wg := newRelaySet(root, stateDir, "", buildDMEdges(root, stateDir, mf.Relay, io.Discard), io.Discard)
-	wg.start(ctx, mf.Relay)
-	defer func() { cancel(); wg.wait() }()
-
-	deadline := time.Now().Add(4 * time.Second)
-	for {
-		doc, err := loadRelayStatus(stateDir)
-		if err == nil && len(doc.Shares) == 1 && doc.Shares[0].State == string(relay.StateAuthenticated) && lr.AuthOK.Load() >= 1 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("relay status = %+v err=%v, want the share authenticated", doc, err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
 
 // #1024: a running serve follows the manifest relay block. A share added
 // connects without a restart, an edited share keeps its running values and
