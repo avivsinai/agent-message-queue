@@ -709,8 +709,9 @@ func runWakeInstallDialogHook(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "Print the hooks without changing the settings file")
 	harness := fs.String("harness", "claude", "claude, codex, cursor, or all (each harness whose home exists)")
 	usage := usageWithFlags(fs, "amq wake install-dialog-hook [--dry-run] [--harness claude|codex|cursor|all]",
-		"Install the wake dialog guard hooks in ~/.claude/settings.json, with --harness",
-		"codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks),",
+		"Install the wake dialog guard hooks in $CLAUDE_CONFIG_DIR/settings.json (default",
+		"~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json",
+		"(Codex runs them once you trust them in /hooks),",
 		"or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session",
 		"starts; it holds the doorbell from a tool call to the end of that turn).",
 		"",
@@ -766,7 +767,7 @@ func runWakeInstallDialogHook(args []string) error {
 			"The guard needs AM_ME and AM_ROOT in the Claude Code environment (amq coop exec\n"+
 			"and amq launch set them). Running sessions pick it up through the settings\n"+
 			"watcher; if /hooks does not list it, restart the session.\n",
-		filepath.Join(home, ".claude", "settings.json"),
+		claude.SettingsPath(home),
 	)
 }
 
@@ -800,7 +801,7 @@ func dialogHookHarnesses(harness string) (claudeOn, codexOn, cursorOn bool, err 
 			return err == nil && info.IsDir()
 		}
 		if home, err := os.UserHomeDir(); err == nil {
-			claudeOn = isDir(filepath.Join(home, ".claude"))
+			claudeOn = isDir(filepath.Dir(claude.SettingsPath(home)))
 		}
 		if path, err := codexHooksPath(); err == nil {
 			codexOn = isDir(filepath.Dir(path))
@@ -818,7 +819,8 @@ func runWakeUninstallDialogHook(args []string) error {
 	harness := fs.String("harness", "claude", "claude, codex, cursor, or all (each harness whose home exists)")
 	usage := usageWithFlags(fs, "amq wake uninstall-dialog-hook [--harness claude|codex|cursor|all]",
 		"Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from",
-		"~/.claude/settings.json, $CODEX_HOME/hooks.json with --harness codex, or",
+		"$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json),",
+		"$CODEX_HOME/hooks.json with --harness codex, or",
 		"~/.cursor/hooks.json with --harness cursor.",
 		"Other settings and hooks are not changed.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -850,7 +852,7 @@ func runWakeUninstallDialogHook(args []string) error {
 	if err := claude.UninstallCommandHooks(home, wakeDialogHookMarker, wakeDialogHookEvents); err != nil {
 		return err
 	}
-	return writeStdout("dialog hook removed from %s\n", filepath.Join(home, ".claude", "settings.json"))
+	return writeStdout("dialog hook removed from %s\n", claude.SettingsPath(home))
 }
 
 // checkClaudeDialogHook reports a missing or partly installed dialog hook,
@@ -867,7 +869,7 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	if err != nil {
 		return doctorCheck{}, false
 	}
-	if info, err := os.Stat(filepath.Join(home, ".claude")); err != nil || !info.IsDir() {
+	if info, err := os.Stat(filepath.Dir(claude.SettingsPath(home))); err != nil || !info.IsDir() {
 		return doctorCheck{}, false
 	}
 	check := doctorCheck{Name: "Claude dialog hook", Status: "warn"}
@@ -897,6 +899,13 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	}
 	if len(missing) > 0 {
 		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
+		return check, true
+	}
+	if disabled, err := claude.HooksDisabled(home); err != nil || disabled {
+		check.Message = "installed, but the user settings set disableAllHooks, so Claude Code does not run it and the wake rings a plain doorbell"
+		if err != nil {
+			check.Message = fmt.Sprintf("read Claude settings: %v", err)
+		}
 		return check, true
 	}
 	for _, hook := range commands {
@@ -1038,7 +1047,7 @@ func dialogGuardStamp(name string) string {
 	switch name {
 	case harness.Claude:
 		if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".claude", "settings.json"))
+			paths = append(paths, claude.SettingsPath(home))
 		}
 	case harness.Codex:
 		if path, err := codexHooksPath(); err == nil {

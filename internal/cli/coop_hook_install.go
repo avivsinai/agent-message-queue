@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -58,7 +57,8 @@ func runCoopInstallHooks(args []string) error {
 	fs := flag.NewFlagSet("coop install-hooks", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "Print the hooks without changing the settings file")
 	usage := usageWithFlags(fs, "amq coop install-hooks [--dry-run]",
-		"Install the co-op hooks in ~/.claude/settings.json.",
+		"Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default",
+		"~/.claude/settings.json).",
 		"",
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and whether a wake rings the",
@@ -98,7 +98,7 @@ func runCoopInstallHooks(args []string) error {
 	if err := claude.InstallCommandHooks(home, hooks); err != nil {
 		return err
 	}
-	if err := writeStdout("co-op hooks installed in %s\n", filepath.Join(home, ".claude", "settings.json")); err != nil {
+	if err := writeStdout("co-op hooks installed in %s\n", claude.SettingsPath(home)); err != nil {
 		return err
 	}
 	return writeLegacyCoopHookEntries()
@@ -107,7 +107,8 @@ func runCoopInstallHooks(args []string) error {
 func runCoopUninstallHooks(args []string) error {
 	fs := flag.NewFlagSet("coop uninstall-hooks", flag.ContinueOnError)
 	usage := usageWithFlags(fs, "amq coop uninstall-hooks",
-		"Remove the co-op hooks (AMQ_COOP_HOOK entries) from ~/.claude/settings.json.",
+		"Remove the co-op hooks (AMQ_COOP_HOOK entries) from",
+		"$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json).",
 		"Other settings and hooks are not changed.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -121,7 +122,7 @@ func runCoopUninstallHooks(args []string) error {
 	if err := claude.UninstallCommandHooks(home, coopHookMarker, coopHookEvents); err != nil {
 		return err
 	}
-	return writeStdout("co-op hooks removed from %s\n", filepath.Join(home, ".claude", "settings.json"))
+	return writeStdout("co-op hooks removed from %s\n", claude.SettingsPath(home))
 }
 
 // writeLegacyCoopHookEntries lists the project hook entries under the

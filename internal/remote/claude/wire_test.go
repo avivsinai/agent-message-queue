@@ -41,17 +41,17 @@ func installSettings(t *testing.T, original string) (home string, installed stri
 	t.Helper()
 	home = t.TempDir()
 	if original != "" {
-		if err := os.MkdirAll(filepath.Dir(settingsPath(home)), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(SettingsPath(home)), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(settingsPath(home), []byte(original), 0o600); err != nil {
+		if err := os.WriteFile(SettingsPath(home), []byte(original), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(settingsPath(home))
+	raw, err := os.ReadFile(SettingsPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}

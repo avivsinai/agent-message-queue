@@ -49,7 +49,8 @@ amq coop exec --no-wake claude
 amq coop install-hooks
 ```
 
-This adds two hooks to `~/.claude/settings.json`:
+This adds two hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
+`~/.claude/settings.json`):
 
 - **SessionStart.** On startup, resume, `/clear`, and compaction it gives the
   agent a short preamble: its handle, session and peers, its unread count, and

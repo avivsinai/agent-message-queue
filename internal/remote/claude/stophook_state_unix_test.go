@@ -17,21 +17,21 @@ func TestStopHookStateIsBoundedAndHonorsDisable(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(settingsPath(home), 0o600); err != nil {
+	if err := syscall.Mkfifo(SettingsPath(home), 0o600); err != nil {
 		t.Skipf("mkfifo: %v", err)
 	}
 	if _, err := StopHookState(home); err == nil {
 		t.Fatal("a FIFO settings file was read as settings")
 	}
-	if err := os.Remove(settingsPath(home)); err != nil {
+	if err := os.Remove(SettingsPath(home)); err != nil {
 		t.Fatal(err)
 	}
 	if err := InstallStopHook(home, "/usr/local/bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(settingsPath(home))
+	raw, _ := os.ReadFile(SettingsPath(home))
 	disabled := append([]byte(`{"disableAllHooks":true,`), raw[1:]...)
-	if err := os.WriteFile(settingsPath(home), disabled, 0o600); err != nil {
+	if err := os.WriteFile(SettingsPath(home), disabled, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if state, err := StopHookState(home); err != nil || state != StopHookDisabled {

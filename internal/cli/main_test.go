@@ -188,6 +188,8 @@ func isolateHome(cleanup *testMainCleanup) string {
 		"GOMODCACHE":  gomodcache,
 		"GOCACHE":     gocache,
 	})
+	// Either would move the Claude or Codex home out of the private home.
+	setTestEnv(cleanup, map[string]string{"CLAUDE_CONFIG_DIR": "", "CODEX_HOME": ""})
 
 	home, err := os.UserHomeDir()
 	if err != nil {

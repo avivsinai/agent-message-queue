@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // Harness names.
@@ -59,8 +61,8 @@ type Config struct {
 func DefaultConfig(home string) Config {
 	return Config{
 		Homes: map[string][]string{
-			Claude: {filepath.Join(home, ".claude")},
-			Codex:  {filepath.Join(home, ".codex")},
+			Claude: {harness.ClaudeConfigDir(home)},
+			Codex:  {harness.CodexHome(home)},
 			Pi:     {filepath.Join(home, ".pi")},
 		},
 		BudgetWall:  DefaultBudgetWall,

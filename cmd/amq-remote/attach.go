@@ -999,7 +999,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 var findSelf = selfCandidate
 
 // claudeStopHookState is the state of the AMQ Stop hook in the user's Claude
-// settings. It is a variable so tests never read the real ~/.claude.
+// settings. It is a variable so tests never read the real Claude settings.
 var claudeStopHookState = func() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1011,7 +1011,7 @@ var claudeStopHookState = func() (string, error) {
 // requireStopHook refuses a Claude session whose settings lack the AMQ Stop
 // hook: a remote task there is admitted and never completes, so it stays
 // running and parks every later task as busy (linked server's first live
-// run, amq-remote 0.97.0). attach never edits ~/.claude/settings.json; it
+// run, amq-remote 0.97.0). attach never edits the Claude settings; it
 // names the command that does. A hook that the user settings turn off with
 // disableAllHooks is accepted with a warning: a project or managed setting
 // may turn hooks back on, and only the user file is read.
@@ -1019,11 +1019,11 @@ func requireStopHook() (warning string, err error) {
 	state, err := claudeStopHookState()
 	switch {
 	case err != nil:
-		return "", fmt.Errorf("cannot read ~/.claude/settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
+		return "", fmt.Errorf("cannot read the Claude user settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
 	case state == claude.StopHookMissing:
 		return "", protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
 	case state == claude.StopHookDisabled:
-		return "~/.claude/settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
+		return "the Claude user settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
 	}
 	return "", nil
 }

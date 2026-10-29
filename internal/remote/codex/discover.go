@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
@@ -25,7 +26,7 @@ func DefaultControlSocket() (string, error) {
 }
 
 func defaultControlSocket(home string) string {
-	return filepath.Join(home, ".codex", "app-server-control", "app-server-control.sock")
+	return filepath.Join(harness.CodexHome(home), "app-server-control", "app-server-control.sock")
 }
 
 // discoverer lists the loaded threads of the running Codex app-server

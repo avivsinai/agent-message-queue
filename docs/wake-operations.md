@@ -215,7 +215,9 @@ amq wake install-dialog-hook
 ```
 
 The installer adds marked command hooks (`AMQ_DIALOG_HOOK=1`) to the user
-settings file `~/.claude/settings.json` and leaves other content as it is.
+settings file `$CLAUDE_CONFIG_DIR/settings.json` (default
+`~/.claude/settings.json`), the file Claude Code reads, and leaves other
+content as it is. The dialog guard reads the same file.
 Running it again keeps current entries and replaces older forms;
 `amq wake uninstall-dialog-hook` removes the entries. Running sessions pick up
 the change through the settings watcher; if `/hooks` does not list the

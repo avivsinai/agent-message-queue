@@ -35,6 +35,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "hookinstall TestMain: set USERPROFILE: %v\n", err)
 		os.Exit(1)
 	}
+	// Either would move the settings files out of the temp home.
+	_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
+	_ = os.Unsetenv("CODEX_HOME")
 	// os.Exit skips defers, so clean up before exiting with the real code.
 	code := m.Run()
 	if err := os.RemoveAll(home); err != nil {

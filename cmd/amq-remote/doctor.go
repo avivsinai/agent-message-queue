@@ -114,14 +114,14 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		switch {
 		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+claude.SettingsPath(home))
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
 		case state == claude.StopHookDisabled:
 			// Only the user file was read; a project or managed setting can
 			// override disableAllHooks, so the effective state is unknown and
 			// is reported, not failed.
-			report["claude_stop_hook"] = "~/.claude/settings.json holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
+			report["claude_stop_hook"] = claude.SettingsPath(home) + " holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		if serr == nil && state != claude.StopHookMissing {
 			form, _ := claude.StopHookForm(home)
@@ -158,13 +158,13 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		switch {
 		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+claude.SettingsPath(home))
 		case state == claude.StopHookMissing && !s.Capabilities.ApproveTool:
 			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so a shared source never sees a tool approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookDisabled:
-			report["claude_approval_hook"] = "~/.claude/settings.json holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
+			report["claude_approval_hook"] = claude.SettingsPath(home) + " holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		// Allow from Buzz needs the owner pinned on the hook's command line,
 		// and the pin holds only while Claude cannot change it unprompted.

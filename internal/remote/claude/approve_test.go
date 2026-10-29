@@ -136,7 +136,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, HookPin{}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(settingsPath(home))
+	raw, err := os.ReadFile(SettingsPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, pin); err != nil {
 		t.Fatal(err)
 	}
-	cmds, err := installedCommands(settingsPath(home), permissionSpec)
+	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner '"+pin.Owner+"'") || PermissionHookPin(home) != pin {
 		t.Fatalf("commands = %q (%v), pin = %+v; want one hook pinning %+v", cmds, err, PermissionHookPin(home), pin)
 	}

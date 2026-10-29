@@ -22,8 +22,12 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// TestMain lets a test run this binary's own main as a child process.
+// TestMain lets a test run this binary's own main as a child process. The
+// tests pass a temp home; CLAUDE_CONFIG_DIR or CODEX_HOME would move the
+// settings files out of it.
 func TestMain(m *testing.M) {
+	_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
+	_ = os.Unsetenv("CODEX_HOME")
 	if os.Getenv("AMQ_REMOTE_TEST_MAIN") == "1" {
 		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}

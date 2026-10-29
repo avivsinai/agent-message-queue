@@ -23,6 +23,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -452,6 +453,68 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	}
 	if len(settings.Hooks["PostToolUse"]) != 1 {
 		t.Errorf("Claude Code 2.1.118 PostToolUse = %+v, want one entry", settings.Hooks["PostToolUse"])
+	}
+}
+
+// field: plain-doorbell live check 2026-10-29 (bead agent-message-queue-r6h).
+// Claude Code reads $CLAUDE_CONFIG_DIR/settings.json when the variable is
+// set, but the installer wrote and the dialog guard read
+// ~/.claude/settings.json, so such a seat got the guard of hooks it never ran.
+func TestWakeDialogHookFollowsClaudeConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	fakeClaudeOnPath(t, "2.1.310")
+	if dialogGuardEnabled(harness.Claude) {
+		t.Fatal("dialog guard is on before any hook is installed")
+	}
+	if _, err := captureStdout(t, func() error {
+		return runWake([]string{"install-dialog-hook"})
+	}); err != nil {
+		t.Fatalf("install-dialog-hook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config, "settings.json")); err != nil {
+		t.Fatalf("no settings.json in CLAUDE_CONFIG_DIR: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+		t.Fatalf("install wrote ~/.claude (stat err %v), want only CLAUDE_CONFIG_DIR", err)
+	}
+	if !dialogGuardEnabled(harness.Claude) {
+		t.Fatal("dialog guard is off with the hook installed in CLAUDE_CONFIG_DIR")
+	}
+}
+
+// field: same live check. With disableAllHooks in the user settings Claude
+// Code runs no hook, yet the guard read the installed entries as on and a
+// startup hold had no hook to release it.
+func TestWakeDialogGuardIsOffWhenClaudeDisablesAllHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeClaudeOnPath(t, "2.1.310")
+	if _, err := captureStdout(t, func() error {
+		return runWake([]string{"install-dialog-hook"})
+	}); err != nil {
+		t.Fatalf("install-dialog-hook: %v", err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["disableAllHooks"] = true
+	if raw, err = json.Marshal(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if dialogGuardEnabled(harness.Claude) {
+		t.Fatal("dialog guard is on although Claude Code runs no hook")
 	}
 }
 
