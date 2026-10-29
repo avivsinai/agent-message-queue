@@ -10,8 +10,10 @@ web
 
 A static HTML page that `amq-board --html --out <file>` renders from Go
 `html/template`. The files are under `internal/board/web/`: one template, one
-hand-written stylesheet, and one script. The board model is embedded in the
-page. No external fonts, scripts, or CDNs.
+hand-written stylesheet, and one script. The page embeds only its publication
+identity and the attachable tasks; message bodies and complete evidence stay in
+`--json`. Growing groups show their count and newest entries. No external
+fonts, scripts, or CDNs.
 
 ## Users
 
