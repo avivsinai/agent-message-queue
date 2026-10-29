@@ -884,9 +884,15 @@ const (
 // say emits text as the agent message and returns the result. A client that
 // left gets no message. kind is postStatus or postFinal.
 func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError) {
+	if outcome != "client_disconnected" && text == "" && kind == postFinal {
+		fmt.Fprintf(os.Stderr, "amq-acp: %s ended with no final text; nothing was posted\n", r.meta.Target)
+	}
 	if outcome != "client_disconnected" && text != "" {
 		// Buzz first: a failed ACP emission never skips the post.
 		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
+		if kind == postFinal && strings.HasPrefix(r.meta.Posted, "error") {
+			fmt.Fprintf(os.Stderr, "amq-acp: the final answer of %s was not posted: %s\n", r.meta.Target, r.meta.Posted)
+		}
 		if r.quiet && kind == postFinal {
 			return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 		}
