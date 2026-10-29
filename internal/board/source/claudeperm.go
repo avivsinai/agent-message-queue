@@ -25,16 +25,6 @@ func (ClaudePermissions) Name() string { return "claude-permissions" }
 
 func (ClaudePermissions) Discover(board.Env) (bool, string) { return true, "" }
 
-// These private-format versions were checked against session records, and
-// 2.1.310 against its installed producer. A new version needs that check too.
-func claudePermissionVersion(version string) bool {
-	switch version {
-	case "2.1.289", "2.1.292", "2.1.294", "2.1.296", "2.1.299", "2.1.308", "2.1.309", "2.1.310":
-		return true
-	}
-	return false
-}
-
 func (ClaudePermissions) Read(ctx context.Context, env board.Env) (res board.Result) {
 	res = board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Feeds: []board.Column{board.ColumnWaiting}}
 	var problems []string
@@ -146,14 +136,18 @@ func (ClaudePermissions) Read(ctx context.Context, env board.Env) (res board.Res
 				fail(fmt.Errorf("claude session %s: invalid session identity", entry.Name()))
 				continue
 			}
+			// The version only labels the result; a record of any version is
+			// read when its fields have the expected types.
 			var format struct {
 				Version string `json:"version"`
 			}
-			if json.Unmarshal(raw, &format) != nil || !claudePermissionVersion(format.Version) {
-				fail(fmt.Errorf("claude session %s: version %q not supported", entry.Name(), format.Version))
+			if err := json.Unmarshal(raw, &format); err != nil {
+				fail(fmt.Errorf("claude session %s: unreadable version", entry.Name()))
 				continue
 			}
-			versions[format.Version] = true
+			if format.Version != "" {
+				versions[format.Version] = true
+			}
 			var status struct {
 				Name      string `json:"name"`
 				Status    string `json:"status"`

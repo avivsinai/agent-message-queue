@@ -178,7 +178,7 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 	ev := usage.Evidence{Source: codexnorm.Source, Contract: codexrpc.Contract, ObservedAt: now}
 
 	// The version check makes no network call, so it runs before the
-	// reservation; an unverified version is held like any failure.
+	// reservation; output that names no version is held like any failure.
 	vctx, vcancel := context.WithTimeout(ctx, versionDeadline)
 	vr := fx.Command(vctx, edge.Command{Path: req.Codex.Bin, Args: codexrpc.VersionArgs, MaxOut: maxVersionOut})
 	vcancel()
@@ -189,9 +189,6 @@ func collectCodex(ctx context.Context, req Request, home string, facts usage.Res
 		got = homeFailure(attempt.Key, ev, vr.Failure, "codex --version: "+errText(vr.Err))
 	case !versionOK:
 		got = homeFailure(attempt.Key, ev, usage.FailUnsupportedVersion, "codex --version printed no version")
-	case !codexrpc.Verified(version):
-		ev.ProducerVersion = usage.Some(version)
-		got = homeFailure(attempt.Key, ev, usage.FailUnsupportedVersion, "codex "+version+" is not a verified version")
 	}
 	if len(got.Failures) > 0 {
 		return finish(facts, got, attempt, fx.Clock(), journal, fx)

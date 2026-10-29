@@ -28,12 +28,15 @@ func (r claudePermRunner) RunLimited(_ context.Context, _ string, argv []string,
 // Slice 5a: a captured, scrubbed Claude status file places a permission
 // wait on its mapped agent, or marks a cwd owner join inferred. Design
 // finding 6 excludes foreign payload, and finding 8 keeps old mapped waits.
+// The new version row: amq-board refused every status record of the
+// installed Claude Code 2.1.312 as "not supported" (2026-10-29), so its
+// permission waits did not show.
 func TestClaudePermissionWaitsFromSessionStatus(t *testing.T) {
 	fixture, err := os.ReadFile("testdata/claude-session-wait-2.1.308.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"mapped old wait", "inferred owner", "foreign project", "unknown version", "old discovery", "other dialog", "duplicate session", "dead process", "nongit project"} {
+	for _, name := range []string{"mapped old wait", "inferred owner", "foreign project", "new version", "old discovery", "other dialog", "duplicate session", "dead process", "nongit project"} {
 		t.Run(name, func(t *testing.T) {
 			home, project := t.TempDir(), t.TempDir()
 			t.Setenv("CLAUDE_CONFIG_DIR", home)
@@ -59,8 +62,8 @@ func TestClaudePermissionWaitsFromSessionStatus(t *testing.T) {
 				record["name"] = map[string]string{"private": "FOREIGN_PAYLOAD"}
 				record["status"] = []string{"FOREIGN_PAYLOAD"}
 			}
-			if name == "unknown version" {
-				record["version"] = "99.0.0"
+			if name == "new version" {
+				record["version"] = "2.1.312"
 			}
 			if name == "other dialog" {
 				record["waitingFor"] = "dialog open"
@@ -122,14 +125,11 @@ func TestClaudePermissionWaitsFromSessionStatus(t *testing.T) {
 			})
 			env := board.Env{Dir: project, Now: func() time.Time { return now }, Run: runner}
 			got := (ClaudePermissions{}).Read(context.Background(), env)
-			if name == "unknown version" {
-				if got.Status != board.StatusDegraded || len(got.Items) != 0 || !strings.Contains(got.Detail, "99.0.0") {
-					t.Fatalf("unknown version: %+v", got)
-				}
-				return
-			}
 			if got.Status != board.StatusOK {
 				t.Fatalf("read: %+v", got)
+			}
+			if name == "new version" && got.Version != "2.1.312" {
+				t.Fatalf("producer version: %q", got.Version)
 			}
 			if name == "foreign project" || name == "old discovery" || name == "other dialog" || name == "dead process" {
 				if len(got.Items) != 0 {

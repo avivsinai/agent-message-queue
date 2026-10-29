@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,11 +31,6 @@ var Args = []string{"-s", "read-only", "-a", "never", "app-server"}
 // VersionArgs prints the CLI version.
 var VersionArgs = []string{"--version"}
 
-// verified lists the exact CLI releases whose replies this parser was run
-// against for real. Any other version, a pre-release included, is
-// unverified: its replies are not read.
-var verified = []string{"0.163.0", "0.164.0"}
-
 // Version reads `codex --version` output ("codex-cli 0.163.0").
 func Version(out []byte) (string, bool) {
 	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
@@ -49,9 +43,6 @@ func Version(out []byte) (string, bool) {
 	}
 	return fields[1], true
 }
-
-// Verified reports whether v is exactly a verified release.
-func Verified(v string) bool { return slices.Contains(verified, v) }
 
 // parseVersion accepts major.minor.patch with an optional pre-release or
 // build suffix.

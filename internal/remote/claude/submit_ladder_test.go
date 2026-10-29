@@ -203,6 +203,30 @@ func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
 	}
 }
 
+// Live check on Claude Code 2.1.312 (bead 611.42.12.2): the transcript is
+// written asynchronously, so the Stop hook ran before the turn's final text
+// reached it, and the run completed with an empty result that the Buzz DM
+// never showed. The hook's last_assistant_message is the result.
+func TestStopHookFinalTextCompletesBeforeTheTranscriptHasIt(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("final-text-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	appendTranscript(t, ft.home, deliveredLine(t, admission.RunID, frameEnvelope(t, ft)), transcriptLine(t, "assistant", ""))
+	att.pollConfirmations()
+
+	time.Sleep(2 * time.Millisecond) // the Stop is dated after the delivery
+	payload, _ := json.Marshal(map[string]any{"session_id": "sess-abc", "hook_event_name": "Stop", "last_assistant_message": "pong"})
+	RunStopHookReceiver(ft.home, strings.NewReader(string(payload)), nil)
+	att.pollConfirmations()
+	if ev, _ := att.Lookup(key, ""); ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "pong" {
+		t.Fatalf("state=%s result=%+v, want completed with the hook's final text", ev.State, ev.Result)
+	}
+}
+
 // TestCompletionCallbackMayReacquireMutex pins codex #855 r1 item 6: the
 // endpoint acknowledges a completed run synchronously from the event
 // callback (core onNative AcknowledgeResult path), which takes a.mu.
