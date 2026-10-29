@@ -25,13 +25,11 @@ import (
 // writes a Startup marker before exec, and the wake holds until Codex
 // records the decision in config.toml, with no hook installed.
 func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
-	h, config, real, marker := newCodexTrustDialogHarness(t)
+	h, config, real, marker := newCodexProperModeHarness(t)
 	// #1180 review: a directory saved as untrusted still opens on Codex's
 	// restricted trust dialog, so it gets the marker too.
 	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
-	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, untrusted)
 	syncStartupMarkerForTest(t, h.root, []string{"-c", "check_for_update_on_startup=false", "-s", "read-only"})
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatalf("no Startup marker for an untrusted checkout: %v", err)
@@ -65,9 +63,7 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	h.send("late", format.PriorityUrgent)
 
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, trusted)
 	// W1 review (Pro finding 1): the trust record is shared by every
 	// terminal, so another terminal's answer released this terminal's
 	// open trust screen. Only a prompt hook of this launch releases it.
@@ -86,9 +82,7 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 	// #1180 ruling: a directory that stays untrusted has no readiness
 	// signal without the Codex SessionStart hook; after 10 minutes the
 	// existing aging applies: input still held, attention output instead.
-	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, untrusted)
 	syncStartupMarkerForTest(t, h.root, []string{"-c", "check_for_update_on_startup=false"})
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatal(err)
@@ -108,7 +102,7 @@ func TestCodexTrustDialogHoldsTheDoorbellUntilTrustIsRecorded(t *testing.T) {
 // doorbell answered the dialog, Codex quit, and the rest of the doorbell ran
 // in the parent shell.
 func TestCodexStartOutsideAGitCheckoutHoldsTheDoorbell(t *testing.T) {
-	h, _, real, marker := newCodexTrustDialogHarness(t)
+	h, _, real, marker := newCodexProperModeHarness(t)
 	if err := os.Remove(filepath.Join(real, ".git")); err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +124,9 @@ func TestCodexStartOutsideAGitCheckoutHoldsTheDoorbell(t *testing.T) {
 // doorbell, Codex's trust record does not release it, and the Codex dialog
 // hook's first-turn close does.
 func TestCodexUnknownVersionOnATrustedSeatHoldsTheDoorbell(t *testing.T) {
-	h, config, real, marker := newCodexTrustDialogHarness(t)
+	h, config, real, marker := newCodexProperModeHarness(t)
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, trusted)
 	// An explicit CLI setting is not proof that higher policy permits it.
 	// Unlike the trust-only fixtures, this calls the full startup producer.
 	if err := syncStartupDialogMarker(h.root, "codex", filepath.Join(t.TempDir(), "codex"), []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
@@ -221,11 +213,9 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 			wakeStartupKindUpdate, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, config, real, marker := newCodexTrustDialogHarness(t)
+			h, config, real, marker := newCodexProperModeHarness(t)
 			trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-			if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeCodexConfigForTest(t, config, trusted)
 			byCwd := map[string]string{"": fmt.Sprintf(tc.hooks, real)}
 			args := []string{"-c", "check_for_update_on_startup=false"}
 			switch {
@@ -248,9 +238,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 					t.Skip("/var is not a symlink here")
 				}
 				trusted = "[projects.\"" + logical + "\"]\ntrust_level = \"trusted\"\n[projects.\"" + canonical + "\"]\ntrust_level = \"trusted\"\n"
-				if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				writeCodexConfigForTest(t, config, trusted)
 				byCwd[""] = fmt.Sprintf(tc.hooks, canonical)
 				byCwd[logical] = fmt.Sprintf(tc.linkHooks, logical)
 				args = append(args, "-C", logical)
@@ -261,9 +249,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 				}
 				t.Chdir(link)
 				trusted += "[projects.\"" + link + "\"]\ntrust_level = \"trusted\"\n"
-				if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				writeCodexConfigForTest(t, config, trusted)
 				byCwd[link] = fmt.Sprintf(tc.linkHooks, link)
 			}
 			bin := fakeCodexForTest(t, filepath.Dir(config), tc.version, byCwd, tc.requirements, tc.config)
@@ -290,7 +276,7 @@ func TestCodex164StartupNeedsTrustAndNativeHookReview(t *testing.T) {
 // screen was still on screen. A 0.164 marker stays held after the trust
 // record is written.
 func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
-	h, config, real, marker := newCodexTrustDialogHarness(t)
+	h, config, real, marker := newCodexProperModeHarness(t)
 	reply := fmt.Sprintf(`{"id":2,"result":{"data":[{"cwd":%q,"hooks":[%s],"warnings":[],"errors":[]}]}}`, real, codexHookForTest("trusted"))
 	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{"": reply}, `{"id":3,"result":{"requirements":null}}`, "")
 	if err := syncStartupDialogMarker(h.root, "codex", bin, []string{"-c", "check_for_update_on_startup=false"}, false); err != nil {
@@ -305,51 +291,12 @@ func TestCodex164MarkerIsNotReleasedByTheTrustRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, trusted)
 	h.send("a", format.PriorityUrgent)
 	h.advance(wakeDialogRecheck)
 	h.scan(h.cfg)
 	if len(h.injected) != 0 {
 		t.Fatalf("typed %q after the trust record, while Codex may review hooks", h.injected)
-	}
-}
-
-// Bead agent-message-queue-uue (live check on codex-cli 0.164.0, finding
-// 3): with the AMQ hook installed but not trusted, doctor's held-doorbell
-// line named amq wake install-dialog-hook; the remedy is to trust the hook
-// in Codex's /hooks.
-func TestCodexHoldHintNamesHooksForAnUntrustedDialogHook(t *testing.T) {
-	clearSendMailboxTestEnv(t)
-	home := t.TempDir()
-	codexHome := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", codexHome)
-	codexRequirementsPath = filepath.Join(home, "no-requirements.toml")
-	t.Cleanup(func() { codexRequirementsPath = "/etc/codex/requirements.toml" })
-	bin := filepath.Join(home, "amq")
-	if err := os.WriteFile(bin, nil, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	store, err := codexDialogStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := claude.InstallCommandHooksAt(filepath.Join(codexHome, "hooks.json"), codexDialogHooks(bin, store)); err != nil {
-		t.Fatal(err)
-	}
-	root := secureTempDirForTest(t)
-	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
-		t.Fatal(err)
-	}
-	raw := `{"schema":1,"event":"Startup","harness":"codex","kind":"hook_review","cwd":"/work","opened_at":"x"}` + "\n"
-	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "codex"), wakeDialogFileName), []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hint, ok := codexStartupHoldHint(root, "codex")
-	if !ok || !strings.Contains(hint.Message, "open /hooks in Codex") || strings.Contains(hint.Message, "install-dialog-hook") {
-		t.Fatalf("held-doorbell hint = %+v, %v; want the /hooks remedy", hint, ok)
 	}
 }
 
@@ -462,9 +409,71 @@ func newCodexTrustDialogHarness(t *testing.T) (h *wakeHoldHarness, config, real,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "codex")
 	h.cfg.startupTrustRelease = wakeStartupTrustReleaseInDir(agentDir)
 	return h, filepath.Join(codexHome, "config.toml"), real, filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+}
+
+// newCodexProperModeHarness is newCodexTrustDialogHarness with the AMQ
+// Codex dialog hook installed and trusted in its CODEX_HOME, so Codex
+// startup holds apply (dialogGuardEnabled). Its tests write config.toml
+// through writeCodexConfigForTest, which keeps that trust.
+func newCodexProperModeHarness(t *testing.T) (h *wakeHoldHarness, config, real, marker string) {
+	t.Helper()
+	h, config, real, marker = newCodexTrustDialogHarness(t)
+	installTrustedCodexDialogHookForTest(t)
+	return h, config, real, marker
+}
+
+// installTrustedCodexDialogHookForTest installs the AMQ Codex dialog hook in
+// $CODEX_HOME/hooks.json and trusts it in config.toml, as /hooks does.
+func installTrustedCodexDialogHookForTest(t *testing.T) {
+	t.Helper()
+	codexRequirementsPath = filepath.Join(t.TempDir(), "requirements.toml")
+	t.Cleanup(func() { codexRequirementsPath = "/etc/codex/requirements.toml" })
+	bin := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(bin, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := codexDialogStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := codexHooksPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
+		t.Fatal(err)
+	}
+	writeCodexConfigForTest(t, filepath.Join(filepath.Dir(path), "config.toml"), "")
+	if !dialogGuardEnabled("codex") {
+		t.Fatal("setup: the installed Codex dialog hook is not trusted")
+	}
+}
+
+// writeCodexConfigForTest writes body as $CODEX_HOME/config.toml, followed
+// by the trust of every AMQ dialog hook entry in $CODEX_HOME/hooks.json.
+func writeCodexConfigForTest(t *testing.T, config, body string) {
+	t.Helper()
+	path, err := codexHooksPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := readCodexHookEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString(body)
+	for event, list := range entries {
+		for _, entry := range list {
+			fmt.Fprintf(&b, "[hooks.state.%q]\ntrusted_hash = %q\n", entry.key(path, event), entry.hash(event))
+		}
+	}
+	if err := os.WriteFile(config, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // #1180 review: coop exec wrote or removed the Startup marker before
@@ -532,7 +541,7 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir), released)
+	h.cfg.dialogSource = withWakeStartupHold(wakeDialogSourceInDir(agentDir, "codex"), released)
 
 	h.send("a", format.PriorityUrgent)
 	h.scan(h.cfg)
@@ -549,12 +558,14 @@ func TestCoopWakeTypesNothingBeforeTheStartupHoldIsReleased(t *testing.T) {
 }
 
 // Lead ruling on #1180: a trust hold that never closes (for example a Codex
-// directory kept untrusted, without the Codex hook) must be visible:
-// amq wake check reports it, its age, and what releases it.
+// directory kept untrusted) must be visible: amq wake check reports it, its
+// age, and what releases it. Such a hold exists only with the Codex dialog
+// hook installed and trusted.
 func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	clearSendMailboxTestEnv(t)
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
+	installTrustedCodexDialogHookForTest(t)
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -585,7 +596,7 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	}
 	hold := result.StartupHold
 	if hold == nil || hold.Harness != "codex" || hold.Dir != "/work" || hold.AgeSeconds < 600 ||
-		!strings.Contains(hold.Release, "install-dialog-hook --harness codex") {
+		!strings.Contains(hold.Release, "the Codex dialog hook releases it at the first prompt") {
 		t.Fatalf("startup hold = %#v", hold)
 	}
 
@@ -600,9 +611,7 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	trusted := "[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, filepath.Join(codexHome, "config.toml"), trusted)
 	accepted := `{"schema":1,"event":"Startup","harness":"codex","cwd":"` + real + `","opened_at":"x"}` + "\n"
 	if err := os.WriteFile(marker, []byte(accepted), 0o600); err != nil {
 		t.Fatal(err)
@@ -794,28 +803,6 @@ func TestCodexStartupProbeKillsAFeaturesChildThatHoldsStdout(t *testing.T) {
 	}
 }
 
-// Pre-merge review of fix/wake-holds-0113 (Pro finding 5 and the lead's
-// W1 ruling): a Codex Startup marker that only the dialog hook releases
-// held the doorbell with no sign before launch when the hook could not
-// run. coop exec now says so on stderr, with the remedy.
-func TestCodexStartupHoldNamesAMissingDialogHookBeforeLaunch(t *testing.T) {
-	h, config, real, _ := newCodexTrustDialogHarness(t)
-	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
-	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, stderr, err := captureEnvOutput(t, func() error {
-		return syncStartupDialogMarker(h.root, "codex", "/usr/local/bin/codex", []string{"-c", "check_for_update_on_startup=false"}, false)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(stderr, "holds this Codex seat's doorbell until the first prompt") ||
-		!strings.Contains(stderr, "amq wake install-dialog-hook --harness codex") {
-		t.Fatalf("stderr = %q, want the held-doorbell line with the install remedy", stderr)
-	}
-}
-
 // Pre-merge review of fix/wake-holds-0113 (Pro finding 4): Codex asks which
 // directory to resume a thread in when its recorded cwd differs from the
 // launch directory, and Enter picks one. With no choice set, coop exec sets
@@ -842,11 +829,9 @@ func TestCodexResumeLaunchKeepsTheLaunchDirectory(t *testing.T) {
 // ended. A resume whose screen may show now runs its own app-server for this
 // launch, and the marker names this launch's process.
 func TestCodexResumeWithAStartupScreenLaunchesEmbedded(t *testing.T) {
-	_, config, real, _ := newCodexTrustDialogHarness(t)
+	_, config, real, _ := newCodexProperModeHarness(t)
 	untrusted := "[projects.\"" + real + "\"]\ntrust_level = \"untrusted\"\n"
-	if err := os.WriteFile(config, []byte(untrusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, untrusted)
 	args := []string{"resume", "01a165af-5f6d-7270-bb60-671490b46ea1"}
 	env := []string{"AM_ME=codex", "AM_ROOT=/q"}
 	decision, err := decideCodexLaunch("/usr/local/bin/codex", args, env, real, coopNamedChoice{}, "")
@@ -867,11 +852,9 @@ func TestCodexResumeWithAStartupScreenLaunchesEmbedded(t *testing.T) {
 // check read trust and hooks for the launch directory and declared it
 // clear.
 func TestCodexSessionResumeHoldsWithoutItsDirectoryEvidence(t *testing.T) {
-	_, config, launchDir, _ := newCodexTrustDialogHarness(t)
+	_, config, launchDir, _ := newCodexProperModeHarness(t)
 	trusted := fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", launchDir)
-	if err := os.WriteFile(config, []byte(trusted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCodexConfigForTest(t, config, trusted)
 	session := `{"id":4,"result":{"config":{"check_for_update_on_startup":false,"tui":{"resume_cwd":"session"}}}}`
 	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{
 		"": `{"id":2,"result":{"data":[{"cwd":"` + launchDir + `","hooks":[]}]}}`,
@@ -915,10 +898,8 @@ func TestCodexResumeDefaultFollowsTheEffectiveConfig(t *testing.T) {
 // order and the last wins, but AMQ read the first tui.resume_cwd and missed
 // a later "session". The mode comes from the probe's config/read.
 func TestCodexLastResumeOverrideKeepsTheStartupHold(t *testing.T) {
-	_, config, dir, _ := newCodexTrustDialogHarness(t)
-	if err := os.WriteFile(config, []byte(fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", dir)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	_, config, dir, _ := newCodexProperModeHarness(t)
+	writeCodexConfigForTest(t, config, fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", dir))
 	bin := fakeCodexForTest(t, filepath.Dir(config), "0.164.0", map[string]string{
 		"": `{"id":2,"result":{"data":[{"cwd":"` + dir + `","hooks":[]}]}}`,
 	}, `{"id":3,"result":{"requirements":null}}`,

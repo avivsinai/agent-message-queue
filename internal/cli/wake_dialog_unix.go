@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
@@ -161,22 +162,39 @@ type wakeDialogMarker struct {
 	Launch *launch.HolderIdentity `json:"launch,omitempty"`
 }
 
-// wakeDialogSourceInDir is the running wake's dialog source. It reads only
-// through the canonical agent directory; a detached directory cannot show
-// the hook's marker, so it reads as unknown, never as closed. A Claude Code
+// wakeDialogSourceInDir is the running wake of harnessName's dialog source.
+// It reads only through the canonical agent directory. A Claude Code
 // Startup marker reads as closed once Claude Code has recorded its trust
-// decision (a Codex one never does),
-// so the doorbell rings without a SessionStart hook. A Claude Code marker
-// whose session transcript shows a result for its tool call
-// (claudeDialogAnswered) is removed; a missing or unreadable transcript, a
-// busy lock or a changed marker keeps the hold until the next recheck.
-func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogState, error) {
+// decision (a Codex one never does), so the doorbell rings without a
+// SessionStart hook. A Claude Code marker whose session transcript shows a
+// result for its tool call (claudeDialogAnswered) is removed; a missing or
+// unreadable transcript, a busy lock or a changed marker keeps the hold
+// until the next recheck.
+//
+// A marker that proves no open dialog (older than wakeDialogQuietHold,
+// dated in the future, unreadable, or behind a detached directory) reads as
+// unknown, and so holds input, only while the dialog guard of the harness
+// that wrote it (else harnessName) is on (dialogGuardEnabled). Without the
+// guard it reads as closed: the default wake is a plain doorbell that never
+// stays held by a marker nothing will close.
+func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
+	guard := dialogGuardCache{}
+	unknown := func(raw []byte, readErr error) (wakeDialogState, error) {
+		name := wakeDialogMarkerHarness(raw)
+		if name == "" {
+			name = harnessName
+		}
+		if !guard.enabled(name) {
+			return wakeDialogClosed, nil
+		}
+		return wakeDialogUnknown, readErr
+	}
 	return func(now time.Time) (wakeDialogState, error) {
 		raw, info, exists, readErr, err := readWakeDialogMarkerInDir(agentDir)
 		if err != nil {
-			return wakeDialogUnknown, err
+			return unknown(nil, err)
 		}
 		if readErr == nil && exists && startupDialogClosed(raw, &startup) {
 			return wakeDialogClosed, nil
@@ -189,7 +207,11 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir) func(time.Time) (wakeDialogSt
 		if info != nil {
 			modTime = info.ModTime()
 		}
-		return classifyWakeDialogMarker(modTime, exists, readErr, now)
+		state, stateErr := classifyWakeDialogMarker(modTime, exists, readErr, now)
+		if state == wakeDialogUnknown {
+			return unknown(raw, stateErr)
+		}
+		return state, stateErr
 	}
 }
 
@@ -291,7 +313,7 @@ func wakeDialogHoldReason(marker wakeDialogMarker) string {
 	case agyTurnMarker(marker):
 		return harness + " is busy; the doorbell rings when the turn ends"
 	case marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider:
-		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy()
+		return harness + " startup screen open; answer it in that terminal; " + codexStartupHoldRemedy
 	case marker.Event == wakeDialogStartupEvent:
 		return harness + " startup screen open; answer it in that terminal to release"
 	}
@@ -833,6 +855,13 @@ func runWakeUninstallDialogHook(args []string) error {
 // checkClaudeDialogHook reports a missing or partly installed dialog hook,
 // or one whose amq binary is gone, when ~/.claude exists. It is read-only.
 func checkClaudeDialogHook() (doctorCheck, bool) {
+	return claudeDialogHookCheck(installedClaudeVersion())
+}
+
+// claudeDialogHookCheck is checkClaudeDialogHook for a known or unknown
+// Claude Code version. An unknown version needs only the ungated events, so
+// the check runs without starting claude.
+func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return doctorCheck{}, false
@@ -845,7 +874,7 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 	var commands []installed
 	var missing []string
 	supported := make(map[string]bool)
-	for _, event := range wakeDialogHookEventsFor(installedClaudeVersion()) {
+	for _, event := range wakeDialogHookEventsFor(version, known) {
 		supported[event] = true
 	}
 	for _, event := range wakeDialogHookEvents {
@@ -888,4 +917,95 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 	check.Status = "ok"
 	check.Message = "installed"
 	return check, true
+}
+
+// dialogGuardEnabled reports whether the person opted in to the dialog
+// guard for the harness name: the wake holds a doorbell only for a dialog
+// that an opted-in writer reports. For Claude Code, Codex and Cursor the
+// opt-in is the AMQ dialog hook that amq wake install-dialog-hook writes,
+// installed in full with its amq binary present; Codex runs it only once
+// trusted and enabled in /hooks. For agy and pi the writer itself is the
+// opt-in: the agy relay runs only when the person set AGY_CLI_OSC7501=on,
+// and the pi extension only when the person installed it. Any other name has
+// no guard. It starts no process.
+func dialogGuardEnabled(name string) bool {
+	var check func() (doctorCheck, bool)
+	switch name {
+	case harness.Claude:
+		check = func() (doctorCheck, bool) { return claudeDialogHookCheck(claudeVersion{}, false) }
+	case harness.Codex:
+		check = checkCodexDialogHook
+	case harness.Cursor:
+		check = checkCursorDialogHook
+	case harness.Agy, harness.Pi:
+		return true
+	default:
+		return false
+	}
+	result, ok := check()
+	return ok && result.Status == "ok"
+}
+
+// dialogGuardCache keeps the last dialogGuardEnabled answer per harness
+// while the files that decide it are unchanged, so a wake that rechecks a
+// marker does not reparse the hooks files each time.
+type dialogGuardCache map[string]struct {
+	stamp   string
+	enabled bool
+}
+
+func (c dialogGuardCache) enabled(name string) bool {
+	stamp := dialogGuardStamp(name)
+	if entry, ok := c[name]; ok && entry.stamp == stamp {
+		return entry.enabled
+	}
+	enabled := dialogGuardEnabled(name)
+	c[name] = struct {
+		stamp   string
+		enabled bool
+	}{stamp, enabled}
+	return enabled
+}
+
+// dialogGuardStamp names the current version of the files that decide the
+// dialog guard of a harness: path, mtime and size of each.
+func dialogGuardStamp(name string) string {
+	var paths []string
+	switch name {
+	case harness.Claude:
+		if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".claude", "settings.json"))
+		}
+	case harness.Codex:
+		if path, err := codexHooksPath(); err == nil {
+			paths = append(paths, path, filepath.Join(filepath.Dir(path), "config.toml"), codexRequirementsPath)
+		}
+	case harness.Cursor:
+		if path, err := cursorHooksPath(); err == nil {
+			paths = append(paths, path)
+		}
+	}
+	var b strings.Builder
+	for _, path := range paths {
+		b.WriteString(path)
+		if info, err := os.Stat(path); err == nil {
+			fmt.Fprintf(&b, "\x00%d\x00%d", info.ModTime().UnixNano(), info.Size())
+		}
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
+// wakeDialogMarkerHarness is the harness that wrote a marker: its harness
+// field, or Claude Code for a dialog hook marker, which names none. It is
+// "" when the marker cannot be parsed.
+func wakeDialogMarkerHarness(raw []byte) string {
+	var marker wakeDialogMarker
+	if json.Unmarshal(raw, &marker) != nil {
+		return ""
+	}
+	if marker.Harness == "" && marker.Event != wakeDialogStartupEvent {
+		return harness.Claude
+	}
+	return marker.Harness
 }

@@ -38,7 +38,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 	hook := func(verb, input string) {
 		t.Helper()
 		if err := runWakeDialog([]string{verb}, strings.NewReader(input)); err != nil {
@@ -147,7 +147,7 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 			}
 			var notices []string
 			attention := 0
-			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 			h.cfg.settings.heldNotice = true
 			h.cfg.desktopNotify = func(title, body string) error {
@@ -196,7 +196,7 @@ func TestWakeDialogPromptAfterABusyTurnNoticesAtOnce(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -240,7 +240,7 @@ func TestWakeDialogNewPromptMarkerNoticesAtOnce(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -286,7 +286,7 @@ func TestWakeDialogNewBusyTurnStartsAFreshNoticeLadder(t *testing.T) {
 		}
 	}
 	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir)
+	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 	h.cfg.settings.heldNotice = true
 	h.cfg.desktopNotify = func(_, body string) error {
@@ -322,13 +322,13 @@ func TestCoopNamedInjectWaitsForTheDialogMarker(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(`{"schema":1,"event":"Startup","harness":"cursor"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if waitCoopNamedInputFree(root, "cur", 50*time.Millisecond, 10*time.Millisecond) {
+	if waitCoopNamedInputFree(root, "cur", "cursor", 50*time.Millisecond, 10*time.Millisecond) {
 		t.Fatal("the namer may type while the Startup marker holds")
 	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
-	if !waitCoopNamedInputFree(root, "cur", 50*time.Millisecond, 10*time.Millisecond) {
+	if !waitCoopNamedInputFree(root, "cur", "cursor", 50*time.Millisecond, 10*time.Millisecond) {
 		t.Fatal("the namer still waits after the marker is gone")
 	}
 }
@@ -400,7 +400,7 @@ func TestWakeDialogClaudeToolCallClosesItsMarker(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
-			state, err := wakeDialogSourceInDir(agentDir)(time.Now())
+			state, err := wakeDialogSourceInDir(agentDir, "")(time.Now())
 			if got := err == nil && state == wakeDialogClosed; got != tc.closed {
 				t.Fatalf("marker closed = %v (%v), want %v", got, err, tc.closed)
 			}

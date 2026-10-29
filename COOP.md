@@ -215,11 +215,16 @@ amq wake --me claude --inject-mode none --bell &
 amq coop exec --require-wake --wake-inject-mode none claude
 ```
 
-`none` never writes terminal input. Other input-injecting modes can activate a
-permission or approval dialog; input deferral reduces collisions but cannot
-detect an idle dialog. For Claude Code, `amq wake install-dialog-hook` holds
-the doorbell while AskUserQuestion, ExitPlanMode, or a permission dialog is open;
-see [Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
+`none` never writes terminal input. The default wake rings a plain doorbell:
+text and Enter, with no holds, hooks, or screen reading, on every harness and
+terminal, so it can activate a permission or approval dialog; input deferral
+reduces collisions but cannot detect an idle dialog. The dialog guard is
+opt-in per harness, and `amq coop exec` prints `dialog guard: plain` or
+`dialog guard: proper (<harness>)`; see
+[Plain doorbell and the opt-in dialog guard](docs/wake-operations.md#plain-doorbell-and-the-opt-in-dialog-guard).
+For Claude Code, `amq wake install-dialog-hook` holds the doorbell while
+AskUserQuestion, ExitPlanMode, or a permission dialog is open; see
+[Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
 dialogs it cannot see. Use `none` when zero synthetic input is required.
 Removing Enter or sanitizing payload text does not prevent single-key approval
 shortcuts. A partially typed prompt already consumed by the app can still be
@@ -227,14 +232,14 @@ submitted after the quiet window. Urgent interrupts bypass input deferral;
 when input remains active through `--input-max-hold`, wake emits an out-of-band
 notice instead of injecting. Unavailable input sampling remains best-effort.
 
-agy runs no hooks with Google Cloud sign-in, so `amq coop exec agy` runs agy
-on a pseudo-terminal and stays as its terminal. It turns on agy's terminal
-status (`AGY_CLI_OSC7501=on`, `AGY_CLI_OSC7501_MESSAGES=brief`) and holds the
-doorbell while agy reports a permission or sign-in prompt or a running turn.
-The doorbell rings once, within 2 seconds after agy reports the turn done or
-idle. When you set `AGY_CLI_OSC7501` to anything but `on`, agy runs as
-before: a doorbell can answer its permission prompt, and doorbells typed
-during a turn can use up the attempt budget.
+agy runs no hooks with Google Cloud sign-in, so by default it gets the plain
+doorbell: a doorbell can answer its permission prompt, and doorbells typed
+during a turn can use up the attempt budget. When you set
+`AGY_CLI_OSC7501=on`, `amq coop exec agy` runs agy on a pseudo-terminal,
+stays as its terminal, asks for brief status messages
+(`AGY_CLI_OSC7501_MESSAGES=brief` unless set), and holds the doorbell while
+agy reports a permission or sign-in prompt or a running turn. The doorbell
+rings once, within 2 seconds after agy reports the turn done or idle.
 
 For Cursor, `amq wake install-dialog-hook --harness cursor` holds the
 doorbell from each tool call of an `amq coop exec cursor-agent` seat to the

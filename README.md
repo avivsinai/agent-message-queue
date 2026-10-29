@@ -91,10 +91,14 @@ backend, it prints one command per agent and exits with code `6` (action
 required). Paste each complete command into a separate terminal; do not
 shorten or rebuild it.
 
+By default the wake rings a plain doorbell (text and Enter) on every harness,
+so it always rings; a doorbell that lands on an open dialog can answer it.
 Optional, for Claude Code: `amq wake install-dialog-hook` keeps the wake from
 typing into an open AskUserQuestion, plan, or permission dialog. Add
-`--harness codex` or `--harness cursor` (or `--harness all`) for their
-approval prompts.
+`--harness codex` (then trust the entries in Codex `/hooks`) or
+`--harness cursor` (or `--harness all`) for their approval prompts.
+`amq coop exec` prints `dialog guard: plain` or
+`dialog guard: proper (<harness>)` to show which one a seat gets.
 
 Start both agents before sending the first message. Messages that arrive
 before a recipient's wake starts remain unread but do not trigger that new

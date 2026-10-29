@@ -728,15 +728,17 @@ Interrupt notices (default on): urgent messages tagged with label "interrupt"
   group and can interrupt or crash the agent.
 
 Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
-  can activate a focused permission/approval dialog. With the Claude Code
-  dialog hook (amq wake install-dialog-hook), the wake writes no input while
-  AskUserQuestion, ExitPlanMode, or a permission dialog is open, and rings
-  about 2s after it closes; after a permission dialog it rings when the turn
-  ends or the person types. A marker older than 10m gets attention output,
-  still no input. --harness codex and --harness cursor guard their approval
-  prompts until the turn ends. Dialogs without a hook (workspace trust,
-  pickers, MCP elicitation, Cursor prompts before a tool call) are not
-  guarded. amq wake dialog is the hook receiver; amq wake
+  can activate a focused permission/approval dialog. Without a dialog hook
+  the wake rings a plain doorbell and holds for no dialog. With the Claude
+  Code dialog hook (amq wake install-dialog-hook), the wake writes no input
+  while AskUserQuestion, ExitPlanMode, or a permission dialog is open, and
+  rings about 2s after it closes; after a permission dialog it rings when
+  the turn ends or the person types. While the hook stays installed, a
+  marker older than 10m gets attention output, still no input. --harness
+  codex and --harness cursor guard their approval prompts until the turn
+  ends once their hooks are installed. Dialogs without a hook (workspace
+  trust, pickers, MCP elicitation, Cursor prompts before a tool call) are
+  not guarded. amq wake dialog is the hook receiver; amq wake
   uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce
   zero synthetic input; stderr output may scribble until redraw.
 
