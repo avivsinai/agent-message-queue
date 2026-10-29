@@ -102,6 +102,9 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 			continue
 		}
 		binding, bound := source.Bindings[key]
+		if !bound && claudeListEmpty(home, list) {
+			continue // no task to attribute: nothing is missing
+		}
 		if !bound && !claudeDefaultList(ctx, home, list, worktrees, budget) {
 			gap("unbound native task list " + list)
 			continue
@@ -228,6 +231,21 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 		return result.Items[i].Namespace+result.Items[i].Ref.ID < result.Items[j].Namespace+result.Items[j].Ref.ID
 	})
 	return result
+}
+
+// claudeListEmpty reports whether a native task list holds no task file. A
+// list that cannot be read is not empty: its gap is reported where it is read.
+func claudeListEmpty(home, list string) bool {
+	files, err := os.ReadDir(filepath.Join(home, "tasks", list))
+	if err != nil {
+		return false
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".json") {
+			return false
+		}
+	}
+	return true
 }
 
 // A default list must match a real session in this exact home and a project
