@@ -66,6 +66,25 @@ func TestClaudeNativeTasksUseHomeListAndTaskIdentity(t *testing.T) {
 	checkClaudeAggregateBudget(t, env)
 }
 
+// amq-board showed claude-tasks degraded on the owner's Mac (2026-10-29):
+// 106 native task lists under ~/.claude/tasks held no task file, and each
+// was reported as an unbound list. An empty list hides no task.
+func TestClaudeNativeTasksSkipAnEmptyUnboundList(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(home, "tasks", "session-00d9ec66"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := captureRunner{"claude --version": []byte("2.1.312 (Claude Code)\n"), "git worktree list --porcelain -z": []byte("worktree " + home + "\x00\x00"), "amq session list --json": []byte(`{"sessions":[]}`)}
+	env := board.Env{Dir: home, Now: time.Now, Run: runner}
+	result := (ClaudeTasks{Home: home}).Read(context.Background(), env)
+	if strings.Contains(result.Coverage.Detail, "unbound native task list") {
+		t.Fatalf("coverage = %q; an empty list is not a gap", result.Coverage.Detail)
+	}
+}
+
 // Native review observed the per-file cap still allowed 10 GiB per home.
 // Two real private file scopes must share one aggregate acquisition budget.
 func checkClaudeAggregateBudget(t *testing.T, env board.Env) {
