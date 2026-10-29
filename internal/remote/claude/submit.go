@@ -739,7 +739,8 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		}
 		// A cut marker text gives way to the whole text the transcript
 		// already holds.
-		if s.text != "" && !(s.cut && len(done.lastText) > len(s.text) && strings.HasPrefix(done.lastText, s.text)) {
+		fuller := s.cut && len(done.lastText) > len(s.text) && strings.HasPrefix(done.lastText, s.text)
+		if s.text != "" && !fuller {
 			done.lastText, done.lastCut = s.text, s.cut
 		}
 		events = a.settleRunLocked(done, protocol.StateCompleted, core.EventRunCompleted, events)
