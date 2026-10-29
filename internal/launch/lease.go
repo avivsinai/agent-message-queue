@@ -399,24 +399,62 @@ func runsUnderProcess(holder HolderIdentity) bool {
 
 // RunsUnderProcess reports whether this process is holder's process or
 // descends from it within maxProcessAncestry ancestors, with holder's start
-// token matching, so a reused pid does not count.
+// token matching, so a reused pid does not count. Every parent edge of the
+// walk is checked with stable identities, not only the last one: an
+// intermediate parent that exits frees its pid for another process, and a
+// walk that followed that pid would reach an unrelated holder.
 func RunsUnderProcess(holder HolderIdentity) bool {
-	pid := os.Getpid()
-	for depth := 0; pid > 0 && depth < maxProcessAncestry; depth++ {
-		if pid == holder.PID {
+	child := inspectProcess(os.Getpid())
+	if !child.Running || child.StartToken == "" {
+		return false
+	}
+	for depth := 0; child.PID > 0 && depth < maxProcessAncestry; depth++ {
+		if child.PID == holder.PID {
+			if child.StartToken != holder.ProcessStart {
+				return false
+			}
 			state, _ := InspectHolder(holder)
 			return state == LeaseValid
 		}
-		if pid == 1 {
+		if child.PID == 1 {
 			return false
 		}
-		parent, err := parentProcessID(pid)
-		if err != nil {
+		parent, ok := verifiedParent(child)
+		if !ok {
 			return false
 		}
-		pid = parent
+		child = parent
 	}
 	return false
+}
+
+// verifiedParent is the process child descends from. child keeps its
+// identity and its parent pid across the read of the parent, and the parent
+// started no later than child. A parent that exits makes the kernel reparent
+// child, so an unchanged parent pid means the process read under it is the
+// real parent; a reused pid names a process that started after child. An
+// observation that cannot be made or ordered fails closed.
+func verifiedParent(child processInfo) (processInfo, bool) {
+	ppid, err := parentProcessID(child.PID)
+	if err != nil || ppid <= 0 {
+		return processInfo{}, false
+	}
+	parent := inspectProcess(ppid)
+	if !parent.Running || parent.StartToken == "" || parent.BootID != child.BootID {
+		return processInfo{}, false
+	}
+	again := inspectProcess(child.PID)
+	if !again.Running || again.StartToken != child.StartToken || again.BootID != child.BootID {
+		return processInfo{}, false
+	}
+	if ppidAgain, err := parentProcessID(child.PID); err != nil || ppidAgain != ppid {
+		return processInfo{}, false
+	}
+	ordered, err := startedNoLaterThan(parent.StartToken, child.StartToken)
+	if err != nil || !ordered {
+		return processInfo{}, false
+	}
+	return parent, true
 }
 
 func writeLeaseRecord(root *fsq.DeliveryRoot, record leaseRecord) error {

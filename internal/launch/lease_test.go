@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -153,5 +155,47 @@ func writeHostileLease(t *testing.T, dir string, record leaseRecord, mode os.Fil
 	}
 	if err := os.WriteFile(leasePath(dir), data, mode); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Regression (pre-merge review of the 1uk.1 design): the ancestry walk
+// followed parent pids and checked only the holder it reached, so a parent
+// that exited and whose pid now names a later process, started after this
+// one, was accepted as this process's ancestor.
+func TestRunsUnderProcessRefusesAParentPIDThatStartedLater(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process ancestry is unavailable on this platform")
+	}
+	ppid := os.Getppid()
+	parent, err := HolderOf(ppid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !RunsUnderProcess(parent) {
+		t.Fatalf("RunsUnderProcess(real parent %+v) = false", parent)
+	}
+	self := inspectProcess(os.Getpid()).StartToken
+	sec, frac, dotted := strings.Cut(self, ".")
+	value, err := strconv.ParseInt(sec, 10, 64)
+	if err != nil {
+		t.Fatalf("start token %q: %v", self, err)
+	}
+	later := strconv.FormatInt(value+1, 10)
+	if dotted {
+		later += "." + frac
+	}
+	old := inspectProcess
+	inspectProcess = func(pid int) processInfo {
+		info := old(pid)
+		if pid == ppid {
+			info.StartToken = later
+		}
+		return info
+	}
+	t.Cleanup(func() { inspectProcess = old })
+	reused := parent
+	reused.ProcessStart = later
+	if RunsUnderProcess(reused) {
+		t.Fatalf("RunsUnderProcess(%+v) = true for a parent pid that started after this process", reused)
 	}
 }

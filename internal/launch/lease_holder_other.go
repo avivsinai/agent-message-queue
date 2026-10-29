@@ -22,3 +22,8 @@ func pidNamespace() string { return "" }
 func processStartUnix(string) (int64, error) {
 	return 0, fmt.Errorf("process start time unavailable on this platform")
 }
+
+// startedNoLaterThan fails closed: this platform has no start token to order.
+func startedNoLaterThan(string, string) (bool, error) {
+	return false, fmt.Errorf("process start time unavailable on this platform")
+}
