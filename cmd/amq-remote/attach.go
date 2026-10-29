@@ -408,7 +408,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 	if err != nil {
 		return "", false, err
 	}
-	_, err = binding.Retire(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
+	_, err = binding.Retire(binding.RemovedMoved, func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
 	return b.Name, reused, err
 }
 
@@ -871,7 +871,10 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if machine.State != agentMissing {
 		say(stdout, "Machine agent: %s (%s)", nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()), machine.State)
 	}
-	if helper.State != agentMissing {
+	// An offline helper is shown only without a machine agent: one deleted
+	// in Desktop never rewrites its marker, and the machine agent serves
+	// every session anyway.
+	if helper.State != agentMissing && (helper.State != agentOffline || machine.State == agentMissing) {
 		say(stdout, "Helper: %s (%s)", nonEmpty(helper.Display, "AMQ Remote helper"), helper.State)
 	}
 	if len(rows) == 0 {
@@ -964,7 +967,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	// channel as soon as the binding is gone; the machine agent archives the
 	// channel after that.
 	channel := false
-	removed, err := binding.Retire(func(b binding.Binding) bool {
+	removed, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool {
 		if !match(b) {
 			return false
 		}

@@ -76,7 +76,18 @@ type Binding struct {
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
+	// Removed is set only in a tombstone: why the binding was removed
+	// (RemovedEnded, RemovedDetached or RemovedMoved). Empty in a tombstone
+	// written before it was recorded.
+	Removed string `json:"removed,omitempty"`
 }
+
+// Why a binding was removed, recorded in its tombstone.
+const (
+	RemovedEnded    = "ended"    // its session was proven ended
+	RemovedDetached = "detached" // the owner detached it; the session may still run
+	RemovedMoved    = "moved"    // the same session attached again under another name
+)
 
 // Mailbox reports whether b delivers through an AMQ handle.
 func (b Binding) Mailbox() bool { return b.Carrier == CarrierMailbox }
@@ -738,22 +749,25 @@ func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tomb
 // unknown one is kept too. Like every removal, it leaves tombstones (see
 // Retire).
 func PruneEnded(inspect Inspector) ([]string, error) {
-	return Retire(func(b Binding) bool {
+	return Retire(RemovedEnded, func(b Binding) bool {
 		state, _ := inspect(b)
 		return state == Ended
 	})
 }
 
 // Retire removes every binding match accepts, as read under the binding lock,
-// and returns the names removed. A named binding is renamed to its tombstone,
+// and returns the names removed. A named binding is replaced by its tombstone,
 // which keeps its name held by its session identity, so a later session never
-// inherits the removed session's Buzz agent through a freed name.
+// inherits the removed session's Buzz agent through a freed name. The
+// tombstone, which records why (one of the Removed values), is written
+// before the binding is removed, so a reader that finds the binding gone
+// finds the reason too; a stop between the two leaves the binding bound.
 // Tombstones are never removed. Their number is bounded by the
 // distinct session identities, and an identity derived from a target (a link
 // share, or a native session whose working directory is unknown) names a
 // process, so each such session leaves one. The legacy single binding has no
 // name to hold and is deleted.
-func Retire(match func(Binding) bool) ([]string, error) {
+func Retire(why string, match func(Binding) bool) ([]string, error) {
 	var removed []string
 	err := transact(func(path string) error {
 		dir, err := namedDir(false)
@@ -768,7 +782,15 @@ func Retire(match func(Binding) bool) ([]string, error) {
 			if !match(b) {
 				continue
 			}
-			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
+			b.Removed = why
+			raw, err := json.MarshalIndent(b, "", "  ")
+			if err != nil {
+				return err
+			}
+			if _, err := fsq.WriteFileAtomic(dir, b.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+				return err
+			}
+			if err := os.Remove(filepath.Join(dir, b.Name+".json")); err != nil {
 				return err
 			}
 			removed = append(removed, b.Name)

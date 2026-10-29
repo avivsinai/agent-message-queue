@@ -390,7 +390,8 @@ worker stops, its relay call in flight is cut off and no new step starts.
   reaches no session; the answer lists each live session and its channel.
 - When the binding is gone (`/amq-remote off`) or its session is proven
   ended, the channel stops taking messages at once. The leader posts
-  "Session ended" in a channel that was active, then archives it; a failed
+  "Session ended" in a channel that was active when the session is proven
+  ended, or "Disconnected" when it may still run, then archives it; a failed
   archive is retried every 10 minutes. A binding name that another session
   identity takes gets a new channel, and the old one is archived. When the
   same session attaches again, its channel is unarchived (when an archive

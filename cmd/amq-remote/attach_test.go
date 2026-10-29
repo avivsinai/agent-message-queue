@@ -474,6 +474,49 @@ func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
 	}
 }
 
+// field: a note on bead agent-message-queue-1uk: after the helper agent was
+// deleted in Buzz Desktop, `amq-remote bindings` showed "Helper: ...
+// (offline)" from its last marker for ever, beside the machine agent that
+// serves every session.
+func TestBindingsHidesAnOfflineHelperBesideTheMachineAgent(t *testing.T) {
+	gone := endedHolder(t)
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	now := time.Now().UTC()
+	for _, m := range []struct {
+		dir     string
+		updated time.Time
+		holder  launch.HolderIdentity
+	}{
+		{helperMarkerDir, now.Add(-time.Hour), gone},
+		{machineMarkerDir, now, self},
+	} {
+		path := filepath.Join(dir, "remote", "acp", "agents", m.dir)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(map[string]any{"name": m.dir, "updated": m.updated.Format(time.RFC3339), "worker": m.holder, "parent": m.holder})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "pk.json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code, err := bindings(nil, &out); code != 0 || err != nil {
+		t.Fatalf("bindings: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(out.String(), "Machine agent:") || strings.Contains(out.String(), "Helper:") {
+		t.Fatalf("bindings printed %q; want the machine agent and no line for the offline helper", out.String())
+	}
+}
+
 // endedHolder is this test process as a holder recorded in another boot, so
 // its binding is proven ended; the test skips where the boot id is unreadable.
 func endedHolder(t *testing.T) launch.HolderIdentity {

@@ -55,7 +55,9 @@ const (
 
 // Why a record was retired.
 const (
-	retiredEnded    = "ended"    // the binding is gone or its session ended
+	retiredEnded    = "ended"    // its session is proven ended
+	retiredDetached = "detached" // the binding is gone; its session may still run
+	retiredMoved    = "moved"    // the same session attached again under another name
 	retiredReset    = "reset"    // amq-remote channel reset
 	retiredReplaced = "replaced" // another session identity holds the name
 )
@@ -387,7 +389,7 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	b, err := binding.ReadNamed(r.Name)
 	switch {
 	case errors.Is(err, binding.ErrNone):
-		s.retire(r, retiredEnded, now)
+		s.retire(r, goneReason(r), now)
 		return false
 	case err != nil:
 		return false
@@ -669,6 +671,37 @@ func (s *Server) removeDurably(path string) error {
 	return fsq.SyncDir(dir)
 }
 
+// goneReason is why the binding of r is gone, as the tombstone of r's
+// session records it. A tombstone without a reason counts as ended only
+// when its session is proven ended, else as detached, because a detach
+// leaves the session running.
+func goneReason(r channelRecord) string {
+	tombs, _ := binding.Tombstones()
+	for _, t := range tombs {
+		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
+			continue
+		}
+		switch t.Removed {
+		case binding.RemovedEnded:
+			return retiredEnded
+		case binding.RemovedMoved:
+			return retiredMoved
+		case binding.RemovedDetached:
+			return retiredDetached
+		}
+		if state, _ := t.Liveness(); state == binding.Ended {
+			return retiredEnded
+		}
+	}
+	return retiredDetached
+}
+
+// left reports whether r was retired because its session left: it ended or
+// it detached. The same session attaching again gets that channel back.
+func left(r channelRecord) bool {
+	return r.RetiredBy == retiredEnded || r.RetiredBy == retiredDetached
+}
+
 // retireGone retires each record whose binding is proven gone or ended, and
 // finishes the move of a record a stopped worker left half retired.
 func (s *Server) retireGone(now time.Time) {
@@ -682,7 +715,7 @@ func (s *Server) retireGone(now time.Time) {
 		}
 		b, err := binding.ReadNamed(r.Name)
 		if errors.Is(err, binding.ErrNone) {
-			s.retire(r, retiredEnded, now)
+			s.retire(r, goneReason(r), now)
 		} else if err == nil {
 			if state, _ := b.Liveness(); state == binding.Ended {
 				s.retire(r, retiredEnded, now)
@@ -756,13 +789,16 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 			return
 		}
 	}
-	if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && !r.SaidEnded && r.ChannelID != "" && !s.stopped() {
+	if left(r) && r.RetiredFrom == channelActive && !r.SaidEnded && r.ChannelID != "" && !s.stopped() {
 		r.SaidEnded = true
 		if s.save(&r, now) != nil {
 			return
 		}
-		_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content",
-			"Session ended: "+r.Label+". This channel no longer reaches it."))
+		text := "Session ended: " + r.Label + ". This channel no longer reaches it."
+		if r.RetiredBy == retiredDetached {
+			text = "Disconnected: " + r.Label + ". This channel no longer reaches it until the session connects again."
+		}
+		_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", text))
 	}
 	for len(r.Orphans) > 0 {
 		if s.stopped() {
@@ -860,7 +896,7 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
-		if r.Name == b.Name && r.Identity == b.SessionIdentity() && r.RetiredBy == retiredEnded &&
+		if r.Name == b.Name && r.Identity == b.SessionIdentity() && left(r) &&
 			r.RetiredFrom == channelActive && r.ChannelID != "" && (found == nil || r.Updated > found.Updated) {
 			found = &r
 		}

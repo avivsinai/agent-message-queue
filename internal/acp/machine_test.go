@@ -288,7 +288,7 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 		}
 		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
 	}
-	if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -310,7 +310,7 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	tick(s, now.Add(2*time.Minute))
 
 	want := []string{
-		"messages send --channel " + machineChanA + " --content Session ended: " + alpha.Label + ". This channel no longer reaches it.",
+		"messages send --channel " + machineChanA + " --content Disconnected: " + alpha.Label + ". This channel no longer reaches it until the session connects again.",
 		"channels archive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
@@ -335,12 +335,29 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 		}
 		return nil
 	})()
-	if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	tick(s, now.Add(3*time.Minute))
 	if len(synced) == 0 || synced[0] != s.retiredDir() {
 		t.Fatalf("directory syncs on retirement = %q; want the retired store synced first", synced)
+	}
+}
+
+// Review of the detach wording: a Codex app-server session records no
+// holder, so only the prune that removed its binding proved it ended. Its
+// channel must still say "Session ended", from the reason in the tombstone.
+func TestMachineSaysSessionEndedForAPrunedSession(t *testing.T) {
+	s, rec := machineServer(t)
+	alpha := liveSession(t, "alpha")
+	activeChannel(t, s, alpha, machineChanA)
+	if _, err := binding.Retire(binding.RemovedEnded, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, time.Now())
+	want := "messages send --channel " + machineChanA + " --content Session ended: " + alpha.Label + ". This channel no longer reaches it."
+	if got := rec.list(); len(got) == 0 || got[0] != want {
+		t.Fatalf("buzz calls = %q; want first %q", got, want)
 	}
 }
 
@@ -368,7 +385,7 @@ func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 	if err := s.save(&progressed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -445,7 +462,7 @@ func TestMachineCreateThatReturnsAfterDetachIsArchived(t *testing.T) {
 		liveSession(t, "alpha")
 		rec.reply = func(args []string) ([]byte, error) {
 			if args[1] == "create" {
-				if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+				if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 					t.Error(err)
 				}
 				return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
@@ -492,7 +509,7 @@ func TestMachineCreateThatReturnsAfterDetachIsArchived(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec.reset()
-		if _, err := binding.Retire(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 			t.Fatal(err)
 		}
 		tick(newMachineServer(t, s.cfg.StateDir), time.Now())
