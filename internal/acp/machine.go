@@ -57,6 +57,7 @@ const (
 const (
 	retiredEnded    = "ended"    // its session is proven ended
 	retiredDetached = "detached" // the binding is gone; its session may still run
+	retiredMoved    = "moved"    // the same session attached again under another name
 	retiredReset    = "reset"    // amq-remote channel reset
 	retiredReplaced = "replaced" // another session identity holds the name
 )
@@ -670,16 +671,26 @@ func (s *Server) removeDurably(path string) error {
 	return fsq.SyncDir(dir)
 }
 
-// goneReason is why the binding of r is gone: retiredEnded when the
-// tombstone of r's session proves it ended (a prune), else retiredDetached,
-// because a detach leaves the session running.
+// goneReason is why the binding of r is gone, as the tombstone of r's
+// session records it. A tombstone without a reason counts as ended only
+// when its session is proven ended, else as detached, because a detach
+// leaves the session running.
 func goneReason(r channelRecord) string {
 	tombs, _ := binding.Tombstones()
 	for _, t := range tombs {
-		if t.Name == r.Name && t.SessionIdentity() == r.Identity {
-			if state, _ := t.Liveness(); state == binding.Ended {
-				return retiredEnded
-			}
+		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
+			continue
+		}
+		switch t.Removed {
+		case binding.RemovedEnded:
+			return retiredEnded
+		case binding.RemovedMoved:
+			return retiredMoved
+		case binding.RemovedDetached:
+			return retiredDetached
+		}
+		if state, _ := t.Liveness(); state == binding.Ended {
+			return retiredEnded
 		}
 	}
 	return retiredDetached

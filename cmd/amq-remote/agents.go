@@ -100,37 +100,6 @@ func agentOf(dirName string, now time.Time) agentInfo {
 	return info
 }
 
-// forgetOfflineHelper removes each helper marker whose worker and parent
-// buzz-acp are proven gone (agentOffline). A helper deleted in Buzz Desktop
-// never rewrites its marker, so it would read offline for ever; a helper
-// started again writes a new marker on its first tick.
-func forgetOfflineHelper(now time.Time) {
-	path, err := binding.Path()
-	if err != nil {
-		return
-	}
-	dir := filepath.Join(filepath.Dir(path), "acp", "agents", helperMarkerDir)
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		file := filepath.Join(dir, e.Name())
-		raw, err := fsq.ReadRegularNoFollowBounded(file, maxMarkerBytes)
-		var m struct {
-			Updated string                `json:"updated"`
-			Worker  launch.HolderIdentity `json:"worker"`
-			Parent  launch.HolderIdentity `json:"parent"`
-		}
-		if err != nil || json.Unmarshal(raw, &m) != nil {
-			continue
-		}
-		if acp.AgentState(m.Updated, m.Worker, m.Parent, now) == agentOffline {
-			_ = os.Remove(file)
-		}
-	}
-}
-
 // agentDisplay is the name the session's agent shows in Buzz: its marker's,
 // else the name the helper drafts with (the label), else the name setup
 // gives it.

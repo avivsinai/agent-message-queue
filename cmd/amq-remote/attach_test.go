@@ -476,34 +476,44 @@ func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
 
 // field: a note on bead agent-message-queue-1uk: after the helper agent was
 // deleted in Buzz Desktop, `amq-remote bindings` showed "Helper: ...
-// (offline)" from its last marker for ever, and no command removed it.
-func TestBindingsForgetsAHelperProvenGone(t *testing.T) {
+// (offline)" from its last marker for ever, beside the machine agent that
+// serves every session.
+func TestBindingsHidesAnOfflineHelperBesideTheMachineAgent(t *testing.T) {
 	gone := endedHolder(t)
-	dir := canonicalTempDir(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	helper := filepath.Join(dir, "remote", "acp", "agents", helperMarkerDir)
-	if err := os.MkdirAll(helper, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker, err := json.Marshal(map[string]any{"name": "_helper", "display_name": "AMQ Remote helper",
-		"updated": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), "worker": gone, "parent": gone})
+	self, err := launch.HolderOf(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(helper, "hh.json")
-	if err := os.WriteFile(file, marker, 0o600); err != nil {
-		t.Fatal(err)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	now := time.Now().UTC()
+	for _, m := range []struct {
+		dir     string
+		updated time.Time
+		holder  launch.HolderIdentity
+	}{
+		{helperMarkerDir, now.Add(-time.Hour), gone},
+		{machineMarkerDir, now, self},
+	} {
+		path := filepath.Join(dir, "remote", "acp", "agents", m.dir)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(map[string]any{"name": m.dir, "updated": m.updated.Format(time.RFC3339), "worker": m.holder, "parent": m.holder})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "pk.json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var out bytes.Buffer
 	if code, err := bindings(nil, &out); code != 0 || err != nil {
 		t.Fatalf("bindings: code=%d err=%v", code, err)
 	}
-	if strings.Contains(out.String(), "Helper:") {
-		t.Fatalf("bindings printed %q; want no line for a helper proven gone", out.String())
-	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Fatalf("the gone helper's marker is still there (stat err %v)", err)
+	if !strings.Contains(out.String(), "Machine agent:") || strings.Contains(out.String(), "Helper:") {
+		t.Fatalf("bindings printed %q; want the machine agent and no line for the offline helper", out.String())
 	}
 }
 
