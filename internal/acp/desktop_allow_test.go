@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,11 +29,13 @@ const desktopAllowPrompt = "Bash command:\ngo test ./...\n\nInteraction: cc-0123
 
 // claudeAllowApproval is the fake runtime presented as a Claude session
 // whose approval offers allow with proof, as the Claude attachment projects
-// it under a Desktop pin. It records the evidence of each answer.
+// it under a Desktop pin, once unbound is false. It records the evidence of
+// each answer.
 type claudeAllowApproval struct {
 	*fake.Runtime
 	mu       *sync.Mutex
 	evidence *[]json.RawMessage
+	unbound  *atomic.Bool // the attachment has not bound the tool call: deny only
 }
 
 func (c claudeAllowApproval) Inspect() protocol.Session {
@@ -45,7 +48,10 @@ func (c claudeAllowApproval) Subscribe(fn func(core.NativeEvent)) func() {
 	return c.Runtime.Subscribe(func(ev core.NativeEvent) {
 		if ev.Type == core.EventQuestion && ev.Interaction != nil {
 			in := *ev.Interaction
-			in.Kind, in.Prompt, in.ApproveOption, in.RejectOption, in.ApproveProof = "approval", desktopAllowPrompt, "allow", "deny", true
+			in.Kind, in.Prompt, in.RejectOption = "approval", desktopAllowPrompt, "deny"
+			if !c.unbound.Load() {
+				in.ApproveOption, in.ApproveProof = "allow", true
+			}
 			ev.Interaction = &in
 		}
 		fn(ev)
@@ -72,9 +78,11 @@ type desktopRun struct {
 // false the hook pins another DM. With denyMidway the owner's ❌ is stored
 // while the agent reads the message's edits. agentDeletion stores a deletion
 // signed by the agent "before" the turn (buzz-acp removing an earlier turn's
-// 💬) or "after" the approval is posted. It returns once the runtime got an
-// answer, or the owner was told ✅ cannot allow or the message was altered.
-func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion string) desktopRun {
+// 💬) or "after" the approval is posted. With lateBind the approval first
+// offers deny only and offers allow once it is posted. It returns once the
+// runtime got an answer, or the owner was told ✅ cannot allow or the
+// message was altered.
+func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion string, lateBind bool) desktopRun {
 	t.Helper()
 	const channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	var owner, agent [32]byte
@@ -98,6 +106,9 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion str
 	buzzRelay = &relay.Config{URL: url, Secret: agent, AuthTag: wire}
 	desktopPinned = func(o, b, c string) bool { return pinned && o == ownerHex && b == agentHex && c == channel }
 	readReactions = func(string, time.Duration) ([]reaction, error) {
+		if lateBind {
+			return nil, nil // the owner reacts only on the approval that offers ✅
+		}
 		return []reaction{{Emoji: "✅", PubKeys: []string{ownerHex}}}, nil
 	}
 	sign := func(evt nostr.Event, key [32]byte) nostr.Event {
@@ -146,7 +157,9 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion str
 	}
 
 	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, claudeAllowApproval{Runtime: rt, mu: &mu, evidence: &run.evidence}, nil)
+	unbound := &atomic.Bool{}
+	unbound.Store(lateBind)
+	s := remoteServer(t, claudeAllowApproval{Runtime: rt, mu: &mu, evidence: &run.evidence, unbound: unbound}, nil)
 	s.cfg.StateDir = canonicalTempDir(t)
 	// The turn ends when the test completes the request, not on a clock:
 	// only the test binary's timeout bounds it.
@@ -187,6 +200,15 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion str
 	}
 	waitFor(t, "the request to run", func() bool { return ended() || rt.HasRun(id) })
 	rt.Question(id, "i_1", []string{"allow", "deny"})
+	if lateBind {
+		waitFor(t, "the deny-only approval", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return ended() || len(run.posts) > 0
+		})
+		unbound.Store(false)
+		rt.Question(id, "i_1", []string{"allow", "deny"})
+	}
 	waitFor(t, "an answer, or the owner told ✅ cannot allow", func() bool {
 		if ended() {
 			return true
@@ -205,7 +227,7 @@ func runDesktopApproval(t *testing.T, pinned, denyMidway bool, agentDeletion str
 // owner's signed ✅ and the message's history from its relay, and hands the
 // endpoint an allow whose evidence the hook's Desktop verifier accepts.
 func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
-	run := runDesktopApproval(t, true, false, "")
+	run := runDesktopApproval(t, true, false, "", false)
 	if len(run.answers) != 1 || run.answers[0].InteractionID != "i_1" || run.answers[0].Option != "allow" {
 		t.Fatalf("answers = %v, posts = %q; want one allow of i_1", run.answers, run.posts)
 	}
@@ -223,7 +245,7 @@ func TestRemoteApprovalOwnerAllowFromTheDesktopDM(t *testing.T) {
 // message's history was missed and the ✅ was allowed. Deny beats allow up
 // to the final reaction read before the grant.
 func TestRemoteApprovalOwnerDenyDuringHistoryBeatsAllow(t *testing.T) {
-	run := runDesktopApproval(t, true, true, "")
+	run := runDesktopApproval(t, true, true, "", false)
 	if len(run.answers) != 1 || run.answers[0].Option != "deny" {
 		t.Fatalf("answers = %v; want the ❌ stored mid-check to deny", run.answers)
 	}
@@ -233,7 +255,7 @@ func TestRemoteApprovalOwnerDenyDuringHistoryBeatsAllow(t *testing.T) {
 // relay share, another Desktop DM) was posted with ✅, which the hook then
 // refused. It stays deny-only and shows the command that pins this DM.
 func TestRemoteApprovalWithoutThisDesktopPinStaysDenyOnly(t *testing.T) {
-	run := runDesktopApproval(t, false, false, "")
+	run := runDesktopApproval(t, false, false, "", false)
 	if len(run.answers) != 0 {
 		t.Fatalf("answers = %v; want no allow without this DM's pin", run.answers)
 	}
@@ -248,13 +270,24 @@ func TestRemoteApprovalWithoutThisDesktopPinStaysDenyOnly(t *testing.T) {
 // altered. A deletion by the agent stored before the approval was posted
 // allows; one stored after it still refuses.
 func TestRemoteApprovalDesktopAllowAfterAnEarlierTurnsReactionCleanup(t *testing.T) {
-	run := runDesktopApproval(t, true, false, "before")
+	run := runDesktopApproval(t, true, false, "before", false)
 	if len(run.answers) != 1 || run.answers[0].Option != "allow" {
 		t.Fatalf("answers = %v, posts = %q; want the ✅ to allow after an earlier deletion by the agent", run.answers, run.posts)
 	}
-	run = runDesktopApproval(t, true, false, "after")
+	run = runDesktopApproval(t, true, false, "after", false)
 	if len(run.answers) != 0 || !slices.Contains(run.posts, alteredText) {
 		t.Fatalf("answers = %v, posts = %q; want a deletion by the agent after the post to refuse as altered", run.answers, run.posts)
+	}
+}
+
+// Live check on Buzz Desktop (bead 611.42.12.3): the hook opened the request
+// in the same second Claude wrote the tool call, so the endpoint published
+// the approval deny-only and offered allow only after it bound the call.
+// amq-acp kept the first version and the owner never saw ✅.
+func TestRemoteApprovalDesktopAllowWhenTheCallBindsLate(t *testing.T) {
+	run := runDesktopApproval(t, true, false, "", true)
+	if len(run.answers) != 1 || run.answers[0].Option != "allow" {
+		t.Fatalf("answers = %v, posts = %q; want the approval posted again with ✅ and the ✅ to allow", run.answers, run.posts)
 	}
 }
 

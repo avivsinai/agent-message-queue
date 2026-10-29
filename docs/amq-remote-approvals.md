@@ -158,6 +158,11 @@ Desktop pin or a relay-share pin, never both. The agent key never leaves
   before the post finds 500 or more deletions, fails, or falls short, the
   approval is deny-only.
 
+The endpoint can show an approval before it reads the tool call from the
+transcript, and then offers allow only once it binds the call. The agent
+then posts the approval again with ✅; from then on only reactions on the
+new message answer it.
+
 Here the agent, not the hook, reads the relay; a holder of the agent key can
 sign a grant. The endpoint accepts this answer from the local socket only
 for the Claude approval of a request submitted on that socket, and runs the
