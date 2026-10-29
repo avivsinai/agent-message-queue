@@ -562,10 +562,6 @@ func hookState(home string, spec hookSpec) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var root struct {
-		DisableAllHooks bool `json:"disableAllHooks"`
-	}
-	_ = json.Unmarshal(raw, &root)
 	found := false
 	if loc.stop != nil {
 		els, err := arrayElements(raw, *loc.stop)
@@ -581,10 +577,32 @@ func hookState(home string, spec hookSpec) (string, error) {
 	switch {
 	case !found:
 		return StopHookMissing, nil
-	case root.DisableAllHooks:
+	case disablesAllHooks(raw):
 		return StopHookDisabled, nil
 	}
 	return StopHookPresent, nil
+}
+
+// HooksDisabled reports whether the user settings file under home sets
+// disableAllHooks, so Claude Code runs none of its hooks unless a project
+// or managed setting turns them on again.
+func HooksDisabled(home string) (bool, error) {
+	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return disablesAllHooks(raw), nil
+}
+
+func disablesAllHooks(raw []byte) bool {
+	var root struct {
+		DisableAllHooks bool `json:"disableAllHooks"`
+	}
+	_ = json.Unmarshal(raw, &root)
+	return root.DisableAllHooks
 }
 
 // SettingsPath is the user settings.json Claude Code reads for the user

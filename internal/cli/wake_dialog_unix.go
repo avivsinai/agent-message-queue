@@ -901,6 +901,13 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
 		return check, true
 	}
+	if disabled, err := claude.HooksDisabled(home); err != nil || disabled {
+		check.Message = "installed, but the user settings set disableAllHooks, so Claude Code does not run it and the wake rings a plain doorbell"
+		if err != nil {
+			check.Message = fmt.Sprintf("read Claude settings: %v", err)
+		}
+		return check, true
+	}
 	for _, hook := range commands {
 		match := wakeDialogHookBinRe.FindStringSubmatch(hook.command)
 		if match == nil {

@@ -128,8 +128,9 @@ in `~/.amq/keepalive`.
 - A symlink or a non-directory at either path is refused.
 - `amq doctor --migrate-home` moves `~/.amq-keepalive` to `~/.amq/keepalive`
   in one rename. Then it changes `--registry` in the supervisor plist,
-  changes the AMQ SessionStart hooks in `~/.claude/settings.json` and
-  `~/.codex/hooks.json` that run the moved script, and bootstraps the
+  changes the AMQ SessionStart hooks in `$CLAUDE_CONFIG_DIR/settings.json`
+  (default `~/.claude/settings.json`) and `$CODEX_HOME/hooks.json` (default
+  `~/.codex/hooks.json`) that run the moved script, and bootstraps the
   supervisor job again. It bootstraps the job only when it moves the home or
   rewrites the plist; otherwise it prints the command to start it. Registered
   agents and their wakes do not change.

@@ -180,7 +180,7 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 		return 0
 	}
 	say(stdout, "approval hook installed: the owner %s can allow a Claude tool call of share %s with ✅ in Buzz, or block it with ❌\n", owner, pin.Session)
-	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
+	say(stdout, "the pin holds only while Claude cannot edit its user settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
 	return 0
 }
 
@@ -210,7 +210,7 @@ func installDesktopApprovalHook(home, owner, body, channel string, stdout, stder
 	}
 	say(stdout, "approval hook installed for Buzz Desktop: the owner %s can allow a Claude tool call with ✅ on an approval that the agent %s posts in the DM %s, or block it with ❌\n", pin.Owner, pin.Body, pin.Channel)
 	say(stdout, "check these three values against Buzz Desktop; an approval from any other agent or channel can only deny\n")
-	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
+	say(stdout, "the pin holds only while Claude cannot edit its user settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions or auto permission mode (also with --permission-mode on the command line, which doctor cannot see), or a Bash(*) allow rule\n")
 	return 0
 }
 

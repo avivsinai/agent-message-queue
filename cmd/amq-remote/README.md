@@ -837,7 +837,9 @@ amq-remote claude uninstall-stop-hook   # removes only that hook
 ```
 
 Without the hook a request is admitted but never completes. Install edits
-`~/.claude/settings.json` in place and keeps every other byte. Uninstall
+`~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when that is
+set; the same applies to every settings path below) in place and keeps every
+other byte. Uninstall
 removes only the AMQ hook and leaves any empty `Stop` or `hooks` container
 behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight

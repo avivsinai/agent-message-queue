@@ -485,6 +485,39 @@ func TestWakeDialogHookFollowsClaudeConfigDir(t *testing.T) {
 	}
 }
 
+// field: same live check. With disableAllHooks in the user settings Claude
+// Code runs no hook, yet the guard read the installed entries as on and a
+// startup hold had no hook to release it.
+func TestWakeDialogGuardIsOffWhenClaudeDisablesAllHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeClaudeOnPath(t, "2.1.310")
+	if _, err := captureStdout(t, func() error {
+		return runWake([]string{"install-dialog-hook"})
+	}); err != nil {
+		t.Fatalf("install-dialog-hook: %v", err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["disableAllHooks"] = true
+	if raw, err = json.Marshal(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if dialogGuardEnabled(harness.Claude) {
+		t.Fatal("dialog guard is on although Claude Code runs no hook")
+	}
+}
+
 // Regression: hook audit inventory #7, every Claude Code session started
 // amq through the dialog guard on each prompt, stop, and session start and
 // end, with or without AM_ME.
