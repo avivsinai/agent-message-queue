@@ -18,7 +18,7 @@ type Rules struct {
 	Transient, TransientMax time.Duration
 	// Unavailable holds after a missing CLI or login.
 	Unavailable time.Duration
-	// Unsupported holds after an unverified version, a platform without
+	// Unsupported holds after a CLI that names no version, a platform without
 	// process groups, a reply not understood, or a run against another
 	// home.
 	Unsupported time.Duration

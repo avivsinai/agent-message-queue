@@ -168,8 +168,9 @@ thread UUID is container context. A replacement goal keeps a distinct permanent
 task. Explicit AMQ bindings can attribute a container; cwd alone does not name
 an owner. Active status records source progress, never observed execution.
 
-Claude filesystem tasks support the installed 2.1.310 producer schema. Their
-identity includes canonical home, list ID and task ID. Default UUID lists need
+Claude filesystem tasks are read from any Claude Code version; a task file
+without the expected id, subject, description, status, blocks and blockedBy
+fields is refused. Their identity includes canonical home, list ID and task ID. Default UUID lists need
 a matching session transcript in that exact home with a project cwd. Team and
 custom lists need an explicit project-local snapshot binding:
 
@@ -182,8 +183,8 @@ amq-board unbind-claude-list --binding-key '["/absolute/claude-home","native-lis
 Binding changes share the serialized owner path. Revocation accepts the exact
 stored key even when the native home or its path alias has disappeared. Acquisition with a removed
 or replaced binding cannot admit tasks at commit. Native task owners remain
-separate from AMQ container attribution. Unsupported producer versions, unbound
-lists, unreadable files and storageV5 scopes are reported as incomplete coverage.
+separate from AMQ container attribution. Unbound lists, unreadable files and
+storageV5 scopes are reported as incomplete coverage.
 A single 16 MiB acquisition byte budget covers task payloads and session scope
 reads across all homes. A stopped or incomplete scope preserves prior facts.
 The filesystem adapter cannot certify other backends are empty. Native file

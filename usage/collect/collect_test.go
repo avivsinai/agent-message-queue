@@ -242,20 +242,18 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 	}
 }
 
-// PR #1235 review: a release nobody ran against passed the version guard as
-// verified because it lay inside a range.
-func TestRunSkipsUnverifiedCodex(t *testing.T) {
+// amq-board showed "codex 0.165.0 is not a verified version" and no plan
+// limits for the installed codex-cli 0.165.0 (2026-10-29): an exact version
+// list refused the release before its reply was read. The version alone no
+// longer refuses; the reply's shape still decides.
+func TestRunReadsANewCodexRelease(t *testing.T) {
 	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.165.0")
-	home := req.Codex.Homes[0]
 	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
-	if f.runs != 0 {
-		t.Fatalf("app-server ran %d times for an unverified version", f.runs)
+	if f.runs != 1 {
+		t.Fatalf("app-server ran %d times, want 1", f.runs)
 	}
-	if len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailUnsupportedVersion {
-		t.Fatalf("failures = %+v", got.Failures)
-	}
-	if a := usage.Assess(got, usage.ProviderCodex, home, now, 15*time.Minute); a.Status != usage.StatusUnknown {
-		t.Fatalf("status = %s, want unknown", a.Status)
+	if len(got.Windows) != 2 {
+		t.Fatalf("windows = %+v, failures = %+v", got.Windows, got.Failures)
 	}
 }
 

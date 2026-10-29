@@ -15,7 +15,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// ClaudeTasks supports version-pinned filesystem task producers.
+// ClaudeTasks reads Claude Code filesystem task lists of any producer
+// version; each task file is accepted only when it has the expected shape.
 // Other storage backends are not inferred from an empty filesystem listing.
 type ClaudeTasks struct {
 	Home     string
@@ -24,10 +25,6 @@ type ClaudeTasks struct {
 
 func (ClaudeTasks) Name() string                      { return "claude-tasks" }
 func (ClaudeTasks) Discover(board.Env) (bool, string) { return true, "" }
-
-func supportedClaudeTaskVersion(version string) bool {
-	return version == "2.1.310" || version == "2.1.311"
-}
 
 func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *claudeReadBudget) board.Result {
 	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Version: "Claude filesystem tasks", Feeds: []board.Column{board.ColumnUnclaimed, board.ColumnInFlight, board.ColumnBlocked}, NativeScopes: map[string]board.NativeScope{}}
@@ -65,13 +62,12 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	home = real
 	result.Namespace = home
+	// The version only labels the result; the task shape decides acceptance.
 	versionOutput, err := env.Run.Run(ctx, env.Dir, []string{"claude", "--version"})
 	version, valid := strings.CutSuffix(strings.TrimSpace(string(versionOutput)), " (Claude Code)")
-	if err != nil || !valid || !supportedClaudeTaskVersion(version) {
-		gap("Claude task producer version unsupported")
-		return result
+	if err == nil && valid && version != "" && !strings.ContainsAny(version, " \t\r\n") {
+		result.Version = "Claude Code " + version + " filesystem"
 	}
-	result.Version = "Claude Code " + version + " filesystem"
 	worktrees, err := projectWorktrees(ctx, env)
 	if err != nil {
 		gap("project scope unavailable: " + err.Error())
@@ -262,14 +258,13 @@ func claudeDefaultList(ctx context.Context, home, list string, worktrees map[str
 			var record struct {
 				SessionID string `json:"sessionId"`
 				Cwd       string `json:"cwd"`
-				Version   string `json:"version"`
 			}
 			if json.Unmarshal(scan.Bytes(), &record) != nil {
 				continue
 			}
 			if record.SessionID == list && record.Cwd != "" {
 				cwd, err := filepath.EvalSymlinks(record.Cwd)
-				if err != nil || !worktrees[cwd] || !supportedClaudeTaskVersion(record.Version) {
+				if err != nil || !worktrees[cwd] {
 					_ = f.Close()
 					return false
 				}
