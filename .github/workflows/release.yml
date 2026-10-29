@@ -186,6 +186,20 @@ jobs:
             echo "AMQ_NOTARY_KEY_PATH=$RUNNER_TEMP/notary-key.p8"
           } >>"$GITHUB_ENV"
 
+      # Tap and Scoop pushes use a short-lived release App token scoped to
+      # those two repos; the PAT is only the fallback until the App is
+      # configured (vars.RELEASE_APP_CLIENT_ID).
+      - name: Mint release App token for tap and Scoop
+        id: tap-app
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap,scoop-bucket
+          permission-contents: write
+
       - name: Release
         id: publish_release
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
@@ -195,7 +209,7 @@ jobs:
           args: release --clean ${{ steps.goreleaser_config.outputs.args }} --release-notes ${{ runner.temp }}/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-app.outputs.token || secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           AMQ_MACOS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           AMQ_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           AMQ_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
