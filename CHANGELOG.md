@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.119.1](https://github.com/avivsinai/agent-message-queue/compare/v0.119.0...v0.119.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **hooks:** follow CLAUDE_CONFIG_DIR, CODEX_HOME and disableAllHooks ([#1302](https://github.com/avivsinai/agent-message-queue/issues/1302)) ([1d681ba](https://github.com/avivsinai/agent-message-queue/commit/1d681ba3d429815abb8704a423383a11a72a4691))
+
 ## [0.119.0](https://github.com/avivsinai/agent-message-queue/compare/v0.118.0...v0.119.0) (2026-10-29)
 
 
