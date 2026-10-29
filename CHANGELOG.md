@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.116.4](https://github.com/avivsinai/agent-message-queue/compare/v0.116.3...v0.116.4) (2026-10-29)
+
+
+### Bug Fixes
+
+* **board:** read harness data on any harness version ([#1290](https://github.com/avivsinai/agent-message-queue/issues/1290)) ([e3a27fd](https://github.com/avivsinai/agent-message-queue/commit/e3a27fd1a47c5b9640231e26af3bda559f5354e8))
+* **remote:** take a Claude turn's final text from the Stop hook ([#1289](https://github.com/avivsinai/agent-message-queue/issues/1289)) ([bce4978](https://github.com/avivsinai/agent-message-queue/commit/bce497871dfc208b4e7e7704e06260a68de40059))
+
 ## [0.116.3](https://github.com/avivsinai/agent-message-queue/compare/v0.116.2...v0.116.3) (2026-10-29)
 
 
