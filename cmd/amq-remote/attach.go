@@ -19,6 +19,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -311,7 +312,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 		name = mailboxBindingName(handle, root)
 	}
 	codexes := newCodexView()
-	h := detectHarness(codexes)
+	h := detectHarness(codexes, root, handle)
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
@@ -720,13 +721,13 @@ func linkShared(stateDir string, b binding.Binding) bool {
 
 // detectHarness finds the harness a mailbox attach runs in: Codex by
 // CODEX_THREAD_ID and its daemon or invoking process, Claude by the registry
-// entry of an ancestor process. A
-// session it cannot detect is still attached, with no harness or holder. It
-// is a variable because it runs ps and reads the Claude registry; tests
-// replace it.
+// entry of an ancestor process, and any other harness by the owner its wake
+// recorded for root and handle. A session it cannot detect is still
+// attached, with no harness or holder. It is a variable because it runs ps
+// and reads the Claude registry; tests replace it.
 var detectHarness = currentHarness
 
-func currentHarness(codexes *codexView) harnessSession {
+func currentHarness(codexes *codexView, root, handle string) harnessSession {
 	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
 		h := harnessSession{Kind: "codex"}
 		if sock, err := codexDefaultSocket(); err == nil {
@@ -771,7 +772,28 @@ func currentHarness(codexes *codexView) harnessSession {
 			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd}
 		}
 	}
-	return harnessSession{}
+	return wakeOwnerSession(root, handle)
+}
+
+// wakeOwnerSession proves the process `coop exec` became for root and
+// handle, which the wake lock records, as the session's holder: that
+// process still has the recorded identity and this attach runs under it.
+// When the harness execs directly (pi does), the holder is the harness; a
+// wrapper that forks is the holder itself, and the binding follows the
+// wrapper's lifetime. Without a recorded owner the holder stays unknown.
+func wakeOwnerSession(root, handle string) harnessSession {
+	owner, ok := amqcli.WakeOwner(root, handle)
+	if !ok {
+		return harnessSession{}
+	}
+	cur, err := processHolder(owner.PID)
+	// The lock records no pid namespace, so WakeOwner gives a candidate only
+	// on Darwin, which has none: both namespaces are empty there.
+	if err != nil || cur.ProcessStart != owner.ProcessStart || cur.BootID != owner.BootID ||
+		cur.PIDNamespace != owner.PIDNamespace || !launch.RunsUnderProcess(cur) {
+		return harnessSession{}
+	}
+	return harnessSession{PID: cur.PID, Holder: cur}
 }
 
 // pruneAfterAttach prunes the bindings of ended sessions once attach has

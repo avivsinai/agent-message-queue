@@ -52,7 +52,7 @@ func linuxProcIdentity(stat string) (startToken string, state string, err error)
 	return fields[startTimeIndex], fields[0], nil
 }
 
-func parentProcessID(pid int) (int, error) {
+func parentProcessIDPlatform(pid int) (int, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, err

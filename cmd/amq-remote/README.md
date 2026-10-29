@@ -591,6 +591,23 @@ current ancestry. An ancestor with an `app-server` argument cannot prove one
 session. This supports a TUI with an embedded app-server. If
 neither path proves the session is live, its binding stays unknown.
 
+For a mailbox session in any other harness, such as pi, started under `amq
+coop exec` with a live `amq wake`, attach reads the owner that the wake
+recorded in `agents/<handle>/.wake.lock` for this root and handle: the
+process `coop exec` became, with its pid, start time and boot id. Attach
+records that process as the holder only when it still has that identity and
+attach runs under it, checked parent by parent. The binding is then live
+while that process runs and ended when it exits. A harness that `coop exec`
+runs directly, as pi does, is itself the holder; a wrapper that forks the
+harness is the holder instead, and the binding follows the wrapper's
+lifetime. The lock is trusted as written by the same user, like the binding
+files: attach refuses a lock owned by another user or writable by others,
+but nothing proves that `coop exec` wrote it. The lock records no pid
+namespace, so this proof works on macOS only. On Linux, and when the lock
+records no owner (for example an `--inject-cmd` or interrupt-key wake, a wake
+after `amq wake repair`, or a wake that could not record its process), the
+binding stays unknown.
+
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
 is found by the command's process ancestry. A pi chat is found the

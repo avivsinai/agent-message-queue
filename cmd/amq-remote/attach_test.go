@@ -738,7 +738,7 @@ func TestDetectHarnessFindsCodexSession(t *testing.T) {
 				return "/opt/codex/bin/codex", nil
 			}
 			processArgs = func(int) ([]string, error) { return row.args, nil }
-			got := currentHarness(newCodexView())
+			got := currentHarness(newCodexView(), "", "")
 			if got.Kind != "codex" {
 				t.Fatalf("harness = %+v, want Codex", got)
 			}

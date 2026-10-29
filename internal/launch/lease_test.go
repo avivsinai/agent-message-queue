@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -153,5 +154,37 @@ func writeHostileLease(t *testing.T, dir string, record leaseRecord, mode os.Fil
 	}
 	if err := os.WriteFile(leasePath(dir), data, mode); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Regression (pre-merge review of the 1uk.1 design): the ancestry walk read
+// each parent pid once and checked only the holder it reached, so a parent
+// that exited between reads, its pid then naming an unrelated process, was
+// accepted as this process's ancestor. The kernel reparents this process
+// when its parent exits; a parent pid that changes across the walk refuses.
+func TestRunsUnderProcessRefusesAParentThatExitedDuringTheWalk(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process ancestry is unavailable on this platform")
+	}
+	parent, err := HolderOf(os.Getppid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !RunsUnderProcess(parent) {
+		t.Fatalf("RunsUnderProcess(real parent %+v) = false", parent)
+	}
+	old := parentProcessID
+	reads := 0
+	parentProcessID = func(pid int) (int, error) {
+		if pid == os.Getpid() {
+			if reads++; reads > 1 {
+				return 1, nil // reparented: the parent exited
+			}
+		}
+		return old(pid)
+	}
+	t.Cleanup(func() { parentProcessID = old })
+	if RunsUnderProcess(parent) {
+		t.Fatalf("RunsUnderProcess(%+v) = true after the parent exited during the walk", parent)
 	}
 }

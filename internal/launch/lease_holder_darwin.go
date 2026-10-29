@@ -39,7 +39,7 @@ func inspectProcessPlatform(pid int) processInfo {
 	return info
 }
 
-func parentProcessID(pid int) (int, error) {
+func parentProcessIDPlatform(pid int) (int, error) {
 	kp, err := readDarwinKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return 0, err
