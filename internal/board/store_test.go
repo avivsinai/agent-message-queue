@@ -204,7 +204,7 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		if err = render(&output); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(output.String(), "Deliver feature") || !strings.Contains(output.String(), "Review the result") || !strings.Contains(output.String(), nativeID) {
+		if !strings.Contains(output.String(), "Deliver feature") || !strings.Contains(output.String(), "Review feature") || !strings.Contains(output.String(), nativeID) {
 			t.Fatal("face omitted unified task or exact attachment")
 		}
 	}

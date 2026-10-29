@@ -81,7 +81,7 @@ func WriteLiveHTML(w io.Writer, m Model) error {
 }
 
 type pageData struct {
-	Model                Model
+	Model                pageModel
 	CSS                  template.CSS
 	JS                   template.JS
 	CSP                  string
@@ -113,6 +113,46 @@ type pageSuggestion struct {
 }
 
 type pageTaskChoice struct{ ID, Title, Label string }
+
+// pageModel is the part of the model the page script reads: publication
+// identity and the attachable tasks. Message bodies and evidence stay in
+// --json and model.json, so the page size does not grow with history.
+type pageModel struct {
+	Dir         string            `json:"dir"`
+	GeneratedAt time.Time         `json:"generated_at"`
+	PublishedAt time.Time         `json:"published_at,omitempty"`
+	Generation  uint64            `json:"generation,omitempty"`
+	Redirects   map[string]string `json:"redirects"`
+	Catalogue   []pageTask        `json:"catalogue"`
+}
+
+type pageTask struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	State      State  `json:"recorded_state,omitempty"`
+	Cancelled  bool   `json:"cancelled"`
+	Historical bool   `json:"historical"`
+}
+
+func buildPageModel(m Model) pageModel {
+	pm := pageModel{Dir: m.Dir, GeneratedAt: m.GeneratedAt, PublishedAt: m.PublishedAt, Generation: m.Generation, Redirects: m.Redirects, Catalogue: []pageTask{}}
+	seen := map[string]bool{}
+	for _, task := range m.Catalogue {
+		seen[task.ID] = true
+		pm.Catalogue = append(pm.Catalogue, pageTask{ID: task.ID, Title: task.Title, State: task.State, Cancelled: task.Cancelled, Historical: task.Historical})
+	}
+	cards := append([]Card(nil), m.Historical...)
+	for _, column := range m.Columns {
+		cards = append(cards, column.Cards...)
+	}
+	for _, card := range cards {
+		if !seen[card.ID] {
+			seen[card.ID] = true
+			pm.Catalogue = append(pm.Catalogue, pageTask{ID: card.ID, Title: card.Title, Cancelled: card.Cancelled, Historical: card.Historical})
+		}
+	}
+	return pm
+}
 
 type pageView struct {
 	ID, Title, Description, Empty, Coverage, CoverageTitle string
@@ -149,6 +189,9 @@ type pageStrip struct {
 	Marks                            []string
 	Cocked                           bool
 	Related                          []string
+	AskCount, Asks                   string
+	AskAction                        *Action
+	Names                            []string
 	Evidence                         []pageEvidence
 	Actions                          []Action
 	HasDetail                        bool
@@ -184,7 +227,7 @@ func buildPage(m Model, regenerate string) pageData {
 		project = m.Dir
 	}
 	p := pageData{
-		Model:      m,
+		Model:      buildPageModel(m),
 		CSS:        template.CSS(pageCSS),
 		JS:         template.JS(pageJS),
 		CSP:        pageCSP,
@@ -404,8 +447,15 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 			s.Cocked = true
 		}
 	}
-	for _, t := range c.Related {
+	others, asks := splitRelated(c.Related)
+	for _, t := range others {
 		s.Related = append(s.Related, clean(tokenLabel(t)))
+	}
+	if len(asks) > 0 {
+		s.AskCount = pluralize(len(asks), "unresolved ask")
+		s.Asks = clean(askSummary(asks))
+		s.AskAction = asks[0].Action
+		s.HasDetail = true
 	}
 	for _, alias := range c.Aliases {
 		s.Related = append(s.Related, clean(alias))
@@ -434,7 +484,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		if attachment.Cancelled {
 			status += " (owner cancelled action)"
 		}
-		ev = append(ev, pageEvidence{Source: "amq", Field: status, Value: clean(attachment.Message.Key), Text: attachment.Message.Body})
+		ev = append(ev, pageEvidence{Source: "amq", Field: status, Value: clean(attachment.Message.Key), Text: cleanTitle(attachment.Message.Subject)})
 	}
 	for _, attachment := range c.ModelAttachments {
 		ev = append(ev, pageEvidence{Source: "amq", Field: "owner-adopted " + clean(attachment.Role), Value: clean(attachment.Unit.MessageKey), Text: quoteText(attachment.Unit.Quote)})
@@ -442,7 +492,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.Evidence = ev
 	s.Actions = c.Actions
 
-	s.HasDetail = len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
+	s.HasDetail = s.HasDetail || len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
 }
 

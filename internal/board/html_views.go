@@ -35,7 +35,12 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 			views[i].Strips = append(views[i].Strips, s)
 		}
 	}
-	for _, message := range m.Unresolved {
+	named := askTasks(m.Columns)
+	asks := newestAsks(m.Unresolved)
+	if omitted := len(m.Unresolved) - len(asks); omitted > 0 {
+		views[3].Description += " Showing the newest " + strconv.Itoa(len(asks)) + " of " + pluralize(len(m.Unresolved), "ask") + "; " + jsonPointer + "."
+	}
+	for _, message := range asks {
 		commands := messageActions(message)
 		if !hasControl(message.Subject) && !hasControl(message.Key) {
 			commands = append(commands, newOwnerAction("Admit task (edit outcome title first)", "amq-board", "admit", "--message", message.Key, "--title", message.Subject))
@@ -43,7 +48,10 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 		if !hasControl(message.Key) {
 			commands = append(commands, newOwnerAction("Dismiss unresolved ask", "amq-board", "dismiss", "--message", message.Key))
 		}
-		strip := pageStrip{AttachKey: message.Key, Key: message.Key, Kind: "unresolved", ID: clean(message.ID), Title: clean(message.Subject), State: "Current status unresolved", Reason: "Historical ask; no task admission or current work evidence", Owner: clean(message.From), AgeLabel: "Message recorded", Actions: commands, Evidence: []pageEvidence{{Source: "amq", Field: message.Kind, Value: clean(message.Key), Text: message.Body}}, HasDetail: true}
+		strip := pageStrip{AttachKey: message.Key, Key: message.Key, Kind: "unresolved", ID: clean(message.ID), Title: clean(message.Subject), State: "Current status unresolved", Reason: "Historical ask; no task admission or current work evidence", Owner: clean(message.From), AgeLabel: "Message recorded", Actions: commands, Evidence: []pageEvidence{{Source: "amq", Field: message.Kind, Value: clean(message.Key)}}, HasDetail: true}
+		for _, card := range named[message.Key] {
+			strip.Names = append(strip.Names, "Names task “"+cleanTitle(card.Title)+"” ("+clean(card.ID)+")")
+		}
 
 		if m.ActionStates[message.Key] == "open" {
 			strip.State = "Open request action"
@@ -83,7 +91,11 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 		}
 	}
 	history := pageView{ID: "history", Title: "History", Description: "Completed, cancelled, and no longer reported tasks. Their evidence remains available; they are outside current work and next actions.", Empty: "No historical tasks recorded."}
-	for _, card := range m.Historical {
+	historical := newestCards(m.Historical)
+	if omitted := len(m.Historical) - len(historical); omitted > 0 {
+		history.Description += " Showing the " + strconv.Itoa(len(historical)) + " most recently updated of " + pluralize(len(m.Historical), "task") + "; " + jsonPointer + "."
+	}
+	for _, card := range historical {
 		history.Strips = append(history.Strips, buildStrip(card, now, live))
 	}
 	return append(views, history)
