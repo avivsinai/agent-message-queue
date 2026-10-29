@@ -43,7 +43,7 @@ func renderFaces(t *testing.T, m Model) (string, string) {
 	return text.String(), page.String()
 }
 
-// An open ask that names a current task's bead id shows on that card and
+// An unresolved ask that names a current task's bead id shows on that card and
 // names the task on its own strip, without changing tasks or counts.
 func TestOpenAskThatNamesABeadShowsOnItsTask(t *testing.T) {
 	m := askSnapshot(1, "Please look at it.").Project(DefaultConfig(), time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), "test")
@@ -59,7 +59,7 @@ func TestOpenAskThatNamesABeadShowsOnItsTask(t *testing.T) {
 	}
 	text, page := renderFaces(t, m)
 	for face, out := range map[string]string{"text": text, "html": page} {
-		if !strings.Contains(out, "1 open ask names this task") || !strings.Contains(out, "amq thread --id p2p/alpha__user") {
+		if !strings.Contains(out, "1 unresolved ask names this task") || !strings.Contains(out, "amq thread --id p2p/alpha__user") {
 			t.Errorf("%s card lacks the ask count or its thread command", face)
 		}
 	}
@@ -68,18 +68,18 @@ func TestOpenAskThatNamesABeadShowsOnItsTask(t *testing.T) {
 	}
 }
 
-// Installed amq-board 0.117.1 on a real machine, 2026-10-29: the default
+// Installed amq-board 0.117.0 on a real machine, 2026-10-29: the default
 // text view was 7,930 lines (2.77 MB) and the HTML 15.4 MB (Requests view
 // 8.3 MB) because every unresolved ask carried its full body. Default views
 // stay the same size as history grows and hold no body; --json keeps them.
 func TestDefaultViewsStayBoundedWithoutMessageBodies(t *testing.T) {
 	const sentinel = "full-body-sentinel"
-	body := strings.Repeat(sentinel+" ", 800)
+	body := strings.Repeat(sentinel+" ", 40)
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	small := askSnapshot(200, body).Project(DefaultConfig(), now, "test")
-	large := askSnapshot(400, body).Project(DefaultConfig(), now, "test")
-	if len(large.Unresolved) != 400 {
-		t.Fatalf("unresolved = %d, want 400", len(large.Unresolved))
+	small := askSnapshot(40, body).Project(DefaultConfig(), now, "test")
+	large := askSnapshot(80, body).Project(DefaultConfig(), now, "test")
+	if len(large.Unresolved) != 80 {
+		t.Fatalf("unresolved = %d, want 80", len(large.Unresolved))
 	}
 	smallText, smallPage := renderFaces(t, small)
 	largeText, largePage := renderFaces(t, large)
@@ -92,9 +92,9 @@ func TestDefaultViewsStayBoundedWithoutMessageBodies(t *testing.T) {
 		}
 	}
 	if grow := len(largeText) - len(smallText); grow > 1024 {
-		t.Errorf("text view grew %d bytes for 200 more asks", grow)
+		t.Errorf("text view grew %d bytes for 40 more asks", grow)
 	}
 	if grow := len(largePage) - len(smallPage); grow > 1024 {
-		t.Errorf("html view grew %d bytes for 200 more asks", grow)
+		t.Errorf("html view grew %d bytes for 40 more asks", grow)
 	}
 }

@@ -251,7 +251,7 @@ func newestCards(cards []Card) []Card {
 	return out[:min(len(out), viewLimit)]
 }
 
-// splitRelated separates the open asks that name a card from its other
+// splitRelated separates the unresolved asks that name a card from its other
 // related records. Asks keep their newest-first order.
 func splitRelated(tokens []Token) (others, asks []Token) {
 	for _, t := range tokens {
@@ -264,13 +264,13 @@ func splitRelated(tokens []Token) (others, asks []Token) {
 	return others, asks
 }
 
-// askSummary is the one line a card shows for the open asks that name it.
+// askSummary is the one line a card shows for the unresolved asks that name it.
 func askSummary(asks []Token) string {
 	verb := " name"
 	if len(asks) == 1 {
 		verb = " names"
 	}
-	return pluralize(len(asks), "open ask") + verb + " this task. Newest " + strings.TrimPrefix(asks[0].Basis, "open ")
+	return pluralize(len(asks), "unresolved ask") + verb + " this task. Newest " + strings.TrimPrefix(asks[0].Basis, "open ")
 }
 
 // askTasks maps each ask key to the current cards that it names.

@@ -452,7 +452,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		s.Related = append(s.Related, clean(tokenLabel(t)))
 	}
 	if len(asks) > 0 {
-		s.AskCount = pluralize(len(asks), "open ask")
+		s.AskCount = pluralize(len(asks), "unresolved ask")
 		s.Asks = clean(askSummary(asks))
 		s.AskAction = asks[0].Action
 		s.HasDetail = true
