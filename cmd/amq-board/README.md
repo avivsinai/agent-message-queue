@@ -168,8 +168,9 @@ thread UUID is container context. A replacement goal keeps a distinct permanent
 task. Explicit AMQ bindings can attribute a container; cwd alone does not name
 an owner. Active status records source progress, never observed execution.
 
-Claude filesystem tasks support the installed 2.1.310 producer schema. Their
-identity includes canonical home, list ID and task ID. Default UUID lists need
+Claude filesystem tasks are read from any Claude Code version; a task file
+without the expected id, subject, description, status, blocks and blockedBy
+fields is refused. Their identity includes canonical home, list ID and task ID. Default UUID lists need
 a matching session transcript in that exact home with a project cwd. Team and
 custom lists need an explicit project-local snapshot binding:
 
