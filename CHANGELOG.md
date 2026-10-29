@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.119.2](https://github.com/avivsinai/agent-message-queue/compare/v0.119.1...v0.119.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **remote:** say Disconnected on detach and hide a gone helper ([#1305](https://github.com/avivsinai/agent-message-queue/issues/1305)) ([638b12e](https://github.com/avivsinai/agent-message-queue/commit/638b12e457dfe32f18c24a3005daa1f3589da823))
+
 ## [0.119.1](https://github.com/avivsinai/agent-message-queue/compare/v0.119.0...v0.119.1) (2026-10-29)
 
 
