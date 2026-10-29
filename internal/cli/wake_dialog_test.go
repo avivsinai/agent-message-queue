@@ -119,7 +119,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 
 // field: agy busy turns showed held notices (2026-10-26). A working marker
 // younger than wakeDialogQuietHold holds without a desktop notice or
-// terminal attention; an older one shows the held notice.
+// terminal attention.
 func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -127,7 +127,6 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 		notices int
 	}{
 		{"younger than the quiet hold", wakeDialogQuietHold - time.Minute, 0},
-		{"older than the quiet hold", wakeDialogQuietHold, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
@@ -261,51 +260,6 @@ func TestWakeDialogNewPromptMarkerNoticesAtOnce(t *testing.T) {
 	h.scan(h.cfg)
 	if len(notices) != 2 {
 		t.Fatalf("notices after a new prompt = %q, want two", notices)
-	}
-}
-
-// W1 review (Pro finding 6): a new busy turn kept the notice ladder of the
-// prompt before it, so once the turn passed its quiet hold the notice still
-// waited for the earlier, longer deadline.
-func TestWakeDialogNewBusyTurnStartsAFreshNoticeLadder(t *testing.T) {
-	h := newWakeHoldHarness(t, wakeHoldPolicy{})
-	agentDir, err := openWakeAgentDir(h.root, "codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = agentDir.Close() })
-	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-	write := func(kind string) {
-		t.Helper()
-		raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"` + kind + `","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
-		if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(marker, h.now, h.now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var notices []string
-	h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
-	h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
-	h.cfg.settings.heldNotice = true
-	h.cfg.desktopNotify = func(_, body string) error {
-		notices = append(notices, body)
-		return nil
-	}
-	h.cfg.attentionWrite = func(p []byte) (int, error) { return len(p), nil }
-	write("permission")
-	h.send("a", format.PriorityNormal)
-	h.scan(h.cfg)
-	// The prompt has reached the longest notice interval.
-	h.cfg.doorbell.nextHeldNotice = h.now.Add(wakeDoorbellAttentionRetryMax)
-	write("working")
-	h.advance(wakeDialogRecheck)
-	h.scan(h.cfg)
-	h.advance(wakeDialogQuietHold)
-	h.scan(h.cfg)
-	if len(notices) != 2 || !strings.Contains(notices[1], "busy") {
-		t.Fatalf("notices = %q, want the busy notice once the turn passes its quiet hold", notices)
 	}
 }
 

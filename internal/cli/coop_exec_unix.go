@@ -996,7 +996,7 @@ func (c *coopExecRun) execAgent() error {
 					Launch: &c.nativeLaunch.Launch}
 				return publishStartupDialogMarker(c.root, c.agentHandle, marker, true, launch.ClaudeProvider)
 			case codexDecided:
-				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold, launch.CodexProvider)
+				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold, launchDecision.guard)
 			case agyRelay:
 				return publishStartupDialogMarker(c.root, c.agentHandle, wakeDialogMarker{}, false, harness.Agy)
 			}

@@ -55,3 +55,43 @@ func TestWakeRingsAPlainDoorbellWithoutDialogHooks(t *testing.T) {
 		t.Fatalf("stderr = %q, want the plain dialog guard line", stderr)
 	}
 }
+
+// Pre-merge review of r6h PR 1: an agy marker left by a relay killed mid
+// turn held a plain seat with no end. It read as unknown after 10 minutes
+// and stayed held, and a plain agy launch, which runs no relay, never
+// removed it. An aged agy marker now reads as closed, and a plain agy launch
+// removes a leftover one.
+func TestWakeRingsPastAnAgyMarkerAKilledRelayLeft(t *testing.T) {
+	h, _, _, marker := newCodexTrustDialogHarness(t)
+	left := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
+	write := func(opened time.Time) {
+		t.Helper()
+		if err := os.WriteFile(marker, []byte(left), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(marker, opened, opened); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(h.now.Add(-wakeDialogQuietHold - time.Minute))
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("doorbells past an aged agy marker = %d, want 1", got)
+	}
+	h.drain()
+
+	write(h.now)
+	if err := syncStartupDialogMarker(h.root, "codex", "/usr/local/bin/agy", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(marker); !os.IsNotExist(err) {
+		t.Fatalf("agy marker after a plain agy launch = %q, %v; want none", raw, err)
+	}
+	h.send("b", format.PriorityNormal)
+	h.advance(wakeDialogRecheck)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("doorbells after a plain agy launch = %d, want 1", got)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -919,15 +920,13 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	return check, true
 }
 
-// dialogGuardEnabled reports whether the person opted in to the dialog
-// guard for the harness name: the wake holds a doorbell only for a dialog
-// that an opted-in writer reports. For Claude Code, Codex and Cursor the
-// opt-in is the AMQ dialog hook that amq wake install-dialog-hook writes,
-// installed in full with its amq binary present; Codex runs it only once
-// trusted and enabled in /hooks. For agy and pi the writer itself is the
-// opt-in: the agy relay runs only when the person set AGY_CLI_OSC7501=on,
-// and the pi extension only when the person installed it. Any other name has
-// no guard. It starts no process.
+// dialogGuardEnabled reports whether the AMQ dialog hook of the harness
+// name is installed, which is the opt-in that lets a marker that proves no
+// open dialog keep holding input: in full with its amq binary present, and
+// for Codex trusted and enabled in /hooks. Only Claude Code, Codex and
+// Cursor have one. The agy relay (an opt-in through AGY_CLI_OSC7501=on) and
+// the pi extension are not visible to the wake, so their markers hold only
+// while they prove an open prompt or turn. It starts no process.
 func dialogGuardEnabled(name string) bool {
 	var check func() (doctorCheck, bool)
 	switch name {
@@ -937,8 +936,6 @@ func dialogGuardEnabled(name string) bool {
 		check = checkCodexDialogHook
 	case harness.Cursor:
 		check = checkCursorDialogHook
-	case harness.Agy, harness.Pi:
-		return true
 	default:
 		return false
 	}
@@ -947,24 +944,91 @@ func dialogGuardEnabled(name string) bool {
 }
 
 // dialogGuardCache keeps the last dialogGuardEnabled answer per harness
-// while the files that decide it are unchanged, so a wake that rechecks a
-// marker does not reparse the hooks files each time.
-type dialogGuardCache map[string]struct {
+// while the files that decide it and the presence of the hooks' amq
+// binaries are unchanged, so a wake that rechecks a marker does not reparse
+// the hooks files each time, and a removed binary turns the guard off.
+type dialogGuardCache map[string]dialogGuardCacheEntry
+
+type dialogGuardCacheEntry struct {
 	stamp   string
+	bins    []string
+	present string
 	enabled bool
 }
 
 func (c dialogGuardCache) enabled(name string) bool {
 	stamp := dialogGuardStamp(name)
-	if entry, ok := c[name]; ok && entry.stamp == stamp {
+	if entry, ok := c[name]; ok && entry.stamp == stamp && entry.present == binariesPresent(entry.bins) {
 		return entry.enabled
 	}
-	enabled := dialogGuardEnabled(name)
-	c[name] = struct {
-		stamp   string
-		enabled bool
-	}{stamp, enabled}
-	return enabled
+	bins := dialogHookBinaries(name)
+	entry := dialogGuardCacheEntry{stamp: stamp, bins: bins, present: binariesPresent(bins), enabled: dialogGuardEnabled(name)}
+	c[name] = entry
+	return entry.enabled
+}
+
+// binariesPresent records which of bins exist, one byte each.
+func binariesPresent(bins []string) string {
+	present := make([]byte, len(bins))
+	for i, bin := range bins {
+		present[i] = '0'
+		if _, err := os.Stat(bin); err == nil {
+			present[i] = '1'
+		}
+	}
+	return string(present)
+}
+
+// dialogHookBinaries are the amq binaries the AMQ dialog hook entries of
+// the harness name run.
+func dialogHookBinaries(name string) []string {
+	var commands []string
+	var re *regexp.Regexp
+	switch name {
+	case harness.Claude:
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		for _, event := range wakeDialogHookEvents {
+			found, _ := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
+			commands = append(commands, found...)
+		}
+		re = wakeDialogHookBinRe
+	case harness.Codex:
+		path, err := codexHooksPath()
+		if err != nil {
+			return nil
+		}
+		entries, _ := readCodexHookEntries(path)
+		for _, list := range entries {
+			for _, entry := range list {
+				commands = append(commands, entry.Command)
+			}
+		}
+		re = codexDialogHookBinRe
+	case harness.Cursor:
+		path, err := cursorHooksPath()
+		if err != nil {
+			return nil
+		}
+		for _, event := range cursorDialogHookEvents {
+			found, _ := claude.MarkedCursorHookCommandsAt(path, event, wakeDialogHookMarker)
+			commands = append(commands, found...)
+		}
+		re = cursorDialogHookBinRe
+	default:
+		return nil
+	}
+	var bins []string
+	for _, command := range commands {
+		if match := re.FindStringSubmatch(command); match != nil {
+			if bin := strings.ReplaceAll(match[1], `'\''`, `'`); !slices.Contains(bins, bin) {
+				bins = append(bins, bin)
+			}
+		}
+	}
+	return bins
 }
 
 // dialogGuardStamp names the current version of the files that decide the

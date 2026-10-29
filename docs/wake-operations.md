@@ -160,14 +160,20 @@ left.
 
 A marker that does not prove an open dialog (older than 10 minutes, dated
 in the future, unreadable, or behind an agent directory that is no longer
-canonical) holds input only while the guard of the harness that wrote it is
-on (a Claude Code hook marker names no harness; a marker that cannot be read
-falls back to the wake's `--harness`). Otherwise the wake reads it as
-closed and rings. An open marker holds as described below. The wake checks
-the guard without starting a process and reads the hooks files again only
-when they change, so an uninstall releases an aged marker at the next
-recheck. A hook installed after launch holds at once, because it writes the
-markers; startup protection waits for the next launch.
+canonical) holds input only while the AMQ dialog hook of the harness that
+wrote it is installed: Claude Code, Codex (trusted) or Cursor. A Claude
+Code hook marker names no harness; a marker that cannot be read falls back
+to the wake's `--harness`. The wake cannot see the agy relay or the pi
+extension, so an agy or pi marker holds only while it proves an open prompt
+or turn. Otherwise the wake reads the marker as closed and rings, so no hold
+outlasts 10 minutes without an installed hook. A plain agy launch, which
+runs no relay, removes an agy marker an earlier relay left. An open marker
+holds as described below. The wake checks the hook without starting a
+process and reads the hooks files again only when they change or a hook's
+amq binary appears or goes, so an uninstall or a removed binary releases an
+aged marker at the next recheck. A hook installed after launch holds at
+once, because it writes the markers; startup protection waits for the next
+launch.
 
 The guard does not change hold by priority, urgent and interrupt delivery,
 the bounded wait while the person types (at most 15 seconds, then attention
@@ -264,8 +270,7 @@ version supports it.
   minutes) while the hold lasts; new messages do not make it due sooner. A
   new marker (a changed marker file) starts a new ladder, so a new prompt's
   notice shows at once, also when the wake never saw the busy turn between
-  two prompts, and a new busy turn's notice is due once its quiet hold
-  ends; an unchanged marker keeps its ladder.
+  two prompts; an unchanged marker keeps its ladder.
   A change of cause logs one hold line in `.wake.log`. On
   macOS the notification comes from `osascript`; on
   Linux from `notify-send` when it is installed; elsewhere only the terminal
@@ -621,10 +626,11 @@ and gets the plain doorbell.
   quiet: it shows no desktop notice and no terminal attention, and the
   `.wake.log` hold line says the harness is busy. A permission or sign-in
   prompt shows the held notice at once.
-- **Not covered.** A turn longer than 10 minutes makes the marker
-  unconfirmed: input stays held, the held notice says that agy is busy, and
-  the doorbell rings on the deferred retry ladder, up to 2 minutes after the
-  close. Another `blocked` kind changes nothing and is logged once.
+- **Not covered.** After 10 minutes the marker proves nothing and reads as
+  closed, so the doorbell rings during a longer turn (agy queues it) or at a
+  prompt still open after 10 minutes. Another `blocked` kind changes
+  nothing and is logged once. A plain launch removes a marker that a relay
+  killed during a turn left.
 
 ## Dialog guard (pi prompts)
 
@@ -635,7 +641,8 @@ project resources, and extensions open prompts (`confirm`, `select`,
 (`harness` `pi`) while either is open: `event` `project_trust` from pi's
 `project_trust` event until the session starts, and `event` `ui_prompt`
 while pi waits on an extension prompt. The wake holds the doorbell with the
-same hold and age rules as above. A session start or shutdown also removes
+same hold rules as above; a pi marker older than 10 minutes reads as
+closed. A session start or shutdown also removes
 the marker. The extension is the only writer of a pi agent's marker and
 removes only a marker it wrote. The guard runs only when the AMQ pi
 extension is loaded; without it pi gets the plain doorbell.

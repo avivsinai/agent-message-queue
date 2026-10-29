@@ -210,15 +210,38 @@ func claudeStartupTrust(dir string) startupTrust {
 // prompt is answered: a trust dialog still pending, or for Codex an update
 // prompt its state does not rule out. Otherwise it removes a Startup marker
 // an earlier launch left (one declined, or one that never started), which
-// would hold this session's doorbell. recorded reports that coop exec
-// recorded the identity of the Codex thread args resume. The caller owns
-// the agent's wake.
+// would hold this session's doorbell. A plain agy launch, which runs no
+// relay, also removes the marker an earlier relay left: nothing else would
+// close it. recorded reports that coop exec recorded the identity of the
+// Codex thread args resume. The caller owns the agent's wake.
 func syncStartupDialogMarker(root, handle, binaryPath string, args []string, recorded bool) error {
-	marker, hold, err := decideStartupDialogMarker(binaryPath, args, recorded)
+	guard := launchDialogGuard(binaryPath)
+	marker, hold, err := decideStartupDialogMarker(binaryPath, args, recorded, guard != "")
 	if err != nil {
 		return err
 	}
-	return publishStartupDialogMarker(root, handle, marker, hold, launchDialogGuard(binaryPath))
+	if facts, _ := harness.ForExecutable(binaryPath); facts.Name == harness.Agy {
+		if err := removeHarnessDialogMarker(root, handle, harness.Agy); err != nil {
+			return err
+		}
+	}
+	return publishStartupDialogMarker(root, handle, marker, hold, guard)
+}
+
+// removeHarnessDialogMarker removes the agent's marker when the harness
+// name wrote it, under the marker lock.
+func removeHarnessDialogMarker(root, handle, name string) error {
+	agentDir, err := openExistingWakeAgentDir(root, handle)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return agentDir.withFD(func(dirfd int) error {
+		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+			var marker wakeDialogMarker
+			return json.Unmarshal(current, &marker) == nil && marker.Harness == name
+		})
+	})
 }
 
 // launchDialogGuard is the harness whose AMQ dialog hook guards a launch of
@@ -242,6 +265,8 @@ type codexLaunchDecision struct {
 	// embeddedOnly keeps a seat that could run on the Codex daemon on its
 	// own app-server for this launch: no daemon thread and no thread record.
 	embeddedOnly bool
+	// guard is "codex" when the Codex dialog guard is on, else "".
+	guard string
 }
 
 // decideCodexLaunch decides a Codex seat's startup marker before naming and
@@ -250,12 +275,13 @@ type codexLaunchDecision struct {
 // screen may show runs its own app-server for this launch, with the
 // identity overrides, no daemon thread and no thread record, and its own
 // children run the dialog hook (startupPromptOfLaunch). A seat stays on the
-// daemon only when no screen can show. Without the Codex dialog guard
-// nothing is decided: the seat stays on the daemon and gets no marker.
+// daemon only when no screen can show. Without the Codex dialog guard the
+// seat stays on the daemon and gets no marker.
 func decideCodexLaunch(binaryPath string, args, env []string, wd string, named coopNamedChoice, resumeChoice string) (codexLaunchDecision, error) {
-	var decision codexLaunchDecision
+	decision := codexLaunchDecision{guard: launchDialogGuard(binaryPath)}
 	var err error
-	if !dialogGuardEnabled(harness.Codex) {
+	if decision.guard == "" {
+		decision.decided = true
 		return decision, nil
 	}
 	_, selected, unresolved := codexResumeSelection(args)
@@ -263,7 +289,7 @@ func decideCodexLaunch(binaryPath string, args, env []string, wd string, named c
 		named.enabled && coopNamedModeFor(binaryPath) == coopNamedModeTUI && !agentArgsPreventAutoNameFor(binaryPath, args)
 	if daemonCandidate {
 		daemonArgs := pinCodexResumeLaunchDir(binaryPath, args, wd, true, resumeChoice)
-		if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, daemonArgs, true); err != nil {
+		if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, daemonArgs, true, true); err != nil {
 			return codexLaunchDecision{}, err
 		}
 		if !decision.hold {
@@ -272,7 +298,7 @@ func decideCodexLaunch(binaryPath string, args, env []string, wd string, named c
 		}
 	}
 	embeddedArgs := pinCodexShellIdentity(binaryPath, pinCodexResumeLaunchDir(binaryPath, args, wd, false, resumeChoice), env, false)
-	if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, embeddedArgs, false); err != nil {
+	if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, embeddedArgs, false, true); err != nil {
 		return codexLaunchDecision{}, err
 	}
 	decision.decided, decision.embeddedOnly = true, daemonCandidate
@@ -280,8 +306,12 @@ func decideCodexLaunch(binaryPath string, args, env []string, wd string, named c
 }
 
 // decideStartupDialogMarker is the Startup marker decision of
-// syncStartupDialogMarker, without publishing it.
-func decideStartupDialogMarker(binaryPath string, args []string, recorded bool) (wakeDialogMarker, bool, error) {
+// syncStartupDialogMarker, without publishing it. Only a launch whose
+// dialog guard is on gets a marker: its hook is what releases it.
+func decideStartupDialogMarker(binaryPath string, args []string, recorded, guarded bool) (wakeDialogMarker, bool, error) {
+	if !guarded {
+		return wakeDialogMarker{}, false, nil
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return wakeDialogMarker{}, false, err
@@ -339,13 +369,8 @@ func syncStartupDialogMarkerState(root, handle string, marker wakeDialogMarker, 
 
 // startupDialogMarkerFor returns the Startup marker a harness started as
 // binaryPath with args in wd needs, and whether it needs one.
-// Only a harness whose dialog guard is on gets one: its hook is what
-// releases it.
 func startupDialogMarkerFor(binaryPath string, args []string, wd string, recorded bool) (wakeDialogMarker, bool) {
 	harness, dir, trust := startupTrustDialog(binaryPath, args, wd)
-	if harness == "" || !dialogGuardEnabled(harness) {
-		return wakeDialogMarker{}, false
-	}
 	if harness != launch.CodexProvider {
 		return startupDialogMarkerDecision(harness, dir, trust, true)
 	}
