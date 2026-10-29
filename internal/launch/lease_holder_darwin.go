@@ -39,7 +39,7 @@ func inspectProcessPlatform(pid int) processInfo {
 	return info
 }
 
-func parentProcessID(pid int) (int, error) {
+func parentProcessIDPlatform(pid int) (int, error) {
 	kp, err := readDarwinKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return 0, err
@@ -76,33 +76,4 @@ func processStartUnix(token string) (int64, error) {
 		return 0, fmt.Errorf("process start token %q is malformed", token)
 	}
 	return value, nil
-}
-
-// startedNoLaterThan reports whether start token a is at or before b. A
-// Darwin token is the kernel's p_starttime as "sec.nsec"; both parts are
-// compared as integers.
-func startedNoLaterThan(a, b string) (bool, error) {
-	aSec, aNsec, err := darwinStartTime(a)
-	if err != nil {
-		return false, err
-	}
-	bSec, bNsec, err := darwinStartTime(b)
-	if err != nil {
-		return false, err
-	}
-	return aSec < bSec || (aSec == bSec && aNsec <= bNsec), nil
-}
-
-func darwinStartTime(token string) (sec, nsec int64, err error) {
-	secText, nsecText, ok := strings.Cut(token, ".")
-	if ok {
-		sec, err = strconv.ParseInt(secText, 10, 64)
-	}
-	if ok && err == nil {
-		nsec, err = strconv.ParseInt(nsecText, 10, 64)
-	}
-	if !ok || err != nil || sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
-		return 0, 0, fmt.Errorf("process start token %q is malformed", token)
-	}
-	return sec, nsec, nil
 }

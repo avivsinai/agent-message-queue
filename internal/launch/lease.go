@@ -107,6 +107,8 @@ type processInfo struct {
 
 var inspectProcess = inspectProcessPlatform
 
+var parentProcessID = parentProcessIDPlatform
+
 var liveLeaseSecrets sync.Map
 
 // These seams keep failure handling testable without changing the filesystem
@@ -428,12 +430,11 @@ func RunsUnderProcess(holder HolderIdentity) bool {
 	return false
 }
 
-// verifiedParent is the process child descends from. child keeps its
-// identity and its parent pid across the read of the parent, and the parent
-// started no later than child. A parent that exits makes the kernel reparent
-// child, so an unchanged parent pid means the process read under it is the
-// real parent; a reused pid names a process that started after child. An
-// observation that cannot be made or ordered fails closed.
+// verifiedParent is the process child descends from: child keeps its
+// identity and its parent pid across the read of the parent. A parent that
+// exits makes the kernel reparent child before its pid can be reused, so an
+// unchanged parent pid means the process read under it is the real parent.
+// An observation that cannot be made fails closed.
 func verifiedParent(child processInfo) (processInfo, bool) {
 	ppid, err := parentProcessID(child.PID)
 	if err != nil || ppid <= 0 {
@@ -448,10 +449,6 @@ func verifiedParent(child processInfo) (processInfo, bool) {
 		return processInfo{}, false
 	}
 	if ppidAgain, err := parentProcessID(child.PID); err != nil || ppidAgain != ppid {
-		return processInfo{}, false
-	}
-	ordered, err := startedNoLaterThan(parent.StartToken, child.StartToken)
-	if err != nil || !ordered {
 		return processInfo{}, false
 	}
 	return parent, true

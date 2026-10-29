@@ -603,9 +603,10 @@ harness is the holder instead, and the binding follows the wrapper's
 lifetime. The lock is trusted as written by the same user, like the binding
 files: attach refuses a lock owned by another user or writable by others,
 but nothing proves that `coop exec` wrote it. The lock records no pid
-namespace, so this proof works on macOS only; on Linux, and with a wake that
-records no owner (an `--inject-cmd` or interrupt-key wake), the binding stays
-unknown.
+namespace, so this proof works on macOS only. On Linux, and when the lock
+records no owner (for example an `--inject-cmd` or interrupt-key wake, a wake
+after `amq wake repair`, or a wake that could not record its process), the
+binding stays unknown.
 
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude

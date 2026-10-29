@@ -52,7 +52,7 @@ func linuxProcIdentity(stat string) (startToken string, state string, err error)
 	return fields[startTimeIndex], fields[0], nil
 }
 
-func parentProcessID(pid int) (int, error) {
+func parentProcessIDPlatform(pid int) (int, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, err
@@ -109,19 +109,4 @@ func processStartUnix(token string) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("boot time unavailable")
-}
-
-// startedNoLaterThan reports whether start token a is at or before b. A
-// Linux token is stat starttime in clock ticks since boot, so a parent and
-// a child forked within one tick have equal tokens.
-func startedNoLaterThan(a, b string) (bool, error) {
-	aTicks, err := strconv.ParseInt(a, 10, 64)
-	if err != nil || aTicks < 0 {
-		return false, fmt.Errorf("process start token %q is malformed", a)
-	}
-	bTicks, err := strconv.ParseInt(b, 10, 64)
-	if err != nil || bTicks < 0 {
-		return false, fmt.Errorf("process start token %q is malformed", b)
-	}
-	return aTicks <= bTicks, nil
 }
