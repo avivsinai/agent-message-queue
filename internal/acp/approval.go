@@ -268,7 +268,8 @@ func (a *approvals) observe(snap protocol.Snapshot) {
 		// approval is posted again with ✅. The owner's ❌ on the first
 		// message still denies.
 		stop, seen := a.stops[current]
-		upgrade := seen && stop != nil && !a.allowing[current] && a.allows(*in)
+		_, answered := a.sent[current]
+		upgrade := seen && stop != nil && !answered && !a.allowing[current] && a.allows(*in)
 		if !seen || upgrade {
 			allow := upgrade || a.allows(*in)
 			if stop != nil {
@@ -392,6 +393,11 @@ func (a *approvals) poll(stop chan struct{}, post, poll func(time.Duration) bool
 		}
 		if !posted {
 			posted = post(budget)
+			select {
+			case <-stop:
+				return
+			default:
+			}
 		}
 		if posted && poll(budget) {
 			return
