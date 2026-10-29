@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.116.3](https://github.com/avivsinai/agent-message-queue/compare/v0.116.2...v0.116.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **acp:** offer the Desktop check mark when the call binds late ([#1286](https://github.com/avivsinai/agent-message-queue/issues/1286)) ([d3ee78a](https://github.com/avivsinai/agent-message-queue/commit/d3ee78a047d704aac7e7044260e86c2e79be8eef))
+
 ## [0.116.2](https://github.com/avivsinai/agent-message-queue/compare/v0.116.1...v0.116.2) (2026-10-28)
 
 
