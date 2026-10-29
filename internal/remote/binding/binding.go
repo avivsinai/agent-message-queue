@@ -756,11 +756,12 @@ func PruneEnded(inspect Inspector) ([]string, error) {
 }
 
 // Retire removes every binding match accepts, as read under the binding lock,
-// and returns the names removed. A named binding is renamed to its tombstone,
+// and returns the names removed. A named binding is replaced by its tombstone,
 // which keeps its name held by its session identity, so a later session never
 // inherits the removed session's Buzz agent through a freed name. The
-// tombstone then records why (one of the Removed values); a failure of that
-// second write leaves a tombstone without a reason.
+// tombstone, which records why (one of the Removed values), is written
+// before the binding is removed, so a reader that finds the binding gone
+// finds the reason too; a stop between the two leaves the binding bound.
 // Tombstones are never removed. Their number is bounded by the
 // distinct session identities, and an identity derived from a target (a link
 // share, or a native session whose working directory is unknown) names a
@@ -781,14 +782,18 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 			if !match(b) {
 				continue
 			}
-			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
+			b.Removed = why
+			raw, err := json.MarshalIndent(b, "", "  ")
+			if err != nil {
+				return err
+			}
+			if _, err := fsq.WriteFileAtomic(dir, b.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+				return err
+			}
+			if err := os.Remove(filepath.Join(dir, b.Name+".json")); err != nil {
 				return err
 			}
 			removed = append(removed, b.Name)
-			b.Removed = why
-			if raw, err := json.MarshalIndent(b, "", "  "); err == nil {
-				_, _ = fsq.WriteFileAtomic(dir, b.Name+tombstoneSuffix, append(raw, '\n'), 0o600)
-			}
 		}
 		if b, err := read(path); err == nil {
 			if b.Name = LegacyName; match(b) {
