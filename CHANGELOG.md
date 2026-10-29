@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.117.1](https://github.com/avivsinai/agent-message-queue/compare/v0.117.0...v0.117.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **board:** do not report an empty Claude task list as a gap ([#1296](https://github.com/avivsinai/agent-message-queue/issues/1296)) ([4d63059](https://github.com/avivsinai/agent-message-queue/commit/4d63059e5dd629b32117d6e91a1065110095b481))
+
 ## [0.117.0](https://github.com/avivsinai/agent-message-queue/compare/v0.116.4...v0.117.0) (2026-10-29)
 
 
