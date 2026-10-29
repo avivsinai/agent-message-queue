@@ -840,6 +840,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		return protocol.ExitActionRequired, err
 	}
 	now := time.Now()
+	forgetOfflineHelper(now)
 	helper, machine := helperOf(now), machineOf(now)
 	rows := make([]bindingRow, 0, len(all))
 	var unknown []string

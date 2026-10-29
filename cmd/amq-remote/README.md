@@ -701,7 +701,8 @@ archived, and a new channel is made. A lost channel may be left over in
 Buzz.
 
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
-ended, then lists the machine agent and each binding with its label, `live`
+ended and forgets a helper agent whose processes are proven gone (deleted or
+stopped in Desktop; a helper started again comes back), then lists the machine agent and each binding with its label, `live`
 or `unknown`, its agent's state, its name and its channel, with `amq-remote
 detach --name <name>` for the unknown ones. It names, once, each per-session
 Buzz agent whose binding is removed, in one line: "Delete these in Buzz

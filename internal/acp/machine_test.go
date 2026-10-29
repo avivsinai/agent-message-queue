@@ -310,7 +310,7 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	tick(s, now.Add(2*time.Minute))
 
 	want := []string{
-		"messages send --channel " + machineChanA + " --content Session ended: " + alpha.Label + ". This channel no longer reaches it.",
+		"messages send --channel " + machineChanA + " --content Disconnected: " + alpha.Label + ". This channel no longer reaches it until the session connects again.",
 		"channels archive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
