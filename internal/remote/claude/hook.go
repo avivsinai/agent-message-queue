@@ -1133,6 +1133,11 @@ type StopHookPayload struct {
 // whole.
 const maxStopTextBytes = 128 * 1024
 
+// maxStopPayloadBytes bounds the hook's stdin. The payload carries the
+// turn's whole final text, JSON-escaped; a cut payload does not decode and
+// would leave the turn without its marker.
+const maxStopPayloadBytes = 64 << 20
+
 // sessionIDRe bounds the session id the receiver will turn into a file
 // name: no separators, no dot segments.
 var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -1156,7 +1161,7 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 		return 0 // no safe create on this platform
 	}
 	var payload StopHookPayload
-	raw, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(stdin, maxStopPayloadBytes))
 	if err != nil {
 		return 0
 	}
