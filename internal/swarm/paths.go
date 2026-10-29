@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // Default Claude Code teams and tasks directories.
@@ -42,5 +44,5 @@ func claudeHome() string {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: unable to determine home directory: %v; using ./%s\n", err, claudeConfigDir)
 		return filepath.Join(".", claudeConfigDir)
 	}
-	return filepath.Join(home, claudeConfigDir)
+	return harness.ClaudeConfigDir(home)
 }

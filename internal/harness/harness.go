@@ -6,6 +6,7 @@
 package harness
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -182,4 +183,23 @@ func WrapperName(executable string) string {
 
 func executableName(executable string) string {
 	return strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
+}
+
+// ClaudeConfigDir is the directory where Claude Code reads the user's
+// settings.json and keeps its sessions, projects, tasks and teams:
+// $CLAUDE_CONFIG_DIR when set, else home/.claude.
+func ClaudeConfigDir(home string) string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// CodexHome is the directory where Codex reads hooks.json and config.toml
+// and keeps its daemon socket: $CODEX_HOME when set, else home/.codex.
+func CodexHome(home string) string {
+	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" {
+		return dir
+	}
+	return filepath.Join(home, ".codex")
 }

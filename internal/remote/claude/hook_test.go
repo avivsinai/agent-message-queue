@@ -11,17 +11,17 @@ import (
 
 func TestUninstallWithoutMarkedEntryLeavesFileUntouched(t *testing.T) {
 	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(settingsPath(home)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(SettingsPath(home)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	original := []byte("{\"a\":1}\n")
-	if err := os.WriteFile(settingsPath(home), original, 0o600); err != nil {
+	if err := os.WriteFile(SettingsPath(home), original, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := UninstallStopHook(home); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := os.ReadFile(settingsPath(home))
+	got, _ := os.ReadFile(SettingsPath(home))
 	if string(got) != string(original) {
 		t.Fatal("uninstall with no marked entry rewrote the file")
 	}
@@ -86,10 +86,10 @@ func TestStopHookBoundSessionAppendsUntilUnsubscribe(t *testing.T) {
 
 func TestPinWarningsNamesAutoMode(t *testing.T) {
 	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(settingsPath(home)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(SettingsPath(home)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(settingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
+	if err := os.WriteFile(SettingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	warns, err := PinWarnings(home)
@@ -122,7 +122,7 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := os.ReadFile(settingsPath(home)); string(again) != installed {
+	if again, _ := os.ReadFile(SettingsPath(home)); string(again) != installed {
 		t.Fatalf("second install rewrote settings.json:\n%s", again)
 	}
 	// A reinstall from a new binary kept the stop hook on an old worktree
@@ -130,7 +130,7 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	if err := InstallStopHook(home, "/opt/homebrew/bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	moved, _ := os.ReadFile(settingsPath(home))
+	moved, _ := os.ReadFile(SettingsPath(home))
 	if err := json.Unmarshal(moved, &s); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 			if err := UninstallStopHook(home); err != nil {
 				t.Fatal(err)
 			}
-			got, _ := os.ReadFile(settingsPath(home))
+			got, _ := os.ReadFile(SettingsPath(home))
 			if string(got) != tc.afterUninstall {
 				t.Fatalf("after uninstall:\nwant %q\ngot  %q", tc.afterUninstall, got)
 			}
@@ -196,18 +196,18 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 // group we installed. Uninstall removes our inner hook and keeps theirs.
 func TestUninstallFromMixedGroupKeepsForeignHook(t *testing.T) {
 	home, _ := installSettings(t, "")
-	raw, _ := os.ReadFile(settingsPath(home))
+	raw, _ := os.ReadFile(SettingsPath(home))
 	mixed := strings.Replace(string(raw), `,"timeout":5}]`, `,"timeout":5},{"type":"command","command":"echo operator"}]`, 1)
 	if mixed == string(raw) {
 		t.Fatalf("setup: could not add a foreign hook to:\n%s", raw)
 	}
-	if err := os.WriteFile(settingsPath(home), []byte(mixed), 0o600); err != nil {
+	if err := os.WriteFile(SettingsPath(home), []byte(mixed), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := UninstallStopHook(home); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := os.ReadFile(settingsPath(home))
+	got, _ := os.ReadFile(SettingsPath(home))
 	var s settingsShape
 	if err := json.Unmarshal(got, &s); err != nil {
 		t.Fatalf("uninstall produced invalid JSON: %v\n%s", err, got)

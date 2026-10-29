@@ -1627,8 +1627,9 @@ $ amq wake install-dialog-hook --help
 Usage:
   amq wake install-dialog-hook [--dry-run] [--harness claude|codex|cursor|all]
 
-Install the wake dialog guard hooks in ~/.claude/settings.json, with --harness
-codex in $CODEX_HOME/hooks.json (Codex runs them once you trust them in /hooks),
+Install the wake dialog guard hooks in $CLAUDE_CONFIG_DIR/settings.json (default
+~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json
+(Codex runs them once you trust them in /hooks),
 or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session
 starts; it holds the doorbell from a tool call to the end of that turn).
 
@@ -1658,7 +1659,8 @@ Usage:
   amq wake uninstall-dialog-hook [--harness claude|codex|cursor|all]
 
 Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
-~/.claude/settings.json, $CODEX_HOME/hooks.json with --harness codex, or
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json),
+$CODEX_HOME/hooks.json with --harness codex, or
 ~/.cursor/hooks.json with --harness cursor.
 Other settings and hooks are not changed.
 
@@ -1773,7 +1775,8 @@ $ amq coop install-hooks --help
 Usage:
   amq coop install-hooks [--dry-run]
 
-Install the co-op hooks in ~/.claude/settings.json.
+Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
+~/.claude/settings.json).
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and whether a wake rings the
@@ -1797,7 +1800,8 @@ $ amq coop uninstall-hooks --help
 Usage:
   amq coop uninstall-hooks
 
-Remove the co-op hooks (AMQ_COOP_HOOK entries) from ~/.claude/settings.json.
+Remove the co-op hooks (AMQ_COOP_HOOK entries) from
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json).
 Other settings and hooks are not changed.
 ```
 

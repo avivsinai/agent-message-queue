@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
 
@@ -274,7 +275,7 @@ func DefaultClaudeConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".claude", "settings.json"), nil
+	return filepath.Join(harness.ClaudeConfigDir(home), "settings.json"), nil
 }
 
 func DefaultCodexConfig() (string, error) {
@@ -282,7 +283,7 @@ func DefaultCodexConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".codex", "hooks.json"), nil
+	return filepath.Join(harness.CodexHome(home), "hooks.json"), nil
 }
 
 func Install(opts Options) (Result, error) {

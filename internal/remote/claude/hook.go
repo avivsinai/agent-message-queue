@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -62,7 +63,7 @@ const maxSettingsBytes = 4 << 20
 // already had a Stop array round-trips byte for byte.
 
 // InstallStopHook adds the fail-open receiver to the Stop hook chain in
-// home/.claude/settings.json. Idempotent: the same entry is left untouched,
+// the user settings.json in the Claude config directory. Idempotent: the same entry is left untouched,
 // and a marked entry with another command (an older binary) is replaced.
 // The settings leaf must be a
 // regular file (lstat rule — a directory or symlink is refused); the write
@@ -82,13 +83,13 @@ const maxSettingsBytes = 4 << 20
 // exists: AMQ_REMOTE_BINDING, a binding file, the bindings directory, or
 // the attachment sentinels. Everywhere else the hook costs one sh.
 func InstallStopHook(home, bin string) error {
-	return replaceHook(settingsPath(home), stopHook, stopHookEntry(home, bin))
+	return replaceHook(SettingsPath(home), stopHook, stopHookEntry(home, bin))
 }
 
 // UninstallStopHook removes marked entries from the Stop chain. When no
 // marked entry exists the file is untouched (no rewrite, no mtime churn).
 func UninstallStopHook(home string) error {
-	return removeHook(settingsPath(home), stopHook)
+	return removeHook(SettingsPath(home), stopHook)
 }
 
 // hookSpec names one hook event chain in settings.json and the marker that
@@ -144,7 +145,7 @@ func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) er
 	case pin.Surface != SurfaceDesktop && pin != (HookPin{}) && !pin.Complete():
 		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
 	}
-	return replaceHook(settingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait, pin))
+	return replaceHook(SettingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait, pin))
 }
 
 // replaceHook makes entry the only marked entry of spec's chain in the
@@ -249,7 +250,7 @@ var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
 // PermissionHookPin is the pin of the installed PermissionRequest hook,
 // empty when there is no hook, no pin, or more than one hook.
 func PermissionHookPin(home string) HookPin {
-	cmds, err := installedCommands(settingsPath(home), permissionSpec)
+	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 {
 		return HookPin{}
 	}
@@ -299,7 +300,7 @@ func (p *HookPin) field(name string) *string {
 // session started with --permission-mode on the command line is not visible
 // here.
 func PinWarnings(home string) ([]string, error) {
-	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -343,7 +344,7 @@ type CommandHook struct {
 // in its event chain of the user settings file, with replaceHook's rules:
 // the same entry is kept and any other marked entry is replaced.
 func InstallCommandHooks(home string, hooks []CommandHook) error {
-	return InstallCommandHooksAt(settingsPath(home), hooks)
+	return InstallCommandHooksAt(SettingsPath(home), hooks)
 }
 
 // InstallCommandHooksAt is InstallCommandHooks for the hooks file at path,
@@ -413,7 +414,7 @@ var (
 // UninstallCommandHooks removes the entries marked with marker from each
 // event chain of the user settings file.
 func UninstallCommandHooks(home, marker string, events []string) error {
-	return UninstallCommandHooksAt(settingsPath(home), marker, events)
+	return UninstallCommandHooksAt(SettingsPath(home), marker, events)
 }
 
 // UninstallCommandHooksAt is UninstallCommandHooks for the hooks file at
@@ -440,7 +441,7 @@ func uninstallCommandHooksAt(path, marker string, flat bool, events []string) er
 // MarkedHookCommands lists the commands marked with marker in the event
 // chain of the user settings file. A missing file lists none.
 func MarkedHookCommands(home, event, marker string) ([]string, error) {
-	return MarkedHookCommandsAt(settingsPath(home), event, marker)
+	return MarkedHookCommandsAt(SettingsPath(home), event, marker)
 }
 
 // MarkedHookCommandsAt is MarkedHookCommands for the hooks file at path.
@@ -456,7 +457,7 @@ func MarkedCursorHookCommandsAt(path, event, marker string) ([]string, error) {
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
 func UninstallPermissionHook(home string) error {
-	return removeHook(settingsPath(home), permissionSpec)
+	return removeHook(SettingsPath(home), permissionSpec)
 }
 
 // PermissionHookState is StopHookState for the PermissionRequest entry.
@@ -513,7 +514,7 @@ func PermissionHookForm(home string) (string, error) {
 // hookForm compares the one marked group of spec's chain with the group
 // render builds from its command, nil when the command does not parse.
 func hookForm(home string, spec hookSpec, render func(cmd string) []byte) (string, error) {
-	path := settingsPath(home)
+	path := SettingsPath(home)
 	groups, err := markedGroups(path, spec)
 	if err != nil || len(groups) != 1 {
 		return "", err
@@ -550,7 +551,7 @@ func StopHookState(home string) (string, error) {
 }
 
 func hookState(home string, spec hookSpec) (string, error) {
-	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return StopHookMissing, nil
 	}
@@ -586,8 +587,10 @@ func hookState(home string, spec hookSpec) (string, error) {
 	return StopHookPresent, nil
 }
 
-func settingsPath(home string) string {
-	return filepath.Join(home, ".claude", "settings.json")
+// SettingsPath is the user settings.json Claude Code reads for the user
+// whose home is home, and the file every AMQ Claude hook installer writes.
+func SettingsPath(home string) string {
+	return filepath.Join(harness.ClaudeConfigDir(home), "settings.json")
 }
 
 // removeHook removes spec's marked entries from the settings file at path.
