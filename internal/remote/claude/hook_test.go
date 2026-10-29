@@ -232,7 +232,7 @@ func TestReceiverRefusesTraversalSessionID(t *testing.T) {
 	if code := RunStopHookReceiver(home, strings.NewReader(`{"session_id":"../escape"}`), os.Stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if _, err := os.Stat(filepath.Join(claudeSessionsDir(home), "escape.jsonl")); err == nil {
+	if _, err := os.Stat(filepath.Join(markerDir(home), "escape.jsonl")); err == nil {
 		t.Fatal("receiver wrote outside the amq-stop directory")
 	}
 }

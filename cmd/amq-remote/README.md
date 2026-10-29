@@ -157,7 +157,9 @@ codex    codex:0198a1b2c3d47e5f8a9b0c1d2e3f4a5b   -                    {"config"
 ```
 
 Claude sessions come from `~/.claude/sessions`: interactive, with a live
-pid and a messaging socket. Codex threads come from the app-server daemon at
+pid and a messaging socket. A session run with `CLAUDE_CONFIG_DIR` set is
+supported: attach from inside it records that absolute directory as the
+entry's `config_dir`, and the endpoint reads the session's data there. Codex threads come from the app-server daemon at
 `~/.codex/app-server-control/app-server-control.sock`, or from
 `--codex-socket` when set. A discovered session is shared only after you
 paste its entry into the manifest: discovery is never consent.

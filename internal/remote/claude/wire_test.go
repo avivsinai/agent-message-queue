@@ -28,11 +28,11 @@ func TestPeerKeyHashIsLexical(t *testing.T) {
 	}
 	sock := filepath.Join(link, "7.sock")
 	sum := sha256.Sum256([]byte(sock))
-	keyFile := filepath.Join(claudeSessionsDir(home), fmt.Sprintf("7.%x.key", sum))
+	keyFile := filepath.Join(registryDir(defaultConfigDir(home)), fmt.Sprintf("7.%x.key", sum))
 	if err := os.WriteFile(keyFile, []byte(`{"peerToken":"00000000000000000000000000000000"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if tok, err := readPeerToken(home, 7, sock); err != nil || tok != "00000000000000000000000000000000" {
+	if tok, err := readPeerToken(defaultConfigDir(home), 7, sock); err != nil || tok != "00000000000000000000000000000000" {
 		t.Fatalf("token=%q err=%v; the key minted under the lexical path was not found", tok, err)
 	}
 }

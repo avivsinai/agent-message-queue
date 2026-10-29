@@ -250,7 +250,12 @@ var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
 // PermissionHookPin is the pin of the installed PermissionRequest hook,
 // empty when there is no hook, no pin, or more than one hook.
 func PermissionHookPin(home string) HookPin {
-	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
+	return PermissionHookPinAt(SettingsPath(home))
+}
+
+// PermissionHookPinAt is PermissionHookPin for the settings file at path.
+func PermissionHookPinAt(path string) HookPin {
+	cmds, err := installedCommands(path, permissionSpec)
 	if err != nil || len(cmds) != 1 {
 		return HookPin{}
 	}
@@ -677,7 +682,7 @@ func shellQuote(s string) string {
 // decides nothing without a live pin. The glob runs inside sh; with no
 // match "$1" is the pattern itself, which does not exist.
 func permissionHookCommand(home, bin string, wait time.Duration, pin HookPin) string {
-	approve := filepath.Join(claudeSessionsDir(home), "amq-approve")
+	approve := filepath.Join(markerDir(home), "amq-approve")
 	cmd := permissionHookMarker + "set -- " + shellQuote(approve) + `/*/pin-*; [ ! -e "$1" ] || exec ` +
 		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
 	if pin != (HookPin{}) {
@@ -1247,11 +1252,11 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 }
 
 func stopMarkerPath(home, sessionID string) string {
-	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
+	return filepath.Join(markerDir(home), "amq-stop", sessionID+".jsonl")
 }
 
 func stopBoundDir(home, sessionID string) string {
-	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
+	return filepath.Join(markerDir(home), "amq-bound", sessionID)
 }
 
 // bindStopSession records one attachment's ownership of this session.

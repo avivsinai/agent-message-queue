@@ -20,7 +20,7 @@ import (
 func TestObserveActivityUsesTheExistingParse(t *testing.T) {
 	home := t.TempDir()
 	const pid = 5151
-	regDir := claudeSessionsDir(home)
+	regDir := registryDir(defaultConfigDir(home))
 	if err := os.MkdirAll(regDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestObserveActivityUsesTheExistingParse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	att := &Attachment{home: home, cfg: config{Pid: pid}, ctx: context.Background()}
+	att := &Attachment{home: home, configDir: defaultConfigDir(home), cfg: config{Pid: pid}, ctx: context.Background()}
 	att.Subscribe(func(core.NativeEvent) {})
 	var notes []ActivityNote
 	unsub := att.ObserveActivity(func(n ActivityNote) { notes = append(notes, n) })
@@ -93,7 +93,7 @@ func TestObserveActivityUsesTheExistingParse(t *testing.T) {
 // in the same batch must not clear a user boundary that came after it.
 func TestOlderStopMustNotClearCurrentActivityTurn(t *testing.T) {
 	root := t.TempDir()
-	dir := claudeSessionsDir(root)
+	dir := registryDir(defaultConfigDir(root))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestOlderStopMustNotClearCurrentActivityTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	var notes []ActivityNote
-	a := &Attachment{home: root, cfg: config{Pid: 5151}, activitySink: func(n ActivityNote) { notes = append(notes, n) }}
+	a := &Attachment{home: root, configDir: defaultConfigDir(root), cfg: config{Pid: 5151}, activitySink: func(n ActivityNote) { notes = append(notes, n) }}
 	appendTranscript(t, root,
 		`{"type":"user","uuid":"turn-A","timestamp":"2026-09-23T06:00:00Z","message":{"content":"first"}}`,
 		`{"type":"assistant","uuid":"answer-A","timestamp":"2026-09-23T06:00:01Z","message":{"content":"done"}}`,
@@ -123,7 +123,7 @@ func TestOlderStopMustNotClearCurrentActivityTurn(t *testing.T) {
 // rewind the confirmation cursor, and that rewind must not re-emit activity.
 func TestRecoveryDoesNotRepeatRecentActivity(t *testing.T) {
 	home := t.TempDir()
-	dir := claudeSessionsDir(home)
+	dir := registryDir(defaultConfigDir(home))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestRecoveryDoesNotRepeatRecentActivity(t *testing.T) {
 	// goroutine from racing the deterministic file append/read sequence.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	att := &Attachment{home: home, cfg: config{Pid: 5151}, ctx: ctx, runs: map[requests.Key]*runRecord{}, recoverFrom: map[requests.Key]recoverScan{}}
+	att := &Attachment{home: home, configDir: defaultConfigDir(home), cfg: config{Pid: 5151}, ctx: ctx, runs: map[requests.Key]*runRecord{}, recoverFrom: map[requests.Key]recoverScan{}}
 	var notes []ActivityNote
 	unsub := att.ObserveActivity(func(n ActivityNote) { notes = append(notes, n) })
 	defer unsub()
@@ -170,7 +170,7 @@ func TestRecoveryDoesNotRepeatRecentActivity(t *testing.T) {
 // so the replacement line is emitted.
 func TestTruncatedTranscriptEmitsNewActivity(t *testing.T) {
 	home := t.TempDir()
-	dir := claudeSessionsDir(home)
+	dir := registryDir(defaultConfigDir(home))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestTruncatedTranscriptEmitsNewActivity(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	att := &Attachment{home: home, cfg: config{Pid: 5151}, ctx: ctx}
+	att := &Attachment{home: home, configDir: defaultConfigDir(home), cfg: config{Pid: 5151}, ctx: ctx}
 	var notes []ActivityNote
 	unsub := att.ObserveActivity(func(n ActivityNote) { notes = append(notes, n) })
 	defer unsub()
@@ -194,7 +194,7 @@ func TestTruncatedTranscriptEmitsNewActivity(t *testing.T) {
 		t.Fatalf("initial notes=%d", len(notes))
 	}
 	// Exercise the reader's supported truncation branch, not a manual cursor reset.
-	path := transcriptPath(home, "/tmp/proj", "sess-abc")
+	path := transcriptPath(defaultConfigDir(home), "/tmp/proj", "sess-abc")
 	if err := os.WriteFile(path, []byte(makeLine("after", "new prompt")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
