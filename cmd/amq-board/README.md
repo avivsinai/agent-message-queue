@@ -183,8 +183,8 @@ amq-board unbind-claude-list --binding-key '["/absolute/claude-home","native-lis
 Binding changes share the serialized owner path. Revocation accepts the exact
 stored key even when the native home or its path alias has disappeared. Acquisition with a removed
 or replaced binding cannot admit tasks at commit. Native task owners remain
-separate from AMQ container attribution. Unsupported producer versions, unbound
-lists, unreadable files and storageV5 scopes are reported as incomplete coverage.
+separate from AMQ container attribution. Unbound lists, unreadable files and
+storageV5 scopes are reported as incomplete coverage.
 A single 16 MiB acquisition byte budget covers task payloads and session scope
 reads across all homes. A stopped or incomplete scope preserves prior facts.
 The filesystem adapter cannot certify other backends are empty. Native file

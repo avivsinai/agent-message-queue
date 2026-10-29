@@ -244,7 +244,8 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 
 // amq-board showed "codex 0.165.0 is not a verified version" and no plan
 // limits for the installed codex-cli 0.165.0 (2026-10-29): an exact version
-// list refused a release whose replies parse unchanged.
+// list refused the release before its reply was read. The version alone no
+// longer refuses; the reply's shape still decides.
 func TestRunReadsANewCodexRelease(t *testing.T) {
 	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.165.0")
 	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
