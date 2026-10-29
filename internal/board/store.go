@@ -977,11 +977,79 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		}
 	}
 	sort.Slice(m.Unresolved, func(i, j int) bool { return m.Unresolved[i].Key < m.Unresolved[j].Key })
+	relateAsks(m.Columns, m.Unresolved, input.Known)
 	for i := range m.Columns {
 		sortCards(m.Columns[i].ID, m.Columns[i].Cards)
 	}
 	m.Next = selectNext(m.Columns)
 	return m
+}
+
+// relateAsks adds one related token to each current card per unresolved ask
+// whose subject, body, or refs name the card's bead id, newest ask first.
+// The longest candidate in the bead vocabulary wins, so a mention of a
+// longer known id never names its prefix. A related ask is context only:
+// placement, counts, attachments, actions, and lifecycle stay as projected.
+func relateAsks(columns []ColumnView, asks []Message, known map[string]string) {
+	type position struct{ column, card int }
+	byBead := map[string][]position{}
+	for i := range columns {
+		for j, card := range columns[i].Cards {
+			for _, ref := range card.Refs {
+				if ref.Kind == RefBead {
+					byBead[ref.ID] = append(byBead[ref.ID], position{i, j})
+				}
+			}
+		}
+	}
+	if len(byBead) == 0 {
+		return
+	}
+	newest := append([]Message(nil), asks...)
+	sort.SliceStable(newest, func(i, j int) bool { return askNewer(newest[i], newest[j]) })
+	for _, ask := range newest {
+		ref, ok := AMQMessage(ask.Key)
+		if !ok {
+			continue
+		}
+		linked := map[position]bool{}
+		text := ask.Subject + "\n" + ask.Body + "\n" + strings.Join(ask.Refs, "\n")
+		for _, token := range BeadTokens(text) {
+			for _, id := range BeadCandidates(token) {
+				positions, current := byBead[id]
+				if _, ok := known[id]; !ok && !current {
+					continue
+				}
+				for _, p := range positions {
+					if linked[p] {
+						continue
+					}
+					linked[p] = true
+					t := Token{Ref: ref, Relation: string(RelationRelated), Basis: "open " + strings.ReplaceAll(ask.Kind, "_", " ") + ": " + cleanTitle(ask.Subject), Inferred: true}
+					if actions := messageActions(ask); len(actions) > 0 {
+						t.Action = &actions[0]
+					}
+					card := &columns[p.column].Cards[p.card]
+					card.Related = append(card.Related, t)
+				}
+				break
+			}
+		}
+	}
+}
+
+// askNewer orders asks newest first by creation time, then by key.
+func askNewer(a, b Message) bool {
+	at, aerr := time.Parse(time.RFC3339Nano, a.Created)
+	bt, berr := time.Parse(time.RFC3339Nano, b.Created)
+	if aerr == nil && berr == nil {
+		if !at.Equal(bt) {
+			return at.After(bt)
+		}
+	} else if a.Created != b.Created {
+		return a.Created > b.Created
+	}
+	return a.Key < b.Key
 }
 
 type Attachment struct {

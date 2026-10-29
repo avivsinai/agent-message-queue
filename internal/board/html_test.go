@@ -11,7 +11,7 @@ import (
 )
 
 // Design 9.1 and slice 6 (finding 15): source text reaches the page only
-// escaped, the embedded model parses back equal, the page script builds no
+// escaped, the embedded page model parses back equal, the page script builds no
 // markup from strings, and a hostile handle yields no command.
 func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	const hostile = `"><img src=x onerror=alert(1)>';touch /tmp/x;'</script><!--` + "\u2028"
@@ -94,10 +94,10 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 	if err := json.Unmarshal([]byte(embedded), &got); err != nil {
 		t.Fatalf("embedded model does not parse: %v", err)
 	}
-	raw, _ := json.Marshal(m)
+	raw, _ := json.Marshal(buildPageModel(m))
 	_ = json.Unmarshal(raw, &want)
 	if !reflect.DeepEqual(got, want) {
-		t.Fatal("embedded model differs from the input model")
+		t.Fatal("embedded model differs from the page model")
 	}
 
 	outside := html[:start] + html[start+end:]

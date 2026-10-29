@@ -15,6 +15,9 @@ type Token struct {
 	Ambiguous bool   `json:"ambiguous,omitempty"`
 	Closed    bool   `json:"closed,omitempty"`
 	Count     int    `json:"count,omitempty"`
+	// Action is the context command for an amq-message token: it reads the
+	// ask's exact thread.
+	Action *Action `json:"action,omitempty"`
 }
 
 // ResolveMentions turns each item's candidate tokens into related references

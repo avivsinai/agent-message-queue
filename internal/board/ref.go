@@ -13,6 +13,7 @@ const (
 	RefForge      = "forge"
 	RefObligation = "amq-obligation"
 	RefAMQThread  = "amq-thread"
+	RefAMQMessage = "amq-message"
 	RefBranch     = "branch"
 	RefExternal   = "ext"
 )
@@ -70,6 +71,15 @@ func Obligation(key string) (Ref, bool) {
 		return Ref{}, false
 	}
 	return Ref{Kind: RefObligation, ID: key}, true
+}
+
+// AMQMessage builds amq-message:<key> from a logical message key. It names
+// one ask as related context; it is never a work identity.
+func AMQMessage(key string) (Ref, bool) {
+	if key == "" || len(key) > 512 || hasControl(key) {
+		return Ref{}, false
+	}
+	return Ref{Kind: RefAMQMessage, ID: key}, true
 }
 
 // AMQThread builds amq-thread:<session>/<thread>, the key that groups

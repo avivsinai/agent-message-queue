@@ -203,6 +203,11 @@ app-server interface and the existing bounded collector cache.
 ## Views
 
 Text, JSON, static HTML, and the live page use the same pure task projection.
+An unresolved ask that names a current card's bead ID appears on that card as
+related context, with a count and the newest ask's thread command; its request
+names the task. This never attaches, admits, or moves work. Text and HTML show
+the newest 25 unresolved asks and historical tasks, with counts, and no message
+bodies; `--json` and `model.json` keep every record and body.
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
 protect against DNS rebinding. The page never runs source commands.
