@@ -361,10 +361,14 @@ func TestHostSkipsASenderItCannotReplyTo(t *testing.T) {
 	if !slices.Equal(reply.Header.Refs, []string{question.Header.ID}) {
 		t.Fatalf("reply refs=%v; want the local question %s", reply.Header.Refs, question.Header.ID)
 	}
-	data, err := os.ReadFile(filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns", bridged.Header.ID+".json"))
-	if err != nil || !strings.Contains(string(data), `"state":"skipped"`) {
-		t.Fatalf("bridged question record=%s (%v); want skipped", data, err)
-	}
+	// Both messages can carry the same millisecond, so the local question may
+	// run first and the bridged one be skipped after the reply (release-tag
+	// run 40830020730 read it still claimed).
+	record := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "turns", bridged.Header.ID+".json")
+	waitFor(t, "the bridged question's skipped record", func() bool {
+		data, _ := os.ReadFile(record)
+		return strings.Contains(string(data), `"state":"skipped"`)
+	})
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 	if len(agent.prompts) != 1 {
