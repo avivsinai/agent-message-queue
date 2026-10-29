@@ -15,12 +15,16 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
 
 // wakeDialogStartupEvent marks a .wake.dialog that coop exec writes before
-// it execs a harness that may show a startup prompt. A doorbell at the trust
+// it execs a harness that may show a startup prompt, only when the person
+// installed the harness's AMQ dialog hook (dialogGuardEnabled): the hook is
+// what releases it. Without the hook coop exec writes none, and the
+// doorbell rings plain from the start. A doorbell at the trust
 // dialog ends the session: Claude Code's Enter picks the default "No, exit",
 // and Codex quits. A doorbell at Codex's update prompt runs the upgrade. A
 // trust marker closes when the harness records that it trusts the
@@ -201,19 +205,56 @@ func claudeStartupTrust(dir string) startupTrust {
 }
 
 // syncStartupDialogMarker writes the Startup marker when the harness about
-// to start as binaryPath with its final args may show a startup prompt, so
-// the wake holds the doorbell until the prompt is answered: a trust dialog
-// still pending, or for Codex an update prompt its state does not rule out.
-// Otherwise it removes a Startup marker an earlier launch left (one
-// declined, or one that never started), which would hold this session's
-// doorbell. recorded reports that coop exec recorded the identity of the
+// to start as binaryPath with its final args has its dialog guard on and
+// may show a startup prompt, so the wake holds the doorbell until the
+// prompt is answered: a trust dialog still pending, or for Codex an update
+// prompt its state does not rule out. Otherwise it removes a Startup marker
+// an earlier launch left (one declined, or one that never started), which
+// would hold this session's doorbell. A plain agy launch, which runs no
+// relay, also removes the marker an earlier relay left: nothing else would
+// close it. recorded reports that coop exec recorded the identity of the
 // Codex thread args resume. The caller owns the agent's wake.
 func syncStartupDialogMarker(root, handle, binaryPath string, args []string, recorded bool) error {
-	marker, hold, err := decideStartupDialogMarker(binaryPath, args, recorded)
+	guard := launchDialogGuard(binaryPath)
+	marker, hold, err := decideStartupDialogMarker(binaryPath, args, recorded, guard != "")
 	if err != nil {
 		return err
 	}
-	return publishStartupDialogMarker(root, handle, marker, hold)
+	if facts, _ := harness.ForExecutable(binaryPath); facts.Name == harness.Agy {
+		if err := removeHarnessDialogMarker(root, handle, harness.Agy); err != nil {
+			return err
+		}
+	}
+	return publishStartupDialogMarker(root, handle, marker, hold, guard)
+}
+
+// removeHarnessDialogMarker removes the agent's marker when the harness
+// name wrote it, under the marker lock.
+func removeHarnessDialogMarker(root, handle, name string) error {
+	agentDir, err := openExistingWakeAgentDir(root, handle)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return agentDir.withFD(func(dirfd int) error {
+		return removeWakeDialogMarkerIf(dirfd, agentDir, func(current []byte) bool {
+			var marker wakeDialogMarker
+			return json.Unmarshal(current, &marker) == nil && marker.Harness == name
+		})
+	})
+}
+
+// launchDialogGuard is the harness whose AMQ dialog hook guards a launch of
+// binaryPath (claude, codex or cursor), or "" for a plain doorbell.
+func launchDialogGuard(binaryPath string) string {
+	facts, _ := harness.ForExecutable(binaryPath)
+	switch facts.Name {
+	case harness.Claude, harness.Codex, harness.Cursor:
+		if dialogGuardEnabled(facts.Name) {
+			return facts.Name
+		}
+	}
+	return ""
 }
 
 // codexLaunchDecision is a Codex seat's startup marker and backend for one
@@ -224,6 +265,8 @@ type codexLaunchDecision struct {
 	// embeddedOnly keeps a seat that could run on the Codex daemon on its
 	// own app-server for this launch: no daemon thread and no thread record.
 	embeddedOnly bool
+	// guard is "codex" when the Codex dialog guard is on, else "".
+	guard string
 }
 
 // decideCodexLaunch decides a Codex seat's startup marker before naming and
@@ -232,16 +275,21 @@ type codexLaunchDecision struct {
 // screen may show runs its own app-server for this launch, with the
 // identity overrides, no daemon thread and no thread record, and its own
 // children run the dialog hook (startupPromptOfLaunch). A seat stays on the
-// daemon only when no screen can show.
+// daemon only when no screen can show. Without the Codex dialog guard the
+// seat stays on the daemon and gets no marker.
 func decideCodexLaunch(binaryPath string, args, env []string, wd string, named coopNamedChoice, resumeChoice string) (codexLaunchDecision, error) {
-	var decision codexLaunchDecision
+	decision := codexLaunchDecision{guard: launchDialogGuard(binaryPath)}
 	var err error
+	if decision.guard == "" {
+		decision.decided = true
+		return decision, nil
+	}
 	_, selected, unresolved := codexResumeSelection(args)
 	daemonCandidate := selected && !unresolved ||
 		named.enabled && coopNamedModeFor(binaryPath) == coopNamedModeTUI && !agentArgsPreventAutoNameFor(binaryPath, args)
 	if daemonCandidate {
 		daemonArgs := pinCodexResumeLaunchDir(binaryPath, args, wd, true, resumeChoice)
-		if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, daemonArgs, true); err != nil {
+		if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, daemonArgs, true, true); err != nil {
 			return codexLaunchDecision{}, err
 		}
 		if !decision.hold {
@@ -250,7 +298,7 @@ func decideCodexLaunch(binaryPath string, args, env []string, wd string, named c
 		}
 	}
 	embeddedArgs := pinCodexShellIdentity(binaryPath, pinCodexResumeLaunchDir(binaryPath, args, wd, false, resumeChoice), env, false)
-	if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, embeddedArgs, false); err != nil {
+	if decision.marker, decision.hold, err = decideStartupDialogMarker(binaryPath, embeddedArgs, false, true); err != nil {
 		return codexLaunchDecision{}, err
 	}
 	decision.decided, decision.embeddedOnly = true, daemonCandidate
@@ -258,8 +306,12 @@ func decideCodexLaunch(binaryPath string, args, env []string, wd string, named c
 }
 
 // decideStartupDialogMarker is the Startup marker decision of
-// syncStartupDialogMarker, without publishing it.
-func decideStartupDialogMarker(binaryPath string, args []string, recorded bool) (wakeDialogMarker, bool, error) {
+// syncStartupDialogMarker, without publishing it. Only a launch whose
+// dialog guard is on gets a marker: its hook is what releases it.
+func decideStartupDialogMarker(binaryPath string, args []string, recorded, guarded bool) (wakeDialogMarker, bool, error) {
+	if !guarded {
+		return wakeDialogMarker{}, false, nil
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return wakeDialogMarker{}, false, err
@@ -275,31 +327,20 @@ func decideStartupDialogMarker(binaryPath string, args []string, recorded bool) 
 	return marker, hold, nil
 }
 
-// publishStartupDialogMarker publishes a decided Startup marker, and says on
-// stderr when a Codex hold waits for a dialog hook that cannot run.
-func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool) error {
+// publishStartupDialogMarker publishes a decided Startup marker and says on
+// stderr which doorbell the launch gets: "dialog guard: plain" (text and
+// Enter, never held for a dialog), or "dialog guard: proper (<harness>)"
+// when guard names the harness whose dialog hook or relay holds it.
+func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool, guard string) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err
 	}
-	if hold && marker.Harness == launch.CodexProvider {
-		if remedy, blocked := codexDialogHookBlocked(); blocked {
-			_ = writeStderr("amq coop exec: AMQ holds this Codex seat's doorbell until the first prompt typed in it, because a Codex startup screen may show, and the AMQ dialog hook that sees that prompt cannot run: %s\n", remedy)
-		}
+	if guard == "" {
+		_ = writeStderr("dialog guard: plain\n")
+	} else {
+		_ = writeStderr("dialog guard: proper (%s)\n", guard)
 	}
 	return nil
-}
-
-// codexDialogHookBlocked reports whether the AMQ Codex dialog hook is
-// missing, disabled or untrusted, with the remedy for the case.
-func codexDialogHookBlocked() (remedy string, blocked bool) {
-	check, ok := checkCodexDialogHook()
-	switch {
-	case ok && check.Status == "ok":
-		return "", false
-	case ok && check.Message == codexDialogHookUntrusted:
-		return "open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries", true
-	}
-	return "run amq wake install-dialog-hook --harness codex, then open /hooks in Codex and trust the AMQ_DIALOG_HOOK entries", true
 }
 
 // syncStartupDialogMarkerState publishes the decided hold through the
@@ -713,15 +754,20 @@ func startupTrustFileStamp(harness string) string {
 }
 
 // codexStartupHoldHint reports a Codex Startup marker for handle that still
-// holds input (startupDialogClosed, as the wake decides). Without a Codex
-// record of the answer the hold releases only through the Codex dialog
-// hook at the session's first turn; while it holds, the wake shows the
-// held-doorbell notice.
+// holds input (wakeStartupMarkerHolds, as the wake decides). Without a
+// Codex record of the answer the hold releases only through the Codex
+// dialog hook at the session's first turn; while it holds, the wake shows
+// the held-doorbell notice.
 func codexStartupHoldHint(root, handle string) (opsHint, bool) {
-	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName), maxWakeMetadataFileBytes)
+	path := filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return opsHint{}, false
+	}
+	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
 	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Harness != launch.CodexProvider ||
-		startupDialogClosed(raw, &startupDialogCache{}) {
+		!wakeStartupMarkerHolds(raw, info.ModTime(), time.Now()) {
 		return opsHint{}, false
 	}
 	return opsHint{
@@ -732,32 +778,18 @@ func codexStartupHoldHint(root, handle string) (opsHint, bool) {
 }
 
 // codexStartupHookRelease says how the Codex dialog hook releases a
-// Startup hold, with the remedy when it cannot run: Codex skips an
-// installed hook it does not trust, so the remedy then is the trust, not
-// another install.
-func codexStartupHookRelease() string {
-	remedy, blocked := codexDialogHookBlocked()
-	if !blocked {
-		return "the Codex dialog hook releases it at the first prompt typed in that Codex session"
-	}
-	return "the Codex dialog hook releases it at the first prompt typed in that Codex session once it runs (" + remedy + ")"
-}
+// Startup hold. coop exec writes the marker only while that hook is
+// installed and trusted.
+const codexStartupHookRelease = "the Codex dialog hook releases it at the first prompt typed in that Codex session"
 
 // codexStartupHoldRemedy is the fixed held-notice text that says what
-// releases a Codex Startup hold once its screen is answered: a prompt typed
-// there, when the dialog hook can run, and the remedy otherwise.
-func codexStartupHoldRemedy() string {
-	remedy, blocked := codexDialogHookBlocked()
-	if !blocked {
-		return "a prompt typed there releases it"
-	}
-	return "a prompt typed there releases it once the AMQ dialog hook runs: " + remedy
-}
+// releases a Codex Startup hold once its screen is answered.
+const codexStartupHoldRemedy = "a prompt typed there releases it"
 
 // codexStartupHoldRelease says why a Codex Startup marker holds the
 // doorbell, what releases it, and the remedy.
 func codexStartupHoldRelease(marker wakeDialogMarker) string {
-	hook := codexStartupHookRelease()
+	hook := codexStartupHookRelease
 	switch {
 	case marker.Kind == wakeStartupKindResumeDir:
 		return "Codex resumes the thread in its own directory or may ask which directory to use (tui.resume_cwd is session or cannot be read), where a trust, hook review or directory screen can show; " + hook
@@ -870,9 +902,8 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 	}
 	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
 	var marker wakeDialogMarker
-	// The wake's own decision: a marker whose trust is recorded holds nothing.
 	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent ||
-		startupDialogClosed(raw, &startupDialogCache{}) {
+		!wakeStartupMarkerHolds(raw, info.ModTime(), now) {
 		return nil
 	}
 	const held = "input stays held, and the wake shows the held-doorbell notice at once"
@@ -885,4 +916,16 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 		Harness: marker.Harness, Dir: marker.Cwd,
 		AgeSeconds: int64(now.Sub(info.ModTime()).Seconds()), Release: release,
 	}
+}
+
+// wakeStartupMarkerHolds reports whether a Startup marker read as raw with
+// modTime holds input now, as the wake decides (wakeDialogSourceInDir): not
+// when its harness recorded the trust that closes it, and not once it no
+// longer proves an open dialog unless its harness's dialog guard is on.
+func wakeStartupMarkerHolds(raw []byte, modTime, now time.Time) bool {
+	if startupDialogClosed(raw, &startupDialogCache{}) {
+		return false
+	}
+	state, _ := classifyWakeDialogMarker(modTime, true, nil, now)
+	return state == wakeDialogOpen || dialogGuardEnabled(wakeDialogMarkerHarness(raw))
 }

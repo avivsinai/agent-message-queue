@@ -974,6 +974,13 @@ func (c *coopExecRun) execAgent() error {
 			fmt.Errorf("cleanup exact coop wake helper: %w", cleanupErr),
 		)
 	}
+	// agy's prompts show only in its terminal output, so with the status the
+	// person turned on coop exec stays as its terminal instead of exec'ing
+	// it. Only a launch whose wake owns the agent's wake keeps the marker:
+	// with --no-wake, or beside another owner's wake, the marker is not this
+	// launch's to change.
+	agyRelay := c.wakeOwned && c.managedLaunchNonce == "" &&
+		agyRelayPlan(c.binaryPath, env, term.IsTerminal(int(os.Stdin.Fd())))
 	// The marker follows the final arguments, which determine the harness
 	// working directory. It changes only once this launch's wake holds the agent's wake
 	// lock, so a launch that loses the race touches no other owner's hold.
@@ -982,14 +989,16 @@ func (c *coopExecRun) execAgent() error {
 	// harness starts would wait in the terminal and answer its first prompt.
 	if c.wakeOwned {
 		publish := func() error {
-			if c.nativeLaunch != nil {
+			switch {
+			case c.nativeLaunch != nil:
 				marker := wakeDialogMarker{Schema: 1, Event: wakeDialogStartupEvent, Harness: launch.ClaudeProvider,
 					Kind: claudeNativeStartupKind, Cwd: c.nativeLaunch.Cwd, SessionID: c.nativeLaunch.SessionID,
 					Launch: &c.nativeLaunch.Launch}
-				return publishStartupDialogMarker(c.root, c.agentHandle, marker, true)
-			}
-			if codexDecided {
-				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold)
+				return publishStartupDialogMarker(c.root, c.agentHandle, marker, true, launch.ClaudeProvider)
+			case codexDecided:
+				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold, launchDecision.guard)
+			case agyRelay:
+				return publishStartupDialogMarker(c.root, c.agentHandle, wakeDialogMarker{}, false, harness.Agy)
 			}
 			return syncStartupDialogMarker(c.root, c.agentHandle, c.binaryPath, c.agentArgs, recorded)
 		}
@@ -1048,20 +1057,12 @@ func (c *coopExecRun) execAgent() error {
 	if c.managedLaunchNonce == "" {
 		env = codexDaemonSeatEnv(c.binaryPath, env, recorded)
 	}
-	relayEnv, relay, strip, notice := agyRelayPlan(c.binaryPath, env, term.IsTerminal(int(os.Stdin.Fd())))
-	if notice != "" {
-		_ = writeStderr("%s\n", notice)
-	}
 	recordExecIdentity(c.binaryPath, env)
 	var execErr error
 	switch {
 	case c.managedLaunchNonce != "":
 		execErr = reexecManagedLaunchWrapper(c.root, c.agentHandle, c.managedLaunchNonce, c.binaryPath, argv, env, c.executionOptions)
-	case relay && c.wakeOwned:
-		// agy's prompts show only in its terminal output, so coop exec stays
-		// as its terminal instead of exec'ing it. Only a launch whose wake
-		// owns the agent's wake keeps the marker: with --no-wake, or beside
-		// another owner's wake, the marker is not this launch's to change.
+	case agyRelay:
 		log, _ := openCoopWakeOutput(c.root, c.agentHandle)
 		sink, sinkErr := newAgyDialogSink(c.root, c.agentHandle, log)
 		if sinkErr != nil {
@@ -1069,7 +1070,7 @@ func (c *coopExecRun) execAgent() error {
 			execErr = coopExecProcess(c.binaryPath, argv, env)
 			break
 		}
-		execErr = runAgyRelay(c.binaryPath, argv, relayEnv, sink, strip)
+		execErr = runAgyRelay(c.binaryPath, argv, agyRelayEnv(env), sink)
 		_ = sink.Close()
 	default:
 		execErr = coopExecProcess(c.binaryPath, argv, env)

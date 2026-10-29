@@ -132,6 +132,53 @@ Use `amq send --priority urgent` or `amq reply --priority urgent` for a
 time-critical verdict or unblocking request that should skip the hold.
 Ordinary review responses remain normal by default.
 
+## Plain doorbell and the opt-in dialog guard
+
+The default wake is a plain doorbell on every harness and terminal: it types
+the doorbell text and Enter (with the harness's own submit keys, such as
+Codex's LF before the Enter), or hands it to the bound `--inject-via`
+injector, and retries as usual. It installs no hook, holds for no dialog,
+and reads no screen, so it always rings and never stays held. The accepted
+risk: a doorbell that lands on an open dialog can answer it.
+
+Safety is opt-in per harness. The dialog guard holds the doorbell only for
+a dialog that an opted-in writer reports in the `.wake.dialog` marker:
+
+| Harness | Opt-in |
+| --- | --- |
+| Claude Code | `amq wake install-dialog-hook`, every entry present and its amq binary present |
+| Codex | `amq wake install-dialog-hook --harness codex`, then trusted and enabled in Codex `/hooks` |
+| Cursor | `amq wake install-dialog-hook --harness cursor` |
+| agy | `AGY_CLI_OSC7501=on` in the environment of `amq coop exec agy` |
+| pi | the AMQ pi extension, installed in pi |
+
+`amq coop exec` prints one line on stderr before it starts the harness:
+`dialog guard: plain`, or `dialog guard: proper (<harness>)` when the guard
+of that harness is on. Only with the guard on does coop exec write a
+`Startup` marker (below); without it, it removes one an earlier launch
+left.
+
+A marker that does not prove an open dialog (older than 10 minutes, dated
+in the future, unreadable, or behind an agent directory that is no longer
+canonical) holds input only while the AMQ dialog hook of the harness that
+wrote it is installed: Claude Code, Codex (trusted) or Cursor. A Claude
+Code hook marker names no harness; a marker that cannot be read falls back
+to the wake's `--harness`. The wake cannot see the agy relay or the pi
+extension, so an agy or pi marker holds only while it proves an open prompt
+or turn. Otherwise the wake reads the marker as closed and rings, so no hold
+outlasts 10 minutes without an installed hook. A plain agy launch, which
+runs no relay, removes an agy marker an earlier relay left. An open marker
+holds as described below. The wake checks the hook without starting a
+process and reads the hooks files again only when they change or a hook's
+amq binary appears or goes, so an uninstall or a removed binary releases an
+aged marker at the next recheck. A hook installed after launch holds at
+once, because it writes the markers; startup protection waits for the next
+launch.
+
+The guard does not change hold by priority, urgent and interrupt delivery,
+the bounded wait while the person types (at most 15 seconds, then attention
+only and a retry), or the opt-in `claude-native` injector.
+
 ## Dialog guard (Claude Code)
 
 ### Native delivery
@@ -161,7 +208,7 @@ already queued native prompts cannot be retracted after a session change.
 Doorbell text and its Enter answer whatever has focus. When Claude Code shows
 AskUserQuestion, ExitPlanMode, or a permission dialog, injected input picks an
 option the person did not choose. The terminal gives no signal that tells an
-open dialog from an idle prompt, so the guard uses Claude Code hooks:
+open dialog from an idle prompt, so the opt-in guard uses Claude Code hooks:
 
 ```bash
 amq wake install-dialog-hook
@@ -216,16 +263,14 @@ version supports it.
   titled `AMQ` that names the agent, the number of waiting messages, and why
   input is held, for example `codex: 1 message waiting, doorbell held. Codex
   startup screen open; answer it in that terminal; a prompt typed there
-  releases it`. When the Codex dialog hook cannot run, the reason names its
-  remedy instead. It also
+  releases it`. It also
   writes the terminal attention floor (title, bell, and an OSC 9 or OSC 777
   notice where the terminal supports one) to the wake's attention output. The
   notice repeats once per attention period (30 seconds, doubling to 15
   minutes) while the hold lasts; new messages do not make it due sooner. A
   new marker (a changed marker file) starts a new ladder, so a new prompt's
   notice shows at once, also when the wake never saw the busy turn between
-  two prompts, and a new busy turn's notice is due once its quiet hold
-  ends; an unchanged marker keeps its ladder.
+  two prompts; an unchanged marker keeps its ladder.
   A change of cause logs one hold line in `.wake.log`. On
   macOS the notification comes from `osascript`; on
   Linux from `notify-send` when it is installed; elsewhere only the terminal
@@ -259,19 +304,23 @@ version supports it.
   says so.
 - **Esc on a permission dialog, and stale markers.** Esc or a deny on a
   permission dialog runs no hook, and no transcript record names the marker,
-  so the marker stays until the person's next prompt. A marker older than 10
-  minutes, dated in the future, or one the wake cannot read, still blocks
-  input. The wake then stops the 2-second recheck and retries on the input
-  retry ladder (5 seconds, doubling to 2 minutes), with the held-doorbell
-  notice on the attention cadence. No timer releases the hold, because Enter
-  on an open permission dialog approves the tool call. Each hold line in
+  so the marker stays until the person's next prompt. While the hook stays
+  installed, a marker older than 10 minutes, dated in the future, or one the
+  wake cannot read, still blocks input. The wake then stops the 2-second
+  recheck and retries on the input retry ladder (5 seconds, doubling to 2
+  minutes), with the held-doorbell notice on the attention cadence. No timer
+  releases the hold, because Enter on an open permission dialog approves the
+  tool call. Each hold line in
   `.wake.log` starts with the UTC time and names the marker's event, kind,
   harness, tool, age, and transcript state.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
   directory before the session starts, and Enter at that dialog ends the
   session. Codex can also show its update prompt first, whose default choice
-  runs the upgrade. Before it execs either harness, `amq coop exec` reads
+  runs the upgrade. Startup holds apply only with the guard of that harness
+  on; a plain launch gets no `Startup` marker, runs no Codex probe, and keeps
+  a Codex seat on the daemon. With the guard on, before it execs either
+  harness, `amq coop exec` reads
   where the harness records trust: Claude Code's `.claude.json` (in
   `CLAUDE_CONFIG_DIR` or the home directory) for the directory or an
   ancestor inside its Git checkout, and Codex's `config.toml` `[projects]`
@@ -305,11 +354,12 @@ version supports it.
   A drain before the release, such as one from another terminal, and an
   inbox file replaced in place prove nothing. A trust file that becomes
   unreadable keeps the hold. A Codex hold stays until the first-turn close
-  of `amq wake install-dialog-hook --harness codex`; without that hook the
-  marker ages as above (input held, with the held-doorbell notice from the
-  first held attempt), and `amq doctor --ops` names the remedy. `amq wake check` reports an open `Startup` marker as
-  `startup_hold`: the harness, the directory, how long it has been open, and
-  what releases it.
+  of the Codex dialog hook; past 10 minutes it ages as above (input held,
+  with the held-doorbell notice) while the hook stays installed and trusted.
+  `amq wake check` reports a `Startup` marker that holds input as
+  `startup_hold`, and `amq doctor --ops` as `codex_trust_hold` for Codex:
+  the harness, the directory, how long it has been open, and what releases
+  it.
 
   Codex's "Not now" on the update prompt records nothing, so an update
   prompt marker releases only through the dialog hook's first-turn close.
@@ -376,13 +426,7 @@ version supports it.
   them.
   `codex app-server` refuses `--profile`, and `-c profile=<name>` selects a
   legacy `[profiles]` table rather than the profile file `--profile` loads,
-  so a `--profile` seat cannot be probed and gets the marker. When coop exec
-  writes a Codex `Startup` marker while the AMQ Codex dialog hook is
-  missing, disabled or untrusted, it prints one diagnostic line on stderr
-  before it starts Codex that names the hold and the remedy. Known limit:
-  without a runnable AMQ Codex dialog hook, a `Startup` hold waits for the
-  remedy; the line and the held notice make it visible, but nothing releases
-  it automatically.
+  so a `--profile` seat cannot be probed and gets the marker.
 
   A `codex resume` or `codex fork` launch asks which directory to resume in
   when the resume mode (`tui.resume_cwd`) is unset and the thread's recorded
@@ -424,10 +468,7 @@ version supports it.
   `migrate-nfs-db`, `responses-api-proxy`, `stdio-to-uds`, `exec-server`,
   `features`, `tcp-tunnel`). An option AMQ does not classify, such as
   `-i`, refuses too. A managed launch gets the same check, with the
-  provider, arguments and environment overlay of its execution ticket. When the AMQ dialog hook is installed but
-  Codex does not trust it, `amq doctor --ops` names the remedy: open
-  `/hooks` in Codex and trust the `AMQ_DIALOG_HOOK` entries. A missing hook
-  names `amq wake install-dialog-hook --harness codex`.
+  provider, arguments and environment overlay of its execution ticket.
 
   `amq-remote` holds a turn for a Codex seat on the managed daemon whose
   thread identity coop exec recorded: while that seat has a `Startup`
@@ -470,7 +511,8 @@ The installer writes `AMQ_DIALOG_HOOK=1` entries into `$CODEX_HOME/hooks.json`
 trust of the person's own hooks stays where it is. Codex runs a new or
 changed hook only after the person trusts it: open `/hooks` in Codex and
 trust the AMQ entries, or choose "Trust all" when Codex asks at start. Each
-change of an entry's command costs that once.
+change of an entry's command costs that once. Until the entries are trusted
+and enabled, the guard is off and the seat gets the plain doorbell.
 
 - **Open and close.** `PermissionRequest`, with no matcher, opens the marker.
   Only a turn or session event closes it: `Stop`, `Interrupt`,
@@ -542,10 +584,11 @@ sessions after an install.
   checks to imported Claude Code closes. Their `PreToolUse` and
   `PostToolUse` matchers (`AskUserQuestion|ExitPlanMode`) name no Cursor
   tool.
-- **Startup.** `coop exec` holds input before Cursor starts. Trust acceptance
-  alone cannot release it because MCP and sandbox prompts can follow.
-  Native `sessionStart` releases it; resumed sessions use the first human
-  `beforeSubmitPrompt`. Without the hook or a ready signal, input stays held.
+- **Startup.** With the hook installed, `coop exec` holds input before Cursor
+  starts. Trust acceptance alone cannot release it because MCP and sandbox
+  prompts can follow. Native `sessionStart` releases it; resumed sessions
+  use the first human `beforeSubmitPrompt`. Without the hook coop exec
+  writes no startup marker, and the doorbell rings plain.
 - **Session naming.** coop exec starts the `/rename` namer only after it
   has published the startup marker decision. The namer waits while a dialog
   marker holds input, as the doorbell does, and checks the marker again
@@ -563,9 +606,13 @@ repairs AMQ entries; unrelated unsafe content needs an operator edit.
 
 ## Dialog guard (agy turns and prompts)
 
-agy runs no hooks with Google Cloud sign-in. `amq coop exec agy` runs agy on
-a pseudo-terminal, turns on its terminal status (OSC 7501), and keeps the
-marker in step with it:
+agy runs no hooks with Google Cloud sign-in; its only prompt signal is the
+terminal status (OSC 7501) it writes when `AGY_CLI_OSC7501=on`. AMQ does not
+turn it on. When the person sets it and stdin is a terminal,
+`amq coop exec agy` runs agy on a pseudo-terminal, passes its output
+through unchanged, sets `AGY_CLI_OSC7501_MESSAGES=brief` unless it is set,
+and keeps the marker in step with the status. Otherwise agy runs directly
+and gets the plain doorbell.
 
 - **Open.** `blocked:kind=permission` and `blocked:kind=auth` open the
   marker, and so does `working`. agy queues a doorbell typed during a turn
@@ -579,10 +626,11 @@ marker in step with it:
   quiet: it shows no desktop notice and no terminal attention, and the
   `.wake.log` hold line says the harness is busy. A permission or sign-in
   prompt shows the held notice at once.
-- **Not covered.** A turn longer than 10 minutes makes the marker
-  unconfirmed: input stays held, the held notice says that agy is busy, and
-  the doorbell rings on the deferred retry ladder, up to 2 minutes after the
-  close. Another `blocked` kind changes nothing and is logged once.
+- **Not covered.** After 10 minutes the marker proves nothing and reads as
+  closed, so the doorbell rings during a longer turn (agy queues it) or at a
+  prompt still open after 10 minutes. Another `blocked` kind changes
+  nothing and is logged once. A plain launch removes a marker that a relay
+  killed during a turn left.
 
 ## Dialog guard (pi prompts)
 
@@ -593,10 +641,11 @@ project resources, and extensions open prompts (`confirm`, `select`,
 (`harness` `pi`) while either is open: `event` `project_trust` from pi's
 `project_trust` event until the session starts, and `event` `ui_prompt`
 while pi waits on an extension prompt. The wake holds the doorbell with the
-same hold and age rules as above. A session start or shutdown also removes
+same hold rules as above; a pi marker older than 10 minutes reads as
+closed. A session start or shutdown also removes
 the marker. The extension is the only writer of a pi agent's marker and
 removes only a marker it wrote. The guard runs only when the AMQ pi
-extension is loaded.
+extension is loaded; without it pi gets the plain doorbell.
 
 ## Live settings
 

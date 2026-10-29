@@ -21,29 +21,26 @@ const (
 	agyStatusMessagesEnv = "AGY_CLI_OSC7501_MESSAGES"
 )
 
-// agyRelayPlan decides how coop exec starts agy. agy runs no hooks with
-// Google Cloud sign-in, so the only signal that its permission or sign-in
-// prompt is open is the OSC 7501 status it writes to its terminal. coop exec
-// then stays as agy's terminal: agy runs on a pty whose output the relay
-// reads. relay is false when AGY_CLI_OSC7501 is set to anything but "on",
-// or when stdin is no terminal; agy then runs as before and notice, if set,
-// says so. strip is true when AMQ turned the status on, so the sequences it
-// consumes never reach the outer terminal.
-func agyRelayPlan(binaryPath string, env []string, stdinIsTerminal bool) (relayEnv []string, relay, strip bool, notice string) {
-	if facts, _ := harness.ForExecutable(binaryPath); facts.Name != harness.Agy || !stdinIsTerminal {
-		return env, false, false, ""
-	}
-	value, set := lookupEnv(env, agyStatusEnv)
-	if set && value != "on" {
-		return env, false, false, "agy status is off (" + agyStatusEnv + "=" + value + "); a doorbell can answer agy's permission prompt"
-	}
-	if !set {
-		env = setEnvVar(env, agyStatusEnv, "on")
-	}
+// agyRelayPlan decides whether coop exec relays agy's terminal. agy runs no
+// hooks with Google Cloud sign-in, so the only signal that its permission or
+// sign-in prompt is open is the OSC 7501 status it writes to its terminal
+// when the person set AGY_CLI_OSC7501=on. Only then, and only when stdin is
+// a terminal, coop exec stays as agy's terminal: agy runs on a pty whose
+// output the relay reads, and the wake holds the doorbell while a prompt is
+// open. Otherwise agy runs directly and gets the plain doorbell.
+func agyRelayPlan(binaryPath string, env []string, stdinIsTerminal bool) bool {
+	facts, _ := harness.ForExecutable(binaryPath)
+	value, _ := lookupEnv(env, agyStatusEnv)
+	return facts.Name == harness.Agy && stdinIsTerminal && value == "on"
+}
+
+// agyRelayEnv is env for a relayed agy: brief status messages unless the
+// person chose otherwise.
+func agyRelayEnv(env []string) []string {
 	if _, ok := lookupEnv(env, agyStatusMessagesEnv); !ok {
 		env = setEnvVar(env, agyStatusMessagesEnv, "brief")
 	}
-	return env, true, !set, ""
+	return env
 }
 
 func lookupEnv(env []string, key string) (string, bool) {
@@ -168,9 +165,9 @@ func (s *agyDialogSink) Close() error {
 // keeps its pid, so the wake's owner binding and controlling terminal are
 // unchanged: the wake types into the outer terminal, and the relay forwards
 // every input byte to agy. It returns only when agy cannot start.
-func runAgyRelay(binaryPath string, argv, env []string, sink *agyDialogSink, strip bool) error {
+func runAgyRelay(binaryPath string, argv, env []string, sink *agyDialogSink) error {
 	var mu sync.Mutex
-	parser := &osc7501Parser{strip: strip, onState: func(state, kind string) {
+	parser := &osc7501Parser{onState: func(state, kind string) {
 		mu.Lock()
 		defer mu.Unlock()
 		sink.onState(state, kind)

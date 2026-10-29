@@ -238,15 +238,38 @@ a reader mistake a stale record for the operator's intent.
 
 Source anchor: `wake_settings_unix.go`.
 
-## `.wake.dialog`: open Claude Code dialog
+## `.wake.dialog`: open harness dialog
 
-**Owns:** whether a Claude Code dialog is open for this agent, as one JSON
-line, mode 0600. Only the hook receiver (`amq wake dialog open|close`) writes
-or removes it. The wake only reads it, before each delivery attempt and each
-terminal write, never infers it from other wake state, and never writes it; no
-wake cleanup removes it. A marker that is unreadable or older than the quiet
-hold still blocks input. Source anchors: `wake_dialog.go` and
-`wake_dialog_unix.go`.
+**Owns:** whether a harness dialog, startup screen or busy turn holds this
+agent's doorbell, as one JSON line, mode 0600. Its writers:
+
+- the hook receiver `amq wake dialog open|close`, run by the AMQ dialog hooks
+  of Claude Code, Codex and Cursor;
+- `amq coop exec`, which writes a `Startup` marker before it starts the
+  harness (also the `claude-native` one), removes a `Startup` marker an
+  earlier launch left, and on a plain agy launch removes an agy marker;
+- the agy relay of `amq coop exec agy`, from agy's OSC 7501 status;
+- the AMQ pi extension.
+
+**Invariant:** every writer is opt-in. A hook writes only once the person
+installed it (for Codex, also trusted it); coop exec writes a `Startup`
+marker only while that harness's hook is installed; the agy relay runs only
+when the person set `AGY_CLI_OSC7501=on`; the pi extension only when the
+person installed it. Without an opt-in no marker holds, and the wake rings a
+plain doorbell. No hold is unbounded without an installed hook: a marker
+that proves no open dialog holds only while the AMQ dialog hook of its
+harness is installed.
+
+The wake reads the marker before each delivery attempt and each terminal
+write and never infers it from other wake state. It writes no marker; it
+removes only a Claude Code tool call marker whose session transcript shows
+that call's result, and only the exact version it read, under the marker
+lock. No wake cleanup removes it. A marker that is unreadable, dated in the
+future, behind a non-canonical agent directory, or older than the quiet hold
+blocks input only while the AMQ dialog hook of the harness that wrote it
+(Claude Code, Codex trusted, or Cursor) is installed with its amq binary
+present; an agy or pi marker never does. Otherwise it reads as closed. Source anchors: `wake_dialog.go`,
+`wake_dialog_unix.go` and `coop_exec_trust.go`.
 
 ## `.wake.lifecycle.lock`: mutation serialization
 

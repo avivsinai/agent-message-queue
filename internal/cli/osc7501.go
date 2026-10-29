@@ -24,11 +24,10 @@ const (
 
 // osc7501Parser scans a terminal output stream for agy's OSC 7501 status
 // sequences. It passes every other byte through unchanged, keeps a sequence
-// split across writes, and, when strip is set, removes the status sequences
-// it consumed. Other OSC sequences pass through as soon as their body stops
+// split across writes, and passes each status sequence on once it is read
+// whole. Other OSC sequences pass through as soon as their body stops
 // matching the prefix, so they are never held back.
 type osc7501Parser struct {
-	strip   bool
 	onState func(state, kind string)
 	state   osc7501State
 	pending []byte // ESC ] and the body bytes seen so far
@@ -122,10 +121,5 @@ func (p *osc7501Parser) finish(out []byte, bel byte) []byte {
 	if p.onState != nil {
 		p.onState(state, kind)
 	}
-	if !p.strip {
-		return p.flush(out)
-	}
-	p.pending = p.pending[:0]
-	p.state = osc7501Text
-	return out
+	return p.flush(out)
 }

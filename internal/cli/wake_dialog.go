@@ -2,7 +2,8 @@ package cli
 
 import "time"
 
-// Dialog guard: a Claude Code hook (amq wake dialog open|close)
+// Dialog guard, opt-in per harness (dialogGuardEnabled); without it the
+// wake rings a plain doorbell. A Claude Code hook (amq wake dialog open|close)
 // writes <root>/agents/<me>/.wake.dialog while AskUserQuestion, ExitPlanMode
 // or a permission dialog is open, and removes it when the dialog closes. The
 // wake reads the marker, and removes it only when the Claude Code transcript
@@ -17,8 +18,9 @@ const (
 	wakeDialogClosed wakeDialogState = iota
 	wakeDialogOpen
 	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
-	// the future, or one that cannot be read. It may still hide an open
-	// dialog, so input stays held; held attempts follow the input retry
+	// the future, or one that cannot be read, while the dialog guard of its
+	// harness is on (without it such a marker reads as closed). It may still
+	// hide an open dialog, so input stays held; held attempts follow the input retry
 	// ladder (5 s doubling to 2 min) instead of the 2-second recheck, and
 	// the held notice follows the attention ladder.
 	wakeDialogUnknown

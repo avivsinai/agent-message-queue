@@ -12,9 +12,10 @@ import (
 )
 
 // Bead agent-message-queue-vd4.4 (agy doorbell probe): the doorbell's Enter
-// answered agy's "Run this command?" prompt. agy reports the prompt as
-// OSC 7501 blocked:kind=permission; the relay holds the doorbell while it
-// is open and shows the person agy's output without the status sequences.
+// answered agy's "Run this command?" prompt. With AGY_CLI_OSC7501=on, which
+// the person sets, agy reports the prompt as OSC 7501
+// blocked:kind=permission; the relay holds the doorbell while it is open and
+// passes agy's output through unchanged.
 // field: agy doorbell parked while busy (2026-10-26): working removed the
 // marker, so the wake spent its attempts on a busy agy and never rang at
 // the end of the turn. working holds the doorbell until done or idle.
@@ -28,7 +29,7 @@ func TestAgyStatusHoldsTheDoorbellWhileAPromptOrTurnIsOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sink.Close() })
-	parser := &osc7501Parser{strip: true, onState: sink.onState}
+	parser := &osc7501Parser{onState: sink.onState}
 	marker := filepath.Join(fsq.AgentBase(root, "agy"), wakeDialogFileName)
 
 	// The steps run in order; kind is the marker kind after the step, ""
@@ -47,9 +48,10 @@ func TestAgyStatusHoldsTheDoorbellWhileAPromptOrTurnIsOpen(t *testing.T) {
 		{"working opens", []string{"\x1b]7501;state=working:app=antigravity\x07"}, "working"},
 		{"idle clears", []string{"\x1b]7501;state=idle:app=antigravity\x07"}, ""},
 	}
-	var shown string
+	var shown, sent string
 	for _, step := range steps {
 		for _, chunk := range step.chunks {
+			sent += chunk
 			shown += string(parser.feed([]byte(chunk)))
 		}
 		raw, err := os.ReadFile(marker)
@@ -65,8 +67,8 @@ func TestAgyStatusHoldsTheDoorbellWhileAPromptOrTurnIsOpen(t *testing.T) {
 			}
 		}
 	}
-	if want := "Run this command?\x1b]0;agy\x07 1. Yesdone"; shown != want {
-		t.Fatalf("shown %q, want %q", shown, want)
+	if shown != sent {
+		t.Fatalf("shown %q, want agy's output %q", shown, sent)
 	}
 }
 

@@ -181,11 +181,12 @@ func runCoopNamedInject(args []string) error {
 	// The typed command and its Enter would answer an open dialog, so it
 	// waits for the dialog marker exactly as the doorbell does.
 	root, handle := strings.TrimSpace(*rootFlag), strings.TrimSpace(*meFlag)
-	if !waitCoopNamedInputFree(root, handle, wakeDialogQuietHold, wakeDialogRecheck) {
+	facts, _ := harness.ForExecutable(binaryBase)
+	if !waitCoopNamedInputFree(root, handle, facts.Name, wakeDialogQuietHold, wakeDialogRecheck) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "a harness dialog stayed open"))
 		return nil
 	}
-	inputFree := func() bool { return waitCoopNamedInputFree(root, handle, 0, 0) }
+	inputFree := func() bool { return waitCoopNamedInputFree(root, handle, facts.Name, 0, 0) }
 	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart, inputFree); err != nil {
 		_ = writeStderr("warning: coop named inject: %v\n", err)
 	}
@@ -193,10 +194,11 @@ func runCoopNamedInject(args []string) error {
 }
 
 // waitCoopNamedInputFree waits until the agent's dialog marker no longer
-// holds input, reading it as the wake's dialog source does, checking every
-// interval for at most limit. It reports false when the marker still holds
-// at the limit, or when the agent's directory cannot be read.
-func waitCoopNamedInputFree(root, handle string, limit, interval time.Duration) bool {
+// holds input, reading it as the wake of harnessName's dialog source does,
+// checking every interval for at most limit. It reports false when the
+// marker still holds at the limit, or when the agent's directory cannot be
+// read.
+func waitCoopNamedInputFree(root, handle, harnessName string, limit, interval time.Duration) bool {
 	if root == "" || handle == "" {
 		return false
 	}
@@ -205,7 +207,7 @@ func waitCoopNamedInputFree(root, handle string, limit, interval time.Duration) 
 		return false
 	}
 	defer func() { _ = agentDir.Close() }()
-	source := wakeDialogSourceInDir(agentDir)
+	source := wakeDialogSourceInDir(agentDir, harnessName)
 	deadline := time.Now().Add(limit)
 	for {
 		if state, err := source(time.Now()); err == nil && state == wakeDialogClosed {
