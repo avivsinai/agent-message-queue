@@ -34,18 +34,18 @@ func TestMailboxAttachProvesTheWakeOwnerItRunsUnder(t *testing.T) {
 		t.Fatal(err)
 	}
 	lock, _ := json.Marshal(map[string]any{
-		"pid": os.Getpid() + 1, "tty": "/dev/ttys001", "root": root, "agent": "amit",
+		"pid": os.Getpid() + 1, "tty": "/dev/ttys001", "root": root, "agent": "pi",
 		"started": time.Now().UTC().Format(time.RFC3339), "resume_schema": 2,
 		"resume_owner": map[string]any{"pid": self.PID, "process_start": self.ProcessStart, "boot_id": self.BootID, "session_id": sid},
 	})
-	dir := filepath.Join(root, "agents", "amit")
+	dir := filepath.Join(root, "agents", "pi")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".wake.lock"), lock, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := currentHarness(newCodexView(), root, "amit")
+	h := currentHarness(newCodexView(), root, "pi")
 	if h.Holder != self {
 		t.Fatalf("harness = %+v, want holder %+v", h, self)
 	}
