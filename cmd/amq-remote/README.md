@@ -809,8 +809,10 @@ probe deadline is reported as unknown, never as current.
 Submit writes one frame to the target session's cross-session socket. The
 socket answers nothing, so progress comes from the session's transcript:
 the entry that delivers the frame is `submitted`, the next assistant entry
-in that turn is admitted, and a Stop event ends the run with the turn's last
-assistant text as the result. The Stop event needs the hook:
+in that turn is admitted, and a Stop event ends the run with the turn's final
+text as the result: the text Claude Code gives the hook, or, from an older
+Claude Code without it, the last assistant text in the transcript. The Stop
+event needs the hook:
 
 ```text
 amq-remote claude install-stop-hook     # adds a Stop hook to ~/.claude/settings.json

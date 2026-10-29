@@ -69,8 +69,10 @@ type runRecord struct {
 	// after turnEndTS belongs to this run.
 	turnEnded bool
 	turnEndTS int64
-	// lastText is the newest non-empty assistant text of this run's turn.
+	// lastText is the newest non-empty assistant text of this run's turn,
+	// or the final text its Stop marker carried; lastCut marks it cut.
 	lastText  string
+	lastCut   bool
 	createdAt time.Time
 	// promptID is the promptId of the run's own delivery line: the prompt
 	// its tool calls and PermissionRequests carry. An absorbed delivery has
@@ -451,11 +453,10 @@ func (a *Attachment) pollConfirmations() {
 	a.mu.Unlock()
 
 	// Stop markers are read BEFORE the transcript and bound only once the
-	// cursor has reached the end of the file it read. The harness writes a
-	// turn's entries before the Stop hook runs, so every marker read here
-	// names a turn whose entries all precede the transcript read. Binding
-	// while the cursor lags would publish a result taken from a partial turn
-	// and miss a later turn boundary.
+	// cursor has reached the end of the file it read. Binding while the
+	// cursor lags would miss a later turn boundary. The harness writes the
+	// transcript asynchronously, so the turn's final text can reach it only
+	// after the hook ran; the marker carries that text.
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
 	// The approval files are read BEFORE the transcript, so this poll's
 	// transcript read covers every request it discovers: a request found
@@ -698,8 +699,9 @@ func (rec *runRecord) bindTS() int64 {
 }
 
 // bindStopsLocked settles Stop markers in file order. A marker completes
-// the oldest admitted run whose turn claims it, with that turn's newest
-// assistant text as the result. A marker no run can claim is dropped; a
+// the oldest admitted run whose turn claims it, with the final text the
+// marker carries as the result, else that turn's newest assistant text read
+// from the transcript, which may lag the hook. A marker no run can claim is dropped; a
 // marker that a not-yet-admitted run could still claim is PRESERVED (the
 // transcript may lag the hook by a tick) and the consumed offset stops
 // there. Caller holds a.mu.
@@ -735,6 +737,9 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		if done == nil {
 			continue
 		}
+		if s.text != "" {
+			done.lastText, done.lastCut = s.text, s.cut
+		}
 		events = a.settleRunLocked(done, protocol.StateCompleted, core.EventRunCompleted, events)
 	}
 	return events
@@ -749,7 +754,7 @@ func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ c
 	a.queueRunEndLocked(rec)
 	rec.terminal = true
 	rec.state = state
-	rec.result = &protocol.Result{Text: rec.lastText, NativeRef: rec.msgID}
+	rec.result = &protocol.Result{Text: rec.lastText, Truncated: rec.lastCut, NativeRef: rec.msgID}
 	if a.owner == rec {
 		a.owner = nil
 	}
@@ -757,10 +762,13 @@ func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ c
 }
 
 // stopObs is one decoded Stop-marker line: the receiver's wall-clock
-// timestamp and the byte offset just past the line.
+// timestamp, the turn's final text when the hook was given it, and the
+// byte offset just past the line.
 type stopObs struct {
-	ts  int64
-	end int64
+	ts   int64
+	text string
+	cut  bool
+	end  int64
 }
 
 type stopMarkers struct {
@@ -811,14 +819,16 @@ func readStopMarkers(path string, from int64) stopMarkers {
 		end := from + pos + int64(nl) + 1
 		pos += int64(nl) + 1
 		var m struct {
-			TS int64 `json:"ts"`
+			TS        int64  `json:"ts"`
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
 		}
 		if err := json.Unmarshal(line, &m); err != nil || m.TS == 0 {
 			// Undecodable marker: settle past it; it names no turn.
 			out.lines = append(out.lines, stopObs{ts: -1, end: end})
 			continue
 		}
-		out.lines = append(out.lines, stopObs{ts: m.TS, end: end})
+		out.lines = append(out.lines, stopObs{ts: m.TS, text: m.Text, cut: m.Truncated, end: end})
 	}
 	return out
 }

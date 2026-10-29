@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // Stop-hook bridge: the hook is how the adapter learns a submitted turn ENDED
@@ -1116,20 +1117,29 @@ func cutOneMarkedHook(raw []byte, stop jsonSpan, spec hookSpec) ([]byte, bool, e
 }
 
 // StopHookPayload is the subset of Claude Code's Stop-hook stdin payload
-// the receiver consumes (session identity + completion).
+// the receiver consumes (session identity + completion). Claude Code writes
+// the transcript asynchronously, so the turn's final text may reach the
+// transcript only after the hook runs; LastAssistantMessage carries it.
 type StopHookPayload struct {
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	Cwd            string `json:"cwd"`
-	HookEventName  string `json:"hook_event_name"`
+	SessionID            string `json:"session_id"`
+	TranscriptPath       string `json:"transcript_path"`
+	Cwd                  string `json:"cwd"`
+	HookEventName        string `json:"hook_event_name"`
+	LastAssistantMessage string `json:"last_assistant_message"`
 }
+
+// maxStopTextBytes bounds the final text one marker line carries. Escaped
+// as JSON it stays within maxStopMarkerBytes, so a line is always read
+// whole.
+const maxStopTextBytes = 128 * 1024
 
 // sessionIDRe bounds the session id the receiver will turn into a file
 // name: no separators, no dot segments.
 var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // RunStopHookReceiver is the fail-open receiver body: it appends one
-// turn-completion marker line {"ts":<unix ms>,"session_id":"<sid>"} to
+// turn-completion marker line {"ts":<unix ms>,"session_id":"<sid>"}, with
+// the turn's final text as "text" (and "truncated" when it was cut), to
 // ~/.claude/sessions/amq-stop/<sid>.jsonl for the adapter's confirmation
 // poller. EVERY error exits 0 — the hook must never block Claude Code
 // (exit 2 is the harness's blocking code). It must also never HANG: the
@@ -1194,7 +1204,15 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if !os.SameFile(pre, post) {
 		return 0
 	}
-	line, err := json.Marshal(map[string]any{"ts": time.Now().UnixMilli(), "session_id": payload.SessionID})
+	m := map[string]any{"ts": time.Now().UnixMilli(), "session_id": payload.SessionID}
+	if payload.LastAssistantMessage != "" {
+		text, cut := protocol.TruncateText(payload.LastAssistantMessage, maxStopTextBytes)
+		m["text"] = text
+		if cut {
+			m["truncated"] = true
+		}
+	}
+	line, err := json.Marshal(m)
 	if err != nil {
 		return 0
 	}
