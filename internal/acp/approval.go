@@ -243,13 +243,14 @@ type approvals struct {
 	mu       sync.Mutex
 	stops    map[string]chan struct{} // interaction id -> its watcher's stop
 	allowing map[string]bool          // interaction ids whose watcher offers allow
+	denied   map[string]string        // interaction id -> its deny-only message, once posted
 	sent     map[string]sentAnswer    // interaction id -> the answer this turn sent
 	reported map[string]bool          // answers whose outcome was posted
 	wg       sync.WaitGroup
 }
 
 func newApprovals(r *remoteTurn, channel, owner string) *approvals {
-	return &approvals{r: r, channel: channel, owner: owner, stops: map[string]chan struct{}{}, allowing: map[string]bool{}, sent: map[string]sentAnswer{}, reported: map[string]bool{}}
+	return &approvals{r: r, channel: channel, owner: owner, stops: map[string]chan struct{}{}, allowing: map[string]bool{}, denied: map[string]string{}, sent: map[string]sentAnswer{}, reported: map[string]bool{}}
 }
 
 // observe starts a watcher for a new approval, retires watchers of
@@ -264,7 +265,8 @@ func (a *approvals) observe(snap protocol.Snapshot) {
 		current = in.InteractionID
 		// An approval first seen deny-only offers allow once the endpoint
 		// binds its tool call; its deny-only watcher then stops and the
-		// approval is posted again with ✅.
+		// approval is posted again with ✅. The owner's ❌ on the first
+		// message still denies.
 		stop, seen := a.stops[current]
 		upgrade := seen && stop != nil && !a.allowing[current] && a.allows(*in)
 		if !seen || upgrade {
@@ -346,6 +348,11 @@ func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, allow
 	post := func(budget time.Duration) bool {
 		id, err := postAnswer(a.channel, approvalText(in.Prompt, hint), budget)
 		posted = id
+		if err == nil {
+			a.mu.Lock()
+			a.denied[in.InteractionID] = id
+			a.mu.Unlock()
+		}
 		return err == nil
 	}
 	poll := func(budget time.Duration) bool {
@@ -534,7 +541,7 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 			}
 		}
 	}
-	rs, err := buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
+	rs, err := w.reactions(ctx)
 	if err != nil {
 		w.drop()
 		return false
@@ -568,7 +575,7 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 		return false
 	}
 	// The observation cutoff: the final read before the grant.
-	rs, err = buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
+	rs, err = w.reactions(ctx)
 	if err != nil {
 		w.drop()
 		return false
@@ -605,6 +612,29 @@ func (w *allowWatch) poll(budget time.Duration) bool {
 		w.a.r.s.publish(w.a.channel, refusal.Message)
 	}
 	return false
+}
+
+// reactions reads the owner's reactions on the posted approval, and the
+// owner's ❌ on the deny-only message this approval was first posted as. A ✅
+// there never allows: the proof names the posted message only.
+func (w *allowWatch) reactions(ctx context.Context) ([]nostr.Event, error) {
+	rs, err := buzzio.OwnerReactions(ctx, w.conn, w.posted, buzzOwner)
+	w.a.mu.Lock()
+	first := w.a.denied[w.in.InteractionID]
+	w.a.mu.Unlock()
+	if err != nil || first == "" {
+		return rs, err
+	}
+	old, err := buzzio.OwnerReactions(ctx, w.conn, first, buzzOwner)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range old {
+		if strings.TrimSpace(r.Content) == "❌" {
+			rs = append(rs, r)
+		}
+	}
+	return rs, nil
 }
 
 // inChannel reports whether evt is posted in channel (its h tag).
