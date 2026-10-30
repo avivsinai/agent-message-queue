@@ -43,7 +43,8 @@ func EncodeFrames(token string, f *Frame) ([]byte, error) {
 }
 
 // peerKeyFile resolves the target's key-file name (capture §2):
-// <pid>.<sha256(path.resolve(sockPath))>.key under ~/.claude/sessions.
+// <pid>.<sha256(path.resolve(sockPath))>.key in the session registry of
+// config dir dir.
 //
 // Node's path.resolve is LEXICAL: absolute + normalized, with no symlink
 // resolution (docs/research/r0-03-cc-socket-wire-capture.md:41, live
@@ -51,21 +52,21 @@ func EncodeFrames(token string, f *Frame) ([]byte, error) {
 // be applied here: on macOS /tmp is a symlink to /private/tmp, so a
 // resolved hash names a key file the target never minted and every real
 // target reads as "no inbound" (reproduced live).
-func peerKeyFile(home string, pid int, sockPath string) (string, error) {
+func peerKeyFile(dir string, pid int, sockPath string) (string, error) {
 	abs, err := filepath.Abs(sockPath)
 	if err != nil {
 		return "", err
 	}
 	h := sha256Hex([]byte(abs))
-	return filepath.Join(claudeSessionsDir(home), fmt.Sprintf("%d.%s.key", pid, h)), nil
+	return filepath.Join(registryDir(dir), fmt.Sprintf("%d.%s.key", pid, h)), nil
 }
 
 // maxPeerKeyBytes bounds the key-file read: the real file is a one-line
 // JSON object well under 1 KiB.
 const maxPeerKeyBytes = 8 << 10
 
-func readPeerToken(home string, pid int, sockPath string) (string, error) {
-	p, err := peerKeyFile(home, pid, sockPath)
+func readPeerToken(dir string, pid int, sockPath string) (string, error) {
+	p, err := peerKeyFile(dir, pid, sockPath)
 	if err != nil {
 		return "", err
 	}

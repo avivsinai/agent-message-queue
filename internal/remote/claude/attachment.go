@@ -27,10 +27,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
@@ -44,9 +46,14 @@ const SentinelUnpinned = "unpinned"
 // config is the adapter-specific config block for a claude manifest entry.
 type config struct {
 	// Pid is the target Claude Code process id. The adapter resolves the
-	// session registry file (~/.claude/sessions/<pid>.json) from it; the
-	// pid also keys the transcript under ~/.claude/projects via sessionId.
+	// session registry file (<config dir>/sessions/<pid>.json) from it; the
+	// pid also keys the transcript under <config dir>/projects via sessionId.
 	Pid int `json:"pid"`
+	// ConfigDir is the absolute Claude config dir the session runs with
+	// (its CLAUDE_CONFIG_DIR), recorded by the attaching process inside the
+	// session. Empty = home/.claude. The endpoint never reads the variable:
+	// its own env is not the session's.
+	ConfigDir string `json:"config_dir,omitempty"`
 	// Target overrides the published target id (the manifest's declared
 	// identity, the same rule as codex/pi). Empty = the registry name,
 	// validated, else "claude:<pid>".
@@ -62,6 +69,83 @@ type config struct {
 	// with a source that must never answer tool prompts sets it instead of
 	// Approve; Approve wins when both are set.
 	ObserveApprovals bool `json:"observe_approvals,omitempty"`
+}
+
+// dirs resolves the home that roots AMQ's markers and the config dir that
+// roots the session's Claude data: the recorded config_dir, else
+// home/.claude. It never reads CLAUDE_CONFIG_DIR.
+func (c config) dirs() (home, configDir string, err error) {
+	home = c.Home
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil {
+			return "", "", fmt.Errorf("resolve home: %w", err)
+		}
+	}
+	configDir = c.ConfigDir
+	if configDir == "" {
+		configDir = defaultConfigDir(home)
+	}
+	return home, configDir, nil
+}
+
+// TargetSettingsPath is the settings.json of the session a claude manifest
+// entry attaches: <config_dir>/settings.json, else
+// home/.claude/settings.json. Like the endpoint, it never reads
+// CLAUDE_CONFIG_DIR.
+func TargetSettingsPath(raw json.RawMessage) (string, error) {
+	var c config
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return "", fmt.Errorf("parse claude config: %w", err)
+		}
+	}
+	_, dir, err := c.dirs()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "settings.json"), nil
+}
+
+// ReplacesEntry reports whether claude config next may replace the manifest
+// entry prev of the same target. Both must name the same pid with the same
+// settings apart from config_dir and a gained approve, and the two config
+// dirs must differ. prev's config dir must hold no registry entry for the
+// pid while next's holds an interactive one: that proves prev does not
+// describe the session now running as that pid. Any doubt keeps prev.
+func ReplacesEntry(prev, next json.RawMessage) bool {
+	var p, n map[string]any
+	if json.Unmarshal(prev, &p) != nil || json.Unmarshal(next, &n) != nil || p == nil || n == nil {
+		return false
+	}
+	if p["approve"] == true && n["approve"] != true {
+		return false
+	}
+	for _, m := range []map[string]any{p, n} {
+		delete(m, "config_dir")
+		delete(m, "approve")
+	}
+	if !reflect.DeepEqual(p, n) {
+		return false
+	}
+	var pc, nc config
+	if json.Unmarshal(prev, &pc) != nil || json.Unmarshal(next, &nc) != nil || pc.Pid <= 0 {
+		return false
+	}
+	for _, d := range []string{pc.ConfigDir, nc.ConfigDir} {
+		if d != "" && !filepath.IsAbs(d) {
+			return false
+		}
+	}
+	_, pdir, perr := pc.dirs()
+	_, ndir, nerr := nc.dirs()
+	if perr != nil || nerr != nil || filepath.Clean(pdir) == filepath.Clean(ndir) {
+		return false
+	}
+	if old, err := readSessionRegistry(pdir, pc.Pid); err != nil || old != nil {
+		return false
+	}
+	cur, err := readSessionRegistry(ndir, nc.Pid)
+	return err == nil && cur != nil && cur.SessionID != "" && (cur.Kind == "" || cur.Kind == "interactive")
 }
 
 // approvals reports whether the attachment follows the hook's approval
@@ -103,6 +187,9 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 	if c.Pid <= 0 {
 		return nil, fmt.Errorf("claude config: pid is required (the target Claude Code process id)")
 	}
+	if c.ConfigDir != "" && !filepath.IsAbs(c.ConfigDir) {
+		return nil, fmt.Errorf("claude config: config_dir %q is not an absolute path; refusing", c.ConfigDir)
+	}
 	// The manifest target is the identity the endpoint addresses this
 	// adapter under (codex factory comment, ".13"); cfg.Target wins over
 	// any registry-derived name, which crosses a trust boundary (the
@@ -121,15 +208,11 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 // missing registry entry is a startup refusal: the adapter never guesses a
 // session identity (the same identity posture as the pi adapter).
 func Attach(cfg config) (*Attachment, error) {
-	home := cfg.Home
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("claude adapter: resolve home: %w", err)
-		}
-		home = h
+	home, configDir, err := cfg.dirs()
+	if err != nil {
+		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
-	reg, err := readSessionRegistry(home, cfg.Pid)
+	reg, err := readSessionRegistry(configDir, cfg.Pid)
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
@@ -158,6 +241,7 @@ func Attach(cfg config) (*Attachment, error) {
 		target:        target,
 		cfg:           cfg,
 		home:          home,
+		configDir:     configDir,
 		boundSession:  reg.SessionID,
 		inflightOwner: hex.EncodeToString(owner[:]),
 		allowFactory:  allowFactory,
@@ -189,11 +273,38 @@ func deriveTarget(pid int, reg *sessionRegistry) string {
 	return "claude:" + strconv.Itoa(pid)
 }
 
-func claudeSessionsDir(home string) string {
+// markerDir holds AMQ's own markers (amq-stop, amq-bound, amq-approve). It
+// is always home/.claude/sessions, whatever config dir a session uses: the
+// hook processes and the endpoint resolve it from home alone.
+func markerDir(home string) string {
 	return filepath.Join(home, ".claude", "sessions")
 }
 
-// readSessionRegistry reads ~/.claude/sessions/<pid>.json.
+// defaultConfigDir is the Claude config dir of a session that does not set
+// CLAUDE_CONFIG_DIR.
+func defaultConfigDir(home string) string {
+	return filepath.Join(home, ".claude")
+}
+
+// sessionConfigDir is the Claude config dir of the session this process
+// runs in: CLAUDE_CONFIG_DIR when set, else home/.claude. Only code that
+// runs inside the session calls it. A relative value is refused, never
+// resolved against a guessed directory.
+func sessionConfigDir(home string) (string, error) {
+	dir := harness.ClaudeConfigDir(home)
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path; refusing", dir)
+	}
+	return filepath.Clean(dir), nil
+}
+
+// registryDir is Claude's session registry under config dir dir: the
+// <pid>.json entries and the peer key files Claude mints beside them.
+func registryDir(dir string) string {
+	return filepath.Join(dir, "sessions")
+}
+
+// readSessionRegistry reads <config dir>/sessions/<pid>.json.
 //
 // Trust boundary: this is a Claude-internal registry file on a
 // local-process-writable path, not an AMQ state leaf — so it does NOT get
@@ -202,8 +313,8 @@ func claudeSessionsDir(home string) string {
 // no-follow non-blocking open, fstat recheck, and a LimitReader, so neither
 // a FIFO nor a growing file can stall or bloat a read under the endpoint
 // mutex.
-func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
-	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
+func readSessionRegistry(dir string, pid int) (*sessionRegistry, error) {
+	path := filepath.Join(registryDir(dir), strconv.Itoa(pid)+".json")
 	raw, err := readRegularBounded(path, maxRegistryBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -229,7 +340,10 @@ func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 type Attachment struct {
 	target string
 	cfg    config
-	home   string
+	// home roots AMQ's markers; configDir roots Claude's own data (the
+	// registry, transcripts, peer key, and settings).
+	home      string
+	configDir string
 
 	// Evidence path (submit.go): retained runs, cancel intent, the
 	// native-event sink, and the confirmation poller's cancel. ctx is the
@@ -380,7 +494,7 @@ func (a *Attachment) NativeSessionID() string {
 // filesystem read: the registry file's status field plus a pid liveness
 // check. No child process, no bound that can silently exceed its timeout.
 func (a *Attachment) observe() (string, string) {
-	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 	if err != nil {
 		return "offline", ""
 	}
@@ -397,6 +511,12 @@ func (a *Attachment) observe() (string, string) {
 		return "unknown", reg.SessionID
 	}
 	return normalizeStatus(reg.Status), reg.SessionID
+}
+
+// settingsPath is the session's settings.json, where the approval hook and
+// its pin are installed.
+func (a *Attachment) settingsPath() string {
+	return filepath.Join(a.configDir, "settings.json")
 }
 
 func (a *Attachment) now() time.Time {
@@ -548,7 +668,7 @@ func init() {
 }
 
 // SessionIDForPID reads the sessionId of the interactive session with this
-// pid from ~/.claude/sessions, the same registry the adapter attaches
+// pid from the session registry, the same registry the adapter attaches
 // through. amq-remote attach uses it to verify the session it pins is the
 // one it runs in.
 func SessionIDForPID(pid int) (string, error) {
@@ -563,13 +683,18 @@ type Session struct {
 }
 
 // SessionForPID reads the registry entry of the Claude process pid from
-// ~/.claude/sessions; an error when pid has none.
+// the session registry of this process's config dir; an error when pid has
+// none. It runs inside the session, so the config dir comes from its env.
 func SessionForPID(pid int) (Session, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Session{}, err
 	}
-	reg, err := readSessionRegistry(home, pid)
+	dir, err := sessionConfigDir(home)
+	if err != nil {
+		return Session{}, err
+	}
+	reg, err := readSessionRegistry(dir, pid)
 	if err != nil {
 		return Session{}, err
 	}

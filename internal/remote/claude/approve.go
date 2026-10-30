@@ -74,7 +74,7 @@ var promptIDRe = sessionIDRe
 var interactionIDRe = regexp.MustCompile(`^cc-[0-9a-f]{32}$`)
 
 func approveDir(home, sessionID string) string {
-	return filepath.Join(claudeSessionsDir(home), "amq-approve", sessionID)
+	return filepath.Join(markerDir(home), "amq-approve", sessionID)
 }
 
 // approvalRequest is requests/<iid>.json.
@@ -331,7 +331,7 @@ func ensureApproveSubdir(home, sessionID, sub string) (string, error) {
 	if sessionID != "" && !sessionIDRe.MatchString(sessionID) {
 		return "", fmt.Errorf("session %q is not a file-safe id", sessionID)
 	}
-	sessions := claudeSessionsDir(home)
+	sessions := markerDir(home)
 	if err := os.MkdirAll(sessions, 0o700); err != nil {
 		return "", err
 	}
@@ -746,7 +746,7 @@ func sweepApprovals(home string) {
 	if !noFollowSupported || !lock.AdvisoryLockAvailable() {
 		return
 	}
-	if fi, err := os.Lstat(filepath.Join(claudeSessionsDir(home), "amq-approve")); err != nil || !fi.IsDir() {
+	if fi, err := os.Lstat(filepath.Join(markerDir(home), "amq-approve")); err != nil || !fi.IsDir() {
 		return
 	}
 	release, err := lockLifecycle(home)
@@ -763,7 +763,7 @@ func sweepApprovals(home string) {
 // pins whose serving process is gone, and inflight records that are
 // expired, unreadable, or whose process is gone.
 func StaleApprovalRecords(home string) []string {
-	entries, err := os.ReadDir(filepath.Join(claudeSessionsDir(home), "amq-approve"))
+	entries, err := os.ReadDir(filepath.Join(markerDir(home), "amq-approve"))
 	if err != nil {
 		return nil
 	}
@@ -822,8 +822,10 @@ func livePins(home, sessionID string) []approvalPin {
 // allowPinned reports whether an allow can reach this session's calls: the
 // installed hook pins a whole share, and a live share pin names the same
 // owner and share session. It decides only whether the DM offers allow.
-func allowPinned(home, sessionID string) bool {
-	pin := PermissionHookPin(home)
+// The hook's pin is read from the settings file settings; the share pins
+// are markers under home.
+func allowPinned(home, settings, sessionID string) bool {
+	pin := PermissionHookPinAt(settings)
 	desktop := pin.DesktopComplete()
 	if !pin.Complete() && !desktop {
 		return false

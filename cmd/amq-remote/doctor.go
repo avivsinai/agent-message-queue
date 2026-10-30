@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -102,32 +103,38 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		fail("registration", "refusals.json", loadErr.Error(), "restart serve; it rewrites refusals.json on every start")
 	}
 	// Native capability: a Claude target completes a request only through
-	// the Stop hook.
+	// the Stop hook. Each target's hooks live in its session's settings.json,
+	// which is checked once.
+	settingsOf := claudeTargetSettings(stateDir)
+	checked := map[string]bool{}
 	for _, s := range sessions {
 		if s.Harness != "claude_code" {
 			continue
 		}
-		home, herr := os.UserHomeDir()
+		home, settings, herr := settingsOf(s.TargetID)
+		if herr == nil && checked[settings] {
+			continue
+		}
+		checked[settings] = true
 		state, serr := "", herr
 		if herr == nil {
-			state, serr = claude.StopHookState(home)
+			state, serr = claude.StopHookStateAt(settings)
 		}
 		switch {
 		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+claude.SettingsPath(home))
+			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+settings)
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
 		case state == claude.StopHookDisabled:
 			// Only the user file was read; a project or managed setting can
 			// override disableAllHooks, so the effective state is unknown and
 			// is reported, not failed.
-			report["claude_stop_hook"] = claude.SettingsPath(home) + " holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
+			report["claude_stop_hook"] = settings + " holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		if serr == nil && state != claude.StopHookMissing {
-			form, _ := claude.StopHookForm(home)
+			form, _ := claude.StopHookForm(home, settings)
 			hookFormFinding(form, s.TargetID, "Stop", "install-stop-hook", fail, note)
 		}
-		break
 	}
 	// A Codex target with approve whose thread runs Codex's automatic
 	// approvals reviewer gets few or no DM approvals: the reviewer answers
@@ -147,50 +154,57 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// with observe_approvals needs it too: the hook raises the approvals it
 	// shows.
 	observing := observeOnlyTargets(stateDir)
+	checked = map[string]bool{}
+	staleNoted := false
 	for _, s := range sessions {
 		if s.Harness != "claude_code" || !s.Capabilities.ApproveTool && !observing[s.TargetID] {
 			continue
 		}
-		home, herr := os.UserHomeDir()
+		home, settings, herr := settingsOf(s.TargetID)
+		if herr == nil && checked[settings] {
+			continue
+		}
+		checked[settings] = true
 		state, serr := "", herr
 		if herr == nil {
-			state, serr = claude.PermissionHookState(home)
+			state, serr = claude.PermissionHookState(settings)
 		}
 		switch {
 		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+claude.SettingsPath(home))
+			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+settings)
 		case state == claude.StopHookMissing && !s.Capabilities.ApproveTool:
 			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so a shared source never sees a tool approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookDisabled:
-			report["claude_approval_hook"] = claude.SettingsPath(home) + " holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
+			report["claude_approval_hook"] = settings + " holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		// Allow from Buzz needs the owner pinned on the hook's command line,
 		// and the pin holds only while Claude cannot change it unprompted.
 		if serr == nil && state != claude.StopHookMissing && s.Capabilities.ApproveTool {
-			if pin := claude.PermissionHookPin(home); pin.DesktopComplete() {
+			if pin := claude.PermissionHookPinAt(settings); pin.DesktopComplete() {
 				report["claude_approval_pin"] = map[string]string{"surface": pin.Surface, "owner": pin.Owner, "agent": pin.Body, "channel": pin.Channel}
 			} else if !pin.Complete() {
 				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz; for Buzz Desktop, run `amq-remote claude install-approval-hook --desktop --owner <pubkey> --body <agent pubkey> --channel <DM channel id>`"
 			} else {
 				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
 			}
-			if warns, werr := claude.PinWarnings(home); werr == nil && len(warns) > 0 {
+			if warns, werr := claude.PinWarnings(settings); werr == nil && len(warns) > 0 {
 				report["claude_approval_pin_warnings"] = warns
 			}
 		}
 		if serr == nil && state != claude.StopHookMissing {
-			form, _ := claude.PermissionHookForm(home)
+			form, _ := claude.PermissionHookForm(home, settings)
 			hookFormFinding(form, s.TargetID, "PermissionRequest", "install-approval-hook", fail, note)
 			// Records of a crashed serve hold the hook's gate open, or make
 			// a prompt typed in the terminal wait, until a bind sweeps them.
-			if stale := claude.StaleApprovalRecords(home); len(stale) > 0 {
+			// They live under home, so they are reported once.
+			if stale := claude.StaleApprovalRecords(home); len(stale) > 0 && !staleNoted {
+				staleNoted = true
 				note("approval_records", s.TargetID, fmt.Sprintf("%d approval record(s) of a process that is gone: %s", len(stale), strings.Join(stale, ", ")),
 					"they are removed when an attachment with approve binds a session; restart `amq-remote serve` to remove them now")
 			}
 		}
-		break
 	}
 	// Body identity: per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
@@ -420,4 +434,26 @@ func errSuffix(e string) string {
 		return ""
 	}
 	return ": " + e
+}
+
+// claudeTargetSettings returns a lookup of a Claude target's home and the
+// settings.json of its session: the manifest entry's recorded config_dir,
+// else home/.claude. Like the endpoint, it never reads CLAUDE_CONFIG_DIR.
+func claudeTargetSettings(stateDir string) func(target string) (home, settings string, err error) {
+	configs := map[string]json.RawMessage{}
+	if mf, err := manifest.Load(manifest.DefaultPath(stateDir)); err == nil {
+		for _, ad := range mf.Adapters {
+			if ad.Kind == "claude" {
+				configs[ad.Target] = ad.Config
+			}
+		}
+	}
+	return func(target string) (string, string, error) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", err
+		}
+		settings, err := claude.TargetSettingsPath(configs[target])
+		return home, settings, err
+	}
 }

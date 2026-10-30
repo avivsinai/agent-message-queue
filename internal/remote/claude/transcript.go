@@ -11,11 +11,11 @@ import (
 )
 
 // transcriptPath maps cwd+sessionId to the target's JSONL transcript:
-// ~/.claude/projects/<slug>/<sessionId>.jsonl (slug = cwd with every
+// <config dir>/projects/<slug>/<sessionId>.jsonl (slug = cwd with every
 // non-alphanumeric character replaced by '-' — the observed rule, e.g.
 // "Application Support" → "Application-Support").
-func transcriptPath(home, cwd, sessionID string) string {
-	return filepath.Join(home, ".claude", "projects", slugifyCwd(cwd), sessionID+".jsonl")
+func transcriptPath(dir, cwd, sessionID string) string {
+	return filepath.Join(dir, "projects", slugifyCwd(cwd), sessionID+".jsonl")
 }
 
 func slugifyCwd(cwd string) string {

@@ -124,7 +124,7 @@ func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, o
 		}
 	}
 	if len(d.requests) > 0 {
-		d.pinned = allowPinned(a.home, sessionID)
+		d.pinned = allowPinned(a.home, a.settingsPath(), sessionID)
 	}
 	return d
 }
@@ -573,7 +573,7 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	if option == optionAllow {
 		// Verified here first, so a proof that fails is a refusal the owner
 		// sees and nothing is answered; the hook verifies again itself.
-		if err := verifyBeforeAnswer(factory, PermissionHookPin(a.home), sessionID, evidence, want); err != nil {
+		if err := verifyBeforeAnswer(factory, PermissionHookPinAt(a.settingsPath()), sessionID, evidence, want); err != nil {
 			return "", err
 		}
 	}

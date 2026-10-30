@@ -250,7 +250,12 @@ var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
 // PermissionHookPin is the pin of the installed PermissionRequest hook,
 // empty when there is no hook, no pin, or more than one hook.
 func PermissionHookPin(home string) HookPin {
-	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
+	return PermissionHookPinAt(SettingsPath(home))
+}
+
+// PermissionHookPinAt is PermissionHookPin for the settings file at path.
+func PermissionHookPinAt(path string) HookPin {
+	cmds, err := installedCommands(path, permissionSpec)
 	if err != nil || len(cmds) != 1 {
 		return HookPin{}
 	}
@@ -299,8 +304,8 @@ func (p *HookPin) field(name string) *string {
 // ~/.claude/settings.json is read; managed settings can add the same, and a
 // session started with --permission-mode on the command line is not visible
 // here.
-func PinWarnings(home string) ([]string, error) {
-	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
+func PinWarnings(settings string) ([]string, error) {
+	raw, err := readRegularBounded(settings, maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -460,9 +465,10 @@ func UninstallPermissionHook(home string) error {
 	return removeHook(SettingsPath(home), permissionSpec)
 }
 
-// PermissionHookState is StopHookState for the PermissionRequest entry.
-func PermissionHookState(home string) (string, error) {
-	return hookState(home, permissionSpec)
+// PermissionHookState is StopHookState for the PermissionRequest entry in
+// the settings file settings.
+func PermissionHookState(settings string) (string, error) {
+	return hookState(settings, permissionSpec)
 }
 
 // Forms of an installed hook command (StopHookForm, PermissionHookForm).
@@ -483,10 +489,11 @@ var (
 	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook --wait ([0-9]+)`)
 )
 
-// StopHookForm reports the form of the one installed Stop hook, "" when
-// the user settings file does not hold exactly one.
-func StopHookForm(home string) (string, error) {
-	return hookForm(home, stopHook, func(cmd string) []byte {
+// StopHookForm reports the form of the one installed Stop hook in the
+// settings file settings, "" when it does not hold exactly one. home roots
+// the markers the current form's gate names.
+func StopHookForm(home, settings string) (string, error) {
+	return hookForm(settings, stopHook, func(cmd string) []byte {
 		m := stopHookBinRe.FindStringSubmatch(cmd)
 		if m == nil {
 			return nil
@@ -497,8 +504,8 @@ func StopHookForm(home string) (string, error) {
 
 // PermissionHookForm is StopHookForm for the PermissionRequest hook; the
 // current form keeps the installed wait and pin.
-func PermissionHookForm(home string) (string, error) {
-	return hookForm(home, permissionSpec, func(cmd string) []byte {
+func PermissionHookForm(home, settings string) (string, error) {
+	return hookForm(settings, permissionSpec, func(cmd string) []byte {
 		m := permissionHookBinRe.FindStringSubmatch(cmd)
 		if m == nil {
 			return nil
@@ -507,14 +514,13 @@ func PermissionHookForm(home string) (string, error) {
 		if err != nil {
 			return nil
 		}
-		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second, PermissionHookPin(home))
+		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second, PermissionHookPinAt(settings))
 	})
 }
 
 // hookForm compares the one marked group of spec's chain with the group
 // render builds from its command, nil when the command does not parse.
-func hookForm(home string, spec hookSpec, render func(cmd string) []byte) (string, error) {
-	path := SettingsPath(home)
+func hookForm(path string, spec hookSpec, render func(cmd string) []byte) (string, error) {
 	groups, err := markedGroups(path, spec)
 	if err != nil || len(groups) != 1 {
 		return "", err
@@ -547,11 +553,16 @@ const (
 // only ~/.claude/settings.json, through the installer's bounded reader;
 // project or managed settings can still change the effective result.
 func StopHookState(home string) (string, error) {
-	return hookState(home, stopHook)
+	return StopHookStateAt(SettingsPath(home))
 }
 
-func hookState(home string, spec hookSpec) (string, error) {
-	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
+// StopHookStateAt is StopHookState for the settings file at path.
+func StopHookStateAt(path string) (string, error) {
+	return hookState(path, stopHook)
+}
+
+func hookState(path string, spec hookSpec) (string, error) {
+	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return StopHookMissing, nil
 	}
@@ -677,7 +688,7 @@ func shellQuote(s string) string {
 // decides nothing without a live pin. The glob runs inside sh; with no
 // match "$1" is the pattern itself, which does not exist.
 func permissionHookCommand(home, bin string, wait time.Duration, pin HookPin) string {
-	approve := filepath.Join(claudeSessionsDir(home), "amq-approve")
+	approve := filepath.Join(markerDir(home), "amq-approve")
 	cmd := permissionHookMarker + "set -- " + shellQuote(approve) + `/*/pin-*; [ ! -e "$1" ] || exec ` +
 		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
 	if pin != (HookPin{}) {
@@ -1247,11 +1258,11 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 }
 
 func stopMarkerPath(home, sessionID string) string {
-	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
+	return filepath.Join(markerDir(home), "amq-stop", sessionID+".jsonl")
 }
 
 func stopBoundDir(home, sessionID string) string {
-	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
+	return filepath.Join(markerDir(home), "amq-bound", sessionID)
 }
 
 // bindStopSession records one attachment's ownership of this session.

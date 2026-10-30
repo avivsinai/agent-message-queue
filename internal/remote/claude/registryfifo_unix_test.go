@@ -26,7 +26,7 @@ func testRegistryFIFO(t *testing.T, home, regPath string) {
 	if err := syscall.Mkfifo(regPath, 0o600); err != nil {
 		t.Skipf("mkfifo unavailable: %v", err)
 	}
-	if _, err := readSessionRegistry(home, 77); err == nil {
+	if _, err := readSessionRegistry(defaultConfigDir(home), 77); err == nil {
 		t.Fatal("accepted a FIFO at the session-registry path")
 	} else if !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("refusal does not name the file-type rule: %v", err)
@@ -38,7 +38,7 @@ func testRegistryFIFO(t *testing.T, home, regPath string) {
 func TestFIFOLeavesNeverBlock(t *testing.T) {
 	home := tempHome(t, 9, &sessionRegistry{Pid: 9, SessionID: "s9", Kind: "interactive"})
 	sock := "/tmp/cc-socks/9.sock"
-	key, err := peerKeyFile(home, 9, sock)
+	key, err := peerKeyFile(defaultConfigDir(home), 9, sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := readPeerToken(home, 9, sock)
+		_, err := readPeerToken(defaultConfigDir(home), 9, sock)
 		RunStopHookReceiver(home, strings.NewReader(`{"session_id":"s9"}`), os.Stderr)
 		done <- err
 	}()
@@ -80,7 +80,7 @@ func TestDiscoverRefusesFIFOSessionsDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(claudeSessionsDir(home), 0o600); err != nil {
+	if err := syscall.Mkfifo(registryDir(defaultConfigDir(home)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)

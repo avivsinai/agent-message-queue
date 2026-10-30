@@ -72,7 +72,7 @@ func newFakeTarget(t *testing.T, pid int, features []string) *fakeTarget {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	// Session registry: the target publishes its messaging socket path.
-	regDir := claudeSessionsDir(home)
+	regDir := registryDir(defaultConfigDir(home))
 	if err := os.MkdirAll(regDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func newFakeTarget(t *testing.T, pid int, features []string) *fakeTarget {
 		t.Fatal(err)
 	}
 	// The harness-minted key file: <pid>.<sha256(resolved sock)>.key.
-	kf, err := peerKeyFile(home, pid, sockPath)
+	kf, err := peerKeyFile(defaultConfigDir(home), pid, sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestSubmitRefusesWhenKeyFileMissing(t *testing.T) {
 	ft := newFakeTarget(t, 4242, nil)
 	// Remove the minted key: the inbound precondition is not met even
 	// though the socket listens.
-	kf, err := peerKeyFile(ft.home, 4242, ft.sockPath)
+	kf, err := peerKeyFile(defaultConfigDir(ft.home), 4242, ft.sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,10 +285,10 @@ func TestSessionChangedBeforeDispatchSendsNothingAfterRestart(t *testing.T) {
 
 	// The same pid now runs session B with its own socket.
 	reg, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "sess-B", "kind": "interactive", "cwd": "/tmp/proj", "messagingSocketPath": ftB.sockPath})
-	if err := os.WriteFile(filepath.Join(claudeSessionsDir(ftA.home), fmt.Sprintf("%d.json", pid)), reg, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(registryDir(defaultConfigDir(ftA.home)), fmt.Sprintf("%d.json", pid)), reg, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	kf, err := peerKeyFile(ftA.home, pid, ftB.sockPath)
+	kf, err := peerKeyFile(defaultConfigDir(ftA.home), pid, ftB.sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}

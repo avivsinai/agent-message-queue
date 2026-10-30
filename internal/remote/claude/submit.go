@@ -126,7 +126,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if err != nil || !a.now().Before(notAfter) {
 		return expired(), nil
 	}
-	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 	if err != nil {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
@@ -139,7 +139,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if req.NativeSession != "" && reg.SessionID != req.NativeSession {
 		return sessionChanged(), nil
 	}
-	token, err := readPeerToken(a.home, a.cfg.Pid, reg.MessagingSocketPath)
+	token, err := readPeerToken(a.configDir, a.cfg.Pid, reg.MessagingSocketPath)
 	if err != nil {
 		// The key file is minted by the target when inbound is enabled;
 		// its absence is the same precondition failure.
@@ -167,7 +167,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
 
-	fromOff := transcriptSize(transcriptPath(a.home, reg.Cwd, reg.SessionID))
+	fromOff := transcriptSize(transcriptPath(a.configDir, reg.Cwd, reg.SessionID))
 	// A session with DM approvals learns of the run before the frame can
 	// reach it: a prompt with no run marker waits for one only while an
 	// inflight record is live, so the record exists before the write, and
@@ -237,7 +237,7 @@ func (a *Attachment) sendFrame(sockPath string, wire []byte, notAfter time.Time,
 		return fmt.Errorf("%w: set write deadline on %s: %v", ErrNotSent, sockPath, err)
 	}
 	if session != "" {
-		reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+		reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 		if err != nil || reg == nil || reg.SessionID != session || reg.MessagingSocketPath != sockPath {
 			_ = conn.Close()
 			return errSessionChanged
@@ -426,12 +426,12 @@ func transcriptSize(path string) int64 {
 // emitted after a.mu is released: the endpoint's completion handler calls
 // AcknowledgeResult synchronously, which takes a.mu.
 func (a *Attachment) pollConfirmations() {
-	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 	if err != nil || reg == nil || reg.SessionID == "" {
 		return
 	}
 	a.trackBoundSession(reg.SessionID)
-	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
+	path := transcriptPath(a.configDir, reg.Cwd, reg.SessionID)
 
 	a.mu.Lock()
 	cur := a.cur
@@ -863,11 +863,11 @@ const recoverScanBytes = 16 << 20
 // tick reads only new bytes. File I/O runs without a.mu.
 func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 	unknown := core.Evidence{Known: true, Class: core.EvidenceUnknown}
-	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 	if err != nil || reg == nil || reg.SessionID == "" {
 		return unknown
 	}
-	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
+	path := transcriptPath(a.configDir, reg.Cwd, reg.SessionID)
 	msgID := frameMsgID(key)
 
 	fi, err := os.Lstat(path)

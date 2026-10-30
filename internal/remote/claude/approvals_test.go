@@ -596,7 +596,7 @@ func TestApprovalSettlesInItsOwnSessionAfterASwitch(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
 	f.writeRequest(os.Getpid())
 	f.question()
-	regPath := filepath.Join(claudeSessionsDir(f.home), "4242.json")
+	regPath := filepath.Join(registryDir(defaultConfigDir(f.home)), "4242.json")
 	raw, err := os.ReadFile(regPath)
 	if err != nil {
 		t.Fatal(err)

@@ -28,7 +28,7 @@ func coreBoundRequest() core.BoundRequest {
 func tempHome(t *testing.T, pid int, reg *sessionRegistry) string {
 	t.Helper()
 	home := t.TempDir()
-	dir := claudeSessionsDir(home)
+	dir := registryDir(defaultConfigDir(home))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestNormalizeStatusProjectionVocabulary(t *testing.T) {
 // unbounded, and this read runs under the endpoint's mutex.
 func TestRegistryLeafMustBeRegularFile(t *testing.T) {
 	home := tempHome(t, 77, &sessionRegistry{Pid: 77, SessionID: "s77", Kind: "interactive"})
-	regPath := filepath.Join(claudeSessionsDir(home), "77.json")
+	regPath := filepath.Join(registryDir(defaultConfigDir(home)), "77.json")
 	// Directory at the leaf: refused, never read.
 	if err := os.Remove(regPath); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestRegistryLeafMustBeRegularFile(t *testing.T) {
 	if err := os.Mkdir(regPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readSessionRegistry(home, 77); err == nil {
+	if _, err := readSessionRegistry(defaultConfigDir(home), 77); err == nil {
 		t.Fatal("accepted a directory at the session-registry path")
 	} else if !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("refusal does not name the file-type rule: %v", err)
@@ -173,11 +173,11 @@ func TestRegistryLeafMustBeRegularFile(t *testing.T) {
 // LimitReader caps the lstat-to-read growth window.
 func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
 	home := tempHome(t, 42, &sessionRegistry{Pid: 42, SessionID: "s42", Kind: "interactive"})
-	regPath := filepath.Join(claudeSessionsDir(home), "42.json")
+	regPath := filepath.Join(registryDir(defaultConfigDir(home)), "42.json")
 	if err := os.Truncate(regPath, maxRegistryBytes+1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readSessionRegistry(home, 42); err == nil {
+	if _, err := readSessionRegistry(defaultConfigDir(home), 42); err == nil {
 		t.Fatal("accepted an oversized session registry")
 	} else if !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("refusal does not state the size bound: %v", err)
@@ -188,7 +188,7 @@ func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
 	}
 	// Truncated to a non-JSON blob is a parse error, NOT a size refusal —
 	// proving the read path runs for in-bound files.
-	if _, err := readSessionRegistry(home, 42); err == nil {
+	if _, err := readSessionRegistry(defaultConfigDir(home), 42); err == nil {
 		t.Fatal("expected a JSON parse error for the truncated blob")
 	} else if strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("in-bound file was size-refused: %v", err)

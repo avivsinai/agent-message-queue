@@ -92,7 +92,7 @@ func TestPinWarningsNamesAutoMode(t *testing.T) {
 	if err := os.WriteFile(SettingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	warns, err := PinWarnings(home)
+	warns, err := PinWarnings(SettingsPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestReceiverRefusesTraversalSessionID(t *testing.T) {
 	if code := RunStopHookReceiver(home, strings.NewReader(`{"session_id":"../escape"}`), os.Stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if _, err := os.Stat(filepath.Join(claudeSessionsDir(home), "escape.jsonl")); err == nil {
+	if _, err := os.Stat(filepath.Join(markerDir(home), "escape.jsonl")); err == nil {
 		t.Fatal("receiver wrote outside the amq-stop directory")
 	}
 }
