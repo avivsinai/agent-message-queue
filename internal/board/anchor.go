@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // AnchorLink is one automatic ask-to-task link. It exists only because the
@@ -85,19 +87,21 @@ func (idx anchorIndex) names(text string) []anchorName {
 	for _, id := range full {
 		out = append(out, anchorName{anchorFullID, id, []string{id}})
 	}
-	prev, prevEnd := "", 0
+	prev, prevStart, prevEnd := "", 0, 0
 	for _, span := range shortTokenRe.FindAllStringIndex(text, -1) {
 		start, end := span[0], span[1]
 		raw := text[start:end]
 		token := strings.Trim(raw, ".")
 		start += strings.Index(raw, token)
 		end = start + len(token)
-		cued := prev == "bead" && strings.Trim(text[prevEnd:start], " :") == ""
-		prev, prevEnd = token, end
+		cued := prev == "bead" && !identifierBefore(text, prevStart) && strings.Trim(text[prevEnd:start], " :") == ""
+		prev, prevStart, prevEnd = token, start, end
 		if suffix, ok := strings.CutPrefix(token, "bead"); ok && suffix != "" && len(idx.byShort[suffix]) > 0 {
-			token, cued = suffix, true
+			token, cued = suffix, !identifierBefore(text, start)
 		}
-		if !cued || len(idx.byShort[token]) == 0 || (end < len(text) && text[end] == '_') {
+		// A cued suffix is a whole word: "bead t35-old" and "bead demo-abc"
+		// name no suffix.
+		if !cued || len(idx.byShort[token]) == 0 || identifierAfter(text, end) {
 			continue
 		}
 		out = append(out, anchorName{anchorCuedID, token, idx.byShort[token]})
@@ -199,4 +203,32 @@ func messageActionStates(s Snapshot) map[string]string {
 func openAsk(s Snapshot, states map[string]string, key string) bool {
 	m := s.Messages[key]
 	return states[key] != "resolved" && !s.Dismissed[key] && !s.ActionCancelled[key] && (m.Kind == "question" || m.Kind == "review_request" || m.Kind == "todo")
+}
+
+// identifierBefore reports whether the rune before text[i] continues an
+// identifier or a path, as the exactBeadTokens boundary does.
+func identifierBefore(text string, i int) bool {
+	if i <= 0 {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(text[:i])
+	return anchorIdentifier(r)
+}
+
+// identifierAfter reports whether text[i:] continues an identifier or a
+// path. A sentence-ending period does not.
+func identifierAfter(text string, i int) bool {
+	if i >= len(text) {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(text[i:])
+	if r == '.' {
+		next, _ := utf8.DecodeRuneInString(text[i+size:])
+		return i+size < len(text) && anchorIdentifier(next)
+	}
+	return anchorIdentifier(r)
+}
+
+func anchorIdentifier(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' || r == '/'
 }

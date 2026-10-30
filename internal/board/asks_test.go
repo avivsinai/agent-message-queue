@@ -193,3 +193,27 @@ func TestExactIDLinkIgnoresRankAndModelProposal(t *testing.T) {
 		}
 	}
 }
+
+// Pre-merge review of the exact-id links: the "bead" cue linked a suffix that
+// was only part of a longer word, so these texts named a second, wrong task.
+// A cued suffix is a whole word.
+func TestBeadCueNamesOnlyAWholeSuffix(t *testing.T) {
+	s := Snapshot{Tasks: map[string]Task{}, Facts: map[string]AliasFact{}}
+	for _, id := range []string{"demo-abc", "demo-12", "other-demo", "amq-t35"} {
+		bead, _ := Bead(id)
+		alias := "beads:/work/.beads:" + id
+		s.Tasks["task-"+id] = Task{ID: "task-" + id, Authority: alias, Aliases: []string{alias}}
+		s.Facts[alias] = AliasFact{Alias: alias, Fact: Item{Ref: bead, Source: "beads"}}
+	}
+	idx := newAnchorIndex(s)
+	for text, want := range map[string]string{"bead demo-abc": "task-demo-abc", "bead t35-old": "", "feat/bead12-x": ""} {
+		links, _ := idx.resolve(idx.names(text), "")
+		var got []string
+		for _, link := range links {
+			got = append(got, link.TaskID)
+		}
+		if strings.Join(got, ",") != want {
+			t.Errorf("%q links %v, want %q", text, got, want)
+		}
+	}
+}
