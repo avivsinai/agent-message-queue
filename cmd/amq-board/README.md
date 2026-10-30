@@ -212,14 +212,16 @@ task is as recent as its newest exact-id linked ask.
 
 An open ask that names a task exactly is linked to that task, done tasks
 included, and leaves the unresolved asks; the card shows "linked by exact id"
-and the name. An exact name is a full bead ID, a bead ID suffix with a digit
-(`611.15`, `t35`) or after the word `bead`, or a pull request number that a
-bead's `external_ref` maps. Only when the ask names nothing does its thread
-name count, never a `p2p/` thread or another message. An ambiguous name, a name
-of an owner-cancelled task, or a thread name that names two tasks leaves the
-ask unresolved. Links are derived for each view and never stored; an owner
-attach, admit, or dismiss wins, and suggestions and candidate rank never make
-a link. Dismiss or attach the ask to correct one.
+and the name. An exact name is a full bead ID, a bead ID suffix right after
+the word `bead` (`bead t35`), or a pull request number that a bead's
+`external_ref` maps; a bare suffix such as a branch name is not one. Only
+when the ask names nothing does its thread name count, never a `p2p/` thread
+or another message. An ambiguous name, a name of an owner-cancelled task, or a
+thread name that names two tasks leaves the ask unresolved. Links are derived
+for each view and never stored; an owner attach, admit, or dismiss wins, and
+suggestions and candidate rank never make a link. Dismiss or attach the ask to
+correct one.
+
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
 protect against DNS rebinding. The page never runs source commands.

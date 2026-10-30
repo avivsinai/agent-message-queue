@@ -20,13 +20,11 @@ type AnchorLink struct {
 // adds a "thread name: " prefix.
 const (
 	anchorFullID      = "full id"
-	anchorShortID     = "short id"
 	anchorCuedID      = "bead cue"
 	anchorPullRequest = "pull request"
 )
 
-// shortTokenRe finds the maximal runs that can be a bead id suffix. A hyphen
-// separates runs, so a full id also yields its own suffix.
+// shortTokenRe finds the maximal runs that can be a bead id suffix.
 var shortTokenRe = regexp.MustCompile(`[0-9a-z.]+`)
 
 // prNumberRe finds #N, PR N, PR #N and pull/N outside URLs and identifiers.
@@ -78,9 +76,11 @@ func newAnchorIndex(s Snapshot) anchorIndex {
 	return idx
 }
 
-// names returns the exact names in text: full catalogue bead ids, bead id
-// suffixes, and pull request numbers that a bead's external_ref maps. A name
-// may resolve to several beads; the caller treats that as ambiguity.
+// names returns the exact names in text: full catalogue bead ids, a bead id
+// suffix right after the word "bead" ("bead t35", "bead444"), and pull
+// request numbers that a bead's external_ref maps. A bare suffix is never a
+// name: branch and path names carry suffixes of work the text is not about.
+// A name may resolve to several beads; the caller treats that as ambiguity.
 func (idx anchorIndex) names(text string) []anchorName {
 	text = strings.ToLower(text)
 	var out []anchorName
@@ -104,34 +104,12 @@ func (idx anchorIndex) names(text string) []anchorName {
 		cued := prev == "bead" && strings.Trim(text[prevEnd:start], " :") == ""
 		prev, prevEnd = token, end
 		if suffix, ok := strings.CutPrefix(token, "bead"); ok && suffix != "" && len(idx.byShort[suffix]) > 0 {
-			token, start, cued = suffix, start+len("bead"), true
+			token, cued = suffix, true
 		}
-		if token == "" || len(idx.byShort[token]) == 0 || (start > 0 && text[start-1] == '_') || (end < len(text) && text[end] == '_') {
+		if !cued || len(idx.byShort[token]) == 0 || (end < len(text) && text[end] == '_') {
 			continue
 		}
-		digit, other := strings.ContainsAny(token, "0123456789"), strings.Trim(token, "0123456789") != ""
-		if !cued && (!digit || !other) {
-			continue
-		}
-		beads := idx.byShort[token]
-		if start > 0 && text[start-1] == '-' {
-			// A hyphenated suffix names a bead only under that bead's own
-			// prefix: other-611.15 is another project's id.
-			var own []string
-			for _, bead := range beads {
-				if strings.HasSuffix(text[:start], bead[:len(bead)-len(token)]) {
-					own = append(own, bead)
-				}
-			}
-			beads = own
-		}
-		if len(beads) > 0 {
-			kind := anchorShortID
-			if cued {
-				kind = anchorCuedID
-			}
-			out = append(out, anchorName{kind, token, beads})
-		}
+		out = append(out, anchorName{anchorCuedID, token, idx.byShort[token]})
 	}
 	for _, ref := range ForgeURLRefs(text) {
 		if beads := idx.byForge[ref.ID]; len(beads) > 0 {
