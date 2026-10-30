@@ -16,8 +16,8 @@ type AnchorLink struct {
 	Basis  string `json:"basis"`
 }
 
-// Anchor kinds, the first words of AnchorLink.Basis. A context basis adds a
-// "refs chain: " or "thread name: " prefix.
+// Anchor kinds, the first words of AnchorLink.Basis. A thread name basis
+// adds a "thread name: " prefix.
 const (
 	anchorFullID      = "full id"
 	anchorShortID     = "short id"
@@ -44,12 +44,10 @@ type anchorIndex struct {
 	byShort   map[string][]string // bead id suffix -> bead ids
 	byForge   map[string][]string // forge ref id -> bead ids, external_ref only
 	cancelled map[string]bool
-	byMessage map[string][]string // namespace + message id -> message keys
-	children  map[string][]string // namespace + referenced id -> message keys
 }
 
 func newAnchorIndex(s Snapshot) anchorIndex {
-	idx := anchorIndex{byBead: map[string][]string{}, byShort: map[string][]string{}, byForge: map[string][]string{}, cancelled: map[string]bool{}, byMessage: map[string][]string{}, children: map[string][]string{}}
+	idx := anchorIndex{byBead: map[string][]string{}, byShort: map[string][]string{}, byForge: map[string][]string{}, cancelled: map[string]bool{}}
 	for _, task := range s.Catalogue() {
 		if task.Cancelled {
 			idx.cancelled[task.ID] = true
@@ -72,13 +70,7 @@ func newAnchorIndex(s Snapshot) anchorIndex {
 			idx.byShort[bead[i+1:]] = appendUnique(idx.byShort[bead[i+1:]], bead)
 		}
 	}
-	for key, m := range s.Messages {
-		idx.byMessage[m.Namespace+"\x00"+m.ID] = append(idx.byMessage[m.Namespace+"\x00"+m.ID], key)
-		for _, ref := range distinct(m.Refs) {
-			idx.children[m.Namespace+"\x00"+ref] = append(idx.children[m.Namespace+"\x00"+ref], key)
-		}
-	}
-	for _, index := range []map[string][]string{idx.byBead, idx.byShort, idx.byForge, idx.byMessage, idx.children} {
+	for _, index := range []map[string][]string{idx.byBead, idx.byShort, idx.byForge} {
 		for _, values := range index {
 			sort.Strings(values)
 		}
@@ -200,68 +192,21 @@ func (idx anchorIndex) resolve(names []anchorName, prefix string) ([]AnchorLink,
 }
 
 // anchors resolves one message. Direct names come from its subject and
-// body. Only without direct names does context count: the thread name (not
-// for p2p threads, which hold unrelated requests) and the exact refs chain
-// (the messages it refs and the messages that ref it, never other messages
-// of the thread). All context names must resolve to one task.
-func (idx anchorIndex) anchors(s Snapshot, m Message) ([]AnchorLink, string) {
+// body. Only without direct names does its thread name count, and never a
+// p2p thread name, which holds handles. Other messages, including those it
+// refs, are never read: a reply chain names neighbouring work too often.
+func (idx anchorIndex) anchors(m Message) ([]AnchorLink, string) {
 	if names := idx.names(m.Subject + "\n" + m.Body); len(names) > 0 {
 		return idx.resolve(names, "")
 	}
-	var context []AnchorLink
-	if m.Thread != "" && !strings.HasPrefix(m.Thread, "p2p/") {
-		if names := idx.names(m.Thread); len(names) > 0 {
-			links, abstain := idx.resolve(names, "thread name: ")
-			if abstain != "" {
-				return nil, abstain
-			}
-			context = append(context, links...)
-		}
-	}
-	chain := map[string]bool{}
-	for _, ref := range distinct(m.Refs) {
-		keys := idx.byMessage[m.Namespace+"\x00"+ref]
-		if len(keys) != 1 {
-			return nil, "refs chain: a referenced message is missing or ambiguous"
-		}
-		chain[keys[0]] = true
-	}
-	if m.ID != "" {
-		for _, key := range idx.children[m.Namespace+"\x00"+m.ID] {
-			chain[key] = true
-		}
-	}
-	delete(chain, m.Key)
-	if len(chain) > 7 {
-		return nil, "refs chain: more than eight messages"
-	}
-	keys := make([]string, 0, len(chain))
-	for key := range chain {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var names []anchorName
-	for _, key := range keys {
-		names = append(names, idx.names(s.Messages[key].Subject+"\n"+s.Messages[key].Body)...)
-	}
-	if len(names) > 0 {
-		links, abstain := idx.resolve(names, "refs chain: ")
-		if abstain != "" {
-			return nil, abstain
-		}
-		context = append(context, links...)
-	}
-	tasks := map[string]bool{}
-	for _, link := range context {
-		tasks[link.TaskID] = true
-	}
-	switch {
-	case len(tasks) == 0:
+	if m.Thread == "" || strings.HasPrefix(m.Thread, "p2p/") {
 		return nil, "no exact name"
-	case len(tasks) > 1:
-		return nil, "context names more than one task"
 	}
-	return context[:1], ""
+	links, abstain := idx.resolve(idx.names(m.Thread), "thread name: ")
+	if len(links) > 1 {
+		return nil, "thread name names more than one task"
+	}
+	return links, abstain
 }
 
 // exactAnchors links each open ask that no owner or adopted model binding
@@ -290,7 +235,7 @@ func exactAnchors(s Snapshot) map[string][]AnchorLink {
 			built := newAnchorIndex(s)
 			idx = &built
 		}
-		if links, _ := idx.anchors(s, m); len(links) > 0 {
+		if links, _ := idx.anchors(m); len(links) > 0 {
 			out[key] = links
 		}
 	}
