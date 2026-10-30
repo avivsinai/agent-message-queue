@@ -19,16 +19,12 @@ type AnchorLink struct {
 // Anchor kinds, the first words of AnchorLink.Basis. A thread name basis
 // adds a "thread name: " prefix.
 const (
-	anchorFullID      = "full id"
-	anchorCuedID      = "bead cue"
-	anchorPullRequest = "pull request"
+	anchorFullID = "full id"
+	anchorCuedID = "bead cue"
 )
 
 // shortTokenRe finds the maximal runs that can be a bead id suffix.
 var shortTokenRe = regexp.MustCompile(`[0-9a-z.]+`)
-
-// prNumberRe finds #N, PR N, PR #N and pull/N outside URLs and identifiers.
-var prNumberRe = regexp.MustCompile(`(?:#|pr ?#?|pull/)([1-9][0-9]*)`)
 
 type anchorName struct {
 	kind, name string
@@ -40,12 +36,11 @@ type anchorName struct {
 type anchorIndex struct {
 	byBead    map[string][]string // bead id -> task ids
 	byShort   map[string][]string // bead id suffix -> bead ids
-	byForge   map[string][]string // forge ref id -> bead ids, external_ref only
 	cancelled map[string]bool
 }
 
 func newAnchorIndex(s Snapshot) anchorIndex {
-	idx := anchorIndex{byBead: map[string][]string{}, byShort: map[string][]string{}, byForge: map[string][]string{}, cancelled: map[string]bool{}}
+	idx := anchorIndex{byBead: map[string][]string{}, byShort: map[string][]string{}, cancelled: map[string]bool{}}
 	for _, task := range s.Catalogue() {
 		if task.Cancelled {
 			idx.cancelled[task.ID] = true
@@ -56,11 +51,6 @@ func newAnchorIndex(s Snapshot) anchorIndex {
 				continue
 			}
 			idx.byBead[ref.ID] = appendUnique(idx.byBead[ref.ID], task.ID)
-			for _, rel := range fact.Fact.Relations {
-				if rel.Kind == RelationSameWork && rel.Basis == "external_ref" && rel.To.Kind == RefForge {
-					idx.byForge[rel.To.ID] = appendUnique(idx.byForge[rel.To.ID], ref.ID)
-				}
-			}
 		}
 	}
 	for bead := range idx.byBead {
@@ -68,7 +58,7 @@ func newAnchorIndex(s Snapshot) anchorIndex {
 			idx.byShort[bead[i+1:]] = appendUnique(idx.byShort[bead[i+1:]], bead)
 		}
 	}
-	for _, index := range []map[string][]string{idx.byBead, idx.byShort, idx.byForge} {
+	for _, index := range []map[string][]string{idx.byBead, idx.byShort} {
 		for _, values := range index {
 			sort.Strings(values)
 		}
@@ -76,10 +66,11 @@ func newAnchorIndex(s Snapshot) anchorIndex {
 	return idx
 }
 
-// names returns the exact names in text: full catalogue bead ids, a bead id
-// suffix right after the word "bead" ("bead t35", "bead444"), and pull
-// request numbers that a bead's external_ref maps. A bare suffix is never a
-// name: branch and path names carry suffixes of work the text is not about.
+// names returns the exact names in text: full catalogue bead ids and a bead
+// id suffix right after the word "bead" ("bead t35", "bead444"). A bare
+// suffix is never a name: branch and path names carry suffixes of work the
+// text is not about. A pull request number is never a name either: one PR
+// is mentioned by asks about many tasks.
 // A name may resolve to several beads; the caller treats that as ambiguity.
 func (idx anchorIndex) names(text string) []anchorName {
 	text = strings.ToLower(text)
@@ -110,34 +101,6 @@ func (idx anchorIndex) names(text string) []anchorName {
 			continue
 		}
 		out = append(out, anchorName{anchorCuedID, token, idx.byShort[token]})
-	}
-	for _, ref := range ForgeURLRefs(text) {
-		if beads := idx.byForge[ref.ID]; len(beads) > 0 {
-			out = append(out, anchorName{anchorPullRequest, ref.ID, beads})
-		}
-	}
-	for _, match := range prNumberRe.FindAllStringSubmatchIndex(text, -1) {
-		if start, end := match[0], match[1]; (start > 0 && strings.ContainsAny(text[start-1:start], "0123456789abcdefghijklmnopqrstuvwxyz_/#")) || (end < len(text) && strings.ContainsAny(text[end:end+1], "0123456789abcdefghijklmnopqrstuvwxyz_")) {
-			continue
-		}
-		number := text[match[2]:match[3]]
-		// PRs and issues share one number space per repository; a bare
-		// number names a bead only through exactly one forge ref across all
-		// repositories. Several refs make the name ambiguous.
-		var refs []string
-		for ref := range idx.byForge {
-			if strings.HasSuffix(ref, "#"+number) {
-				refs = append(refs, ref)
-			}
-		}
-		sort.Strings(refs)
-		beads := refs
-		if len(refs) == 1 {
-			beads = idx.byForge[refs[0]]
-		}
-		if len(beads) > 0 {
-			out = append(out, anchorName{anchorPullRequest, "#" + number, beads})
-		}
 	}
 	return out
 }

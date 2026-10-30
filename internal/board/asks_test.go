@@ -116,8 +116,8 @@ func TestOpenAskThatNamesABeadExactlyLinksToItsTask(t *testing.T) {
 	if len(cards) != 1 || len(m.Unresolved) != 0 {
 		t.Fatalf("cards=%d unresolved=%d, want 1 card and no unresolved ask", len(cards), len(m.Unresolved))
 	}
-	if a := cards[0].Attachments; len(a) != 1 || a[0].Message.Key != ask.Key || a[0].Anchor != "full id demo-abc" {
-		t.Fatalf("card attachments = %+v, want the ask linked by full id demo-abc", a)
+	if a := cards[0].Attachments; len(a) != 1 || a[0].Message.Key != ask.Key {
+		t.Fatalf("card attachments = %+v, want the ask", a)
 	}
 	text, page := renderFaces(t, m)
 	data, err := json.Marshal(m)
@@ -127,6 +127,69 @@ func TestOpenAskThatNamesABeadExactlyLinksToItsTask(t *testing.T) {
 	for face, out := range map[string]string{"text": text, "html": page, "json": string(data)} {
 		if !strings.Contains(out, "full id demo-abc") {
 			t.Errorf("%s face does not show the exact-id link", face)
+		}
+	}
+}
+
+// Held-out run 2026-10-29, row R02: for an ask about 611.15, the candidate
+// rank and the model chose 611.13.4. An ask that names 611.15 by its full id
+// links to 611.15 only; a published proposal for 611.13.4 changes nothing.
+func TestExactIDLinkIgnoresRankAndModelProposal(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	s := Snapshot{
+		Input:    Input{Dir: "/work", Known: map[string]string{}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, ObservedAt: now}}}},
+		Tasks:    map[string]Task{},
+		Facts:    map[string]AliasFact{},
+		Messages: map[string]Message{},
+	}
+	for id, title := range map[string]string{"demo-611.15": "R3-02 enrollment runbook", "demo-611.13.4": "Verify share body key and staged renew residue"} {
+		bead, _ := Bead(id)
+		alias := "beads:/work/.beads:" + id
+		s.Input.Known[id] = "closed"
+		s.Tasks["task-"+id] = Task{ID: "task-" + id, Title: title, Authority: alias, Aliases: []string{alias}}
+		s.Facts[alias] = AliasFact{Alias: alias, Fact: Item{Ref: bead, Source: "beads", Title: title, State: StateDone, Structural: true, UpdatedAt: now.Add(-time.Hour)}, ObservedAt: now}
+	}
+	ask := Message{Namespace: "/work", Key: "/work#msg-r02", Root: "/work", ID: "msg-r02", Thread: "p2p/lead__worker", From: "lead", To: []string{"worker"}, Subject: "r10 ready for verification", Kind: "todo", Body: "Updated head for demo-611.15: 0b820ed. Re-run the share faces with no body.key and a corrupt share.staged.json; check renew. Verification only.", Created: now.Format(time.RFC3339Nano)}
+	s.Messages[ask.Key] = ask
+	units := []EvidenceUnit{makeUnit(ask, 0, len(ask.Body))}
+	_, choices := buildDecision(s, units, false, now)
+	wrong := ""
+	for id, c := range choices {
+		if c.TaskID == "task-demo-611.13.4" && c.Role == "review" {
+			wrong = id
+		}
+	}
+	if wrong == "" {
+		t.Fatal("611.13.4 is not a candidate")
+	}
+	fp := s.SuggestionFingerprint(s.Suggestions.Config)
+	proposal := makeSuggestion(fp, units[0], []string{wrong}, choices)
+	s.Suggestions = SuggestionState{Units: units, Config: s.Suggestions.Config, Fingerprint: fp, Proposals: []Suggestion{proposal}}
+
+	m := s.Project(DefaultConfig(), now, "test")
+	if len(m.Unresolved) != 0 || len(m.Historical) != 2 {
+		t.Fatalf("unresolved=%d historical=%d, want 0 and 2", len(m.Unresolved), len(m.Historical))
+	}
+	for _, card := range m.Historical {
+		want := 0
+		if card.ID == "task-demo-611.15" {
+			want = 1
+		}
+		if len(card.Attachments) != want || len(card.ModelAttachments) != 0 {
+			t.Errorf("%s attachments=%d model attachments=%d, want %d and 0", card.ID, len(card.Attachments), len(card.ModelAttachments), want)
+		}
+	}
+	if len(m.Suggestions) != 1 || m.Suggestions[0].ID != proposal.ID || m.Suggestions[0].Adopted {
+		t.Fatalf("suggestions = %+v, want the one unadopted proposal", m.Suggestions)
+	}
+	text, page := renderFaces(t, m)
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for face, out := range map[string]string{"text": text, "html": page, "json": string(data)} {
+		if !strings.Contains(out, "full id demo-611.15") {
+			t.Errorf("%s face does not show the exact-id link to 611.15", face)
 		}
 	}
 }
