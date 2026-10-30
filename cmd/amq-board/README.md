@@ -207,7 +207,19 @@ An unresolved ask that names a current card's bead ID appears on that card as
 related context, with a count and the newest ask's thread command; its request
 names the task. This never attaches, admits, or moves work. Text and HTML show
 the newest 25 unresolved asks and historical tasks, with counts, and no message
-bodies; `--json` and `model.json` keep every record and body.
+bodies; `--json` and `model.json` keep every record and body. A historical
+task is as recent as its newest exact-id linked ask.
+
+An open ask that names a task exactly is linked to that task, done tasks
+included, and leaves the unresolved asks; the card shows "linked by exact id"
+and the name. An exact name is a full bead ID, a bead ID suffix with a digit
+(`611.15`, `t35`) or after the word `bead`, or a pull request number that a
+bead's `external_ref` maps. Only when the ask names nothing do its thread name
+(not `p2p/`) and the messages it refs or that ref it count. An ambiguous name,
+a name of an owner-cancelled task, or context that names two tasks leaves the
+ask unresolved. Links are derived for each view and never stored; an owner
+attach, admit, or dismiss wins, and suggestions and candidate rank never make
+a link. Dismiss or attach the ask to correct one.
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
 protect against DNS rebinding. The page never runs source commands.

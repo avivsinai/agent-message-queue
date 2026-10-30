@@ -216,6 +216,9 @@ func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]str
 		if attachment.Cancelled {
 			state = "action cancelled by owner"
 		}
+		if attachment.Anchor != "" {
+			state = "linked by exact id: " + clean(attachment.Anchor)
+		}
 		fmt.Fprintf(b, "    %s: %s\n      %s\n", state, clean(attachment.Message.Key), cleanTitle(attachment.Message.Subject))
 	}
 	for _, a := range c.Actions {
@@ -244,10 +247,21 @@ func newestAsks(asks []Message) []Message {
 	return out[:min(len(out), viewLimit)]
 }
 
-// newestCards returns at most viewLimit cards, most recently updated first.
+// newestCards returns at most viewLimit cards, most recently active first: a
+// card is as recent as its update or its newest exact-id linked ask, so a
+// done task that a new ask names stays in the default views.
 func newestCards(cards []Card) []Card {
 	out := append([]Card(nil), cards...)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	active := func(c Card) time.Time {
+		at := c.UpdatedAt
+		for _, a := range c.Attachments {
+			if created, err := time.Parse(time.RFC3339Nano, a.Message.Created); a.Anchor != "" && err == nil && created.After(at) {
+				at = created
+			}
+		}
+		return at
+	}
+	sort.SliceStable(out, func(i, j int) bool { return active(out[i]).After(active(out[j])) })
 	return out[:min(len(out), viewLimit)]
 }
 
