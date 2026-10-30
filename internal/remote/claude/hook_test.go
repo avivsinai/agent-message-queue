@@ -92,7 +92,7 @@ func TestPinWarningsNamesAutoMode(t *testing.T) {
 	if err := os.WriteFile(SettingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	warns, err := PinWarnings(home)
+	warns, err := PinWarnings(SettingsPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}

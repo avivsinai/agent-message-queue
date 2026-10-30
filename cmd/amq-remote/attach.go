@@ -1099,6 +1099,12 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 		return registry.Candidate{}, fmt.Errorf("ambiguous: %s all report pid %d; refusing to guess", strings.Join(targets, ", "), pid)
 	}
+	// A Claude session whose sessions could not be listed is named by why.
+	for _, d := range diags {
+		if d.Kind == "claude" {
+			return registry.Candidate{}, fmt.Errorf("cannot identify the session this runs in: list Claude sessions: %v", d.Err)
+		}
+	}
 	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi session")
 }
 
@@ -1253,7 +1259,8 @@ func nativeSessionOf(stateDir, target string) (string, error) {
 
 // persistAdapter adds a manifest entry for a so a restart attaches it again.
 // An existing entry for the target is kept as it is, except that a Claude
-// entry gains approve; upgraded reports that change.
+// entry gains approve or moves to the config dir that now holds its pid's
+// session; upgraded reports that change.
 func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err error) {
 	if !lock.AdvisoryLockAvailable() {
 		return false, errors.New("refusing to update the manifest without an advisory file lock")
@@ -1280,8 +1287,10 @@ func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err err
 				return nil
 			}
 			// The same Claude session attached before approvals existed
-			// gains approve; anything else names another session.
-			if upgraded, err := withApprove(existing.Config); a.Kind != "claude" || err != nil || !sameJSON(upgraded, a.Config) {
+			// gains approve. An entry whose config dir holds no registry
+			// entry for the pid, while the new config dir holds this
+			// session's, is replaced. Anything else names another session.
+			if upgraded, err := withApprove(existing.Config); a.Kind != "claude" || (err != nil || !sameJSON(upgraded, a.Config)) && !claude.ReplacesEntry(existing.Config, a.Config) {
 				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
 			}
 			for i := range f.Adapters {

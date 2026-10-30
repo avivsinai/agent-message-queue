@@ -933,6 +933,44 @@ func TestLiveRegisterAppliesAnApproveUpgrade(t *testing.T) {
 	}
 }
 
+// agent-message-queue-srt review: an attach of a CLAUDE_CONFIG_DIR session
+// that failed before the fix left {"approve":true,"pid":N} in the manifest,
+// and every later attach of that session was refused with "manifest already
+// declares claude:N for another session; refusing".
+func TestLiveRegisterReplacesAnEntryWhoseConfigDirLostThePid(t *testing.T) {
+	home, dir := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	pid := os.Getpid()
+	reg, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s-custom", "kind": "interactive"})
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sessions", strconv.Itoa(pid)+".json"), reg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := canonicalTempDir(t)
+	stateDir := filepath.Join(root, stateDirName)
+	target := "claude:" + strconv.Itoa(pid)
+	if _, err := persistAdapter(stateDir, manifest.Adapter{Kind: "claude", Target: target, Config: json.RawMessage(`{"approve":true,"pid":` + strconv.Itoa(pid) + `}`)}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
+	config, _ := json.Marshal(map[string]any{"approve": true, "config_dir": dir, "pid": pid})
+	register := liveRegistrar(root, stateDir, "remote", ep, nil)
+	if _, err := register(ipc.RegisterRequest{Kind: "claude", Target: target, Config: config}); err != nil {
+		t.Fatalf("register = %v", err)
+	}
+	f, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(f.Adapters) != 1 || !sameJSON(f.Adapters[0].Config, config) {
+		t.Fatalf("manifest = %+v, %v; want the entry with config_dir", f.Adapters, err)
+	}
+}
+
 // Bead agent-message-queue-t97.4 (Pro finding 7): an attached session's
 // handle stayed unregistered. A mailbox attach records the harness it found
 // in the handle's existing mailbox, and never creates a missing one.

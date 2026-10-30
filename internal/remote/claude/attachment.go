@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -68,6 +69,83 @@ type config struct {
 	// with a source that must never answer tool prompts sets it instead of
 	// Approve; Approve wins when both are set.
 	ObserveApprovals bool `json:"observe_approvals,omitempty"`
+}
+
+// dirs resolves the home that roots AMQ's markers and the config dir that
+// roots the session's Claude data: the recorded config_dir, else
+// home/.claude. It never reads CLAUDE_CONFIG_DIR.
+func (c config) dirs() (home, configDir string, err error) {
+	home = c.Home
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil {
+			return "", "", fmt.Errorf("resolve home: %w", err)
+		}
+	}
+	configDir = c.ConfigDir
+	if configDir == "" {
+		configDir = defaultConfigDir(home)
+	}
+	return home, configDir, nil
+}
+
+// TargetSettingsPath is the settings.json of the session a claude manifest
+// entry attaches: <config_dir>/settings.json, else
+// home/.claude/settings.json. Like the endpoint, it never reads
+// CLAUDE_CONFIG_DIR.
+func TargetSettingsPath(raw json.RawMessage) (string, error) {
+	var c config
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return "", fmt.Errorf("parse claude config: %w", err)
+		}
+	}
+	_, dir, err := c.dirs()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "settings.json"), nil
+}
+
+// ReplacesEntry reports whether claude config next may replace the manifest
+// entry prev of the same target. Both must name the same pid with the same
+// settings apart from config_dir and a gained approve, and the two config
+// dirs must differ. prev's config dir must hold no registry entry for the
+// pid while next's holds an interactive one: that proves prev does not
+// describe the session now running as that pid. Any doubt keeps prev.
+func ReplacesEntry(prev, next json.RawMessage) bool {
+	var p, n map[string]any
+	if json.Unmarshal(prev, &p) != nil || json.Unmarshal(next, &n) != nil || p == nil || n == nil {
+		return false
+	}
+	if p["approve"] == true && n["approve"] != true {
+		return false
+	}
+	for _, m := range []map[string]any{p, n} {
+		delete(m, "config_dir")
+		delete(m, "approve")
+	}
+	if !reflect.DeepEqual(p, n) {
+		return false
+	}
+	var pc, nc config
+	if json.Unmarshal(prev, &pc) != nil || json.Unmarshal(next, &nc) != nil || pc.Pid <= 0 {
+		return false
+	}
+	for _, d := range []string{pc.ConfigDir, nc.ConfigDir} {
+		if d != "" && !filepath.IsAbs(d) {
+			return false
+		}
+	}
+	_, pdir, perr := pc.dirs()
+	_, ndir, nerr := nc.dirs()
+	if perr != nil || nerr != nil || filepath.Clean(pdir) == filepath.Clean(ndir) {
+		return false
+	}
+	if old, err := readSessionRegistry(pdir, pc.Pid); err != nil || old != nil {
+		return false
+	}
+	cur, err := readSessionRegistry(ndir, nc.Pid)
+	return err == nil && cur != nil && cur.SessionID != "" && (cur.Kind == "" || cur.Kind == "interactive")
 }
 
 // approvals reports whether the attachment follows the hook's approval
@@ -130,17 +208,9 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 // missing registry entry is a startup refusal: the adapter never guesses a
 // session identity (the same identity posture as the pi adapter).
 func Attach(cfg config) (*Attachment, error) {
-	home := cfg.Home
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("claude adapter: resolve home: %w", err)
-		}
-		home = h
-	}
-	configDir := cfg.ConfigDir
-	if configDir == "" {
-		configDir = defaultConfigDir(home)
+	home, configDir, err := cfg.dirs()
+	if err != nil {
+		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
 	reg, err := readSessionRegistry(configDir, cfg.Pid)
 	if err != nil {

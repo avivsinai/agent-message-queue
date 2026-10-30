@@ -87,6 +87,8 @@ func TestDiscoverAttachesSessionWithCustomConfigDir(t *testing.T) {
 		t.Fatalf("config = %s, want config_dir %q", cands[0].Config, dir)
 	}
 
+	// The endpoint does not have the session's env.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	cfg["home"] = home
 	raw, _ := json.Marshal(cfg)
 	att, err := Factory(context.Background(), registry.FactoryConfig{Config: raw})

@@ -151,7 +151,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if len(got.Hooks["PermissionRequest"]) != 1 || string(got.Hooks["PermissionRequest"][0]) != want || len(got.Hooks["Stop"]) != 1 {
 		t.Fatalf("settings = %s, want the Stop hook and %s", raw, want)
 	}
-	if state, err := PermissionHookState(home); err != nil || state != StopHookPresent {
+	if state, err := PermissionHookState(SettingsPath(home)); err != nil || state != StopHookPresent {
 		t.Fatalf("state = %q, %v; want installed", state, err)
 	}
 	pin := HookPin{Owner: strings.Repeat("ab", 32), Root: "/work/it's root", Session: "work",
@@ -166,7 +166,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := UninstallPermissionHook(home); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := PermissionHookState(home); state != StopHookMissing {
+	if state, _ := PermissionHookState(SettingsPath(home)); state != StopHookMissing {
 		t.Fatalf("after uninstall the approval hook state = %q, want missing", state)
 	}
 	if state, _ := StopHookState(home); state != StopHookPresent {
