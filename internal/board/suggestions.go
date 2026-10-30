@@ -207,11 +207,12 @@ func actionState(s Snapshot, key string) string {
 func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 	keys := []string{}
 	fp := s.SuggestionFingerprint(s.Suggestions.Config)
+	anchored := exactAnchors(s)
 	for k, m := range s.Messages {
 		if key == "" && s.Observations[k].AttemptFingerprint == fp {
 			continue
 		}
-		if (key == "" || key == k) && format.IsValidKind(m.Kind) && !s.Dismissed[k] && !s.ActionCancelled[k] {
+		if (key == "" || key == k) && format.IsValidKind(m.Kind) && !s.Dismissed[k] && !s.ActionCancelled[k] && anchored[k] == nil {
 			keys = append(keys, k)
 		}
 	}
@@ -234,7 +235,7 @@ func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 		return keys[i] < keys[j]
 	})
 	if key != "" && len(keys) == 0 {
-		return nil, errors.New("exact message is absent or has an owner/resolved disposition")
+		return nil, errors.New("exact message is absent, has an owner/resolved disposition, or is linked by exact id")
 	}
 	units := []EvidenceUnit{}
 	adoptedUnits := map[string]bool{}
@@ -432,35 +433,6 @@ func candidates(s Snapshot, units []EvidenceUnit, limit int) []TaskCatalogueEntr
 	return out
 }
 
-// Exact references rank candidates; they never establish task identity.
-func exactBeadTokens(text string) map[string]bool {
-	text = strings.ToLower(text)
-	ids := map[string]bool{}
-	identifier := func(r rune) bool {
-		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
-	}
-	for _, span := range beadTokenRe.FindAllStringIndex(text, -1) {
-		start, end := span[0], span[1]
-		if start > 0 {
-			before, _ := utf8.DecodeLastRuneInString(text[:start])
-			if identifier(before) {
-				continue
-			}
-		}
-		if end < len(text) {
-			after, size := utf8.DecodeRuneInString(text[end:])
-			next, _ := utf8.DecodeRuneInString(text[end+size:])
-			if after == '.' && !identifier(next) {
-				after = ' '
-			}
-			if identifier(after) {
-				continue
-			}
-		}
-		ids[text[start:end]] = true
-	}
-	return ids
-}
 func buildDecision(s Snapshot, units []EvidenceUnit, expanded bool, now time.Time) (decision.Request, map[string]SuggestionChoice) {
 	limit := 8
 	if expanded {

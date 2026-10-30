@@ -834,6 +834,12 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	m.Suggestions = s.SuggestionViews()
 	m.SuggestionDiagnostic = s.Suggestions.Attempt
 	attached := map[string]bool{}
+	anchored := map[string][]Attachment{}
+	for key, links := range exactAnchors(s) {
+		for _, link := range links {
+			anchored[link.TaskID] = append(anchored[link.TaskID], Attachment{Message: s.Messages[key], Anchor: link.Basis})
+		}
+	}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
 		ids = append(ids, id)
@@ -946,6 +952,14 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 			card.Actions = append(card.Actions, newOwnerAction(operation+" this request action", "amq-board", operation, "--scope", "action", "--message", key))
 		}
+		links := anchored[id]
+		sort.Slice(links, func(i, j int) bool { return links[i].Message.Key < links[j].Message.Key })
+		for _, link := range links {
+			attached[link.Message.Key] = true
+			card.Attachments = append(card.Attachments, link)
+			card.Actions = append(card.Actions, messageActions(link.Message)...)
+			card.Actions = append(card.Actions, newOwnerAction("Dismiss this ask", "amq-board", "dismiss", "--message", link.Message.Key))
+		}
 		taskOperation := "cancel"
 		if task.Cancelled {
 			taskOperation = "reopen"
@@ -961,18 +975,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 		}
 	}
-	actionStates := map[string]string{}
-	for _, nr := range s.Input.Results {
-		for key, status := range nr.Result.ActionStates {
-			actionStates[key] = status
-		}
-	}
-	m.ActionStates = actionStates
+	m.ActionStates = messageActionStates(s)
 	for key, msg := range s.Messages {
-		if actionStates[key] == "resolved" {
-			continue
-		}
-		if !attached[key] && !s.Dismissed[key] && !s.ActionCancelled[key] && (msg.Kind == "question" || msg.Kind == "review_request" || msg.Kind == "todo") {
+		if !attached[key] && openAsk(s, m.ActionStates, key) {
 			m.Unresolved = append(m.Unresolved, msg)
 		}
 	}
@@ -1052,9 +1057,13 @@ func askNewer(a, b Message) bool {
 	return a.Key < b.Key
 }
 
+// Attachment is an owner binding, or, when Anchor is set, a link derived at
+// projection time because the open ask names this task by an exact id.
+// Anchor holds the basis of that link.
 type Attachment struct {
 	Message   Message `json:"message"`
 	Cancelled bool    `json:"owner_cancelled"`
+	Anchor    string  `json:"anchor,omitempty"`
 }
 
 // WithdrawalAdoption names the exact target and the exact withdrawal. The

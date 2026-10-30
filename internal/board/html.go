@@ -480,6 +480,10 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		ev = append(ev, d.e)
 	}
 	for _, attachment := range c.Attachments {
+		if attachment.Anchor != "" {
+			ev = append(ev, pageEvidence{Source: "amq", Field: "linked by exact id", Value: clean(attachment.Message.Key), Text: clean(attachment.Anchor)})
+			continue
+		}
 		status := "attached " + attachment.Message.Kind
 		if attachment.Cancelled {
 			status += " (owner cancelled action)"

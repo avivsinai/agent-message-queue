@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Ref kinds. Every ref in the board is built by one constructor below; no
@@ -125,6 +127,39 @@ func GitHubRepoRef(ownerRepo string, n int) (Ref, bool) {
 // BeadTokens returns the distinct candidate bead tokens in text.
 func BeadTokens(text string) []string {
 	return distinct(beadTokenRe.FindAllString(strings.ToLower(text), -1))
+}
+
+// exactBeadTokens returns the whole bead-shaped tokens of text, lowercased,
+// that no identifier character extends. Unlike BeadCandidates it never cuts
+// a token at a hyphen, so feat/demo-a1b-parser names no bead. Candidate
+// ranking and exact anchors read it; only a catalogue member is a name.
+func exactBeadTokens(text string) map[string]bool {
+	text = strings.ToLower(text)
+	ids := map[string]bool{}
+	identifier := func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
+	}
+	for _, span := range beadTokenRe.FindAllStringIndex(text, -1) {
+		start, end := span[0], span[1]
+		if start > 0 {
+			before, _ := utf8.DecodeLastRuneInString(text[:start])
+			if identifier(before) {
+				continue
+			}
+		}
+		if end < len(text) {
+			after, size := utf8.DecodeRuneInString(text[end:])
+			next, _ := utf8.DecodeRuneInString(text[end+size:])
+			if after == '.' && !identifier(next) {
+				after = ' '
+			}
+			if identifier(after) {
+				continue
+			}
+		}
+		ids[text[start:end]] = true
+	}
+	return ids
 }
 
 // BeadCandidates lists the ids a text token may name, longest first: the
