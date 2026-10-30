@@ -676,29 +676,31 @@ func decorateOpsWakeLockWithWakeCheck(
 	includeV2 bool,
 ) {
 	root = canonicalWakeRoot(root)
-	if includeV2 {
+	var decision wakeCheckDecision
+	if includeV2 || inspection.Lock.HealthSchema == wakeHealthSchema {
 		mutation := lock.Mutation
 		snapshot := inspectWakeCheckSnapshot(root, agent)
 		opsLock := snapshot.OpsLock
 		opsLock.Mutation = mutation
 		opsLock.WakeCheckDecision = &snapshot.Decision
 		*lock = *opsLock
-		return
+		decision = snapshot.Decision
+	} else {
+		runningVersion := wakeCheckVersion(inspection.Lock.ImageVersion)
+		currentVersion := wakeCheckVersion(cliVersion)
+		switch {
+		case runningVersion != wakeCheckUnknown &&
+			currentVersion != wakeCheckUnknown &&
+			runningVersion != currentVersion:
+			lock.ImageStatus = wakeCheckVersionImageStatus(runningVersion, currentVersion)
+		case staleBinary:
+			lock.ImageStatus = wakeImageDifferent
+		default:
+			lock.ImageStatus = wakeImageUnknown
+		}
+		decision = buildWakeCheckDecision(root, agent, inspection, lock, false)
 	}
-	runningVersion := wakeCheckVersion(inspection.Lock.ImageVersion)
-	currentVersion := wakeCheckVersion(cliVersion)
-	switch {
-	case runningVersion != wakeCheckUnknown &&
-		currentVersion != wakeCheckUnknown &&
-		runningVersion != currentVersion:
-		lock.ImageStatus = wakeCheckVersionImageStatus(runningVersion, currentVersion)
-	case staleBinary:
-		lock.ImageStatus = wakeImageDifferent
-	default:
-		lock.ImageStatus = wakeImageUnknown
-	}
-	legacyDecision := buildWakeCheckDecision(root, agent, inspection, lock, false)
-	check := renderWakeCheckV1(legacyDecision)
+	check := renderWakeCheckV1(decision)
 	lock.CanStartHere = check.CanStartHere
 	lock.StartMode = check.StartMode
 	lock.StartReason = check.StartReason
@@ -707,6 +709,8 @@ func decorateOpsWakeLockWithWakeCheck(
 	lock.CurrentImagePath = check.CurrentImagePath
 	lock.CurrentVersion = check.CurrentVersion
 	lock.ImageStatus = check.ImageStatus
+	lock.HealthStatus = check.HealthStatus
+	lock.HealthDetail = check.HealthDetail
 	lock.RestartCapability = check.RestartCapability
 	lock.OperatorTerminalRequired = check.OperatorTerminalRequired
 	lock.NextAction = check.NextAction

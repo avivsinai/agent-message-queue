@@ -429,6 +429,9 @@ func runDoctor(args []string) error {
 					wakeCheckTextValue(wl.RestartCapability),
 					wakeCheckTextValue(wl.NextAction),
 				)
+				if wl.HealthStatus != "" {
+					line += fmt.Sprintf(" health=%s", wl.HealthStatus)
+				}
 				if wl.RestartStageStatus != "" {
 					line += fmt.Sprintf(
 						" restart_stage=%s restart_stage_path=%s restart_stage_reason=%s",

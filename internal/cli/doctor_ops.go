@@ -159,6 +159,8 @@ type opsWakeLock struct {
 	CurrentImagePath         string `json:"current_image_path,omitempty"`
 	CurrentVersion           string `json:"current_version,omitempty"`
 	ImageStatus              string `json:"image_status,omitempty"`
+	HealthStatus             string `json:"health_status,omitempty"`
+	HealthDetail             string `json:"health_detail,omitempty"`
 	RestartCapability        string `json:"restart_capability,omitempty"`
 	RestartStagePath         string `json:"restart_stage_path,omitempty"`
 	RestartStageStatus       string `json:"restart_stage_status,omitempty"`
@@ -781,6 +783,14 @@ func checkWakeLocksWithHintsSchema(
 		lock.RestartStageStatus = stage.Status
 		lock.RestartStageReason = stage.Reason
 		applyWakeBinaryDirGoneOpsReason(&lock, inspection, stage)
+		if lock.HealthStatus == wakeHealthUnresponsive || lock.HealthStatus == wakeHealthDegraded {
+			hints = append(hints, opsHint{
+				Code:   "wake_loop_" + lock.HealthStatus,
+				Status: "warn",
+				Message: fmt.Sprintf("%s notification loop is %s: %s; %s",
+					agent, lock.HealthStatus, lock.HealthDetail, lock.NextAction),
+			})
+		}
 		if fixCommand != "" && (stage.Status != "" || lock.Reason == wakeReasonBinaryDirGone) {
 			lock.Fix = fixCommand
 		}
