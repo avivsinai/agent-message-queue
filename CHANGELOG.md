@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.119.3](https://github.com/avivsinai/agent-message-queue/compare/v0.119.2...v0.119.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* **remote:** support a Claude session with a custom CLAUDE_CONFIG_DIR ([#1308](https://github.com/avivsinai/agent-message-queue/issues/1308)) ([73ee206](https://github.com/avivsinai/agent-message-queue/commit/73ee206a010380f5b42a6b6de1a0a19aa4b37e11))
+
 ## [0.119.2](https://github.com/avivsinai/agent-message-queue/compare/v0.119.1...v0.119.2) (2026-10-29)
 
 
