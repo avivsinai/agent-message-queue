@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.120.1](https://github.com/avivsinai/agent-message-queue/compare/v0.120.0...v0.120.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **doctor:** report unresponsive notification loops ([#1313](https://github.com/avivsinai/agent-message-queue/issues/1313)) ([1c26c7c](https://github.com/avivsinai/agent-message-queue/commit/1c26c7c8a1a9eeda1431b39ea6e504b728b3ee27))
+
+
+### Dependencies
+
+* bump github.com/btcsuite/btcd/btcec/v2 from 2.5.0 to 2.5.1 ([#1307](https://github.com/avivsinai/agent-message-queue/issues/1307)) ([38facdf](https://github.com/avivsinai/agent-message-queue/commit/38facdf735be2ebadaeb24fa27922e5164413e35))
+
 ## [0.120.0](https://github.com/avivsinai/agent-message-queue/compare/v0.119.3...v0.120.0) (2026-10-30)
 
 
