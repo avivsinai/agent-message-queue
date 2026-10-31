@@ -677,7 +677,8 @@ func decorateOpsWakeLockWithWakeCheck(
 ) {
 	root = canonicalWakeRoot(root)
 	var decision wakeCheckDecision
-	if includeV2 || inspection.Lock.HealthSchema == wakeHealthSchema {
+	switch {
+	case includeV2:
 		mutation := lock.Mutation
 		snapshot := inspectWakeCheckSnapshot(root, agent)
 		opsLock := snapshot.OpsLock
@@ -685,7 +686,11 @@ func decorateOpsWakeLockWithWakeCheck(
 		opsLock.WakeCheckDecision = &snapshot.Decision
 		*lock = *opsLock
 		decision = snapshot.Decision
-	} else {
+	case inspection.Lock.HealthSchema == wakeHealthSchema:
+		// Schema 1 keeps doctor's own fix advice and mutation outcome; only the
+		// decision comes from the probed snapshot.
+		decision = inspectWakeCheckSnapshot(root, agent).Decision
+	default:
 		runningVersion := wakeCheckVersion(inspection.Lock.ImageVersion)
 		currentVersion := wakeCheckVersion(cliVersion)
 		switch {
