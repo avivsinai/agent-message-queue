@@ -225,9 +225,12 @@ func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
+	// A dead macOS wake leaves a lock that advertises loop health; review of
+	// the loop-health doctor change found that path dropped the fix advice.
 	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
-		PID:        999999999,
-		Executable: "/opt/homebrew/bin/amq",
+		PID:          999999999,
+		Executable:   "/opt/homebrew/bin/amq",
+		HealthSchema: wakeHealthSchema,
 	})
 
 	result := runOpsChecks(root, "test_source", false)

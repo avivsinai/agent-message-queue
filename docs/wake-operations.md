@@ -45,6 +45,10 @@ reports wake status `unverified`, and a failed loop reports `degraded`;
 the live process claim is preserved. This check does not prove that a harness
 received or consumed a doorbell. Use a drained receipt for consumption proof.
 
+`doctor --ops` probes advertised loop health in both JSON schemas and text output. Schema 1 adds
+`health_status` and `health_detail` to the wake row; schema 2 uses `wake_check.health`.
+A degraded or unresponsive loop also produces a warning hint. A valid process lock alone does not prove loop health.
+
 `image_status` (schema 2: `image.status`) is `outdated` when the recorded
 running version is older than this installed CLI. `different` reports other
 confirmed image differences, including same-version rebuilds. Installing a

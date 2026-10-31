@@ -339,8 +339,8 @@ func TestDarwinWakeHealthForwardsToLoopAndReturnsStatus(t *testing.T) {
 	}
 }
 
-// Regression: the 2026-10-26 machine audit reported live/valid for wakes
-// that never acknowledged settings; a listening socket alone proves no loop progress.
+// Regression: machine audits on 2026-10-26 and session4 on 2026-10-30 found
+// live wakes without loop progress; default doctor output also omitted that failure.
 func TestDarwinWakeHealthProbeTimesOutWithoutLoopResponse(t *testing.T) {
 	root, agent, _, lock, _ := testDarwinWakeRestartControlLock(t)
 	lock.HealthSchema = wakeHealthSchema
@@ -375,6 +375,21 @@ func TestDarwinWakeHealthProbeTimesOutWithoutLoopResponse(t *testing.T) {
 	}
 	if got := renderWakeCheckV2(decision); got.Health.Status != wakeHealthUnresponsive || got.Action.Actor != wakeActionActorOperator {
 		t.Fatalf("schema 2 unresponsive loop check = %#v", got)
+	}
+	locks, _ := checkWakeLocksWithHints(root, []string{agent}, false)
+	if len(locks) != 1 {
+		t.Fatalf("doctor wake locks = %d, want 1", len(locks))
+	}
+	raw, err := json.Marshal(locks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doctor map[string]any
+	if err := json.Unmarshal(raw, &doctor); err != nil {
+		t.Fatal(err)
+	}
+	if doctor["health_status"] != wakeHealthUnresponsive {
+		t.Fatalf("default doctor hides unresponsive loop: %s", raw)
 	}
 }
 
