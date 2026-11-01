@@ -10,7 +10,7 @@
   var storageKey = "amq-board-ui:" + (snapshot.dir || "");
   var saved = {};
   try { saved = JSON.parse(window.sessionStorage.getItem(storageKey) || "{}"); } catch (e) { /* storage is optional */ }
-  var current = "next";
+  var current = "flow";
   var allNext = saved.allNext === true;
 
   function say(text) { if (announce) { announce.textContent = text; } }
@@ -29,7 +29,7 @@
     var input = view.querySelector(".view-search");
     if (!input) { return; }
     var query = input.value.trim().toLowerCase();
-    var rows = Array.prototype.slice.call(view.querySelectorAll(".strip"));
+    var rows = Array.prototype.slice.call(view.querySelectorAll(".strip, .flow-card"));
     var matched = 0;
     rows.forEach(function (row) {
       var text = [".title", ".c-ref", ".c-owner"].map(function (selector) {
@@ -52,9 +52,10 @@
   function selectView(focus) {
     var requested = window.location.hash.replace(/^#view-/, "");
     var chosen = views.find(function (view) { return view.dataset.view === requested; });
-    if (!chosen) { chosen = views.find(function (view) { return view.dataset.view === (saved.view || "next"); }) || views[0]; }
+    if (!chosen) { chosen = views.find(function (view) { return view.dataset.view === (saved.view || "flow"); }) || views[0]; }
     if (!chosen) { return; }
     current = chosen.dataset.view;
+    root.setAttribute("data-view", current);
     views.forEach(function (view) { view.hidden = view !== chosen; });
     links.forEach(function (link) {
       if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); }
@@ -91,6 +92,35 @@
     if (search) { search.focus({preventScroll:true}); }
   }
 
+  function sheets() { return Array.prototype.slice.call(document.querySelectorAll(".card-sheet[open]")); }
+  function closeSheet(sheet, focus) {
+    sheet.open = false;
+    if (focus) { sheet.querySelector("summary").focus({preventScroll:true}); }
+  }
+  document.addEventListener("toggle", function (event) {
+    var sheet = event.target;
+    if (!sheet.matches || !sheet.matches(".card-sheet") || !sheet.open) { return; }
+    sheets().forEach(function (other) { if (other !== sheet) { closeSheet(other, false); } });
+    var close = sheet.querySelector(".sheet-close");
+    if (close) { close.focus({preventScroll:true}); }
+  }, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") { return; }
+    sheets().forEach(function (sheet) { closeSheet(sheet, true); });
+  });
+  document.addEventListener("click", function (event) {
+    var close = event.target.closest(".sheet-close");
+    if (close) { closeSheet(close.closest(".card-sheet"), true); return; }
+    var opener = event.target.closest("[data-open]");
+    if (!opener) { return; }
+    var target = document.getElementById(opener.getAttribute("data-open"));
+    if (!target) { return; }
+    event.preventDefault();
+    var row = target.closest(".flow-card");
+    if (row) { row.hidden = false; }
+    target.open = true;
+  });
+
   var appearance = document.getElementById("appearance");
   var theme = "system";
   try { theme = window.localStorage.getItem("amq-board-appearance") || theme; } catch (e) { /* use the system theme */ }
@@ -113,7 +143,7 @@
   function manualCopy(button, command) {
     var row = button.closest(".strip");
     if (row) { row.querySelector(".item-details").open = true; }
-    var scope = row || button.closest(".cmd");
+    var scope = row || button.closest(".cmd") || button.closest(".sheet");
     var field = scope && Array.prototype.slice.call(scope.querySelectorAll("textarea")).find(function (node) { return node.value === command; });
     button.classList.add("is-failed");
     if (field) { field.focus(); field.select(); say("Copy unavailable. The command is selected for manual copying."); }

@@ -809,7 +809,8 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 }
 
 // Project is pure: one admitted task produces one card, regardless of source
-// link graphs. Unadmitted asks remain outside task and WIP counts.
+// link graphs. Unadmitted asks remain outside task and WIP counts. Forge
+// items that no task claims as the same work become Flow cards, never tasks.
 func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	s = s.projectionSnapshot()
 	input := s.Input
@@ -817,7 +818,17 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	input.Config = cfg
 	input.Now = now
 	input.Version = version
+	var forge []Item
+	observed := map[string]time.Time{}
 	for i := range input.Results {
+		nr := input.Results[i]
+		observed[nr.Name] = nr.Result.ObservedAt
+		for _, it := range nr.Result.Items {
+			if it.Ref.Kind == RefForge {
+				it.Source = nr.Name
+				forge = append(forge, it)
+			}
+		}
 		input.Results[i].Result.Items = nil
 	}
 	m := Build(input)
@@ -876,6 +887,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		card := Card{Inferred: task.Inferred, Cancelled: task.Cancelled, ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
 		card.SourceObservedAt = task.ObservedAt
 		card.Authority = task.Authority
+		card.current = !task.Cancelled && !task.SourceMissing
 		for _, alias := range task.Aliases {
 			fact := s.Facts[alias]
 			card.SourceFacts = append(card.SourceFacts, fact)
@@ -987,6 +999,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		sortCards(m.Columns[i].ID, m.Columns[i].Cards)
 	}
 	m.Next = selectNext(m.Columns)
+	buildFlow(&m, forge, input, observed)
 	return m
 }
 

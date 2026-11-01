@@ -162,6 +162,13 @@ func runOwner(kind string, args []string) int {
 	if flags.NArg() != 0 {
 		return exitUsage
 	}
+	switch kind {
+	case "admit", "attach", "detach", "move", "dismiss":
+		if *message == "" {
+			fmt.Fprintf(os.Stderr, "amq-board %s: --message KEY is required: the exact root#messageID the card shows\n", kind)
+			return exitUsage
+		}
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -42,18 +42,7 @@ func (c Column) Title() string {
 // structured field needs the human's action; work the human owns and can
 // move is In flight, and only human-owned blocked work waits on the human.
 func Place(items []Item) (Column, int) {
-	human := func(o Owner) bool { return o.Kind == OwnerHuman }
-	if i := first(items, func(it Item) bool {
-		if it.State == StateNeedsHuman {
-			return true
-		}
-		for _, w := range it.WaitsOn {
-			if human(w) {
-				return true
-			}
-		}
-		return human(it.Owner) && it.State == StateBlocked
-	}); i >= 0 {
+	if i := first(items, needsHuman); i >= 0 {
 		return ColumnWaiting, i
 	}
 	if i := first(items, func(it Item) bool { return it.State == StateBlocked }); i >= 0 {
@@ -69,6 +58,20 @@ func Place(items []Item) (Column, int) {
 		return ColumnRequests, i
 	}
 	return ColumnHidden, -1
+}
+
+// needsHuman is the waiting-on-you predicate: a structured field asks the
+// human to act, or the human owns blocked work.
+func needsHuman(it Item) bool {
+	if it.State == StateNeedsHuman {
+		return true
+	}
+	for _, w := range it.WaitsOn {
+		if w.Kind == OwnerHuman {
+			return true
+		}
+	}
+	return it.Owner.Kind == OwnerHuman && it.State == StateBlocked
 }
 
 func first(items []Item, match func(Item) bool) int {

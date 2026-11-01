@@ -100,3 +100,85 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 	}
 	return append(views, history)
 }
+
+type pageFlow struct {
+	Legend, Coverage, CoverageTitle string
+	Stages                          []pageStage
+	NeedsYou                        []pageStrip
+	Gates                           []string
+	ReplyDue                        int
+	Unresolved                      string
+}
+
+type pageStage struct {
+	ID, Title, Empty, More string
+	Count                  int
+	Cards                  []pageStrip
+}
+
+var stageEmpty = map[Stage]string{
+	StageBacklog:    "No open work without an owner.",
+	StageReady:      "Nothing is assigned and waiting to start.",
+	StageInProgress: "No work is marked started. Tracker state does not prove a running worker.",
+	StageInReview:   "No open pull request is ready for review.",
+	StageBlocked:    "Nothing blocked.",
+	StageShipped:    "Nothing finished recently. Older work is in History.",
+}
+
+// buildFlowPage renders Flow: one column per stage, plus the attention strip
+// of cards that need the owner and the unread messages for the owner.
+func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
+	f := pageFlow{Legend: flowLegend}
+	for _, g := range m.Gates {
+		f.Gates = append(f.Gates, pluralize(g.OpenCount, "unread message")+" for you in "+clean(g.Session))
+	}
+	cards := m.FlowCards()
+	for _, v := range m.Flow {
+		st := pageStage{ID: string(v.ID), Title: v.Title, Count: len(v.CardIDs) + v.Omitted, Empty: stageEmpty[v.ID]}
+		for _, id := range v.CardIDs {
+			c := cards[id]
+			s := flowStrip(c, now, live)
+			st.Cards = append(st.Cards, s)
+			if s.NeedsYou {
+				f.NeedsYou = append(f.NeedsYou, s)
+			}
+			if s.ReplyDue {
+				f.ReplyDue++
+			}
+		}
+		if v.Omitted > 0 {
+			st.More = "+" + strconv.Itoa(v.Omitted) + " older shipped"
+		}
+		f.Stages = append(f.Stages, st)
+	}
+	if n := len(m.Unresolved); n > 0 {
+		f.Unresolved = pluralize(n, "unresolved ask") + " not linked to a card"
+	}
+	var gaps []string
+	for _, source := range m.Sources {
+		if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial {
+			continue
+		}
+		gaps = append(gaps, clean(source.Name))
+	}
+	if len(gaps) > 0 {
+		f.CoverageTitle = "Incomplete coverage (" + strconv.Itoa(len(gaps)) + " sources)"
+		f.Coverage = "Incomplete coverage: " + strings.Join(gaps, ", ") + ". Some cards may be missing."
+	}
+	return f
+}
+
+func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
+	s := buildStrip(c, now, live)
+	sum := summarizeFlow(c, now)
+	s.Stage, s.StageID, s.StageAge = c.Stage.Title(), string(c.Stage), clean(sum.Age)
+	s.PR, s.CI, s.CIText = clean(sum.PR), string(c.CI), sum.CI
+	s.NamesBead = clean(sum.Names)
+	s.NeedsYou, s.ReplyDue = sum.NeedsYou, sum.ReplyDue
+	s.Owner = clean(sum.Owner)
+	if c.Authority == "" {
+		s.TaskID = ""
+	}
+	s.Anchor = stripArgs("flow", s).ID
+	return s
+}

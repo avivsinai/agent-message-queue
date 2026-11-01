@@ -194,7 +194,7 @@ are a separate owner-adopted surface.
 
 Configuration uses `~/.amq/board.json` and `.amq/board.json`. Settings include
 `sources`, `humans`, `forges`, `providers`, `liveness_window`, `stale_after`,
-`obligation_max_age`, and user-only `usage`. Sync and serve reload configuration;
+`shipped_window` (default `7d`), `obligation_max_age`, and user-only `usage`. Sync and serve reload configuration;
 a refused edit keeps the last good value. Source identity is restart-only.
 Usage collection can be disabled with `{"usage":{"enabled":false}}`. Enabled
 usage reads numeric harness usage facts; Codex plan limits use its installed
@@ -203,6 +203,28 @@ app-server interface and the existing bounded collector cache.
 ## Views
 
 Text, JSON, static HTML, and the live page use the same pure task projection.
+
+Flow is the default page view and a `== Flow ==` text section. It puts every
+current card in one stage, first match wins: In review (a linked pull request
+is open and not a draft), Blocked (the tracker records a blocker), In progress
+(the tracker says started, or the only open pull request is a draft), Shipped
+(done or merged within `shipped_window`, with a recorded close time), Ready
+(assigned, not started), and Backlog (everything else that is current). A
+bead's close time is its `closed_at`; Codex goals and Claude tasks record no
+close time, so their finished work stays in History. Shipped lists the 12
+newest cards and counts the rest. Flow cards also include the open GitHub pull
+requests and issues of the published snapshot. A forge item joins a task card
+only when the task's bead records it as the same work (`external_ref gh-N`); a
+pull request that only names a bead stays its own card and shows the name.
+Forge cards are never tasks: they have no task ID, cannot take attachments,
+and stay outside task counts. Needs you (a structured field waits on you) and
+Reply due (an open ask names the task exactly) are flags on the card, not
+stages; the strip above the board lists the cards that need you and the unread
+messages for you. A pull request card shows its checks as CI green, CI red,
+CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
+omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
+`flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and
+Requests remain.
 An unresolved ask that names a current card's bead ID appears on that card as
 related context, with a count and the newest ask's thread command; its request
 names the task. This never attaches, admits, or moves work. Text and HTML show

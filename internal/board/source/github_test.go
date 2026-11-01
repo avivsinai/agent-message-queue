@@ -518,3 +518,46 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	}
 	return p
 }
+
+func TestGitHubMergedPRIsDone(t *testing.T) {
+	body := `{"data":{"viewer":{"login":"me"},"attention":{"issueCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"r0":{"pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"issues":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"merged":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"number":31,"title":"fix: ship it","url":"https://github.com/octo-org/demo/pull/31","createdAt":"2026-10-30T08:00:00Z","updatedAt":"2026-10-31T10:00:00Z","mergedAt":"2026-10-31T09:30:00Z","author":{"login":"octo-agent"}}]},
+"closed":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[
+{"number":32,"title":"done issue","url":"https://github.com/octo-org/demo/issues/32","updatedAt":"2026-10-31T11:00:00Z","closedAt":"2026-10-31T11:00:00Z","stateReason":"COMPLETED"},
+{"number":33,"title":"dropped issue","url":"https://github.com/octo-org/demo/issues/33","updatedAt":"2026-10-31T12:00:00Z","closedAt":"2026-10-31T12:00:00Z","stateReason":"NOT_PLANNED"}]}}}}`
+	res := source.GitHub{}.Build([]byte(body), []string{"octo-org/demo"}, githubNow, nil)
+	want := map[string]time.Time{
+		"31": time.Date(2026, 10, 31, 9, 30, 0, 0, time.UTC),
+		"32": time.Date(2026, 10, 31, 11, 0, 0, 0, time.UTC),
+	}
+	if len(res.Items) != len(want) {
+		t.Fatalf("%d items, want the merged PR and the completed issue only: %+v", len(res.Items), res.Items)
+	}
+	for _, it := range res.Items {
+		n := it.Ref.ID[strings.LastIndex(it.Ref.ID, "#")+1:]
+		if it.State != board.StateDone || !it.Reason.Since.Equal(want[n]) {
+			t.Errorf("#%s = %s since %v, want done since %v", n, it.State, it.Reason.Since, want[n])
+		}
+	}
+}
+
+// Regression (Flow review): the merged list was cut at a fixed length with
+// no coverage note, so a busy week dropped merged PRs from Shipped while the
+// source still read as complete; then an older cut of the closed list hid
+// the merged list's later floor.
+func TestGitHubCutMergedListInsideShippedWindowIsPartial(t *testing.T) {
+	body := `{"data":{"viewer":{"login":"me"},"attention":{"issueCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"r0":{"pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"issues":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"merged":{"pageInfo":{"hasNextPage":true},"nodes":[
+{"number":41,"title":"newest","url":"https://github.com/octo-org/demo/pull/41","createdAt":"2026-10-21T08:00:00Z","updatedAt":"2026-10-22T10:00:00Z","mergedAt":"2026-10-22T09:00:00Z","author":{"login":"octo-agent"}},
+{"number":40,"title":"oldest fetched","url":"https://github.com/octo-org/demo/pull/40","createdAt":"2026-10-19T08:00:00Z","updatedAt":"2026-10-20T12:00:00Z","mergedAt":"2026-10-20T11:00:00Z","author":{"login":"octo-agent"}}]},
+"closed":{"pageInfo":{"hasNextPage":true},"nodes":[
+{"number":12,"title":"old close","url":"https://github.com/octo-org/demo/issues/12","updatedAt":"2026-10-01T12:00:00Z","closedAt":"2026-10-01T12:00:00Z","stateReason":"COMPLETED"}]}}}}`
+	res := source.GitHub{ShippedWindow: 7 * 24 * time.Hour}.Build([]byte(body), []string{"octo-org/demo"}, githubNow, nil)
+	if !res.Coverage.Partial() || !strings.Contains(res.Coverage.Window, "2026-10-20T12:00:00Z") || !strings.Contains(res.Coverage.Detail, "2026-10-20T12:00:00Z") {
+		t.Fatalf("coverage = %+v, want partial since the oldest fetched update", res.Coverage)
+	}
+}

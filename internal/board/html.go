@@ -102,6 +102,7 @@ type pageData struct {
 	Live                 bool
 	TaskChoices          []pageTaskChoice
 	Views                []pageView
+	Flow                 pageFlow
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
 }
@@ -196,6 +197,9 @@ type pageStrip struct {
 	Actions                          []Action
 	HasDetail                        bool
 	ReasonField, Priority            string
+	// Flow card facts.
+	Stage, StageID, StageAge, PR, CI, CIText, NamesBead, Anchor string
+	NeedsYou, ReplyDue                                          bool
 }
 
 type pageEvidence struct {
@@ -301,6 +305,7 @@ func buildPage(m Model, regenerate string) pageData {
 		p.Roster = append(p.Roster, buildSession(rs, now))
 	}
 	p.Views = buildViews(m, now, live)
+	p.Flow = buildFlowPage(m, now, live)
 	if m.SuggestionDiagnostic.Status != "" {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)
 	}
