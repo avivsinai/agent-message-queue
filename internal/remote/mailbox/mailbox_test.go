@@ -160,3 +160,91 @@ func TestSubmitMakesAVisibleTombstoneDurableBeforeRefusing(t *testing.T) {
 		t.Fatalf("handle inbox holds %d messages", n)
 	}
 }
+
+// Regression (#1304): a strict share bound to a mailbox target refused an
+// owner DM sent while the previous request was still open; the DM ended as
+// a terminal busy row and never reached the handle.
+func TestSecondRequestToABusyHandleIsDeliveredNotRejected(t *testing.T) {
+	clk := time.Now().UTC()
+	now := func() time.Time { return clk }
+	a, root := newTestAttachment(t, &clk)
+	for _, box := range []string{"new", "cur", "tmp"} {
+		if err := os.MkdirAll(filepath.Join(root, "agents", localCarrier, "inbox", box), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := requests.Open(t.TempDir(), requests.WithClock(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(a)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	first := requests.Key{CreatorHost: "local", TargetID: "squad", RequestID: "11111111-1111-4111-8111-1111111111a1"}
+	second := requests.Key{CreatorHost: "local", TargetID: "squad", RequestID: "11111111-1111-4111-8111-1111111111b2"}
+	for _, k := range []requests.Key{first, second} {
+		out, err := ep.Handle(&protocol.Command{
+			Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+			RequestID: k.RequestID, TargetID: "squad", Epoch: a.epoch(),
+			NotAfter: protocol.FormatTime(clk.Add(time.Minute)),
+			Input:    &protocol.SubmitInput{Text: "request " + k.RequestID},
+		}, core.Source{Host: "local"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := out.(protocol.Reply); r.Outcome.Code == protocol.CodeBusy || r.Snapshot.State == protocol.StateRejected {
+			t.Fatalf("submit %s = %+v, want it delivered", k.RequestID, r)
+		}
+	}
+	if n := inboxCount(t, root); n != 2 {
+		t.Fatalf("handle inbox holds %d messages, want both requests", n)
+	}
+
+	// The handle answers the second request only.
+	inbox := filepath.Join(root, "agents", "squad", "inbox", "new")
+	names, err := os.ReadDir(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prompt format.Message
+	for _, n := range names {
+		m, err := format.ReadMessageFile(filepath.Join(inbox, n.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(m.Body, "request "+second.RequestID) {
+			prompt = m
+		}
+	}
+	created := clk.Add(time.Second)
+	replyID, err := format.NewMessageID(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: replyID, From: "squad", To: []string{localCarrier}, Thread: prompt.Header.Thread,
+		Refs: []string{prompt.Header.ID}, Created: created.Format(time.RFC3339Nano), Kind: string(format.KindAnswer),
+	}, Body: "second done"}
+	data, err := reply.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", localCarrier, "inbox", "new", replyID+".md"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk = created.Add(time.Second)
+	if err := ep.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[requests.Key]protocol.State{first: protocol.StateRunning, second: protocol.StateCompleted} {
+		rec, ok, err := store.Get(k)
+		if err != nil || !ok || rec.State != want {
+			t.Fatalf("record %s = %+v, %v, %v; want %s", k.RequestID, rec, ok, err, want)
+		}
+	}
+	if rec, _, _ := store.Get(second); rec.Result == nil || !strings.Contains(rec.Result.Text, "second done") {
+		t.Fatalf("second result = %+v, want the handle's reply", rec.Result)
+	}
+}

@@ -498,3 +498,21 @@ func TestStoredRowWhoseOKWasLostIsAccepted(t *testing.T) {
 		})
 	}
 }
+
+func TestBusyRowSaysToSendTheMessageAgain(t *testing.T) {
+	c, owner, _ := busyCarrier(t)
+	dm := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "fix the build", Tags: nostr.Tags{{"h", "dm-1"}}}
+	if err := dm.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0].Content, "rejected (busy)") || !strings.Contains(sent[0].Content, "send the message again") {
+		t.Fatalf("sent = %+v, want one busy row that says to send the message again", sent)
+	}
+}

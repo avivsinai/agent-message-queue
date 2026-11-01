@@ -1463,6 +1463,10 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 		// the DM renderer cannot decode entities or autolink URLs inside it.
 		fmt.Fprintf(&b, ": %s", protocol.InertInline(reason))
 	}
+	if s.State == protocol.StateRejected && s.Code == protocol.CodeBusy {
+		// A settled DM never runs again, so a new message is the only retry.
+		b.WriteString("\nNothing ran; send the message again when the session is free.")
+	}
 	if s.Result != nil && s.Result.Text != "" {
 		text := s.Result.Text
 		if len(text) > maxRowText || s.Result.Truncated {

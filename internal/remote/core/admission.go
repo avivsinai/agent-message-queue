@@ -146,8 +146,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
 	}
 	// Per-runtime reservation: refuse a second concurrent dispatch
-	// for the same target. Fail-closed — an undeterminable reservation state
-	// never authorizes a dispatch.
+	// for the same target, unless the target is a ConcurrentSubmitter.
+	// Fail-closed — an undeterminable reservation state never authorizes a
+	// dispatch.
 	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
 	if rerr != nil {
 		// An undeterminable reservation must not leave a Tick-admissible
@@ -520,7 +521,8 @@ func (e *Endpoint) linkFullLocked(host string) (bool, error) {
 // to prevent. A POISON record for the target itself (undecodable file whose
 // identity is recovered from the path) makes the target's reservation state
 // UNDETERMINABLE — also fail-closed. Poison for other targets does not
-// block this target. The caller holds e.mu.
+// block this target. A ConcurrentSubmitter target holds no reservation:
+// its requests share no native turn. The caller holds e.mu.
 func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
 	recs, poison, err := e.store.ListWithPoison()
 	if err != nil {
@@ -533,6 +535,11 @@ func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) 
 			// determined, so treat the target as possibly-busy. An empty
 			// TargetID is neither "this target" nor "another" — fail closed.
 			return false, fmt.Errorf("target %s has an unreadable record %s: %w", targetID, p.Path, errUndeterminableReservation)
+		}
+	}
+	if t, ok := e.targets[targetID]; ok {
+		if c, ok := t.att.(ConcurrentSubmitter); ok && c.ConcurrentSubmit() {
+			return false, nil
 		}
 	}
 	for _, r := range recs {
