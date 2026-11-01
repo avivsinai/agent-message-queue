@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.120.2](https://github.com/avivsinai/agent-message-queue/compare/v0.120.1...v0.120.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* **build:** pin gofmt and lint to the go line when go.mod has no toolchain line ([#1315](https://github.com/avivsinai/agent-message-queue/issues/1315)) ([0165f8a](https://github.com/avivsinai/agent-message-queue/commit/0165f8afd0b47aee4de6c2f0dc4830bc7f4e33a9))
+* **wake:** exit when the wake directory's volume is revoked instead of staying deaf ([#1317](https://github.com/avivsinai/agent-message-queue/issues/1317)) ([cf90e6d](https://github.com/avivsinai/agent-message-queue/commit/cf90e6d5ce67cf6846eb65af304819ebb8d0e445))
+
 ## [0.120.1](https://github.com/avivsinai/agent-message-queue/compare/v0.120.0...v0.120.1) (2026-10-31)
 
 
