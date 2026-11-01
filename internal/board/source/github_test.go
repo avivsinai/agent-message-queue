@@ -518,3 +518,27 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	}
 	return p
 }
+
+func TestGitHubMergedPRIsDone(t *testing.T) {
+	body := `{"data":{"viewer":{"login":"me"},"attention":{"issueCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"r0":{"pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"issues":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+"merged":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"number":31,"title":"fix: ship it","url":"https://github.com/octo-org/demo/pull/31","createdAt":"2026-10-30T08:00:00Z","updatedAt":"2026-10-31T10:00:00Z","mergedAt":"2026-10-31T09:30:00Z","author":{"login":"octo-agent"}}]},
+"closed":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[
+{"number":32,"title":"done issue","url":"https://github.com/octo-org/demo/issues/32","updatedAt":"2026-10-31T11:00:00Z","closedAt":"2026-10-31T11:00:00Z","stateReason":"COMPLETED"},
+{"number":33,"title":"dropped issue","url":"https://github.com/octo-org/demo/issues/33","updatedAt":"2026-10-31T12:00:00Z","closedAt":"2026-10-31T12:00:00Z","stateReason":"NOT_PLANNED"}]}}}}`
+	res := source.GitHub{}.Build([]byte(body), []string{"octo-org/demo"}, githubNow, nil)
+	want := map[string]time.Time{
+		"31": time.Date(2026, 10, 31, 9, 30, 0, 0, time.UTC),
+		"32": time.Date(2026, 10, 31, 11, 0, 0, 0, time.UTC),
+	}
+	if len(res.Items) != len(want) {
+		t.Fatalf("%d items, want the merged PR and the completed issue only: %+v", len(res.Items), res.Items)
+	}
+	for _, it := range res.Items {
+		n := it.Ref.ID[strings.LastIndex(it.Ref.ID, "#")+1:]
+		if it.State != board.StateDone || !it.Reason.Since.Equal(want[n]) {
+			t.Errorf("#%s = %s since %v, want done since %v", n, it.State, it.Reason.Since, want[n])
+		}
+	}
+}

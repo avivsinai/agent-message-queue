@@ -29,6 +29,7 @@ type PaneStrip struct {
 	Reason  string    `json:"reason"`
 	Since   time.Time `json:"since"`
 	Command string    `json:"command"`
+	Stage   Stage     `json:"stage,omitempty"`
 }
 
 // PaneModel is a bounded presentation of current tasks, never an evidence export.
@@ -93,7 +94,7 @@ func ProjectPane(model Model) PaneModel {
 			if len(p.Waiting) == paneWaitingLimit {
 				continue
 			}
-			strip := PaneStrip{TaskID: card.ID, Title: paneText(card.Title, 160), Reason: paneText(card.Reason.Text, 160), Since: card.Reason.Since}
+			strip := PaneStrip{TaskID: card.ID, Title: paneText(card.Title, 160), Reason: paneText(card.Reason.Text, 160), Since: card.Reason.Since, Stage: card.Stage}
 			for _, action := range card.Actions {
 				if action.Purpose != ActionContext || strings.TrimSpace(action.Command) == "" {
 					continue

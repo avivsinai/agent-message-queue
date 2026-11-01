@@ -81,6 +81,7 @@ type rawConfig struct {
 	} `json:"identities"`
 	LivenessWindow   *string `json:"liveness_window"`
 	StaleAfter       *string `json:"stale_after"`
+	ShippedWindow    *string `json:"shipped_window"`
 	ObligationMaxAge *string `json:"obligation_max_age"`
 	Sources          *struct {
 		Beads  *bool `json:"beads"`
@@ -265,6 +266,7 @@ func applyShared(cfg *FileConfig, raw rawConfig, path string, warn func(string, 
 	}
 	setDuration("liveness_window", raw.LivenessWindow, &cfg.Board.LivenessWindow)
 	setDuration("stale_after", raw.StaleAfter, &cfg.Board.StaleAfter)
+	setDuration("shipped_window", raw.ShippedWindow, &cfg.Board.ShippedWindow)
 	if v := raw.ObligationMaxAge; v != nil {
 		if _, err := ParseDuration(*v); err != nil {
 			warn("%s: obligation_max_age %q is not a duration; ignored", path, *v)

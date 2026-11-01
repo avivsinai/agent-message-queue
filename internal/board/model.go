@@ -15,11 +15,14 @@ const Schema = "amq/board/v2"
 type Config struct {
 	LivenessWindow time.Duration
 	StaleAfter     time.Duration
+	// ShippedWindow is how long finished work stays in the Flow Shipped
+	// stage before it is only in History.
+	ShippedWindow time.Duration
 }
 
 // DefaultConfig is the configuration when no file sets one.
 func DefaultConfig() Config {
-	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour}
+	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour, ShippedWindow: 7 * 24 * time.Hour}
 }
 
 // NamedResult is one source's read, in source order.
@@ -64,6 +67,14 @@ type Model struct {
 	Roster               []RosterSession      `json:"roster"`
 	RosterNote           string               `json:"roster_note,omitempty"`
 	Usage                *UsageView           `json:"usage,omitempty"`
+	// Flow is the lifecycle view: every current card in one stage. Its
+	// card IDs name cards in Columns, Historical (recently shipped), or
+	// Forge.
+	Flow []StageView `json:"flow"`
+	// Forge holds the forge items that no task claims as the same work.
+	// They are Flow cards only: never tasks, never attachable, outside task
+	// counts.
+	Forge []Card `json:"forge_cards"`
 	// Conversations are the harness sessions AMQ records tie to agents; they
 	// attribute usage to workers.
 	Conversations []Conversation `json:"-"`
@@ -115,7 +126,15 @@ type Card struct {
 	Actions          []Action          `json:"actions"`
 	Items            []Item            `json:"items"`
 	UpdatedAt        time.Time         `json:"updated_at"`
-	stale            bool
+	// Stage, StageSince, Flags and CI are the card's Flow facts; see flow.go.
+	Stage      Stage     `json:"stage,omitempty"`
+	StageSince time.Time `json:"stage_since,omitzero"`
+	Flags      []Flag    `json:"flags,omitempty"`
+	CI         CI        `json:"ci,omitempty"`
+	stale      bool
+	// current is set for a task that is not cancelled and still reported,
+	// so recent finished work can reach Flow from History.
+	current bool
 }
 
 // RosterSession is one session's agents. Quiet agents are folded.

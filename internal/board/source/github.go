@@ -17,7 +17,7 @@ import (
 
 // GitHubQuerySchema versions the query and its cache entries: a cache entry
 // written for another schema is a miss.
-const GitHubQuerySchema = "amq/board-github/v2"
+const GitHubQuerySchema = "amq/board-github/v3"
 
 // maxGitHubRepos bounds the aliases in the one query.
 const maxGitHubRepos = 10
@@ -342,6 +342,12 @@ func GitHubQueryArgv(repos []string) []string {
       pageInfo { hasNextPage }
       nodes { number title url updatedAt assignees(first: 5) { nodes { login } } }
     }
+    merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number title body url headRefName createdAt updatedAt mergedAt author { login } }
+    }
+    closed: issues(states: CLOSED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number title url updatedAt closedAt stateReason }
+    }
   }`, i, i, i, githubPRFields)
 		argv = append(argv, "-f", fmt.Sprintf("owner%d=%s", i, owner), "-f", fmt.Sprintf("name%d=%s", i, name))
 	}
@@ -466,6 +472,7 @@ type ghPR struct {
 	ReviewDecision *string  `json:"reviewDecision"`
 	CreatedAt      string   `json:"createdAt"`
 	UpdatedAt      string   `json:"updatedAt"`
+	MergedAt       string   `json:"mergedAt"`
 	Author         *ghLogin `json:"author"`
 	ReviewRequests struct {
 		Nodes []struct {
@@ -491,7 +498,10 @@ type ghIssue struct {
 	Title     string `json:"title"`
 	URL       string `json:"url"`
 	UpdatedAt string `json:"updatedAt"`
-	Assignees struct {
+	ClosedAt  string `json:"closedAt"`
+	// StateReason is COMPLETED or NOT_PLANNED on a closed issue.
+	StateReason string `json:"stateReason"`
+	Assignees   struct {
 		Nodes []ghLogin `json:"nodes"`
 	} `json:"assignees"`
 }
@@ -512,6 +522,12 @@ type ghRepo struct {
 		ghPage
 		Nodes []ghIssue `json:"nodes"`
 	} `json:"issues"`
+	Merged struct {
+		Nodes []ghPR `json:"nodes"`
+	} `json:"merged"`
+	Closed struct {
+		Nodes []ghIssue `json:"nodes"`
+	} `json:"closed"`
 }
 
 type ghResponse struct {
@@ -592,6 +608,27 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 			}
 		}
 		for _, is := range rr.repo.Issues.Nodes {
+			if it, ok := m.issue(rr.slug, is); ok {
+				res.Items = append(res.Items, it)
+			} else {
+				res.Coverage.Skipped++
+			}
+		}
+		// The merged and closed lists are the newest few per repository: a
+		// recent window, not a full listing, so their later pages are no
+		// coverage gap.
+		for _, pr := range rr.repo.Merged.Nodes {
+			if it, ok := m.pr(rr.slug, pr); ok {
+				res.Items = append(res.Items, it)
+			} else {
+				res.Coverage.Skipped++
+			}
+		}
+		for _, is := range rr.repo.Closed.Nodes {
+			// An issue closed as not planned is not shipped work.
+			if is.StateReason != "COMPLETED" {
+				continue
+			}
 			if it, ok := m.issue(rr.slug, is); ok {
 				res.Items = append(res.Items, it)
 			} else {
@@ -773,6 +810,10 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 	viewerOwner := board.Owner{Kind: board.OwnerHuman, Display: m.viewer}
 	approvedAndGreen := decision == "APPROVED" && checks == "SUCCESS"
 	switch {
+	case pr.MergedAt != "":
+		merged, _ := time.Parse(time.RFC3339, pr.MergedAt)
+		it.State = board.StateDone
+		it.Reason = board.Reason{Field: "mergedAt", Text: "merged", Since: merged}
 	case viewerRequested:
 		it.State = board.StateNeedsHuman
 		it.WaitsOn = []board.Owner{viewerOwner}
@@ -847,7 +888,11 @@ func (m githubMapper) issue(slug string, is ghIssue) (board.Item, bool) {
 		Structural: true,
 		Evidence:   []board.Evidence{{Field: "type", Value: board.ForgeIssue, Text: "issue #" + strconv.Itoa(is.Number), At: updated, URL: httpsGitHubURL(is.URL)}},
 	}
-	if a := is.Assignees.Nodes; len(a) > 0 {
+	if is.ClosedAt != "" {
+		closed, _ := time.Parse(time.RFC3339, is.ClosedAt)
+		it.State = board.StateDone
+		it.Reason = board.Reason{Field: "closedAt", Text: "issue closed", Since: closed}
+	} else if a := is.Assignees.Nodes; len(a) > 0 {
 		it.Owner = m.owner(a[0].Login)
 		it.State = board.StateQueued
 		it.Reason = board.Reason{Field: "assignees", Text: "issue assigned"}

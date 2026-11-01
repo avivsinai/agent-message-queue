@@ -123,6 +123,7 @@ type beadRow struct {
 	Assignee     string `json:"assignee"`
 	UpdatedAt    string `json:"updated_at"`
 	StartedAt    string `json:"started_at"`
+	ClosedAt     string `json:"closed_at"`
 	ExternalRef  string `json:"external_ref"`
 	Dependencies []struct {
 		IssueID     string `json:"issue_id"`
@@ -236,7 +237,13 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 		}
 		it.Reason = board.Reason{Field: "status", Text: text, Since: since}
 	case r.Status == "closed":
+		// A closed bead is done since its recorded close time; without one,
+		// since is updated_at, which bd also sets when it closes a bead.
 		it.State = board.StateDone
+		if closed, err := time.Parse(time.RFC3339Nano, r.ClosedAt); err == nil {
+			since = closed
+			it.Evidence = append(it.Evidence, board.Evidence{Field: "closed_at", Value: r.ClosedAt, At: closed})
+		}
 		it.Reason = board.Reason{Field: "status", Text: "bead closed", Since: since}
 	case r.Status == "in_progress":
 		it.State = board.StateActive

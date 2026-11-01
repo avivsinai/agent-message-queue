@@ -75,6 +75,8 @@ func WriteText(w io.Writer, m Model) error {
 		}
 	}
 
+	writeFlow(&b, m, now)
+
 	for _, c := range m.Columns {
 		fmt.Fprintf(&b, "\n== %s (%d) ==\n", c.Title, len(c.Cards))
 		if c.ID == ColumnWaiting {
@@ -152,6 +154,40 @@ func WriteText(w io.Writer, m Model) error {
 	fmt.Fprintf(&b, "\nregenerate: amq-board · %s\n", m.Version)
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// writeFlow prints one line per Flow card under its stage: flags, title,
+// owner, PR and CI, and time in stage.
+func writeFlow(b *strings.Builder, m Model, now time.Time) {
+	if len(m.Flow) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n== Flow ==\n  %s\n", flowLegend)
+	cards := m.FlowCards()
+	for _, v := range m.Flow {
+		fmt.Fprintf(b, "  %s (%d)\n", v.Title, len(v.CardIDs)+v.Omitted)
+		for _, id := range v.CardIDs {
+			c := cards[id]
+			f := summarizeFlow(c, now)
+			parts := []string{cleanTitle(c.Title), f.Owner}
+			if f.PR != "" {
+				parts = append(parts, strings.TrimSpace(f.PR+" "+f.CI))
+			}
+			parts = append(parts, f.Age)
+			if f.Names != "" {
+				parts = append(parts, f.Names)
+			}
+			flags := ""
+			if f.NeedsYou {
+				flags += "◆ Needs you · "
+			}
+			if f.ReplyDue {
+				flags += "✉ Reply due · "
+			}
+			fmt.Fprintf(b, "    %s%s\n", flags, clean(strings.Join(parts, " · ")))
+		}
+		writeOmitted(b, v.Omitted, "older shipped card")
+	}
 }
 
 func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]string) {

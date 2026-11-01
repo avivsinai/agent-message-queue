@@ -49,6 +49,11 @@ the owner adopts them.
 
 ## Capabilities and Constraints
 
+- Flow, the default view, shows every current card in one lifecycle stage:
+  Backlog, Ready, In progress, In review, Blocked, or recently Shipped. Open
+  GitHub pull requests and issues are Flow cards too; one joins a task card
+  only when the task records it as the same work. Needs you and Reply due are
+  flags on cards, not stages.
 - Work categories distinguish needs-you items, declared in-progress work, blocked work, backlog, and reply-due requests. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept
@@ -69,9 +74,9 @@ the owner adopts them.
 
 ## Brand Commitments
 
-- Next leads with supported useful actions. Work, Backlog, Requests,
-  Suggestions, and History are separate views; Sources and Agents provide
-  secondary context.
+- Flow leads with where all work stands and what needs the owner. Next lists
+  supported useful actions. Work, Backlog, Requests, Suggestions, and History
+  are separate views; Sources and Agents provide secondary context.
 - Do not hardcode personal or organization data into product assets or
   fixtures. Live source records can contain owner names and paths.
 
@@ -85,7 +90,8 @@ the owner adopts them.
 
 ## Product Principles
 
-1. The owner's queue first: Waiting on you leads on every viewport.
+1. The owner's queue first: Needs you leads on every viewport, above the Flow
+   board and as a flag on each card that needs the owner.
 2. Structure places, text informs.
 3. No silent source: coverage and age are always visible.
 4. Show commands only for supported actions; the owner chooses whether to run

@@ -14,7 +14,7 @@
 <a class="skip-link" href="#content">Skip to work</a>
 <div class="shell">
 <header class="mast">
-  <div class="mast-id"><a class="brand" href="#view-next">AMQ</a><span class="project">{{.Project}}</span></div>
+  <div class="mast-id"><a class="brand" href="#view-flow">AMQ</a><span class="project">{{.Project}}</span></div>
   <div class="snapshot">
     <p class="mast-gen">Snapshot <time datetime="{{.Generated}}">{{.Clock}}</time><span id="page-age"></span></p>
     {{if .Live}}<button type="button" id="refresh">Refresh</button>{{end}}
@@ -24,6 +24,7 @@
 <div class="workspace">
 <nav class="navigation" aria-label="Board views">
   <div class="primary-nav">
+  <a href="#view-flow" data-view-link="flow">Flow</a>
   <a href="#view-next" data-view-link="next">Next</a>
   <a href="#view-work" data-view-link="work">Work</a>
   <a href="#view-backlog" data-view-link="backlog">Backlog</a>
@@ -39,6 +40,40 @@
   <p class="nav-note">Read the context.<br>Copy a command.<br>Act in your terminal.</p>
 </nav>
 <main id="content">
+{{with .Flow}}
+<section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
+  <div class="view-heading"><div><h1 id="heading-flow">Flow</h1><p class="view-description">{{.Legend}}</p></div>
+  <label class="search">Search Flow<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Title, person, or reference"></label></div>
+  <div class="attention" aria-label="Needs you">
+    <p class="attention-head"><span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span></p>
+    <ul class="attention-list">{{range .NeedsYou}}<li><a href="#{{.Anchor}}" data-open="{{.Anchor}}">{{.Title}}</a> <span class="muted">{{.Reason}}</span></li>{{else}}<li>No card waits on you.</li>{{end}}{{range .Gates}}<li class="muted">{{.}}</li>{{end}}</ul>
+    <p class="attention-side">{{if .ReplyDue}}<span><span aria-hidden="true">✉&#xFE0E;</span> Reply due on {{.ReplyDue}} card{{if ne .ReplyDue 1}}s{{end}}</span>{{end}}{{if .Unresolved}}<a href="#view-requests">{{.Unresolved}}</a>{{end}}</p>
+  </div>
+  <div class="flow-notes">
+  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope, read errors, and observation times.</p></details>{{end}}
+  <details class="stage-rules"><summary>How stages are decided</summary><div class="detail-content">
+    <p>Each card is in one stage. The first rule that matches decides it.</p>
+    <ol>
+      <li><strong>In review</strong>: a linked pull request is open and is not a draft.</li>
+      <li><strong>Blocked</strong>: the tracker records a blocker.</li>
+      <li><strong>In progress</strong>: the tracker says started, or the only open pull request is a draft.</li>
+      <li><strong>Shipped</strong>: done or merged recently, with a recorded close time.</li>
+      <li><strong>Ready</strong>: assigned and not started, and nothing blocks it.</li>
+      <li><strong>Backlog</strong>: everything else that is current: open with no assignee, paused, or admitted by you.</li>
+    </ol>
+    <p>A pull request joins a task card only when the task records it as the same work. A pull request that only names a bead stays its own card. Needs you and Reply due are flags, not stages: they say who acts next. Older finished work is in <a href="#view-history">History</a>.</p>
+  </div></details>
+  </div>
+  <div class="flow-board">{{range .Stages}}
+    <section class="stage stage-{{.ID}}" aria-labelledby="stage-{{.ID}}">
+      <h2 class="stage-head" id="stage-{{.ID}}"><span class="stage-mark" aria-hidden="true"></span>{{.Title}} <span class="stage-count">{{.Count}}</span></h2>
+      {{if .Cards}}<ul class="stage-cards">{{range .Cards}}{{template "card" (stripArgs "flow" .)}}{{end}}</ul>{{else}}<p class="stage-empty">{{.Empty}}</p>{{end}}
+      {{if .More}}<a class="stage-more" href="#view-history">{{.More}}</a>{{end}}
+    </section>{{end}}
+  </div>
+  <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
+</section>
+{{end}}
 {{range .Views}}
 <section class="view" id="view-{{.ID}}" data-view="{{.ID}}" aria-labelledby="heading-{{.ID}}">
   <div class="view-heading"><div><h1 id="heading-{{.ID}}">{{.Title}}</h1><p class="view-description">{{.Description}}</p></div>
@@ -111,7 +146,10 @@
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
   </div>
   <div class="item-action">{{if .Shown}}{{range .Shown}}<button type="button" class="copy primary-copy" id="{{$.ID}}-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{else}}<p class="command-unavailable">No context command available. Owner corrections are in Details.</p>{{end}}</div>
-  <details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">
+  <details class="item-details" id="{{.ID}}-details"><summary>Details</summary>{{template "detail" .}}</details>
+</article>
+{{end}}
+{{define "detail"}}<div class="detail-content">
     <p>{{.S.Reason}}</p>{{range .S.People}}<p>{{.}}</p>{{end}}
     <dl>{{if .S.TaskID}}<dt>Task ID</dt><dd class="token">{{.S.TaskID}}</dd>{{end}}<dt>Reference</dt><dd class="token">{{.S.Kind}} {{.S.ID}}</dd>{{if .S.Checked}}<dt>Source observation</dt><dd>{{.S.Checked}}</dd>{{end}}</dl>
     {{if .S.Marks}}<p class="marks">{{range .S.Marks}}<span>{{.}}</span>{{end}}</p>{{end}}
@@ -120,8 +158,25 @@
     {{if .S.Evidence}}<details><summary>Source evidence</summary><ul class="evidence">{{range .S.Evidence}}<li><span>{{.Source}}: {{.Field}} = {{if .URL}}<a href="{{.URL}}" rel="noreferrer noopener">{{.Value}}</a>{{else}}{{.Value}}{{end}}{{if .Age}} ({{.Age}}){{end}}</span>{{if .Text}}<p>{{.Text}}</p>{{end}}</li>{{end}}</ul></details>{{end}}
     {{if .S.AttachKey}}<div class="attach-control" data-message="{{.S.AttachKey}}"><label>Find a task <input type="text" list="board-tasks" autocomplete="off" class="attach-task" placeholder="Search by task title"></label><p class="attach-selection" aria-live="polite">Current, completed, and historical tasks are available.</p><label class="cmd-label">Attach command<textarea readonly rows="2" spellcheck="false"></textarea></label><button type="button" class="copy" disabled>Copy attach command</button></div>{{end}}
     {{range .S.Actions}}{{template "cmd" .}}{{end}}
-  </div></details>
-</article>
+</div>{{end}}
+{{define "card"}}
+<li class="flow-card{{if .S.NeedsYou}} is-flagged{{end}}" data-item-id="{{.S.Key}}">
+<details class="card-sheet" id="{{.ID}}">
+  <summary>
+    {{if or .S.NeedsYou .S.ReplyDue}}<span class="card-flags">{{if .S.NeedsYou}}<span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span>{{end}}{{if .S.ReplyDue}}<span class="flag flag-reply"><span aria-hidden="true">✉&#xFE0E;</span> Reply due</span>{{end}}</span>{{end}}
+    <span class="card-title title">{{.S.Title}}</span>
+    <span class="card-meta"><span class="c-owner">{{.S.Owner}}</span><span class="card-age">{{.S.StageAge}}</span>{{if .S.PR}}<span class="pr">{{.S.PR}} <span class="ci ci-{{.S.CI}}">{{.S.CIText}}</span></span>{{end}}{{if .S.NamesBead}}<span>{{.S.NamesBead}}</span>{{end}}</span>
+    <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
+  </summary>
+  <div class="sheet" role="group" aria-labelledby="{{.ID}}-title">
+    <div class="sheet-head"><h2 id="{{.ID}}-title">{{.S.Title}}</h2><button type="button" class="sheet-close">Close</button></div>
+    <p class="sheet-stage stage-{{.S.StageID}}"><span class="stage-mark" aria-hidden="true"></span><strong>{{.S.Stage}}</strong> <span>{{if eq .S.StageAge "age unknown"}}time in stage unknown{{else}}{{.S.StageAge}} in stage{{end}}</span></p>
+    <div class="item-meta"><span class="c-owner">{{.S.Owner}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}{{if .S.PR}}<span>{{.S.PR}} {{.S.CIText}}</span>{{end}}{{if .S.NeedsYou}}<span>◆ Needs you</span>{{end}}{{if .S.ReplyDue}}<span>✉&#xFE0E; Reply due</span>{{end}}</div>
+    {{with .Shown}}{{range .}}<button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{end}}
+    {{template "detail" .}}
+  </div>
+</details>
+</li>
 {{end}}
 {{define "cmd"}}
 <div class="cmd"><label class="cmd-label">{{.Label}}<textarea readonly rows="2" spellcheck="false">{{.Command}}</textarea></label><code class="sr-only">{{.Command}}</code><button type="button" class="copy" data-command="{{.Command}}" aria-label="Copy: {{.Label}}">Copy command</button></div>
