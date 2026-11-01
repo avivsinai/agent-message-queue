@@ -1,6 +1,8 @@
 package board
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"strconv"
 	"strings"
 	"time"
@@ -181,4 +183,108 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	}
 	s.Anchor = stripArgs("flow", s).ID
 	return s
+}
+
+type pageFloor struct {
+	Counts                                    []pageCount
+	Summary, Dormant, Coverage, CoverageTitle string
+	DormantBy                                 []string
+	Sessions                                  []pageFloorSession
+}
+
+type pageCount struct{ State, Glyph, Text string }
+
+type pageFloorSession struct {
+	Name, Count string
+	Stations    []pageStation
+}
+
+type pageStation struct {
+	ID, Key, State, Word, Glyph, Why                string
+	Handle, Session, Harness                        string
+	Now, NowStage, NowMore, Shared                  string
+	Says, Status, Inbox, Activity, Wake, WakeReason string
+	Foot, ActivitySource                            string
+	WakePresence                                    bool
+	Limit, LimitNote, Spend                         string
+	Work                                            []string
+	SharedN                                         int
+	Action                                          *Action
+}
+
+// buildFloorPage renders the Floor: one plate per station under its
+// session, the state counts, and the dormant mailboxes.
+func buildFloorPage(m Model, now time.Time) pageFloor {
+	states, dormant := floorCounts(m)
+	f := pageFloor{Summary: "No seat has recent evidence.", Dormant: dormant}
+	if len(states) > 0 {
+		f.Summary = "Agent seats with recent evidence, by session."
+	}
+	n := map[StationState]int{}
+	for _, st := range m.Stations {
+		n[st.State]++
+	}
+	for _, state := range StationStates {
+		if n[state] > 0 {
+			f.Counts = append(f.Counts, pageCount{State: string(state), Glyph: state.Glyph(), Text: strconv.Itoa(n[state]) + " " + strings.ToLower(state.Title())})
+		}
+	}
+	for _, d := range m.Dormant {
+		f.DormantBy = append(f.DormantBy, clean(d.Session)+": "+strconv.Itoa(d.Count))
+	}
+	cards := m.FlowCards()
+	for _, st := range m.Stations {
+		if n := len(f.Sessions); n == 0 || f.Sessions[n-1].Name != clean(st.Session) {
+			f.Sessions = append(f.Sessions, pageFloorSession{Name: clean(st.Session)})
+		}
+		sum := summarizeStation(st, cards, now)
+		key := st.Session + "/" + st.Handle
+		hash := sha256.Sum256([]byte(key))
+		ps := pageStation{
+			ID: "station-" + base64.RawURLEncoding.EncodeToString(hash[:12]), Key: clean(key),
+			State: string(st.State), Word: st.State.Title(), Glyph: st.State.Glyph(), Why: clean(st.StateWhy),
+			Handle: clean(st.Handle), Session: clean(st.Session), Harness: sum.Harness,
+			Now: sum.Now, NowStage: sum.NowStage, NowMore: sum.NowMore, Shared: sum.Shared,
+			Says: sum.Says, Status: sum.Status, Inbox: sum.Inbox, Activity: sum.Activity, Wake: sum.Wake,
+			WakeReason: clean(st.Wake.Reason), LimitNote: sum.Limit, Spend: sum.Spend,
+		}
+		ps.SharedN = st.HandleSessions
+		ps.ActivitySource = st.ActivitySource
+		ps.WakePresence = st.Wake.Live && st.ActivitySource != "usage"
+		ps.Foot = sum.Wake
+		if st.State != StationWorking {
+			ps.Foot += " · " + sum.Activity
+		}
+		if st.Limit != nil {
+			ps.Limit = clean(limitWhy(*st.Limit, now))
+		}
+		for _, id := range st.Now {
+			c := cards[id]
+			title := cleanTitle(c.Title)
+			if title == "" {
+				title = clean(id)
+			}
+			ps.Work = append(ps.Work, c.Stage.Title()+": "+title)
+		}
+		if a, ok := MessageAgent(st.Session, st.Handle); ok {
+			ps.Action = &a
+		}
+		last := &f.Sessions[len(f.Sessions)-1]
+		last.Stations = append(last.Stations, ps)
+	}
+	for i := range f.Sessions {
+		f.Sessions[i].Count = pluralize(len(f.Sessions[i].Stations), "seat")
+	}
+	for _, source := range m.Sources {
+		if source.Name != "amq" || source.Status == StatusOK && !source.Partial {
+			continue
+		}
+		f.CoverageTitle = "Incomplete coverage (amq)"
+		f.Coverage = "AMQ is " + string(source.Status)
+		if source.Partial {
+			f.Coverage += " with a partial read"
+		}
+		f.Coverage += ": some seats may be missing or show Unknown."
+	}
+	return f
 }

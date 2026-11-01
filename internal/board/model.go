@@ -75,6 +75,11 @@ type Model struct {
 	// They are Flow cards only: never tasks, never attachable, outside task
 	// counts.
 	Forge []Card `json:"forge_cards"`
+	// Stations are the Floor: one per agent seat with recent evidence, by
+	// session in roster order, then in state table order. Every other agent
+	// mailbox is counted in Dormant.
+	Stations []Station          `json:"stations"`
+	Dormant  []DormantMailboxes `json:"dormant_mailboxes"`
 	// Conversations are the harness sessions AMQ records tie to agents; they
 	// attribute usage to workers.
 	Conversations []Conversation `json:"-"`
@@ -154,6 +159,10 @@ type RosterAgent struct {
 	// LimitReached is set while the worker's harness account reports a
 	// reached limit. It is a roster flag, never a column.
 	LimitReached *usage.Limit `json:"limit_reached,omitempty"`
+	// AccountActiveAt is the newest spend record of the limited account on
+	// any of its sessions. A reached limit is account-wide, so a record
+	// after the limit was read shows the account served requests since.
+	AccountActiveAt time.Time `json:"account_active_at,omitzero"`
 }
 
 var titlePriority = map[string]int{"beads": 0, "github": 1, "amq": 2}

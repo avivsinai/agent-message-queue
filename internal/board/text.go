@@ -76,6 +76,7 @@ func WriteText(w io.Writer, m Model) error {
 	}
 
 	writeFlow(&b, m, now)
+	writeFloor(&b, m, now)
 
 	for _, c := range m.Columns {
 		fmt.Fprintf(&b, "\n== %s (%d) ==\n", c.Title, len(c.Cards))
@@ -187,6 +188,62 @@ func writeFlow(b *strings.Builder, m Model, now time.Time) {
 			fmt.Fprintf(b, "    %s%s\n", flags, clean(strings.Join(parts, " · ")))
 		}
 		writeOmitted(b, v.Omitted, "older shipped card")
+	}
+}
+
+// writeFloor prints one line per station under its session: state, handle,
+// harness, why, current work, inbox, self-report, and limit; then the
+// dormant mailboxes.
+func writeFloor(b *strings.Builder, m Model, now time.Time) {
+	if m.Stations == nil {
+		return
+	}
+	states, dormant := floorCounts(m)
+	if len(states) == 0 {
+		states = []string{"no seat with recent evidence"}
+	}
+	fmt.Fprintf(b, "\n== Floor ==\n  %s\n", strings.Join(states, " · "))
+	cards := m.FlowCards()
+	session := ""
+	for _, st := range m.Stations {
+		if st.Session != session {
+			session = st.Session
+			fmt.Fprintf(b, "  %s\n", clean(session))
+		}
+		f := summarizeStation(st, cards, now)
+		parts := []string{st.State.Glyph() + " " + st.State.Title(), clean(st.Handle)}
+		if f.Harness != "" {
+			parts = append(parts, f.Harness)
+		}
+		parts = append(parts, clean(st.StateWhy))
+		work := "now: " + f.Now
+		if f.NowStage != "" {
+			work += " (" + f.NowStage + ")"
+		}
+		if f.NowMore != "" {
+			work += " " + f.NowMore
+		}
+		if f.Shared != "" {
+			work += " · " + f.Shared
+		}
+		parts = append(parts, work, "inbox "+f.Inbox, f.Wake)
+		if f.Says != "" {
+			parts = append(parts, "says “"+f.Says+"”")
+		}
+		if f.Status != "" {
+			parts = append(parts, "status “"+f.Status+"”")
+		}
+		if f.Limit != "" {
+			parts = append(parts, f.Limit)
+		}
+		fmt.Fprintf(b, "    %s\n", strings.Join(parts, " · "))
+	}
+	if dormant != "" {
+		var by []string
+		for _, d := range m.Dormant {
+			by = append(by, clean(d.Session)+" "+strconv.Itoa(d.Count))
+		}
+		fmt.Fprintf(b, "  %s: %s\n", dormant, strings.Join(by, ", "))
 	}
 }
 

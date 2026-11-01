@@ -833,6 +833,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	}
 	m := Build(input)
 	m.Usage = s.Usage
+	attachUsage(&m)
 	m.Generation = s.Generation
 	m.PublishedAt = s.PublishedAt
 	for i := range m.Columns {
@@ -1000,6 +1001,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	}
 	m.Next = selectNext(m.Columns)
 	buildFlow(&m, forge, input, observed)
+	buildFloor(&m, observed["amq"], cfg, now)
 	return m
 }
 

@@ -25,6 +25,7 @@
 <nav class="navigation" aria-label="Board views">
   <div class="primary-nav">
   <a href="#view-flow" data-view-link="flow">Flow</a>
+  <a href="#view-floor" data-view-link="floor">Floor</a>
   <a href="#view-next" data-view-link="next">Next</a>
   <a href="#view-work" data-view-link="work">Work</a>
   <a href="#view-backlog" data-view-link="backlog">Backlog</a>
@@ -71,6 +72,63 @@
       {{if .More}}<a class="stage-more" href="#view-history">{{.More}}</a>{{end}}
     </section>{{end}}
   </div>
+  <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
+</section>
+{{end}}
+{{with .Floor}}
+<section class="view view-floor" id="view-floor" data-view="floor" aria-labelledby="heading-floor">
+  <div class="view-heading"><div><h1 id="heading-floor">Floor</h1><p class="view-description">{{.Summary}}</p>{{if .Counts}}<p class="floor-counts">{{range .Counts}}<span class="station-word station-{{.State}}"><span class="station-glyph" aria-hidden="true">{{.Glyph}}</span> {{.Text}}</span>{{end}}</p>{{end}}</div>
+  <label class="search">Search Floor<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Handle, session, or work"></label></div>
+  <div class="flow-notes">
+  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the read error and observation time.</p></details>{{end}}
+  <details class="stage-rules"><summary>How states are decided</summary><div class="detail-content">
+    <p>The board reads mail, presence, wake, and usage. It cannot see processes, so it never says a worker runs or has stopped. The first rule that matches decides a seat's state.</p>
+    <ol class="state-rules">
+      <li class="station-limit_reached"><span class="station-word"><span class="station-glyph" aria-hidden="true">■</span> Limit reached</span>: the account reports a reached limit whose reset is ahead, and neither this seat nor any session of the account was active after the limit was read.</li>
+      <li class="station-stalled"><span class="station-word"><span class="station-glyph" aria-hidden="true">▲</span> Stalled</span>: mail has waited longer than the liveness window, and the last activity is older than that mail.</li>
+      <li class="station-working"><span class="station-word"><span class="station-glyph" aria-hidden="true">●</span> Working</span>: a usage record, or presence when no wake is live, shows activity inside the liveness window. A live wake refreshes presence itself, so with a wake only usage counts as activity.</li>
+      <li class="station-idle"><span class="station-word"><span class="station-glyph" aria-hidden="true">○</span> Idle</span>: the wake is live and the inbox is counted; no mail waits without an activity record.</li>
+      <li class="station-off"><span class="station-word"><span class="station-glyph" aria-hidden="true">–</span> Off</span>: no wake and no recent activity; the inbox is counted.</li>
+      <li class="station-unknown"><span class="station-word"><span class="station-glyph" aria-hidden="true">?</span> Unknown</span>: the inbox was not counted, or mail waits and no activity was observed.</li>
+    </ol>
+    <p>A mailbox with no live wake, no owned work, no recent activity, and no unread mail newer than the stale window is dormant. Says and Status quote the agent's own words; they are not checked.</p>
+  </div></details>
+  {{if .Dormant}}<details class="stage-rules dormant"><summary>{{.Dormant}}</summary><div class="detail-content"><p>Dormant mailboxes have no recent evidence. Each still appears under <a href="#view-agents">Agents</a>.</p><ul>{{range .DormantBy}}<li>{{.}}</li>{{end}}</ul></div></details>{{end}}
+  </div>
+  {{if .Sessions}}<div class="floor-sessions">{{end}}{{range .Sessions}}
+  <section class="floor-session" aria-labelledby="floor-{{.Name}}">
+    <h2 class="floor-session-head" id="floor-{{.Name}}">{{.Name}} <span class="stage-count">{{.Count}}</span></h2>
+    <ul class="stations">{{range .Stations}}
+    <li class="station station-{{.State}}" data-item-id="{{.Key}}">
+    <details class="card-sheet" id="{{.ID}}">
+      <summary>
+        <span class="station-word"><span class="station-glyph" aria-hidden="true">{{.Glyph}}</span> {{.Word}}</span>
+        <span class="station-name"><span class="title">{{.Handle}}</span>{{if .Harness}} <span class="station-harness">{{.Harness}}</span>{{end}}</span>
+        <span class="station-why">{{.Why}}</span>
+        <span class="station-facts">
+          <span class="fact"><span class="fact-label">Now</span><span class="fact-value"><span class="clamp c-owner">{{.Now}}</span>{{if or .NowStage .Shared}}<span class="now-meta">{{.NowStage}}{{if .NowMore}} · {{.NowMore}}{{end}}{{if .Shared}}{{if .NowStage}} · {{end}}{{.Shared}}{{end}}</span>{{end}}</span></span>
+          {{if .Says}}<span class="fact"><span class="fact-label">Says</span><q class="fact-value clamp">{{.Says}}</q></span>{{else if .Status}}<span class="fact"><span class="fact-label">Status</span><q class="fact-value clamp">{{.Status}}</q></span>{{end}}
+          {{if .LimitNote}}<span class="fact fact-limit"><span class="fact-label">Limit</span><span class="fact-value">{{.LimitNote}}</span></span>{{end}}
+          <span class="fact"><span class="fact-label">Inbox</span><span class="fact-value">{{.Inbox}}</span></span>
+        </span>
+        <span class="station-foot">{{.Foot}}</span>
+        <span class="c-ref sr-only">{{.Session}} {{.Handle}}</span>
+      </summary>
+      <div class="sheet" role="group" aria-labelledby="{{.ID}}-title">
+        <div class="sheet-head"><h2 id="{{.ID}}-title">{{.Handle}} <span class="muted">in {{.Session}}</span></h2><button type="button" class="sheet-close">Close</button></div>
+        <p class="sheet-stage"><span class="station-word"><span class="station-glyph" aria-hidden="true">{{.Glyph}}</span> {{.Word}}</span> <span>{{.Why}}</span></p>
+        <div class="detail-content">
+          <dl>{{if .Harness}}<dt>Harness</dt><dd>{{.Harness}}</dd>{{end}}<dt>Wake</dt><dd>{{.Wake}}{{if .WakeReason}}: {{.WakeReason}}{{end}}</dd><dt>Inbox</dt><dd>{{.Inbox}}</dd><dt>Last activity</dt><dd>{{.Activity}}{{if .WakePresence}}; the wake keeps presence fresh, so presence is not counted{{end}}</dd>{{if .Limit}}<dt>Account limit</dt><dd>{{.Limit}}{{if .LimitNote}}; {{.LimitNote}}{{end}}</dd>{{end}}{{if .Spend}}<dt>Spend</dt><dd>{{.Spend}}</dd>{{end}}</dl>
+          {{if or .Says .Status}}<div class="self-report">{{if .Says}}<p>Says <q>{{.Says}}</q></p>{{end}}{{if .Status}}<p>Status <q>{{.Status}}</q></p>{{end}}<p class="muted">The agent's own words; the board does not check them.</p></div>{{end}}
+          <div><h3>Owned work</h3>{{if .Work}}<ul>{{range .Work}}<li>{{.}}</li>{{end}}</ul>{{else}}<p class="muted">No current card names this seat.</p>{{end}}{{if .Shared}}<p class="muted">The cards name the handle only; it has a mailbox in {{.SharedN}} sessions. The board does not guess which seat works on them.</p>{{end}}</div>
+          {{with .Action}}{{template "cmd" .}}{{end}}
+        </div>
+      </div>
+    </details>
+    </li>{{end}}
+    </ul>
+  </section>
+  {{else}}<div class="empty"><h2>No seat has recent evidence.</h2><p>Every mailbox is dormant. <a href="#view-agents">Agents</a> lists them.</p></div>{{end}}{{if .Sessions}}</div>{{end}}
   <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
 </section>
 {{end}}

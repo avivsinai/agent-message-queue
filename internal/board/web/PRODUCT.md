@@ -54,6 +54,12 @@ the owner adopts them.
   GitHub pull requests and issues are Flow cards too; one joins a task card
   only when the task records it as the same work. Needs you and Reply due are
   flags on cards, not stages.
+- Floor shows each agent seat with recent evidence as a station in one of six
+  states: Limit reached, Stalled, Working, Idle, Off, or Unknown. Each state
+  names its evidence (mail, presence, wake, usage, account limits); the board
+  cannot see processes, so it never says a worker runs or has stopped. Mailboxes
+  with no recent evidence fold into one dormant count. An agent's presence note
+  and status are quoted as self-reports, never shown as facts.
 - Work categories distinguish needs-you items, declared in-progress work, blocked work, backlog, and reply-due requests. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept
@@ -75,7 +81,7 @@ the owner adopts them.
 ## Brand Commitments
 
 - Flow leads with where all work stands and what needs the owner. Next lists
-  supported useful actions. Work, Backlog, Requests, Suggestions, and History
+  supported useful actions. Floor shows the agent seats. Work, Backlog, Requests, Suggestions, and History
   are separate views; Sources and Agents provide secondary context.
 - Do not hardcode personal or organization data into product assets or
   fixtures. Live source records can contain owner names and paths.

@@ -92,8 +92,6 @@ func UsageMapping(convs []Conversation) usage.Mapping {
 // and the fleet total. It is pure; r.Now dates the windows.
 func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 	view := &UsageView{Accounts: []AccountUsage{}}
-	perWorker := map[usage.RosterKey][]Usage{}
-	reached := map[usage.RosterKey]*usage.Limit{}
 	var fleet []Usage
 	for _, a := range r.Accounts {
 		windows := accountWindows(a, r.Now)
@@ -141,10 +139,6 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 				w.Usage = append(w.Usage, makeUsage(win, workerCounts[key][i], workerAsOf[key][i], au.Partial, workerSpend[key].unknown()))
 			}
 			au.Workers = append(au.Workers, *w)
-			perWorker[key] = sumUsage(perWorker[key], w.Usage)
-			if l := reachedLimit(a.Limits); l != nil {
-				reached[key] = l
-			}
 		}
 		sort.Slice(au.Workers, func(i, j int) bool {
 			if au.Workers[i].Session != au.Workers[j].Session {
@@ -163,19 +157,59 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 	}
 	view.Fleet = fleet
 	m.Usage = view
-	for i := range m.Roster {
-		for j := range m.Roster[i].Agents {
-			a := &m.Roster[i].Agents[j]
-			key := usage.RosterKey{Session: a.Session, Handle: a.Handle}
-			a.Usage, a.LimitReached = perWorker[key], reached[key]
+	attachUsage(&m)
+	return m
+}
+
+// attachUsage puts each worker's spend, summed over its accounts, and its
+// account's reached limit on the worker's roster entry. A limit travels with
+// the newest activity of its own account, so one account's spend never
+// rebuts another account's limit; a worker on several limited accounts gets
+// one that no later activity rebuts, when there is one. It reads only
+// m.Usage, so a model projected from a stored usage view carries the same
+// roster facts as the model the view was computed on.
+func attachUsage(m *Model) {
+	if m.Usage == nil {
+		return
+	}
+	perWorker := map[usage.RosterKey][]Usage{}
+	type accountLimit struct {
+		limit  *usage.Limit
+		active time.Time
+	}
+	reached := map[usage.RosterKey]accountLimit{}
+	for _, a := range m.Usage.Accounts {
+		limit := reachedLimit(a.Limits)
+		var newest time.Time
+		for _, u := range a.Other {
+			newest = later(newest, u.AsOf)
 		}
-		for j := range m.Roster[i].Quiet {
-			a := &m.Roster[i].Quiet[j]
-			key := usage.RosterKey{Session: a.Session, Handle: a.Handle}
-			a.Usage, a.LimitReached = perWorker[key], reached[key]
+		for _, w := range a.Workers {
+			for _, u := range w.Usage {
+				newest = later(newest, u.AsOf)
+			}
+		}
+		for _, w := range a.Workers {
+			key := usage.RosterKey{Session: w.Session, Handle: w.Handle}
+			perWorker[key] = sumUsage(perWorker[key], w.Usage)
+			if limit == nil {
+				continue
+			}
+			cur, ok := reached[key]
+			if !ok || (cur.active.After(cur.limit.AsOf) && !newest.After(limit.AsOf)) {
+				reached[key] = accountLimit{limit: limit, active: newest}
+			}
 		}
 	}
-	return m
+	for i := range m.Roster {
+		for _, agents := range [][]RosterAgent{m.Roster[i].Agents, m.Roster[i].Quiet} {
+			for j := range agents {
+				a := &agents[j]
+				key := usage.RosterKey{Session: a.Session, Handle: a.Handle}
+				a.Usage, a.LimitReached, a.AccountActiveAt = perWorker[key], reached[key].limit, reached[key].active
+			}
+		}
+	}
 }
 
 // reachedLimit is the account's reached limit, if it reports one.

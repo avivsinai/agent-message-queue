@@ -103,6 +103,7 @@ type pageData struct {
 	TaskChoices          []pageTaskChoice
 	Views                []pageView
 	Flow                 pageFlow
+	Floor                pageFloor
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
 }
@@ -306,6 +307,7 @@ func buildPage(m Model, regenerate string) pageData {
 	}
 	p.Views = buildViews(m, now, live)
 	p.Flow = buildFlowPage(m, now, live)
+	p.Floor = buildFloorPage(m, now)
 	if m.SuggestionDiagnostic.Status != "" {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)
 	}

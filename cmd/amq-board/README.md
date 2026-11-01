@@ -225,6 +225,36 @@ CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
 omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 `flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and
 Requests remain.
+
+Floor is a page view and a `== Floor ==` text section with one station per
+agent seat of the AMQ roster. A seat is shown when its wake is live, presence
+or usage shows activity inside `liveness_window`, it has unread mail newer than
+`stale_after`, or a current card names it; the other mailboxes fold into one
+dormant count per session, and so does a mailbox whose fresh mail arrived after
+more than `stale_after` without activity. The state is the first that matches:
+Limit reached (the account reports a reached limit whose reset is ahead, and
+neither the seat nor any session of that account was active after the limit
+was read: a limit is account-wide), Stalled (mail older than
+`liveness_window` waits and the last activity is older than that mail; unread
+ages date from the AMQ read),
+Working (activity inside `liveness_window`), Idle (the wake is live and the
+inbox is counted; no mail waits without an activity record), Off (no wake and
+no recent activity; the inbox is counted), and Unknown (the inbox was not
+counted, or mail waits and no activity was observed). Activity is the
+worker's newest usage record, or presence last seen when no wake is live: a
+live wake refreshes presence itself, so it proves only the wake. The plate
+names the fact it used. The board cannot see processes and never says a
+worker is running or has stopped. A seat lists the current cards that name
+it, In progress first, then In review, Ready, and Blocked; a card that names a
+handle without a session is listed under each seat of that handle with
+"handle in N sessions". The agent's presence note (Says) and free-text status
+are quoted, never treated as facts. A limit read before later activity shows
+as "limit reported N ago; active since" (or "the account was active since");
+a limit with no reset time shows when it was read. Claude Code error turns
+(`isApiErrorMessage`, model `<synthetic>`) are not spend or activity. `--json` carries `stations` and
+`dormant_mailboxes`; harness, note, notifier mode and reason, and doorbell
+parked come from `amq who --json` and `amq doctor --ops --json` at sync.
+Roster agents carry their usage and reached account limit in every view.
 An unresolved ask that names a current card's bead ID appears on that card as
 related context, with a count and the newest ask's thread command; its request
 names the task. This never attaches, admits, or moves work. Text and HTML show

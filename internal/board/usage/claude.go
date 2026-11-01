@@ -18,8 +18,12 @@ type claudeLine struct {
 	SessionID string    `json:"sessionId"`
 	Cwd       string    `json:"cwd"`
 	Version   string    `json:"version"`
-	Message   struct {
+	// IsAPIErrorMessage and the model "<synthetic>" mark turns Claude Code
+	// wrote itself, such as API errors: no request was served.
+	IsAPIErrorMessage bool `json:"isApiErrorMessage"`
+	Message           struct {
 		ID    string `json:"id"`
+		Model string `json:"model"`
 		Usage *struct {
 			In         int64 `json:"input_tokens"`
 			CacheRead  int64 `json:"cache_read_input_tokens"`
@@ -125,7 +129,7 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 				}
 			}
 			u := l.Message.Usage
-			if u == nil || l.Message.ID == "" {
+			if u == nil || l.Message.ID == "" || l.IsAPIErrorMessage || l.Message.Model == "<synthetic>" {
 				return true
 			}
 			ids := seen[l.SessionID]
