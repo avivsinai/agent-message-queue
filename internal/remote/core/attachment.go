@@ -178,7 +178,7 @@ type Forgetter interface {
 
 // ConcurrentSubmitter is an optional Attachment method for an adapter whose
 // requests share no native turn: each is correlated by its own id, so the
-// endpoint holds no target-wide reservation for it and never answers busy.
+// endpoint holds no target-wide reservation for it.
 type ConcurrentSubmitter interface {
 	ConcurrentSubmit() bool
 }
