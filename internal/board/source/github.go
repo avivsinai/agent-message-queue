@@ -625,19 +625,25 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 		// The merged and closed lists run newest update first. A merge or
 		// close never comes after the item's last update, so a cut list is
 		// complete back to its oldest fetched update and no further.
-		var cut []string
+		// Each cut list has its own floor; together they are complete only
+		// back to the later one.
 		if rr.repo.Merged.PageInfo.HasNextPage {
+			var updated []string
 			for _, pr := range rr.repo.Merged.Nodes {
-				cut = append(cut, pr.UpdatedAt)
+				updated = append(updated, pr.UpdatedAt)
+			}
+			if t := oldestTime(updated); t.After(shippedFloor) {
+				shippedFloor = t
 			}
 		}
 		if rr.repo.Closed.PageInfo.HasNextPage {
+			var updated []string
 			for _, is := range rr.repo.Closed.Nodes {
-				cut = append(cut, is.UpdatedAt)
+				updated = append(updated, is.UpdatedAt)
 			}
-		}
-		if t := oldestTime(cut); t.After(shippedFloor) {
-			shippedFloor = t
+			if t := oldestTime(updated); t.After(shippedFloor) {
+				shippedFloor = t
+			}
 		}
 		for _, pr := range rr.repo.Merged.Nodes {
 			if it, ok := m.pr(rr.slug, pr); ok {
@@ -684,6 +690,7 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 	res.Coverage.Truncated = morePRs + moreIssues + moreAttention
 	if g.ShippedWindow > 0 && shippedFloor.After(fetchedAt.Add(-g.ShippedWindow)) {
 		res.Coverage.Window = "merged PRs and closed issues since " + shippedFloor.UTC().Format(time.RFC3339)
+		gaps = append(gaps, "merged PRs and closed issues before "+shippedFloor.UTC().Format(time.RFC3339))
 	}
 	if morePRs > 0 {
 		gaps = append(gaps, fmt.Sprintf("%d more PRs not fetched", morePRs))

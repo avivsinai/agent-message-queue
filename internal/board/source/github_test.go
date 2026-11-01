@@ -545,7 +545,8 @@ func TestGitHubMergedPRIsDone(t *testing.T) {
 
 // Regression (Flow review): the merged list was cut at a fixed length with
 // no coverage note, so a busy week dropped merged PRs from Shipped while the
-// source still read as complete.
+// source still read as complete; then an older cut of the closed list hid
+// the merged list's later floor.
 func TestGitHubCutMergedListInsideShippedWindowIsPartial(t *testing.T) {
 	body := `{"data":{"viewer":{"login":"me"},"attention":{"issueCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
 "r0":{"pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
@@ -553,9 +554,10 @@ func TestGitHubCutMergedListInsideShippedWindowIsPartial(t *testing.T) {
 "merged":{"pageInfo":{"hasNextPage":true},"nodes":[
 {"number":41,"title":"newest","url":"https://github.com/octo-org/demo/pull/41","createdAt":"2026-10-21T08:00:00Z","updatedAt":"2026-10-22T10:00:00Z","mergedAt":"2026-10-22T09:00:00Z","author":{"login":"octo-agent"}},
 {"number":40,"title":"oldest fetched","url":"https://github.com/octo-org/demo/pull/40","createdAt":"2026-10-19T08:00:00Z","updatedAt":"2026-10-20T12:00:00Z","mergedAt":"2026-10-20T11:00:00Z","author":{"login":"octo-agent"}}]},
-"closed":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}`
+"closed":{"pageInfo":{"hasNextPage":true},"nodes":[
+{"number":12,"title":"old close","url":"https://github.com/octo-org/demo/issues/12","updatedAt":"2026-10-01T12:00:00Z","closedAt":"2026-10-01T12:00:00Z","stateReason":"COMPLETED"}]}}}}`
 	res := source.GitHub{ShippedWindow: 7 * 24 * time.Hour}.Build([]byte(body), []string{"octo-org/demo"}, githubNow, nil)
-	if !res.Coverage.Partial() || !strings.Contains(res.Coverage.Window, "2026-10-20T12:00:00Z") {
+	if !res.Coverage.Partial() || !strings.Contains(res.Coverage.Window, "2026-10-20T12:00:00Z") || !strings.Contains(res.Coverage.Detail, "2026-10-20T12:00:00Z") {
 		t.Fatalf("coverage = %+v, want partial since the oldest fetched update", res.Coverage)
 	}
 }
