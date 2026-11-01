@@ -179,8 +179,8 @@ func (w *retainedWakeInboxKqueueWatcher) run() {
 				w.fail(sourceErr)
 				return
 			}
-			if event.Fflags&(unix.NOTE_RENAME|unix.NOTE_DELETE|unix.NOTE_REVOKE) != 0 {
-				w.fail(fmt.Errorf("retained wake %s directory was renamed or deleted", source))
+			if err := retainedWakeKeventError(source, event.Fflags); err != nil {
+				w.fail(err)
 				return
 			}
 			if source == "inbox" {
@@ -198,6 +198,19 @@ func (w *retainedWakeInboxKqueueWatcher) run() {
 			}
 		}
 	}
+}
+
+// retainedWakeKeventError maps one retained directory kevent to a watcher
+// failure. A revoke is reported first: it arrives alone and is terminal, while
+// a rename or delete may be a legitimate swap that a rebind can follow.
+func retainedWakeKeventError(source string, fflags uint32) error {
+	if fflags&unix.NOTE_REVOKE != 0 {
+		return fmt.Errorf("retained wake %s directory: %w", source, errWakeDirectoryRevoked)
+	}
+	if fflags&(unix.NOTE_RENAME|unix.NOTE_DELETE) != 0 {
+		return fmt.Errorf("retained wake %s directory was renamed or deleted", source)
+	}
+	return nil
 }
 
 func (w *retainedWakeInboxKqueueWatcher) eventSource(ident uint64) (string, error) {

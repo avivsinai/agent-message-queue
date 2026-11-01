@@ -245,6 +245,12 @@ func newWakeOwnershipLoss(reason string) error {
 	return &wakeOwnershipLossError{reason: reason}
 }
 
+// errWakeDirectoryRevoked signals that a retained wake directory's vnode was
+// revoked, as when its volume is force-detached. A revoked descriptor never
+// heals, and reopening the directory by path would claim ownership outside the
+// acquire protocol, so the wake exits instead of rearming.
+var errWakeDirectoryRevoked = errors.New("wake directory was revoked: its volume was detached")
+
 // wakeInboxCanonicalMismatchError signals that the retained wake inbox no
 // longer matches the canonical namespace (a directory swap detached it). It
 // carries the one rule for canonical authority loss:

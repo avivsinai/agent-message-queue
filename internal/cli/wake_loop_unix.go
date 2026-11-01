@@ -42,6 +42,9 @@ type wakeLoop struct {
 	doorbellTimer               *time.Timer
 	doorbellTimerC              <-chan time.Time
 	unreadableGenerationNotice  wakeUnreadableGenerationNoticeState
+	// fatalWatcherErr holds a terminal watcher failure seen where the loop
+	// cannot return it; run returns it at the next iteration.
+	fatalWatcherErr error
 
 	maintenanceOutputs []*os.File
 	preconditionCheck  func(*wakeConfig) error
@@ -552,6 +555,26 @@ func (l *wakeLoop) retryWatcher(context string, cause error) {
 	_ = writeWakeDiagnostic(&l.cfg, "amq wake: %s: %v; retrying watcher setup\n", context, cause)
 }
 
+// onWatcherFailure ends the wake when the watcher reports a revoked retained
+// directory and otherwise rearms it. A failing watcher buffers its error before
+// it closes its event channel, so a closed-events wake first drains that error.
+func (l *wakeLoop) onWatcherFailure(context string, cause error) error {
+	if cause == nil && l.watcher != nil {
+		if pending := pendingWakeWatcherError(l.watcher); errors.Is(pending, errWakeDirectoryRevoked) {
+			cause = pending
+		}
+	}
+	if !errors.Is(cause, errWakeDirectoryRevoked) {
+		l.retryWatcher(context, cause)
+		return nil
+	}
+	_ = emitWakeAttention(&l.cfg, wakePayload{
+		text:       "AMQ wake stopped: its queue volume went away; run amq wake check",
+		provenance: wakePayloadSystemFixed,
+	})
+	return failWakeOnWatcherError(&l.cfg, "wake directory revoked", cause)
+}
+
 func (l *wakeLoop) scheduleWatcherRebindFailure(context string, cause error) {
 	l.pendingNotify = true
 	l.inboxScanFailures++
@@ -775,6 +798,9 @@ func (l *wakeLoop) emitScanFallback() error {
 // first fatal error otherwise.
 func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 	for {
+		if l.fatalWatcherErr != nil {
+			return l.fatalWatcherErr
+		}
 		var debounceC <-chan time.Time
 		if l.debounceTimer != nil {
 			debounceC = l.debounceTimer.C
@@ -808,17 +834,23 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 
 		case event, ok := <-watcherEvents:
 			if !ok {
-				l.retryWatcher("wake inbox watcher closed", nil)
+				if err := l.onWatcherFailure("wake inbox watcher closed", nil); err != nil {
+					return err
+				}
 				continue
 			}
 			l.onWatcherEvent(event)
 
 		case err, ok := <-watcherErrors:
 			if !ok {
-				l.retryWatcher("wake inbox watcher closed", nil)
+				if err := l.onWatcherFailure("wake inbox watcher closed", nil); err != nil {
+					return err
+				}
 				continue
 			}
-			l.retryWatcher("wake inbox watcher failed", err)
+			if err := l.onWatcherFailure("wake inbox watcher failed", err); err != nil {
+				return err
+			}
 			continue
 
 		case <-debounceC:
@@ -877,7 +909,7 @@ func (l *wakeLoop) healthStatus() string {
 		return wakeHealthDegraded
 	}
 	if err := pendingWakeWatcherError(l.watcher); err != nil {
-		l.retryWatcher("wake inbox watcher failed during health check", err)
+		l.fatalWatcherErr = l.onWatcherFailure("wake inbox watcher failed during health check", err)
 		return wakeHealthDegraded
 	}
 	if l.inboxScanRetryC != nil || l.cfg.inputRecoveryRequired {

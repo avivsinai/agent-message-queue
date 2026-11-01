@@ -3431,6 +3431,7 @@ func classifyWakeFailure(err error) wakeFailureDisposition {
 	var canonicalMismatch *wakeInboxCanonicalMismatchError
 	if errors.As(err, &ownershipLoss) ||
 		errors.As(err, &canonicalMismatch) ||
+		errors.Is(err, errWakeDirectoryRevoked) ||
 		(isWakeTerminalAuthorityLoss(err) &&
 			!isWakeTerminalForegroundPGRPChanged(err) &&
 			!isWakeTerminalControlStopped(err)) {
