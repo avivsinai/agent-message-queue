@@ -152,6 +152,12 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				if e.CountError != "" {
 					uncounted = append(uncounted, s.Name+"/"+e.Handle)
 				}
+				// doctor --ops carries no presence note; who does.
+				w := who[[2]string{s.Name, e.Handle}]
+				e.Note = w.Note
+				if e.Harness == "" && w.Identity != nil {
+					e.Harness = w.Identity.Harness
+				}
 				counted[e.Handle] = e
 			}
 			if gate != nil && gate.OpenCount > 0 {
@@ -174,7 +180,13 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				ValidHandle:    fsq.ValidateHandle(h) == nil,
 				PresenceSource: w.PresenceSource,
 				NotifierStatus: w.NotifierStatus,
+				NotifierMode:   w.NotifierMode,
+				NotifierReason: w.NotifierReason,
+				Note:           w.Note,
 				PresenceStatus: "unknown",
+			}
+			if w.Identity != nil {
+				e.Harness = w.Identity.Harness
 			}
 			if w.Active {
 				e.PresenceStatus = "active"
@@ -241,9 +253,19 @@ func parseSessionList(data []byte) ([]sessionRow, error) {
 }
 
 type whoAgent struct {
-	Active         bool   `json:"active"`
-	PresenceSource string `json:"presence_source"`
-	NotifierStatus string `json:"notifier_status"`
+	Active         bool      `json:"active"`
+	PresenceSource string    `json:"presence_source"`
+	NotifierStatus string    `json:"notifier_status"`
+	NotifierMode   string    `json:"notifier_mode"`
+	NotifierReason string    `json:"notifier_reason"`
+	Note           string    `json:"note"`
+	Identity       *identity `json:"identity"`
+}
+
+// identity is the harness AMQ recorded for a mailbox (who and doctor
+// --ops).
+type identity struct {
+	Harness string `json:"harness"`
 }
 
 func parseWho(data []byte) (map[[2]string]whoAgent, error) {
@@ -270,16 +292,20 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 	var out struct {
 		Ops *struct {
 			Agents []struct {
-				Handle                 string  `json:"handle"`
-				UnreadCount            int     `json:"unread_count"`
-				UnreadCountError       string  `json:"unread_count_error"`
-				OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
-				DLQCount               int     `json:"dlq_count"`
-				DLQCountError          string  `json:"dlq_count_error"`
-				PresenceStatus         string  `json:"presence_status"`
-				PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
-				PresenceSource         string  `json:"presence_source"`
-				NotifierStatus         string  `json:"notifier_status"`
+				Handle                 string    `json:"handle"`
+				UnreadCount            int       `json:"unread_count"`
+				UnreadCountError       string    `json:"unread_count_error"`
+				OldestUnreadAgeSeconds float64   `json:"oldest_unread_age_seconds"`
+				DLQCount               int       `json:"dlq_count"`
+				DLQCountError          string    `json:"dlq_count_error"`
+				PresenceStatus         string    `json:"presence_status"`
+				PresenceAgeSeconds     float64   `json:"presence_age_seconds"`
+				PresenceSource         string    `json:"presence_source"`
+				NotifierStatus         string    `json:"notifier_status"`
+				NotifierMode           string    `json:"notifier_mode"`
+				NotifierReason         string    `json:"notifier_reason"`
+				DoorbellParked         bool      `json:"doorbell_parked"`
+				Identity               *identity `json:"identity"`
 			} `json:"agents"`
 			OperatorGate *struct {
 				OpenCount            int     `json:"open_count"`
@@ -317,7 +343,13 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 			PresenceAgeSeconds:     a.PresenceAgeSeconds,
 			PresenceSource:         a.PresenceSource,
 			NotifierStatus:         a.NotifierStatus,
+			NotifierMode:           a.NotifierMode,
+			NotifierReason:         a.NotifierReason,
+			DoorbellParked:         a.DoorbellParked,
 		})
+		if a.Identity != nil {
+			entries[len(entries)-1].Harness = a.Identity.Harness
+		}
 	}
 	var gate *board.Gate
 	if g := out.Ops.OperatorGate; g != nil {

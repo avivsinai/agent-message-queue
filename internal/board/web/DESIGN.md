@@ -139,12 +139,13 @@ The Work Navigator uses a cool neutral canvas, a clear list surface, and restrai
 Inline disclosures reveal context in place. Suggestion quotes preserve line breaks and tabs; other control characters appear as escapes. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.
 
 **Key Characteristics:**
-- One reading lane with a secondary navigation rail; Flow alone uses the full window as a lifecycle board.
+- One reading lane with a secondary navigation rail; Flow and Floor use the full window, as a lifecycle board and as a grid of agent stations.
 - Readable titles, body text, and metadata at distinct sizes.
 - Flat surfaces, fine dividers, and restrained cobalt selection.
 - Native inline disclosures and visible keyboard focus.
 - Separate destinations for Suggestions and History.
 - Stage marks that fill as work advances: an empty circle for Backlog, a quarter, half, and three quarters for Ready, In progress, and In review, a full disc for Shipped, and a square for Blocked.
+- Station plates that state each agent seat's state as a glyph and a word, repeated by a 6px state bar.
 
 ## Colors
 
@@ -182,7 +183,7 @@ The shell is centered and bounded at 75rem, with 2rem side gutters on wide scree
 
 At 959px and below, gutters become 1rem, navigation moves above the content, secondary destinations and Appearance use More, and search fills its row. Snapshot age remains visible at compact widths. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
 
-Flow is the exception to the reading lane. With script, the Flow view releases the shell to the window width (2rem gutters, at most 120rem), the navigation becomes one top row of tabs, and six stage columns share the width. At 1279px and below the board has three columns; at 600px and below the stages stack as sections under their headings. Without script, Flow renders inside the normal shell.
+Flow and Floor are the exceptions to the reading lane. With script, both views release the shell to the window width (2rem gutters, at most 120rem) and the navigation becomes one top row of tabs. On Flow, six stage columns share the width; at 1279px and below the board has three columns; at 600px and below the stages stack as sections under their headings. On Floor, sessions flow side by side, each holding its station plates at 16.5rem; a session wraps its plates, and at 600px and below the plates and sessions become one column. Without script, both render inside the normal shell.
 
 Without script, all views remain readable in document order. With script, one destination is shown at a time. Print shows all views and removes navigation and controls.
 
@@ -205,13 +206,16 @@ Outlined surface buttons use accent text. Hover uses the selected tone, active u
 Search has a visible label, surface fill, control border, and full-size body type. Commands use a readonly, resizable monospace textarea with a minimum height of 4.5rem. Both retain visible focus.
 
 ### Navigation
-Primary destinations are Flow (the default), Next, Work, Backlog, and Requests. Suggestions, History, Sources, Agents, and Appearance sit under More. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts.
+Primary destinations are Flow (the default), Floor, Next, Work, Backlog, and Requests. Suggestions, History, Sources, Agents, and Appearance sit under More. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts.
 
 ### Cards / Containers
 A shared list surface groups work records; each row holds a title, reason, metadata, copy action, and Details. Secondary source and agent lists use the same surface and divider treatment. Empty states remain inside the list surface; search-empty feedback sits outside it.
 
 ### Flow Board
 Each stage column has a 3px top rule in its stage tone (control for Backlog, ink for Ready, accent for In progress and In review, warning for Blocked, muted for Shipped), its stage mark, its word, and its count. Cards are flat list-surface tiles with a 1px divider border and the control radius: flags, a title clamped to two lines, then owner, time in stage, and the PR number with its CI word. A card that needs you has an accent border. Flags are a glyph and a word: ◆ Needs you in accent ink, ✉ Reply due in muted ink. CI is a small shape and a word: a filled disc for CI green, an error-ink diamond for CI red, a ring for CI running, a dash for no CI. The Needs you strip sits above the board on the selected tone. A card is a native disclosure: with script, its body opens as a side sheet fixed to the right edge (34rem, full height, a 1px control rule on its left, no shadow), Esc or Close returns focus to the card, and opening one sheet closes the others. The sheet slides 1.5rem in 150ms only when reduced motion is not requested. Without script, the body opens in place under the card.
+
+### Station Plate
+The Floor shows one plate per agent seat with recent evidence, grouped under its session name and seat count. A plate is a flat tile with a 1px divider border, the control radius, and a 6px state bar on its left edge. From the top: the state glyph and word at title size and weight in the state ink, the handle and its harness, the state's reason, then Now (the most advanced owned card, clamped to two lines, with its stage and the count of the rest), Says or Status (the agent's own words in quotation marks, never styled as fact), Limit (warning ink, only when an account limit was read before later activity on the seat or its account), and Inbox; a divider rule separates the wake and last activity at the foot. The six states and their tones: ■ Limit reached in warning ink on the warning background, ▲ Stalled in error ink on the error background, ● Working in accent, ○ Idle in ink, – Off in muted ink with a control bar, and ? Unknown in muted ink with a dashed bar. The headline repeats the state counts with the same glyphs and ink; dormant mailboxes fold into one disclosure. A plate is a native disclosure with the same side sheet as a Flow card: state and reason, wake, inbox, last activity and its source, account limit, spend, quoted self-reports, owned work, and the message command. The board never claims a process is running or has stopped; state words name the evidence.
 
 ### Inline Disclosure
 Details keep source evidence and selectable commands in the reading flow. The detail body uses subtle fill and 1rem padding. Coverage is a compact warning disclosure above work lists, with its missing scope and source link inside. Header feedback keeps refresh errors and a pending Update snapshot action close to the snapshot time.
@@ -228,5 +232,5 @@ Suggestions use the shared white list surface and fine dividers. Each entry show
 
 ### Don't:
 - Don't use color alone to identify status.
-- Don't add flight-strip cells or condensed micro-labels. Cards appear only on the owner-ratified Flow board, where each stage column is a short sorted list; other views stay as reading rows.
+- Don't add flight-strip cells or condensed micro-labels. Cards appear only on the owner-ratified Flow board, where each stage column is a short sorted list, and plates only on the owner-ratified Floor; other views stay as reading rows.
 - Don't hide the keyboard focus outline.

@@ -185,6 +185,15 @@ type RosterEntry struct {
 	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 	PresenceSource         string  `json:"presence_source,omitempty"`
 	NotifierStatus         string  `json:"notifier_status,omitempty"`
+	NotifierMode           string  `json:"notifier_mode,omitempty"`
+	NotifierReason         string  `json:"notifier_reason,omitempty"`
+	DoorbellParked         bool    `json:"doorbell_parked,omitempty"`
+	// Harness is the harness AMQ recorded for the mailbox's identity; empty
+	// when none is recorded.
+	Harness string `json:"harness,omitempty"`
+	// Note is the agent's own presence note: a self-report, never a fact
+	// about its work.
+	Note string `json:"note,omitempty"`
 }
 
 // SessionInfo is one AMQ session of the project.

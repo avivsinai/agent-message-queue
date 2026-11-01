@@ -342,3 +342,22 @@ func TestCodexPlanWindowsNeedARateLimitReport(t *testing.T) {
 		}
 	}
 }
+
+// Review of the Floor build: Claude Code writes API errors (a 401 that asks
+// for /login, a usage limit) into the transcript as "<synthetic>" turns with
+// a message id and zero usage. Counting them advanced the newest spend time,
+// so a seat whose every turn failed read as working.
+func TestClaudeErrorTurnsAreNotSpend(t *testing.T) {
+	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "projects", "-work-demo", sid+".jsonl"),
+		claudeLineJSON("2.1.300", "msg_a"),
+		`{"type":"assistant","timestamp":"2026-10-22T11:30:00.000Z","sessionId":"`+sid+`","cwd":"/work/demo","version":"2.1.300","isApiErrorMessage":true,"error":"authentication_failed","message":{"id":"0f1e2d3c-0000-4000-8000-000000000009","model":"<synthetic>","role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"Please run /login · API Error: 401"}]}}`)
+	a := Read(Config{Homes: map[string][]string{Claude: {home}}}, testNow, demoRoots, nil).Accounts[0]
+	if len(a.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(a.Sessions))
+	}
+	if _, asOf := a.Sessions[0].Totals(testNow.Add(-span)); !asOf.Equal(time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC)) {
+		t.Errorf("newest spend at %v, want the real turn at 11:00", asOf)
+	}
+}

@@ -29,7 +29,7 @@
     var input = view.querySelector(".view-search");
     if (!input) { return; }
     var query = input.value.trim().toLowerCase();
-    var rows = Array.prototype.slice.call(view.querySelectorAll(".strip, .flow-card"));
+    var rows = Array.prototype.slice.call(view.querySelectorAll(".strip, .flow-card, .station"));
     var matched = 0;
     rows.forEach(function (row) {
       var text = [".title", ".c-ref", ".c-owner"].map(function (selector) {
