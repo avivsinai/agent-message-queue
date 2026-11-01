@@ -161,6 +161,11 @@ func (a *Attachment) NativeSessionID() string { return a.handle }
 
 func (a *Attachment) epoch() string { return "mailbox:" + a.handle }
 
+// ConcurrentSubmit implements core.ConcurrentSubmitter: each request is its
+// own message, answered by its own id, so requests to one handle never wait
+// for each other.
+func (a *Attachment) ConcurrentSubmit() bool { return true }
+
 // Inspect implements core.Attachment. The target is live while the handle's
 // inbox exists.
 func (a *Attachment) Inspect() protocol.Session {

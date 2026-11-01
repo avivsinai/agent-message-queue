@@ -116,7 +116,9 @@ invariants.
   covering dispatching, unresolved and unacknowledged work, plus a
   `not_after` check at native admission for the queued item. Until both
   exist, a busy target is refused with `busy` (action-required) rather than
-  admitting work whose ordering and expiry we cannot honour.
+  admitting work whose ordering and expiry we cannot honour. An adapter
+  whose requests share no native turn (the AMQ mailbox) holds no per-target
+  reservation, so it never answers `busy`.
 - **A decision uses the medium of its evidence.** The owner answers the
   exact interaction that was shown: a native approval by its interaction id,
   a terminal approval by the capture it was shown with. The harness applies

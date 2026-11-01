@@ -1458,6 +1458,10 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 	if s.Code != "" {
 		fmt.Fprintf(&b, " (%s)", s.Code)
 	}
+	if s.State == protocol.StateRejected && s.Code == protocol.CodeBusy {
+		// A settled DM never runs again, so a new message is the only retry.
+		b.WriteString("\nAnother request is still running in this session. Nothing ran; send the message again when it ends.")
+	}
 	if reason != "" {
 		// The reason is adapter text (a stored refusal); render it inert so
 		// the DM renderer cannot decode entities or autolink URLs inside it.

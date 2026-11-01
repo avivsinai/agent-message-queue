@@ -261,7 +261,7 @@ Reasons for every `false` (source: as cited per row in §3):
   no PTY or tmux binding is part of this feature.
 - `mailbox.submit` is graded **submitted**: the message is in the handle's
   inbox, and nothing proves the handle read it. Its reply to the message is
-  the result.
+  the result. Requests to one handle do not wait for each other.
 - `mailbox.cancel_request` cannot unsend a delivered message: after delivery
   a cancel ends the request as delivered and no longer waited for. Before
   delivery it keeps the message from being written.
