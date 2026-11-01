@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.123.0](https://github.com/avivsinai/agent-message-queue/compare/v0.122.0...v0.123.0) (2026-11-01)
+
+
+### Features
+
+* **board:** Floor view, one station per agent seat with its state ([#1322](https://github.com/avivsinai/agent-message-queue/issues/1322)) ([835dd6d](https://github.com/avivsinai/agent-message-queue/commit/835dd6dbfa2cff7581e0dcb6e79048a36c47da88))
+
 ## [0.122.0](https://github.com/avivsinai/agent-message-queue/compare/v0.121.0...v0.122.0) (2026-11-01)
 
 
