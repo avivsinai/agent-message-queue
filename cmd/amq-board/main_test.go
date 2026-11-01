@@ -112,3 +112,11 @@ func TestBoardReadsUsageSettings(t *testing.T) {
 		t.Errorf("a 1 byte budget read the whole listed home: %+v", u.Accounts)
 	}
 }
+
+// Regression: `amq-board dismiss` with no --message reported "message not
+// found" instead of naming the missing flag (seen by the owner 2026-11-01).
+func TestOwnerCommandWithoutMessageIsAUsageError(t *testing.T) {
+	if got := runOwner("dismiss", nil); got != exitUsage {
+		t.Fatalf("runOwner(dismiss) = %d, want usage exit %d", got, exitUsage)
+	}
+}

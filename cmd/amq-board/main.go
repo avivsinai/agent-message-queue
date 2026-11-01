@@ -222,6 +222,7 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 		Humans:                   cfg.GitHubLogins,
 		Identities:               cfg.GitHubIdentities,
 		ReadyToMergeWaitsOnHuman: cfg.ReadyToMergeWaitsH,
+		ShippedWindow:            cfg.Board.ShippedWindow,
 		TTL:                      cfg.GitHubTTL,
 		Timeout:                  opt.githubTimeout,
 		Refresh:                  opt.refresh,

@@ -35,10 +35,13 @@ type GitHub struct {
 	Humans                   []string          // GitHub logins of the owner
 	Identities               map[string]string // login -> AMQ handle
 	ReadyToMergeWaitsOnHuman bool
-	Timeout                  time.Duration // positive bounds the complete read
-	TTL                      time.Duration
-	Refresh                  bool  // ignore a fresh cache entry
-	Cache                    Cache // nil: no cache
+	// ShippedWindow, when positive, is how far back merged PRs and closed
+	// issues must be complete; a shorter listing says from when it is.
+	ShippedWindow time.Duration
+	Timeout       time.Duration // positive bounds the complete read
+	TTL           time.Duration
+	Refresh       bool  // ignore a fresh cache entry
+	Cache         Cache // nil: no cache
 	// Account is the viewer login of a token the caller holds and passes
 	// to gh (serve's token_once). It replaces the configured login as the
 	// cache identity, since an account switch changes that login but not
@@ -342,10 +345,12 @@ func GitHubQueryArgv(repos []string) []string {
       pageInfo { hasNextPage }
       nodes { number title url updatedAt assignees(first: 5) { nodes { login } } }
     }
-    merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    merged: pullRequests(states: MERGED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage }
       nodes { number title body url headRefName createdAt updatedAt mergedAt author { login } }
     }
-    closed: issues(states: CLOSED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    closed: issues(states: CLOSED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage }
       nodes { number title url updatedAt closedAt stateReason }
     }
   }`, i, i, i, githubPRFields)
@@ -523,9 +528,11 @@ type ghRepo struct {
 		Nodes []ghIssue `json:"nodes"`
 	} `json:"issues"`
 	Merged struct {
+		ghPage
 		Nodes []ghPR `json:"nodes"`
 	} `json:"merged"`
 	Closed struct {
+		ghPage
 		Nodes []ghIssue `json:"nodes"`
 	} `json:"closed"`
 }
@@ -598,6 +605,7 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 	var gaps []string
 	seen := map[board.Ref]bool{}
 	morePRs, moreIssues := 0, 0
+	var shippedFloor time.Time
 	for _, rr := range results {
 		for _, pr := range rr.repo.PullRequests.Nodes {
 			if it, ok := m.pr(rr.slug, pr); ok {
@@ -614,9 +622,23 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 				res.Coverage.Skipped++
 			}
 		}
-		// The merged and closed lists are the newest few per repository: a
-		// recent window, not a full listing, so their later pages are no
-		// coverage gap.
+		// The merged and closed lists run newest update first. A merge or
+		// close never comes after the item's last update, so a cut list is
+		// complete back to its oldest fetched update and no further.
+		var cut []string
+		if rr.repo.Merged.PageInfo.HasNextPage {
+			for _, pr := range rr.repo.Merged.Nodes {
+				cut = append(cut, pr.UpdatedAt)
+			}
+		}
+		if rr.repo.Closed.PageInfo.HasNextPage {
+			for _, is := range rr.repo.Closed.Nodes {
+				cut = append(cut, is.UpdatedAt)
+			}
+		}
+		if t := oldestTime(cut); t.After(shippedFloor) {
+			shippedFloor = t
+		}
 		for _, pr := range rr.repo.Merged.Nodes {
 			if it, ok := m.pr(rr.slug, pr); ok {
 				res.Items = append(res.Items, it)
@@ -660,6 +682,9 @@ func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr e
 		moreAttention = r.Data.Attention.IssueCount - len(r.Data.Attention.Nodes)
 	}
 	res.Coverage.Truncated = morePRs + moreIssues + moreAttention
+	if g.ShippedWindow > 0 && shippedFloor.After(fetchedAt.Add(-g.ShippedWindow)) {
+		res.Coverage.Window = "merged PRs and closed issues since " + shippedFloor.UTC().Format(time.RFC3339)
+	}
 	if morePRs > 0 {
 		gaps = append(gaps, fmt.Sprintf("%d more PRs not fetched", morePRs))
 	}
@@ -904,4 +929,15 @@ func (m githubMapper) issue(slug string, is ghIssue) (board.Item, bool) {
 		it.Mentions = append(it.Mentions, board.Mention{Token: tok, Basis: "title mention"})
 	}
 	return it, true
+}
+
+// oldestTime is the earliest of the RFC 3339 times, zero for none.
+func oldestTime(times []string) time.Time {
+	var oldest time.Time
+	for _, v := range times {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && (oldest.IsZero() || t.Before(oldest)) {
+			oldest = t
+		}
+	}
+	return oldest
 }

@@ -147,7 +147,7 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 			}
 		}
 		if v.Omitted > 0 {
-			st.More = "+" + strconv.Itoa(v.Omitted) + " more in History"
+			st.More = "+" + strconv.Itoa(v.Omitted) + " older shipped"
 		}
 		f.Stages = append(f.Stages, st)
 	}

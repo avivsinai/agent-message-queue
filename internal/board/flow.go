@@ -316,7 +316,8 @@ func buildFlow(m *Model, forge []Item, in Input, observed map[string]time.Time) 
 
 // cardFlags says who must act next: Needs you when an open item of the card
 // waits on the human (the predicate of the Needs you column), Reply due when
-// an open ask names the card's task exactly.
+// an open ask names the card's task exactly and the work has not shipped:
+// shipped work owes no reply, and its asks stay in the card's detail.
 func cardFlags(c Card) []Flag {
 	var flags []Flag
 	for _, it := range c.Items {
@@ -326,7 +327,7 @@ func cardFlags(c Card) []Flag {
 		}
 	}
 	for _, a := range c.Attachments {
-		if a.Anchor != "" {
+		if a.Anchor != "" && c.Stage != StageShipped {
 			flags = append(flags, FlagReplyDue)
 			break
 		}
