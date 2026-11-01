@@ -9,7 +9,9 @@ GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 GOLANGCI_LINT_VERSION := 2.13.1
 # Use go.mod's toolchain so gofmt and golangci-lint do not drift from
 # setup-go: a newer local Go writes export data the linter cannot read.
-GO_TOOLCHAIN := $(shell sed -n 's/^toolchain //p' go.mod)
+# Without a toolchain line, the go line names the release (go 1.27 is go1.27.0).
+GO_LINE := $(shell sed -n 's/^go //p' go.mod)
+GO_TOOLCHAIN := $(or $(shell sed -n 's/^toolchain //p' go.mod),go$(GO_LINE)$(if $(word 3,$(subst ., ,$(GO_LINE))),,.0))
 GOFMT := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN) go env GOROOT)/bin/gofmt
 
 build:
