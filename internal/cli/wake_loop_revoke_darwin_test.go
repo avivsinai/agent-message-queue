@@ -4,6 +4,7 @@ package cli
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -62,5 +63,54 @@ func TestWakeLoopExitsWhenRetainedDirectoryRevoked(t *testing.T) {
 		close(stop)
 		<-result
 		t.Fatal("wake loop kept running after its retained directory was revoked")
+	}
+}
+
+// #1312 review: a revoke during rebind backoff kept the wake retrying forever.
+// Closing the held-open agent descriptor behind the capability's back makes
+// fstat return EBADF, the errno the kernel returns for a revoked directory.
+func TestWakeLoopExitsWhenRetainedDirectoryRevokedDuringRebind(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A high slot keeps the closed number from being reused during the test.
+	heldFD, err := unix.FcntlInt(agentDir.file.Fd(), unix.F_DUPFD_CLOEXEC, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = agentDir.file.Close()
+	agentDir.file = os.NewFile(uintptr(heldFD), agentDir.path)
+	defer func() { _ = agentDir.Close() }()
+	if err := unix.Close(heldFD); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	l := &wakeLoop{
+		cfg: wakeConfig{
+			root: root, me: "codex", injectMode: wakeInjectModeNone,
+			settings:    wakeSettings{previewLen: 80},
+			controlStop: stop,
+		},
+		inboxNew:            fsq.AgentInboxNew(root, "codex"),
+		ordinaryRecoverable: true,
+		ordinaryAgentDir:    agentDir,
+	}
+	defer l.stopTimers()
+	l.scheduleInboxScanRetry(0)
+
+	result := make(chan error, 1)
+	go func() { result <- l.run(nil, nil) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errWakeDirectoryRevoked) {
+			t.Fatalf("run returned %v, want errWakeDirectoryRevoked", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(stop)
+		<-result
+		t.Fatal("wake loop kept rebinding after its retained directory was revoked")
 	}
 }

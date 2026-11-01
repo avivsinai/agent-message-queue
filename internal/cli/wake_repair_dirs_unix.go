@@ -146,19 +146,33 @@ func wakeRepairDirectoryIdentityForFD(
 	return identity, nil
 }
 
+// retainedWakeDirectoryIdentity reads the identity of a held-open retained
+// directory descriptor. A caller reaches it only through an open capability,
+// so EBADF from fstat means the kernel revoked the directory's vnode.
+func retainedWakeDirectoryIdentity(
+	fd int,
+	label string,
+) (wakeRepairDirectoryIdentity, error) {
+	identity, err := wakeRepairDirectoryIdentityForFD(fd, label)
+	if errors.Is(err, unix.EBADF) {
+		return identity, fmt.Errorf("%w: %w", err, errWakeDirectoryRevoked)
+	}
+	return identity, err
+}
+
 func newRetainedWakeDirectoryAuthority(
 	agentFD, inboxFD int,
 	agentPath, inboxPath string,
 	inboxParentIdentity wakeRepairDirectoryIdentity,
 ) (retainedWakeDirectoryAuthority, error) {
-	agentIdentity, err := wakeRepairDirectoryIdentityForFD(
+	agentIdentity, err := retainedWakeDirectoryIdentity(
 		agentFD,
 		"retained wake agent directory",
 	)
 	if err != nil {
 		return retainedWakeDirectoryAuthority{}, err
 	}
-	retainedInboxIdentity, err := wakeRepairDirectoryIdentityForFD(
+	retainedInboxIdentity, err := retainedWakeDirectoryIdentity(
 		inboxFD,
 		"retained wake inbox directory",
 	)
@@ -259,7 +273,7 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 	var retainedIdentity wakeRepairDirectoryIdentity
 	if err := agentDir.withFD(func(agentFD int) error {
 		var err error
-		retainedIdentity, err = wakeRepairDirectoryIdentityForFD(
+		retainedIdentity, err = retainedWakeDirectoryIdentity(
 			agentFD,
 			"retained wake agent directory",
 		)

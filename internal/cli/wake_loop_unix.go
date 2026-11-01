@@ -134,10 +134,19 @@ func runWakeLoop(cfg wakeConfig) error {
 	l.touchPresence()
 
 	// Notify if messages already exist
-	if err := l.attemptNotification(); err != nil {
-		return err
+	err := l.attemptNotification()
+	if err == nil {
+		err = l.run(maintenanceTicks, settingsTicks)
 	}
-	return l.run(maintenanceTicks, settingsTicks)
+	if errors.Is(err, errWakeDirectoryRevoked) {
+		// The wake log is on the revoked volume; only the attention
+		// destination can still tell the operator why the wake stopped.
+		_ = emitWakeAttention(&l.cfg, wakePayload{
+			text:       "AMQ wake stopped: its queue volume went away; run amq wake check",
+			provenance: wakePayloadSystemFixed,
+		})
+	}
+	return err
 }
 
 func (l *wakeLoop) closeWatchers() {
@@ -568,10 +577,6 @@ func (l *wakeLoop) onWatcherFailure(context string, cause error) error {
 		l.retryWatcher(context, cause)
 		return nil
 	}
-	_ = emitWakeAttention(&l.cfg, wakePayload{
-		text:       "AMQ wake stopped: its queue volume went away; run amq wake check",
-		provenance: wakePayloadSystemFixed,
-	})
 	return failWakeOnWatcherError(&l.cfg, "wake directory revoked", cause)
 }
 
@@ -672,6 +677,11 @@ func (l *wakeLoop) attemptNotification() error {
 		return nil
 	}
 	err := notifyNewMessages(&l.cfg)
+	// A revoked retained directory surfaces as a canonical mismatch, but no
+	// rearm can recover it, so it ends the wake before the mismatch routing.
+	if errors.Is(err, errWakeDirectoryRevoked) {
+		return err
+	}
 	// A canonical mismatch (wakeInboxCanonicalMismatchError) is handled
 	// BEFORE the ordinary scan-retry path: rebindWatcher returns at once
 	// while watcher != nil, so the watcher must be invalidated here.
