@@ -162,7 +162,10 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 }
 
 // attachUsage puts each worker's spend, summed over its accounts, and its
-// account's reached limit on the worker's roster entry. It reads only
+// account's reached limit on the worker's roster entry. A limit travels with
+// the newest activity of its own account, so one account's spend never
+// rebuts another account's limit; a worker on several limited accounts gets
+// one that no later activity rebuts, when there is one. It reads only
 // m.Usage, so a model projected from a stored usage view carries the same
 // roster facts as the model the view was computed on.
 func attachUsage(m *Model) {
@@ -170,8 +173,11 @@ func attachUsage(m *Model) {
 		return
 	}
 	perWorker := map[usage.RosterKey][]Usage{}
-	reached := map[usage.RosterKey]*usage.Limit{}
-	accountActive := map[usage.RosterKey]time.Time{}
+	type accountLimit struct {
+		limit  *usage.Limit
+		active time.Time
+	}
+	reached := map[usage.RosterKey]accountLimit{}
 	for _, a := range m.Usage.Accounts {
 		limit := reachedLimit(a.Limits)
 		var newest time.Time
@@ -186,9 +192,12 @@ func attachUsage(m *Model) {
 		for _, w := range a.Workers {
 			key := usage.RosterKey{Session: w.Session, Handle: w.Handle}
 			perWorker[key] = sumUsage(perWorker[key], w.Usage)
-			if limit != nil {
-				reached[key] = limit
-				accountActive[key] = later(accountActive[key], newest)
+			if limit == nil {
+				continue
+			}
+			cur, ok := reached[key]
+			if !ok || (cur.active.After(cur.limit.AsOf) && !newest.After(limit.AsOf)) {
+				reached[key] = accountLimit{limit: limit, active: newest}
 			}
 		}
 	}
@@ -197,7 +206,7 @@ func attachUsage(m *Model) {
 			for j := range agents {
 				a := &agents[j]
 				key := usage.RosterKey{Session: a.Session, Handle: a.Handle}
-				a.Usage, a.LimitReached, a.AccountActiveAt = perWorker[key], reached[key], accountActive[key]
+				a.Usage, a.LimitReached, a.AccountActiveAt = perWorker[key], reached[key].limit, reached[key].active
 			}
 		}
 	}

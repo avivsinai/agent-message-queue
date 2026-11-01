@@ -96,3 +96,32 @@ func TestProjectAttachesAccountLimitToWorker(t *testing.T) {
 		t.Errorf("session1/claude has limit %+v and usage %+v, want the account's seven_day limit and its spend", a.LimitReached, a.Usage)
 	}
 }
+
+// Pre-merge review: a seat on two limited accounts read Idle, because the
+// limit of one account was rebutted by the spend of the other.
+func TestAccountLimitIsRebuttedOnlyByItsOwnAccount(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	resets := now.Add(48 * time.Hour)
+	s := Snapshot{Tasks: map[string]Task{}, Facts: map[string]AliasFact{}, Messages: map[string]Message{}}
+	s.Input.Results = []NamedResult{{Name: "amq", Result: Result{
+		Status: StatusOK, ObservedAt: now,
+		AMQ:    &AMQContext{Sessions: []SessionInfo{{Name: "session1", Path: "/q/session1"}}},
+		Roster: []RosterEntry{{Session: "session1", Handle: "claude", ValidHandle: true, Counted: true, PresenceSource: "notifier_live"}},
+	}}}
+	seat := []WorkerUsage{{Session: "session1", Handle: "claude", Usage: []Usage{{Window: usage.Window5h, Fresh: 10, AsOf: now.Add(-4 * time.Hour)}}}}
+	s.Usage = &UsageView{Accounts: []AccountUsage{{
+		Key: "claude:~/.claude", Harness: usage.Claude,
+		Limits:  []usage.Limit{{Kind: "reached", Name: "five_hour", ResetsAt: &resets, AsOf: now.Add(-5 * time.Hour)}},
+		Other:   []Usage{{Window: usage.Window5h, Fresh: 10, AsOf: now.Add(-time.Hour)}},
+		Workers: seat,
+	}, {
+		Key: "codex:~/.codex", Harness: usage.Codex,
+		Limits:  []usage.Limit{{Kind: "reached", Name: "seven_day", ResetsAt: &resets, AsOf: now.Add(-3 * time.Hour)}},
+		Workers: seat,
+	}}}
+
+	a := s.Project(DefaultConfig(), now, "test").Roster[0].Agents[0]
+	if a.LimitReached == nil || a.LimitReached.Name != "seven_day" || a.AccountActiveAt.After(a.LimitReached.AsOf) {
+		t.Errorf("limit %+v, account active at %v; want the codex seven_day limit with no activity after it", a.LimitReached, a.AccountActiveAt)
+	}
+}
