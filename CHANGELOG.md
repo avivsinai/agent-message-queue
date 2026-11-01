@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.122.0](https://github.com/avivsinai/agent-message-queue/compare/v0.121.0...v0.122.0) (2026-11-01)
+
+
+### Features
+
+* **board:** Flow view, one kanban of all work by stage, with shipped PRs ([#1320](https://github.com/avivsinai/agent-message-queue/issues/1320)) ([34556fe](https://github.com/avivsinai/agent-message-queue/commit/34556fe69c5d6f3f850e6ec61f83bd47278ad790))
+
 ## [0.121.0](https://github.com/avivsinai/agent-message-queue/compare/v0.120.2...v0.121.0) (2026-11-01)
 
 
