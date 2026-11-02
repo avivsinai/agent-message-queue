@@ -39,6 +39,9 @@
       matched += match ? 1 : 0;
       row.hidden = !match || view.dataset.view === "next" && !query && !allNext && matched > 5;
     });
+    Array.prototype.slice.call(view.querySelectorAll(".request-group")).forEach(function (group) {
+      group.hidden = !!query && !group.querySelector(".strip:not([hidden])");
+    });
     var note = view.querySelector(".filter-result");
     if (note) { note.hidden = !query || matched !== 0; }
     var list = view.querySelector(".work-list");

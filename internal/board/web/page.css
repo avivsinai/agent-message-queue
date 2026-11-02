@@ -138,6 +138,30 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .attach-control > label:first-child { display: grid; gap: .5rem; }
 .attach-task { width: 100%; min-height: 2.75rem; padding: .625rem .75rem; border: 1px solid var(--control); border-radius: .5rem; background: var(--surface); color: var(--ink); }
 .attach-selection { color: var(--muted); font-size: .875rem; }
+/* Requests: observations are plain rows with a glyph and words; an opinion
+   sits apart on the subtle inset with its classifier. */
+.request-summary { margin-bottom: 2rem; max-width: 66ch; }
+.request-headline { font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
+.request-note { margin-top: .5rem; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
+.request-group + .request-group { margin-top: 2rem; }
+.request-group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .75rem; padding-bottom: .75rem; overflow-wrap: anywhere; }
+.request-group-head .stage-count { margin-left: 0; font-size: .875rem; }
+.request-group > .request-note { margin: -.25rem 0 .75rem; }
+.request .title { font-size: 1.125rem; }
+.request-facts { list-style: none; padding: 0; margin-top: .5rem; max-width: 66ch; }
+.request-facts li { display: grid; grid-template-columns: 1.375rem minmax(0, 1fr); overflow-wrap: anywhere; }
+.request-facts li + li { margin-top: .25rem; }
+.observed-glyph { color: var(--muted); }
+.observed-unreplied { font-weight: 550; }
+.observed-unreplied .observed-glyph { color: var(--ink); }
+.observed-replied, .observed-unknown { color: var(--muted); }
+.opinion { margin-top: .75rem; max-width: 66ch; padding: .75rem 1rem; background: var(--subtle); border-radius: .5rem; overflow-wrap: anywhere; }
+.opinion-head { color: var(--muted); font-size: .875rem; line-height: 1.4286; }
+.opinion-value { color: var(--ink); font-weight: 600; }
+.opinion blockquote { margin: .5rem 0 0; padding-left: .75rem; border-left: 2px solid var(--control); white-space: pre-wrap; }
+.opinion-source { margin-top: .375rem; color: var(--muted); font-size: .875rem; }
+.request-older .title { font-size: 1rem; }
+.request-compact { grid-template-columns: minmax(0, 1fr); padding-block: 1rem; }
 .source, .crew { padding: 1.25rem 1.5rem; overflow-wrap: anywhere; }
 .source + .source, .crew + .crew { border-top: 1px solid var(--divider); }
 .source p, .crew > p { margin-top: .5rem; }
@@ -183,9 +207,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .attention-side { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .25rem 1.25rem; color: var(--muted); font-size: .875rem; }
 .flag { font-size: .875rem; font-weight: 600; white-space: nowrap; }
 .flag-you { color: var(--accent); }
-.flag-reply { color: var(--muted); font-weight: 500; }
 .flag > span { display: inline-block; min-width: 1em; text-align: center; }
-.flag-reply > span { font-size: 1.25em; line-height: 1; vertical-align: -.0625em; }
 .flow-notes { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .75rem 1.5rem; margin-bottom: 1.5rem; }
 .flow-notes > .coverage { margin-bottom: 0; padding-block: 0; }
 .flow-notes > details > summary { padding-block: .625rem; }

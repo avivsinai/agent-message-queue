@@ -79,8 +79,8 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	if !model.GeneratedAt.Equal(now) || !model.PublishedAt.Equal(first.PublishedAt) {
 		t.Fatal("projection time and snapshot publication time must remain separate")
 	}
-	if len(model.Unresolved) != 1 {
-		t.Fatalf("unadmitted ask count = %d", len(model.Unresolved))
+	if requestCount(model) != 1 {
+		t.Fatalf("request count = %d", requestCount(model))
 	}
 	if _, err = store.Apply(ctx, OwnerAction{Kind: "attach", TaskID: nativeID, MessageKey: ask.Key}); err != nil {
 		t.Fatal(err)
@@ -196,8 +196,8 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 			}
 		}
 	}
-	if cards != 1 || len(model.Unresolved) != 0 {
-		t.Fatalf("cards=%d unresolved=%d", cards, len(model.Unresolved))
+	if cards != 1 || requestCount(model) != 0 {
+		t.Fatalf("cards=%d requests=%d", cards, requestCount(model))
 	}
 	for _, render := range []func(*bytes.Buffer) error{func(b *bytes.Buffer) error { return WriteText(b, model) }, func(b *bytes.Buffer) error { return WriteHTML(b, model, "") }, func(b *bytes.Buffer) error { return json.NewEncoder(b).Encode(model) }} {
 		var output bytes.Buffer
@@ -805,16 +805,18 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 		t.Fatal(err)
 	}
 	exported := func(id, kind, body, created string) (Message, []byte) {
-		entry := thread.Entry{ID: id, Thread: "episode-" + id, Kind: kind, Body: body, Created: created}
+		entry := thread.Entry{ID: id, From: "lead", To: []string{"worker"}, Thread: "episode-" + id, Kind: kind, Body: body, Created: created}
 		raw, marshalErr := json.Marshal(entry)
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
 		sum := sha256.Sum256(raw)
-		return MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:])), raw
+		m := MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:]))
+		m.Copies[0].Agents = []string{"lead", "worker"}
+		return m, raw
 	}
 	old, oldRaw := exported("old", "todo", "Implement the archived report format.\n\nThis note supplies historical context.", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano))
-	acquisition := Acquisition{ProjectID: initial.ProjectID, Messages: []Message{old}, Evidence: [][]byte{oldRaw}, Input: Input{Results: []NamedResult{{Name: "amq-history", Result: Result{Status: StatusOK, ActionStates: map[string]string{old.Key: "open"}}}}}}
+	acquisition := Acquisition{ProjectID: initial.ProjectID, Messages: []Message{old}, Evidence: [][]byte{oldRaw}, Input: Input{Results: []NamedResult{{Name: "amq-history", Result: Result{Status: StatusOK}}}}}
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +830,6 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	current, currentRaw := exported("current", "todo", "Implement a local export command.", baseline.HistoryBaseline.Add(time.Nanosecond).Format(time.RFC3339Nano))
 	acquisition.Messages = append(acquisition.Messages, current)
 	acquisition.Evidence = append(acquisition.Evidence, currentRaw)
-	acquisition.Input.Results[0].Result.ActionStates[current.Key] = "open"
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +891,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 		t.Fatal(err)
 	}
 	task := after.Tasks[adopted[0]]
-	if len(adopted) != 1 || !task.Inferred || task.Fact.State != StateRequested || len(task.ModelAttachments) != 1 || task.ModelAttachments[0].Unit.Quote != current.Body || len(after.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 2 {
+	if len(adopted) != 1 || !task.Inferred || task.Fact.State != StateRequested || len(task.ModelAttachments) != 1 || task.ModelAttachments[0].Unit.Quote != current.Body || requestCount(after.Project(DefaultConfig(), time.Now(), "test")) != 2 {
 		t.Fatal("adoption lost exact evidence or hid unsupported source text")
 	}
 	if _, err = store.Apply(ctx, OwnerAction{Kind: "cancel", Scope: "task", TaskID: task.ID}); err != nil {
@@ -936,7 +937,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 		t.Fatal("adoption/ignore changed source disposition or cleared cancellation")
 	}
 	model := final.Project(DefaultConfig(), time.Now(), "test")
-	if len(model.Historical) != 1 || model.Historical[0].HistoryStatus != "owner-cancelled" || len(model.Next) != 0 || len(model.Unresolved) != 2 {
+	if len(model.Historical) != 1 || model.Historical[0].HistoryStatus != "owner-cancelled" || len(model.Next) != 0 || requestCount(model) != 2 {
 		t.Fatal("noncurrent inferred task entered current work or hid source remainder")
 	}
 	if err = store.publishSuggestions(ctx, state, cfg, units, true, []Suggestion{proposal}, SuggestionAttempt{}); err == nil {
@@ -1009,7 +1010,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spanMoved.Tasks[nativeID].Attachments) != 0 || len(spanMoved.Tasks[nativeID].ModelAttachments) != 1 || len(spanMoved.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 1 {
+	if len(spanMoved.Tasks[nativeID].Attachments) != 0 || len(spanMoved.Tasks[nativeID].ModelAttachments) != 1 || !hasRequest(spanMoved.Project(DefaultConfig(), time.Now(), "test"), current.Key) {
 		t.Fatal("span-only move promoted evidence to whole-message attachment")
 	}
 	if _, err = store.MoveAlias(ctx, AliasMove{Alias: alias, Destination: destination, DonorAuthority: "owner", Attachments: []string{current.Key}, ExpectedGeneration: spanMoved.Generation}); err != nil {
@@ -1024,7 +1025,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 			t.Fatal("alias move promoted span to whole-message attachment")
 		}
 	}
-	if len(aliasMoved.Tasks[nativeID].ModelAttachments) != 0 || len(aliasMoved.Tasks[destination].ModelAttachments) != 2 || len(aliasMoved.Project(DefaultConfig(), time.Now(), "test").Unresolved) != 1 {
+	if len(aliasMoved.Tasks[nativeID].ModelAttachments) != 0 || len(aliasMoved.Tasks[destination].ModelAttachments) != 2 || !hasRequest(aliasMoved.Project(DefaultConfig(), time.Now(), "test"), current.Key) {
 		t.Fatal("alias move lost spans or source remainder")
 	}
 	// Final review: an oversized oldest message retains its source key in a
@@ -1032,7 +1033,6 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	large, largeRaw := exported("large", "todo", strings.Repeat("A source paragraph.\n\n", 9), time.Now().UTC().Format(time.RFC3339Nano))
 	acquisition.Messages = append(acquisition.Messages, large)
 	acquisition.Evidence = append(acquisition.Evidence, largeRaw)
-	acquisition.Input.Results[0].Result.ActionStates[large.Key] = "open"
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -1062,7 +1062,6 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	status, statusRaw := exported("status", "status", "The local export command is ready for review.", time.Now().UTC().Format(time.RFC3339Nano))
 	acquisition.Messages = append(acquisition.Messages, status)
 	acquisition.Evidence = append(acquisition.Evidence, statusRaw)
-	acquisition.Input.Results[0].Result.ActionStates[status.Key] = "resolved"
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -1125,4 +1124,20 @@ func checkReferencedSuggestionCandidates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requestCount is every request the projection shows, in any age partition.
+func requestCount(m Model) int {
+	return len(m.Requests.Recent) + len(m.Requests.Older) + len(m.Requests.Undated)
+}
+
+func hasRequest(m Model, key string) bool {
+	for _, list := range [][]Request{m.Requests.Recent, m.Requests.Older, m.Requests.Undated} {
+		for _, r := range list {
+			if r.Message.Key == key {
+				return true
+			}
+		}
+	}
+	return false
 }

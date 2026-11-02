@@ -52,15 +52,22 @@ the owner adopts them.
 - Flow, the default view, shows every current card in one lifecycle stage:
   Backlog, Ready, In progress, In review, Blocked, or recently Shipped. Open
   GitHub pull requests and issues are Flow cards too; one joins a task card
-  only when the task records it as the same work. Needs you and Reply due are
-  flags on cards, not stages.
+  only when the task records it as the same work. Needs you is a flag on
+  cards, not a stage.
 - Floor shows each agent seat with recent evidence as a station in one of six
   states: Limit reached, Stalled, Working, Idle, Off, or Unknown. Each state
   names its evidence (mail, presence, wake, usage, account limits); the board
   cannot see processes, so it never says a worker runs or has stopped. Mailboxes
   with no recent evidence fold into one dormant count. An agent's presence note
   and status are quoted as self-reports, never shown as facts.
-- Work categories distinguish needs-you items, declared in-progress work, blocked work, backlog, and reply-due requests. A source
+- Requests shows recorded questions, review requests, and todos of the last
+  14 days by scoped addressee. Each recipient carries an observation (direct
+  reply or none, with later thread messages as secondary context, or not
+  assessed); a classifier's opinion is shown apart, with its name, an exact
+  quote, and the quoted sender and age. The one count is recent requests with
+  no direct reply observed, never unfinished work. Older requests are a
+  separate, searchable view of the newest 200.
+- Work categories distinguish needs-you items, declared in-progress work, blocked work, and backlog. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept
   apart from card counts, usage per worker and limits per account.
@@ -81,14 +88,14 @@ the owner adopts them.
 ## Brand Commitments
 
 - Flow leads with where all work stands and what needs the owner. Next lists
-  supported useful actions. Floor shows the agent seats. Work, Backlog, Requests, Suggestions, and History
-  are separate views; Sources and Agents provide secondary context.
+  supported useful actions. Floor shows the agent seats. Work, Backlog, Requests,
+  Older requests, Suggestions, and History are separate views; Sources and Agents provide secondary context.
 - Do not hardcode personal or organization data into product assets or
   fixtures. Live source records can contain owner names and paths.
 
 ## Evidence on Hand
 
-- Real board models come from `amq-board --json` (schema `amq/board/v2`) on a
+- Real board models come from `amq-board --json` (schema `amq/board/v3`) on a
   live project. They hold real session names, handles, and titles: reference
   only, never copied into fixtures or committed screenshots.
 - Real data exists for AMQ roots, beads, Codex goals, and Claude, Codex, and pi

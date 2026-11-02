@@ -13,7 +13,6 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 		{ID: "next", Title: "Next", Description: "Useful next actions from the available records.", Empty: "No next actions identified in the available data. Explore Backlog or Requests."},
 		{ID: "work", Title: "Work", Description: "Declared work and recorded blockers. Tracker state does not prove a worker is running.", Empty: "No work is marked started or blocked in the available data."},
 		{ID: "backlog", Title: "Backlog", Description: "Open work that has not started. Assignment alone does not mean work is underway.", Empty: "No queued work found in the available data."},
-		{ID: "requests", Title: "Requests", Description: "Historical asks with unresolved current status. These are outside task and work counts. Attach, admit, or dismiss them explicitly.", Empty: "No unresolved asks found in the available history."},
 	}
 	byID := map[string]pageStrip{}
 	for _, col := range m.Columns {
@@ -21,45 +20,11 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 			s := buildStrip(card, now, live)
 			byID[card.ID] = s
 			i := 1
-			switch col.ID {
-			case ColumnUnclaimed:
+			if col.ID == ColumnUnclaimed || col.ID == ColumnRequests {
 				i = 2
-			case ColumnRequests:
-				i = 3
-			case ColumnWaiting:
-				for _, item := range card.Items {
-					if item.Ref.Kind == RefObligation {
-						i = 3
-						break
-					}
-				}
 			}
 			views[i].Strips = append(views[i].Strips, s)
 		}
-	}
-	named := askTasks(m.Columns)
-	asks := newestAsks(m.Unresolved)
-	if omitted := len(m.Unresolved) - len(asks); omitted > 0 {
-		views[3].Description += " Showing the newest " + strconv.Itoa(len(asks)) + " of " + pluralize(len(m.Unresolved), "ask") + "; " + jsonPointer + "."
-	}
-	for _, message := range asks {
-		commands := messageActions(message)
-		if !hasControl(message.Subject) && !hasControl(message.Key) {
-			commands = append(commands, newOwnerAction("Admit task (edit outcome title first)", "amq-board", "admit", "--message", message.Key, "--title", message.Subject))
-		}
-		if !hasControl(message.Key) {
-			commands = append(commands, newOwnerAction("Dismiss unresolved ask", "amq-board", "dismiss", "--message", message.Key))
-		}
-		strip := pageStrip{AttachKey: message.Key, Key: message.Key, Kind: "unresolved", ID: clean(message.ID), Title: clean(message.Subject), State: "Current status unresolved", Reason: "Historical ask; no task admission or current work evidence", Owner: clean(message.From), AgeLabel: "Message recorded", Actions: commands, Evidence: []pageEvidence{{Source: "amq", Field: message.Kind, Value: clean(message.Key)}}, HasDetail: true}
-		for _, card := range named[message.Key] {
-			strip.Names = append(strip.Names, "Names task “"+cleanTitle(card.Title)+"” ("+clean(card.ID)+")")
-		}
-
-		if m.ActionStates[message.Key] == "open" {
-			strip.State = "Open request action"
-			strip.Reason = "AMQ reports an open request action; task admission is separate"
-		}
-		views[3].Strips = append(views[3].Strips, strip)
 	}
 	for _, action := range m.Next {
 		if s, ok := byID[action.CardID]; ok {
@@ -71,7 +36,6 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 		{ColumnWaiting, ColumnBlocked, ColumnUnclaimed, ColumnRequests},
 		{ColumnWaiting, ColumnInFlight, ColumnBlocked},
 		{ColumnUnclaimed},
-		{ColumnWaiting, ColumnRequests},
 	}
 	for i := range views {
 		var gaps []string
@@ -108,8 +72,8 @@ type pageFlow struct {
 	Stages                          []pageStage
 	NeedsYou                        []pageStrip
 	Gates                           []string
-	ReplyDue                        int
-	Unresolved                      string
+	// Requests is the request headline, linked to the Requests view.
+	Requests string
 }
 
 type pageStage struct {
@@ -144,17 +108,15 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 			if s.NeedsYou {
 				f.NeedsYou = append(f.NeedsYou, s)
 			}
-			if s.ReplyDue {
-				f.ReplyDue++
-			}
 		}
 		if v.Omitted > 0 {
 			st.More = "+" + strconv.Itoa(v.Omitted) + " older shipped"
 		}
 		f.Stages = append(f.Stages, st)
 	}
-	if n := len(m.Unresolved); n > 0 {
-		f.Unresolved = pluralize(n, "unresolved ask") + " not linked to a card"
+	if len(m.Requests.Recent) > 0 {
+		head, notes := requestHeadline(m.Requests)
+		f.Requests = strings.Join(append([]string{head}, notes...), "; ")
 	}
 	var gaps []string
 	for _, source := range m.Sources {
@@ -176,7 +138,7 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.Stage, s.StageID, s.StageAge = c.Stage.Title(), string(c.Stage), clean(sum.Age)
 	s.PR, s.CI, s.CIText = clean(sum.PR), string(c.CI), sum.CI
 	s.NamesBead = clean(sum.Names)
-	s.NeedsYou, s.ReplyDue = sum.NeedsYou, sum.ReplyDue
+	s.NeedsYou = sum.NeedsYou
 	s.Owner = clean(sum.Owner)
 	if c.Authority == "" {
 		s.TaskID = ""

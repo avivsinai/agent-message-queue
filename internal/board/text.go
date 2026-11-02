@@ -110,17 +110,7 @@ func WriteText(w io.Writer, m Model) error {
 		writeCard(&b, card, now, live)
 	}
 	writeOmitted(&b, len(m.Historical)-len(historical), "older historical task")
-	fmt.Fprintf(&b, "\n== Unresolved historical asks (%d, outside task counts) ==\n", len(m.Unresolved))
-	named := askTasks(m.Columns)
-	asks := newestAsks(m.Unresolved)
-	for _, message := range asks {
-		fmt.Fprintf(&b, "  %s: %s\n", clean(message.Key), cleanTitle(message.Subject))
-		for _, card := range named[message.Key] {
-			fmt.Fprintf(&b, "    names task: %s (%s)\n", cleanTitle(card.Title), clean(card.ID))
-		}
-		fmt.Fprintf(&b, "    %s\n", clean(Quote([]string{"amq-board", "admit", "--message", message.Key, "--title", message.Subject})))
-	}
-	writeOmitted(&b, len(m.Unresolved)-len(asks), "older ask")
+	writeRequests(&b, m, now)
 	b.WriteString("\n== Roster ==\n")
 	if m.RosterNote != "" {
 		fmt.Fprintf(&b, "  %s\n", clean(m.RosterNote))
@@ -181,9 +171,6 @@ func writeFlow(b *strings.Builder, m Model, now time.Time) {
 			flags := ""
 			if f.NeedsYou {
 				flags += "◆ Needs you · "
-			}
-			if f.ReplyDue {
-				flags += "✉ Reply due · "
 			}
 			fmt.Fprintf(b, "    %s%s\n", flags, clean(strings.Join(parts, " · ")))
 		}
@@ -295,7 +282,7 @@ func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]str
 	if len(asks) > 0 {
 		fmt.Fprintf(b, "    %s\n", clean(askSummary(asks)))
 		if asks[0].Action != nil {
-			fmt.Fprintf(b, "    %s: %s\n", asks[0].Action.Label+" of the newest ask", asks[0].Action.Command)
+			fmt.Fprintf(b, "    %s: %s\n", asks[0].Action.Label+" of the newest request", asks[0].Action.Command)
 		}
 	}
 	for _, fact := range c.SourceFacts {
@@ -308,9 +295,6 @@ func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]str
 		state := "attached"
 		if attachment.Cancelled {
 			state = "action cancelled by owner"
-		}
-		if attachment.Anchor != "" {
-			state = "linked by exact id: " + clean(attachment.Anchor)
 		}
 		fmt.Fprintf(b, "    %s: %s\n      %s\n", state, clean(attachment.Message.Key), cleanTitle(attachment.Message.Subject))
 	}
@@ -333,33 +317,77 @@ func writeOmitted(b *strings.Builder, n int, noun string) {
 	}
 }
 
-// newestAsks returns at most viewLimit asks, newest first.
-func newestAsks(asks []Message) []Message {
-	out := append([]Message(nil), asks...)
-	sort.SliceStable(out, func(i, j int) bool { return askNewer(out[i], out[j]) })
-	return out[:min(len(out), viewLimit)]
-}
-
-// newestCards returns at most viewLimit cards, most recently active first: a
-// card is as recent as its update or its newest exact-id linked ask, so a
-// done task that a new ask names stays in the default views.
+// newestCards returns at most viewLimit cards, most recently updated first.
 func newestCards(cards []Card) []Card {
 	out := append([]Card(nil), cards...)
-	active := func(c Card) time.Time {
-		at := c.UpdatedAt
-		for _, a := range c.Attachments {
-			if created, err := time.Parse(time.RFC3339Nano, a.Message.Created); a.Anchor != "" && err == nil && created.After(at) {
-				at = created
-			}
-		}
-		return at
-	}
-	sort.SliceStable(out, func(i, j int) bool { return active(out[i]).After(active(out[j])) })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out[:min(len(out), viewLimit)]
 }
 
-// splitRelated separates the unresolved asks that name a card from its other
-// related records. Asks keep their newest-first order.
+// writeRequests prints the request headline, then Recent requests by
+// addressee with their observations and attributed opinions, at most
+// viewLimit per addressee and no message bodies; then the Older and
+// Undated counts.
+func writeRequests(b *strings.Builder, m Model, now time.Time) {
+	v := m.Requests
+	fmt.Fprintf(b, "\n== Requests (outside task counts) ==\n")
+	head, notes := requestHeadline(v)
+	fmt.Fprintf(b, "  %s\n", head)
+	for _, note := range notes {
+		fmt.Fprintf(b, "    %s\n", clean(note))
+	}
+	fmt.Fprintf(b, "  recent (%d days) %d · older %d · undated %d\n", int(RequestWindow/(24*time.Hour)), len(v.Recent), len(v.Older), len(v.Undated))
+	named := askTasks(m.Columns)
+	for _, g := range recentGroups(v) {
+		fmt.Fprintf(b, "  %s (%d)\n", clean(g.Addressee), len(g.Requests))
+		shown := g.Requests[:min(len(g.Requests), viewLimit)]
+		for _, r := range shown {
+			writeRequest(b, r, named, now)
+		}
+		writeOmitted(b, len(g.Requests)-len(shown), "request")
+	}
+	if n := len(v.Older) + len(v.Undated); n > 0 {
+		fmt.Fprintf(b, "  %s not listed; the page's Older requests view and %s\n", pluralize(n, "older or undated request"), jsonPointer)
+	}
+}
+
+func writeRequest(b *strings.Builder, r Request, named map[string][]Card, now time.Time) {
+	m := r.Message
+	when := "time unknown"
+	if at, ok := messageTime(m); ok {
+		when = age(now.Sub(at)) + " ago"
+	}
+	from := m.From
+	if r.Sender != nil {
+		from = participantLabel(*r.Sender)
+	}
+	fmt.Fprintf(b, "    %s · %s · from %s · %s\n", clean(strings.ReplaceAll(m.Kind, "_", " ")), cleanTitle(m.Subject), clean(from), when)
+	for _, fact := range requestFacts(r) {
+		fmt.Fprintf(b, "      %s\n", clean(fact.Text))
+	}
+	for _, t := range r.Tasks {
+		fmt.Fprintf(b, "      task: %s (%s) · %s · recorded %s\n", cleanTitle(t.Title), clean(t.TaskID), t.Binding, clean(string(t.State)))
+	}
+	for _, card := range named[m.Key] {
+		fmt.Fprintf(b, "      mentions task: %s (%s)\n", cleanTitle(card.Title), clean(card.ID))
+	}
+	for _, o := range r.Opinions {
+		line := "opinion: " + opinionText(o)
+		if o.Quote != nil {
+			line += ": “" + o.Quote.Text + "”"
+			if src := quoteSource(o, now); src != "" {
+				line += " (" + src + ")"
+			}
+		}
+		fmt.Fprintf(b, "      %s\n", cleanTitle(line))
+	}
+	if actions := messageActions(m); len(actions) > 0 {
+		fmt.Fprintf(b, "      %s: %s\n", actions[0].Label, actions[0].Command)
+	}
+}
+
+// splitRelated separates the requests that name a card from its other
+// related records. Requests keep their newest-first order.
 func splitRelated(tokens []Token) (others, asks []Token) {
 	for _, t := range tokens {
 		if t.Ref.Kind == RefAMQMessage {
@@ -371,16 +399,16 @@ func splitRelated(tokens []Token) (others, asks []Token) {
 	return others, asks
 }
 
-// askSummary is the one line a card shows for the unresolved asks that name it.
+// askSummary is the one line a card shows for the requests that name it.
 func askSummary(asks []Token) string {
 	verb := " name"
 	if len(asks) == 1 {
 		verb = " names"
 	}
-	return pluralize(len(asks), "unresolved ask") + verb + " this task. Newest " + strings.TrimPrefix(asks[0].Basis, "open ")
+	return pluralize(len(asks), "request") + verb + " this task. Newest " + asks[0].Basis
 }
 
-// askTasks maps each ask key to the current cards that it names.
+// askTasks maps each request key to the current cards that it names.
 func askTasks(columns []ColumnView) map[string][]Card {
 	out := map[string][]Card{}
 	for _, column := range columns {

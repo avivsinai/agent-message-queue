@@ -48,7 +48,6 @@ func TestHistoryVerifiesEachRootAndNormalizesEvidence(t *testing.T) {
 	if len(again) != 1 || again[0].EvidenceHash != message.EvidenceHash || len(nextEvidence) != 1 || string(nextEvidence[0]) != string(evidence[0]) {
 		t.Fatal("acquisition timestamp changed evidence identity")
 	}
-	checkHistoryLogicalIdentity(t)
 }
 
 // Wave1 review found that cwd/.beads split one backend into multiple task
@@ -66,46 +65,5 @@ func TestBeadsBindsReportedDatabaseAcrossWorktrees(t *testing.T) {
 		if result.Status != board.StatusOK || result.Namespace != backend || len(result.Items) != 1 {
 			t.Fatalf("backend binding failed in %s: %+v", dir, result)
 		}
-	}
-}
-
-// Review found answered asks stayed unknown because an unrelated ambiguous
-// follow-up invalidated the whole scope. Only native recipient outcomes close
-// actions; missing facts and continuation-only IDs remain unknown.
-func checkHistoryLogicalIdentity(t *testing.T) {
-	t.Helper()
-	metadata := `{"schema":"amq/thread-list/v1","base_root":"/base","threads":[{"thread_id":"work","message_ids":["ask"],"roots":[{"root":"/base","session":"","agents":["user","other"],"message_ids":["ask"]},{"root":"/base/session","session":"session","agents":["worker"],"message_ids":["ask"]}]}],"coverage":{"complete":true}}`
-	body := `[{"id":"ask","thread":"work","from":"user","to":["worker"],"kind":"question","body":"Exact request"}]`
-	coverage := `"coverage":{"max_age_seconds":0,"skipped":[],"unresolved_lineage":[],"ambiguous":[{"id":"unrelated-follow-up"}],"pruned_files":[],"expired":[],"outbound_routed":[{"session":"session","count":1}],"outbound_routed_openers":[{"id":"unrelated-outbound","session":"session"}],"skew_deferred":[],"truncated_by_limit":{"omitted":0}}`
-	fold := func(outcomes string) []byte {
-		return []byte(`{"schema":"amq/thread-open/v1","base_root":"/base","sessions":["","session"],` + strings.Replace(coverage, `"coverage":{`, `"coverage":{"action_outcomes":`+outcomes+`,`, 1) + `}`)
-	}
-	command := "amq thread open --all-sessions --include-base --max-age 0 --json"
-	closed := `[{"opener_id":"ask","key":"session/ask/worker","state":"closed"}]`
-	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user,other --message-ids ask --include-body --json --root /base": []byte(body), "amq thread --id work --agents worker --message-ids ask --include-body --json --root /base/session": []byte(body), command: fold(closed)}
-	env := board.Env{Dir: "/project", Now: time.Now, Run: runner}
-	result, messages, _ := ReadHistory(context.Background(), env, "/base")
-	if len(messages) != 1 || messages[0].Key != "/base#ask" || len(messages[0].Copies) != 2 || len(messages[0].Copies[0].Agents) != 0 || result.ActionStates["/base#ask"] != "resolved" {
-		t.Fatalf("logical identity, exact copy facts or lifecycle: %+v %+v", messages, result.ActionStates)
-	}
-	runner[command] = fold(`[{"opener_id":"ask","key":"session/ask/worker","state":"closed"},{"opener_id":"ask","key":"session/ask/other","state":"open"}]`)
-	result, _, _ = ReadHistory(context.Background(), env, "/base")
-	if result.ActionStates["/base#ask"] != "open" {
-		t.Fatal("open recipient action hidden")
-	}
-	runner[command] = []byte(strings.Replace(string(fold(closed)), `"unrelated-outbound"`, `"ask"`, 1))
-	result, _, _ = ReadHistory(context.Background(), env, "/base")
-	if result.ActionStates["/base#ask"] != "unknown" {
-		t.Fatal("unresolved routed recipient hidden by local closed action")
-	}
-	runner[command] = fold(`[]`)
-	result, _, _ = ReadHistory(context.Background(), env, "/base")
-	if result.ActionStates["/base#ask"] != "unknown" {
-		t.Fatal("absence treated as resolution")
-	}
-	delete(runner, command)
-	result, _, _ = ReadHistory(context.Background(), env, "/base")
-	if result.ActionStates["/base#ask"] != "unknown" || !result.Coverage.Partial() {
-		t.Fatal("failed lifecycle acquisition presented healthy")
 	}
 }

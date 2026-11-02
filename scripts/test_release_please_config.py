@@ -31,6 +31,7 @@ def test_release_please_config() -> None:
         {"type": "generic", "path": "skills/amq-cli/SKILL.md"},
         {"type": "generic", "path": "skills/amq-spec/SKILL.md"},
         {"type": "generic", "path": "skills/amq-remote/SKILL.md"},
+        {"type": "generic", "path": "skills/amq-board/SKILL.md"},
     ]
 
     manifest = json.loads((ROOT / ".release-please-manifest.json").read_text())
@@ -149,7 +150,7 @@ def test_release_workflow_marks_published_release_pr_as_tagged() -> None:
 
 def test_version_files_and_replacement_gates() -> None:
     version = json.loads((ROOT / ".release-please-manifest.json").read_text())["."]
-    for path in ["skills/amq-cli/SKILL.md", "skills/amq-spec/SKILL.md", "skills/amq-remote/SKILL.md"]:
+    for path in ["skills/amq-cli/SKILL.md", "skills/amq-spec/SKILL.md", "skills/amq-remote/SKILL.md", "skills/amq-board/SKILL.md"]:
         version_line = (ROOT / path).read_text().splitlines()[2]
         assert version_line == f"version: {version} # x-release-please-version"
 

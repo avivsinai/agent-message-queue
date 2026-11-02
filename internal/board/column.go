@@ -28,7 +28,7 @@ func (c Column) Title() string {
 	case ColumnUnclaimed:
 		return "Backlog"
 	case ColumnRequests:
-		return "Reply due"
+		return "Requested"
 	case ColumnHistorical:
 		return "History"
 	}

@@ -32,6 +32,7 @@
   <a href="#view-requests" data-view-link="requests">Requests</a>
   </div>
   <details class="secondary-nav" open><summary>More</summary><div>
+    <a href="#view-older-requests" data-view-link="older-requests">Older requests</a>
     <a href="#view-suggestions" data-view-link="suggestions">Suggestions</a>
     <a href="#view-history" data-view-link="history">History</a>
     <a href="#view-sources" data-view-link="sources">Sources</a>
@@ -48,7 +49,7 @@
   <div class="attention" aria-label="Needs you">
     <p class="attention-head"><span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span></p>
     <ul class="attention-list">{{range .NeedsYou}}<li><a href="#{{.Anchor}}" data-open="{{.Anchor}}">{{.Title}}</a> <span class="muted">{{.Reason}}</span></li>{{else}}<li>No card waits on you.</li>{{end}}{{range .Gates}}<li class="muted">{{.}}</li>{{end}}</ul>
-    <p class="attention-side">{{if .ReplyDue}}<span><span aria-hidden="true">✉&#xFE0E;</span> Reply due on {{.ReplyDue}} card{{if ne .ReplyDue 1}}s{{end}}</span>{{end}}{{if .Unresolved}}<a href="#view-requests">{{.Unresolved}}</a>{{end}}</p>
+    <p class="attention-side">{{if .Requests}}<a href="#view-requests">{{.Requests}}</a>{{end}}</p>
   </div>
   <div class="flow-notes">
   {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope, read errors, and observation times.</p></details>{{end}}
@@ -62,7 +63,7 @@
       <li><strong>Ready</strong>: assigned and not started, and nothing blocks it.</li>
       <li><strong>Backlog</strong>: everything else that is current: open with no assignee, paused, or admitted by you.</li>
     </ol>
-    <p>A pull request joins a task card only when the task records it as the same work. A pull request that only names a bead stays its own card. Needs you and Reply due are flags, not stages: they say who acts next. Older finished work is in <a href="#view-history">History</a>.</p>
+    <p>A pull request joins a task card only when the task records it as the same work. A pull request that only names a bead stays its own card. Needs you is a flag, not a stage: it says who acts next. Older finished work is in <a href="#view-history">History</a>.</p>
   </div></details>
   </div>
   <div class="flow-board">{{range .Stages}}
@@ -146,6 +147,39 @@
   {{if eq .ID "next"}}<button type="button" class="show-all" hidden>Show all known next actions</button>{{end}}
 </section>
 {{end}}
+{{with .Requests}}
+<section class="view view-requests" id="view-requests" data-view="requests" aria-labelledby="heading-requests">
+  <div class="view-heading"><div><h1 id="heading-requests">Requests</h1><p class="view-description">Questions, review requests, and todos from AMQ history, outside task and work counts. Observations come from the recorded messages. An opinion is one classifier's judgment, shown with its name and quote; it never changes the observations.</p></div>
+  <label class="search">Search Requests<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Subject, person, or message"></label></div>
+  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope and observation time.</p></details>{{end}}
+  <div class="request-summary">
+    <p class="request-headline">{{.Headline}}</p>
+    {{range .Notes}}<p class="request-note">{{.}}</p>{{end}}
+    <p class="request-note">This is not a count of unfinished work: a request can be done without a direct reply, and a reply does not finish it. {{.Partition}}{{if .OlderCount}} <a href="#view-older-requests">Search older requests</a>{{end}}</p>
+  </div>
+  {{range .Groups}}
+  <section class="request-group" aria-labelledby="{{.ID}}">
+    <h2 class="request-group-head" id="{{.ID}}">{{.Addressee}} <span class="stage-count">{{.Count}}</span></h2>
+    <div class="work-list">{{range .Rows}}{{template "request" .}}{{end}}</div>
+    {{if .More}}<p class="request-note">{{.More}}</p>{{end}}
+  </section>
+  {{else}}<div class="work-list"><div class="empty"><h2>No requests recorded in the last 14 days.</h2>{{if .OlderCount}}<p><a href="#view-older-requests">Search older requests</a></p>{{end}}</div></div>{{end}}
+  {{if .Undated}}<section class="request-group" aria-labelledby="requests-undated">
+    <h2 class="request-group-head" id="requests-undated">Undated <span class="stage-count">{{len .Undated}}</span></h2>
+    <p class="request-note">The recorded time is missing, unreadable, or in the future, so these are neither recent nor older.</p>
+    <div class="work-list">{{range .Undated}}{{template "request" .}}{{end}}</div>
+    {{if .UndatedMore}}<p class="request-note">{{.UndatedMore}}</p>{{end}}
+  </section>{{end}}
+  <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
+</section>
+<section class="view" id="view-older-requests" data-view="older-requests" aria-labelledby="heading-older-requests">
+  <div class="view-heading"><div><h1 id="heading-older-requests">Older requests</h1><p class="view-description">Requests recorded more than 14 days ago, newest 200 first. Age does not finish a request; the board closed none of these. Message bodies and thread commands are in <code>amq-board --json</code>.</p></div>
+  <label class="search">Search older requests<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Subject, person, or message"></label></div>
+  <div class="work-list">{{range .Older}}{{template "older" .}}{{else}}<div class="empty"><h2>No older requests recorded.</h2></div>{{end}}</div>
+  {{if .OlderMore}}<p class="request-note">{{.OlderMore}}</p>{{end}}
+  <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
+</section>
+{{end}}
 <section class="view" id="view-suggestions" data-view="suggestions" aria-labelledby="heading-suggestions">
   <div class="view-heading"><div><h1 id="heading-suggestions">Suggestions</h1><p class="view-description">Optional local-model matches for your review. A suggestion becomes task evidence only when you adopt it in the terminal. Model accuracy has not been measured.</p></div></div>
   {{if .SuggestionDiagnostic}}<p class="coverage">{{.SuggestionDiagnostic}}</p>{{end}}
@@ -200,7 +234,7 @@
   <div class="item-main">
     <h2 class="title" id="{{.ID}}">{{.S.Title}}</h2>
     <p class="item-reason">{{if .S.NextReason}}{{.S.NextReason}}{{else}}{{.S.Reason}}{{end}}</p>
-    <div class="item-meta"><span class="item-state">{{.S.State}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}<span class="c-owner">{{.S.Owner}}</span>{{if .S.AskCount}}<span>{{.S.AskCount}}</span>{{end}}{{range .S.Names}}<span>{{.}}</span>{{end}}<span>{{.S.AgeLabel}} {{if .S.SinceAt}}<time datetime="{{.S.SinceAt}}">{{.S.Since}} ago</time>{{else}}unknown{{end}}</span></div>
+    <div class="item-meta"><span class="item-state">{{.S.State}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}<span class="c-owner">{{.S.Owner}}</span>{{if .S.AskCount}}<span>{{.S.AskCount}}</span>{{end}}<span>{{.S.AgeLabel}} {{if .S.SinceAt}}<time datetime="{{.S.SinceAt}}">{{.S.Since}} ago</time>{{else}}unknown{{end}}</span></div>
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
   </div>
   <div class="item-action">{{if .Shown}}{{range .Shown}}<button type="button" class="copy primary-copy" id="{{$.ID}}-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{else}}<p class="command-unavailable">No context command available. Owner corrections are in Details.</p>{{end}}</div>
@@ -221,7 +255,7 @@
 <li class="flow-card{{if .S.NeedsYou}} is-flagged{{end}}" data-item-id="{{.S.Key}}">
 <details class="card-sheet" id="{{.ID}}">
   <summary>
-    {{if or .S.NeedsYou .S.ReplyDue}}<span class="card-flags">{{if .S.NeedsYou}}<span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span>{{end}}{{if .S.ReplyDue}}<span class="flag flag-reply"><span aria-hidden="true">✉&#xFE0E;</span> Reply due</span>{{end}}</span>{{end}}
+    {{if .S.NeedsYou}}<span class="card-flags"><span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span></span>{{end}}
     <span class="card-title title">{{.S.Title}}</span>
     <span class="card-meta"><span class="c-owner">{{.S.Owner}}</span><span class="card-age">{{.S.StageAge}}</span>{{if .S.PR}}<span class="pr">{{.S.PR}} <span class="ci ci-{{.S.CI}}">{{.S.CIText}}</span></span>{{end}}{{if .S.NamesBead}}<span>{{.S.NamesBead}}</span>{{end}}</span>
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
@@ -229,12 +263,40 @@
   <div class="sheet" role="group" aria-labelledby="{{.ID}}-title">
     <div class="sheet-head"><h2 id="{{.ID}}-title">{{.S.Title}}</h2><button type="button" class="sheet-close">Close</button></div>
     <p class="sheet-stage stage-{{.S.StageID}}"><span class="stage-mark" aria-hidden="true"></span><strong>{{.S.Stage}}</strong> <span>{{if eq .S.StageAge "age unknown"}}time in stage unknown{{else}}{{.S.StageAge}} in stage{{end}}</span></p>
-    <div class="item-meta"><span class="c-owner">{{.S.Owner}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}{{if .S.PR}}<span>{{.S.PR}} {{.S.CIText}}</span>{{end}}{{if .S.NeedsYou}}<span>◆ Needs you</span>{{end}}{{if .S.ReplyDue}}<span>✉&#xFE0E; Reply due</span>{{end}}</div>
+    <div class="item-meta"><span class="c-owner">{{.S.Owner}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}{{if .S.PR}}<span>{{.S.PR}} {{.S.CIText}}</span>{{end}}{{if .S.NeedsYou}}<span>◆ Needs you</span>{{end}}</div>
     {{with .Shown}}{{range .}}<button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{end}}
     {{template "detail" .}}
   </div>
 </details>
 </li>
+{{end}}
+{{define "request"}}
+<article class="strip request{{if not .Full}} request-compact{{end}}" aria-labelledby="{{.ID}}">
+  <div class="item-main">
+    <h3 class="title" id="{{.ID}}">{{.Title}}</h3>
+    <ul class="request-facts" aria-label="Observations">{{range .Facts}}<li class="observed-{{.State}}"><span class="observed-glyph" aria-hidden="true">{{if eq .State "unreplied"}}○{{else if eq .State "replied"}}●{{else}}?{{end}}</span>{{.Text}}</li>{{end}}</ul>
+    {{range .Opinions}}<div class="opinion" role="group" aria-label="Opinion of {{.Classifier}}"><p class="opinion-head"><span class="opinion-value">{{.Value}}</span> · {{.Classifier}}</p>{{if .Quote}}<blockquote>{{.Quote}}</blockquote>{{if .Source}}<p class="opinion-source">Quoted {{.Source}}</p>{{end}}{{end}}</div>{{end}}
+    <div class="item-meta"><span class="item-state">{{.Kind}}</span><span class="c-owner">from {{.From}} to {{.To}}</span><span>Sent {{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span></div>
+    <span class="c-ref sr-only">{{.MessageID}}</span>
+  </div>
+  {{if .Full}}<div class="item-action">{{with .Read}}<button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy thread command</button>{{end}}</div>
+  <details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">
+    <dl><dt>Message</dt><dd class="token">{{.MessageID}}</dd>{{if .Tasks}}<dt>Bound tasks</dt><dd><ul>{{range .Tasks}}<li>{{.}}</li>{{end}}</ul></dd>{{end}}{{if .Mentions}}<dt>Text mentions</dt><dd><ul>{{range .Mentions}}<li>{{.}}</li>{{end}}</ul></dd>{{end}}</dl>
+    <p>A bound task's state is the tracker's, not the request's. Attaching this request to a task keeps it in this view.</p>
+    {{with .Read}}{{template "cmd" .}}{{end}}
+    <div class="attach-control" data-message="{{.Key}}"><label>Find a task <input type="text" list="board-tasks" autocomplete="off" class="attach-task" placeholder="Search by task title"></label><p class="attach-selection" aria-live="polite">Current, completed, and historical tasks are available.</p><label class="cmd-label">Attach command<textarea readonly rows="2" spellcheck="false"></textarea></label><button type="button" class="copy" disabled>Copy attach command</button></div>
+    {{range .Actions}}{{template "cmd" .}}{{end}}
+  </div></details>{{end}}
+</article>
+{{end}}
+{{define "older"}}
+<article class="strip request-compact request-older">
+  <div class="item-main">
+    <h2 class="title">{{.Title}}</h2>
+    <div class="item-meta"><span class="item-state">{{.Kind}}</span><span class="c-owner">from {{.From}} to {{.To}}</span><span>Sent {{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span></div>
+    <span class="c-ref sr-only">{{.MessageID}}</span>
+  </div>
+</article>
 {{end}}
 {{define "cmd"}}
 <div class="cmd"><label class="cmd-label">{{.Label}}<textarea readonly rows="2" spellcheck="false">{{.Command}}</textarea></label><code class="sr-only">{{.Command}}</code><button type="button" class="copy" data-command="{{.Command}}" aria-label="Copy: {{.Label}}">Copy command</button></div>

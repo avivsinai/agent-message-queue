@@ -46,18 +46,6 @@ func selectNext(columns []ColumnView) []NextAction {
 			switch card.Column {
 			case ColumnWaiting:
 				reason = "Needs your input"
-			case ColumnRequests:
-				tier, reason = 1, "Reply due"
-				for _, owner := range card.WaitsOn {
-					name := owner.Display
-					if name == "" {
-						name = owner.Handle
-					}
-					if name != "" {
-						reason += " from " + name
-						break
-					}
-				}
 			case ColumnBlocked:
 				if len(card.WaitsOn) == 0 {
 					continue

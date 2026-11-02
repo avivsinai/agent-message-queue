@@ -49,6 +49,10 @@
         {
           "type": "generic",
           "path": "skills/amq-remote/SKILL.md"
+        },
+        {
+          "type": "generic",
+          "path": "skills/amq-board/SKILL.md"
         }
       ]
     }

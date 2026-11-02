@@ -45,10 +45,7 @@ func (s Stage) Title() string {
 // can carry one.
 type Flag string
 
-const (
-	FlagNeedsYou Flag = "needs_you"
-	FlagReplyDue Flag = "reply_due"
-)
+const FlagNeedsYou Flag = "needs_you"
 
 // CI is a pull request's checks rollup. It is shown on the card, never a
 // stage.
@@ -315,24 +312,14 @@ func buildFlow(m *Model, forge []Item, in Input, observed map[string]time.Time) 
 }
 
 // cardFlags says who must act next: Needs you when an open item of the card
-// waits on the human (the predicate of the Needs you column), Reply due when
-// an open ask names the card's task exactly and the work has not shipped:
-// shipped work owes no reply, and its asks stay in the card's detail.
+// waits on the human (the predicate of the Needs you column).
 func cardFlags(c Card) []Flag {
-	var flags []Flag
 	for _, it := range c.Items {
 		if it.State != StateDone && needsHuman(it) {
-			flags = append(flags, FlagNeedsYou)
-			break
+			return []Flag{FlagNeedsYou}
 		}
 	}
-	for _, a := range c.Attachments {
-		if a.Anchor != "" && c.Stage != StageShipped {
-			flags = append(flags, FlagReplyDue)
-			break
-		}
-	}
-	return flags
+	return nil
 }
 
 // sortFlow orders one stage. Shipped is newest first, so its listed cards
@@ -389,7 +376,7 @@ func (m Model) FlowCards() map[string]Card {
 // flowSummary is what a Flow card shows on every face.
 type flowSummary struct {
 	Owner, PR, CI, Age, Names string
-	NeedsYou, ReplyDue        bool
+	NeedsYou                  bool
 }
 
 func summarizeFlow(c Card, now time.Time) flowSummary {
@@ -425,7 +412,6 @@ func summarizeFlow(c Card, now time.Time) flowSummary {
 	}
 	for _, f := range c.Flags {
 		s.NeedsYou = s.NeedsYou || f == FlagNeedsYou
-		s.ReplyDue = s.ReplyDue || f == FlagReplyDue
 	}
 	return s
 }

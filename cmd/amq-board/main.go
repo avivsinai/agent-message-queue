@@ -40,6 +40,8 @@ const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
        amq-board adopt-suggestion --suggestion ID --choice ID --generation N [--confirm-independent]
        amq-board ignore-suggestion --suggestion ID --generation N
        amq-board serve
+       amq-board classify --classifier NAME [--next N] --json
+       amq-board classify --file LABELS.json
        amq-board admit --message KEY --title OUTCOME
        amq-board attach|detach --task ID --message KEY
        amq-board move --from-task ID --task ID --message KEY
@@ -58,7 +60,9 @@ prefer current messages, and skip unchanged attempts. Select an exact message wi
 suggest --message KEY when you need a specific episode.
 First initialization is explicit; an existing or interrupted store needs
 recovery and is never replaced. Native Beads and admitted AMQ outcomes
-have permanent task IDs. Unresolved messages are outside task counts.
+have permanent task IDs. Requests are outside task counts; classify exports
+recent requests for a classifier you run and imports its labels as
+attributed opinions.
 Owner commands make scoped local corrections; they never write sources.
 `
 
@@ -73,6 +77,8 @@ func run(args []string) int {
 			return runSuggestions(args[0], args[1:])
 		case "sync":
 			return runSync(args[1:])
+		case "classify":
+			return runClassify(args[1:])
 		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list", "consolidate", "move-alias", "catalogue":
 			return runOwner(args[0], args[1:])
 		}

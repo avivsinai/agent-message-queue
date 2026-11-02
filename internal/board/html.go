@@ -104,6 +104,7 @@ type pageData struct {
 	Views                []pageView
 	Flow                 pageFlow
 	Floor                pageFloor
+	Requests             pageRequests
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
 }
@@ -193,14 +194,13 @@ type pageStrip struct {
 	Related                          []string
 	AskCount, Asks                   string
 	AskAction                        *Action
-	Names                            []string
 	Evidence                         []pageEvidence
 	Actions                          []Action
 	HasDetail                        bool
 	ReasonField, Priority            string
 	// Flow card facts.
 	Stage, StageID, StageAge, PR, CI, CIText, NamesBead, Anchor string
-	NeedsYou, ReplyDue                                          bool
+	NeedsYou                                                    bool
 }
 
 type pageEvidence struct {
@@ -308,6 +308,7 @@ func buildPage(m Model, regenerate string) pageData {
 	p.Views = buildViews(m, now, live)
 	p.Flow = buildFlowPage(m, now, live)
 	p.Floor = buildFloorPage(m, now)
+	p.Requests = buildRequestsPage(m, now)
 	if m.SuggestionDiagnostic.Status != "" {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)
 	}
@@ -459,7 +460,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		s.Related = append(s.Related, clean(tokenLabel(t)))
 	}
 	if len(asks) > 0 {
-		s.AskCount = pluralize(len(asks), "unresolved ask")
+		s.AskCount = pluralize(len(asks), "related request")
 		s.Asks = clean(askSummary(asks))
 		s.AskAction = asks[0].Action
 		s.HasDetail = true
@@ -487,10 +488,6 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		ev = append(ev, d.e)
 	}
 	for _, attachment := range c.Attachments {
-		if attachment.Anchor != "" {
-			ev = append(ev, pageEvidence{Source: "amq", Field: "linked by exact id", Value: clean(attachment.Message.Key), Text: clean(attachment.Anchor)})
-			continue
-		}
 		status := "attached " + attachment.Message.Kind
 		if attachment.Cancelled {
 			status += " (owner cancelled action)"

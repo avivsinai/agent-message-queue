@@ -66,7 +66,7 @@ func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result,
 	for _, record := range index.Threads {
 		for _, root := range record.Roots {
 			for _, id := range root.MessageIDs {
-				copyFacts[id] = append(copyFacts[id], board.MessageCopy{Root: root.Root, Session: root.Session})
+				copyFacts[id] = append(copyFacts[id], board.MessageCopy{Root: root.Root, Session: root.Session, Agents: append([]string(nil), root.Agents...)})
 			}
 		}
 	}
@@ -159,114 +159,7 @@ acquire:
 		messages = append(messages, message)
 	}
 	sort.Slice(messages, func(i, j int) bool { return messages[i].Key < messages[j].Key })
-	var actionGaps []string
-	result.ActionStates, actionGaps = readActionStates(ctx, env, base, messages, result.Status == board.StatusOK)
-	for _, detail := range actionGaps {
-		gap(detail)
-	}
 	return result, messages, blobs
-}
-
-// readActionStates consumes positive recipient-action facts from AMQ's reducer.
-// An omitted opener, continuation, unresolved route or failed acquisition stays
-// unknown. No action is closed because it disappeared from an open list.
-func readActionStates(ctx context.Context, env board.Env, base string, messages []board.Message, historyComplete bool) (map[string]string, []string) {
-	states := map[string]string{}
-	for _, message := range messages {
-		states[message.Key] = "unknown"
-	}
-	raw, err := env.Run.RunLimited(ctx, env.Dir, []string{"amq", "thread", "open", "--all-sessions", "--include-base", "--max-age", "0", "--json"}, 64<<20)
-	if err != nil {
-		return states, []string{"action lifecycle acquisition failed: " + errLine(err)}
-	}
-	var doc struct {
-		Schema   string   `json:"schema"`
-		BaseRoot string   `json:"base_root"`
-		Sessions []string `json:"sessions"`
-		Coverage struct {
-			Outcomes *[]struct {
-				OpenerID string `json:"opener_id"`
-				Key      string `json:"key"`
-				State    string `json:"state"`
-			} `json:"action_outcomes"`
-			MaxAge  int64             `json:"max_age_seconds"`
-			Since   string            `json:"assessed_since"`
-			Skipped []json.RawMessage `json:"skipped"`
-			Pruned  []struct {
-				Count int `json:"count"`
-			} `json:"pruned_files"`
-			Unresolved []struct {
-				ID string `json:"id"`
-			} `json:"unresolved_lineage"`
-			Ambiguous []struct {
-				ID string `json:"id"`
-			} `json:"ambiguous"`
-			Outbound *[]struct {
-				ID string `json:"id"`
-			} `json:"outbound_routed_openers"`
-			Truncated struct {
-				Omitted int `json:"omitted"`
-			} `json:"truncated_by_limit"`
-		} `json:"coverage"`
-	}
-	if json.Unmarshal(raw, &doc) != nil || doc.Schema != ThreadOpenSchema || filepath.Clean(doc.BaseRoot) != base || doc.Coverage.Outcomes == nil || doc.Coverage.Outbound == nil {
-		return states, []string{"action lifecycle schema or root not accepted"}
-	}
-	complete := historyComplete && doc.Coverage.MaxAge == 0 && doc.Coverage.Since == "" && doc.Coverage.Truncated.Omitted == 0 && len(doc.Coverage.Skipped) == 0
-	for _, row := range doc.Coverage.Pruned {
-		if row.Count > 0 {
-			complete = false
-		}
-	}
-	var gaps []string
-	if !complete {
-		gaps = append(gaps, "action lifecycle acquisition has incomplete history coverage")
-	}
-	covered := map[string]bool{}
-	for _, session := range doc.Sessions {
-		covered[session] = true
-	}
-	uncertain := map[string]bool{}
-	for _, row := range doc.Coverage.Unresolved {
-		uncertain[row.ID] = true
-	}
-	for _, row := range doc.Coverage.Ambiguous {
-		uncertain[row.ID] = true
-	}
-	for _, row := range *doc.Coverage.Outbound {
-		uncertain[row.ID] = true
-	}
-	outcomes := map[string]string{}
-	keys := map[string]bool{}
-	for _, row := range *doc.Coverage.Outcomes {
-		if row.OpenerID == "" || row.Key == "" || keys[row.Key] || row.State != "open" && row.State != "closed" {
-			return states, append(gaps, "action lifecycle outcome not accepted")
-		}
-		keys[row.Key] = true
-		if row.State == "open" || outcomes[row.OpenerID] == "" {
-			outcomes[row.OpenerID] = row.State
-		}
-	}
-	for _, message := range messages {
-		status := outcomes[message.ID]
-		if status == "open" {
-			states[message.Key] = "open"
-			continue
-		}
-		if status != "closed" || !complete || uncertain[message.ID] || len(message.Copies) == 0 {
-			continue
-		}
-		allCovered := true
-		for _, copy := range message.Copies {
-			if !covered[copy.Session] {
-				allCovered = false
-			}
-		}
-		if allCovered {
-			states[message.Key] = "resolved"
-		}
-	}
-	return states, gaps
 }
 
 // Bound both argument count and UTF-8 bytes below platform command-line limits.

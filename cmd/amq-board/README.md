@@ -7,17 +7,19 @@ an explicit sync command. A view refresh only reads the published snapshot.
 amq-board sync --init              # first initialization and acquisition
 amq-board sync --watch             # acquire and publish once per minute
 amq-board                         # text
-amq-board --json                  # complete model, schema amq/board/v2
+amq-board --json                  # complete model, schema amq/board/v3
 amq-board --pane-json             # bounded native pane, amq/board-pane/v1
 amq-board --html --out board.html  # one self-contained page
 amq-board serve                   # live view on 127.0.0.1
+amq-board classify --classifier NAME --next 8 --json  # export requests to label
+amq-board classify --file labels.json                 # import labels
 ```
 
 The installed `amq` must support `amq thread list --all-sessions --json`.
 An unavailable command is reported as incomplete history. The board does not
 scan mailboxes itself or fall back to a different source.
 
-## Tasks and unresolved asks
+## Tasks
 
 A supported native task and an explicitly admitted AMQ outcome have a permanent
 project-local task ID. Each admitted task has one card. Native references and
@@ -31,17 +33,9 @@ a live notifier, or a recent session as proof that a task is running. Source
 disappearance keeps the last task state in History, outside current work counts
 and Next; it never completes a task.
 
-AMQ's native full-history lifecycle fold classifies request actions independently
-from tasks. Explicit native recipient outcomes resolve an action. An open recipient action
-keeps it open; omitted and continuation-only IDs remain unknown. Routing and
-coverage gaps also leave status unknown. Admission and attachment do not change
-source lifecycle status. Historical questions, review requests, and todos
-that remain open or unknown enter the unresolved inbox,
-outside task and work counts. Their current status is unknown until the local
-operator attaches, admits, or dismisses them. Copy commands in the page run
-only when the user runs them in a terminal. Source/context commands can appear
-on a card; owner corrections remain explicitly labelled in Details and do not
-make a task a Next action.
+Copy commands in the page run only when the user runs them in a terminal.
+Source/context commands can appear on a card; owner corrections remain
+explicitly labelled in Details and do not make a task a Next action.
 
 ```sh
 amq-board admit --message '/canonical/base#message-id' --title 'Deliver an outcome'
@@ -75,6 +69,89 @@ Read the catalogue's current generation and authority aliases before either
 command. Absorbed IDs redirect to the survivor. Consolidation preserves owner
 cancellation; reopening requires an explicit owner action.
 
+## Requests
+
+Every recorded `question`, `review_request`, and `todo` in AMQ history is a
+request, outside task and work counts. The board keeps three things apart:
+
+- The message is a fact.
+- Observations are derived for each view and never stored. A direct reply is
+  a message whose last ref is the request, sent by a recipient; its thread and
+  time do not matter. Later activity is a message in the same thread, with a
+  strictly later recorded time, sent by a recipient. Neither means answered
+  or finished.
+- Opinions are labels from a classifier the caller runs. Each label names its
+  classifier and the evidence digest it judged, and never changes a fact, an
+  observation, or a count.
+
+A party's scope comes from what AMQ records: `reply_to` (handle@session) and
+`reply_project` on routed sends, and, for each root that holds a copy, the
+agents that `amq thread list` reports for that thread in that root. A handle
+is scoped to the one copy root whose agents name it; for a routed message the
+sender's session is never the recipient's. When no root or several roots
+name the handle, or the recipient is in another project, the scope is
+unknown and the recipient is not assessed: a copy location alone is never
+proof, and a copy without recorded agents names no handle. The board never guesses a session from a bare
+handle.
+
+Requests from the last 14 days, by recorded message time, are Recent; the
+rest are Older, or Undated when the time is missing, unreadable, or in the
+future. Age never completes a request. Recent requests are grouped by scoped
+addressee, with requests that have no direct reply first. The only request
+count is the headline "N recent requests with no direct reply observed". A
+request counts once when any scoped recipient sent no direct reply; later
+thread activity is a secondary observation on the row. In a `p2p/` thread
+every message between the pair shares the thread, so later activity there is
+weak evidence. Requests with an unknown recipient scope are listed and
+counted separately, and incomplete history coverage is stated. The headline
+is never a count of unfinished work.
+
+Owner dismissal and action cancellation remove a request from the view. An
+attachment or an adopted suggestion binds a task to the request; the request
+stays listed and shows the task's recorded state as separate context. A
+request that names a current card's bead ID appears on that card as related
+context; this never attaches, admits, or moves work.
+
+### Classification on demand
+
+```sh
+amq-board classify --classifier MODEL/requests-v1 --next 8 --json > batch.json
+amq-board classify --file labels.json
+```
+
+Export is read-only. It lists up to `--next` Recent requests without a label
+from that classifier for their current evidence digest, newest first. Each
+candidate carries whole messages, never clipped: the request, its direct
+parent, direct replies, later thread messages, then other referrers, up to
+eight messages and 16 KiB, with the count of omitted evidence messages. A
+request larger than 16 KiB alone is `unclassifiable` and takes `unclear`.
+
+The evidence digest covers the request, its direct parent, its referrers,
+same-thread messages not recorded earlier, the scoped identities, bound
+tasks (ID, binding, recorded state, cancellation), owner disposition, the
+resolved sender scope of every evidence message, and the structured history
+coverage (complete, and the count of omitted records; never its wording),
+including messages left out of the slice. Each successful import drops stored
+labels whose message is gone and earlier labels of the messages it labels;
+other labels stay. An import that adds and drops nothing publishes nothing. New evidence makes the request current for
+classification again; the earlier label stays stored but is no longer shown.
+
+The label file has schema `amq/board-request-labels/v1`, the export's
+`project_id` and `classifier`, and `labels` entries with `message_key`,
+`evidence_digest`, `value` (`done`, `open`, `superseded`, `not_an_ask`, or
+`unclear`), and an optional `quote` of `message_key`, `field` (`body` or
+`subject`), and `text`. Every value except `unclear` needs an exact quote from
+a message in the candidate's slice; the check proves where the text came
+from, not that the judgment is right. Import validates the whole file under
+the writer lock and publishes it as one snapshot update in
+`request_labels`, keyed by the SHA-256 of `[message_key, evidence_digest,
+classifier]`. An identical label is accepted again; a different value for
+the same key is refused, so a revised classifier uses a revised name. The
+board runs no model and schedules nothing; the `amq-board` skill describes
+the classification loop for a harness model.
+
+## Withdrawals
+
 To adopt recorded withdrawals, run `amq-board adopt --file withdrawals.json`.
 Both messages must already be in the published history. The command is the
 local operator's authorization; a source handle or message body does not grant
@@ -88,9 +165,9 @@ authority. The full batch commits together.
 
 Suggestions are optional interpretations of exact quoted message spans. They
 remain outside task and work counts until the owner adopts them. Their accuracy
-on AMQ work has not been measured. Unsupported matches remain unresolved;
+on AMQ work has not been measured. Unsupported matches stay unmatched;
 bounded retrieval does not establish that an outcome is new.
-Replies, status updates, and resolved requests can supply attachment evidence;
+Replies, status updates, and answered requests can supply attachment evidence;
 they do not establish current work or qualify for a new task.
 
 Each pass handles one whole message with at most eight quoted units. Episode
@@ -217,10 +294,9 @@ requests and issues of the published snapshot. A forge item joins a task card
 only when the task's bead records it as the same work (`external_ref gh-N`); a
 pull request that only names a bead stays its own card and shows the name.
 Forge cards are never tasks: they have no task ID, cannot take attachments,
-and stay outside task counts. Needs you (a structured field waits on you) and
-Reply due (an open ask names the task exactly) are flags on the card, not
-stages; the strip above the board lists the cards that need you and the unread
-messages for you. A pull request card shows its checks as CI green, CI red,
+and stay outside task counts. Needs you (a structured field waits on you) is a
+flag on the card, not a stage; the strip above the board lists the cards that
+need you, the unread messages for you, and the request headline. A pull request card shows its checks as CI green, CI red,
 CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
 omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 `flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and
@@ -255,23 +331,16 @@ a limit with no reset time shows when it was read. Claude Code error turns
 `dormant_mailboxes`; harness, note, notifier mode and reason, and doorbell
 parked come from `amq who --json` and `amq doctor --ops --json` at sync.
 Roster agents carry their usage and reached account limit in every view.
-An unresolved ask that names a current card's bead ID appears on that card as
-related context, with a count and the newest ask's thread command; its request
-names the task. This never attaches, admits, or moves work. Text and HTML show
-the newest 25 unresolved asks and historical tasks, with counts, and no message
-bodies; `--json` and `model.json` keep every record and body. A historical
-task is as recent as its newest exact-id linked ask.
-
-An open ask that names a task exactly is linked to that task, done tasks
-included, and leaves the unresolved asks; the card shows "linked by exact id"
-and the name. An exact name is a full bead ID or a bead ID suffix right after
-the word `bead` (`bead t35`); a bare suffix such as a branch name and a pull
-request number are not. Only when the ask names nothing does its thread name
-count, never a `p2p/` thread or another message. An ambiguous name, a name of an owner-cancelled task, or a
-thread name that names two tasks leaves the ask unresolved. Links are derived
-for each view and never stored; an owner attach, admit, or dismiss wins, and
-suggestions and candidate rank never make a link. Dismiss or attach the ask to
-correct one.
+A request that names a current card's bead ID appears on that card as
+related context, with a count and the newest request's thread command. Text
+shows at most 25 Recent requests per addressee and the 25 most recently
+updated historical tasks, with counts. Per addressee, the page's Requests
+view lists up to 25 Recent requests without a direct reply, with their
+commands in Details, and the newest 5 with a direct reply from every scoped
+recipient as compact rows; the rest are counted. The searchable Older
+requests view lists the newest 200 and counts the rest. An opinion's quote names its sender and
+age, never a message key. Neither face shows message bodies; `--json` and
+`model.json` keep every record and body.
 
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
@@ -289,7 +358,7 @@ remain complete evidence exports.
 
 The pane shows all current task totals and up to 100 waiting tasks, with omitted
 row counts. It includes up to 32 source summaries and states any omissions.
-History and unresolved messages are outside its task counts. Commands are exact
+History and requests are outside its task counts. Commands are exact
 context commands only; the pane does not copy owner mutations. Publication time
 controls freshness, and recorded progress does not mean observed execution.
 

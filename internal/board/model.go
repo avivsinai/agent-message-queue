@@ -9,7 +9,7 @@ import (
 )
 
 // Schema names the JSON face.
-const Schema = "amq/board/v2"
+const Schema = "amq/board/v3"
 
 // Config holds the board's display settings.
 type Config struct {
@@ -50,23 +50,24 @@ type Model struct {
 	Catalogue            []TaskCatalogueEntry `json:"catalogue"`
 	Redirects            map[string]string    `json:"redirects"`
 	Historical           []Card               `json:"historical"`
-	ActionStates         map[string]string    `json:"action_states,omitempty"`
 	Schema               string               `json:"schema"`
 	Generation           uint64               `json:"generation,omitempty"`
 	PublishedAt          time.Time            `json:"published_at,omitempty"`
-	Unresolved           []Message            `json:"unresolved"`
-	GeneratedAt          time.Time            `json:"generated_at"`
-	Version              string               `json:"version"`
-	Dir                  string               `json:"dir"`
-	Project              string               `json:"project,omitempty"`
-	Sessions             []string             `json:"sessions"`
-	Sources              []SourceView         `json:"sources"`
-	Columns              []ColumnView         `json:"columns"`
-	Next                 []NextAction         `json:"next"`
-	Gates                []Gate               `json:"operator_gates"`
-	Roster               []RosterSession      `json:"roster"`
-	RosterNote           string               `json:"roster_note,omitempty"`
-	Usage                *UsageView           `json:"usage,omitempty"`
+	// Requests are the recorded request messages with their observations
+	// and attributed opinions, outside task and work counts.
+	Requests    RequestView     `json:"requests"`
+	GeneratedAt time.Time       `json:"generated_at"`
+	Version     string          `json:"version"`
+	Dir         string          `json:"dir"`
+	Project     string          `json:"project,omitempty"`
+	Sessions    []string        `json:"sessions"`
+	Sources     []SourceView    `json:"sources"`
+	Columns     []ColumnView    `json:"columns"`
+	Next        []NextAction    `json:"next"`
+	Gates       []Gate          `json:"operator_gates"`
+	Roster      []RosterSession `json:"roster"`
+	RosterNote  string          `json:"roster_note,omitempty"`
+	Usage       *UsageView      `json:"usage,omitempty"`
 	// Flow is the lifecycle view: every current card in one stage. Its
 	// card IDs name cards in Columns, Historical (recently shipped), or
 	// Forge.
@@ -415,7 +416,7 @@ var emptyTeach = map[Column]string{
 	ColumnInFlight:  "No work is marked in progress. This is tracker state, not proof of a running worker.",
 	ColumnBlocked:   "Nothing blocked.",
 	ColumnUnclaimed: "No queued work.",
-	ColumnRequests:  "No unanswered requests.",
+	ColumnRequests:  "No requested tasks.",
 }
 
 // emptyText says "nothing" only when every source that feeds the column read
