@@ -32,24 +32,17 @@ func TestNextActionsUseRecordedStateAndPriority(t *testing.T) {
 	blocked := bead("demo-blocked", StateBlocked, "")
 	blocked.Owner = Owner{Kind: OwnerAgent, Handle: "alpha"}
 	blocked.WaitsOn = []Owner{{Kind: OwnerAgent, Handle: "beta"}}
-	ref, _ := Obligation("s1/request/beta")
-	request := Item{Ref: ref, State: StateRequested, Structural: true,
-		Owner:      Owner{Kind: OwnerAgent, Handle: "beta", Session: "s1"},
-		WaitsOn:    []Owner{{Kind: OwnerAgent, Handle: "beta", Display: "beta"}},
-		Reason:     Reason{Since: now.Add(-time.Hour)},
-		Obligation: &ObligationFacts{Thread: "p2p/alpha__beta", OwnerSession: "s1"}}
 	items := []Item{active, epic, blocked, parent, child,
 		bead("demo-z", StateQueued, "P1"), bead("demo-a", StateOpenUnowned, "P1"),
 		bead("demo-p2", StateOpenUnowned, "P2"), bead("demo-unknown", StateOpenUnowned, "")}
 	model := Build(Input{Results: []NamedResult{
 		{Name: "beads", Result: Result{Status: StatusOK, Items: items}},
 		{Name: "claude-permissions", Result: Result{Status: StatusOK, Items: []Item{waiting}}},
-		{Name: "amq", Result: Result{Status: StatusOK, Items: []Item{request},
+		{Name: "amq", Result: Result{Status: StatusOK,
 			AMQ: &AMQContext{Sessions: []SessionInfo{{Name: "s1", Path: "/fixture/s1"}}}}}},
 		Known: known, Now: now, Config: DefaultConfig()})
 	want := []NextAction{
 		{CardID: waitRef.String(), Reason: "Needs your input"},
-		{CardID: ref.String(), Reason: "Reply due from beta"},
 		{CardID: "bead:demo-blocked", Reason: "Recorded blocker"},
 		{CardID: "bead:demo-a", Reason: "Open; not started"},
 		{CardID: "bead:demo-z", Reason: "Open; not started"},

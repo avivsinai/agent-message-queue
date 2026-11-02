@@ -29,6 +29,9 @@ var ErrProjectChanged = errors.New("board project identity changed; restart requ
 
 var errSnapshotBound = errors.New("board snapshot capacity reached; ingestion stopped")
 
+// errUnchanged from an update's change ends it without a publication.
+var errUnchanged = errors.New("board state unchanged")
+
 const evidenceLimit = 256 << 20
 
 var errEvidenceBound = errors.New("board evidence bound reached; ingestion stopped")
@@ -65,6 +68,8 @@ type Snapshot struct {
 	Dismissed         map[string]bool               `json:"dismissed"`
 	ActionCancelled   map[string]bool               `json:"action_cancelled"`
 	Withdrawals       map[string]string             `json:"withdrawal_adoptions"`
+	// RequestLabels are classifier opinions keyed by RequestLabelKey.
+	RequestLabels map[string]RequestLabel `json:"request_labels,omitempty"`
 }
 
 type Task struct {
@@ -313,6 +318,11 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
 	for key, msg := range state.Messages {
 		if key != msg.Key || msg.ID == "" || msg.Root == "" {
 			return Snapshot{}, errors.New("board message identity invalid; recovery required")
+		}
+	}
+	for key, label := range state.RequestLabels {
+		if key != RequestLabelKey(label.MessageKey, label.EvidenceDigest, label.Classifier) {
+			return Snapshot{}, errors.New("board request label identity invalid; recovery required")
 		}
 	}
 	if err := state.validateIdentityRecords(); err != nil {
@@ -809,8 +819,9 @@ func (s Store) Apply(ctx context.Context, a OwnerAction) (string, error) {
 }
 
 // Project is pure: one admitted task produces one card, regardless of source
-// link graphs. Unadmitted asks remain outside task and WIP counts. Forge
-// items that no task claims as the same work become Flow cards, never tasks.
+// link graphs. Requests are projected separately and stay outside task and
+// WIP counts. Forge items that no task claims as the same work become Flow
+// cards, never tasks.
 func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	s = s.projectionSnapshot()
 	input := s.Input
@@ -839,19 +850,12 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	for i := range m.Columns {
 		m.Columns[i].Cards = []Card{}
 	}
-	m.Unresolved = []Message{}
 	m.Historical = []Card{}
 	m.Catalogue = s.Catalogue()
 	m.Redirects = s.redirects()
 	m.Suggestions = s.SuggestionViews()
 	m.SuggestionDiagnostic = s.Suggestions.Attempt
 	attached := map[string]bool{}
-	anchored := map[string][]Attachment{}
-	for key, links := range exactAnchors(s) {
-		for _, link := range links {
-			anchored[link.TaskID] = append(anchored[link.TaskID], Attachment{Message: s.Messages[key], Anchor: link.Basis})
-		}
-	}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
 		ids = append(ids, id)
@@ -965,14 +969,6 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 			card.Actions = append(card.Actions, newOwnerAction(operation+" this request action", "amq-board", operation, "--scope", "action", "--message", key))
 		}
-		links := anchored[id]
-		sort.Slice(links, func(i, j int) bool { return links[i].Message.Key < links[j].Message.Key })
-		for _, link := range links {
-			attached[link.Message.Key] = true
-			card.Attachments = append(card.Attachments, link)
-			card.Actions = append(card.Actions, messageActions(link.Message)...)
-			card.Actions = append(card.Actions, newOwnerAction("Dismiss this ask", "amq-board", "dismiss", "--message", link.Message.Key))
-		}
 		taskOperation := "cancel"
 		if task.Cancelled {
 			taskOperation = "reopen"
@@ -988,14 +984,16 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 		}
 	}
-	m.ActionStates = messageActionStates(s)
-	for key, msg := range s.Messages {
-		if !attached[key] && openAsk(s, m.ActionStates, key) {
-			m.Unresolved = append(m.Unresolved, msg)
+	m.Requests = s.RequestView(now)
+	var unattached []Message
+	for _, list := range [][]Request{m.Requests.Recent, m.Requests.Older, m.Requests.Undated} {
+		for _, r := range list {
+			if !attached[r.Message.Key] {
+				unattached = append(unattached, r.Message)
+			}
 		}
 	}
-	sort.Slice(m.Unresolved, func(i, j int) bool { return m.Unresolved[i].Key < m.Unresolved[j].Key })
-	relateAsks(m.Columns, m.Unresolved, input.Known)
+	relateAsks(m.Columns, unattached, input.Known)
 	for i := range m.Columns {
 		sortCards(m.Columns[i].ID, m.Columns[i].Cards)
 	}
@@ -1005,8 +1003,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	return m
 }
 
-// relateAsks adds one related token to each current card per unresolved ask
-// whose subject, body, or refs name the card's bead id, newest ask first.
+// relateAsks adds one related token to each current card per request that
+// no task holds and whose subject, body, or refs name the card's bead id,
+// newest request first.
 // The longest candidate in the bead vocabulary wins, so a mention of a
 // longer known id never names its prefix. A related ask is context only:
 // placement, counts, attachments, actions, and lifecycle stay as projected.
@@ -1045,7 +1044,7 @@ func relateAsks(columns []ColumnView, asks []Message, known map[string]string) {
 						continue
 					}
 					linked[p] = true
-					t := Token{Ref: ref, Relation: string(RelationRelated), Basis: "open " + strings.ReplaceAll(ask.Kind, "_", " ") + ": " + cleanTitle(ask.Subject), Inferred: true}
+					t := Token{Ref: ref, Relation: string(RelationRelated), Basis: strings.ReplaceAll(ask.Kind, "_", " ") + ": " + cleanTitle(ask.Subject), Inferred: true}
 					if actions := messageActions(ask); len(actions) > 0 {
 						t.Action = &actions[0]
 					}
@@ -1072,13 +1071,10 @@ func askNewer(a, b Message) bool {
 	return a.Key < b.Key
 }
 
-// Attachment is an owner binding, or, when Anchor is set, a link derived at
-// projection time because the open ask names this task by an exact id.
-// Anchor holds the basis of that link.
+// Attachment is an owner binding of an exact message to a task.
 type Attachment struct {
 	Message   Message `json:"message"`
 	Cancelled bool    `json:"owner_cancelled"`
-	Anchor    string  `json:"anchor,omitempty"`
 }
 
 // WithdrawalAdoption names the exact target and the exact withdrawal. The

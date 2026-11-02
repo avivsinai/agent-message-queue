@@ -148,7 +148,7 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 	if !bytes.Equal(rec.Body.Bytes(), want) || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("pane route did not serve the shared cached projection")
 	}
-	model := Model{Generation: 7, GeneratedAt: time.Now(), PublishedAt: time.Now().Add(-time.Hour), Dir: "/work/" + strings.Repeat("long-project/", 30), Project: "project", Columns: []ColumnView{{ID: ColumnWaiting}, {ID: ColumnInFlight, Cards: make([]Card, 2)}, {ID: ColumnRequests, Cards: make([]Card, 3)}}, Unresolved: []Message{{Body: strings.Repeat("retained evidence ", 300000)}}, Historical: []Card{{ID: "historical"}}}
+	model := Model{Generation: 7, GeneratedAt: time.Now(), PublishedAt: time.Now().Add(-time.Hour), Dir: "/work/" + strings.Repeat("long-project/", 30), Project: "project", Columns: []ColumnView{{ID: ColumnWaiting}, {ID: ColumnInFlight, Cards: make([]Card, 2)}, {ID: ColumnRequests, Cards: make([]Card, 3)}}, Requests: RequestView{Recent: []Request{{Message: Message{Body: strings.Repeat("retained evidence ", 300000)}}}}, Historical: []Card{{ID: "historical"}}}
 	const exact = "amq thread --id 'a b'"
 	for i := 0; i < 101; i++ {
 		model.Columns[0].Cards = append(model.Columns[0].Cards, Card{ID: "task-a", Title: strings.Repeat("title", 50), Reason: Reason{Text: strings.Repeat("reason", 50)}, Actions: []Action{{Purpose: ActionOwnerMutation, Command: "amq-board cancel --task task-a"}, {Purpose: ActionContext, Command: exact}}})

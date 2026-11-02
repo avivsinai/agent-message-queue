@@ -137,7 +137,7 @@ func runOwner(kind string, args []string) int {
 	flags := flag.NewFlagSet("amq-board "+kind, flag.ContinueOnError)
 	task := flags.String("task", "", "permanent task ID")
 	fromTask := flags.String("from-task", "", "source task for an explicit move")
-	message := flags.String("message", "", "exact root#messageID from the published unresolved inbox")
+	message := flags.String("message", "", "exact root#messageID from the published history")
 	title := flags.String("title", "", "independently actionable outcome")
 	anchor := flags.String("anchor", "", "stable operator admission anchor")
 	scope := flags.String("scope", "", "task or action")

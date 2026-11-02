@@ -239,7 +239,6 @@ type NativeScope struct {
 
 type Result struct {
 	NativeScopes map[string]NativeScope `json:"native_scopes,omitempty"`
-	ActionStates map[string]string      `json:"action_states,omitempty"`
 	Namespace    string                 `json:"namespace,omitempty"`
 	Items        []Item
 	Roster       []RosterEntry

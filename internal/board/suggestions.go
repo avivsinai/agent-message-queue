@@ -143,12 +143,11 @@ func (s Snapshot) SuggestionFingerprint(cfg decision.Config) string {
 		Status   SourceStatus
 		Coverage Coverage
 		Detail   string
-		Actions  map[string]string
 		Scopes   map[string]NativeScope
 	}
 	sources := []coverage{}
 	for _, nr := range s.Input.Results {
-		sources = append(sources, coverage{nr.Name, nr.Result.Status, nr.Result.Coverage, nr.Result.Detail, nr.Result.ActionStates, nr.Result.NativeScopes})
+		sources = append(sources, coverage{nr.Name, nr.Result.Status, nr.Result.Coverage, nr.Result.Detail, nr.Result.NativeScopes})
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Name < sources[j].Name })
 	type observedEligibility struct {
@@ -196,23 +195,14 @@ func makeUnit(m Message, start, end int) EvidenceUnit {
 	}{u.MessageKey, u.Revision, u.Field, u.Start, u.End})[:32]
 	return u
 }
-func actionState(s Snapshot, key string) string {
-	for _, nr := range s.Input.Results {
-		if state := nr.Result.ActionStates[key]; state != "" {
-			return state
-		}
-	}
-	return "unknown"
-}
 func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 	keys := []string{}
 	fp := s.SuggestionFingerprint(s.Suggestions.Config)
-	anchored := exactAnchors(s)
 	for k, m := range s.Messages {
 		if key == "" && s.Observations[k].AttemptFingerprint == fp {
 			continue
 		}
-		if (key == "" || key == k) && format.IsValidKind(m.Kind) && !s.Dismissed[k] && !s.ActionCancelled[k] && anchored[k] == nil {
+		if (key == "" || key == k) && format.IsValidKind(m.Kind) && !s.Dismissed[k] && !s.ActionCancelled[k] {
 			keys = append(keys, k)
 		}
 	}
@@ -235,7 +225,7 @@ func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 		return keys[i] < keys[j]
 	})
 	if key != "" && len(keys) == 0 {
-		return nil, errors.New("exact message is absent, has an owner/resolved disposition, or is linked by exact id")
+		return nil, errors.New("exact message is absent or has an owner disposition")
 	}
 	units := []EvidenceUnit{}
 	adoptedUnits := map[string]bool{}
@@ -274,7 +264,8 @@ func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 	return units, nil
 }
 
-// NEW needs positive current intent in addition to structural outcome text.
+// NEW needs positive current intent in addition to structural outcome text,
+// and a request that some scoped recipient has not directly replied to.
 func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
 	m := s.Messages[u.MessageKey]
 	episode, episodeErr := buildEpisode(s, []EvidenceUnit{u})
@@ -283,7 +274,7 @@ func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
 	}
 	o, ok := s.Observations[m.Key]
 	created, err := time.Parse(time.RFC3339Nano, m.Created)
-	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || actionState(s, m.Key) != "open" || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] {
+	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] || !newRequestIndex(s).request(m.Key, now).NoDirectReply {
 		return false
 	}
 	for _, prior := range s.Messages {
