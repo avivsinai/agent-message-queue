@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.125.0](https://github.com/avivsinai/agent-message-queue/compare/v0.124.2...v0.125.0) (2026-11-02)
+
+
+### Features
+
+* **board:** one sentence per record, the Signal page, and true token totals ([#1331](https://github.com/avivsinai/agent-message-queue/issues/1331)) ([96dc2f9](https://github.com/avivsinai/agent-message-queue/commit/96dc2f960e60dce54f38d33bb062015f193fe9ab))
+
 ## [0.124.2](https://github.com/avivsinai/agent-message-queue/compare/v0.124.1...v0.124.2) (2026-11-02)
 
 
