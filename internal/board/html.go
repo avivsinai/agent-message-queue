@@ -163,8 +163,8 @@ type pageView struct {
 }
 
 type pageSource struct {
-	Name, Status, Age, Detail, Gap string
-	Partial                        bool
+	Name, Status, Age, Detail, Gap, Scope string
+	Partial                               bool
 }
 
 type pageLimit struct {
@@ -267,7 +267,7 @@ func buildPage(m Model, regenerate string) pageData {
 		}
 	}
 	for _, s := range m.Sources {
-		ps := pageSource{Name: clean(s.Name), Status: string(s.Status), Partial: s.Partial}
+		ps := pageSource{Name: clean(s.Name), Status: string(s.Status), Partial: s.Partial, Scope: clean(s.Coverage.Scope)}
 		if !s.ObservedAt.IsZero() {
 			ps.Age = age(now.Sub(s.ObservedAt))
 		}

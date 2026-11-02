@@ -422,11 +422,14 @@ var emptyTeach = map[Column]string{
 // emptyText says "nothing" only when every source that feeds the column read
 // completely; otherwise it names what was not assessed.
 func emptyText(col Column, results []NamedResult) string {
-	var gaps []string
+	var gaps, scopes []string
 	for _, nr := range results {
 		r := nr.Result
 		if !feeds(r.Feeds, col) && (r.Status != StatusUnavailable || len(r.Feeds) != 0) {
 			continue
+		}
+		if r.Coverage.Scope != "" {
+			scopes = append(scopes, nr.Name+" "+r.Coverage.Scope)
 		}
 		// A degraded source names itself here; its error detail stays in
 		// the source strip. Its coverage gap is a separate fact and shows
@@ -442,10 +445,14 @@ func emptyText(col Column, results []NamedResult) string {
 			gaps = append(gaps, nr.Name+": "+detail)
 		}
 	}
-	if len(gaps) == 0 {
-		return emptyTeach[col]
+	read := ""
+	if len(scopes) > 0 {
+		read = " Read: " + strings.Join(scopes, "; ") + "."
 	}
-	return "No items found. Not assessed: " + strings.Join(gaps, "; ") + "."
+	if len(gaps) == 0 {
+		return strings.TrimSpace(emptyTeach[col] + read)
+	}
+	return "No items found." + read + " Not assessed: " + strings.Join(gaps, "; ") + "."
 }
 
 func feeds(cols []Column, col Column) bool {

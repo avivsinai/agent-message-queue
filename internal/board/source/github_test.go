@@ -27,15 +27,17 @@ func githubEnv(r board.Runner) board.Env {
 	}
 }
 
+// beadLookupPR is the lookup a branch name such as feat/pr-11 caused when
+// every hyphenated word was a candidate bead id.
+const beadLookupPR = "bd --readonly --sandbox list --all --id pr-11,pr-12,pr-13,pr-14 --json --brief --limit 0"
+
 func githubOutputs() map[string]string {
 	return map[string]string{
 		"git remote get-url origin":        "origin-url.txt",
 		"gh config get user -h github.com": "gh-user.txt",
 		"gh api graphql":                   "github-graphql.json",
 		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list-github.json",
-		// Branch names such as feat/pr-11 are candidate bead ids until bd
-		// says they are not.
-		"bd --readonly --sandbox list --all --id pr-11,pr-12,pr-13,pr-14 --json --brief --limit 0": "bd-lookup-empty.json",
+		beadLookupPR: "bd-lookup-empty.json",
 	}
 }
 
@@ -60,10 +62,15 @@ func cardText(c board.Card) string {
 }
 
 func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
-	r := fakeRunner{t: t, outputs: githubOutputs()}
+	r := fakeRunner{t: t, outputs: githubOutputs(), calls: map[string]int{}}
 	sources := []board.Source{source.Beads{GitHubRepo: "octo-org/demo"}, demoGitHub()}
 	m := board.Run(context.Background(), githubEnv(r), sources, board.DefaultConfig(), "test")
 	cards := cardsByRef(m)
+	// Live board 2026-11-02: words like "codex-cli" and "pr-11" filled the
+	// 200-id bead lookup on every sync. Only the beads' own prefix is looked up.
+	if n := r.calls[beadLookupPR]; n != 0 {
+		t.Errorf("branch words were looked up as beads %d times", n)
+	}
 	pr := func(n string) board.Card { return cards["forge:github.com/octo-org/demo#"+n] }
 
 	if c := pr("11"); c.Column != board.ColumnWaiting || c.Reason.Text != "ready to merge" {

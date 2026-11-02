@@ -159,7 +159,10 @@ const (
 )
 
 // Coverage is what a result did not assess, even when its status is ok.
+// Scope is the range the source reads by design, such as a declared
+// lookback; it names what lies outside the read without making it partial.
 type Coverage struct {
+	Scope      string `json:"scope,omitempty"`
 	Window     string `json:"window,omitempty"`
 	Truncated  int    `json:"truncated"`
 	Skipped    int    `json:"skipped"`
