@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 // fakeRunner answers each argv with a captured payload from testdata. An
 // argv it does not know fails the test, so the sources run exactly the
 // read-only commands listed here.
+var callsMu sync.Mutex
+
 type fakeRunner struct {
 	t       *testing.T
 	outputs map[string]string // argv joined by spaces -> testdata file
@@ -47,7 +50,11 @@ func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, err
 		}
 	}
 	if f.calls != nil {
+		// Acquire reads sources in parallel; macOS CI on PR #1329 crashed
+		// with concurrent map writes here.
+		callsMu.Lock()
 		f.calls[key]++
+		callsMu.Unlock()
 	}
 	if err := f.fail[key]; err != nil {
 		return nil, err
