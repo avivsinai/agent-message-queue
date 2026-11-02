@@ -239,6 +239,13 @@ func TestBoardPageShowsBeadDescriptionAndNotes(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
+	found := false
+	for _, c := range cardsByRef(m) {
+		found = found || c.Summary == "The owner picks one cache format."
+	}
+	if !found {
+		t.Error("no card carries the bead's one-sentence summary")
+	}
 }
 
 // Pro finding 13: with AMQ failing, beads cards still place and the roster

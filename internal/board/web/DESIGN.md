@@ -29,16 +29,16 @@ colors:
 typography:
   headline:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"
-    fontSize: "1.75rem"
-    fontWeight: 650
-    lineHeight: 1.2143
-    letterSpacing: "-.02em"
+    fontSize: "2rem"
+    fontWeight: 700
+    lineHeight: 1.1875
+    letterSpacing: "-.03em"
   headline-compact:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"
     fontSize: "1.5rem"
-    fontWeight: 650
+    fontWeight: 700
     lineHeight: 1.25
-    letterSpacing: "-.02em"
+    letterSpacing: "-.03em"
   title:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"
     fontSize: "1.125rem"
@@ -144,13 +144,14 @@ Inline disclosures reveal context in place. Suggestion quotes preserve line brea
 - Flat surfaces, fine dividers, and restrained cobalt selection.
 - Native inline disclosures and visible keyboard focus.
 - Separate destinations for Older requests, Suggestions, and History.
+- Cobalt is reserved for what needs you, links, and navigation; stage tones stay neutral.
 - Stage marks that fill as work advances: an empty circle for Backlog, a quarter, half, and three quarters for Ready, In progress, and In review, a full disc for Shipped, and a square for Blocked.
 - Station plates that state each agent seat's state as a glyph and a word, repeated by a 6px state bar.
 
 ## Colors
 
 ### Primary
-Cobalt (`accent`) identifies links, actions, focus, and the selected destination. The pale selection tone (`selected`) fills active navigation, button hover, and text selection.
+Cobalt (`accent`) identifies links, actions, focus, the selected destination, and work that needs you. It is not a stage tone. The pale selection tone (`selected`) fills active navigation, button hover, and text selection.
 
 ### Secondary
 Warning ink and its pale background (`warning`, `warning-bg`) identify incomplete coverage and old observations. Error ink (`error`) marks failed copy and refresh states. These states also use words.
@@ -168,12 +169,12 @@ The cool page (`page`) holds a light list surface (`surface`); inset context use
 The type is plain and readable. View headings lead; record titles support scanning; body text explains the reason; metadata supplies context. There is no display type role or condensed label face.
 
 ### Hierarchy
-- Headline: view names; the compact headline applies at 959px and below.
+- Headline: view names at 2rem, weight 700, tracking -.03em; the compact headline (1.5rem) applies at 959px and below.
 - Title: record titles and section headings.
 - Body: reasons and descriptions, with a repeated maximum line length of 66ch.
 - Metadata: ownership, age, source observations, and field labels.
 - Control: buttons and disclosure labels; navigation has the same size and weight with a slightly taller line height.
-- Code: command fields and references. Times use tabular numerals.
+- Code: command fields and references. Times, counts, and ages use tabular numerals. Conventional-commit prefixes use Code as a small chip. Scrollbars and native controls take the theme (scrollbar colors, accent color).
 
 **The Reading Size Rule.** Compact layouts reflow rows and controls without reducing body or metadata type.
 
@@ -206,22 +207,26 @@ Outlined surface buttons use accent text. Hover uses the selected tone, active u
 Search has a visible label, surface fill, control border, and full-size body type. Commands use a readonly, resizable monospace textarea with a minimum height of 4.5rem. Both retain visible focus.
 
 ### Navigation
-Primary destinations are Flow (the default), Floor, Next, Work, Backlog, and Requests. Older requests, Suggestions, History, Sources, Agents, and Appearance sit under More. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts.
+Primary destinations are Flow (the default), Floor, Next, Work, Backlog, and Requests. Older requests, Suggestions, History, Sources, Agents, and Appearance sit under More. The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts and a menu that starts closed on Flow and Floor. Disclosure markers are drawn chevrons (a 1.5px stroke that turns when open), not browser triangles.
 
 ### Cards / Containers
-A shared list surface groups work records; each row holds a title, reason, metadata, copy action, and Details. Secondary source and agent lists use the same surface and divider treatment. Empty states remain inside the list surface; search-empty feedback sits outside it.
+A shared list surface groups work records; each row holds a title, a one-sentence summary clamped to two lines when the record has one, the reason, metadata, copy action, and Details. A conventional-commit prefix (feat, fix, and the like) is a quiet monospace chip on the subtle tone before the title, and the rest of the title is sentence-cased. Secondary source and agent lists use the same surface and divider treatment. Empty states remain inside the list surface; search-empty feedback sits outside it.
 
 ### Flow Board
-Each stage column has a 3px top rule in its stage tone (control for Backlog, ink for Ready, accent for In progress and In review, warning for Blocked, muted for Shipped), its stage mark, its word, and its count. Cards are flat list-surface tiles with a 1px divider border and the control radius: flags, a title clamped to two lines, then owner, time in stage, and the PR number with its CI word. A card that needs you has an accent border. The flag is a glyph and a word: ◆ Needs you in accent ink. CI is a small shape and a word: a filled disc for CI green, an error-ink diamond for CI red, a ring for CI running, a dash for no CI. The Needs you strip sits above the board on the selected tone. A card is a native disclosure: with script, its body opens as a side sheet fixed to the right edge (34rem, full height, a 1px control rule on its left, no shadow), Esc or Close returns focus to the card, and opening one sheet closes the others. The sheet slides 1.5rem in 150ms only when reduced motion is not requested. Without script, the body opens in place under the card.
+Each stage column has a 3px top rule in its stage tone (control for Backlog, muted for Ready, ink for In progress and In review, warning for Blocked, muted for Shipped), its stage mark, its word, and its count. Stages that hold cards share the width; an empty stage is a narrow vertical rail (2.75rem, rotated heading with its count) above 600px and a short heading at 600px and below. Cards are flat list-surface tiles with a 1px divider border and the control radius: the title (conventional-commit chip first, clamped to three lines), a one-sentence summary clamped to four lines, then metadata: owner, time in stage, "Needs you" when it applies, and the PR number with its CI word. When the stage time is unknown, a pull request card shows "open Nd" from its open date. There is no flag row above the title. A card that needs you has an accent border. The flag is a drawn diamond and the words Needs you in accent ink. CI is a small drawn shape and a word: a filled disc for CI green, an error-ink diamond for CI red, a ring for CI running, a dash for no CI.
+
+The Needs you section sits above the board. Its heading holds the flag and a count. Each card that needs you is one tile on the selected tone with an accent border: the title as a link that opens the card (three lines), the summary (four lines), then the reason and that card's own wait in accent. Unread gate lines follow apart from the tiles on one quiet muted line, led by "Unread for you" and the oldest age, with the requests link beside them. Coverage is one inline line under the section: "Incomplete coverage:" in warning ink, each gap named with its status, then See Sources; it wraps, and at 600px and below it shows a count of sources and See Sources. The legend and the stage rules are one disclosure whose summary is the legend and "How stages are decided"; search sits inline beside it on the same row, and an open disclosure takes the full row.
+
+A card is a native disclosure: with script, its body opens as a side sheet fixed to the right edge (34rem, full height, a 1px control rule on its left, no shadow), Esc or Close returns focus to the card, and opening one sheet closes the others. The sheet slides 1.5rem in 150ms only when reduced motion is not requested. Without script, the body opens in place under the card.
 
 ### Station Plate
 The Floor shows one plate per agent seat with recent evidence, grouped under its session name and seat count. A plate is a flat tile with a 1px divider border, the control radius, and a 6px state bar on its left edge. From the top: the state glyph and word at title size and weight in the state ink, the handle and its harness, the state's reason, then Now (the most advanced owned card, clamped to two lines, with its stage and the count of the rest), Says or Status (the agent's own words in quotation marks, never styled as fact), Limit (warning ink, only when an account limit was read before later activity on the seat or its account), and Inbox; a divider rule separates the wake and last activity at the foot. The six states and their tones: ■ Limit reached in warning ink on the warning background, ▲ Stalled in error ink on the error background, ● Working in accent, ○ Idle in ink, – Off in muted ink with a control bar, and ? Unknown in muted ink with a dashed bar. The headline repeats the state counts with the same glyphs and ink; dormant mailboxes fold into one disclosure. A plate is a native disclosure with the same side sheet as a Flow card: state and reason, wake, inbox, last activity and its source, account limit, spend, quoted self-reports, owned work, and the message command. The board never claims a process is running or has stopped; state words name the evidence.
 
 ### Inline Disclosure
-Details keep source evidence and selectable commands in the reading flow. The detail body uses subtle fill and 1rem padding. Coverage is a compact warning disclosure above work lists, with its missing scope and source link inside. Header feedback keeps refresh errors and a pending Update snapshot action close to the snapshot time.
+Details use the drawn chevron and keep source evidence and selectable commands in the reading flow. The detail body uses subtle fill and 1rem padding. Outside Flow, coverage is a compact warning disclosure above work lists, with its missing scope and source link inside; Flow uses the inline line described above. Header feedback keeps refresh errors and a pending Update snapshot action close to the snapshot time.
 
 ### Request Rows
-Requests is a reading lane. The headline sentence sits above the groups at title size, with its coverage notes and the reminder that it is not a count of unfinished work in muted metadata. Each scoped addressee is a section heading with its count, holding one shared list surface of request rows. A row is a strip: the subject as title, then one observation per recipient as a glyph and words (○ no direct reply, in ink and medium weight; ● direct reply; ? not assessed, both muted), with later thread messages after it, then any opinions, then kind, sender and recipients, and send time. An opinion sits apart from the observations on the subtle inset: the value in ink and weight 600, the classifier name after it, and the exact quote under a 2px control rule with its sender and age. The copy action is Copy thread command. A request without a direct reply has the copy action and Details: the message ID, bound tasks with their recorded states, text mentions, the attach control, and the owner commands. A replied request is a compact row with no commands. Each addressee shows up to 25 requests without a reply and the newest five replied ones, with a count of the rest. Older requests use the same list surface with compact rows (subject, kind, people, and time), the view's search, and the newest 200 with a count of the rest. No row prints a namespace path outside a command.
+Requests is a reading lane. The headline sentence sits above the groups at title size, with its coverage notes and the reminder that it is not a count of unfinished work in muted metadata. Each scoped addressee is a section heading with its count, holding one shared list surface of request rows. A row is a strip: the subject as title, then one observation per recipient as a drawn mark and words (a ring for no direct reply, in ink and medium weight; a filled disc for direct reply; a dashed ring for not assessed, both muted), with later thread messages after it, then any opinions, then kind, sender and recipients, and send time. An opinion sits apart from the observations on the subtle inset: the value in ink and weight 600, the classifier name after it, and the exact quote under a 2px control rule with its sender and age. The copy action is Copy thread command. A request without a direct reply has the copy action and Details: the message ID, bound tasks with their recorded states, text mentions, the attach control, and the owner commands. A replied request is a compact row with no commands. Each addressee shows up to 25 requests without a reply and the newest five replied ones, with a count of the rest. Older requests use the same list surface with compact rows (subject, kind, people, and time), the view's search, and the newest 200 with a count of the rest. No row prints a namespace path outside a command.
 
 ### Suggestion Review
 Suggestions use the shared white list surface and fine dividers. Each entry shows its state, quoted source span, and proposed interpretations; line breaks and tabs remain in the quote, while other control characters appear as escapes. Native Details reveals the source message, exact span, and available terminal commands. Suggestions remain a separate review surface, outside task counts.
@@ -235,5 +240,7 @@ Suggestions use the shared white list surface and fine dividers. Each entry show
 
 ### Don't:
 - Don't use color alone to identify status.
+- Don't spend cobalt on stage tones; it marks what needs you, links, and navigation.
+- Don't use font glyphs for flag and observation marks; draw them in CSS with one 1.5px stroke so they match the stage marks and CI shapes. Floor station glyphs are the exception.
 - Don't add flight-strip cells or condensed micro-labels. Cards appear only on the owner-ratified Flow board, where each stage column is a short sorted list, and plates only on the owner-ratified Floor; other views stay as reading rows.
 - Don't hide the keyboard focus outline.

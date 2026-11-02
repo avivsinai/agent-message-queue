@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,10 +40,13 @@ const (
 const span = 7 * 24 * time.Hour
 
 // Default per-run budget: the reader stops at a line boundary once either is
-// spent and marks the totals it could not finish as "at least".
+// spent and marks the totals it could not finish as "at least". Bytes are the
+// bound: the same files in the same order read the same lines. The wall
+// clock only backstops a slow disk, so it is set well past what the byte
+// budget takes to read, and a busy machine does not read less.
 const (
-	DefaultBudgetWall  = time.Second
-	DefaultBudgetBytes = 300 << 20
+	DefaultBudgetWall  = 5 * time.Second
+	DefaultBudgetBytes = 512 << 20
 )
 
 // maxLine bounds one transcript line; a longer one is skipped and counted.
@@ -126,6 +130,9 @@ type Limit struct {
 	RemainingPercent *float64 `json:"remaining_percent,omitempty"`
 	// Status is the reading's derived status: fresh, stale or partial.
 	Status string `json:"status,omitempty"`
+	// Past marks a reached limit its account spent tokens after: it was
+	// reached, and requests were served since.
+	Past bool `json:"past,omitempty"`
 }
 
 // Account is one harness home: its limits and the sessions of this project
@@ -201,8 +208,8 @@ const listShare = 4
 // roots (its worktrees, or the project directory outside Git) are given.
 // now dates the windows. Every home is listed first, inside a quarter of
 // the wall budget; reading then has the rest. Inside a home, mapped session
-// files are read first, then files in the project's session directories,
-// then the newest.
+// files and their subagents' are read first, then files in the project's
+// own session directories, then the rest; newest first inside each.
 func Read(cfg Config, now time.Time, roots []string, mapping Mapping) Report {
 	return read(cfg, now, roots, mapping, time.Now)
 }
@@ -421,15 +428,16 @@ func listPattern(root string, segs []string, since time.Time, first func(string)
 	return out, incomplete
 }
 
-// projectFirst reports whether a path lies in a session directory of this
-// project, so its sessions are listed and read before other projects'.
-// Claude Code names a session directory after the working directory, with
-// every character other than an ASCII letter or digit replaced by '-'; a
-// directory inside a root gets that root's name plus '-' and more. The name
-// only orders the work: eligibility still comes from each file's recorded
-// working directory, and a session under another name (a symlinked alias)
-// is read after the others, never dropped. Other harnesses' session paths
-// do not name the project.
+// projectFirst reports whether a path lies in the session directory of one
+// of this project's roots, so its sessions are listed and read before other
+// projects'. Claude Code names a session directory after the working
+// directory, with every character other than an ASCII letter or digit
+// replaced by '-'; so the directory of a folder inside a root and that of a
+// sibling folder named root plus "-" and more look alike, and only a root's
+// own name matches. The name only orders the work: eligibility still comes
+// from each file's recorded working directory, and a session under another
+// name (a subfolder, a symlinked alias) is read after the others, never
+// dropped. Other harnesses' session paths do not name the project.
 func projectFirst(harness, home string, roots []string) func(string) bool {
 	if harness != Claude || len(roots) == 0 {
 		return func(string) bool { return false }
@@ -445,12 +453,7 @@ func projectFirst(harness, home string, roots []string) func(string) bool {
 			return false
 		}
 		dir, _, _ := strings.Cut(rel, string(filepath.Separator))
-		for _, n := range names {
-			if dir == n || strings.HasPrefix(dir, n+"-") {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(names, dir)
 	}
 }
 
@@ -479,13 +482,20 @@ func spanFile(p string, since time.Time) (file, bool, error) {
 	return file{path: p, mtime: info.ModTime()}, true, nil
 }
 
-// mappedPath reports whether a file name carries a mapped session id, so
-// mapped workers' files are read first. A miss only changes the order.
+// mappedPath reports whether a file name, or for a Claude subagent file the
+// name of its session's directory, carries a mapped session id, so mapped
+// workers' files and their subagents' are read first. A miss only changes
+// the order.
 func mappedPath(path string, mapping Mapping) bool {
-	base := filepath.Base(path)
+	names := []string{filepath.Base(path)}
+	if dir := filepath.Dir(path); filepath.Base(dir) == "subagents" {
+		names = append(names, filepath.Base(filepath.Dir(dir)))
+	}
 	for ref := range mapping {
-		if ref.ID != "" && strings.Contains(base, ref.ID) {
-			return true
+		for _, n := range names {
+			if ref.ID != "" && strings.Contains(n, ref.ID) {
+				return true
+			}
 		}
 	}
 	return false

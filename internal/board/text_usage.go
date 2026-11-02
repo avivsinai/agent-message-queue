@@ -25,7 +25,7 @@ func writeUsage(b *strings.Builder, m Model) {
 	b.WriteString("limits:\n")
 	for _, a := range u.Accounts {
 		fmt.Fprintf(b, "  %s: %s\n", accountName(a.Key), clean(limitsLine(a.Limits, now)))
-		other := fmt.Sprintf("other sessions in this project (%d): %s", a.OtherSessions, spendLine(a.Other, now, a.Harness == usage.Pi))
+		other := fmt.Sprintf("other sessions in this project (%s): %s", otherCount(a), spendLine(a.Other, now, a.Harness == usage.Pi))
 		if a.Detail != "" {
 			other += " · " + a.Detail
 		}
@@ -33,9 +33,20 @@ func writeUsage(b *strings.Builder, m Model) {
 	}
 }
 
+// otherCount is how many other sessions were counted: a lower bound while
+// files of the account went unread, never a plain zero.
+func otherCount(a AccountUsage) string {
+	n := strconv.Itoa(a.OtherSessions)
+	if a.Partial {
+		return "at least " + n
+	}
+	return n
+}
+
 // usageLine is a roster chip's spend line, or "" for a worker with no
 // mapped harness session. A reached account limit is named on the chip with
-// its reset time; the account's other limits never are.
+// its reset time, a past one with its age; the account's other limits never
+// are.
 func usageLine(a RosterAgent, now time.Time) string {
 	var parts []string
 	if len(a.Usage) > 0 {
@@ -43,12 +54,27 @@ func usageLine(a RosterAgent, now time.Time) string {
 	}
 	if l := a.LimitReached; l != nil {
 		p := "limit reached"
-		if l.ResetsAt != nil {
+		switch {
+		case l.Past:
+			p = pastLimit(*l, now)
+		case l.ResetsAt != nil:
 			p += " until " + l.ResetsAt.Local().Format("15:04")
 		}
 		parts = append(parts, p)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// pastLimit names a reached limit the account spent tokens after.
+func pastLimit(l usage.Limit, now time.Time) string {
+	p := "limit reported"
+	if l.Name != "" {
+		p = limitName(l.Name) + " " + p
+	}
+	if !l.AsOf.IsZero() {
+		p += " " + age(now.Sub(l.AsOf)) + " ago"
+	}
+	return p + "; the account was active since then"
 }
 
 // spendLine prints each window's fresh and cached tokens. withCost names
@@ -120,6 +146,8 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 			parts = append(parts, p)
 		case l.Kind == "reached" && l.Source == appServer:
 			parts = append(parts, bucket+strings.ReplaceAll(l.Name, "_", " "))
+		case l.Kind == "reached" && l.Past:
+			parts = append(parts, pastLimit(l, now))
 		case l.Kind == "reached":
 			p := limitName(l.Name) + " limit reached"
 			if l.ResetsAt != nil {

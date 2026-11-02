@@ -100,6 +100,12 @@ func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
 	if c := cards["forge:github.com/octo-org/demo#20"]; c.Column != board.ColumnUnclaimed {
 		t.Errorf("issue #20 = %s", c.Column)
 	}
+	if c := pr("11"); c.Summary != "Adds a --port flag to the relay so it can listen off 8080." {
+		t.Errorf("#11 summary = %q", c.Summary)
+	}
+	if c := cards["forge:github.com/octo-org/demo#20"]; c.Summary != "Deferred beads never reach the board." {
+		t.Errorf("issue #20 summary = %q", c.Summary)
+	}
 
 	// Pro finding 10: approved with passing checks is not "ready to merge"
 	// while the PR is a draft or conflicting; the facts are evidence.

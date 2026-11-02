@@ -343,7 +343,7 @@ func GitHubQueryArgv(repos []string) []string {
     issues(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
       totalCount
       pageInfo { hasNextPage }
-      nodes { number title url updatedAt assignees(first: 5) { nodes { login } } }
+      nodes { number title body url updatedAt assignees(first: 5) { nodes { login } } }
     }
     merged: pullRequests(states: MERGED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage }
@@ -351,7 +351,7 @@ func GitHubQueryArgv(repos []string) []string {
     }
     closed: issues(states: CLOSED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage }
-      nodes { number title url updatedAt closedAt stateReason }
+      nodes { number title body url updatedAt closedAt stateReason }
     }
   }`, i, i, i, githubPRFields)
 		argv = append(argv, "-f", fmt.Sprintf("owner%d=%s", i, owner), "-f", fmt.Sprintf("name%d=%s", i, name))
@@ -501,6 +501,7 @@ type ghPR struct {
 type ghIssue struct {
 	Number    int    `json:"number"`
 	Title     string `json:"title"`
+	Body      string `json:"body"`
 	URL       string `json:"url"`
 	UpdatedAt string `json:"updatedAt"`
 	ClosedAt  string `json:"closedAt"`
@@ -820,6 +821,9 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 	}
 	fact("reviewDecision", decision)
 	fact("mergeable", pr.Mergeable)
+	if !created.IsZero() {
+		it.Evidence = append(it.Evidence, board.Evidence{Field: "createdAt", Value: pr.CreatedAt, At: created})
+	}
 	fact("checks", checks)
 	if pr.IsDraft {
 		fact("isDraft", "true")
@@ -895,6 +899,9 @@ func (m githubMapper) pr(slug string, pr ghPR) (board.Item, bool) {
 	if len(body) > maxBodyBytes {
 		body = body[:maxBodyBytes]
 	}
+	if sentence := board.Sentence(body); sentence != "" {
+		it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldSummary, Text: sentence, At: updated})
+	}
 	for _, src := range []struct{ text, basis string }{{pr.Title, "title mention"}, {body, "body mention"}, {pr.HeadRefName, "branch name"}} {
 		for _, tok := range board.BeadTokens(src.text) {
 			it.Mentions = append(it.Mentions, board.Mention{Token: tok, Basis: src.basis})
@@ -931,6 +938,14 @@ func (m githubMapper) issue(slug string, is ghIssue) (board.Item, bool) {
 	} else {
 		it.State = board.StateOpenUnowned
 		it.Reason = board.Reason{Field: "assignees", Text: "issue open, no assignee"}
+	}
+	if body := is.Body; body != "" {
+		if len(body) > maxBodyBytes {
+			body = body[:maxBodyBytes]
+		}
+		if sentence := board.Sentence(body); sentence != "" {
+			it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldSummary, Text: sentence, At: updated})
+		}
 	}
 	for _, tok := range board.BeadTokens(is.Title) {
 		it.Mentions = append(it.Mentions, board.Mention{Token: tok, Basis: "title mention"})

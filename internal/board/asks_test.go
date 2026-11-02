@@ -73,11 +73,11 @@ func TestRequestThatNamesABeadShowsOnItsTask(t *testing.T) {
 // Installed amq-board 0.117.0 on a real machine, 2026-10-29: the default
 // text view was 7,930 lines (2.77 MB) and the HTML 15.4 MB (Requests view
 // 8.3 MB) because every unresolved ask carried its full body. Default views
-// hold no body and stay the same size as history grows; --json keeps every
-// body.
+// hold at most a body's first sentence and stay the same size as history
+// grows; --json keeps every body.
 func TestDefaultViewsStayBoundedWithoutMessageBodies(t *testing.T) {
 	const sentinel = "full-body-sentinel"
-	body := strings.Repeat(sentinel+" ", 40)
+	body := "Please review the parser. " + strings.Repeat(sentinel+" ", 40)
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	small := askSnapshot(40, body).Project(DefaultConfig(), now, "test")
 	large := askSnapshot(80, body).Project(DefaultConfig(), now, "test")

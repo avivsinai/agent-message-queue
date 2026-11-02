@@ -13,7 +13,7 @@ import (
 type pageRequests struct {
 	Headline, Partition     string
 	Notes                   []string
-	Coverage, CoverageTitle string
+	Coverage                []pageGap
 	RecentCount, OlderCount int
 	Groups                  []pageRequestGroup
 	Undated                 []pageRequest
@@ -41,6 +41,7 @@ type pageRequestGroup struct {
 type pageRequest struct {
 	Full                                      bool
 	ID, Key, MessageID, Kind, Title, From, To string
+	Prefix, Summary                           string
 	Age, AgeAt                                string
 	Facts                                     []requestFact
 	Opinions                                  []pageOpinion
@@ -64,8 +65,11 @@ func buildRequestsPage(m Model, now time.Time) pageRequests {
 	}
 	p.Partition += "."
 	if !v.Coverage.Complete {
-		p.CoverageTitle = "Incomplete coverage (amq-history)"
-		p.Coverage = "History coverage incomplete. Requests may be missing, and a missing reply cannot be told apart from one that was not read."
+		gap := "requests may be missing, and a missing reply cannot be told apart from one that was not read"
+		if v.Coverage.Detail != "" {
+			gap = clean(v.Coverage.Detail) + "; " + gap
+		}
+		p.Coverage = []pageGap{{Name: "amq-history", Gap: gap}}
 	}
 	named := askTasks(m.Columns)
 	for i, g := range recentGroups(v) {
@@ -148,10 +152,11 @@ func requestRow(r Request, bay string, named map[string][]Card, now time.Time) p
 // of whom, and when, with the thread command. Bodies stay in --json.
 func olderRow(r Request, now time.Time) pageRequest {
 	msg := r.Message
-	row := pageRequest{Key: clean(msg.Key), MessageID: clean(msg.ID), Kind: clean(strings.ReplaceAll(msg.Kind, "_", " ")), Title: cleanTitle(msg.Subject), From: clean(msg.From), Age: "time unknown"}
+	row := pageRequest{Key: clean(msg.Key), MessageID: clean(msg.ID), Kind: clean(strings.ReplaceAll(msg.Kind, "_", " ")), Title: cleanTitle(msg.Subject), From: clean(msg.From), Age: "time unknown", Summary: clean(r.Summary)}
 	if row.Title == "" {
 		row.Title = "(no subject)"
 	}
+	row.Prefix, row.Title = commitPrefix(row.Title)
 	if r.Sender != nil {
 		row.From = clean(participantLabel(*r.Sender))
 	}

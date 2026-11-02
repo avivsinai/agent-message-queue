@@ -44,16 +44,15 @@
 <main id="content">
 {{with .Flow}}
 <section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
-  <div class="view-heading"><div><h1 id="heading-flow">Flow</h1><p class="view-description">{{.Legend}}</p></div>
-  <label class="search">Search Flow<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Title, person, or reference"></label></div>
-  <div class="attention" aria-label="Needs you">
-    <p class="attention-head"><span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span></p>
-    <ul class="attention-list">{{range .NeedsYou}}<li><a href="#{{.Anchor}}" data-open="{{.Anchor}}">{{.Title}}</a> <span class="muted">{{.Reason}}</span></li>{{else}}<li>No card waits on you.</li>{{end}}{{range .Gates}}<li class="muted">{{.}}</li>{{end}}</ul>
-    <p class="attention-side">{{if .Requests}}<a href="#view-requests">{{.Requests}}</a>{{end}}</p>
-  </div>
-  <div class="flow-notes">
-  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope, read errors, and observation times.</p></details>{{end}}
-  <details class="stage-rules"><summary>How stages are decided</summary><div class="detail-content">
+  <div class="view-heading"><h1 id="heading-flow">Flow</h1></div>
+  <section class="attention" aria-labelledby="needs-you">
+    <h2 class="attention-head" id="needs-you"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span> <span class="stage-count">{{len .NeedsYou}}</span></h2>
+    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}" data-open="{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else}}<p class="attention-empty">No card waits on you.</p>{{end}}
+    {{if or .Gates .Requests}}<div class="attention-foot">{{if .Gates}}<p class="gates"><span class="gates-head">Unread for you</span>{{range .Gates}} <span>{{.}}</span>{{end}}</p>{{end}}{{if .Requests}}<a class="attention-requests" href="#view-requests">{{.Requests}}</a>{{end}}</div>{{end}}
+  </section>
+  {{template "coverage" .Coverage}}
+  <div class="flow-tools">
+  <details class="stage-rules"><summary><span class="flow-legend">{{.Legend}}</span> <span class="rules-link">How stages are decided</span></summary><div class="detail-content">
     <p>Each card is in one stage. The first rule that matches decides it.</p>
     <ol>
       <li><strong>In review</strong>: a linked pull request is open and is not a draft.</li>
@@ -65,10 +64,11 @@
     </ol>
     <p>A pull request joins a task card only when the task records it as the same work. A pull request that only names a bead stays its own card. Needs you is a flag, not a stage: it says who acts next. Older finished work is in <a href="#view-history">History</a>.</p>
   </div></details>
+  <label class="search search-inline"><span>Search Flow</span><input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Title, person, or reference"></label>
   </div>
   <div class="flow-board">{{range .Stages}}
-    <section class="stage stage-{{.ID}}" aria-labelledby="stage-{{.ID}}">
-      <h2 class="stage-head" id="stage-{{.ID}}"><span class="stage-mark" aria-hidden="true"></span>{{.Title}} <span class="stage-count">{{.Count}}</span></h2>
+    <section class="stage stage-{{.ID}}{{if eq .Count 0}} is-empty{{end}}" aria-labelledby="stage-{{.ID}}">
+      <h2 class="stage-head" id="stage-{{.ID}}"><span class="stage-mark" aria-hidden="true"></span><span class="stage-word">{{.Title}}</span> <span class="stage-count">{{.Count}}</span></h2>
       {{if .Cards}}<ul class="stage-cards">{{range .Cards}}{{template "card" (stripArgs "flow" .)}}{{end}}</ul>{{else}}<p class="stage-empty">{{.Empty}}</p>{{end}}
       {{if .More}}<a class="stage-more" href="#view-history">{{.More}}</a>{{end}}
     </section>{{end}}
@@ -81,7 +81,7 @@
   <div class="view-heading"><div><h1 id="heading-floor">Floor</h1><p class="view-description">{{.Summary}}</p>{{if .Counts}}<p class="floor-counts">{{range .Counts}}<span class="station-word station-{{.State}}"><span class="station-glyph" aria-hidden="true">{{.Glyph}}</span> {{.Text}}</span>{{end}}</p>{{end}}</div>
   <label class="search">Search Floor<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Handle, session, or work"></label></div>
   <div class="flow-notes">
-  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the read error and observation time.</p></details>{{end}}
+  {{template "coverage" .Coverage}}
   <details class="stage-rules"><summary>How states are decided</summary><div class="detail-content">
     <p>The board reads mail, presence, wake, and usage. It cannot see processes, so it never says a worker runs or has stopped. The first rule that matches decides a seat's state.</p>
     <ol class="state-rules">
@@ -137,7 +137,7 @@
 <section class="view" id="view-{{.ID}}" data-view="{{.ID}}" aria-labelledby="heading-{{.ID}}">
   <div class="view-heading"><div><h1 id="heading-{{.ID}}">{{.Title}}</h1><p class="view-description">{{.Description}}</p></div>
   <label class="search">Search {{.Title}}<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Title, person, or reference"></label></div>
-  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope, read errors, and observation times. A fresh check does not make old work current.</p></details>{{end}}
+  {{template "coverage" .Coverage}}
   <div class="work-list">
     {{$view := .ID}}{{range $i, $s := .Strips}}{{template "strip" (stripArgs $view $s)}}{{else}}
     <div class="empty"><h2>{{.Empty}}</h2>{{if eq .ID "next"}}<p><a href="#view-backlog">Explore backlog</a> or <a href="#view-requests">check requests</a>.</p>{{end}}</div>
@@ -151,7 +151,7 @@
 <section class="view view-requests" id="view-requests" data-view="requests" aria-labelledby="heading-requests">
   <div class="view-heading"><div><h1 id="heading-requests">Requests</h1><p class="view-description">Questions, review requests, and todos from AMQ history, outside task and work counts. Observations come from the recorded messages. An opinion is one classifier's judgment, shown with its name and quote; it never changes the observations.</p></div>
   <label class="search">Search Requests<input type="search" class="view-search" autocomplete="off" spellcheck="false" placeholder="Subject, person, or message"></label></div>
-  {{if .Coverage}}<details class="coverage"><summary>{{.CoverageTitle}}</summary><p>{{.Coverage}}</p><p>Read <a href="#view-sources">Sources</a> for the missing scope and observation time.</p></details>{{end}}
+  {{template "coverage" .Coverage}}
   <div class="request-summary">
     <p class="request-headline">{{.Headline}}</p>
     {{range .Notes}}<p class="request-note">{{.}}</p>{{end}}
@@ -232,8 +232,9 @@
 {{define "strip"}}
 <article class="strip" data-item-id="{{.S.Key}}" aria-labelledby="{{.ID}}">
   <div class="item-main">
-    <h2 class="title" id="{{.ID}}">{{.S.Title}}</h2>
-    <p class="item-reason">{{if .S.NextReason}}{{.S.NextReason}}{{else}}{{.S.Reason}}{{end}}</p>
+    <h2 class="title" id="{{.ID}}">{{template "title" .S}}</h2>
+    {{if .S.Summary}}<p class="item-summary">{{.S.Summary}}</p>{{end}}
+    {{if .S.Why}}<p class="item-reason{{if .S.Summary}} is-secondary{{end}}">{{.S.Why}}</p>{{end}}
     <div class="item-meta"><span class="item-state">{{.S.State}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}<span class="c-owner">{{.S.Owner}}</span>{{if .S.AskCount}}<span>{{.S.AskCount}}</span>{{end}}<span>{{.S.AgeLabel}} {{if .S.SinceAt}}<time datetime="{{.S.SinceAt}}">{{.S.Since}} ago</time>{{else}}unknown{{end}}</span></div>
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
   </div>
@@ -257,15 +258,15 @@
 <li class="flow-card{{if .S.NeedsYou}} is-flagged{{end}}" data-item-id="{{.S.Key}}">
 <details class="card-sheet" id="{{.ID}}">
   <summary>
-    {{if .S.NeedsYou}}<span class="card-flags"><span class="flag flag-you"><span aria-hidden="true">◆</span> Needs you</span></span>{{end}}
-    <span class="card-title title">{{.S.Title}}</span>
-    <span class="card-meta"><span class="c-owner">{{.S.Owner}}</span><span class="card-age">{{.S.StageAge}}</span>{{if .S.PR}}<span class="pr">{{.S.PR}} <span class="ci ci-{{.S.CI}}">{{.S.CIText}}</span></span>{{end}}{{if .S.NamesBead}}<span>{{.S.NamesBead}}</span>{{end}}</span>
+    <span class="card-title title">{{template "title" .S}}</span>
+    {{if .S.Summary}}<span class="card-summary">{{.S.Summary}}</span>{{end}}
+    <span class="card-meta"><span class="c-owner" title="{{.S.Owner}}">{{template "owners" .S.Owners}}</span><span class="card-age">{{.S.CardAge}}</span>{{if .S.NeedsYou}}<span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span>{{end}}{{if .S.PR}}<span class="pr">{{.S.PR}} <span class="ci ci-{{.S.CI}}">{{.S.CIText}}</span></span>{{end}}{{if .S.NamesBead}}<span>{{.S.NamesBead}}</span>{{end}}</span>
     <span class="c-ref sr-only">{{.S.Kind}} {{.S.ID}}</span>
   </summary>
   <div class="sheet" role="group" aria-labelledby="{{.ID}}-title">
-    <div class="sheet-head"><h2 id="{{.ID}}-title">{{.S.Title}}</h2><button type="button" class="sheet-close">Close</button></div>
+    <div class="sheet-head"><h2 id="{{.ID}}-title">{{template "title" .S}}</h2><button type="button" class="sheet-close">Close</button></div>
     <p class="sheet-stage stage-{{.S.StageID}}"><span class="stage-mark" aria-hidden="true"></span><strong>{{.S.Stage}}</strong> <span>{{if eq .S.StageAge "age unknown"}}time in stage unknown{{else}}{{.S.StageAge}} in stage{{end}}</span></p>
-    <div class="item-meta"><span class="c-owner">{{.S.Owner}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}{{if .S.PR}}<span>{{.S.PR}} {{.S.CIText}}</span>{{end}}{{if .S.NeedsYou}}<span>◆ Needs you</span>{{end}}</div>
+    <div class="item-meta"><span class="c-owner">{{.S.Owner}}</span>{{if .S.Priority}}<span>{{.S.Priority}}</span>{{end}}{{if .S.PR}}<span>{{.S.PR}} {{.S.CIText}}</span>{{end}}{{if .S.Opened}}<span>{{.S.Opened}}</span>{{end}}{{if .S.NeedsYou}}<span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span>{{end}}</div>
     {{with .Shown}}{{range .}}<button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy {{.Label}}</button>{{end}}{{end}}
     {{template "detail" .}}
   </div>
@@ -275,8 +276,9 @@
 {{define "request"}}
 <article class="strip request{{if not .Full}} request-compact{{end}}" aria-labelledby="{{.ID}}">
   <div class="item-main">
-    <h3 class="title" id="{{.ID}}">{{.Title}}</h3>
-    <ul class="request-facts" aria-label="Observations">{{range .Facts}}<li class="observed-{{.State}}"><span class="observed-glyph" aria-hidden="true">{{if eq .State "unreplied"}}○{{else if eq .State "replied"}}●{{else}}?{{end}}</span>{{.Text}}</li>{{end}}</ul>
+    <h3 class="title" id="{{.ID}}">{{template "title" .}}</h3>
+    {{if .Summary}}<p class="item-summary">{{.Summary}}</p>{{end}}
+    <ul class="request-facts" aria-label="Observations">{{range .Facts}}<li class="observed-{{.State}}"><span class="observed-glyph" aria-hidden="true"><span class="mark mark-{{.State}}"></span></span>{{.Text}}</li>{{end}}</ul>
     {{range .Opinions}}<div class="opinion" role="group" aria-label="Opinion of {{.Classifier}}"><p class="opinion-head"><span class="opinion-value">{{.Value}}</span> · {{.Classifier}}</p>{{if .Quote}}<blockquote>{{.Quote}}</blockquote>{{if .Source}}<p class="opinion-source">Quoted {{.Source}}</p>{{end}}{{end}}</div>{{end}}
     <div class="item-meta"><span class="item-state">{{.Kind}}</span><span class="c-owner">from {{.From}} to {{.To}}</span><span>Sent {{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span></div>
     <span class="c-ref sr-only">{{.MessageID}}</span>
@@ -294,12 +296,15 @@
 {{define "older"}}
 <article class="strip request-compact request-older">
   <div class="item-main">
-    <h2 class="title">{{.Title}}</h2>
+    <h2 class="title">{{template "title" .}}</h2>
     <div class="item-meta"><span class="item-state">{{.Kind}}</span><span class="c-owner">from {{.From}} to {{.To}}</span><span>Sent {{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span></div>
     <span class="c-ref sr-only">{{.MessageID}}</span>
   </div>
 </article>
 {{end}}
+{{define "title"}}{{if .Prefix}}<span class="cc">{{.Prefix}}</span> {{end}}{{.Title}}{{end}}
+{{define "owners"}}{{range $i, $o := .}}{{if $i}}, {{end}}{{if $o.Unmapped}}<span class="sr-only">not mapped: </span>{{end}}{{$o.Name}}{{end}}{{end}}
+{{define "coverage"}}{{if .}}<p class="coverage-line"><span class="coverage-word">Incomplete coverage:</span> <span class="gaps" title="{{range $i, $g := .}}{{if $i}} · {{end}}{{$g.Name}}{{if $g.Status}} {{$g.Status}}{{end}}{{if $g.Gap}}: {{$g.Gap}}{{end}}{{end}}">{{range $i, $g := .}}{{if $i}} · {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span>{{if $g.Status}} {{$g.Status}}{{end}}{{if $g.Gap}}: {{$g.Gap}}{{end}}</span>{{end}}</span> <span class="gaps-count">{{len .}} {{if eq (len .) 1}}source{{else}}sources{{end}}.</span> <a href="#view-sources">See Sources</a></p>{{end}}{{end}}
 {{define "cmd"}}
 <div class="cmd"><label class="cmd-label">{{.Label}}<textarea readonly rows="2" spellcheck="false">{{.Command}}</textarea></label><code class="sr-only">{{.Command}}</code><button type="button" class="copy" data-command="{{.Command}}" aria-label="Copy: {{.Label}}">Copy command</button></div>
 {{end}}
