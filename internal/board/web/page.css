@@ -110,6 +110,7 @@ summary:hover { text-decoration: underline; text-underline-offset: .2em; }
 .detail-content { border-radius: .5rem; padding: 1rem; background: var(--subtle); overflow-wrap: anywhere; }
 .detail-content > * + * { margin-top: 1rem; }
 .detail-content p { max-width: 66ch; }
+.prose { white-space: pre-line; }
 dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 3fr); gap: .5rem 1rem; font-size: .875rem; }
 dt { color: var(--muted); }
 dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }

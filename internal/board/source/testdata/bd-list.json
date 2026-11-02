@@ -2,6 +2,8 @@
   {
     "id": "demo-b1",
     "title": "Decide the cache format",
+    "description": "User outcome: the owner picks one cache format.",
+    "notes": "2026-10-20 blocked: waits on the owner's choice.",
     "status": "blocked",
     "priority": 2,
     "issue_type": "task",

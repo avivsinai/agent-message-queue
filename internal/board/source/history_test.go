@@ -58,7 +58,7 @@ func TestBeadsBindsReportedDatabaseAcrossWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ := json.Marshal(map[string]string{"database_path": backend})
-	runner := captureRunner{"bd --readonly --sandbox info --json": info, "bd --readonly --sandbox list --json --brief --all --limit 0": []byte(`[{"id":"demo-a1b","title":"Deliver outcome","status":"open"}]`)}
+	runner := captureRunner{"bd --readonly --sandbox info --json": info, "bd --readonly --sandbox list --json --all --limit 0": []byte(`[{"id":"demo-a1b","title":"Deliver outcome","status":"open"}]`)}
 	source := Beads{IncludeClosed: true}
 	for _, dir := range []string{"/main", "/worktree"} {
 		result := source.Read(context.Background(), board.Env{Dir: dir, Now: time.Now, Run: runner})

@@ -1,6 +1,7 @@
 package source_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -68,10 +69,10 @@ func outputs(threadOpen string) map[string]string {
 		"amq env --json":          "env.json",
 		"amq session list --json": "session-list.json",
 		"amq who --json":          "who.json",
-		"amq doctor --ops --json --root /fixture/.agent-mail/s1":                                           "doctor-s1.json",
-		"amq doctor --ops --json --root /fixture/.agent-mail/s2":                                           "doctor-s2.json",
-		"amq thread open --all-sessions --json":                                                            threadOpen,
-		"bd --readonly --sandbox list --json --brief --status open,in_progress,blocked,deferred --limit 0": "bd-list.json",
+		"amq doctor --ops --json --root /fixture/.agent-mail/s1":                                   "doctor-s1.json",
+		"amq doctor --ops --json --root /fixture/.agent-mail/s2":                                   "doctor-s2.json",
+		"amq thread open --all-sessions --json":                                                    threadOpen,
+		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list.json",
 	}
 }
 
@@ -217,6 +218,19 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 	}
 	if got := liveness(m, "s2", "alpha"); got != "quiet" {
 		t.Errorf("s2/alpha = %q", got)
+	}
+}
+
+func TestBoardPageShowsBeadDescriptionAndNotes(t *testing.T) {
+	m := runBoard(t, fakeRunner{t: t, outputs: outputs("thread-open.json")}, true)
+	var page bytes.Buffer
+	if err := board.WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"User outcome: the owner picks one cache format.", "<summary>Notes</summary>", "waits on the owner&#39;s choice."} {
+		if !strings.Contains(page.String(), want) {
+			t.Errorf("page lacks %q", want)
+		}
 	}
 }
 

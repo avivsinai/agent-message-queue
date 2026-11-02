@@ -107,6 +107,12 @@ type Relation struct {
 	Inferred bool         `json:"inferred"`
 }
 
+// FieldDescription and FieldNotes carry a record's own prose in Evidence.Text.
+const (
+	FieldDescription = "description"
+	FieldNotes       = "notes"
+)
+
 // Evidence is one structured fact behind an item.
 type Evidence struct {
 	Source string    `json:"source"`

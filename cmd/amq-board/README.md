@@ -234,7 +234,8 @@ Sync reads AMQ through read-only CLI commands. Historical metadata comes from
 `amq thread list --all-sessions --json`; full bodies come from the existing
 `amq thread --id THREAD --agents HANDLES --include-body --json --root ROOT`.
 Missing bodies, conflicting message content, and read bounds are coverage gaps.
-Beads comes from `bd --readonly --sandbox list --json --brief --all --limit 0`.
+Beads comes from `bd --readonly --sandbox list --json --all --limit 0`; an
+open bead's description and notes show in its details.
 Its namespace is the canonical `database_path` returned by `bd --readonly
 --sandbox info --json`, checked before and after acquisition.
 Closed task identities remain known. The board never changes source records.
