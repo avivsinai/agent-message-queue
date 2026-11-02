@@ -194,6 +194,7 @@ type pageStrip struct {
 	Related                          []string
 	AskCount, Asks                   string
 	AskAction                        *Action
+	Description, Notes               string
 	Evidence                         []pageEvidence
 	Actions                          []Action
 	HasDetail                        bool
@@ -476,6 +477,19 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	var all []dated
 	for _, it := range c.Items {
 		for _, e := range it.Evidence {
+			// The card's first item is its authority; its prose names the card.
+			switch e.Field {
+			case FieldDescription:
+				if s.Description == "" {
+					s.Description = quoteText(e.Text)
+				}
+				continue
+			case FieldNotes:
+				if s.Notes == "" {
+					s.Notes = quoteText(e.Text)
+				}
+				continue
+			}
 			pe := pageEvidence{Source: clean(it.Source), Field: clean(e.Field), Value: clean(e.Value), Text: clean(e.Text), URL: httpsOnly(e.URL)}
 			if !e.At.IsZero() {
 				pe.Age = age(now.Sub(e.At)) + " ago"
@@ -500,7 +514,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.Evidence = ev
 	s.Actions = c.Actions
 
-	s.HasDetail = s.HasDetail || len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
+	s.HasDetail = s.HasDetail || s.Description != "" || s.Notes != "" || len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
 }
 

@@ -32,7 +32,7 @@ func githubOutputs() map[string]string {
 		"git remote get-url origin":        "origin-url.txt",
 		"gh config get user -h github.com": "gh-user.txt",
 		"gh api graphql":                   "github-graphql.json",
-		"bd --readonly --sandbox list --json --brief --status open,in_progress,blocked,deferred --limit 0": "bd-list-github.json",
+		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list-github.json",
 		// Branch names such as feat/pr-11 are candidate bead ids until bd
 		// says they are not.
 		"bd --readonly --sandbox list --all --id pr-11,pr-12,pr-13,pr-14 --json --brief --limit 0": "bd-lookup-empty.json",

@@ -26,10 +26,10 @@ type Beads struct {
 	GitHubRepo string
 }
 
-// beadsListArgv reads every non-closed bead. Deferred beads are read so a
-// deferred blocker still blocks; they are not shown. --limit 0 because bd
-// otherwise stops at 50 rows without saying so.
-var beadsListArgv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--brief", "--status", "open,in_progress,blocked,deferred", "--limit", "0"}
+// beadsListArgv reads every non-closed bead with its description and notes.
+// Deferred beads are read so a deferred blocker still blocks; they are not
+// shown. --limit 0 because bd otherwise stops at 50 rows without saying so.
+var beadsListArgv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--status", "open,in_progress,blocked,deferred", "--limit", "0"}
 
 func (Beads) Name() string { return "beads" }
 
@@ -52,7 +52,7 @@ func (b Beads) Read(ctx context.Context, env board.Env) board.Result {
 		if err != nil {
 			return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
 		}
-		argv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--brief", "--all", "--limit", "0"}
+		argv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--all", "--limit", "0"}
 	}
 	out, err := env.Run.Run(ctx, env.Dir, argv)
 	result := b.Build(out, err, env.Now())
@@ -125,6 +125,8 @@ type beadRow struct {
 	StartedAt    string `json:"started_at"`
 	ClosedAt     string `json:"closed_at"`
 	ExternalRef  string `json:"external_ref"`
+	Description  string `json:"description"`
+	Notes        string `json:"notes"`
 	Dependencies []struct {
 		IssueID     string `json:"issue_id"`
 		DependsOnID string `json:"depends_on_id"`
@@ -203,6 +205,16 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 	}
 	if r.IssueType != "" {
 		it.Evidence = append(it.Evidence, board.Evidence{Field: "issue_type", Value: r.IssueType, At: updated})
+	}
+	// Only open work carries its prose, which keeps a project's closed
+	// history out of every snapshot.
+	if r.Status != "closed" {
+		if r.Description != "" {
+			it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldDescription, Text: r.Description, At: updated})
+		}
+		if r.Notes != "" {
+			it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldNotes, Text: r.Notes, At: updated})
+		}
 	}
 
 	var blockers []string
