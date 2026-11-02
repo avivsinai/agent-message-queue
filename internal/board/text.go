@@ -46,6 +46,9 @@ func WriteText(w io.Writer, m Model) error {
 		case s.Partial && s.Coverage.Detail != "":
 			fmt.Fprintf(&b, "  %s not assessed: %s\n", s.Name, clean(s.Coverage.Detail))
 		}
+		if s.Coverage.Scope != "" {
+			fmt.Fprintf(&b, "  %s reads: %s\n", s.Name, clean(s.Coverage.Scope))
+		}
 	}
 	writeUsage(&b, m)
 

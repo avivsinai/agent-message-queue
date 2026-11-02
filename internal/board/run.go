@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -104,8 +105,14 @@ func readIsolated(ctx context.Context, env Env, s Source) (res Result) {
 }
 
 // mentionCandidates lists candidate bead tokens that are not already known,
-// sorted so the cap is deterministic.
+// sorted so the cap is deterministic. A bead id is its project prefix, a
+// dash, and a suffix without dashes, so a token is a candidate only when its
+// prefix is one a known bead carries; other hyphenated words are not looked up.
 func mentionCandidates(results []NamedResult, known map[string]string) []string {
+	prefixes := map[string]bool{}
+	for id := range known {
+		prefixes[beadPrefix(id)] = true
+	}
 	seen := map[string]bool{}
 	var out []string
 	for _, nr := range results {
@@ -116,7 +123,7 @@ func mentionCandidates(results []NamedResult, known map[string]string) []string 
 					continue
 				}
 				for _, c := range cands {
-					if !seen[c] {
+					if prefixes[beadPrefix(c)] && !seen[c] {
 						seen[c] = true
 						out = append(out, c)
 					}
@@ -126,6 +133,13 @@ func mentionCandidates(results []NamedResult, known map[string]string) []string 
 	}
 	sort.Strings(out)
 	return out
+}
+
+func beadPrefix(id string) string {
+	if i := strings.LastIndexByte(id, '-'); i > 0 {
+		return id[:i]
+	}
+	return ""
 }
 
 func anyKnown(ids []string, known map[string]string) bool {

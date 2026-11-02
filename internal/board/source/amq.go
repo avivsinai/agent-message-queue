@@ -425,8 +425,7 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 	var cov board.Coverage
 	var gaps []string
 	if t, err := time.Parse(time.RFC3339Nano, doc.Coverage.AssessedSince); err == nil {
-		cov.Window = "obligations since " + t.UTC().Format("2006-01-02")
-		gaps = append(gaps, "obligations before "+t.UTC().Format("2006-01-02"))
+		cov.Scope = "obligations since " + t.UTC().Format("2006-01-02")
 	}
 	cov.Skipped = len(doc.Coverage.Skipped)
 	cov.Unresolved = len(doc.Coverage.UnresolvedLineage) + len(doc.Coverage.Ambiguous)

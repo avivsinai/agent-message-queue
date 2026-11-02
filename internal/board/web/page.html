@@ -201,7 +201,7 @@
   <div class="view-heading"><div><h1 id="heading-sources">Sources</h1><p class="view-description">What this snapshot covers, and what it could not assess.</p></div></div>
   <div class="source-list">{{range .Sources}}
   <section class="source"><h2>{{.Name}}</h2><p class="source-status">{{if .Partial}}Incomplete coverage{{else}}{{.Status}}{{end}}{{if .Age}} <span>Checked {{.Age}} ago</span>{{end}}</p>
-  {{if .Gap}}<p>{{.Gap}}</p>{{end}}{{if .Detail}}<details><summary>Read details</summary><p>{{.Detail}}</p></details>{{end}}</section>
+  {{if .Scope}}<p>Reads {{.Scope}}</p>{{end}}{{if .Gap}}<p>{{.Gap}}</p>{{end}}{{if .Detail}}<details><summary>Read details</summary><p>{{.Detail}}</p></details>{{end}}</section>
   {{end}}</div>
   {{if .Waiting.Gates}}<details class="context-block"><summary>Unread messages addressed to the owner</summary><p>Unread counts are mailbox facts, not task counts.</p><ul>{{range .Waiting.Gates}}<li>{{.}}</li>{{end}}</ul></details>{{end}}
   <details class="context-block"><summary>Snapshot details</summary><dl><dt>Generated</dt><dd><time datetime="{{.Generated}}">{{.Generated}}</time></dd><dt>Scope</dt><dd>{{.Dir}}</dd><dt>Sessions</dt><dd>{{.Sessions}}</dd><dt>Version</dt><dd>{{.Version}}</dd></dl>{{if .Regenerate}}<p>Regenerate in the terminal:</p><code>{{.Regenerate}}</code>{{end}}</details>

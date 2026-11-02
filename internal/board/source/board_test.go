@@ -260,7 +260,7 @@ func TestBoardEmptyWaitingNamesCoverageGap(t *testing.T) {
 	if len(waiting.Cards) != 0 {
 		t.Fatalf("waiting cards = %d", len(waiting.Cards))
 	}
-	for _, want := range []string{"Not assessed", "obligations before 2026-10-08", "1 ambiguous replies"} {
+	for _, want := range []string{"Read: amq obligations since 2026-10-08", "Not assessed", "1 ambiguous replies"} {
 		if !strings.Contains(waiting.Empty, want) {
 			t.Errorf("empty state %q lacks %q", waiting.Empty, want)
 		}
