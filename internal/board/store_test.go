@@ -1144,7 +1144,10 @@ func hasRequest(m Model, key string) bool {
 
 func TestRequestRowCarriesFirstSentenceAfterPublish(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	identity, err := fsq.StableTreeIdentity(base)
 	if err != nil {
 		t.Fatal(err)
