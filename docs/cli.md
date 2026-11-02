@@ -615,7 +615,7 @@ Options:
   -json
         Emit JSON output
   -kind string
-        Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo (default: same as original, review_response for review_request, answer for question)
+        Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo (default: same as original; review_response for review_request, answer for question, status for todo)
   -labels string
         Comma-separated labels/tags
   -me string

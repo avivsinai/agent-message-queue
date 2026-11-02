@@ -842,9 +842,6 @@ func closesObligation(openerKind string, fromOwner bool, msg *thread.Entry) bool
 	hasLabel := func(labels ...string) bool {
 		return slices.ContainsFunc(msg.Labels, func(label string) bool { return slices.Contains(labels, label) })
 	}
-	if msg.Kind == format.KindDecision {
-		return true
-	}
 	if !fromOwner {
 		if openerKind == format.KindReviewRequest {
 			return hasLabel("withdrawn", "done", "merged", "closed")

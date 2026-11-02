@@ -230,7 +230,7 @@ whitespace-only input is a usage error unless `--allow-empty` is explicit.
 | `decision` | - | normal | Record a decision. |
 | `brainstorm` | - | normal | Explore options. |
 | `status` | - | low | Report progress or state. |
-| `todo` | - | normal | Assign work. |
+| `todo` | `status` | normal | Assign work. |
 
 When work starts, reply with `kind=status` and an ETA. Review responses remain
 `normal` by default. Use `--priority urgent` on `send` or `reply` for a

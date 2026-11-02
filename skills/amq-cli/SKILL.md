@@ -86,8 +86,8 @@ escalation is due. Avoid file-by-file completion notices and unchanged check-ins
 Automated callers own duplicate suppression by item, revision, and event;
 AMQ threads correlate messages, but do not deduplicate repeated sends.
 
-Use an explicit reply kind for task updates. A reply to a `todo` otherwise
-inherits `todo` and can open another request. Progress uses `--kind status`;
+A reply to a `todo` defaults to `--kind status`; an explicit `--kind todo`
+opens another request. Progress uses `--kind status`;
 completion uses `--kind status --labels done`; cancellation uses
 `--kind decision --labels withdrawn`. State the result or cancellation
 honestly: withdrawing a request does not mean its feature shipped.
