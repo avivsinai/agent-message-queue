@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.124.1](https://github.com/avivsinai/agent-message-queue/compare/v0.124.0...v0.124.1) (2026-11-02)
+
+
+### Features
+
+* **board:** show an open bead's description and notes in its details ([#1327](https://github.com/avivsinai/agent-message-queue/issues/1327)) ([dc5d1c8](https://github.com/avivsinai/agent-message-queue/commit/dc5d1c897e3c357f01642163999d32ca450adbf3))
+
 ## [0.124.0](https://github.com/avivsinai/agent-message-queue/compare/v0.123.0...v0.124.0) (2026-11-02)
 
 
