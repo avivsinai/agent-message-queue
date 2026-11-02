@@ -22,7 +22,7 @@ func runReply(args []string) error {
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
-	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original, review_response for review_request, answer for question)", format.ValidKindsList()))
+	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original; review_response for review_request, answer for question, status for todo)", format.ValidKindsList()))
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after reply (e.g., drained)")
@@ -311,6 +311,8 @@ func runReply(args []string) error {
 			kind = format.KindReviewResponse
 		case format.KindQuestion:
 			kind = format.KindAnswer
+		case format.KindTodo:
+			kind = format.KindStatus
 		default:
 			kind = originalMsg.Header.Kind
 		}

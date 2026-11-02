@@ -169,3 +169,41 @@ func TestReply_Basic(t *testing.T) {
 		}
 	}
 }
+
+// A bare reply to a todo is a status update; it must not open a new todo.
+func TestReply_TodoDefaultsToStatus(t *testing.T) {
+	root := t.TempDir()
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+	now := time.Now()
+	originalID, _ := format.NewMessageID(now)
+	original := format.Message{
+		Header: format.Header{
+			Schema: format.CurrentSchema, ID: originalID, From: "bob", To: []string{"alice"},
+			Thread: "p2p/alice__bob", Subject: "Do it", Created: now.UTC().Format(time.RFC3339Nano),
+			Priority: format.PriorityNormal, Kind: format.KindTodo,
+		},
+		Body: "please",
+	}
+	data, _ := original.Marshal()
+	if _, err := deliverToInboxesForTest(t, root, []string{"alice"}, originalID+".md", data); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+	if err := runReply([]string{"--me", "alice", "--root", root, "--id", originalID, "--body", "started", "--json"}); err != nil {
+		t.Fatalf("runReply: %v", err)
+	}
+	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "bob"))
+	if len(entries) != 1 {
+		t.Fatalf("bob inbox has %d messages, want 1", len(entries))
+	}
+	got, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "bob"), entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
+	if got.Header.Kind != format.KindStatus {
+		t.Fatalf("reply kind = %q, want %q", got.Header.Kind, format.KindStatus)
+	}
+}

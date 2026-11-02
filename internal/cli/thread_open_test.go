@@ -95,7 +95,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			messages: []threadOpenMessage{
 				{name: "t1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "t2", from: "alpha@s2", to: "beta@s2", kind: format.KindTodo},
-				{name: "dec", from: "beta@s2", to: "alpha@s2", kind: format.KindDecision},
+				{name: "dec", from: "beta@s2", to: "alpha@s2", kind: format.KindDecision, labels: []string{"closed"}},
 			},
 			want: []string{"s1/t1/beta pending agent"},
 			check: func(t *testing.T, result threadOpenResult, names map[string]string) {
@@ -131,6 +131,18 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			want: []string{"s1/m1/beta pending agent", "s1/m2/beta pending agent"},
 		},
 		{
+			// An unlabelled decision is not a completion: only the closing
+			// label ends the todo.
+			name: "decision closes a todo only with a closing label",
+			messages: []threadOpenMessage{
+				{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "x"},
+				{name: "d1", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "x", refs: []string{"m1"}},
+				{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "y"},
+				{name: "d2", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "y", labels: []string{"closed"}, refs: []string{"m2"}},
+			},
+			want: []string{"s1/m1/beta acknowledged agent"},
+		},
+		{
 			// Pro review finding 2 (trace T2): a decision that answers the
 			// owner's question inherited the todo's ref and closed the
 			// unfinished todo.
@@ -138,7 +150,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}},
-				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"m", "q"}},
+				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, refs: []string{"m", "q"}},
 			},
 			want: []string{"s1/m/beta acknowledged agent"},
 		},
@@ -159,7 +171,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			name: "same handle in another session is another participant",
 			messages: []threadOpenMessage{
 				{name: "m", from: "codex@s1", to: "codex@s2", kind: format.KindTodo, thread: "p2p/s1:codex__s2:codex", replyTo: "codex@s1"},
-				{name: "dec", from: "codex@s3", to: "codex@s1", kind: format.KindDecision, thread: "p2p/s1:codex__s2:codex", replyTo: "codex@s3"},
+				{name: "dec", from: "codex@s3", to: "codex@s1", kind: format.KindDecision, labels: []string{"closed"}, thread: "p2p/s1:codex__s2:codex", replyTo: "codex@s3"},
 			},
 			want: []string{"s2/m/codex pending agent"},
 		},
@@ -229,7 +241,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			name: "two skewed children of one unreferenced parent both act",
 			messages: []threadOpenMessage{
 				{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, refs: []string{"st"}},
-				{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, refs: []string{"st"}},
+				{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, refs: []string{"st"}},
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "st", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
 			},
@@ -249,7 +261,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			name: "opener with a later parent is open for an unreferenced closer",
 			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, refs: []string{"p"}},
-				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision},
+				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, labels: []string{"closed"}},
 				{name: "p", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus},
 			},
 		},
@@ -262,7 +274,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 				{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
 				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, labels: []string{"done"}, refs: []string{"m1"}},
 				{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo},
-				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision},
+				{name: "dec", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, labels: []string{"closed"}},
 			},
 		},
 		{
@@ -314,7 +326,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			// the reply is created first.
 			name: "reply to an empty lineage is a no-op",
 			messages: []threadOpenMessage{
-				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, refs: []string{"st"}},
+				{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, labels: []string{"closed"}, refs: []string{"st"}},
 				{name: "st", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus},
 			},
 			check: func(t *testing.T, result threadOpenResult, _ map[string]string) {
@@ -341,7 +353,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, at: 10 * time.Second},
 				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}, at: 11 * time.Second},
-				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, at: 9500 * time.Millisecond},
+				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, at: 9500 * time.Millisecond},
 			},
 			want: []string{"s1/m/beta acknowledged agent", "s1/q/alpha pending agent"},
 		},
@@ -353,7 +365,7 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 			messages: []threadOpenMessage{
 				{name: "m", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, at: 10 * time.Second},
 				{name: "q", from: "beta@s1", to: "alpha@s1", kind: format.KindQuestion, refs: []string{"m"}, at: 9 * time.Second},
-				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, at: 9500 * time.Millisecond},
+				{name: "d", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, at: 9500 * time.Millisecond},
 			},
 			want: []string{"s1/m/beta acknowledged agent"},
 		},
@@ -510,23 +522,23 @@ func TestThreadOpenIgnoresFileOrderAndReplyClocks(t *testing.T) {
 	messages := []threadOpenMessage{
 		{name: "m1", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "x"},
 		{name: "st1", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "x"},
-		{name: "dec1", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, thread: "x", refs: []string{"st1"}},
+		{name: "dec1", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, thread: "x", refs: []string{"st1"}},
 
 		{name: "m2", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "y"},
 		{name: "st2", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "y"},
 		{name: "d1", from: "alpha@s1", to: "beta@s1", kind: format.KindStatus, thread: "y", refs: []string{"st2"}},
-		{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, thread: "y", refs: []string{"st2"}},
+		{name: "d2", from: "alpha@s1", to: "beta@s1", kind: format.KindDecision, labels: []string{"closed"}, thread: "y", refs: []string{"st2"}},
 
 		{name: "rr1", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
 		{name: "resp", from: "beta@s1", to: "alpha@s1", kind: format.KindReviewResponse, thread: "z", refs: []string{"rr1"}},
 		{name: "rr2", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest, thread: "z"},
-		{name: "decz", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "z"},
+		{name: "decz", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, labels: []string{"closed"}, thread: "z"},
 
 		{name: "t", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "w"},
 		{name: "dg", from: "beta@s1", to: "gamma@s1", kind: format.KindTodo, thread: "w", refs: []string{"t"}},
 
 		{name: "mp", from: "alpha@s1", to: "beta@s1", kind: format.KindTodo, thread: "v", refs: []string{"pp"}},
-		{name: "decp", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, thread: "v"},
+		{name: "decp", from: "beta@s1", to: "alpha@s1", kind: format.KindDecision, labels: []string{"closed"}, thread: "v"},
 		{name: "pp", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "v"},
 	}
 	moved := map[string]string{"dec1": "st1", "d1": "st2", "d2": "st2", "resp": "rr1"} // reply -> parent
