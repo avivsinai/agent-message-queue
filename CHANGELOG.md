@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.124.0](https://github.com/avivsinai/agent-message-queue/compare/v0.123.0...v0.124.0) (2026-11-02)
+
+
+### Features
+
+* **board:** requests view built from message facts, with on-demand labels ([#1325](https://github.com/avivsinai/agent-message-queue/issues/1325)) ([0f95b86](https://github.com/avivsinai/agent-message-queue/commit/0f95b863bbb95cb062295194994f42d412682e41))
+
+
+### Bug Fixes
+
+* **cli:** a reply to a todo is a status; a decision alone closes nothing ([#1324](https://github.com/avivsinai/agent-message-queue/issues/1324)) ([6093a5b](https://github.com/avivsinai/agent-message-queue/commit/6093a5b671a6bde750c85a730b42ea6f5ef9cb63))
+
 ## [0.123.0](https://github.com/avivsinai/agent-message-queue/compare/v0.122.0...v0.123.0) (2026-11-01)
 
 
