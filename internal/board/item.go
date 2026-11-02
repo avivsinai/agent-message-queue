@@ -111,6 +111,8 @@ type Relation struct {
 const (
 	FieldDescription = "description"
 	FieldNotes       = "notes"
+	// FieldSummary carries the prose a card's one-sentence Summary is cut from.
+	FieldSummary = "summary"
 )
 
 // Evidence is one structured fact behind an item.

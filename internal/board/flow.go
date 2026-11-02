@@ -137,6 +137,23 @@ func flowStage(fact Item, linked []Item, shippedAfter time.Time) (Stage, time.Ti
 	return StageBacklog, fact.Reason.Since, true
 }
 
+// openedAt is when the first open pull request among items was created, or
+// zero when none is open or no creation time was read. It is the PR's open
+// age, not the time in stage: a reviewer can be asked long after it opened.
+func openedAt(items []Item) time.Time {
+	for _, it := range items {
+		if it.Ref.Kind != RefForge || it.State == StateDone || ForgeType(it) != ForgePullRequest {
+			continue
+		}
+		for _, e := range it.Evidence {
+			if e.Field == "createdAt" && !e.At.IsZero() {
+				return e.At
+			}
+		}
+	}
+	return time.Time{}
+}
+
 // closeTime is when finished work finished, or zero when no source records
 // it. A bead's close time is its closed_at; a fact read before that field
 // was kept has since = updated_at, which bd sets when it closes the bead.
@@ -234,6 +251,10 @@ func buildFlow(m *Model, forge []Item, in Input, observed map[string]time.Time) 
 			}
 		}
 		c.Stage, c.StageSince = stage, since
+		c.OpenedAt = openedAt(c.Items)
+		if c.Summary == "" {
+			c.Summary = cardSummary(c.Items)
+		}
 		for _, f := range linked {
 			if f.State == StateDone || ForgeType(f) != ForgePullRequest {
 				continue
@@ -284,6 +305,7 @@ func buildFlow(m *Model, forge []Item, in Input, observed map[string]time.Time) 
 		}
 		c := buildCard(group{items: items}, col, idx, in, observed, nil, nil, nil)
 		c.Stage, c.StageSince, c.current = stage, since, true
+		c.OpenedAt = openedAt(c.Items)
 		if ForgeType(it) == ForgePullRequest && it.State != StateDone {
 			c.CI = ciOf(it)
 		}

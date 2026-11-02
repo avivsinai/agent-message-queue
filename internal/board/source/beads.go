@@ -206,8 +206,11 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 	if r.IssueType != "" {
 		it.Evidence = append(it.Evidence, board.Evidence{Field: "issue_type", Value: r.IssueType, At: updated})
 	}
-	// Only open work carries its prose, which keeps a project's closed
-	// history out of every snapshot.
+	// Every bead carries its one-sentence summary; only open work carries its
+	// full prose, which keeps a project's closed history out of every snapshot.
+	if sentence := board.Sentence(r.Description); sentence != "" {
+		it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldSummary, Text: sentence, At: updated})
+	}
 	if r.Status != "closed" {
 		if r.Description != "" {
 			it.Evidence = append(it.Evidence, board.Evidence{Field: board.FieldDescription, Text: r.Description, At: updated})

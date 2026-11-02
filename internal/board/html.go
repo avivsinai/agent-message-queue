@@ -158,8 +158,35 @@ func buildPageModel(m Model) pageModel {
 }
 
 type pageView struct {
-	ID, Title, Description, Empty, Coverage, CoverageTitle string
-	Strips                                                 []pageStrip
+	ID, Title, Description, Empty string
+	Coverage                      []pageGap
+	Strips                        []pageStrip
+}
+
+// pageGap is one source the view rests on that is not fully read, with what
+// is missing in the source's own words.
+type pageGap struct{ Name, Status, Gap string }
+
+// sourceGap names what a source did not read, in its own words: the status
+// of a failed read, its error, and its coverage gap.
+func sourceGap(s SourceView) pageGap {
+	g := pageGap{Name: clean(s.Name)}
+	var parts []string
+	if s.Status == StatusDegraded || s.Status == StatusUnavailable {
+		g.Status = string(s.Status)
+		if s.Detail != "" {
+			parts = append(parts, s.Detail)
+		}
+	}
+	if s.Partial {
+		gap := s.Coverage.Detail
+		if gap == "" {
+			gap = "not every record assessed"
+		}
+		parts = append(parts, gap)
+	}
+	g.Gap = clean(strings.Join(parts, "; "))
+	return g
 }
 
 type pageSource struct {
@@ -179,29 +206,50 @@ type pageBay struct {
 }
 
 type pageStrip struct {
-	Key, State, NextReason, AgeLabel string
-	TaskID                           string
-	AttachKey                        string
-	Kind, ID, Title                  string
-	Refs                             []string
-	Reason, Since                    string
-	SinceAt                          string
-	Checked                          string
-	Owner                            string
-	People                           []string
-	Marks                            []string
-	Cocked                           bool
-	Related                          []string
-	AskCount, Asks                   string
-	AskAction                        *Action
-	Description, Notes               string
-	Evidence                         []pageEvidence
-	Actions                          []Action
-	HasDetail                        bool
-	ReasonField, Priority            string
+	Key, State, AgeLabel string
+	TaskID               string
+	AttachKey            string
+	Kind, ID, Title      string
+	// Prefix is a conventional-commit type(scope) cut from the title, so the
+	// title starts with its noun.
+	Prefix string
+	// Summary is the card's one sentence. Why is the reason a row shows
+	// after it, empty when a summary stands in for a reason that only
+	// restates the state.
+	Summary, Why          string
+	Refs                  []string
+	Reason, Since         string
+	SinceAt               string
+	Checked               string
+	Owner                 string
+	Owners                []pageOwner
+	People                []string
+	Marks                 []string
+	Cocked                bool
+	Related               []string
+	AskCount, Asks        string
+	AskAction             *Action
+	Description, Notes    string
+	Evidence              []pageEvidence
+	Actions               []Action
+	HasDetail             bool
+	ReasonField, Priority string
 	// Flow card facts.
 	Stage, StageID, StageAge, PR, CI, CIText, NamesBead, Anchor string
-	NeedsYou                                                    bool
+	// Opened is an open pull request's age ("open 30d"); CardAge is the age
+	// a card face shows: time in stage, else Opened.
+	Opened, CardAge string
+	// Waited is how long a card that needs the owner has waited: since its
+	// reason, else since it entered its stage.
+	Waited   string
+	NeedsYou bool
+}
+
+// pageOwner is one owner as a card face names it: the name alone, with
+// Unmapped kept for assistive text and Details.
+type pageOwner struct {
+	Name     string
+	Unmapped bool
 }
 
 type pageEvidence struct {
@@ -255,7 +303,7 @@ func buildPage(m Model, regenerate string) pageData {
 		for _, a := range m.Usage.Accounts {
 			other := ""
 			if a.OtherSessions > 0 {
-				other = "other sessions (" + strconv.Itoa(a.OtherSessions) + "): " + spendLine(a.Other, now, a.Harness == usage.Pi)
+				other = "other sessions (" + otherCount(a) + "): " + spendLine(a.Other, now, a.Harness == usage.Pi)
 			}
 			if a.Detail != "" {
 				other = strings.TrimPrefix(other+" · "+a.Detail, " · ")
@@ -380,9 +428,14 @@ func buildPage(m Model, regenerate string) pageData {
 }
 
 func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
-	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded"}
+	s := pageStrip{TaskID: c.ID, Key: c.ID, Title: clean(c.Title), Reason: clean(c.Reason.Text), ReasonField: clean(c.Reason.Field), State: c.Column.Title(), AgeLabel: "State recorded", Summary: clean(c.Summary)}
 	if s.Title == "" {
 		s.Title = clean(c.ID)
+	}
+	s.Prefix, s.Title = commitPrefix(s.Title)
+	s.Why = s.Reason
+	if s.Summary != "" && restatesState(c) {
+		s.Why = ""
 	}
 	placing := Item{Ref: Ref{Kind: c.ID}}
 	if len(c.Items) > 0 {
@@ -441,6 +494,7 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 		}
 		s.Owner = clean(strings.Join(names, ", "))
 	}
+	s.Owners = faceOwners(c.Owners)
 	for _, o := range c.WaitsOn {
 		if owns(c.Owners, o) {
 			continue
@@ -489,6 +543,10 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 					s.Notes = quoteText(e.Text)
 				}
 				continue
+			case FieldSummary:
+				// The summary sentence is on the face; its source prose
+				// stays in --json.
+				continue
 			}
 			pe := pageEvidence{Source: clean(it.Source), Field: clean(e.Field), Value: clean(e.Value), Text: clean(e.Text), URL: httpsOnly(e.URL)}
 			if !e.At.IsZero() {
@@ -516,6 +574,77 @@ func buildStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 
 	s.HasDetail = s.HasDetail || s.Description != "" || s.Notes != "" || len(s.Evidence) > 0 || len(s.Related) > 0 || len(s.Refs) > 1 || len(s.Actions) > 0
 	return s
+}
+
+// commitTypes are the conventional-commit types a title prefix may name.
+var commitTypes = map[string]bool{"feat": true, "fix": true, "chore": true, "docs": true, "refactor": true, "perf": true, "test": true, "build": true, "ci": true, "style": true, "revert": true}
+
+// commitPrefix splits a conventional-commit "type(scope)!: " prefix from a
+// title. A title that is only the prefix, or whose prefix names no known
+// type, is returned whole.
+func commitPrefix(title string) (string, string) {
+	head, rest, ok := strings.Cut(title, ": ")
+	rest = strings.TrimSpace(rest)
+	if !ok || rest == "" {
+		return "", title
+	}
+	kind := strings.TrimSuffix(head, "!")
+	if open := strings.IndexByte(kind, '('); open >= 0 {
+		scope := kind[open+1:]
+		if !strings.HasSuffix(scope, ")") || len(scope) < 2 || strings.ContainsAny(scope[:len(scope)-1], "() \t") {
+			return "", title
+		}
+		kind = kind[:open]
+	}
+	if !commitTypes[kind] {
+		return "", title
+	}
+	return head, sentenceCase(rest)
+}
+
+// sentenceCase capitalizes a description whose first word is a plain
+// lowercase word; a first word with digits, dots, or dashes is an identifier
+// and keeps its case.
+func sentenceCase(s string) string {
+	word, _, _ := strings.Cut(s, " ")
+	for _, r := range word {
+		if r < 'a' || r > 'z' {
+			return s
+		}
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// restatesState reports whether a card's reason is only its tracker's status
+// word, which the state already says: a status or state field whose text
+// names no related record.
+func restatesState(c Card) bool {
+	if c.Reason.Field != "status" && c.Reason.Field != "state" {
+		return false
+	}
+	for _, t := range c.Related {
+		if t.Ref.ID != "" && strings.Contains(c.Reason.Text, t.Ref.ID) {
+			return false
+		}
+	}
+	return true
+}
+
+// faceOwners names owners for a card face: a person or agent by name, and an
+// unmapped assignee by its tracker name, marked unmapped.
+func faceOwners(owners []Owner) []pageOwner {
+	if len(owners) == 0 {
+		return []pageOwner{{Name: "no owner"}}
+	}
+	var out []pageOwner
+	for _, o := range owners {
+		if o.Kind == OwnerUnmapped {
+			out = append(out, pageOwner{Name: clean(o.Display), Unmapped: true})
+			continue
+		}
+		out = append(out, pageOwner{Name: clean(ownerLabel(o, nil))})
+	}
+	return out
 }
 
 // quoteText preserves reading structure while making other controls visible.
@@ -579,7 +708,7 @@ func refCell(it Item) (string, string) {
 func buildSession(rs RosterSession, now time.Time) pageSession {
 	ps := pageSession{Name: clean(rs.Session)}
 	for _, a := range rs.Agents {
-		pa := pageAgent{Handle: clean(a.Handle), Liveness: a.Liveness, Human: a.Human, Invalid: !a.ValidHandle, Action: a.Action, Limited: a.LimitReached != nil}
+		pa := pageAgent{Handle: clean(a.Handle), Liveness: a.Liveness, Human: a.Human, Invalid: !a.ValidHandle, Action: a.Action, Limited: a.LimitReached != nil && !a.LimitReached.Past}
 		if a.Human {
 			pa.Liveness = "human"
 		}

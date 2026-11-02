@@ -72,3 +72,17 @@ func TestFlowStagesFromSnapshot(t *testing.T) {
 		t.Errorf("the review-requested PR has flags %v, want Needs you", flags)
 	}
 }
+
+// Live board 2026-11-02: PR #1329 (checks red, In review) showed "age unknown"
+// because its reason has no recorded time. Its open age comes from createdAt;
+// the time in stage stays unknown.
+func TestFlowInReviewPRShowsOpenAgeNotStageAge(t *testing.T) {
+	ref, _ := GitHubRepoRef("acme/app", 1329)
+	created := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	pr := Item{Ref: ref, State: StateActive, Reason: Reason{Field: "reviewDecision", Text: "checks failing"}, Evidence: []Evidence{
+		{Field: "type", Value: ForgePullRequest}, {Field: "createdAt", At: created}}}
+	stage, since, ok := flowStage(pr, []Item{pr}, created.Add(-time.Hour))
+	if !ok || stage != StageInReview || !since.IsZero() || !openedAt([]Item{pr}).Equal(created) {
+		t.Fatalf("stage=%s since=%v opened=%v ok=%v, want In review, unknown stage time, opened at createdAt", stage, since, openedAt([]Item{pr}), ok)
+	}
+}

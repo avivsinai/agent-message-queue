@@ -278,9 +278,9 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 			st.LimitNote += " " + age(now.Sub(l.AsOf)) + " ago"
 		}
 		if seatActive {
-			st.LimitNote += "; active since"
+			st.LimitNote += "; active since then"
 		} else {
-			st.LimitNote += "; the account was active since"
+			st.LimitNote += "; the account was active since then"
 		}
 	}
 	unread := pluralize(a.UnreadCount, "unread message") + ", oldest " + age(oldest)

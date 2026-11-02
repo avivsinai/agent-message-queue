@@ -120,6 +120,7 @@ type Card struct {
 	Attachments      []Attachment      `json:"attachments,omitempty"`
 	Column           Column            `json:"column"`
 	Title            string            `json:"title"`
+	Summary          string            `json:"summary,omitempty"`
 	Refs             []Ref             `json:"refs"`
 	Reason           Reason            `json:"reason"`
 	ReasonSource     string            `json:"reason_source"`
@@ -135,9 +136,12 @@ type Card struct {
 	// Stage, StageSince, Flags and CI are the card's Flow facts; see flow.go.
 	Stage      Stage     `json:"stage,omitempty"`
 	StageSince time.Time `json:"stage_since,omitzero"`
-	Flags      []Flag    `json:"flags,omitempty"`
-	CI         CI        `json:"ci,omitempty"`
-	stale      bool
+	// OpenedAt is when the card's open pull request was created. It is not
+	// the time in stage and never orders or ranks a card.
+	OpenedAt time.Time `json:"opened_at,omitzero"`
+	Flags    []Flag    `json:"flags,omitempty"`
+	CI       CI        `json:"ci,omitempty"`
+	stale    bool
 	// current is set for a task that is not cancelled and still reported,
 	// so recent finished work can reach Flow from History.
 	current bool
@@ -348,8 +352,24 @@ func buildCard(g group, col Column, idx int, in Input, observed map[string]time.
 			c.Marks = append(c.Marks, "assignee not mapped: "+it.Owner.Display)
 		}
 	}
+	c.Summary = cardSummary(g.items)
 	c.Actions = cardActions(g.items, col, in.Known, sessionPaths, peers)
 	return c
+}
+
+// cardSummary is the one sentence of the first item that carries summary
+// prose; items are in authority order.
+func cardSummary(items []Item) string {
+	for _, it := range items {
+		for _, e := range it.Evidence {
+			if e.Field == FieldSummary {
+				if s := Sentence(e.Text); s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // maxActions is the most copy commands a card offers.

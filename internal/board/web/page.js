@@ -5,6 +5,8 @@
   var announce = document.getElementById("announce");
   var views = Array.prototype.slice.call(document.querySelectorAll(".view"));
   var links = Array.prototype.slice.call(document.querySelectorAll("[data-view-link]"));
+  var secondary = document.querySelector(".secondary-nav");
+  var mobile = window.matchMedia("(max-width: 959px)");
   var snapshot = {};
   try { snapshot = JSON.parse(document.getElementById("model").textContent); } catch (e) { /* the server still renders every record */ }
   var storageKey = "amq-board-ui:" + (snapshot.dir || "");
@@ -65,6 +67,10 @@
       else { link.removeAttribute("aria-current"); }
     });
     filter(chosen);
+    placeSecondary();
+    // One view shows at a time, so a view link opens it from the top with
+    // the masthead and navigation in place instead of jumping to its anchor.
+    if (requested === current) { window.scrollTo(0, 0); }
     if (focus) {
       var heading = chosen.querySelector("h1");
       if (heading) { heading.tabIndex = -1; heading.focus({preventScroll:true}); }
@@ -86,6 +92,9 @@
   root.classList.add("enhanced");
   selectView(false);
   window.addEventListener("hashchange", function () { selectView(true); });
+  // The browser scrolls to the fragment after load, so the view opens from
+  // the top once that scroll has happened.
+  window.addEventListener("load", function () { window.setTimeout(function () { if (window.location.hash === "#view-" + current) { window.scrollTo(0, 0); } }, 0); });
   document.addEventListener("toggle", function (event) { if (event.target.matches(".item-details")) { save(); } }, true);
   if (saved.focus) {
     var previous = document.getElementById(saved.focus);
@@ -94,6 +103,18 @@
     var search = document.querySelector(".view:not([hidden]) .view-search");
     if (search) { search.focus({preventScroll:true}); }
   }
+
+  // More is an open rail beside the reading views and a closed menu on the
+  // top row of Flow and Floor and on compact layouts.
+  function menu() { return mobile.matches || current === "flow" || current === "floor"; }
+  function placeSecondary() { if (secondary) { secondary.open = !menu(); } }
+  function closeMenu(focus) {
+    if (!secondary || !secondary.open || !menu()) { return false; }
+    secondary.open = false;
+    if (focus) { secondary.querySelector("summary").focus({preventScroll:true}); }
+    return true;
+  }
+  document.addEventListener("click", function (event) { if (secondary && !secondary.contains(event.target)) { closeMenu(false); } });
 
   function sheets() { return Array.prototype.slice.call(document.querySelectorAll(".card-sheet[open]")); }
   function closeSheet(sheet, focus) {
@@ -109,6 +130,7 @@
   }, true);
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") { return; }
+    if (closeMenu(!!secondary && secondary.contains(document.activeElement))) { return; }
     sheets().forEach(function (sheet) { closeSheet(sheet, true); });
   });
   document.addEventListener("click", function (event) {
@@ -137,10 +159,6 @@
     applyTheme(appearance.value);
     try { window.localStorage.setItem("amq-board-appearance", appearance.value); } catch (e) { /* theme still applies to this view */ }
   });
-  var mobile = window.matchMedia("(max-width: 959px)");
-  var secondary = document.querySelector(".secondary-nav");
-  function placeSecondary() { if (secondary) { secondary.open = !mobile.matches; } }
-  placeSecondary();
   mobile.addEventListener("change", placeSecondary);
 
   function manualCopy(button, command) {

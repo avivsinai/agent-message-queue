@@ -3,10 +3,13 @@ package board
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // WriteText renders the model for a terminal, in the page's order: header,
@@ -167,7 +170,11 @@ func writeFlow(b *strings.Builder, m Model, now time.Time) {
 			if f.PR != "" {
 				parts = append(parts, strings.TrimSpace(f.PR+" "+f.CI))
 			}
-			parts = append(parts, f.Age)
+			stageAge := f.Age
+			if c.StageSince.IsZero() && !c.OpenedAt.IsZero() {
+				stageAge = "open " + age(now.Sub(c.OpenedAt))
+			}
+			parts = append(parts, stageAge)
 			if f.Names != "" {
 				parts = append(parts, f.Names)
 			}
@@ -176,6 +183,9 @@ func writeFlow(b *strings.Builder, m Model, now time.Time) {
 				flags += "◆ Needs you · "
 			}
 			fmt.Fprintf(b, "    %s%s\n", flags, clean(strings.Join(parts, " · ")))
+			if c.Summary != "" {
+				fmt.Fprintf(b, "      %s\n", clean(c.Summary))
+			}
 		}
 		writeOmitted(b, v.Omitted, "older shipped card")
 	}
@@ -238,7 +248,11 @@ func writeFloor(b *strings.Builder, m Model, now time.Time) {
 }
 
 func writeCard(b *strings.Builder, c Card, now time.Time, live map[[2]string]string) {
-	fmt.Fprintf(b, "  * %s\n    Task ID: %s\n", cleanTitle(c.Title), clean(c.ID))
+	fmt.Fprintf(b, "  * %s\n", cleanTitle(c.Title))
+	if c.Summary != "" {
+		fmt.Fprintf(b, "    %s\n", clean(c.Summary))
+	}
+	fmt.Fprintf(b, "    Task ID: %s\n", clean(c.ID))
 	if c.HistoryStatus != "" {
 		fmt.Fprintf(b, "    History: %s\n", clean(c.HistoryStatus))
 	}
@@ -577,4 +591,101 @@ func age(d time.Duration) string {
 		return strconv.Itoa(int(d/time.Hour)) + "h"
 	}
 	return strconv.Itoa(int(d/(24*time.Hour))) + "d"
+}
+
+// SentenceLimit bounds a one-sentence summary in runes.
+const SentenceLimit = 120
+
+var (
+	mdComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+	mdLink    = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
+	mdHeading = regexp.MustCompile(`(?m)^[ \t]*#{1,6}[ \t].*$`)
+	mdCode    = regexp.MustCompile("`[^`\n]*`")
+	mdBullet  = regexp.MustCompile(`(?m)^[ \t]*(?:[-*+]|\d+[.)])[ \t]+`)
+	mdQuote   = regexp.MustCompile(`(?m)^[ \t]*>[ \t]?`)
+	mdMark    = strings.NewReplacer("`", "", "**", "", "__", "", "*", "")
+	// mdRefLine is a line that only points at other work ("Closes #12").
+	mdRefLine = regexp.MustCompile(`(?im)^[ \t]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|part of|refs?|related to)[ \t:]+(?:[\w./-]*#\d+[ \t,]*(?:and[ \t]+)?)+[ \t]*$`)
+	sentLabel = regexp.MustCompile(`^[A-Za-z][\w/-]*(?: [\w/-]+){0,2}:(?:\s+|$)`)
+)
+
+// Private markers that keep a code-span semicolon and a bullet join out of
+// the sentence cut.
+const (
+	codeSemicolon = "\x01"
+	bulletJoin    = "\x02"
+)
+
+// Sentence reduces prose to one plain sentence: comments, headings, markdown
+// syntax, reference-only lines and a short leading label are dropped, the text
+// stops at the first sentence end, and the result is cut on a word boundary at
+// SentenceLimit runes.
+func Sentence(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = mdComment.ReplaceAllString(text, "")
+	text = mdHeading.ReplaceAllString(text, "")
+	text = mdRefLine.ReplaceAllString(text, "")
+	text = mdLink.ReplaceAllString(text, "$1")
+	text = mdCode.ReplaceAllStringFunc(text, func(c string) string { return strings.ReplaceAll(c, ";", codeSemicolon) })
+	text = mdQuote.ReplaceAllString(text, "")
+	text = mdMark.Replace(text)
+	var para []string
+	labelled := false
+	for _, p := range strings.Split(strings.TrimSpace(text), "\n\n") {
+		// A label alone on its paragraph introduces the next one.
+		p = strings.TrimSpace(p)
+		bare := strings.TrimSpace(sentLabel.ReplaceAllString(p, ""))
+		labelled = labelled || bare != p
+		if bare != "" {
+			para = append(para, bare)
+			break
+		}
+	}
+	if len(para) == 0 {
+		return ""
+	}
+	text = para[0]
+	// What followed a dropped label starts the sentence; other text keeps
+	// its own case (iOS, npm), as does a leading URL or path.
+	if lead, _, _ := strings.Cut(text, " "); labelled && !strings.Contains(lead, "://") && !strings.Contains(lead, "/") {
+		if r, n := utf8.DecodeRuneInString(text); r != utf8.RuneError {
+			text = string(unicode.ToUpper(r)) + text[n:]
+		}
+	}
+	first := true
+	text = mdBullet.ReplaceAllStringFunc(text, func(string) string {
+		if first {
+			first = false
+			return ""
+		}
+		return bulletJoin
+	})
+	end := len(text)
+	for _, sep := range []string{". ", "? ", "! ", ";", ".\n", "?\n", "!\n"} {
+		if i := strings.Index(text, sep); i >= 0 && i < end {
+			end = i
+			if sep != ";" {
+				end = i + 1
+			}
+		}
+	}
+	text = strings.Join(strings.Fields(text[:end]), " ")
+	text = strings.ReplaceAll(text, " "+bulletJoin, "; ")
+	text = strings.ReplaceAll(text, bulletJoin, "; ")
+	text = strings.ReplaceAll(text, codeSemicolon, ";")
+	if utf8.RuneCountInString(text) <= SentenceLimit {
+		return text
+	}
+	cut := string([]rune(text)[:SentenceLimit-1])
+	// Prefer ending at a clause boundary in the second half, so the cut
+	// reads as a clause rather than a dangling word.
+	for _, sep := range []string{", ", " — ", " - ", ": "} {
+		if i := strings.LastIndex(cut, sep); i > len(cut)/2 {
+			return cut[:i] + "…"
+		}
+	}
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		return cut[:i] + "…"
+	}
+	return cut + "…"
 }

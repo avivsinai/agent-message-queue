@@ -25,8 +25,8 @@ type Settings struct {
 // "homes" are read in addition to the harness's default home, each as its
 // own account; a home listed twice, or the default listed again, is read
 // once. A home is absolute or starts with "~/". The budget takes a
-// Go duration ("1s") and a byte size ("300MB"; KB, MB and GB are 1024-based,
-// so the default 300MB is 300 << 20 bytes).
+// Go duration ("5s") and a byte size ("512MB"; KB, MB and GB are 1024-based,
+// so the default 512MB is 512 << 20 bytes).
 func LoadSettings(path, home string) (Settings, error) {
 	st := Settings{Enabled: true, Config: DefaultConfig(home)}
 	data, err := os.ReadFile(path)

@@ -167,3 +167,57 @@ func TestHTMLUnknownStateAgeReadsOnce(t *testing.T) {
 		t.Error("snapshot timestamp became the later view-render time")
 	}
 }
+
+// A card face shows its one-sentence summary, and a conventional-commit
+// prefix becomes a chip so the title starts with its noun.
+func TestHTMLCardShowsSummaryAndPrefixChip(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	bead, _ := Bead("demo-a1b")
+	beads := Result{Status: StatusOK, ObservedAt: now, Items: []Item{{
+		Ref: bead, Title: "fix(board): coverage notes name real gaps", State: StateBlocked, Structural: true,
+		Owner:  Owner{Kind: OwnerAgent, Handle: "alpha", Display: "alpha"},
+		Reason: Reason{Field: "status", Text: "bead blocked", Since: now.Add(-time.Hour)},
+	}}}
+	m := Build(Input{Results: []NamedResult{{Name: "beads", Result: beads}}, Config: DefaultConfig(), Now: now})
+	// Build places the card in a column; Flow stages come from projection,
+	// so the card is staged here as Project would.
+	for i := range m.Columns {
+		for j := range m.Columns[i].Cards {
+			c := &m.Columns[i].Cards[j]
+			c.Summary, c.Stage = "Coverage notes name only the sources that missed records.", StageBlocked
+			m.Flow = append(m.Flow, StageView{ID: StageBlocked, Title: StageBlocked.Title(), CardIDs: []string{c.ID}})
+		}
+	}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	if !strings.Contains(html, `<span class="card-summary">Coverage notes name only the sources that missed records.</span>`) {
+		t.Error("the Flow card does not show its summary")
+	}
+	if !strings.Contains(html, `<span class="cc">fix(board)</span> Coverage notes name real gaps`) {
+		t.Error("the title prefix is not a chip before the title")
+	}
+	// The Work row shows the summary in place of a reason that only restates
+	// the state.
+	if !strings.Contains(html, `<p class="item-summary">Coverage notes name only the sources that missed records.</p>`) || strings.Contains(html, `<p class="item-reason">bead blocked</p>`) {
+		t.Error("the Work row does not replace the restated reason with its summary")
+	}
+}
+
+// Every view names its coverage gaps in one line, with the source's own
+// words and a link to Sources, instead of a closed box with a count.
+func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	beads := Result{Status: StatusOK, ObservedAt: now, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}}
+	m := Build(Input{Results: []NamedResult{{Name: "beads", Result: beads}}, Config: DefaultConfig(), Now: now})
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	want := `<span class="gap"><span class="gap-name">beads</span>: 238 mentioned bead ids over the lookup cap</span></span> <span class="gaps-count">1 source.</span> <a href="#view-sources">See Sources</a></p>`
+	if !strings.Contains(page.String(), want) {
+		t.Error("the coverage line does not name the beads gap with its Sources link")
+	}
+}

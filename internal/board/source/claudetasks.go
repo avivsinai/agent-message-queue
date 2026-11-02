@@ -196,6 +196,9 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 					item.HostAttribution = &host
 				}
 			}
+			if sentence := board.Sentence(task.Description); sentence != "" {
+				item.Evidence = append(item.Evidence, board.Evidence{Field: board.FieldSummary, Text: sentence, At: info.ModTime().UTC()})
+			}
 			if task.ActiveForm != "" {
 				item.Evidence = append(item.Evidence, board.Evidence{Field: "activeForm", Value: task.ActiveForm})
 			}

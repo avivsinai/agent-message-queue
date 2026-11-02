@@ -114,6 +114,7 @@ func RequestLabelKey(messageKey, digest, classifier string) string {
 // recorded for its current evidence.
 type Request struct {
 	Message    Message            `json:"message"`
+	Summary    string             `json:"summary,omitempty"`
 	Age        string             `json:"age"`
 	Sender     *Participant       `json:"sender,omitempty"`
 	Recipients []RequestRecipient `json:"recipients"`
@@ -298,7 +299,7 @@ func messageTime(m Message) (time.Time, bool) {
 // opinions.
 func (x requestIndex) request(key string, now time.Time) Request {
 	m := x.s.Messages[key]
-	r := Request{Message: m, Age: RequestUndated, Recipients: []RequestRecipient{}, Tasks: x.tasks[key]}
+	r := Request{Message: m, Summary: Sentence(m.Body), Age: RequestUndated, Recipients: []RequestRecipient{}, Tasks: x.tasks[key]}
 	created, dated := messageTime(m)
 	if dated && !created.After(now) {
 		r.Age = RequestOlder

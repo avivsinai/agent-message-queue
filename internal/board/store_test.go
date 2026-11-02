@@ -1141,3 +1141,42 @@ func hasRequest(m Model, key string) bool {
 	}
 	return false
 }
+
+func TestRequestRowCarriesFirstSentenceAfterPublish(t *testing.T) {
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask := Message{Namespace: base, Copies: []MessageCopy{{Root: base}}, Key: base + "#ask", Root: base, ID: "ask", Thread: "feature", Subject: "Review feature", Kind: "review_request", Body: "## Ask\n\nPlease review the board change. It touches three files."}
+	raw, _ := json.Marshal(thread.Entry{ID: ask.ID, Thread: ask.Thread, Subject: ask.Subject, Kind: ask.Kind, Body: ask.Body})
+	sum := sha256.Sum256(raw)
+	ask.EvidenceHash = hex.EncodeToString(sum[:])
+	if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Evidence: [][]byte{raw}, Input: Input{Dir: base}, Messages: []Message{ask}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := got.RequestView(time.Now())
+	rows := append(append(v.Recent, v.Older...), v.Undated...)
+	if len(rows) != 1 || rows[0].Summary != "Please review the board change." {
+		t.Fatalf("requests after publish and read = %+v", rows)
+	}
+}

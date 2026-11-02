@@ -13,7 +13,7 @@
           {
             "number": 11,
             "title": "Add the relay port flag",
-            "body": "",
+            "body": "## Summary\n\n- Adds a `--port` flag to the relay so it can listen off 8080.\n- Updates the docs.",
             "url": "https://github.com/octo-org/demo/pull/11",
             "headRefName": "feat/pr-11",
             "isDraft": false,
@@ -259,6 +259,7 @@
           {
             "number": 20,
             "title": "Board ignores deferred beads",
+            "body": "Deferred beads never reach the board. Repro: bd defer then sync.",
             "url": "https://github.com/octo-org/demo/issues/20",
             "updatedAt": "2026-10-21T09:00:00Z",
             "assignees": {

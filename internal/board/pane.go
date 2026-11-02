@@ -26,6 +26,7 @@ type PaneSource struct {
 type PaneStrip struct {
 	TaskID  string    `json:"task_id"`
 	Title   string    `json:"title"`
+	Summary string    `json:"summary,omitempty"`
 	Reason  string    `json:"reason"`
 	Since   time.Time `json:"since"`
 	Command string    `json:"command"`
@@ -94,7 +95,7 @@ func ProjectPane(model Model) PaneModel {
 			if len(p.Waiting) == paneWaitingLimit {
 				continue
 			}
-			strip := PaneStrip{TaskID: card.ID, Title: paneText(card.Title, 160), Reason: paneText(card.Reason.Text, 160), Since: card.Reason.Since, Stage: card.Stage}
+			strip := PaneStrip{TaskID: card.ID, Title: paneText(card.Title, 160), Summary: paneText(card.Summary, 160), Reason: paneText(card.Reason.Text, 160), Since: card.Reason.Since, Stage: card.Stage}
 			for _, action := range card.Actions {
 				if action.Purpose != ActionContext || strings.TrimSpace(action.Command) == "" {
 					continue

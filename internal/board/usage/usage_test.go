@@ -361,3 +361,57 @@ func TestClaudeErrorTurnsAreNotSpend(t *testing.T) {
 		t.Errorf("newest spend at %v, want the real turn at 11:00", asOf)
 	}
 }
+
+// A byte budget that cannot hold every file still reads the mapped session
+// whole, subagents included, and this project's own sessions before other
+// folders. Regressions for the live board of 2026-11-02: a mapped worker's
+// subagent files were ordered by age with the rest, and sibling folders
+// named <project>-wt-scratch-* were read first as if they were the
+// project's, so the same window read less from one run to the next.
+func TestByteBudgetReadsTheMappedSessionAndTheProjectFirst(t *testing.T) {
+	const mapped, other = "aaaaaaaa-0000-4000-8000-000000000001", "bbbbbbbb-0000-4000-8000-000000000002"
+	row := func(sid, cwd, id string, out int) string {
+		return `{"type":"assistant","timestamp":"2026-10-22T11:00:00.000Z","sessionId":"` + sid + `","cwd":"` + cwd + `","version":"2.1.300","message":{"id":"` + id + `","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":` + fmt.Sprint(out) + `}}}`
+	}
+	// pad is a line larger than the whole budget.
+	pad := `{"type":"user","text":"` + strings.Repeat("x", 256<<10) + `"}`
+	at := func(path string, age time.Duration, lines ...string) {
+		writeFile(t, path, lines...)
+		if err := os.Chtimes(path, testNow.Add(-age), testNow.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := func(a Account, sid string) int64 {
+		for _, s := range a.Sessions {
+			if s.ID == sid {
+				c, _ := s.Totals(testNow.Add(-span))
+				return c.Fresh()
+			}
+		}
+		return 0
+	}
+	run := func(home string, mapping Mapping) Account {
+		cfg := Config{Homes: map[string][]string{Claude: {home}}, BudgetBytes: 64 << 10}
+		return read(cfg, testNow, demoRoots, mapping, func() time.Time { return testNow }).Accounts[0]
+	}
+	t.Run("mapped subagents before other sessions", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, "projects", "-work-demo")
+		at(filepath.Join(dir, mapped+".jsonl"), 3*time.Hour, row(mapped, "/work/demo", "msg_main", 1))
+		at(filepath.Join(dir, mapped, "subagents", "agent-a1.jsonl"), 5*time.Hour, row(mapped, "/work/demo", "msg_sub", 2))
+		at(filepath.Join(dir, other+".jsonl"), time.Hour, row(other, "/work/demo", "msg_other", 4), pad)
+		a := run(home, Mapping{{Harness: Claude, ID: mapped}: {Session: "s1", Handle: "w"}})
+		if got := fresh(a, mapped); got != 3 {
+			t.Fatalf("mapped session counted %d fresh tokens (%s), want 3 with its subagent", got, a.Detail)
+		}
+	})
+	t.Run("project folder before sibling folders", func(t *testing.T) {
+		home := t.TempDir()
+		at(filepath.Join(home, "projects", "-work-demo", other+".jsonl"), 2*time.Hour, row(other, "/work/demo", "msg_other", 4))
+		at(filepath.Join(home, "projects", "-work-demo-wt-scratch-x", mapped+".jsonl"), time.Hour, pad, row(mapped, "/work/demo-wt-scratch-x", "msg_sib", 8))
+		a := run(home, nil)
+		if got := fresh(a, other); got != 4 {
+			t.Fatalf("project session counted %d fresh tokens (%s), want 4", got, a.Detail)
+		}
+	})
+}

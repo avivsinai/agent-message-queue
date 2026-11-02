@@ -1,6 +1,7 @@
 package board
 
 import (
+	"slices"
 	"sort"
 	"time"
 
@@ -89,10 +90,16 @@ func UsageMapping(convs []Conversation) usage.Mapping {
 
 // WithUsage adds the usage report to the model: per account limits, per
 // worker spend through mapping, the rest as the account's other sessions,
-// and the fleet total. It is pure; r.Now dates the windows.
+// and the fleet total. Accounts align their windows to their own resets, so
+// the fleet sums every session over the trailing windows instead: a sum
+// never mixes window definitions. It is pure; r.Now dates the windows.
 func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 	view := &UsageView{Accounts: []AccountUsage{}}
-	var fleet []Usage
+	trailing := trailingWindows(r.Now)
+	fleet := make([]usage.Counts, len(trailing))
+	fleetAsOf := make([]time.Time, len(trailing))
+	fleetSpend := spendState{}
+	fleetPartial := false
 	for _, a := range r.Accounts {
 		windows := accountWindows(a, r.Now)
 		au := AccountUsage{Key: a.Key, Harness: a.Harness, Limits: a.Limits, Workers: []WorkerUsage{}, Partial: a.Partial(), Detail: a.Detail}
@@ -123,6 +130,12 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 				au.OtherSessions++
 				otherSpend.note(s)
 			}
+			fleetSpend.note(s)
+			for i, win := range trailing {
+				c, asOf := s.Totals(win.from)
+				fleet[i] = usage.Add(fleet[i], c)
+				fleetAsOf[i] = later(fleetAsOf[i], asOf)
+			}
 			for i, win := range windows {
 				c, asOf := s.Totals(win.from)
 				if mapped {
@@ -149,19 +162,21 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range windows {
 			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial, otherSpend.unknown()))
 		}
-		fleet = sumUsage(fleet, au.Other)
-		for _, w := range au.Workers {
-			fleet = sumUsage(fleet, w.Usage)
-		}
+		fleetPartial = fleetPartial || au.Partial
 		view.Accounts = append(view.Accounts, au)
 	}
-	view.Fleet = fleet
+	if len(r.Accounts) > 0 {
+		for i, win := range trailing {
+			view.Fleet = append(view.Fleet, makeUsage(win, fleet[i], fleetAsOf[i], fleetPartial, fleetSpend.unknown()))
+		}
+	}
 	m.Usage = view
 	attachUsage(&m)
 	return m
 }
 
-// attachUsage puts each worker's spend, summed over its accounts, and its
+// attachUsage marks each reached limit its account spent tokens after as
+// past, and puts each worker's spend, summed over its accounts, and its
 // account's reached limit on the worker's roster entry. A limit travels with
 // the newest activity of its own account, so one account's spend never
 // rebuts another account's limit; a worker on several limited accounts gets
@@ -172,14 +187,18 @@ func attachUsage(m *Model) {
 	if m.Usage == nil {
 		return
 	}
+	// The view may be a stored snapshot's; the marks go on a copy.
+	view := *m.Usage
+	view.Accounts = slices.Clone(view.Accounts)
+	m.Usage = &view
 	perWorker := map[usage.RosterKey][]Usage{}
 	type accountLimit struct {
 		limit  *usage.Limit
 		active time.Time
 	}
 	reached := map[usage.RosterKey]accountLimit{}
-	for _, a := range m.Usage.Accounts {
-		limit := reachedLimit(a.Limits)
+	for k := range m.Usage.Accounts {
+		a := &m.Usage.Accounts[k]
 		var newest time.Time
 		for _, u := range a.Other {
 			newest = later(newest, u.AsOf)
@@ -189,6 +208,13 @@ func attachUsage(m *Model) {
 				newest = later(newest, u.AsOf)
 			}
 		}
+		a.Limits = slices.Clone(a.Limits)
+		for i := range a.Limits {
+			if l := &a.Limits[i]; l.Kind == "reached" {
+				l.Past = newest.After(l.AsOf)
+			}
+		}
+		limit := reachedLimit(a.Limits)
 		for _, w := range a.Workers {
 			key := usage.RosterKey{Session: w.Session, Handle: w.Handle}
 			perWorker[key] = sumUsage(perWorker[key], w.Usage)
@@ -228,13 +254,18 @@ type window struct {
 	from        time.Time
 }
 
-// accountWindows are the account's 5 h and 7 d windows: aligned to a
-// reported reset when the account has one ahead, else trailing.
-func accountWindows(a usage.Account, now time.Time) []window {
-	ws := []window{
+// trailingWindows are the 5 h and 7 d windows that end now.
+func trailingWindows(now time.Time) []window {
+	return []window{
 		{name: usage.Window5h, label: "last 5 h", from: now.Add(-5 * time.Hour)},
 		{name: usage.Window7d, label: "last 7 d", from: now.Add(-7 * 24 * time.Hour)},
 	}
+}
+
+// accountWindows are the account's 5 h and 7 d windows: aligned to a
+// reported reset when the account has one ahead, else trailing.
+func accountWindows(a usage.Account, now time.Time) []window {
+	ws := trailingWindows(now)
 	for _, l := range a.Limits {
 		if l.ResetsAt == nil || !l.ResetsAt.After(now) {
 			continue
@@ -283,7 +314,7 @@ func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown s
 }
 
 // sumUsage adds b into a window by window. The first operand's labels win;
-// a sum of differently aligned windows keeps the window name only.
+// a sum of differently aligned windows says so and starts at the earlier.
 func sumUsage(a, b []Usage) []Usage {
 	if a == nil {
 		return append([]Usage(nil), b...)
@@ -321,7 +352,7 @@ func sumUsage(a, b []Usage) []Usage {
 		x.AsOf = later(x.AsOf, y.AsOf)
 		x.Partial = x.Partial || y.Partial
 		if !x.WindowFrom.Equal(y.WindowFrom) {
-			x.Label = "last " + map[string]string{usage.Window5h: "5 h", usage.Window7d: "7 d"}[x.Window]
+			x.Label = windowName(x.Window) + ", windows differ by account"
 			x.WindowFrom = earlier(x.WindowFrom, y.WindowFrom)
 		}
 		a[i] = x

@@ -40,3 +40,44 @@ func TestTextBoundsSourceTitlesAndMarksInferredOwners(t *testing.T) {
 		t.Fatalf("rendered %d source titles, want 2", titles)
 	}
 }
+
+func TestSentence(t *testing.T) {
+	long := strings.Repeat("word ", 60)
+	for _, tc := range []struct{ name, in, want string }{
+		// Finish review 2026-11-02: summaries cut at the limit ended on a dangling word.
+		{"long sentence ends at a clause", "The owner approves a tool call from the phone, the terminal dialog closes at once, and the board shows the outcome beside the request without a second refresh.", "The owner approves a tool call from the phone, the terminal dialog closes at once…"},
+		// Code review 2026-11-02: every first word was upper-cased ("IOS", "Npm").
+		{"own case kept without a label", "iOS build breaks on the second run. More text.", "iOS build breaks on the second run."},
+		{"bead label", "User outcome: the owner sees one sentence per card. Gap: none.", "The owner sees one sentence per card."},
+		{"pr heading and bullets", "## Summary\n\n- Adds a `--port` flag to the [relay](http://x) so it listens elsewhere.\n- Docs.", "Adds a --port flag to the relay so it listens elsewhere."},
+		{"semicolon", "Fix the clock; add a test", "Fix the clock"},
+		{"label alone on its paragraph", "User outcome:\n\nThe owner sees one sentence.", "The owner sees one sentence."},
+		{"bold label alone", "**User outcome:**\n\nThe owner sees one sentence.", "The owner sees one sentence."},
+		{"empty label", "Gap: \n\nX marks it.", "X marks it."},
+		{"html comment and closes line", "<!-- Describe the change -->\nCloses #12\n\nAdds the relay flag. More text.", "Adds the relay flag."},
+		{"semicolon inside code", "Fix the `a; b` parsing. Later.", "Fix the a; b parsing."},
+		{"bullets join", "- Adds a flag\n- Updates the docs", "Adds a flag; Updates the docs"},
+		{"empty", "  \n", ""},
+		{"long", long, "word" + strings.Repeat(" word", 22) + "…"},
+	} {
+		got := Sentence(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: Sentence = %q, want %q", tc.name, got, tc.want)
+		}
+		if utf8.RuneCountInString(got) > SentenceLimit {
+			t.Errorf("%s: %d runes", tc.name, utf8.RuneCountInString(got))
+		}
+	}
+}
+
+func TestTextShowsCardSummaryUnderTitle(t *testing.T) {
+	bead, _ := Bead("demo-a1")
+	m := Build(Input{Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, Items: []Item{{Ref: bead, Title: "Deliver", State: StateActive, Owner: Owner{Kind: OwnerAgent, Handle: "w"}, Evidence: []Evidence{{Field: FieldSummary, Text: "User outcome: the owner sees one line."}}}}}}}, Config: DefaultConfig(), Now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)})
+	var out strings.Builder
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "  * Deliver\n    The owner sees one line.\n") {
+		t.Fatalf("summary not under the title: %q", out.String())
+	}
+}

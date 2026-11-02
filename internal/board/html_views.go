@@ -28,7 +28,12 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 	}
 	for _, action := range m.Next {
 		if s, ok := byID[action.CardID]; ok {
-			s.NextReason = clean(action.Reason)
+			// A Next reason is the tier of the card's column, which the
+			// state word already says; a summary takes its line.
+			s.Why = ""
+			if s.Summary == "" {
+				s.Why = clean(action.Reason)
+			}
 			views[0].Strips = append(views[0].Strips, s)
 		}
 	}
@@ -38,23 +43,13 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 		{ColumnUnclaimed},
 	}
 	for i := range views {
-		var gaps []string
-		for _, source := range m.Sources {
-			if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial {
-				continue
-			}
+		views[i].Coverage = coverageGaps(m.Sources, func(source SourceView) bool {
 			relevant := len(source.Feeds) == 0
 			for _, col := range coverageColumns[i] {
 				relevant = relevant || feeds(source.Feeds, col)
 			}
-			if relevant {
-				gaps = append(gaps, clean(source.Name))
-			}
-		}
-		if len(gaps) > 0 {
-			views[i].CoverageTitle = "Incomplete coverage (" + strconv.Itoa(len(gaps)) + " sources)"
-			views[i].Coverage = "Incomplete coverage: " + strings.Join(gaps, ", ") + ". Some items may be missing."
-		}
+			return relevant
+		})
 	}
 	history := pageView{ID: "history", Title: "History", Description: "Completed, cancelled, and no longer reported tasks. Their evidence remains available; they are outside current work and next actions.", Empty: "No historical tasks recorded."}
 	historical := newestCards(m.Historical)
@@ -67,11 +62,26 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 	return append(views, history)
 }
 
+// coverageGaps lists the sources a view rests on that were not fully read.
+func coverageGaps(sources []SourceView, relevant func(SourceView) bool) []pageGap {
+	var gaps []pageGap
+	for _, source := range sources {
+		if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial || !relevant(source) {
+			continue
+		}
+		gaps = append(gaps, sourceGap(source))
+	}
+	return gaps
+}
+
 type pageFlow struct {
-	Legend, Coverage, CoverageTitle string
-	Stages                          []pageStage
-	NeedsYou                        []pageStrip
-	Gates                           []string
+	Legend   string
+	Coverage []pageGap
+	Stages   []pageStage
+	NeedsYou []pageStrip
+	// Gates are the unread messages for the owner, one line per session
+	// with its oldest age, kept apart from the cards.
+	Gates []string
 	// Requests is the request headline, linked to the Requests view.
 	Requests string
 }
@@ -96,7 +106,7 @@ var stageEmpty = map[Stage]string{
 func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 	f := pageFlow{Legend: flowLegend}
 	for _, g := range m.Gates {
-		f.Gates = append(f.Gates, pluralize(g.OpenCount, "unread message")+" for you in "+clean(g.Session))
+		f.Gates = append(f.Gates, clean(g.Session)+": "+pluralize(g.OpenCount, "unread message")+", oldest "+age(seconds(g.OldestAgeSeconds)))
 	}
 	cards := m.FlowCards()
 	for _, v := range m.Flow {
@@ -118,17 +128,7 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 		head, notes := requestHeadline(m.Requests)
 		f.Requests = strings.Join(append([]string{head}, notes...), "; ")
 	}
-	var gaps []string
-	for _, source := range m.Sources {
-		if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial {
-			continue
-		}
-		gaps = append(gaps, clean(source.Name))
-	}
-	if len(gaps) > 0 {
-		f.CoverageTitle = "Incomplete coverage (" + strconv.Itoa(len(gaps)) + " sources)"
-		f.Coverage = "Incomplete coverage: " + strings.Join(gaps, ", ") + ". Some cards may be missing."
-	}
+	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f
 }
 
@@ -140,6 +140,23 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	s.NamesBead = clean(sum.Names)
 	s.NeedsYou = sum.NeedsYou
 	s.Owner = clean(sum.Owner)
+	if !c.OpenedAt.IsZero() {
+		s.Opened = "open " + age(now.Sub(c.OpenedAt))
+	}
+	s.CardAge = s.StageAge
+	if sum.Age == "age unknown" && s.Opened != "" {
+		s.CardAge = s.Opened
+	}
+	switch {
+	case s.SinceAt != "":
+		s.Waited = s.Since + " ago"
+	case sum.Age != "age unknown":
+		s.Waited = s.StageAge + " in stage"
+	case s.Opened != "":
+		s.Waited = s.Opened
+	default:
+		s.Waited = "age unknown"
+	}
 	if c.Authority == "" {
 		s.TaskID = ""
 	}
@@ -148,10 +165,11 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 }
 
 type pageFloor struct {
-	Counts                                    []pageCount
-	Summary, Dormant, Coverage, CoverageTitle string
-	DormantBy                                 []string
-	Sessions                                  []pageFloorSession
+	Counts           []pageCount
+	Summary, Dormant string
+	Coverage         []pageGap
+	DormantBy        []string
+	Sessions         []pageFloorSession
 }
 
 type pageCount struct{ State, Glyph, Text string }
@@ -237,16 +255,6 @@ func buildFloorPage(m Model, now time.Time) pageFloor {
 	for i := range f.Sessions {
 		f.Sessions[i].Count = pluralize(len(f.Sessions[i].Stations), "seat")
 	}
-	for _, source := range m.Sources {
-		if source.Name != "amq" || source.Status == StatusOK && !source.Partial {
-			continue
-		}
-		f.CoverageTitle = "Incomplete coverage (amq)"
-		f.Coverage = "AMQ is " + string(source.Status)
-		if source.Partial {
-			f.Coverage += " with a partial read"
-		}
-		f.Coverage += ": some seats may be missing or show Unknown."
-	}
+	f.Coverage = coverageGaps(m.Sources, func(source SourceView) bool { return source.Name == "amq" })
 	return f
 }

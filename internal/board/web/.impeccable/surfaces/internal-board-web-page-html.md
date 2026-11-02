@@ -1,17 +1,24 @@
+---
+version: 1
+slug: "internal-board-web-page-html"
+primary_target: "internal/board/web/page.html"
+related_targets: ["internal/board/web/page.css","internal/board/web/page.js","internal/board/html.go","internal/board/html_views.go"]
+---
+
 # Board work navigator
 
-Mode: Operate. Primary target: internal/board/web/page.html. Related targets: page.css, page.js, ../html.go.
+Mode: Operate. Primary target: internal/board/web/page.html. Related targets: page.css, page.js, ../html.go, ../html_views.go.
 
 ## Direction contract
 
-THESIS: One readable work navigator turns a real record into the next useful inspection or response. A message is a request, assignment is backlog, and tracker state does not establish execution.
+THESIS: The board reads like a well-set operations page: every record says what it is in one plain sentence, and the owner's queue is a row of items with their own ages, not a count. It refuses the equal-width card wall where empty stages take the same room as full ones.
 
-OWN-WORLD: Cool neutral canvas, white or charcoal list surface, clear system sans, restrained cobalt selection. Titles: 18px; body: 16px; metadata: 14px. Generous rows, fine dividers, 44px controls. No flight strips, card wall, micro-labels, or summary metrics.
+OWN-WORLD: "Signal". The ratified cool neutral canvas, white or charcoal surfaces, and cobalt reserved for what needs the owner. Hierarchy and rhythm carry the beauty: a 2rem/700 view headline at -0.03em, stage heads in sentence case at 1.125rem with the count at the right, card titles at 1rem/600, a one-sentence summary in ink at .875rem, metadata muted. A conventional-commit prefix (fix(board):) becomes a quiet monospace chip, so the title starts with its noun. Flat surfaces, fine dividers, no shadows, no gradients.
 
-STORY: The owner opens Next, reads the title and recorded reason, copies a supported command, and opens Details for provenance. Work, Backlog, Requests, Suggestions, History, Sources, and Agents remain separate destinations. Suggestions show an exact source span for review; only an owner-adopted terminal action makes it task evidence.
+STORY: The owner opens Flow, reads each Needs-you tile (title, sentence, why, how long), scans the stages for what moved, and opens a card only for provenance and commands.
 
-FIRST VIEWPORT: A 1200px bounded shell, 176px navigation and 32px gap, one main reading lane. Next contains at most 5 supported actions, with relevant source coverage above them. Search and a copy action are visible when available. Snapshot age remains visible at compact widths. Below 960px navigation moves above the list; at 600px rows become one column without smaller type.
+FIRST VIEWPORT: 1440px: header with project and snapshot age; Needs-you as one tile per item with its age, gates as a separate quiet line, the requests link apart; coverage as one inline line naming the gaps; then the stage board where an empty stage is a narrow rail (word and 0, vertical) and full stages share the width. 390px: Needs-you directly under the header, before navigation detail and search.
 
-FORM: Work navigator, grounded candidate 3 of 7; seed 1e1a1274. Pro direction: https://chatgpt.com/c/6adf7d42-fbd0-8332-adc2-8d3f31ea9b3d. Cool neutral canvas, cobalt selection, local system sans, and monospace commands. Titles: 18px; body: 16px; metadata: 14px. Generous rows, fine dividers, 44px controls. Native inline disclosure preserves reading context; new live snapshots wait for explicit Update. Motion responds to input and respects reduced motion.
+FORM: Signal, a refinement inside the ratified Work Navigator world (no concept seed: extension of an established surface, owner chose Signal over Ledger and Instrument on 2026-11-02).
 
-FINISH: Keep this surface contract aligned with the shipped template, styles, script, and rendered view model. Claims require corresponding installed evidence and model-quality measurements.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

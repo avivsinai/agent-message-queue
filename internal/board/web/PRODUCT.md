@@ -12,7 +12,8 @@ A static HTML page that `amq-board --html --out <file>` renders from Go
 `html/template`. The files are under `internal/board/web/`: one template, one
 hand-written stylesheet, and one script. The page embeds only its publication
 identity and the attachable tasks; message bodies and complete evidence stay in
-`--json`. Growing groups show their count and newest entries. No external
+`--json`. Every task, pull request, issue, and request carries a one-sentence
+summary cut from its own prose; the page never embeds a full body. Growing groups show their count and newest entries. No external
 fonts, scripts, or CDNs.
 
 ## Users
@@ -61,7 +62,8 @@ the owner adopts them.
   with no recent evidence fold into one dormant count. An agent's presence note
   and status are quoted as self-reports, never shown as facts.
 - Requests shows recorded questions, review requests, and todos of the last
-  14 days by scoped addressee. Each recipient carries an observation (direct
+  14 days by scoped addressee, each with the first sentence of its message
+  body. Each recipient carries an observation (direct
   reply or none, with later thread messages as secondary context, or not
   assessed); a classifier's opinion is shown apart, with its name, an exact
   quote, and the quoted sender and age. The one count is recent requests with
