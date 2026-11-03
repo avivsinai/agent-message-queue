@@ -310,7 +310,7 @@ func TestHostAnswersAMessageOnItsThread(t *testing.T) {
 
 func TestHostRejectsAToolCall(t *testing.T) {
 	root := newRoot(t)
-	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	t.Setenv(binding.EnvPath, filepath.Join(bindingStore(t), "binding.json"))
 	send(t, root, "codex", format.KindTodo, "clean the build")
 	agent := &fakeAgent{askPermission: true}
 	startHost(t, root, agent)
@@ -583,17 +583,23 @@ func (l bridgeLiveness) at() time.Time {
 	return at
 }
 
+// bindingStore is a throwaway binding store directory. The store refuses a
+// symlinked path, and the macOS temp dir is under the /var symlink (macOS CI
+// failed here).
+func bindingStore(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // bindRemote binds a mailbox binding for the host's root and handle in a
 // throwaway store and returns that binding's dialog directory.
 func bindRemote(t *testing.T, root string) string {
 	t.Helper()
-	// The binding store refuses a symlinked path, and the macOS temp dir is
-	// under the /var symlink (macOS CI failed here).
-	store, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(binding.EnvPath, filepath.Join(store, "binding.json"))
+	t.Setenv(binding.EnvPath, filepath.Join(bindingStore(t), "binding.json"))
 	if err := binding.WriteNamed(binding.Binding{Name: "grok", Carrier: binding.CarrierMailbox, Root: root, Handle: "grok", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}

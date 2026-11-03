@@ -9,7 +9,12 @@ import (
 )
 
 func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
-	store := t.TempDir()
+	// The binding store refuses a symlinked path, and the macOS temp dir is
+	// under the /var symlink (macOS CI failed here).
+	store, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(binding.EnvPath, filepath.Join(store, "binding.json"))
 	root := t.TempDir()
 	if err := binding.WriteNamed(binding.Binding{Name: "proj", Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
