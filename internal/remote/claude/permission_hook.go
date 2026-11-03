@@ -74,8 +74,8 @@ const (
 type Seat struct {
 	Root, Handle string // AM_ROOT and AM_ME; empty outside AMQ
 	Session      string // the hook's session_id
-	// Holder is the Claude process the hook runs under whose session
-	// registry entry names Session; zero when none does.
+	// Holder is the Claude process the hook runs under (claudeAncestor);
+	// zero when none was found.
 	Holder launch.HolderIdentity
 }
 
@@ -226,16 +226,25 @@ func heldBinding(holder launch.HolderIdentity) (string, error) {
 	return "", nil
 }
 
-// claudeAncestor is the Claude process the hook runs under: the nearest
-// ancestor whose session registry entry names session, with the identity
-// the process walk verified; zero when none does.
+// claudeAncestor is the Claude process the hook runs under, with the
+// identity the process walk verified: the nearest ancestor whose session
+// registry entry names session, else the nearest with any entry (Claude may
+// not have rewritten its entry yet after /clear); zero when none has one.
 func claudeAncestor(session string) launch.HolderIdentity {
+	var fallback launch.HolderIdentity
 	for _, h := range launch.Ancestors() {
-		if s, err := SessionForPID(h.PID); err == nil && s.ID == session {
+		s, err := SessionForPID(h.PID)
+		if err != nil {
+			continue
+		}
+		if s.ID == session {
 			return h
 		}
+		if fallback.PID == 0 {
+			fallback = h
+		}
 	}
-	return launch.HolderIdentity{}
+	return fallback
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the

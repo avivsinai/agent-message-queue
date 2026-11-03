@@ -101,8 +101,8 @@ command's own message. Do not work around a refusal.
    installed, tell the user: "This adds one approval hook. The first approval
    dialog of each Claude Code session on this machine connects that session
    to its own Buzz channel, even one that never ran /amq-remote: an AMQ
-   session gets the mailbox binding /amq-remote writes, any other session a
-   native binding, where chat needs /amq-remote --native. Every dialog of
+   session gets its own binding (the mailbox one /amq-remote writes), any
+   other session a native binding, where chat needs /amq-remote --native. Every dialog of
    the session then shows there; ✅ allows, ❌ denies, first answer wins.
    /amq-remote off stops it for that session, and
    `amq-remote claude uninstall-approval-hook` removes the hook." Ask once, then run

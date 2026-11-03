@@ -449,6 +449,7 @@ func runApprovalHook(t *testing.T, count int, session, name string) []dialog.Req
 func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
 	root := filepath.Join(dir, "p", ".agent-mail", "session1")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -470,28 +471,54 @@ func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
 	}
 }
 
-// After /amq-remote off the approval hook writes no binding for the session
-// again: its dialogs stay in the terminal until the owner connects it.
+// After /amq-remote off the approval hook writes no binding for the
+// session's process again: its dialogs stay in the terminal until the owner
+// connects it. A session in another process is not off.
 //
 // Regression: code review of the hook-written binding found that the first
 // dialog after /amq-remote off connected the session again.
 func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
-	dir := canonicalTempDir(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	root := filepath.Join(dir, "p", ".agent-mail", "session1")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
+	this, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
 	}
-	attachMailboxAs(t, root)
-	if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
-		t.Fatalf("detach: code=%d err=%v", code, err)
+	ancestors := launch.Ancestors()
+	if len(ancestors) == 0 {
+		t.Skip("no process ancestry on this platform")
 	}
-	if open := runApprovalHook(t, 1, "s-1", "claude-p-session1"); len(open) != 0 {
-		t.Fatalf("open dialogs = %+v; want none for a detached session", open)
+	other := ancestors[0] // a live process that is not this one
+	saved := detectHarness
+	t.Cleanup(func() { detectHarness = saved })
+	var holder launch.HolderIdentity
+	detectHarness = func(*codexView, string, string) harnessSession {
+		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder}
 	}
-	if all, _ := binding.List(); len(all) != 0 {
-		t.Fatalf("bindings = %+v; want none", all)
+	for _, tc := range []struct {
+		name     string
+		detached launch.HolderIdentity
+		want     int
+	}{{"this process", this, 0}, {"another process", other, 1}} {
+		dir := canonicalTempDir(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+		t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+		root := filepath.Join(dir, "p", ".agent-mail", "session1")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		holder = tc.detached
+		attachMailboxAs(t, root)
+		if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
+			t.Fatalf("detach: code=%d err=%v", code, err)
+		}
+		holder = this
+		open := runApprovalHook(t, 1, "s-1", "claude-p-session1")
+		if len(open) != tc.want {
+			t.Fatalf("%s detached: open dialogs = %d; want %d", tc.name, len(open), tc.want)
+		}
+		if all, _ := binding.List(); len(all) != tc.want {
+			t.Fatalf("%s detached: bindings = %+v; want %d", tc.name, all, tc.want)
+		}
 	}
 }
 
@@ -511,7 +538,9 @@ func TestApprovalHookBindsANativeSession(t *testing.T) {
 	pid := ancestors[0].PID
 	config := canonicalTempDir(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", config)
-	raw, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s-desktop", "cwd": "/work/myproj", "messagingSocketPath": "/m.sock"})
+	// No messaging socket and no kind: the hook never submits to the
+	// session, so any registry entry will do.
+	raw, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s-desktop", "cwd": "/work/myproj"})
 	if err := os.MkdirAll(filepath.Join(config, "sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}

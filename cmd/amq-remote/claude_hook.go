@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -79,7 +80,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
 			return 1
 		}
-		say(stdout, "approval hook installed: the first tool dialog of each Claude Code session on this machine connects that session to its own Buzz channel (an AMQ session gets the mailbox binding /amq-remote writes; any other session a native binding, where chat needs /amq-remote --native), and every dialog appears there; the first answer, there or in the terminal, decides; /amq-remote off stops it for that session\n")
+		say(stdout, "approval hook installed: the first tool dialog of each Claude Code session on this machine connects that session to its own Buzz channel (an AMQ session gets its own binding, the mailbox one /amq-remote writes; any other session a native binding, where chat needs /amq-remote --native), and every dialog appears there; the first answer, there or in the terminal, decides; /amq-remote off stops it for that session\n")
 		return 0
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {
@@ -118,27 +119,28 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 // hookBinding writes the binding of a Claude session that no binding serves,
 // for its first approval dialog, with the code attach --self uses: the
 // mailbox binding of an AMQ session (AM_ROOT and AM_ME set), else the native
-// binding of --native in AM_ROOT or the machine root. It registers no
-// target with the endpoint and needs no Stop hook, so chat in a native
-// session's channel waits for /amq-remote --native. A session whose owner
-// detached it (/amq-remote off) gets nothing.
+// binding of --native in AM_ROOT when it is a usable root, else in the
+// machine root. It registers no target with the endpoint and needs no Stop
+// hook, so chat in a native session's channel waits for /amq-remote
+// --native. A session whose process the owner detached (/amq-remote off)
+// gets nothing.
 func hookBinding(s claude.Seat) (string, error) {
 	if s.Root != "" && s.Handle != "" {
 		_, name, _, err := bindMailbox(s.Root, s.Handle, "", io.Discard, true)
 		return name, err
 	}
 	if s.Holder.PID <= 0 {
-		return "", errors.New("no Claude process above the hook names this session")
+		return "", errors.New("no Claude process above the hook")
 	}
-	cand, ok, err := claude.CandidateFor(s.Holder.PID)
+	cand, ok, err := claude.RegistryCandidate(s.Holder.PID)
 	if !ok {
 		if err == nil {
-			err = fmt.Errorf("claude:%d is not an attachable Claude session", s.Holder.PID)
+			err = fmt.Errorf("claude:%d has no Claude session registry entry", s.Holder.PID)
 		}
 		return "", err
 	}
 	root := s.Root
-	if root == "" {
+	if !usableRoot(root) {
 		if root, err = binding.EnsureMachineRoot(); err != nil {
 			return "", err
 		}
@@ -149,7 +151,7 @@ func hookBinding(s claude.Seat) (string, error) {
 		return "", fmt.Errorf("this session is attached through %s (binding %s)", b.Root, b.Name)
 	}
 	nb, _, codexes := nativeBinding(root, filepath.Join(root, stateDirName), cand, s.Session, nonEmpty(cand.Display, "claude "+cand.Target), "", false)
-	if err := ownerDetached(nb); err != nil {
+	if err := ownerDetached(s.Holder, nb.Holder); err != nil {
 		return "", err
 	}
 	inspect := inspectOutsideLock(codexes)
@@ -161,18 +163,33 @@ func hookBinding(s claude.Seat) (string, error) {
 	return name, nil
 }
 
-// ownerDetached refuses a session whose owner turned it off: a tombstone of
-// b's session identity that detach left. The binding stays gone until the
-// owner attaches the session again.
-func ownerDetached(b binding.Binding) error {
+// usableRoot reports whether root can hold a native binding as attach
+// checks a mailbox root: absolute and an existing directory.
+func usableRoot(root string) bool {
+	if root == "" || !filepath.IsAbs(root) {
+		return false
+	}
+	fi, err := os.Stat(root)
+	return err == nil && fi.IsDir()
+}
+
+// ownerDetached refuses a session whose process the owner turned off: a
+// tombstone that detach left whose holder is one of holders. A session in
+// another process (a new Claude session in the same place) is not off. The
+// binding stays gone until the owner attaches the session again.
+func ownerDetached(holders ...launch.HolderIdentity) error {
 	tombs, err := binding.Tombstones()
 	if err != nil {
 		return err
 	}
-	id := b.SessionIdentity()
 	for _, t := range tombs {
-		if t.Removed == binding.RemovedDetached && t.SessionIdentity() == id {
-			return fmt.Errorf("the owner turned this session off (binding %s); /amq-remote connects it again", t.Name)
+		if t.Removed != binding.RemovedDetached || t.Holder.PID <= 0 {
+			continue
+		}
+		for _, h := range holders {
+			if t.Holder == h {
+				return fmt.Errorf("the owner turned this session off (binding %s); /amq-remote connects it again", t.Name)
+			}
 		}
 	}
 	return nil

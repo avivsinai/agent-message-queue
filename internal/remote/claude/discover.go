@@ -117,15 +117,28 @@ func init() {
 	registry.RegisterDiscoverer("claude", discoverer{})
 }
 
-// CandidateFor is the discovered session of the Claude process pid, as
-// attach --self --native finds it; ok=false when pid is not an attachable
-// session.
-func CandidateFor(pid int) (registry.Candidate, bool, error) {
-	cands, err := discoverer{}.Discover(context.Background(), registry.DiscoverRequest{})
-	for _, c := range cands {
-		if c.Target == "claude:"+strconv.Itoa(pid) {
-			return c, true, nil
-		}
+// RegistryCandidate is the candidate of the Claude process pid read from its
+// session registry entry alone, whatever its kind and with or without a
+// messaging socket: the approval hook binds a session it never submits to.
+// attach --self --native finds its candidate through Discover instead.
+// ok=false when pid has no entry.
+func RegistryCandidate(pid int) (registry.Candidate, bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return registry.Candidate{}, false, err
 	}
-	return registry.Candidate{}, false, err
+	configDir, err := sessionConfigDir(home)
+	if err != nil {
+		return registry.Candidate{}, false, err
+	}
+	reg, err := readSessionRegistry(configDir, pid)
+	if err != nil || reg == nil {
+		return registry.Candidate{}, false, err
+	}
+	recorded := ""
+	if configDir != defaultConfigDir(home) {
+		recorded = configDir
+	}
+	cfg, _ := json.Marshal(config{Pid: pid, ConfigDir: recorded})
+	return registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), Display: reg.Name, Config: cfg}, true, nil
 }

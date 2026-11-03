@@ -316,7 +316,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 // this process is the holder. It returns the binding as built, the name
 // written and whether the session already held it. The approval hook calls
 // it for an AMQ session that no binding serves yet, with fromHook: then a
-// session whose owner detached it gets nothing (ownerDetached).
+// session whose process the owner detached gets nothing (ownerDetached).
 func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool) (b binding.Binding, written string, reused bool, err error) {
 	if root == "" || handle == "" {
 		return b, "", false, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
@@ -344,7 +344,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool) (b 
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
 		AppServer: h.AppServer}
 	if fromHook {
-		if err := ownerDetached(b); err != nil {
+		if err := ownerDetached(b.Holder); err != nil {
 			return b, "", false, err
 		}
 	}
