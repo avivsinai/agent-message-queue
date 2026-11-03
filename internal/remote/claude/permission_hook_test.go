@@ -202,7 +202,8 @@ func TestClaudeAncestorChooser(t *testing.T) {
 		want  int
 	}{
 		{"registry names the session", []ancestor{shell, proc(30, "other", "/x/claude"), proc(20, "s-1", "/x/claude")}, 20},
-		{"any registry entry", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude"), proc(20, "other", "/x/node")}, 20},
+		{"registry not yet rewritten", []ancestor{shell, proc(30, "other", "/x/node")}, 30},
+		{"child session under a parent with an entry", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude"), proc(20, "other", "/x/claude")}, 30},
 		{"desktop app", []ancestor{shell, proc(30, "", "/Users/me/Library/Application Support/Claude/claude-code/2.1.317/abc123/claude.app/Contents/MacOS/claude")}, 30},
 		{"Homebrew or npm", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude")}, 30},
 		{"native installer", []ancestor{shell, proc(30, "", "/Users/me/.local/share/claude/versions/2.1.317")}, 30},
