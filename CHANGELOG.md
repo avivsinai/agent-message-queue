@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.126.1](https://github.com/avivsinai/agent-message-queue/compare/v0.126.0...v0.126.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **remote:** show every dialog in the session's own Buzz channel ([#1335](https://github.com/avivsinai/agent-message-queue/issues/1335)) ([74fc1ea](https://github.com/avivsinai/agent-message-queue/commit/74fc1eafbcce2beeb2305a003314b70b1e4ad97b))
+
 ## [0.126.0](https://github.com/avivsinai/agent-message-queue/compare/v0.125.0...v0.126.0) (2026-11-03)
 
 
