@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.126.0](https://github.com/avivsinai/agent-message-queue/compare/v0.125.0...v0.126.0) (2026-11-03)
+
+
+### Features
+
+* **remote:** answer any harness approval dialog from Buzz ([798fb1a](https://github.com/avivsinai/agent-message-queue/commit/798fb1a5ed645bd6c713e6e84065fb943b5c4ab0))
+
+
+### Bug Fixes
+
+* **acp:** show status replies and post late answers in Buzz ([798fb1a](https://github.com/avivsinai/agent-message-queue/commit/798fb1a5ed645bd6c713e6e84065fb943b5c4ab0))
+
 ## [0.125.0](https://github.com/avivsinai/agent-message-queue/compare/v0.124.2...v0.125.0) (2026-11-02)
 
 
