@@ -14,14 +14,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // PermissionRequest hook. Claude Code runs it for every tool permission
 // dialog, in the CLI, the desktop app and the IDE, alongside the dialog it
-// shows. It mirrors the dialog into a dialogs directory: the binding's that
-// serves the session, else the machine's, where the Buzz agent posts it.
-// Then it waits for the first answer: the owner's in Buzz, or the
+// shows. It mirrors the dialog into the dialogs directory of the binding that
+// serves the session, else of the session's own session record, so the Buzz
+// agent posts it in the session's own channel. Then it waits for the first answer: the owner's in Buzz, or the
 // terminal's. A Buzz answer prints the decision; a terminal answer ends the
 // hook with no output, so the terminal's choice stands. On any error it
 // exits with no output and the terminal dialog decides. It never exits 2
@@ -99,7 +100,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.HookEventName != "" && in.HookEventName != permissionHookType {
 		return 0
 	}
-	name, err := dialog.BindingFor(hookSession(in))
+	name, err := dialogName(in)
 	if err != nil {
 		return 0
 	}
@@ -167,30 +168,33 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 // the hook's parent. A variable so tests can name another process.
 var claudeProcess = os.Getppid
 
-// hookSession is the session the dialog comes from, as attach --self
-// --native records it: the Claude process is its holder, and that process's
-// session registry entry gives the working directory when it names this
-// session, else the hook's cwd.
-func hookSession(in permissionInput) dialog.Session {
-	s := dialog.Session{Harness: harnessClaude, Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Native: in.SessionID, Cwd: in.Cwd}
-	if s.Root == "" {
-		s.Handle = ""
-	}
+// dialogName is where the dialog opens: the binding that serves the session
+// (its AMQ handle, its session id, or its Claude process, which outlives a
+// /clear), else the session record of that Claude process, labelled by the
+// session's project.
+func dialogName(in permissionInput) (string, error) {
 	pid := claudeProcess()
-	if holder, err := launch.HolderOf(pid); err == nil {
-		s.Holder = holder
+	name, err := dialog.FindBinding(os.Getenv("AM_ROOT"), os.Getenv("AM_ME"), in.SessionID, pid)
+	if err != nil || name != "" {
+		return name, err
 	}
-	if reg, err := SessionForPID(pid); err == nil && reg.ID == in.SessionID && reg.Cwd != "" {
-		s.Cwd = reg.Cwd
+	holder, err := launch.HolderOf(pid)
+	if err != nil {
+		return "", err
 	}
-	return s
+	place, base := harnessClaude, harnessClaude
+	if b := filepath.Base(filepath.Clean(in.Cwd)); in.Cwd != "" && b != string(filepath.Separator) {
+		place, base = b, harnessClaude+"-"+b
+	}
+	return dialog.RecordSession(dialog.SessionRecord{Harness: harnessClaude, Session: in.SessionID,
+		Label: binding.SessionLabel(harnessClaude, place, binding.Machine()), Holder: holder}, binding.SanitizeName(base))
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
 // permission updates "Allow this session" applies. Claude offers it when
 // the dialog suggests updates (each echoed with destination session), and
-// for an edit tool without suggestions (accept edits for the session). The
-// label never names the updates: they can hold paths and modes.
+// for an edit tool without suggestions (accept edits for the session). Its
+// label says the scope in short (sessionScope).
 func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow}}
 	var rules []json.RawMessage
@@ -203,9 +207,88 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 		rules = []json.RawMessage{json.RawMessage(`{"type":"setMode","mode":"acceptEdits","destination":"session"}`)}
 	}
 	if len(rules) > 0 {
-		opts = append(opts, dialog.Option{N: 2, Label: "Allow this session", Value: valueAllowSession})
+		opts = append(opts, dialog.Option{N: 2, Label: sessionScope(rules), Value: valueAllowSession})
 	}
 	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true}), rules
+}
+
+// sessionScope is the label of "Allow this session" with what it allows,
+// short and with no full path: "Allow this session: Bash(rm:*)", "Allow
+// edits in <dir> this session", "Accept edits this session".
+func sessionScope(rules []json.RawMessage) string {
+	var parts, ruleParts []string
+	for _, raw := range rules {
+		var r struct {
+			Type  string `json:"type"`
+			Mode  string `json:"mode"`
+			Rules []struct {
+				ToolName    string `json:"toolName"`
+				RuleContent string `json:"ruleContent"`
+			} `json:"rules"`
+			Directories []string `json:"directories"`
+		}
+		if json.Unmarshal(raw, &r) != nil {
+			continue
+		}
+		switch r.Type {
+		case "setMode":
+			if r.Mode == "acceptEdits" {
+				parts = append(parts, "Accept edits this session")
+			} else if r.Mode != "" {
+				parts = append(parts, "Use "+r.Mode+" mode this session")
+			}
+		case "addDirectories":
+			var dirs []string
+			for _, d := range r.Directories {
+				dirs = append(dirs, filepath.Base(filepath.Clean(d)))
+			}
+			if len(dirs) > 0 {
+				parts = append(parts, "Allow edits in "+strings.Join(dirs, ", ")+" this session")
+			}
+		default:
+			for _, rule := range r.Rules {
+				if rule.RuleContent == "" {
+					ruleParts = append(ruleParts, rule.ToolName)
+				} else {
+					ruleParts = append(ruleParts, rule.ToolName+"("+shortPaths(rule.RuleContent)+")")
+				}
+			}
+		}
+	}
+	if len(ruleParts) > 0 {
+		parts = append([]string{"Allow this session: " + strings.Join(ruleParts, ", ")}, parts...)
+	}
+	if len(parts) == 0 {
+		return "Allow this session"
+	}
+	label := strings.Join(parts, "; ")
+	if r := []rune(label); len(r) > maxOptionLabel {
+		label = string(r[:maxOptionLabel-1]) + "…"
+	}
+	return label
+}
+
+// maxOptionLabel bounds an option label: one line in Buzz.
+const maxOptionLabel = 120
+
+// shortPaths cuts each absolute path in a rule to its last element and any
+// glob after it: "//Users/me/proj/**" is "proj/**".
+func shortPaths(s string) string {
+	fields := strings.Fields(s)
+	for i, f := range fields {
+		if !strings.HasPrefix(f, "/") && !strings.HasPrefix(f, "~/") {
+			continue
+		}
+		glob := ""
+		for _, g := range []string{"/**", "/*"} {
+			if rest, ok := strings.CutSuffix(f, g); ok {
+				f, glob = rest, g
+				break
+			}
+		}
+		fields[i] = filepath.Base(f) + glob
+	}
+	return strings.Join(fields, " ")
 }
 
 func editTool(name string) bool {

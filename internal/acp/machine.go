@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
@@ -254,8 +255,9 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // machineTick runs every machineScanInterval in the worker that leads the
 // machine identity, until ctx ends. It writes the marker first, before any
 // relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions, and every lateReplyInterval
-// works through the retired store.
+// that are gone, provisions the live sessions and the session records
+// (sessions.go), and every lateReplyInterval works through the retired
+// store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
@@ -275,6 +277,9 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.retireGone(now)
 	all, err := binding.List()
 	if err == nil {
+		// Session records first: a session that attached hands its channel
+		// to its binding before the binding would make its own.
+		s.provisionSessions(all, now)
 		for _, b := range all {
 			if s.stopped() {
 				return
@@ -391,6 +396,9 @@ func (s *Server) advance(r *channelRecord, now time.Time) {
 func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	if s.stopped() || !s.unchanged(r) {
 		return false
+	}
+	if dialog.IsSessionName(r.Name) {
+		return s.sessionServes(r, now)
 	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {
@@ -585,7 +593,7 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 		return
 	}
 	welcome := "AMQ Remote: this channel reaches " + r.Label + ". Write here to talk to that session."
-	if b, err := binding.ReadNamed(r.Name); err == nil && b.DialogsOnly() {
+	if dialog.IsSessionName(r.Name) {
 		welcome = "AMQ Remote: this channel shows the approvals of " + r.Label + ". React ✅ or ❌, or reply with an option's number. Run /amq-remote in that session to chat from Buzz."
 	}
 	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", buzzOwner) {
@@ -720,6 +728,12 @@ func (s *Server) retireGone(now time.Time) {
 		}
 		if r.State == channelRetired {
 			s.finishRetire(r, now)
+			continue
+		}
+		if dialog.IsSessionName(r.Name) {
+			if _, ok, err := dialog.ReadSession(r.Name); err == nil && !ok {
+				s.retire(r, retiredEnded, now)
+			}
 			continue
 		}
 		b, err := binding.ReadNamed(r.Name)
@@ -996,7 +1010,7 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 	return channelRecord{}, false
 }
 
-// errApprovalsOnly refuses a prompt in the channel of a dialogs binding that
+// errApprovalsOnly refuses a prompt in the channel of a session record that
 // answers no open dialog.
 var errApprovalsOnly = errors.New("this session's channel takes only answers to its dialogs")
 
@@ -1026,6 +1040,9 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	if !ok {
 		return binding.Binding{}, &unpinnedError{machine: true}
 	}
+	if dialog.IsSessionName(r.Name) {
+		return binding.Binding{}, errApprovalsOnly
+	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {
 	case errors.Is(err, binding.ErrNone):
@@ -1054,7 +1071,7 @@ func (s *Server) machineDirectory() string {
 	all, _ := binding.List()
 	listed := 0
 	for _, bd := range all {
-		if state, _ := bd.Liveness(); state != binding.Live || bd.Name == binding.LegacyName || bd.DialogsOnly() {
+		if state, _ := bd.Liveness(); state != binding.Live || bd.Name == binding.LegacyName {
 			continue
 		}
 		if listed == 0 {

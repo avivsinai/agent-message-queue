@@ -382,10 +382,12 @@ worker stops, its relay call in flight is cut off and no new step starts.
   was ever sent) and becomes active only after the unarchive is accepted and
   the session is still attached; then it posts "Connected again". An
   archived channel stays in Buzz history.
-- Each session's dialogs post in its channel with every option. The channel
-  of a dialogs binding (a session that is not connected) shows approvals
-  only and answers any other message with "This session shows approvals
-  only. Run /amq-remote in it to chat from Buzz." (see
+- Each session's dialogs post in its channel with every option. A session
+  that is not connected has a session record instead of a binding; its
+  channel lives while the session's process runs, shows approvals only, and
+  answers any other message with "This session shows approvals only. Run
+  /amq-remote in it to chat from Buzz." When a binding whose holder is that
+  process appears, the channel becomes the binding's (see
   [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
 
 A pinned agent keeps its Buzz identity in step with its binding. On each

@@ -216,8 +216,9 @@ func (s *Server) dialogStopped() bool {
 	}
 }
 
-// dialogTargets are the bindings this worker posts dialogs for: a machine
-// agent's live channels, or a pinned agent's live binding and its latest DM.
+// dialogTargets are the bindings and session records this worker posts
+// dialogs for: a machine agent's live channels, or a pinned agent's live
+// binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
 	if buzzSelf == "" {
 		return nil
@@ -229,6 +230,12 @@ func (s *Server) dialogTargets() []dialogTarget {
 		var out []dialogTarget
 		for _, r := range s.activeRecords() {
 			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
+				continue
+			}
+			if dialog.IsSessionName(r.Name) {
+				if rec, ok, _ := dialog.ReadSession(r.Name); ok && sessionIdentity(rec) == r.Identity {
+					out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: rec.Label})
+				}
 				continue
 			}
 			if b, err := binding.ReadNamed(r.Name); err == nil && b.SessionIdentity() == r.Identity && live(b) {
@@ -267,9 +274,9 @@ func live(b binding.Binding) bool {
 }
 
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
-// ended, edits their posts, and removes the binding's dialogs once their
-// seams left (seamsLeft). A machine
-// agent does this for every binding, a pinned agent for its own.
+// ended, and of each session record that is gone, edits their posts, and
+// removes their dialogs once their seams left (seamsLeft). A machine agent
+// does this for every directory, a pinned agent for its own binding's.
 func (s *Server) dropGoneDialogs(now time.Time) {
 	root, err := dialog.Root()
 	if err != nil {
@@ -291,13 +298,7 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		if _, err := os.Lstat(dir); err != nil {
 			continue
 		}
-		b, err := binding.ReadNamed(name)
-		switch {
-		// A name no binding can have (an older machine's approvals
-		// dialogs) is gone too.
-		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
-		case err == nil && !live(b):
-		default:
+		if !dialogsGone(name) {
 			continue
 		}
 		reqs, _ := dialog.Requests(dir)
@@ -306,10 +307,28 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		}
 		s.dialogClose(name, dir, nil)
 		if seamsLeft(dir, now) {
-			_ = os.RemoveAll(dir)
+			if dialog.IsSessionName(name) {
+				if removed, _ := dialog.RemoveSessionDir(name); !removed {
+					continue
+				}
+			} else {
+				_ = os.RemoveAll(dir)
+			}
 			_ = os.RemoveAll(s.dialogPostDir(name))
 		}
 	}
+}
+
+// dialogsGone reports whether the dialogs directory name serves nothing any
+// more: its session record is gone, or its binding is gone or ended. A name
+// no binding can have (an older machine's approvals dialogs) is gone too.
+func dialogsGone(name string) bool {
+	if dialog.IsSessionName(name) {
+		_, ok, err := dialog.ReadSession(name)
+		return err == nil && !ok
+	}
+	b, err := binding.ReadNamed(name)
+	return errors.Is(err, binding.ErrNone) || binding.ValidName(name) != nil || err == nil && !live(b)
 }
 
 // seamGrace is how long a resolved dialog's directory stays while its seam

@@ -1,12 +1,17 @@
 // Package dialog carries harness permission dialogs to Buzz and answers back.
 // A harness seam (a hook, an app-server client, a bridge) opens a request
-// for the binding that serves its session, writing the session's own
-// dialogs binding when none does, so every dialog shows in the session's own
-// channel; the Buzz agent posts it and writes the owner's answer;
-// the seam applies the answer, unless the terminal answered first. The
-// first create of resolved/<id>.json decides how a dialog ended.
+// for the binding that serves its session; the Buzz agent posts it in the
+// session's channel and writes the owner's answer; the seam applies the
+// answer, unless the terminal answered first. The first create of
+// resolved/<id>.json decides how a dialog ended.
 //
-//	<binding store dir>/dialogs/<binding name>/
+// A session no binding serves records itself instead: a session record
+// "~<name>" (session.json) beside its dialogs, which the machine agent gives
+// a channel of its own while the session's process runs. The "~" keeps the
+// name apart from every binding name.
+//
+//	<binding store dir>/dialogs/<binding name or ~session name>/
+//	  session.json        a session record: the session no binding serves
 //	  requests/<id>.json  the seam: one open dialog
 //	  answers/<id>.json   the Buzz agent: the owner's answer
 //	  resolved/<id>.json  whoever closed the dialog first
@@ -33,6 +38,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -111,11 +117,11 @@ func Root() (string, error) {
 	return filepath.Join(filepath.Dir(path), "dialogs"), nil
 }
 
-// DirFor returns the dialogs directory of a binding, creating it and its
-// requests/, answers/ and resolved/ subdirectories.
+// DirFor returns the dialogs directory of a binding or a session record,
+// creating it and its requests/, answers/ and resolved/ subdirectories.
 func DirFor(bindingName string) (string, error) {
 	if bindingName != binding.LegacyName {
-		if err := binding.ValidName(bindingName); err != nil {
+		if err := binding.ValidName(strings.TrimPrefix(bindingName, sessionPrefix)); err != nil {
 			return "", err
 		}
 	}
@@ -213,10 +219,12 @@ func ReadResolved(dir, id string) (Resolved, bool, error) {
 }
 
 // FindBinding returns the live binding name that serves this seam: a
-// mailbox binding with Root==root and Handle==handle, or a binding whose
-// NativeSession or Codex app-server thread is session. ("", nil) when none
-// does. A binding proven ended serves nothing.
-func FindBinding(root, handle, session string) (string, error) {
+// mailbox binding with Root==root and Handle==handle, a binding whose
+// NativeSession or Codex app-server thread is session, or one whose holder
+// is the process holder (0 for none), so a session keeps its binding when
+// its session id changes (/clear). ("", nil) when none does. A binding
+// proven ended serves nothing.
+func FindBinding(root, handle, session string, holder int) (string, error) {
 	list, err := binding.List()
 	if err != nil {
 		if errors.Is(err, binding.ErrNone) || errors.Is(err, os.ErrNotExist) {
@@ -228,7 +236,8 @@ func FindBinding(root, handle, session string) (string, error) {
 	for _, b := range list {
 		mailbox := b.Mailbox() && root != "" && handle != "" && b.Handle == handle && canonical(b.Root) == root
 		native := session != "" && (b.NativeSession == session || b.AppServer.Thread == session)
-		if !mailbox && !native {
+		held := holder > 0 && b.Holder.PID == holder
+		if !mailbox && !native && !held {
 			continue
 		}
 		if state, _ := b.Liveness(); state == binding.Ended {
@@ -239,76 +248,168 @@ func FindBinding(root, handle, session string) (string, error) {
 	return "", nil
 }
 
-// Session is what a seam knows of the session its dialog comes from.
-type Session struct {
-	Harness string // claude | codex
-	// Root is the AMQ root: the session's AM_ROOT, or "" for DefaultRoot,
-	// the root attach --self --native uses for a session that is not on AMQ.
-	Root string
-	// Handle is the session's AMQ handle (AM_ME); "" for a session that is
-	// not an AMQ participant.
-	Handle string
-	Native string // native session id: Claude's session_id, a Codex thread
-	Target string // the amq-remote endpoint target that runs the session; "" when none does
-	Cwd    string // the session's working directory; "" when not known
-	// Holder is the process that runs the session, which proves it live.
-	Holder    launch.HolderIdentity
-	AppServer binding.AppServerThread
+// sessionPrefix starts every session record name; no binding name has it.
+const sessionPrefix = "~"
+
+// IsSessionName reports whether name is a session record's, not a binding's.
+func IsSessionName(name string) bool { return strings.HasPrefix(name, sessionPrefix) }
+
+// SessionRecord is a session no binding serves, as its seam recorded it.
+type SessionRecord struct {
+	Harness string `json:"harness"`
+	Session string `json:"session"` // native session id
+	Label   string `json:"label"`   // "<harness> · <project> @ <machine>", the channel's name
+	// Holder is the process that runs the session: its channel lives while
+	// that process runs.
+	Holder launch.HolderIdentity `json:"holder"`
 }
 
-// DefaultRoot is the AMQ root of a session that is not on AMQ,
-// <binding store dir>/root (~/.amq/remote/root), made private when missing.
-func DefaultRoot() (string, error) {
-	path, err := binding.Path()
+// RecordSession returns the name of r's session record, writing it when
+// needed: the record r's holder already has, else "~<base>", "~<base>-2",
+// ... the first that no live session holds. Seams of one session at once
+// get one record: the choice and the write share one lock.
+func RecordSession(r SessionRecord, base string) (string, error) {
+	if r.Holder.PID <= 0 {
+		return "", errors.New("a session record needs its process")
+	}
+	if err := binding.ValidName(base); err != nil {
+		return "", err
+	}
+	root, err := Root()
 	if err != nil {
 		return "", err
 	}
-	root := filepath.Join(filepath.Dir(path), "root")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
-	return root, nil
+	name := ""
+	err = lock.WithExclusiveFileLock(filepath.Join(root, ".sessions.lock"), func() error {
+		held, err := Sessions()
+		if err != nil {
+			return err
+		}
+		for n, o := range held {
+			if o.Holder == r.Holder {
+				name = n
+			}
+		}
+		for i := 1; name == "" && i <= 100; i++ {
+			candidate := sessionPrefix + base
+			if i > 1 {
+				suffix := fmt.Sprintf("-%d", i)
+				candidate = sessionPrefix + strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
+			}
+			o, taken := held[candidate]
+			_, statErr := os.Lstat(filepath.Join(root, candidate))
+			switch {
+			case taken:
+				if state, _ := launch.InspectHolder(o.Holder); state == launch.LeaseStale {
+					name = candidate // its session ended; the name is free
+				}
+			case errors.Is(statErr, os.ErrNotExist):
+				name = candidate
+			case statErr != nil:
+				return statErr
+			}
+		}
+		if name == "" {
+			return errors.New("no free session record name")
+		}
+		if o, ok := held[name]; ok && o == r {
+			return nil
+		}
+		dir, err := DirFor(name)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		_, err = fsq.WriteFileAtomic(dir, sessionFile, raw, 0o600)
+		return err
+	})
+	return name, err
 }
 
-// BindingFor returns the name of the binding that serves s: the live one
-// FindBinding finds, else s's own dialogs binding, written now with the
-// label, identity and name attach --self gives the same session. The
-// machine agent makes the channel of that binding as for any session, so
-// the dialog shows in the session's own channel; a later attach of the
-// session has the same identity and takes the binding over, keeping its
-// name and channel. Concurrent seams of one session write one binding:
-// binding.WriteSession reuses the name the session already holds.
-func BindingFor(s Session) (string, error) {
-	if name, err := FindBinding(s.Root, s.Handle, s.Native); err != nil || name != "" {
-		return name, err
+// sessionFile is a session record's file in its dialogs directory.
+const sessionFile = "session.json"
+
+// Sessions returns every readable session record by name.
+func Sessions() (map[string]SessionRecord, error) {
+	root, err := Root()
+	if err != nil {
+		return nil, err
 	}
-	if s.Native == "" {
-		return "", errors.New("a dialog with no native session has no binding of its own")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]SessionRecord{}, nil
 	}
-	root := s.Root
-	if root == "" {
-		var err error
-		if root, err = DefaultRoot(); err != nil {
-			return "", err
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]SessionRecord{}
+	for _, e := range entries {
+		if !e.IsDir() || !IsSessionName(e.Name()) {
+			continue
+		}
+		if r, ok, _ := ReadSession(e.Name()); ok {
+			out[e.Name()] = r
 		}
 	}
-	machine := binding.Machine()
-	place, base := s.Harness, s.Harness
-	if s.Cwd != "" {
-		place = filepath.Base(filepath.Clean(s.Cwd))
-		base = s.Harness + "-" + place
+	return out, nil
+}
+
+// ReadSession reads the session record name; ok=false when there is none.
+func ReadSession(name string) (SessionRecord, bool, error) {
+	var r SessionRecord
+	if !IsSessionName(name) || binding.ValidName(name[len(sessionPrefix):]) != nil {
+		return r, false, fmt.Errorf("%q is not a session record name", name)
 	}
-	b := binding.Binding{Carrier: binding.CarrierDialogs, Root: root, Target: s.Target, NativeSession: s.Native,
-		Display: place, Harness: s.Harness, Holder: s.Holder, Label: binding.SessionLabel(s.Harness, place, machine),
-		Machine: machine, AppServer: s.AppServer}
-	switch {
-	case s.Handle != "" && s.Root != "":
-		b.Identity = binding.MailboxIdentity(s.Handle, s.Root)
-	case s.Cwd != "":
-		b.Identity = binding.NativeIdentity(s.Harness, root, s.Cwd)
+	root, err := Root()
+	if err != nil {
+		return r, false, err
 	}
-	name, _, err := binding.WriteSession(b, binding.SanitizeName(base), binding.Binding.Liveness)
-	return name, err
+	ok, err := readJSON(filepath.Join(root, name, sessionFile), &r)
+	return r, ok, err
+}
+
+// RemoveSessionDir removes the dialogs directory of a session record that
+// is gone, under the lock RecordSession takes, so a record written
+// meanwhile is never removed; removed=false when the record is back.
+func RemoveSessionDir(name string) (removed bool, err error) {
+	if !IsSessionName(name) || binding.ValidName(name[len(sessionPrefix):]) != nil {
+		return false, fmt.Errorf("%q is not a session record name", name)
+	}
+	root, err := Root()
+	if err != nil {
+		return false, err
+	}
+	err = lock.WithExclusiveFileLock(filepath.Join(root, ".sessions.lock"), func() error {
+		if _, ok, err := ReadSession(name); err != nil || ok {
+			return err
+		}
+		removed = true
+		return os.RemoveAll(filepath.Join(root, name))
+	})
+	return removed, err
+}
+
+// DropSession removes the session record name; its dialogs stay until they
+// are resolved and dropped like those of a binding that is gone.
+func DropSession(name string) error {
+	if !IsSessionName(name) || binding.ValidName(name[len(sessionPrefix):]) != nil {
+		return fmt.Errorf("%q is not a session record name", name)
+	}
+	root, err := Root()
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(root, name, sessionFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // ParseAnswer maps a Buzz reply to an answer: "N" picks option N;

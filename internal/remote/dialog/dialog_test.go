@@ -20,7 +20,7 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Name: "proj", Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	name, err := FindBinding(root, "claude", "")
+	name, err := FindBinding(root, "claude", "", 0)
 	if err != nil || name != "proj" {
 		t.Fatalf("FindBinding = %q, %v", name, err)
 	}

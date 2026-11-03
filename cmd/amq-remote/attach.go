@@ -371,7 +371,7 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 }
 
 // writeBinding adds the named binding, removes any other binding for the
-// same session (its dialogs binding too), so one session is one Buzz agent, and returns the name
+// same session, so one session is one Buzz agent, and returns the name
 // written and whether this session already held that name. A defaulted name
 // never replaces another session's binding; an explicit --name is the
 // caller's choice and replaces. A defaulted name is the
@@ -399,19 +399,8 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 	if err != nil {
 		return "", false, err
 	}
-	_, err = binding.Retire(binding.RemovedMoved, func(o binding.Binding) bool { return o.Name != b.Name && (o.Same(b) || dialogsOf(o, b)) })
+	_, err = binding.Retire(binding.RemovedMoved, func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
 	return b.Name, reused, err
-}
-
-// dialogsOf reports whether o is the dialogs binding of b's session, which
-// a seam wrote before the session attached under another identity: it names
-// b's native session or Codex thread, or b's harness process holds it.
-func dialogsOf(o, b binding.Binding) bool {
-	if !o.DialogsOnly() {
-		return false
-	}
-	native := o.NativeSession != "" && (o.NativeSession == b.NativeSession || o.NativeSession == b.AppServer.Thread)
-	return native || b.Holder.PID > 0 && o.Holder == b.Holder
 }
 
 // heldBySession reports whether b's session already held the name b.Name,
@@ -912,7 +901,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if *self && c.root == "" {
 		if all, err := binding.List(); err == nil {
 			for _, b := range all {
-				if !b.Mailbox() && !b.DialogsOnly() {
+				if !b.Mailbox() {
 					c.root = b.Root
 					break
 				}

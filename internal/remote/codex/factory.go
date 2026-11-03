@@ -40,7 +40,7 @@ func Factory(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, 
 	// adapter under ("sales" is addressed as "sales", not codex:<thread>). The
 	// native thread id stays with the daemon protocol; only the advertised
 	// target id changes. cfg.Target empty = legacy derived identity.
-	opts := []Option{WithRoot(cfg.Root)}
+	var opts []Option
 	if cfg.Target != "" {
 		opts = append(opts, WithTarget(cfg.Target))
 	}

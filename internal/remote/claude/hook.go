@@ -1290,15 +1290,11 @@ func bindingDecision(home, sessionID string) int {
 	return bindingAbsent
 }
 
-// nativeSessionIs reports whether a binding file drives sessionID natively.
-// A dialogs binding names the session too, but takes no prompt, so it needs
-// no Stop record.
 func nativeSessionIs(raw []byte, sessionID string) bool {
 	var b struct {
-		Carrier       string `json:"carrier"`
 		NativeSession string `json:"native_session"`
 	}
-	return json.Unmarshal(raw, &b) == nil && b.NativeSession == sessionID && b.Carrier != binding.CarrierDialogs
+	return json.Unmarshal(raw, &b) == nil && b.NativeSession == sessionID
 }
 
 // bindingMaxBytes matches the binding package's read bound.

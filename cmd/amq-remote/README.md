@@ -847,9 +847,9 @@ the message is edited with the outcome.
 Once the Claude hook is installed, every Claude Code session on the machine
 (terminal, desktop app Code tab, IDE) mirrors its dialogs to Buzz, with or
 without `/amq-remote`, each in its own channel. The first dialog of a session
-that is not connected binds it for dialogs only (carrier `dialogs`), and the
-machine agent makes its channel as for any session; that channel takes
-approvals only until `/amq-remote` in the session keeps it as a chat.
+that is not connected records the session, and the machine agent makes its
+channel while its Claude process runs; that channel takes approvals only
+until `/amq-remote` in the session keeps it as a chat.
 Install it once:
 
 ```text
