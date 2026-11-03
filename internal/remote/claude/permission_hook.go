@@ -3,7 +3,6 @@ package claude
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,27 +70,38 @@ const (
 	valueDeny         = "deny"
 )
 
+// Seat is the session a dialog comes from, as the hook found it.
+type Seat struct {
+	Root, Handle string // AM_ROOT and AM_ME; empty outside AMQ
+	Session      string // the hook's session_id
+	// Holder is the Claude process the hook runs under whose session
+	// registry entry names Session; zero when none does.
+	Holder launch.HolderIdentity
+}
+
+// Binder writes the binding of a seat that no binding serves, as /amq-remote
+// writes it, and returns its name. It refuses a session whose owner turned
+// it off.
+type Binder func(Seat) (string, error)
+
 // permissionHook holds the hook's clock and pacing, so tests can drive it,
-// and the writer of an AMQ session's mailbox binding.
+// and the writer of a new binding.
 type permissionHook struct {
 	now  func() time.Time
 	wait time.Duration
 	poll time.Duration
-	// mailbox writes the mailbox binding of handle in root as attach
-	// --self does and returns its name; nil when the caller has none.
-	mailbox func(root, handle string) (string, error)
+	bind Binder // nil: a session no binding serves answers in the terminal
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
-// configured timeout. It always returns 0.
-// mailbox writes the mailbox binding of an AMQ session that no binding
-// serves (see permissionHook).
-func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration, mailbox func(root, handle string) (string, error)) int {
+// configured timeout. bind writes the binding of a session no binding
+// serves. It always returns 0.
+func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration, bind Binder) int {
 	if wait <= 0 {
 		wait = DefaultPermissionWait
 	}
-	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond, mailbox: mailbox}
+	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond, bind: bind}
 	return h.run(stdin, stdout, done)
 }
 
@@ -172,83 +181,61 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 }
 
-// dialogName is where the dialog opens: the binding that serves the session
-// (its AMQ handle or its session id), else the session's own binding,
-// written now as /amq-remote writes it, so the machine agent gives it a
-// channel like any binding: the mailbox binding of an AMQ session (AM_ROOT
-// and AM_ME set), else the native binding attach --self --native writes.
-// After /clear the same Claude process writes the same native binding again
-// with its new session id. With no Claude process found, "" and the
-// terminal decides.
+// dialogName is where the dialog opens, in order: the binding that serves
+// the session (its AMQ handle or its session id); a binding, not proven
+// ended, held by exactly the Claude process the hook runs under, as it is
+// (a session after /clear keeps the binding attach made); else a binding
+// bind writes now, so the machine agent gives the session a channel. With
+// none, "" and the terminal decides.
 func (h permissionHook) dialogName(in permissionInput) (string, error) {
-	root, handle := os.Getenv("AM_ROOT"), os.Getenv("AM_ME")
-	name, err := dialog.FindBinding(root, handle, in.SessionID)
+	seat := Seat{Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Session: in.SessionID}
+	name, err := dialog.FindBinding(seat.Root, seat.Handle, seat.Session)
 	if err != nil || name != "" {
 		return name, err
 	}
-	if root != "" && handle != "" {
-		if h.mailbox == nil {
-			return "", errors.New("no mailbox binding writer")
+	seat.Holder = claudeAncestor(seat.Session)
+	if seat.Holder.PID > 0 {
+		if name, err := heldBinding(seat.Holder); err != nil || name != "" {
+			return name, err
 		}
-		return h.mailbox(root, handle)
 	}
-	pid, reg, ok := claudeAncestor(in.SessionID)
-	if !ok {
-		return "", errors.New("no Claude process above the hook")
+	if h.bind == nil {
+		return "", errors.New("no binding writer")
 	}
-	holder, err := launch.HolderOf(pid)
+	return h.bind(seat)
+}
+
+// heldBinding is the binding, not proven ended, whose recorded holder is
+// exactly holder; "" when none is.
+func heldBinding(holder launch.HolderIdentity) (string, error) {
+	all, err := binding.List()
+	if errors.Is(err, binding.ErrNone) || errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	if root == "" {
-		if root, err = binding.EnsureMachineRoot(); err != nil {
-			return "", err
-		}
-	}
-	return writeNativeBinding(root, pid, holder, cmp.Or(reg.Cwd, in.Cwd), reg.Name, in.SessionID)
-}
-
-// writeNativeBinding writes the native binding of the Claude session that
-// process pid runs, with the target, label, identity and name attach --self
-// --native gives it, through binding.WriteSession: the same session (same
-// identity and holder) gets its name back with the binding rewritten.
-func writeNativeBinding(root string, pid int, holder launch.HolderIdentity, cwd, display, session string) (string, error) {
-	target := "claude:" + strconv.Itoa(pid)
-	machine := binding.Machine()
-	b := binding.Binding{Root: root, Target: target, NativeSession: session, Display: cmp.Or(display, harnessClaude+" "+target),
-		Name: binding.SanitizeName(target), Harness: harnessClaude, Holder: holder, Machine: machine}
-	place := cmp.Or(b.Display, target)
-	if cwd != "" {
-		place = filepath.Base(cwd)
-		b.Identity = binding.NativeIdentity(harnessClaude, root, cwd)
-		b.Name = binding.SanitizeName(harnessClaude + "-" + place)
-	}
-	b.Label = binding.SessionLabel(harnessClaude, place, machine)
-	name, _, err := binding.WriteSession(b, b.Name, binding.Binding.Liveness)
-	return name, err
-}
-
-// claudeAncestor is the Claude process the hook runs under, nearest first:
-// the first ancestor whose session registry entry names session, else the
-// nearest whose executable is claude or that has a registry entry. ok is
-// false when no ancestor is one.
-func claudeAncestor(session string) (pid int, reg Session, ok bool) {
-	fallback, found := 0, Session{}
-	for _, h := range launch.Ancestors() {
-		s, err := SessionForPID(h.PID)
-		if err == nil && s.ID == session {
-			return h.PID, s, true
-		}
-		if fallback != 0 {
+	for _, b := range all {
+		if b.Holder != holder {
 			continue
 		}
-		if err == nil {
-			fallback, found = h.PID, s
-		} else if exe, err := launch.ProcessExecutable(h.PID); err == nil && filepath.Base(exe) == harnessClaude {
-			fallback = h.PID
+		if state, _ := b.Liveness(); state != binding.Ended {
+			return b.Name, nil
 		}
 	}
-	return fallback, found, fallback != 0
+	return "", nil
+}
+
+// claudeAncestor is the Claude process the hook runs under: the nearest
+// ancestor whose session registry entry names session, with the identity
+// the process walk verified; zero when none does.
+func claudeAncestor(session string) launch.HolderIdentity {
+	for _, h := range launch.Ancestors() {
+		if s, err := SessionForPID(h.PID); err == nil && s.ID == session {
+			return h
+		}
+	}
+	return launch.HolderIdentity{}
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
@@ -338,29 +325,30 @@ const maxOptionLabel = 200
 // it, also in Claude's "//<absolute path>" rule form: "//Users/me/notes/**"
 // is "~/notes/**". A token starts at the start of s or after a space, '(',
 // '=', ':' or a quote, and the home directory must end at '/' or at the end
-// of s; a path that only contains it stays as it is.
+// of s; a path that only contains it stays as it is. Both conditions are
+// read in s as given, so a replacement never makes a new token start.
 func homeShort(s, home string) string {
 	if home == "" || home == string(filepath.Separator) {
 		return s
 	}
 	home = filepath.Clean(home)
 	var b strings.Builder
-	for {
-		i := strings.Index(s, home)
+	done := 0 // s[:done] is written
+	for from := 0; ; {
+		i := strings.Index(s[from:], home)
 		if i < 0 {
-			b.WriteString(s)
+			b.WriteString(s[done:])
 			return b.String()
 		}
-		start, end := i, i+len(home)
+		start, end := from+i, from+i+len(home)
 		if start > 0 && s[start-1] == '/' {
 			start-- // the "//" rule form
 		}
 		if (start == 0 || strings.ContainsRune(" (=:'\"", rune(s[start-1]))) && (end == len(s) || s[end] == '/') {
-			b.WriteString(s[:start] + "~")
-		} else {
-			b.WriteString(s[:end])
+			b.WriteString(s[done:start] + "~")
+			done = end
 		}
-		s = s[end:]
+		from = end
 	}
 }
 

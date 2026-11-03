@@ -116,3 +116,16 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 func init() {
 	registry.RegisterDiscoverer("claude", discoverer{})
 }
+
+// CandidateFor is the discovered session of the Claude process pid, as
+// attach --self --native finds it; ok=false when pid is not an attachable
+// session.
+func CandidateFor(pid int) (registry.Candidate, bool, error) {
+	cands, err := discoverer{}.Discover(context.Background(), registry.DiscoverRequest{})
+	for _, c := range cands {
+		if c.Target == "claude:"+strconv.Itoa(pid) {
+			return c, true, nil
+		}
+	}
+	return registry.Candidate{}, false, err
+}

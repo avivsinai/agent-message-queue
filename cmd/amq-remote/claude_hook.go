@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -9,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -76,7 +79,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
 			return 1
 		}
-		say(stdout, "approval hook installed: tool dialogs of every Claude Code session on this machine appear in Buzz; the first answer, there or in the terminal, decides\n")
+		say(stdout, "approval hook installed: the first tool dialog of each Claude Code session on this machine connects that session to its own Buzz channel (an AMQ session gets the mailbox binding /amq-remote writes; any other session a native binding, where chat needs /amq-remote --native), and every dialog appears there; the first answer, there or in the terminal, decides; /amq-remote off stops it for that session\n")
 		return 0
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {
@@ -109,12 +112,68 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 		<-sigs
 		close(done)
 	}()
-	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second, hookMailboxBinding)
+	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second, hookBinding)
 }
 
-// hookMailboxBinding writes the mailbox binding of an AMQ session that no
-// binding serves, as attach --self does, for its first approval dialog.
-func hookMailboxBinding(root, handle string) (string, error) {
-	_, name, _, err := bindMailbox(root, handle, "", io.Discard)
-	return name, err
+// hookBinding writes the binding of a Claude session that no binding serves,
+// for its first approval dialog, with the code attach --self uses: the
+// mailbox binding of an AMQ session (AM_ROOT and AM_ME set), else the native
+// binding of --native in AM_ROOT or the machine root. It registers no
+// target with the endpoint and needs no Stop hook, so chat in a native
+// session's channel waits for /amq-remote --native. A session whose owner
+// detached it (/amq-remote off) gets nothing.
+func hookBinding(s claude.Seat) (string, error) {
+	if s.Root != "" && s.Handle != "" {
+		_, name, _, err := bindMailbox(s.Root, s.Handle, "", io.Discard, true)
+		return name, err
+	}
+	if s.Holder.PID <= 0 {
+		return "", errors.New("no Claude process above the hook names this session")
+	}
+	cand, ok, err := claude.CandidateFor(s.Holder.PID)
+	if !ok {
+		if err == nil {
+			err = fmt.Errorf("claude:%d is not an attachable Claude session", s.Holder.PID)
+		}
+		return "", err
+	}
+	root := s.Root
+	if root == "" {
+		if root, err = binding.EnsureMachineRoot(); err != nil {
+			return "", err
+		}
+	}
+	if b, err := boundElsewhere(root, cand.Target, s.Session); err != nil {
+		return "", err
+	} else if b != nil {
+		return "", fmt.Errorf("this session is attached through %s (binding %s)", b.Root, b.Name)
+	}
+	nb, _, codexes := nativeBinding(root, filepath.Join(root, stateDirName), cand, s.Session, nonEmpty(cand.Display, "claude "+cand.Target), "", false)
+	if err := ownerDetached(nb); err != nil {
+		return "", err
+	}
+	inspect := inspectOutsideLock(codexes)
+	name, _, err := writeBinding(nb, false, false, inspect)
+	if err != nil {
+		return "", err
+	}
+	pruneAfterAttach(inspect)
+	return name, nil
+}
+
+// ownerDetached refuses a session whose owner turned it off: a tombstone of
+// b's session identity that detach left. The binding stays gone until the
+// owner attaches the session again.
+func ownerDetached(b binding.Binding) error {
+	tombs, err := binding.Tombstones()
+	if err != nil {
+		return err
+	}
+	id := b.SessionIdentity()
+	for _, t := range tombs {
+		if t.Removed == binding.RemovedDetached && t.SessionIdentity() == id {
+			return fmt.Errorf("the owner turned this session off (binding %s); /amq-remote connects it again", t.Name)
+		}
+	}
+	return nil
 }

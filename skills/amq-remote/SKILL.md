@@ -98,11 +98,14 @@ command's own message. Do not work around a refusal.
    a successful attach). Run `amq-remote doctor --root "$ROOT" --json` and
    read its `failing` list; the exit code is not the signal. When a
    `native_capability` entry says the PermissionRequest hook is not
-   installed, tell the user: "This adds one approval hook so Buzz shows every
-   approval dialog of each Claude Code session on this machine in that
-   session's own channel, connected or not; ✅ allows, ❌ denies, first answer
-   wins.
-   `amq-remote claude uninstall-approval-hook` removes it." Ask once, then run
+   installed, tell the user: "This adds one approval hook. The first approval
+   dialog of each Claude Code session on this machine connects that session
+   to its own Buzz channel, even one that never ran /amq-remote: an AMQ
+   session gets the mailbox binding /amq-remote writes, any other session a
+   native binding, where chat needs /amq-remote --native. Every dialog of
+   the session then shows there; ✅ allows, ❌ denies, first answer wins.
+   /amq-remote off stops it for that session, and
+   `amq-remote claude uninstall-approval-hook` removes the hook." Ask once, then run
    `amq-remote claude install-approval-hook`. Codex needs no hook: its
    approvals reach Buzz only for a session on the Codex app-server (the
    `--native` Codex path below); a plain `codex` TUI session answers

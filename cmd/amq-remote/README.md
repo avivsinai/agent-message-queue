@@ -851,7 +851,8 @@ that is not connected binds it as `attach --self` does: the mailbox binding
 of an AMQ session (`AM_ROOT` and `AM_ME` set), whose channel then reaches its
 inbox, else the native binding of `--native`, whose channel takes messages
 once `/amq-remote --native` runs in the session. The machine agent makes the
-channel as for any session.
+channel as for any session. `/amq-remote off` stops this for that session
+until `/amq-remote` connects it again.
 Install it once:
 
 ```text

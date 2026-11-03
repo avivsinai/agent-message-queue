@@ -162,28 +162,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if display == "" {
 		display = session.DisplayName
 	}
-	bindName, explicit := nativeBindingName(*name, cand.Target)
-	codexes := newCodexView()
-	h := nativeHarness(codexes, cand)
-	place := nonEmpty(display, cand.Target)
-	if h.Cwd != "" {
-		place = filepath.Base(h.Cwd)
-	}
-	machine := binding.Machine()
-	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
-		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
-	// The session identity is the harness, root and working directory, so the
-	// same session coming back gets its name and agent back. A link
-	// share keeps its target-derived identity: the share names its binding,
-	// and another process must never take that name over. That holds for a
-	// plain attach of a session a link already shares too: it keeps the
-	// share's binding as the share made it.
-	if *linkName == "" && h.Cwd != "" && !linkShared(stateDir, nb) {
-		nb.Identity = binding.NativeIdentity(h.Kind, c.root, h.Cwd)
-		if !explicit {
-			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
-		}
-	}
+	nb, explicit, codexes := nativeBinding(c.root, stateDir, cand, native, display, *name, *linkName != "")
 	inspect := inspectOutsideLock(codexes)
 	var reused bool
 	if nb.Name, reused, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
@@ -218,6 +197,36 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	connected(stdout, v)
 	sayWarning(stdout, hookWarning)
 	return 0, nil
+}
+
+// nativeBinding is the binding attach --self --native writes for cand in
+// root: the name flagName gives (explicit), else the session's default, with
+// the harness, holder, label and identity of the session. It returns the
+// Codex view it read, for the write's inspector.
+func nativeBinding(root, stateDir string, cand registry.Candidate, native, display, flagName string, link bool) (binding.Binding, bool, *codexView) {
+	bindName, explicit := nativeBindingName(flagName, cand.Target)
+	codexes := newCodexView()
+	h := nativeHarness(codexes, cand)
+	place := nonEmpty(display, cand.Target)
+	if h.Cwd != "" {
+		place = filepath.Base(h.Cwd)
+	}
+	machine := binding.Machine()
+	nb := binding.Binding{Root: root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
+		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
+	// The session identity is the harness, root and working directory, so the
+	// same session coming back gets its name and agent back. A link
+	// share keeps its target-derived identity: the share names its binding,
+	// and another process must never take that name over. That holds for a
+	// plain attach of a session a link already shares too: it keeps the
+	// share's binding as the share made it.
+	if !link && h.Cwd != "" && !linkShared(stateDir, nb) {
+		nb.Identity = binding.NativeIdentity(h.Kind, root, h.Cwd)
+		if !explicit {
+			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
+		}
+	}
+	return nb, explicit, codexes
 }
 
 // linkAttachRoot is the root attach --self --link shares the session through:
@@ -284,7 +293,7 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 // required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
-	b, name, reused, err := bindMailbox(root, handle, name, stderr)
+	b, name, reused, err := bindMailbox(root, handle, name, stderr, false)
 	if err != nil {
 		if protocol.RefusalCode(err) == protocol.CodeInvalid {
 			return protocol.ExitUsage, err
@@ -306,8 +315,9 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 // root, the Buzz handle joins the root's roster, and the harness found above
 // this process is the holder. It returns the binding as built, the name
 // written and whether the session already held it. The approval hook calls
-// it for an AMQ session that no binding serves yet.
-func bindMailbox(root, handle, name string, stderr io.Writer) (b binding.Binding, written string, reused bool, err error) {
+// it for an AMQ session that no binding serves yet, with fromHook: then a
+// session whose owner detached it gets nothing (ownerDetached).
+func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool) (b binding.Binding, written string, reused bool, err error) {
 	if root == "" || handle == "" {
 		return b, "", false, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -333,6 +343,11 @@ func bindMailbox(root, handle, name string, stderr io.Writer) (b binding.Binding
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
 		AppServer: h.AppServer}
+	if fromHook {
+		if err := ownerDetached(b); err != nil {
+			return b, "", false, err
+		}
+	}
 	if err := listBuzzInRoster(root); err != nil {
 		return b, "", false, err
 	}

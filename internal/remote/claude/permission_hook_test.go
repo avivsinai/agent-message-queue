@@ -135,11 +135,11 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	}
 }
 
-// unboundClaude is a Claude session no binding serves: AM_* unset, and a
-// session registry entry for the process the hook runs under, which names
-// session and cwd. It returns that process's pid.
-func unboundClaude(t *testing.T, session, cwd string) int {
-	t.Helper()
+// After /clear the Claude process that attach bound has a new session id: the
+// hook finds the binding by that process's whole identity and opens the
+// dialog there, leaving the binding as attach wrote it.
+func TestPermissionHookUsesTheBindingOfItsProcessAfterASessionChange(t *testing.T) {
+	boundHookEnv(t)
 	t.Setenv("AM_ROOT", "")
 	t.Setenv("AM_ME", "")
 	ancestors := launch.Ancestors()
@@ -151,97 +151,32 @@ func unboundClaude(t *testing.T, session, cwd string) int {
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", config)
-	writeRegistry(t, config, ancestors[0].PID, session, cwd)
-	return ancestors[0].PID
-}
-
-func writeRegistry(t *testing.T, config string, pid int, session, cwd string) {
-	t.Helper()
-	raw, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": session, "cwd": cwd})
+	raw, _ := json.Marshal(map[string]any{"pid": ancestors[0].PID, "sessionId": "s-new", "cwd": "/work/myproj"})
 	if err := os.MkdirAll(filepath.Join(config, "sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(ancestors[0].PID)+".json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// answerAll denies every open dialog in dir once count are open and waits
-// for each hook.
-func answerAll(t *testing.T, dir string, count int, waits ...func() string) {
-	t.Helper()
-	var open []dialog.Request
-	for deadline := time.Now().Add(3 * time.Second); len(open) < count && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		open, _ = dialog.Requests(dir)
-	}
-	if len(open) != count {
-		t.Fatalf("open dialogs in %s = %+v; want %d", dir, open, count)
-	}
-	for _, req := range open {
-		if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: len(req.Options), By: dialog.ByBuzz}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, wait := range waits {
-		if d := decisionOf(t, wait()); d["behavior"] != "deny" {
-			t.Fatalf("decision = %v, want deny", d)
-		}
-	}
-}
-
-// A Claude session no binding serves (the desktop app, an IDE, a terminal
-// session never connected) gets the native binding attach --self --native
-// writes for it, once for two dialogs at a time, and its dialogs open in
-// that binding's directory.
-func TestPermissionHookWritesTheSessionsNativeBinding(t *testing.T) {
-	boundHookEnv(t)
-	pid := unboundClaude(t, "s-desktop", "/work/myproj")
-	holder, err := launch.HolderOf(pid)
-	if err != nil {
+	attached := binding.Binding{Name: "claude-myproj", Root: t.TempDir(), Target: "claude:" + strconv.Itoa(ancestors[0].PID),
+		NativeSession: "s-old", Holder: ancestors[0], BoundAt: "2026-11-03T00:00:00Z"}
+	if err := binding.WriteNamed(attached); err != nil {
 		t.Fatal(err)
 	}
-	stdin := `{"session_id":"s-desktop","cwd":"/elsewhere","tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`
-	waits := []func() string{runHook(t, stdin), runHook(t, stdin)}
 	dir, err := dialog.DirFor("claude-myproj")
 	if err != nil {
 		t.Fatal(err)
 	}
-	answerAll(t, dir, 2, waits...)
-	root, err := binding.MachineRoot()
-	if err != nil {
+	wait := runHook(t, `{"session_id":"s-new","tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`)
+	req := openRequest(t, dir)
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
 		t.Fatal(err)
 	}
-	b, err := binding.ReadNamed("claude-myproj")
-	target := "claude:" + strconv.Itoa(pid)
-	if err != nil || b.Mailbox() || b.Root != root || b.Target != target || b.NativeSession != "s-desktop" || b.Harness != "claude" ||
-		b.Holder != holder || b.Label != binding.SessionLabel("claude", "myproj", binding.Machine()) ||
-		b.Identity != binding.NativeIdentity("claude", root, "/work/myproj") {
-		t.Fatalf("binding = %+v, %v", b, err)
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v, want allow", d)
 	}
-	if all, _ := binding.List(); len(all) != 2 {
-		t.Fatalf("bindings = %+v; want the mailbox binding and one native binding", all)
-	}
-}
-
-// After /clear the same Claude process has a new session id: the hook
-// rewrites the same binding with it, so the dialogs stay in its channel.
-func TestPermissionHookKeepsTheBindingAfterASessionChange(t *testing.T) {
-	boundHookEnv(t)
-	pid := unboundClaude(t, "s-old", "/work/myproj")
-	wait := runHook(t, `{"session_id":"s-old","tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`)
-	dir, err := dialog.DirFor("claude-myproj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	answerAll(t, dir, 1, wait)
-	writeRegistry(t, os.Getenv("CLAUDE_CONFIG_DIR"), pid, "s-new", "/work/myproj")
-	wait = runHook(t, `{"session_id":"s-new","tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`)
-	answerAll(t, dir, 1, wait)
-	if b, err := binding.ReadNamed("claude-myproj"); err != nil || b.NativeSession != "s-new" {
-		t.Fatalf("binding = %+v, %v; want the same binding with the new session id", b, err)
-	}
-	if all, _ := binding.List(); len(all) != 2 {
-		t.Fatalf("bindings = %+v; want the session's one binding", all)
+	if b, err := binding.ReadNamed("claude-myproj"); err != nil || b.NativeSession != "s-old" || b.Holder != attached.Holder {
+		t.Fatalf("binding = %+v, %v; want it as attach wrote it", b, err)
 	}
 }
 
@@ -254,6 +189,7 @@ func TestSessionScopeLabels(t *testing.T) {
 		`{"type":"addRules","rules":[{"toolName":"Read","ruleContent":"//Users/me/notes/**"}]}`:                 "Allow this session: Read(~/notes/**)",
 		`{"type":"addDirectories","directories":["/Users/me/proj"]}`:                                            "Allow edits in ~/proj this session",
 		`{"type":"removeDirectories","directories":["/Volumes/x/Users/me/p"]}`:                                  "Stop allowing edits in /Volumes/x/Users/me/p this session",
+		`{"type":"addDirectories","directories":["/Users/me/Users/me/x"]}`:                                      "Allow edits in ~/Users/me/x this session",
 		`{"type":"setMode","mode":"acceptEdits"}`:                                                               "Accept edits this session",
 	} {
 		if got := sessionScope([]json.RawMessage{json.RawMessage(raw)}); got != want {
