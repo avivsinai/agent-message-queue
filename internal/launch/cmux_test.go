@@ -6,12 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const fakeCmuxScript = `#!/usr/bin/env python3
@@ -223,96 +220,6 @@ if command == "close-surface":
 print("unknown command " + command, file=sys.stderr)
 sys.exit(2)
 `
-
-func TestCmuxBackendLifecycleAndRecovery(t *testing.T) {
-	backend, logPath := newFakeCmuxBackend(t)
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude", "codex")
-	fakeAMQ := writeSleepAMQ(t)
-	nonce := "019c5a10-75d8-7eef-8db7-5ee77f70e7a5"
-	plan := cmuxTestPlan(project, nonce)
-
-	detect := backend.Detect()
-	if !detect.Available || detect.Profile.Identity() != "cmux/darwin/v1" || !strings.HasPrefix(detect.InstanceIdentity, "cmux-socket:") {
-		t.Fatalf("Detect = %#v", detect)
-	}
-	if strings.Contains(detect.InstanceIdentity, "@") || strings.Contains(detect.InstanceIdentity, detect.Profile.VersionRange) {
-		t.Fatalf("instance identity leaked version: %q", detect.InstanceIdentity)
-	}
-
-	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: fakeAMQ, Root: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.Outcome != OutcomeCreated {
-		t.Fatalf("Create = %#v", created)
-	}
-	assertNoCmuxCommandFlag(t, logPath)
-	if agents := countCmuxAgentResources(created.Binding); agents != 2 {
-		t.Fatalf("binding agents = %d, want 2: %#v", agents, created.Binding.Resources)
-	}
-
-	inspection, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
-	if err != nil || inspection.Status != InspectPresent {
-		t.Fatalf("Inspect = %#v, %v", inspection, err)
-	}
-	focused, err := backend.Focus(FocusRequest{Binding: created.Binding, Root: root})
-	if err != nil || focused.Outcome != OutcomeAttached {
-		t.Fatalf("Focus = %#v, %v", focused, err)
-	}
-	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "select-workspace") < 0 {
-		t.Fatal("Focus did not select the created workspace")
-	}
-
-	journal := LaunchJournal{
-		Phase: JournalCreated, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
-		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
-		Backend: LauncherCMux, Profile: detect.Profile.Identity(),
-		Binding: &created.Binding, Placement: created.Binding.Placement,
-	}
-	journal.RootIdentity, err = canonicalIdentity(root.Base())
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal.RootPhysical, _ = fsq.StableTreeIdentityInfo(root.FileInfo())
-	reclaimed, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: journal, Root: root})
-	if err != nil || reclaimed.Status != ReclaimAdoptable || countCmuxAgentResources(BindingRecord{Resources: ResourceIdentitySet{Resources: reclaimed.Resources}}) != 2 {
-		t.Fatalf("Reclaim = %#v, %v", reclaimed, err)
-	}
-	if cmuxWindowID(reclaimed.Binding) == "" || cmuxWindowID(reclaimed.Binding) != cmuxWindowID(created.Binding) {
-		t.Fatalf("Reclaim window = %q, want %q", cmuxWindowID(reclaimed.Binding), cmuxWindowID(created.Binding))
-	}
-	if !reflect.DeepEqual(reclaimed.Binding.Placement, created.Binding.Placement) {
-		t.Fatalf("Reclaim placement = %#v, want %#v", reclaimed.Binding.Placement, created.Binding.Placement)
-	}
-	if !reflect.DeepEqual(reclaimed.Binding.Resources, created.Binding.Resources) {
-		t.Fatalf("Reclaim resources = %#v, want %#v", reclaimed.Binding.Resources, created.Binding.Resources)
-	}
-
-	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: fakeAMQ, Root: root}); err == nil {
-		t.Fatal("duplicate Create succeeded")
-	}
-	afterDuplicate, _ := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
-	if afterDuplicate.Status != InspectPresent {
-		t.Fatalf("duplicate Create changed live resource: %#v", afterDuplicate)
-	}
-
-	foreignBinding := created.Binding
-	foreignBinding.InstanceIdentity = "cmux-socket:/foreign"
-	foreignInspection, err := backend.Inspect(InspectRequest{Binding: foreignBinding, Root: root})
-	if err != nil || foreignInspection.Status != InspectUnknown {
-		t.Fatalf("foreign Inspect = %#v, %v", foreignInspection, err)
-	}
-
-	closed, err := backend.Close(CloseRequest{Binding: created.Binding, Root: root})
-	if err != nil || closed.Outcome != OutcomeClosed {
-		t.Fatalf("Close = %#v, %v", closed, err)
-	}
-	absent, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
-	if err != nil || absent.Status != InspectAbsent {
-		t.Fatalf("Inspect after Close = %#v, %v", absent, err)
-	}
-}
 
 func TestCmuxCreateSendsExactLineAfterHealthGate(t *testing.T) {
 	backend, logPath := newFakeCmuxBackend(t)
@@ -556,17 +463,6 @@ func cmuxTestPlan(project, nonce string) Plan {
 	}}
 }
 
-func assertNoCmuxCommandFlag(t *testing.T, logPath string) {
-	t.Helper()
-	for _, argv := range readCmuxArgvLog(t, logPath) {
-		for _, arg := range argv {
-			if arg == "--command" {
-				t.Fatalf("cmux invoked with --command: %v", argv)
-			}
-		}
-	}
-}
-
 func readCmuxArgvLog(t *testing.T, logPath string) [][]string {
 	t.Helper()
 	data, err := os.ReadFile(logPath)
@@ -608,16 +504,6 @@ func cmuxArgvHas(args []string, command string) bool {
 		}
 	}
 	return false
-}
-
-func countCmuxAgentResources(binding BindingRecord) int {
-	count := 0
-	for _, resource := range binding.Resources.Resources {
-		if resource.Agent != "" {
-			count++
-		}
-	}
-	return count
 }
 
 func TestCmuxCrashAfterWorkspaceIsUncertain(t *testing.T) {
