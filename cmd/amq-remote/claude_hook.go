@@ -132,11 +132,8 @@ func hookBinding(s claude.Seat) (string, error) {
 	if s.Holder.PID <= 0 {
 		return "", errors.New("no Claude process above the hook")
 	}
-	cand, ok, err := claude.RegistryCandidate(s.Holder.PID)
-	if !ok {
-		if err == nil {
-			err = fmt.Errorf("claude:%d has no Claude session registry entry", s.Holder.PID)
-		}
+	cand, err := claude.HookCandidate(s.Holder.PID)
+	if err != nil {
 		return "", err
 	}
 	root := s.Root
@@ -150,7 +147,7 @@ func hookBinding(s claude.Seat) (string, error) {
 	} else if b != nil {
 		return "", fmt.Errorf("this session is attached through %s (binding %s)", b.Root, b.Name)
 	}
-	nb, _, codexes := nativeBinding(root, filepath.Join(root, stateDirName), cand, s.Session, nonEmpty(cand.Display, "claude "+cand.Target), "", false)
+	nb, _, codexes := nativeBinding(root, filepath.Join(root, stateDirName), cand, s.Session, nonEmpty(cand.Display, "claude "+cand.Target), "", false, s.Cwd)
 	if err := ownerDetached(s.Holder, nb.Holder); err != nil {
 		return "", err
 	}

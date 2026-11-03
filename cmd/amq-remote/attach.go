@@ -162,7 +162,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if display == "" {
 		display = session.DisplayName
 	}
-	nb, explicit, codexes := nativeBinding(c.root, stateDir, cand, native, display, *name, *linkName != "")
+	nb, explicit, codexes := nativeBinding(c.root, stateDir, cand, native, display, *name, *linkName != "", "")
 	inspect := inspectOutsideLock(codexes)
 	var reused bool
 	if nb.Name, reused, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
@@ -202,11 +202,16 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 // nativeBinding is the binding attach --self --native writes for cand in
 // root: the name flagName gives (explicit), else the session's default, with
 // the harness, holder, label and identity of the session. It returns the
-// Codex view it read, for the write's inspector.
-func nativeBinding(root, stateDir string, cand registry.Candidate, native, display, flagName string, link bool) (binding.Binding, bool, *codexView) {
+// Codex view it read, for the write's inspector. cwd is the session's working
+// directory when the harness gives none (a Claude session with no registry
+// entry, as the approval hook reads it); "" otherwise.
+func nativeBinding(root, stateDir string, cand registry.Candidate, native, display, flagName string, link bool, cwd string) (binding.Binding, bool, *codexView) {
 	bindName, explicit := nativeBindingName(flagName, cand.Target)
 	codexes := newCodexView()
 	h := nativeHarness(codexes, cand)
+	if h.Cwd == "" {
+		h.Cwd = cwd
+	}
 	place := nonEmpty(display, cand.Target)
 	if h.Cwd != "" {
 		place = filepath.Base(h.Cwd)

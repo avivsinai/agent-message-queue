@@ -180,6 +180,39 @@ func TestPermissionHookUsesTheBindingOfItsProcessAfterASessionChange(t *testing.
 	}
 }
 
+// The Claude process is the nearest ancestor whose registry entry names the
+// session, else the nearest with any entry, else the nearest that runs a
+// Claude executable, in each layout Claude Code installs.
+//
+// Regression: the live smoke of the hook-written binding found a terminal
+// session with no registry entry (CLAUDE_CODE_CHILD_SESSION=1), so the hook
+// found no Claude process and wrote no binding.
+func TestClaudeAncestorChooser(t *testing.T) {
+	proc := func(pid int, reg string, exe string) ancestor {
+		a := ancestor{holder: launch.HolderIdentity{PID: pid, ProcessStart: "s"}, exe: exe}
+		if reg != "" {
+			a.reg = &Session{ID: reg}
+		}
+		return a
+	}
+	shell := proc(40, "", "/bin/zsh")
+	for _, tc := range []struct {
+		name  string
+		procs []ancestor
+		want  int
+	}{
+		{"registry names the session", []ancestor{shell, proc(30, "other", "/x/claude"), proc(20, "s-1", "/x/claude")}, 20},
+		{"any registry entry", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude"), proc(20, "other", "/x/node")}, 20},
+		{"desktop app", []ancestor{shell, proc(30, "", "/Users/me/Library/Application Support/Claude/claude-code/2.1.317/abc123/claude.app/Contents/MacOS/claude")}, 30},
+		{"Homebrew or npm", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude")}, 30},
+		{"native installer", []ancestor{shell, proc(30, "", "/Users/me/.local/share/claude/versions/2.1.317")}, 30},
+	} {
+		if got := claudeAncestor(tc.procs, "s-1"); got.PID != tc.want {
+			t.Fatalf("%s: claudeAncestor = pid %d; want %d", tc.name, got.PID, tc.want)
+		}
+	}
+}
+
 // "Allow this session" names its scope with each path as Claude gives it,
 // the home directory as ~ where a path starts with it.
 func TestSessionScopeLabels(t *testing.T) {

@@ -77,6 +77,7 @@ type Seat struct {
 	// Holder is the Claude process the hook runs under (claudeAncestor);
 	// zero when none was found.
 	Holder launch.HolderIdentity
+	Cwd    string // the hook's cwd, for a session with no registry entry
 }
 
 // Binder writes the binding of a seat that no binding serves, as /amq-remote
@@ -188,12 +189,12 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 // bind writes now, so the machine agent gives the session a channel. With
 // none, "" and the terminal decides.
 func (h permissionHook) dialogName(in permissionInput) (string, error) {
-	seat := Seat{Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Session: in.SessionID}
+	seat := Seat{Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Session: in.SessionID, Cwd: in.Cwd}
 	name, err := dialog.FindBinding(seat.Root, seat.Handle, seat.Session)
 	if err != nil || name != "" {
 		return name, err
 	}
-	seat.Holder = claudeAncestor(seat.Session)
+	seat.Holder = claudeAncestor(hookAncestors(), seat.Session)
 	if seat.Holder.PID > 0 {
 		if name, err := heldBinding(seat.Holder); err != nil || name != "" {
 			return name, err
@@ -226,25 +227,58 @@ func heldBinding(holder launch.HolderIdentity) (string, error) {
 	return "", nil
 }
 
-// claudeAncestor is the Claude process the hook runs under, with the
-// identity the process walk verified: the nearest ancestor whose session
-// registry entry names session, else the nearest with any entry (Claude may
-// not have rewritten its entry yet after /clear); zero when none has one.
-func claudeAncestor(session string) launch.HolderIdentity {
-	var fallback launch.HolderIdentity
+// ancestor is one process the hook runs under, as hookAncestors read it.
+type ancestor struct {
+	holder launch.HolderIdentity // the identity the process walk verified
+	reg    *Session              // its session registry entry; nil when it has none
+	exe    string                // its executable; "" when it cannot be read
+}
+
+// hookAncestors reads the processes the hook runs under, nearest first: each
+// one's session registry entry and executable.
+func hookAncestors() []ancestor {
+	var out []ancestor
 	for _, h := range launch.Ancestors() {
-		s, err := SessionForPID(h.PID)
-		if err != nil {
-			continue
+		a := ancestor{holder: h}
+		if s, err := SessionForPID(h.PID); err == nil {
+			a.reg = &s
 		}
-		if s.ID == session {
-			return h
-		}
-		if fallback.PID == 0 {
-			fallback = h
+		a.exe, _ = launch.ProcessExecutable(h.PID)
+		out = append(out, a)
+	}
+	return out
+}
+
+// claudeAncestor is the Claude process among procs: the one whose session
+// registry entry names session, else the nearest that is a Claude process
+// at all, by a registry entry (Claude may not have rewritten it yet after
+// /clear) or by its executable (a session that writes no entry: a child
+// session, the desktop app). Nearest wins, so a child session is never
+// taken for the Claude process it runs under. Zero when none is.
+func claudeAncestor(procs []ancestor, session string) launch.HolderIdentity {
+	for _, p := range procs {
+		if p.reg != nil && p.reg.ID == session {
+			return p.holder
 		}
 	}
-	return fallback
+	for _, p := range procs {
+		if p.reg != nil || claudeExecutable(p.exe) {
+			return p.holder
+		}
+	}
+	return launch.HolderIdentity{}
+}
+
+// claudeExecutable reports whether path is a Claude Code executable: one
+// named claude (the desktop app's .../claude.app/Contents/MacOS/claude, a
+// Homebrew or npm install), or a version file of the native installer,
+// .../claude/versions/<version>.
+func claudeExecutable(path string) bool {
+	if path == "" {
+		return false
+	}
+	dir := filepath.Dir(path)
+	return filepath.Base(path) == harnessClaude || filepath.Base(dir) == "versions" && filepath.Base(filepath.Dir(dir)) == harnessClaude
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the

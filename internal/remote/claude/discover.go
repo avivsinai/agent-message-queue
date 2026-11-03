@@ -117,28 +117,32 @@ func init() {
 	registry.RegisterDiscoverer("claude", discoverer{})
 }
 
-// RegistryCandidate is the candidate of the Claude process pid read from its
-// session registry entry alone, whatever its kind and with or without a
-// messaging socket: the approval hook binds a session it never submits to.
+// HookCandidate is the candidate of the Claude process pid for the approval
+// hook, which binds a session it never submits to: from its session
+// registry entry whatever its kind and with or without a messaging socket,
+// or, for a session that writes no entry, the bare claude:<pid> target.
 // attach --self --native finds its candidate through Discover instead.
-// ok=false when pid has no entry.
-func RegistryCandidate(pid int) (registry.Candidate, bool, error) {
+func HookCandidate(pid int) (registry.Candidate, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return registry.Candidate{}, false, err
+		return registry.Candidate{}, err
 	}
 	configDir, err := sessionConfigDir(home)
 	if err != nil {
-		return registry.Candidate{}, false, err
+		return registry.Candidate{}, err
 	}
 	reg, err := readSessionRegistry(configDir, pid)
-	if err != nil || reg == nil {
-		return registry.Candidate{}, false, err
+	if err != nil {
+		return registry.Candidate{}, err
 	}
 	recorded := ""
 	if configDir != defaultConfigDir(home) {
 		recorded = configDir
 	}
 	cfg, _ := json.Marshal(config{Pid: pid, ConfigDir: recorded})
-	return registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), Display: reg.Name, Config: cfg}, true, nil
+	c := registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), Config: cfg}
+	if reg != nil {
+		c.Display = reg.Name
+	}
+	return c, nil
 }
