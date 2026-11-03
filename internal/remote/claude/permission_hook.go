@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -163,24 +164,24 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 }
 
-// claudeProcess is the Claude Code process that runs the hook: the
-// installed command execs amq-remote from the shell Claude starts, so it is
-// the hook's parent. A variable so tests can name another process.
-var claudeProcess = os.Getppid
-
 // dialogName is where the dialog opens: the binding that serves the session
-// (its AMQ handle, its session id, or its Claude process, which outlives a
-// /clear), else the session record of that Claude process, labelled by the
-// session's project.
+// (its AMQ handle, its session id, or a process the hook runs under, which
+// outlives a /clear), else the session record of the session's process,
+// labelled by the session's project. With no such process, "" and the
+// terminal decides.
 func dialogName(in permissionInput) (string, error) {
-	pid := claudeProcess()
-	name, err := dialog.FindBinding(os.Getenv("AM_ROOT"), os.Getenv("AM_ME"), in.SessionID, pid)
+	procs := hookAncestors()
+	ids := make([]launch.HolderIdentity, len(procs))
+	for i, p := range procs {
+		ids[i] = p.holder
+	}
+	name, err := dialog.FindBinding(os.Getenv("AM_ROOT"), os.Getenv("AM_ME"), in.SessionID, ids)
 	if err != nil || name != "" {
 		return name, err
 	}
-	holder, err := launch.HolderOf(pid)
-	if err != nil {
-		return "", err
+	holder, ok := sessionHolder(procs)
+	if !ok {
+		return "", errors.New("no process of the session to hold a session record")
 	}
 	place, base := harnessClaude, harnessClaude
 	if b := filepath.Base(filepath.Clean(in.Cwd)); in.Cwd != "" && b != string(filepath.Separator) {
@@ -188,6 +189,42 @@ func dialogName(in permissionInput) (string, error) {
 	}
 	return dialog.RecordSession(dialog.SessionRecord{Harness: harnessClaude, Session: in.SessionID,
 		Label: binding.SessionLabel(harnessClaude, place, binding.Machine()), Holder: holder}, binding.SanitizeName(base))
+}
+
+// hookProcess is one process the hook runs under: its identity and its
+// executable ("" when it cannot be read).
+type hookProcess struct {
+	holder launch.HolderIdentity
+	exe    string
+}
+
+// hookAncestors are the processes the hook runs under, nearest first, from
+// the kernel's process table.
+func hookAncestors() []hookProcess {
+	var out []hookProcess
+	for _, h := range launch.Ancestors() {
+		exe, _ := launch.ProcessExecutable(h.PID)
+		out = append(out, hookProcess{holder: h, exe: exe})
+	}
+	return out
+}
+
+// sessionHolder is the process that runs the session: the nearest ancestor
+// that is not a shell, so the shell Claude starts the hook command in (or
+// one it execs into) is skipped; never pid 1. An ancestor whose executable
+// cannot be read is not known not to be a shell, so nothing qualifies.
+func sessionHolder(procs []hookProcess) (launch.HolderIdentity, bool) {
+	for _, p := range procs {
+		if p.holder.PID <= 1 || p.exe == "" {
+			return launch.HolderIdentity{}, false
+		}
+		switch filepath.Base(p.exe) {
+		case "sh", "bash", "zsh", "dash":
+			continue
+		}
+		return p.holder, true
+	}
+	return launch.HolderIdentity{}, false
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
@@ -213,9 +250,11 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 }
 
 // sessionScope is the label of "Allow this session" with what it allows,
-// short and with no full path: "Allow this session: Bash(rm:*)", "Allow
-// edits in <dir> this session", "Accept edits this session".
+// each path as Claude gives it with only the home directory shortened to ~:
+// "Allow this session: Bash(rm:*)", "Allow edits in ~/proj this session",
+// "Stop allowing edits in ~/proj this session", "Accept edits this session".
 func sessionScope(rules []json.RawMessage) string {
+	home, _ := os.UserHomeDir()
 	var parts, ruleParts []string
 	for _, raw := range rules {
 		var r struct {
@@ -230,6 +269,10 @@ func sessionScope(rules []json.RawMessage) string {
 		if json.Unmarshal(raw, &r) != nil {
 			continue
 		}
+		dirs := make([]string, len(r.Directories))
+		for i, d := range r.Directories {
+			dirs[i] = homeShort(d, home)
+		}
 		switch r.Type {
 		case "setMode":
 			if r.Mode == "acceptEdits" {
@@ -238,19 +281,19 @@ func sessionScope(rules []json.RawMessage) string {
 				parts = append(parts, "Use "+r.Mode+" mode this session")
 			}
 		case "addDirectories":
-			var dirs []string
-			for _, d := range r.Directories {
-				dirs = append(dirs, filepath.Base(filepath.Clean(d)))
-			}
 			if len(dirs) > 0 {
 				parts = append(parts, "Allow edits in "+strings.Join(dirs, ", ")+" this session")
+			}
+		case "removeDirectories":
+			if len(dirs) > 0 {
+				parts = append(parts, "Stop allowing edits in "+strings.Join(dirs, ", ")+" this session")
 			}
 		default:
 			for _, rule := range r.Rules {
 				if rule.RuleContent == "" {
 					ruleParts = append(ruleParts, rule.ToolName)
 				} else {
-					ruleParts = append(ruleParts, rule.ToolName+"("+shortPaths(rule.RuleContent)+")")
+					ruleParts = append(ruleParts, rule.ToolName+"("+homeShort(rule.RuleContent, home)+")")
 				}
 			}
 		}
@@ -261,34 +304,36 @@ func sessionScope(rules []json.RawMessage) string {
 	if len(parts) == 0 {
 		return "Allow this session"
 	}
-	label := strings.Join(parts, "; ")
-	if r := []rune(label); len(r) > maxOptionLabel {
-		label = string(r[:maxOptionLabel-1]) + "…"
-	}
-	return label
+	return truncateRunes(strings.Join(parts, "; "), maxOptionLabel)
 }
 
-// maxOptionLabel bounds an option label: one line in Buzz.
-const maxOptionLabel = 120
+// maxOptionLabel bounds an option label.
+const maxOptionLabel = 200
 
-// shortPaths cuts each absolute path in a rule to its last element and any
-// glob after it: "//Users/me/proj/**" is "proj/**".
-func shortPaths(s string) string {
-	fields := strings.Fields(s)
-	for i, f := range fields {
-		if !strings.HasPrefix(f, "/") && !strings.HasPrefix(f, "~/") {
+// homeShort writes each home directory path in s as ~, also in Claude's
+// "//<absolute path>" rule form: "//Users/me/.ssh/**" is "~/.ssh/**". Only
+// the whole home directory counts: "/Users/meow" stays as it is.
+func homeShort(s, home string) string {
+	if home == "" || home == string(filepath.Separator) {
+		return s
+	}
+	home = filepath.Clean(home)
+	var b strings.Builder
+	for {
+		i := strings.Index(s, home)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := i + len(home)
+		if end < len(s) && s[end] != '/' && s[end] != ' ' && s[end] != ')' {
+			b.WriteString(s[:end])
+			s = s[end:]
 			continue
 		}
-		glob := ""
-		for _, g := range []string{"/**", "/*"} {
-			if rest, ok := strings.CutSuffix(f, g); ok {
-				f, glob = rest, g
-				break
-			}
-		}
-		fields[i] = filepath.Base(f) + glob
+		b.WriteString(strings.TrimSuffix(s[:i], "/") + "~")
+		s = s[end:]
 	}
-	return strings.Join(fields, " ")
 }
 
 func editTool(name string) bool {

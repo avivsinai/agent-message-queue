@@ -1446,7 +1446,7 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 	// A thread no binding serves answers its dialogs in the terminal: it
 	// runs in the app-server daemon and has no process of its own to prove
 	// it live for a channel.
-	name, err := dialog.FindBinding("", "", a.threadID, 0)
+	name, err := dialog.FindBinding("", "", a.threadID, nil)
 	if err != nil || name == "" {
 		return
 	}

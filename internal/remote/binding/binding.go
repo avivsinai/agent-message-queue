@@ -165,9 +165,7 @@ func (b Binding) Liveness() (State, string) {
 		return Unknown, err.Error()
 	}
 	h := b.Holder
-	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && h.PID <= 0 && !b.Mailbox() {
-		h.PID, _ = strconv.Atoi(pid)
-	}
+	h.PID = b.HolderPID()
 	if h.PID <= 0 {
 		return Unknown, "no holder recorded"
 	}
@@ -179,6 +177,20 @@ func (b Binding) Liveness() (State, string) {
 	default:
 		return Unknown, evidence
 	}
+}
+
+// HolderPID is the pid of the process that runs b's session: its holder's,
+// else, for a native Claude binding written before holders were recorded,
+// the pid in its target; 0 when neither is known.
+func (b Binding) HolderPID() int {
+	if b.Holder.PID > 0 {
+		return b.Holder.PID
+	}
+	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && !b.Mailbox() {
+		n, _ := strconv.Atoi(pid)
+		return n
+	}
+	return 0
 }
 
 // Machine is this machine's short name for labels: the first label of the

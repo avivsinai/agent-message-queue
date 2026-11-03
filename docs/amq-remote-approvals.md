@@ -78,11 +78,13 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 - **Claude Code:** the `PermissionRequest` hook shows every dialog of every
   session: "Allow once", a session-wide option when Claude suggests one or
   the tool edits files, and "Deny". The session-wide option applies Claude's
-  own suggestion for this session only, and its label says what it allows
-  without a full path: "Allow this session: Bash(rm:*)", "Allow edits in
-  <directory> this session", or "Accept edits this session". A session keeps
-  its channel when its session id changes (`/clear`): the hook finds the
-  binding its Claude process holds. It waits up to 600 seconds and then
+  own suggestion for this session only, and its label says what it allows,
+  each path as Claude gives it with the home directory written `~`: "Allow
+  this session: Bash(rm -rf ~/other/node_modules)", "Allow edits in ~/proj
+  this session", "Stop allowing edits in ~/proj this session", or "Accept
+  edits this session". A session keeps its channel when its session id
+  changes (`/clear`): the hook finds the binding whose holder is a process
+  it runs under, matched by pid, start time and boot. It waits up to 600 seconds and then
   leaves the dialog to the terminal. A terminal answer closes the Buzz message.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
@@ -112,9 +114,13 @@ Each seam writes a request file under
 `~/.amq/remote/dialogs/<binding>/requests/`. The Claude hook whose session
 no binding serves writes it under `dialogs/~<harness>-<project>/` instead,
 beside `session.json`, the session record: harness, session id, label, and
-the Claude process as its holder. The machine agent gives each record whose
-process runs a channel, retires it when the process is gone, and hands it to
-the binding whose holder is that process once the session attaches. The Buzz
+its holder, the nearest process above the hook that is not a shell (with
+none, the terminal decides). The machine agent gives each record whose
+process runs a channel, and retires it and drops the record when the
+process is gone. Once the session attaches, the binding whose holder is that
+process takes the channel: it gets the binding's label and the message "This
+channel now reaches <label>; chat from Buzz works.", and the record's open
+dialogs are still answered there until they resolve. The Buzz
 agent (`amq-acp`) posts it and turns
 the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides

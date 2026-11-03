@@ -387,7 +387,9 @@ worker stops, its relay call in flight is cut off and no new step starts.
   channel lives while the session's process runs, shows approvals only, and
   answers any other message with "This session shows approvals only. Run
   /amq-remote in it to chat from Buzz." When a binding whose holder is that
-  process appears, the channel becomes the binding's (see
+  process appears, the channel becomes the binding's, is renamed to its
+  label, and says "This channel now reaches <label>; chat from Buzz works."
+  (see
   [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
 
 A pinned agent keeps its Buzz identity in step with its binding. On each

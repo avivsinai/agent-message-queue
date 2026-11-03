@@ -76,11 +76,28 @@ func TestSessionRecordGetsItsOwnChannel(t *testing.T) {
 
 // When the session's process attaches, its binding takes the session's
 // channel over: the record moves to the binding's name with the same
-// channel, and the session record is dropped.
+// channel and gets the binding's label, the channel says so once, and a
+// dialog that was open is still answered there; the session's directory
+// goes once that dialog is resolved.
 func TestSessionChannelMovesToTheBindingOfItsProcess(t *testing.T) {
 	holder := selfHolder(t)
 	s, calls, name, _ := sessionChannelServer(t, holder)
+	savedPost, savedRead, savedEdit := postAnswer, readReactions, editMessage
+	t.Cleanup(func() { postAnswer, readReactions, editMessage = savedPost, savedRead, savedEdit })
+	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
+	readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
+	editMessage = func(string, string, time.Duration) error { return nil }
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ make",
+		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}, OpenedAt: time.Now()}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
 	tick(s, time.Now())
+	s.dialogTick(time.Now())
 	if r := channelState(t, s, name); r.State != channelActive {
 		t.Fatalf("session channel = %+v", r)
 	}
@@ -93,17 +110,30 @@ func TestSessionChannelMovesToTheBindingOfItsProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	tick(s, time.Now())
-	if r := channelState(t, s, "alpha"); r.State != channelActive || r.ChannelID != machineChanB || r.Identity != b.SessionIdentity() {
-		t.Fatalf("binding's record = %+v; want the session's channel", r)
+	if r := channelState(t, s, "alpha"); r.State != channelActive || r.ChannelID != machineChanB || r.Identity != b.SessionIdentity() || r.Label != b.Label || r.Handed {
+		t.Fatalf("binding's record = %+v; want the session's channel under the binding's label", r)
 	}
 	if _, found, _ := loadChannelRecord(s.slotPath(name)); found {
 		t.Fatal("the session's record is still there")
 	}
-	if _, ok, _ := dialog.ReadSession(name); ok {
-		t.Fatal("the session record is still there")
+	if calls.count("channels create") != 1 || calls.count("channels update --channel "+machineChanB+" --name "+b.Label) != 1 ||
+		calls.count("messages send --channel "+machineChanB+" --content This channel now reaches "+b.Label+"; chat from Buzz works.") != 1 {
+		t.Fatalf("calls = %q; want one channel, renamed and announced once", calls.list())
 	}
-	if n := calls.count("channels create"); n != 1 {
-		t.Fatalf("creates = %d; want the one channel", n)
+
+	readReactions = func(string, time.Duration) ([]reaction, error) {
+		return []reaction{{Emoji: "✅", PubKeys: []string{buzzOwner}}}, nil
+	}
+	s.dialogTick(time.Now())
+	if a, ok, _ := dialog.ReadAnswer(dir, req.ID); !ok || a.Option != 1 {
+		t.Fatalf("answer = %+v, %v; want the open dialog still answered in the channel", a, ok)
+	}
+	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	s.dialogTick(time.Now())
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the session's dialogs directory is still there: %v", err)
 	}
 }
 

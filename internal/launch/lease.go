@@ -430,6 +430,27 @@ func RunsUnderProcess(holder HolderIdentity) bool {
 	return false
 }
 
+// Ancestors is this process's ancestors, nearest first, each with its
+// identity, up to but not including pid 1. Every parent edge is checked as
+// RunsUnderProcess checks it; the walk stops at the first edge it cannot
+// prove, so each entry is a process this one runs under.
+func Ancestors() []HolderIdentity {
+	child := inspectProcess(os.Getpid())
+	if !child.Running || child.StartToken == "" {
+		return nil
+	}
+	var out []HolderIdentity
+	for depth := 0; depth < maxProcessAncestry; depth++ {
+		parent, ok := verifiedParent(child)
+		if !ok || parent.PID <= 1 {
+			break
+		}
+		out = append(out, HolderIdentity{PID: parent.PID, ProcessStart: parent.StartToken, BootID: parent.BootID, PIDNamespace: pidNamespace()})
+		child = parent
+	}
+	return out
+}
+
 // verifiedParent is the process child descends from: child keeps its
 // identity and its parent pid across the read of the parent. A parent that
 // exits makes the kernel reparent child before its pid can be reused, so an

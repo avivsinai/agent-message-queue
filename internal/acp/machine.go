@@ -129,6 +129,10 @@ type channelRecord struct {
 	// Doubted records that a create outcome was once unknown: no create is
 	// ever sent again for this record.
 	Doubted bool `json:"doubted,omitempty"`
+	// Handed is set when the channel of a session record moved to its
+	// session's binding, until the channel carries the binding's label and
+	// says it now reaches the session (announceHandover).
+	Handed bool `json:"handed,omitempty"`
 	// ArchiveSent is written before the channel's archive is sent, so a
 	// restore unarchives a channel that may be archived although no archive
 	// was confirmed.
@@ -276,10 +280,11 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.applyResets(now)
 	s.retireGone(now)
 	all, err := binding.List()
+	// Session records first: a session that attached hands its channel to
+	// its binding before the binding would make its own. Without a binding
+	// list nothing is handed over, and the records are still served.
+	s.provisionSessions(all, err == nil, now)
 	if err == nil {
-		// Session records first: a session that attached hands its channel
-		// to its binding before the binding would make its own.
-		s.provisionSessions(all, now)
 		for _, b := range all {
 			if s.stopped() {
 				return
@@ -340,6 +345,9 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 			return
 		}
 		ok = false
+	}
+	if ok && r.Handed {
+		s.announceHandover(&r, now)
 	}
 	if !ok {
 		if s.restore(b, now) || s.stopped() {
@@ -737,8 +745,8 @@ func (s *Server) retireGone(now time.Time) {
 			continue
 		}
 		b, err := binding.ReadNamed(r.Name)
-		// A name no binding can have (an older machine's approvals
-		// channel) is gone too.
+		// A record under a name that is neither a binding's nor a session
+		// record's serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
 			s.retire(r, goneReason(r), now)
 		} else if err == nil {
