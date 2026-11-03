@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,14 +14,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // PermissionRequest hook. Claude Code runs it for every tool permission
 // dialog, in the CLI, the desktop app and the IDE, alongside the dialog it
-// shows. It mirrors the dialog into a dialogs directory: the binding's that
-// serves the session, else the machine's, where the Buzz agent posts it.
-// Then it waits for the first answer: the owner's in Buzz, or the
+// shows. It mirrors the dialog into the dialogs directory of the binding that
+// serves the session, else of the session's own session record, so the Buzz
+// agent posts it in the session's own channel. Then it waits for the first answer: the owner's in Buzz, or the
 // terminal's. A Buzz answer prints the decision; a terminal answer ends the
 // hook with no output, so the terminal's choice stands. On any error it
 // exits with no output and the terminal dialog decides. It never exits 2
@@ -67,21 +70,39 @@ const (
 	valueDeny         = "deny"
 )
 
-// permissionHook holds the hook's clock and pacing, so tests can drive it.
+// Seat is the session a dialog comes from, as the hook found it.
+type Seat struct {
+	Root, Handle string // AM_ROOT and AM_ME; empty outside AMQ
+	Session      string // the hook's session_id
+	// Holder is the Claude process the hook runs under (claudeAncestor);
+	// zero when none was found.
+	Holder launch.HolderIdentity
+	Cwd    string // the hook's cwd, for a session with no registry entry
+}
+
+// Binder writes the binding of a seat that no binding serves, as /amq-remote
+// writes it, and returns its name. It refuses a session whose owner turned
+// it off.
+type Binder func(Seat) (string, error)
+
+// permissionHook holds the hook's clock and pacing, so tests can drive it,
+// and the writer of a new binding.
 type permissionHook struct {
 	now  func() time.Time
 	wait time.Duration
 	poll time.Duration
+	bind Binder // nil: a session no binding serves answers in the terminal
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
-// configured timeout. It always returns 0.
-func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration) int {
+// configured timeout. bind writes the binding of a session no binding
+// serves. It always returns 0.
+func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration, bind Binder) int {
 	if wait <= 0 {
 		wait = DefaultPermissionWait
 	}
-	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond}
+	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond, bind: bind}
 	return h.run(stdin, stdout, done)
 }
 
@@ -98,14 +119,9 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.HookEventName != "" && in.HookEventName != permissionHookType {
 		return 0
 	}
-	// A session no binding serves still mirrors its dialogs, to the
-	// machine's directory.
-	name, err := dialog.FindBinding(os.Getenv("AM_ROOT"), os.Getenv("AM_ME"), in.SessionID)
+	name, err := h.dialogName(in)
 	if err != nil {
 		return 0
-	}
-	if name == "" {
-		name = dialog.MachineBinding
 	}
 	dir, err := dialog.DirFor(name)
 	if err != nil {
@@ -115,7 +131,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	opened := h.now()
 	req := dialog.Request{
 		ID: dialog.NewID(), Harness: harnessClaude, Session: in.SessionID, Tool: in.ToolName,
-		Label: sessionLabel(in.Cwd), Text: dialogText(in.ToolName, in.ToolInput), Options: options,
+		Text: dialogText(in.ToolName, in.ToolInput), Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
 	// Claude signals no terminal approve: the call's tool_result in the
@@ -166,18 +182,110 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 }
 
-// sessionLabel says which session asks: "claude · <cwd base>".
-func sessionLabel(cwd string) string {
-	if base := filepath.Base(filepath.Clean(cwd)); cwd != "" && base != string(filepath.Separator) {
-		return harnessClaude + " · " + base
+// dialogName is where the dialog opens, in order: the binding that serves
+// the session (its AMQ handle or its session id); a binding, not proven
+// ended, held by exactly the Claude process the hook runs under, as it is
+// (a session after /clear keeps the binding attach made); else a binding
+// bind writes now, so the machine agent gives the session a channel. With
+// none, "" and the terminal decides.
+func (h permissionHook) dialogName(in permissionInput) (string, error) {
+	seat := Seat{Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Session: in.SessionID, Cwd: in.Cwd}
+	name, err := dialog.FindBinding(seat.Root, seat.Handle, seat.Session)
+	if err != nil || name != "" {
+		return name, err
 	}
-	return harnessClaude
+	seat.Holder = claudeAncestor(hookAncestors(), seat.Session)
+	if seat.Holder.PID > 0 {
+		if name, err := heldBinding(seat.Holder); err != nil || name != "" {
+			return name, err
+		}
+	}
+	if h.bind == nil {
+		return "", errors.New("no binding writer")
+	}
+	return h.bind(seat)
+}
+
+// heldBinding is the binding, not proven ended, whose recorded holder is
+// exactly holder; "" when none is.
+func heldBinding(holder launch.HolderIdentity) (string, error) {
+	all, err := binding.List()
+	if errors.Is(err, binding.ErrNone) || errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, b := range all {
+		if b.Holder != holder {
+			continue
+		}
+		if state, _ := b.Liveness(); state != binding.Ended {
+			return b.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// ancestor is one process the hook runs under, as hookAncestors read it.
+type ancestor struct {
+	holder launch.HolderIdentity // the identity the process walk verified
+	reg    *Session              // its session registry entry; nil when it has none
+	exe    string                // its executable; "" when it cannot be read
+}
+
+// hookAncestors reads the processes the hook runs under, nearest first: each
+// one's session registry entry and executable.
+func hookAncestors() []ancestor {
+	var out []ancestor
+	for _, h := range launch.Ancestors() {
+		a := ancestor{holder: h}
+		if s, err := SessionForPID(h.PID); err == nil {
+			a.reg = &s
+		}
+		a.exe, _ = launch.ProcessExecutable(h.PID)
+		out = append(out, a)
+	}
+	return out
+}
+
+// claudeAncestor is the Claude process among procs: the one whose session
+// registry entry names session, else the nearest that is a Claude process
+// at all, by a registry entry (Claude may not have rewritten it yet after
+// /clear) or by its executable (a session that writes no entry: a child
+// session, the desktop app). Nearest wins, so a child session is never
+// taken for the Claude process it runs under. Zero when none is.
+func claudeAncestor(procs []ancestor, session string) launch.HolderIdentity {
+	for _, p := range procs {
+		if p.reg != nil && p.reg.ID == session {
+			return p.holder
+		}
+	}
+	for _, p := range procs {
+		if p.reg != nil || claudeExecutable(p.exe) {
+			return p.holder
+		}
+	}
+	return launch.HolderIdentity{}
+}
+
+// claudeExecutable reports whether path is a Claude Code executable: one
+// named claude (the desktop app's .../claude.app/Contents/MacOS/claude, a
+// Homebrew or npm install), or a version file of the native installer,
+// .../claude/versions/<version>.
+func claudeExecutable(path string) bool {
+	if path == "" {
+		return false
+	}
+	dir := filepath.Dir(path)
+	return filepath.Base(path) == harnessClaude || filepath.Base(dir) == "versions" && filepath.Base(filepath.Dir(dir)) == harnessClaude
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
 // permission updates "Allow this session" applies. Claude offers it when
 // the dialog suggests updates (each echoed with destination session), and
-// for an edit tool without suggestions (accept edits for the session).
+// for an edit tool without suggestions (accept edits for the session). Its
+// label says the scope in short (sessionScope).
 func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow}}
 	var rules []json.RawMessage
@@ -186,17 +294,105 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 			rules = append(rules, r)
 		}
 	}
-	label := ""
-	if len(rules) > 0 {
-		label = "Allow this session (" + suggestionSummary(rules) + ")"
-	} else if editTool(in.ToolName) {
+	if len(rules) == 0 && editTool(in.ToolName) {
 		rules = []json.RawMessage{json.RawMessage(`{"type":"setMode","mode":"acceptEdits","destination":"session"}`)}
-		label = "Allow all edits this session"
 	}
-	if label != "" {
-		opts = append(opts, dialog.Option{N: 2, Label: label, Value: valueAllowSession})
+	if len(rules) > 0 {
+		opts = append(opts, dialog.Option{N: 2, Label: sessionScope(rules), Value: valueAllowSession})
 	}
 	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true}), rules
+}
+
+// sessionScope is the label of "Allow this session" with what it allows,
+// each path as Claude gives it with only the home directory shortened to ~:
+// "Allow this session: Bash(rm:*)", "Allow edits in ~/proj this session",
+// "Stop allowing edits in ~/proj this session", "Accept edits this session".
+func sessionScope(rules []json.RawMessage) string {
+	home, _ := os.UserHomeDir()
+	var parts, ruleParts []string
+	for _, raw := range rules {
+		var r struct {
+			Type  string `json:"type"`
+			Mode  string `json:"mode"`
+			Rules []struct {
+				ToolName    string `json:"toolName"`
+				RuleContent string `json:"ruleContent"`
+			} `json:"rules"`
+			Directories []string `json:"directories"`
+		}
+		if json.Unmarshal(raw, &r) != nil {
+			continue
+		}
+		dirs := make([]string, len(r.Directories))
+		for i, d := range r.Directories {
+			dirs[i] = homeShort(d, home)
+		}
+		switch r.Type {
+		case "setMode":
+			if r.Mode == "acceptEdits" {
+				parts = append(parts, "Accept edits this session")
+			} else if r.Mode != "" {
+				parts = append(parts, "Use "+r.Mode+" mode this session")
+			}
+		case "addDirectories":
+			if len(dirs) > 0 {
+				parts = append(parts, "Allow edits in "+strings.Join(dirs, ", ")+" this session")
+			}
+		case "removeDirectories":
+			if len(dirs) > 0 {
+				parts = append(parts, "Stop allowing edits in "+strings.Join(dirs, ", ")+" this session")
+			}
+		default:
+			for _, rule := range r.Rules {
+				if rule.RuleContent == "" {
+					ruleParts = append(ruleParts, rule.ToolName)
+				} else {
+					ruleParts = append(ruleParts, rule.ToolName+"("+homeShort(rule.RuleContent, home)+")")
+				}
+			}
+		}
+	}
+	if len(ruleParts) > 0 {
+		parts = append([]string{"Allow this session: " + strings.Join(ruleParts, ", ")}, parts...)
+	}
+	if len(parts) == 0 {
+		return "Allow this session"
+	}
+	return truncateRunes(strings.Join(parts, "; "), maxOptionLabel)
+}
+
+// maxOptionLabel bounds an option label.
+const maxOptionLabel = 200
+
+// homeShort writes the home directory as ~ where a path token starts with
+// it, also in Claude's "//<absolute path>" rule form: "//Users/me/notes/**"
+// is "~/notes/**". A token starts at the start of s or after a space, '(',
+// '=', ':' or a quote, and the home directory must end at '/' or at the end
+// of s; a path that only contains it stays as it is. Both conditions are
+// read in s as given, so a replacement never makes a new token start.
+func homeShort(s, home string) string {
+	if home == "" || home == string(filepath.Separator) {
+		return s
+	}
+	home = filepath.Clean(home)
+	var b strings.Builder
+	done := 0 // s[:done] is written
+	for from := 0; ; {
+		i := strings.Index(s[from:], home)
+		if i < 0 {
+			b.WriteString(s[done:])
+			return b.String()
+		}
+		start, end := from+i, from+i+len(home)
+		if start > 0 && s[start-1] == '/' {
+			start-- // the "//" rule form
+		}
+		if (start == 0 || strings.ContainsRune(" (=:'\"", rune(s[start-1]))) && (end == len(s) || s[end] == '/') {
+			b.WriteString(s[done:start] + "~")
+			done = end
+		}
+		from = end
+	}
 }
 
 func editTool(name string) bool {
@@ -217,41 +413,6 @@ func sessionScoped(raw json.RawMessage) (json.RawMessage, bool) {
 	m["destination"] = json.RawMessage(`"session"`)
 	out, err := json.Marshal(m)
 	return out, err == nil
-}
-
-// suggestionSummary names what the session updates allow, for the option
-// label: "Bash(rm -rf node_modules)", "mode acceptEdits", a directory.
-func suggestionSummary(rules []json.RawMessage) string {
-	var parts []string
-	for _, raw := range rules {
-		var r struct {
-			Type  string `json:"type"`
-			Mode  string `json:"mode"`
-			Rules []struct {
-				ToolName    string `json:"toolName"`
-				RuleContent string `json:"ruleContent"`
-			} `json:"rules"`
-			Directories []string `json:"directories"`
-		}
-		if json.Unmarshal(raw, &r) != nil {
-			continue
-		}
-		switch r.Type {
-		case "setMode":
-			parts = append(parts, "mode "+r.Mode)
-		case "addDirectories", "removeDirectories":
-			parts = append(parts, strings.Join(r.Directories, ", "))
-		default:
-			for _, rule := range r.Rules {
-				if rule.RuleContent == "" {
-					parts = append(parts, rule.ToolName)
-				} else {
-					parts = append(parts, rule.ToolName+"("+rule.RuleContent+")")
-				}
-			}
-		}
-	}
-	return truncateRunes(strings.Join(parts, "; "), 200)
 }
 
 func chosen(options []dialog.Option, n int) (dialog.Option, bool) {

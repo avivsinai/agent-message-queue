@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -411,6 +412,163 @@ func pinMailboxSession(t *testing.T, root string) {
 	for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
 		"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
 		t.Setenv(k, v)
+	}
+}
+
+// runApprovalHook runs count approval hooks at once in this process, each
+// for one Bash dialog of session, with the binding writer the installed hook
+// uses, and returns the dialogs open in name's directory once count are, or
+// after 1 s. The hooks then end as answered in the terminal.
+func runApprovalHook(t *testing.T, count int, session, name string) []dialog.Request {
+	t.Helper()
+	done, ended := make(chan struct{}), make(chan int, count)
+	for range count {
+		go func() {
+			ended <- claude.RunPermissionHook(strings.NewReader(`{"session_id":"`+session+`","tool_name":"Bash","tool_input":{"command":"make"}}`),
+				io.Discard, done, time.Minute, hookBinding)
+		}()
+	}
+	ddir, err := dialog.DirFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var open []dialog.Request
+	for deadline := time.Now().Add(time.Second); len(open) < count && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		open, _ = dialog.Requests(ddir)
+	}
+	close(done)
+	for range count {
+		<-ended
+	}
+	return open
+}
+
+// An AMQ session that never ran /amq-remote gets its mailbox binding from
+// its first approval dialog, as attach --self writes it, and the dialog
+// opens there; a later attach --self keeps that one binding.
+func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session1")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
+	if open := runApprovalHook(t, 1, "s-1", "claude-p-session1"); len(open) != 1 || open[0].Text != "$ make" {
+		t.Fatalf("open dialogs = %+v; want the dialog in the mailbox binding's directory", open)
+	}
+	b, err := binding.ReadNamed("claude-p-session1")
+	if err != nil || !b.Mailbox() || b.Root != root || b.Handle != "claude" || b.Label != binding.SessionLabel("claude", "p/session1", binding.Machine()) {
+		t.Fatalf("binding = %+v, %v; want the mailbox binding attach --self writes", b, err)
+	}
+	if got := attachMailboxAs(t, root); got != "claude-p-session1" {
+		t.Fatalf("attach --self wrote %q; want the hook's binding", got)
+	}
+	if all, _ := binding.List(); len(all) != 1 {
+		t.Fatalf("bindings = %+v; want one", all)
+	}
+}
+
+// After /amq-remote off the approval hook writes no binding for the
+// session's process again: its dialogs stay in the terminal until the owner
+// connects it. A session in another process is not off.
+//
+// Regression: code review of the hook-written binding found that the first
+// dialog after /amq-remote off connected the session again.
+func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
+	this, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	ancestors := launch.Ancestors()
+	if len(ancestors) == 0 {
+		t.Skip("no process ancestry on this platform")
+	}
+	other := ancestors[0] // a live process that is not this one
+	saved := detectHarness
+	t.Cleanup(func() { detectHarness = saved })
+	var holder launch.HolderIdentity
+	detectHarness = func(*codexView, string, string) harnessSession {
+		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder}
+	}
+	for _, tc := range []struct {
+		name     string
+		detached launch.HolderIdentity
+		want     int
+	}{{"this process", this, 0}, {"another process", other, 1}} {
+		dir := canonicalTempDir(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+		t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+		root := filepath.Join(dir, "p", ".agent-mail", "session1")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		holder = tc.detached
+		attachMailboxAs(t, root)
+		if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
+			t.Fatalf("detach: code=%d err=%v", code, err)
+		}
+		holder = this
+		open := runApprovalHook(t, 1, "s-1", "claude-p-session1")
+		if len(open) != tc.want {
+			t.Fatalf("%s detached: open dialogs = %d; want %d", tc.name, len(open), tc.want)
+		}
+		if all, _ := binding.List(); len(all) != tc.want {
+			t.Fatalf("%s detached: bindings = %+v; want %d", tc.name, all, tc.want)
+		}
+	}
+}
+
+// A Claude session outside AMQ that no binding serves (the desktop app, a
+// plain terminal) gets the native binding attach --self --native writes,
+// once for two dialogs at a time, and its dialogs open there.
+func TestApprovalHookBindsANativeSession(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_ME", "")
+	ancestors := launch.Ancestors()
+	if len(ancestors) == 0 {
+		t.Skip("no process ancestry on this platform")
+	}
+	pid := ancestors[0].PID
+	config := canonicalTempDir(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	// No messaging socket and no kind: the hook never submits to the
+	// session, so any registry entry will do.
+	raw, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": "s-desktop", "cwd": "/work/myproj"})
+	if err := os.MkdirAll(filepath.Join(config, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := claudeSession
+	t.Cleanup(func() { claudeSession = saved })
+	claudeSession = func(int) (claude.Session, error) { return claude.Session{ID: "s-desktop", Cwd: "/work/myproj"}, nil }
+	if open := runApprovalHook(t, 2, "s-desktop", "claude-myproj"); len(open) != 2 {
+		t.Fatalf("open dialogs = %+v; want both in the native binding's directory", open)
+	}
+	root, err := binding.MachineRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := launch.HolderOf(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := binding.ReadNamed("claude-myproj")
+	if err != nil || b.Mailbox() || b.Root != root || b.Target != "claude:"+strconv.Itoa(pid) || b.NativeSession != "s-desktop" ||
+		b.Harness != "claude" || b.Holder != holder || b.Label != binding.SessionLabel("claude", "myproj", binding.Machine()) ||
+		b.Identity != binding.NativeIdentity("claude", root, "/work/myproj") {
+		t.Fatalf("binding = %+v, %v; want the native binding attach --self --native writes", b, err)
+	}
+	if all, _ := binding.List(); len(all) != 1 {
+		t.Fatalf("bindings = %+v; want one", all)
 	}
 }
 

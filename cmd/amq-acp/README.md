@@ -382,9 +382,11 @@ worker stops, its relay call in flight is cut off and no new step starts.
   was ever sent) and becomes active only after the unarchive is accepted and
   the session is still attached; then it posts "Connected again". An
   archived channel stays in Buzz history.
-- Each session's dialogs post in its channel with every option. Dialogs of
-  sessions no binding serves post in the "Approvals @ <machine>" channel
-  (see [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
+- Each session's dialogs post in its channel with every option. The approval
+  hook binds a Claude session that is not connected as `/amq-remote` does
+  (mailbox for an AMQ session, else native), so it gets its channel like any
+  session (see
+  [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
 
 A pinned agent keeps its Buzz identity in step with its binding. On each
 tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`

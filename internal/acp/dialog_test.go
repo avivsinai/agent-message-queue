@@ -61,7 +61,7 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	now := time.Now()
 	s.dialogTick(now) // posts
 	s.dialogTick(now) // reads the ✅
-	want := dm + ": Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
+	want := dm + ": Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\n\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
 	if len(posts) != 1 || posts[0] != want {
 		t.Fatalf("posts = %q; want the dialog once", posts)
 	}
@@ -101,46 +101,6 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	}
 	if last := posts[len(posts)-1]; last != dm+": Answered." {
 		t.Fatalf("posts = %q; want the answer acknowledged", posts)
-	}
-}
-
-// A dialog of a session never connected to Buzz makes the machine agent
-// create its approvals channel once, add the owner, and post the dialog
-// there under the session's own label.
-func TestUnboundDialogReachesTheApprovalsChannel(t *testing.T) {
-	s, calls := machineServer(t)
-	calls.reply = func(args []string) ([]byte, error) {
-		if strings.Join(args[:2], " ") == "channels create" {
-			return []byte(`{"accepted":true,"channel_id":"` + machineChanB + `"}`), nil
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
-	var posts []string
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
-		posts = append(posts, channel+": "+content)
-		return strings.Repeat("f", 64), nil
-	}
-	dir, err := dialog.DirFor(dialog.MachineBinding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ make", Label: "claude · proj",
-		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}, OpenedAt: time.Now(), PID: os.Getpid()}
-	if err := dialog.Open(dir, req); err != nil {
-		t.Fatal(err)
-	}
-	tick(s, time.Now())
-	s.dialogTick(time.Now())
-	if r := channelState(t, s, dialog.MachineBinding); r.State != channelActive || r.ChannelID != machineChanB || !strings.HasPrefix(r.Label, "Approvals") {
-		t.Fatalf("approvals record = %+v", r)
-	}
-	if calls.count("channels create") != 1 || calls.count("channels add-member --channel "+machineChanB+" --pubkey "+buzzOwner) != 1 {
-		t.Fatalf("calls = %q; want one create and the owner added", calls.list())
-	}
-	if len(posts) != 1 || !strings.HasPrefix(posts[0], machineChanB+": claude · proj wants to run Bash:\n$ make") {
-		t.Fatalf("posts = %q; want the dialog in the approvals channel once", posts)
 	}
 }
 

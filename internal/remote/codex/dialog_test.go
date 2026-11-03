@@ -10,7 +10,7 @@ import (
 )
 
 // dialogHarness is an attachment on a fake app-server whose binding store is
-// a temp dir; bound names the binding that serves thread t1, or "" for none.
+// a temp dir; bound names the binding that serves thread t1.
 type dialogHarness struct {
 	t   *testing.T
 	att *Attachment
@@ -25,14 +25,10 @@ func newDialogHarness(t *testing.T, bound string) *dialogHarness {
 		t.Fatal(err)
 	}
 	t.Setenv(binding.EnvPath, filepath.Join(base, "remote", "binding.json"))
-	name := dialog.MachineBinding
-	if bound != "" {
-		if err := binding.WriteNamed(binding.Binding{Name: bound, Root: base, Target: "codex:t1", NativeSession: "t1"}); err != nil {
-			t.Fatal(err)
-		}
-		name = bound
+	if err := binding.WriteNamed(binding.Binding{Name: bound, Root: base, Target: "codex:t1", NativeSession: "t1"}); err != nil {
+		t.Fatal(err)
 	}
-	dir, err := dialog.DirFor(name)
+	dir, err := dialog.DirFor(bound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,16 +120,6 @@ func TestTUIRequestsOpenDialogsAndReplyWithTheAnswer(t *testing.T) {
 	}
 	if r.Outcome != dialog.OutcomeAnswered || r.By != dialog.ByBuzz {
 		t.Fatalf("resolved = %+v, want answered from Buzz", r)
-	}
-}
-
-// A thread no binding serves still mirrors its dialogs, to the machine
-// agent, named by the session's project.
-func TestUnboundThreadOpensMachineDialog(t *testing.T) {
-	h := newDialogHarness(t, "")
-	h.srv.sendServerRequest(t, "7", methodCommandApproval, `{"threadId":"t1","turnId":"tui-1","itemId":"c1","command":"ls"}`)
-	if req := h.opened(""); req.Label != "codex · work" || req.Text != "$ ls" {
-		t.Fatalf("dialog = %+v, want the machine dialog of codex · work", req)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -114,9 +115,9 @@ func serviceRoot(flagRoot string, create bool) (string, error) {
 	var err error
 	switch {
 	case root == "" && create:
-		root, err = ensureMachineRoot()
+		root, err = binding.EnsureMachineRoot()
 	case root == "":
-		root, err = machineRoot()
+		root, err = binding.MachineRoot()
 	case !filepath.IsAbs(root):
 		return "", protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}

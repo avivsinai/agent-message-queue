@@ -205,6 +205,60 @@ func Machine() string {
 	return out
 }
 
+// maxLabel bounds a label to the longest Buzz agent display name.
+const maxLabel = 120
+
+// SessionLabel is the human name of a session and of its Buzz agent,
+// "<harness> · <place> @ <machine>", at most maxLabel characters. A long
+// place is cut, never the machine, which tells two machines' agents apart.
+func SessionLabel(harness, place, machine string) string {
+	head, tail := harness+" · ", ""
+	if machine != "" {
+		tail = " @ " + machine
+	}
+	room := max(maxLabel-len([]rune(head))-len([]rune(tail)), 0)
+	if r := []rune(place); len(r) > room {
+		place = string(r[:room])
+	}
+	label := []rune(head + place + tail)
+	return string(label[:min(len(label), maxLabel)])
+}
+
+// MachineRoot is the per-machine root, ~/.amq/remote/root: the root a link
+// lives in unless --root names another, and the root of a native session
+// outside AMQ (attach --self --native, and the approval hook).
+func MachineRoot() (string, error) {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "remote", "root"), nil
+}
+
+// EnsureMachineRoot creates the machine root, each directory 0700, and
+// refuses a symlink or non-directory on the way.
+func EnsureMachineRoot() (string, error) {
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		return "", err
+	}
+	dir := home
+	for _, part := range []string{"remote", "root"} {
+		dir = filepath.Join(dir, part)
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("%s is not a plain directory; refusing", dir)
+		}
+	}
+	return dir, nil
+}
+
 // canonicalRoot is root with its symlinks resolved, so one root reached
 // through two spellings is one identity; the clean path when it does not
 // resolve.

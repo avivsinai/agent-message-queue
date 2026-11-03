@@ -846,8 +846,14 @@ the message is edited with the outcome.
 
 Once the Claude hook is installed, every Claude Code session on the machine
 (terminal, desktop app Code tab, IDE) mirrors its dialogs to Buzz, with or
-without `/amq-remote`: a connected session posts in its own channel, an
-unconnected one in the "Approvals @ <machine>" channel. Install it once:
+without `/amq-remote`, each in its own channel. The first dialog of a session
+that is not connected binds it as `attach --self` does: the mailbox binding
+of an AMQ session (`AM_ROOT` and `AM_ME` set), whose channel then reaches its
+inbox, else the native binding of `--native`, whose channel takes messages
+once `/amq-remote --native` runs in the session. The machine agent makes the
+channel as for any session. `/amq-remote off` stops this for that session
+until `/amq-remote` connects it again.
+Install it once:
 
 ```text
 amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~/.claude/settings.json

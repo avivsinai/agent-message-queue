@@ -46,7 +46,6 @@ type Request struct {
 	ID       string    `json:"id"`                  // unique, filename-safe (NewID)
 	Harness  string    `json:"harness"`             // claude | codex | pi | acp
 	Session  string    `json:"session"`             // native session id when known
-	Label    string    `json:"label,omitempty"`     // which session asks, for a request no binding serves: "claude · <cwd base>"
 	Tool     string    `json:"tool"`                // e.g. Bash, Edit, mcp__srv__tool, exec, apply_patch
 	Text     string    `json:"text"`                // the dialog body as Buzz shows it
 	Options  []Option  `json:"options"`             // empty for a free-text dialog without choices
@@ -86,11 +85,6 @@ type Resolved struct {
 	At      time.Time `json:"at"`
 }
 
-// MachineBinding is the dialogs directory of requests no binding serves: a
-// session that never ran /amq-remote still mirrors its dialogs, and the
-// machine agent posts them.
-const MachineBinding = "_machine"
-
 // maxFileBytes bounds every dialog file read.
 const maxFileBytes = 256 << 10
 
@@ -105,19 +99,28 @@ func NewID() string {
 	return "d-" + hex.EncodeToString(b[:])
 }
 
-// DirFor returns the dialogs directory of a binding, or of MachineBinding,
-// creating it and its requests/, answers/ and resolved/ subdirectories.
-func DirFor(bindingName string) (string, error) {
-	if bindingName != binding.LegacyName && bindingName != MachineBinding {
-		if err := binding.ValidName(bindingName); err != nil {
-			return "", err
-		}
-	}
+// Root is the directory that holds every binding's dialogs directory.
+func Root() (string, error) {
 	path, err := binding.Path()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(filepath.Dir(path), "dialogs", bindingName)
+	return filepath.Join(filepath.Dir(path), "dialogs"), nil
+}
+
+// DirFor returns the dialogs directory of a binding, creating it and its
+// requests/, answers/ and resolved/ subdirectories.
+func DirFor(bindingName string) (string, error) {
+	if bindingName != binding.LegacyName {
+		if err := binding.ValidName(bindingName); err != nil {
+			return "", err
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, bindingName)
 	for _, sub := range []string{"requests", "answers", "resolved"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return "", err

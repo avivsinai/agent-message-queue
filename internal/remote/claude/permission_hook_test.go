@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
@@ -101,7 +103,7 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	// The owner answers 2 in Buzz: allow, with the suggestion kept to this session.
 	wait := runHook(t, string(stdin))
 	req := openRequest(t, dir)
-	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || !strings.HasPrefix(req.Options[1].Label, "Allow this session") || !req.Options[2].Deny {
+	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || req.Options[1].Label != "Allow this session: Bash(rm -rf node_modules)" || !req.Options[2].Deny {
 		t.Fatalf("request = %+v", req)
 	}
 	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 2, By: dialog.ByBuzz}); err != nil {
@@ -133,31 +135,99 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	}
 }
 
-// A Claude session with no AM_* (the desktop app, an IDE) reaches its own
-// channel when a native binding names its session id, and the machine's
-// dialogs otherwise, labelled with its working directory.
-func TestPermissionHookRoutesUnboundSessionsToTheMachine(t *testing.T) {
+// After /clear the Claude process that attach bound has a new session id: the
+// hook finds the binding by that process's whole identity and opens the
+// dialog there, leaving the binding as attach wrote it.
+func TestPermissionHookUsesTheBindingOfItsProcessAfterASessionChange(t *testing.T) {
 	boundHookEnv(t)
 	t.Setenv("AM_ROOT", "")
 	t.Setenv("AM_ME", "")
-	if err := binding.WriteNamed(binding.Binding{Name: "native", Root: t.TempDir(), Target: "claude:native", NativeSession: "s-native", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
+	ancestors := launch.Ancestors()
+	if len(ancestors) == 0 {
+		t.Skip("no process ancestry on this platform")
+	}
+	config, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	for session, want := range map[string]string{"s-native": "native", "s-desktop": dialog.MachineBinding} {
-		dir, err := dialog.DirFor(want)
-		if err != nil {
-			t.Fatal(err)
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	raw, _ := json.Marshal(map[string]any{"pid": ancestors[0].PID, "sessionId": "s-new", "cwd": "/work/myproj"})
+	if err := os.MkdirAll(filepath.Join(config, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(ancestors[0].PID)+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attached := binding.Binding{Name: "claude-myproj", Root: t.TempDir(), Target: "claude:" + strconv.Itoa(ancestors[0].PID),
+		NativeSession: "s-old", Holder: ancestors[0], BoundAt: "2026-11-03T00:00:00Z"}
+	if err := binding.WriteNamed(attached); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := dialog.DirFor("claude-myproj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := runHook(t, `{"session_id":"s-new","tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`)
+	req := openRequest(t, dir)
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v, want allow", d)
+	}
+	if b, err := binding.ReadNamed("claude-myproj"); err != nil || b.NativeSession != "s-old" || b.Holder != attached.Holder {
+		t.Fatalf("binding = %+v, %v; want it as attach wrote it", b, err)
+	}
+}
+
+// The Claude process is the nearest ancestor whose registry entry names the
+// session, else the nearest with any entry, else the nearest that runs a
+// Claude executable, in each layout Claude Code installs.
+//
+// Regression: the live smoke of the hook-written binding found a terminal
+// session with no registry entry (CLAUDE_CODE_CHILD_SESSION=1), so the hook
+// found no Claude process and wrote no binding.
+func TestClaudeAncestorChooser(t *testing.T) {
+	proc := func(pid int, reg string, exe string) ancestor {
+		a := ancestor{holder: launch.HolderIdentity{PID: pid, ProcessStart: "s"}, exe: exe}
+		if reg != "" {
+			a.reg = &Session{ID: reg}
 		}
-		wait := runHook(t, `{"session_id":"`+session+`","cwd":"/work/myproj","tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"summarize"}}`)
-		req := openRequest(t, dir)
-		if req.Session != session || req.Label != "claude · myproj" || req.Text != "https://example.com\nsummarize" {
-			t.Fatalf("%s request in %s = %+v", session, want, req)
+		return a
+	}
+	shell := proc(40, "", "/bin/zsh")
+	for _, tc := range []struct {
+		name  string
+		procs []ancestor
+		want  int
+	}{
+		{"registry names the session", []ancestor{shell, proc(30, "other", "/x/claude"), proc(20, "s-1", "/x/claude")}, 20},
+		{"registry not yet rewritten", []ancestor{shell, proc(30, "other", "/x/node")}, 30},
+		{"child session under a parent with an entry", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude"), proc(20, "other", "/x/claude")}, 30},
+		{"desktop app", []ancestor{shell, proc(30, "", "/Users/me/Library/Application Support/Claude/claude-code/2.1.317/abc123/claude.app/Contents/MacOS/claude")}, 30},
+		{"Homebrew or npm", []ancestor{shell, proc(30, "", "/opt/homebrew/bin/claude")}, 30},
+		{"native installer", []ancestor{shell, proc(30, "", "/Users/me/.local/share/claude/versions/2.1.317")}, 30},
+	} {
+		if got := claudeAncestor(tc.procs, "s-1"); got.PID != tc.want {
+			t.Fatalf("%s: claudeAncestor = pid %d; want %d", tc.name, got.PID, tc.want)
 		}
-		if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: len(req.Options), By: dialog.ByBuzz}); err != nil {
-			t.Fatal(err)
-		}
-		if d := decisionOf(t, wait()); d["behavior"] != "deny" || d["message"] != "Denied from Buzz" {
-			t.Fatalf("decision = %v, want deny", d)
+	}
+}
+
+// "Allow this session" names its scope with each path as Claude gives it,
+// the home directory as ~ where a path starts with it.
+func TestSessionScopeLabels(t *testing.T) {
+	t.Setenv("HOME", "/Users/me")
+	for raw, want := range map[string]string{
+		`{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"rm -rf /Users/me/other/node_modules"}]}`: "Allow this session: Bash(rm -rf ~/other/node_modules)",
+		`{"type":"addRules","rules":[{"toolName":"Read","ruleContent":"//Users/me/notes/**"}]}`:                 "Allow this session: Read(~/notes/**)",
+		`{"type":"addDirectories","directories":["/Users/me/proj"]}`:                                            "Allow edits in ~/proj this session",
+		`{"type":"removeDirectories","directories":["/Volumes/x/Users/me/p"]}`:                                  "Stop allowing edits in /Volumes/x/Users/me/p this session",
+		`{"type":"addDirectories","directories":["/Users/me/Users/me/x"]}`:                                      "Allow edits in ~/Users/me/x this session",
+		`{"type":"setMode","mode":"acceptEdits"}`:                                                               "Accept edits this session",
+	} {
+		if got := sessionScope([]json.RawMessage{json.RawMessage(raw)}); got != want {
+			t.Fatalf("sessionScope(%s) = %q, want %q", raw, got, want)
 		}
 	}
 }

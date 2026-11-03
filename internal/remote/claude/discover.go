@@ -116,3 +116,33 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 func init() {
 	registry.RegisterDiscoverer("claude", discoverer{})
 }
+
+// HookCandidate is the candidate of the Claude process pid for the approval
+// hook, which binds a session it never submits to: from its session
+// registry entry whatever its kind and with or without a messaging socket,
+// or, for a session that writes no entry, the bare claude:<pid> target.
+// attach --self --native finds its candidate through Discover instead.
+func HookCandidate(pid int) (registry.Candidate, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return registry.Candidate{}, err
+	}
+	configDir, err := sessionConfigDir(home)
+	if err != nil {
+		return registry.Candidate{}, err
+	}
+	reg, err := readSessionRegistry(configDir, pid)
+	if err != nil {
+		return registry.Candidate{}, err
+	}
+	recorded := ""
+	if configDir != defaultConfigDir(home) {
+		recorded = configDir
+	}
+	cfg, _ := json.Marshal(config{Pid: pid, ConfigDir: recorded})
+	c := registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), Config: cfg}
+	if reg != nil {
+		c.Display = reg.Name
+	}
+	return c, nil
+}

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1432,10 +1431,9 @@ func (a *Attachment) endDialogs(turnID string) {
 // dialogPoll is how often a waiting dialog looks for the owner's answer.
 const dialogPoll = 250 * time.Millisecond
 
-// awaitDialog opens d for the binding that serves this thread, or for the
-// machine agent when none does, waits for the owner's answer or for the
-// request to end elsewhere, and answers the app-server with the owner's
-// choice. The first resolution written wins.
+// awaitDialog opens d for the binding that serves this thread, waits for
+// the owner's answer or for the request to end elsewhere, and answers the
+// app-server with the owner's choice. The first resolution written wins.
 func (a *Attachment) awaitDialog(key string, d *openDialog) {
 	defer a.dialogWG.Done()
 	defer func() {
@@ -1445,16 +1443,12 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		}
 		a.mu.Unlock()
 	}()
+	// A thread no binding serves answers its dialogs in the terminal: it
+	// runs in the app-server daemon and has no process of its own to prove
+	// it live for a channel.
 	name, err := dialog.FindBinding("", "", a.threadID)
-	if err != nil {
+	if err != nil || name == "" {
 		return
-	}
-	if name == "" {
-		// No binding serves the thread: the machine agent posts it.
-		a.mu.Lock()
-		cwd := a.cwd
-		a.mu.Unlock()
-		name, d.req.Label = dialog.MachineBinding, "codex · "+filepath.Base(cmp.Or(cwd, "."))
 	}
 	dir, err := dialog.DirFor(name)
 	if err != nil {
