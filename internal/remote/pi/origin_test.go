@@ -24,7 +24,7 @@ func TestSubmitDeliversTheRecordOrigin(t *testing.T) {
 	}
 	ep := core.New(core.Config{Store: store, Consent: func(string, string) bool { return true }})
 	defer func() { _ = ep.Close() }()
-	stampLivenessRevisionAt(t, dir, fixedNow, ApproveBridgeRevision) // a bridge that publishes its session id
+	stampLivenessRevisionAt(t, dir, fixedNow, 4) // a bridge that publishes its session id
 	att := mustAttach(t, dir)
 	ep.Register(att)
 	// A link submit carries what its verified signature named: the native

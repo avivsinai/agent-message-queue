@@ -12,10 +12,11 @@ import (
 )
 
 // config is the adapter-specific config block for a codex manifest entry.
+// A legacy approve key is ignored: every approval is shown in Buzz while a
+// binding serves the thread.
 type config struct {
-	Socket  string `json:"socket"`
-	Thread  string `json:"thread"`
-	Approve bool   `json:"approve"`
+	Socket string `json:"socket"`
+	Thread string `json:"thread"`
 }
 
 // Factory builds a codex Attachment from a registry.FactoryConfig. It is a
@@ -39,7 +40,7 @@ func Factory(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, 
 	// adapter under ("sales" is addressed as "sales", not codex:<thread>). The
 	// native thread id stays with the daemon protocol; only the advertised
 	// target id changes. cfg.Target empty = legacy derived identity.
-	opts := []Option{WithApprovals(c.Approve)}
+	var opts []Option
 	if cfg.Target != "" {
 		opts = append(opts, WithTarget(cfg.Target))
 	}

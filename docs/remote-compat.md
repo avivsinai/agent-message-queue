@@ -48,7 +48,7 @@ generate-json-schema` writes; `thread/queue/*` appears only with
 | Completion evidence | `turn/completed` notification (`status: completed\|failed\|interrupted`) | completed | Schema |
 | Exact cancellation gate | `turn/interrupt {threadId, turnId}`. `[live]` It works from a second connection that does not own the turn. | completed (drives `turn/completed(interrupted)`) | Schema; `Attachment.CancelExact` |
 | Steer | `turn/steer` | submitted | Schema |
-| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests). Every client on the thread receives the request, the first response wins, and `serverRequest/resolved` follows (source-read at `rust-v0.156.1`, `codex-rs/app-server/src/outgoing_message.rs:330-495`). AMQ answers only the decision approvals; a permissions, user-input or MCP elicitation request shows in the DM as "Answer in the terminal." with no one-tap answer | submitted (request), answered by client | Schema; `Attachment.onServerRequest` |
+| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests). Every client on the thread receives the request, the first response wins, and `serverRequest/resolved` follows (source-read at `rust-v0.156.1`, `codex-rs/app-server/src/outgoing_message.rs:330-495`). AMQ shows every one in Buzz with the options of `availableDecisions` (free text for user-input and elicitation requests) and answers from the owner's reply. This holds for a session on the app-server (`codex app-server daemon start`, then `codex --remote unix://`). Codex runs a `PermissionRequest` hook before it draws the TUI prompt, so a hook that waits would hide the terminal prompt; AMQ installs none, and a plain `codex` TUI session answers approvals in the terminal | submitted (request), answered by client | Schema; `Attachment.onServerRequest`; [remote approvals](amq-remote-approvals.md) |
 | Session-switch/reload epoch triggers | `thread/resume` (rehydrates full history), `thread/started` and `thread/status/changed` notifications | delivered | Schema |
 | Local draft access (must not submit) | `unavailable`: the schema has no draft or compose method; the only staging primitive is `thread/queue/add`, which is a real queued submission, not a draft | n/a | Schema |
 | Inspect/roster | `thread/read` (`includeTurns`), `thread/items/list`, `thread/turns/list`, `codex agents` | delivered (polling), strong typed schema | Schema; `codex agents --help` |
@@ -70,7 +70,7 @@ files from the pi-bridge directory and calls the extension API; a claim marked
 | Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via bridge correlation only) | (source: pi `docs/extensions.md` "Respect the runtime lifecycle"; `docs/session-format.md`) |
 | Exact cancellation gate | `ctx.abort()` aborts the current agent operation; the extension context has no clear-queue or dequeue-by-item method (`hasPendingMessages()` only). The bridge exposes no cancel request, so the adapter answers `unsupported`. **Unverified:** that `ctx.abort()` keeps queued follow-ups | `unsupported` | (source: pi `src/core/extensions/types.ts` `abort`, `hasPendingMessages`) |
 | Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the `steer` RPC command | submitted | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/rpc-commands.md` "steer") |
-| Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions. Stock pi raises no tool approval that an extension can answer from outside, so the reference bridge (revision 3) has no decision seam. Bridge revision 4 adds one for an extension that holds a tool call for an external decision: `interaction` event lines and adapter-written `answers/` files (see [the pi bridge protocol](pi-bridge-protocol.md), "Bridge revision 4: tool approval"). Questions have no seam | approvals: revision 4 only; questions: n/a | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
+| Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions. Stock pi raises no tool approval that an extension can answer from outside. The reference bridge shows each prompt in Buzz with "answer in the terminal" | approvals: none from Buzz | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
 | Native session identity | `ctx.sessionManager.getSessionId()`: the session header id, kept when a session file is loaded again (reload, resume; compaction only appends entries) and new on `newSession` and on a branched (forked) session. A bridge of revision 4 publishes it as `session_id` in `bridge.liveness`; the adapter reports it as the native session id a relay share pins | delivered (revision 4 only) | (source: pi `src/core/extensions/types.ts` `sessionManager`; `src/core/session-manager.ts` `ReadonlySessionManager`, `getSessionId`, `newSession`) |
 | Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: pi `src/core/extensions/types.ts` event declarations) |
 | Local draft access (must not submit) | `ctx.ui.getEditorText()` reads the input editor text; the bridge does not read it. The `clear_queue` RPC command returns already-queued text, not an unsent draft | n/a | (source: pi `src/core/extensions/types.ts` `getEditorText`; `docs/rpc-commands.md` "clear_queue") |
@@ -93,7 +93,7 @@ observed on Claude Code 2.1.278. The adapter is `internal/remote/claude`.
 | Completion evidence | Opt-in user-level `Stop` hook reporting `prompt_id`, `transcript_path`, `last_assistant_message` | completed (requires the target's own settings.json) | [Claude Code hooks](https://code.claude.com/docs/en/hooks) "Stop" |
 | Exact cancellation gate | `unavailable`: no documented user-level way interrupts a running foreground turn without keystrokes | n/a | Claude Code hooks and CLI documentation |
 | Steer | `unavailable`: delivery timing ("arrives between tool calls") is not steering semantics | n/a | Capture §5 |
-| Approvals | Opt-in `PermissionRequest` command hook (`amq-remote claude install-approval-hook`). Its stdin carries `session_id`, `prompt_id`, `tool_name` and `tool_input`, but no `tool_use_id`. AMQ's hook prints `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…"}}}` for the owner's ❌, and `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}` only when the checks in [remote approvals](amq-remote-approvals.md) pass. No output leaves the terminal dialog to decide. The allow path is not live-verified. `[live]` on 2.1.283: the hook's `prompt_id` equals the `promptId` of the peer delivery line; a terminal reject sends SIGTERM to the hook, then SIGKILL about 1 s later; a terminal approve sends no signal, and the call's `tool_result` line (with `promptId` and `tool_use_id`) is the only trace; parallel decision hooks race and the first decision wins. Questions stay `unavailable` | delivered (live probe; DM path not live-verified) | [Claude Code hooks](https://code.claude.com/docs/en/hooks) "PermissionRequest" |
+| Approvals | Opt-in `PermissionRequest` command hook (`amq-remote claude install-approval-hook`). Its stdin carries `session_id`, `prompt_id`, `tool_name`, `tool_input`, `permission_suggestions` and `transcript_path`, but no `tool_use_id`. AMQ's hook writes one request per dialog, shows the tool input and the options in Buzz, and prints `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}` (with an echoed `permission_suggestions` entry as `updatedPermissions` for "allow this session") or `{"behavior":"deny","message":"…"}` for the owner's answer. No output leaves the terminal dialog to decide. `[live]` on 2.1.283: a terminal reject sends SIGTERM to the hook, then SIGKILL about 1 s later; a terminal approve sends no signal, and the call's `tool_result` line in the transcript is the only trace, so the hook tails `transcript_path` for it; parallel decision hooks race and the first decision wins. The allow path and the session-wide allow are not live-verified. Questions arrive as `PreToolUse` and are not shown | delivered (live probe; DM path not live-verified) | [Claude Code hooks](https://code.claude.com/docs/en/hooks) "PermissionRequest" |
 | Session-switch/reload epoch triggers | `unavailable` as a documented signal; `queue-operation` transcript entries mark messages queued while busy | delivered (observed in transcript only) | Capture §3.2 |
 | Local draft access (must not submit) | `unavailable`: no draft or compose primitive on the messaging socket or CLI surface | n/a | Capture §3 |
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | `claude agents --help` |
@@ -120,7 +120,7 @@ of its agent. ACP facts are from agentclientprotocol.com.
 | Completion evidence | The `session/prompt` response `stopReason` | completed | ACP `/protocol/prompt-turn`; `requestOutcome` |
 | Exact cancellation gate | The adapter writes `cancels/<ref>.json` (bridge revision 5). The host sends `session/cancel`, which is session-wide, only after checking that the ref is its prompt in flight; it is the agent's only client and keeps one prompt in flight, so the cancel stops that request alone. A ref that has not run is refused `cancelled` | completed (`stopReason: cancelled`) | ACP `/protocol/prompt-turn`; `Host.prompt`, `Attachment.CancelExact` |
 | Steer | `unavailable` | n/a | - |
-| Approvals | `session/request_permission` during a request's turn becomes an `interaction` line with `presence: local_only`; the owner can reject from the remote face, and the host's policy rejects at expiry. Not live-verified against a real harness | approvals: reject only | ACP `/protocol/tool-calls`; `Host.askOwner` |
+| Approvals | `session/request_permission` becomes a request file with the options the agent offered; Buzz shows them and the owner's answer picks one. Not live-verified against a real harness | approvals: any offered option | ACP `/protocol/tool-calls`; `Host.askOwner` |
 | Native session identity | The ACP `sessionId`, published as `session_id` in `bridge.liveness` | delivered | `Host.writeLiveness` |
 | Session-switch epoch triggers | A host start mints a new `session_generation` | delivered | `Host.startBridge` |
 | Local draft access (must not submit) | n/a: the host has no editor | n/a | - |
@@ -154,8 +154,8 @@ contract:
   answers approval requests itself, so few or none reach a remote client.
   `thread/resume` returns the thread's reviewer and
   `thread/settings/updated` reports a change; the adapter publishes an
-  automatic one as the session's `approval_reviewer`, and doctor reports it
-  for a target with `approve`. A `-c approvals_reviewer=user` on a resumed
+  automatic one as the session's `approval_reviewer`, and doctor reports
+  it. A `-c approvals_reviewer=user` on a resumed
   TUI does not change the reviewer of turns submitted remotely; a thread
   started with it does. An `approvalsReviewer` override on `turn/start`
   applies to that turn and every later one, the terminal's included, so the
@@ -195,19 +195,16 @@ not Claude Code's.
 
 Reasons for every `false` (source: as cited per row in §3):
 
-- `codex.approve_tool` is opt-in per target (`"approve": true`). Source-read
-  at `rust-v0.156.1`: the app-server sends each approval request to every
-  client on the thread, applies the first response, drops later ones with
-  only a log line, and then sends `serverRequest/resolved` to every client
+- `codex.approve_tool`: source-read at `rust-v0.156.1`: the app-server sends
+  each approval request to every client on the thread, applies the first
+  response, drops later ones with only a log line, and then sends
+  `serverRequest/resolved` to every client
   (`codex-rs/app-server/src/outgoing_message.rs:330-495`,
-  `thread_lifecycle.rs:864-885`). The adapter answers
-  approvals of runs it submitted and, for a turn it did not submit (one
-  started in the Codex TUI), decision approvals on the relay share pinned to
-  the thread. It clears an approval on `serverRequest/resolved` or when its
-  turn completes, so a late answer is refused. A remote approve is offered
-  only for a plain command that the prompt shows whole; file changes and
-  network, permission or write-root grants take a remote reject only. Not
-  live-verified against a running Codex terminal.
+  `thread_lifecycle.rs:864-885`). The adapter shows every approval and
+  question of the thread in Buzz, whether the turn started in Buzz or in the
+  Codex TUI, and clears one on `serverRequest/resolved` or when its turn
+  completes, so a late answer is refused. Not live-verified against a running
+  Codex terminal.
 - `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: the app-server protocol has no PTY concept.
 - `pi.cancel_request`: the reference bridge (revision 3) has no cancel
@@ -215,36 +212,20 @@ Reasons for every `false` (source: as cited per row in §3):
   5. `ctx.abort()` aborts the current operation, not one request, and the
   extension context has no dequeue primitive for a queued request that has
   not started (source: §3.2 "Exact cancellation gate").
-- `pi.approve_tool` is true only while the live bridge advertises
-  `bridge_revision` 4 or higher. That extension raises each approval under a
-  request it owns as an `interaction` line and applies the first decision
-  from a local face or from the adapter's `answers/` file, bound to the
-  interaction id, manifest hash and expiry. A remote approve is offered only
-  for `presence: remote` and a prompt the owner sees whole; otherwise the
-  remote is offered reject only. The reference bridge is revision 3 and
-  advertises no approvals. Not live-verified against a revision-4 extension.
+- `pi.approve_tool`: pi has no extension API that answers a prompt from
+  outside, so Buzz shows the prompt and the owner answers in the terminal.
 - `pi.answer_question`: the bridge has no external decision seam for the
   in-process `ctx.ui.select` await (source: §3.2 "Approvals/questions").
 - `pi.terminal`: no terminal binding is part of this adapter contract.
-- `acp.approve_tool` is advertised (the host is bridge revision 4), with a
-  remote reject only: every approval is `presence: local_only` until a live
-  capture shows that a harness puts the whole call in `rawInput`.
+- `acp.approve_tool`: the host writes a request file for each permission
+  request, with the options the agent offered.
 - `acp.answer_question`: ACP has no question seam the host serves.
 - `acp.terminal`: no terminal binding is part of this adapter contract.
 - `claude_code.cancel_request`: no user-level interrupt exists at all
   (§3.3 "Exact cancellation gate").
-- `claude_code.approve_tool`: opt-in through the manifest `approve` and the
-  `PermissionRequest` hook, and only for a tool call of a request that a
-  relay share submitted as its own turn. Buzz blocks any call; it allows
-  only a Bash call shown whole, with the owner's signed ✅ verified by the
-  hook against the owner key pinned on its command line. Not live-verified
-  through the Buzz DM. The adapter config `observe_approvals` (without
-  `approve`) shows the pending approval as the request's interaction with
-  `remote_answer` false: `approve_tool` stays false, a remote answer is
-  refused `unsupported`, and the hook, pinned by an observe-only pin, raises
-  the request and applies no answer file. The terminal decides. One adapter
-  entry has one mode: with both `approve` and `observe_approvals`, `approve`
-  wins.
+- `claude_code.approve_tool`: the `PermissionRequest` hook shows every
+  dialog of the session in Buzz, and the owner's answer decides it (first
+  answer wins). Not live-verified through Buzz.
 - Discovery (`up --discover`) lists a live pi chat under the root as
   target `pi:<handle>` with its manifest entry, from the handle's
   `bridge.liveness`, and prints the chat's pi `session_id` as

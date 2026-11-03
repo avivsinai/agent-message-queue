@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -186,6 +187,9 @@ type Server struct {
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
+	// dialogs is the dialog poster's state, used only by the worker that
+	// runs dialogTick.
+	dialogs dialogState
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -396,8 +400,11 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 		return s.setModel(params)
 	case "_session/steering":
 		// A mailbox-binding turn takes follow-up DMs; every other remote turn
-		// refuses.
+		// refuses. The owner's answer to an open dialog goes to the dialog.
 		if s.cfg.RemoteBinding {
+			if result, ok := s.steeringDialogReply(params); ok {
+				return result, nil
+			}
 			return s.mailboxSteering(params)
 		}
 		if s.remote() {
@@ -757,6 +764,19 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	eventID, rpcErr := resolveEventID(parsed.Meta)
 	if rpcErr != nil {
 		return nil, nil, rpcErr
+	}
+	// The owner's answer to an open dialog goes to the dialog, never to the
+	// session.
+	if s.cfg.RemoteBinding {
+		channel := buzzChannel(text)
+		if s.cfg.Machine {
+			channel = hostContext(parsed.Prompt)
+		}
+		if dir, answer, ok := s.dialogReply(channel, text); ok {
+			return func(emit func(any) error) (any, *rpcError) {
+				return s.answerDialog(parsed.SessionID, channel, dir, answer, emit)
+			}, nil, nil
+		}
 	}
 
 	var dm string
@@ -1153,6 +1173,9 @@ const (
 	// SteeringDuplicate is a redelivered steer event: the original message
 	// (its id is in _meta.amq) stands, and nothing new was delivered.
 	SteeringDuplicate = "duplicate"
+	// SteeringAnswered is a steer that answered an open dialog: nothing was
+	// delivered to the session.
+	SteeringAnswered = "answered"
 )
 
 // steerPromptWait bounds how long a steer waits for an in-flight prompt's
@@ -1225,6 +1248,45 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		outcome = SteeringInjected
 	}
 	return newSteeringResult(outcome, delivery), nil
+}
+
+// steeringDialogReply answers an open dialog with a steer that the owner
+// typed as its answer. The steer's channel is its own context block's, else
+// the session's. The acknowledgement is posted apart from the reader.
+func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
+	var parsed steeringParams
+	if decodeParams(params, &parsed, false) != nil {
+		return nil, false
+	}
+	text, rpcErr := steeringText(parsed.Prompt)
+	if rpcErr != nil {
+		return nil, false
+	}
+	channel := buzzChannel(text)
+	s.mu.Lock()
+	if session, ok := s.sessions[parsed.SessionID]; ok {
+		switch {
+		case s.cfg.Machine:
+			channel = session.route
+		case channel == "" && session.turn != nil:
+			channel = session.turn.channel
+		}
+	}
+	s.mu.Unlock()
+	dir, answer, ok := s.dialogReply(channel, text)
+	if !ok {
+		return nil, false
+	}
+	ack := "Answered."
+	won, err := dialog.WriteAnswer(dir, answer)
+	switch {
+	case err != nil:
+		return nil, false
+	case !won:
+		ack = "Already answered."
+	}
+	go s.publish(channel, ack)
+	return steeringResult{Outcome: SteeringAnswered}, true
 }
 
 func newSteeringResult(outcome string, delivery Delivery) steeringResult {

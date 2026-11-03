@@ -65,9 +65,6 @@ type Carrier struct {
 	now      func() time.Time
 
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
-	// respondThread answers thread approvals; set once after the endpoint
-	// exists.
-	respondThread ThreadResponder
 }
 
 // NewCarrier builds the edge for one binding. secret is the body key and
@@ -127,10 +124,6 @@ func (c *Carrier) source(eventID, root string) core.Source {
 	}
 	return src
 }
-
-// ShareSource is this carrier's identity to the endpoint with no input
-// event: the owner share a thread approval belongs to.
-func (c *Carrier) ShareSource() core.Source { return c.source("", "") }
 
 // sourceFor is the source of a request submitted by evt. A mention-channel
 // input is marked, so its result row carries no reference into the channel
@@ -201,30 +194,17 @@ const KindReaction = 7
 // cancelReaction is the owner's cancel gesture on a result row.
 const cancelReaction = "❌"
 
-// IngestReaction handles one verified kind 7 event from the owner. On an
-// approval message this edge posted, ✅ approves and ❌ rejects exactly that
-// interaction (answerApproval). On one of this edge's result rows, ❌
-// cancels exactly that row's request; the row is resolved through the
-// persisted receipt mapping, not the reaction's own
+// IngestReaction handles one verified kind 7 event from the owner. On one
+// of this edge's result rows, ❌ cancels exactly that row's request; the row
+// is resolved through the persisted receipt mapping, not the reaction's own
 // tags, and a reaction carries no h tag it has to match. Anything else is
-// ignored; removing a reaction never undoes a cancel or an answer.
+// ignored; removing a reaction never undoes a cancel.
 func (c *Carrier) IngestReaction(evt nostr.Event) error {
 	if evt.Kind != KindReaction || evt.PubKey.Hex() != c.binding.Owner {
 		return nil
 	}
 	target := lastETag(evt) // NIP-25: the last e tag is the reacted-to event
-	gesture := strings.TrimSpace(evt.Content)
-	if target == "" || gesture != approveReaction && !rejectReaction(gesture) {
-		return nil
-	}
-	appr, isApproval, err := c.ledger.ApprovalFor(target)
-	if err != nil {
-		return err
-	}
-	if isApproval {
-		return c.answerApproval(evt, target, appr, gesture)
-	}
-	if gesture != cancelReaction {
+	if target == "" || strings.TrimSpace(evt.Content) != cancelReaction {
 		return nil
 	}
 	ref, ok, err := c.ledger.RequestForRow(target)
@@ -306,37 +286,6 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	// session: /inspect of a replacement session is never answered.
 	if err := c.fence(); err != nil {
 		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, protocol.InertInline(err.Error()))
-	}
-	// A typed answer in the owner DM is the same decision as the reaction on
-	// the approval message. A replay keeps its first decision: an
-	// event claimed as a prompt stays a prompt, and one claimed as an answer
-	// answers only the approval it named.
-	if gesture := typedAnswer(n.Text); n.Op == OpSubmit && gesture != "" && tagValue(evt, "h") == c.binding.Channel {
-		prior, claimed, err := c.ledger.ClaimFor(evt.ID.Hex())
-		if err != nil {
-			return err
-		}
-		switch {
-		case claimed && prior.Op == OpRespond:
-			var first struct{ Message string }
-			_ = json.Unmarshal(prior.Command, &first)
-			appr, ok, err := c.ledger.ApprovalFor(first.Message)
-			if err != nil || !ok {
-				return err
-			}
-			return c.answerApproval(evt, first.Message, appr, gesture)
-		case !claimed:
-			if msgID, appr, ok, err := c.openApproval(evt); err != nil {
-				return err
-			} else if ok && gesture == approveReaction && appr.ApproveProof && appr.ApproveOption != "" && !hasTagName(evt, "e") {
-				// An unthreaded yes names no approval message in what the
-				// owner signed, so it cannot prove the allow: it is not
-				// sent, and the owner learns how to allow.
-				return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, typedApproveHint)
-			} else if ok {
-				return c.answerApproval(evt, msgID, appr, gesture)
-			}
-		}
 	}
 	claim := c.claimFor(evt, n.Op, n.RequestID, "", n.NotAfter, nil)
 	if n.Op == OpSubmit {
@@ -661,9 +610,6 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	} else if err := c.ledger.ensureRowMap(rc); err != nil {
 		return err
 	}
-	if err := c.prepareApprovals(snap, rc, origin); err != nil {
-		return err
-	}
 	if int(snap.Revision) <= rc.Revision {
 		return nil // this or a newer revision is already prepared
 	}
@@ -691,544 +637,12 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	return c.ledger.PutReceipt(rc)
 }
 
-// Owner reactions on an approval message. Approve runs a command, so it
-// takes only an explicit ✅, never the "+" that a plain like sends; reject
-// fails safe and takes any of the usual refusals.
-const approveReaction = "✅"
-
-// typedAnswer maps an owner's typed reply to an approval gesture, or "".
-func typedAnswer(text string) string {
-	switch strings.ToLower(strings.TrimSpace(text)) {
-	case "✅", "yes", "y", "approve":
-		return approveReaction
-	case "❌", "no", "n", "reject":
-		return "❌"
-	}
-	return ""
-}
-
-// openApproval is the approval message a typed answer refers to: the one
-// whose thread the owner replied in, or else the target's one pending
-// approval, when its message reached the relay before the owner typed. An
-// approval the owner could not yet have seen is never answered.
-func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) {
-	// A threaded reply refers only to the message it names: the parent it
-	// replies to first, then its thread root. It never falls back to another
-	// pending approval.
-	msgID := ""
-	threaded := false
-	for _, t := range evt.Tags {
-		if len(t) > 0 && t[0] == "e" {
-			threaded = true // any e tag, valid or not, rules out the fallback
-		}
-	}
-	for _, id := range threadRefs(evt) {
-		if _, ok, err := c.ledger.ApprovalFor(id); err != nil {
-			return "", Approval{}, false, err
-		} else if ok {
-			msgID = id
-			break
-		}
-	}
-	if threaded && msgID == "" {
-		return "", Approval{}, false, nil
-	}
-	if !threaded {
-		s, err := c.inspect()
-		if err != nil || s.PendingInteraction == nil || s.ActiveRequestRef == nil {
-			return "", Approval{}, false, nil
-		}
-		posted, ok, err := c.ledger.Prepared(approvalKey(*s.ActiveRequestRef, *s.PendingInteraction))
-		if err != nil || !ok || !posted.Accepted || posted.AcceptedAt == 0 {
-			return "", Approval{}, false, err
-		}
-		// Typed after the relay accepted the message, so the owner could
-		// have seen it; one second covers the timestamps' precision.
-		if int64(evt.CreatedAt) <= posted.AcceptedAt {
-			return "", Approval{}, false, nil
-		}
-		var msg nostr.Event
-		if err := json.Unmarshal(posted.Event, &msg); err != nil {
-			return "", Approval{}, false, err
-		}
-		msgID = msg.ID.Hex()
-	}
-	appr, ok, err := c.ledger.ApprovalFor(msgID)
-	if err != nil || !ok || appr.Disabled {
-		return "", Approval{}, false, err
-	}
-	return msgID, appr, true, nil
-}
-
-// threadRefs are the events an owner reply names, in the order a typed
-// answer resolves them: the parent it replies to, then its thread root,
-// then unmarked e tags. A mention names none.
-func threadRefs(evt nostr.Event) []string {
-	var ids []string
-	for _, marker := range []string{"reply", "root", ""} {
-		for _, t := range evt.Tags {
-			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
-				continue
-			}
-			ids = append(ids, t[1])
-		}
-	}
-	return ids
-}
-
-// typedApproveHint answers an unthreaded typed approve for a harness that
-// approves only with proof bound to the approval message.
-const typedApproveHint = "To allow, react ✅ on the approval or reply yes in its thread."
-
-func rejectReaction(gesture string) bool {
-	return gesture == "❌" || gesture == "👎" || gesture == "-"
-}
-
-// approvalKey is the outbox key of the message that shows one interaction.
-// It is in its request's ordering group, after the root row, which is
-// always prepared first.
-func approvalKey(ref, interactionID string) string {
-	return fmt.Sprintf("row/%s/approval/%s", ref, interactionID)
-}
-
-// prepareApprovals posts one message for a pending approval that the owner
-// can answer, edits it when whether a remote answer can apply changes, and
-// edits it once with the outcome when the record resolves it. Every edit is
-// keyed per interaction and revision, so a republished revision changes
-// nothing.
-func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin map[string]string) error {
-	if err := c.refreshApproval(snap, rc); err != nil {
-		return err
-	}
-	// An older revision replayed after a newer one never posts its approval:
-	// that interaction may be resolved already.
-	if in := snap.Interaction; in != nil && in.RemoteAnswer && in.Kind == "approval" && int(snap.Revision) >= rc.Revision {
-		appr := Approval{RequestRef: snap.RequestRef, InteractionID: in.InteractionID, Target: rc.Target, Epoch: snap.Epoch,
-			Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption, ApproveProof: in.ApproveProof}
-		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: approvalText(appr, "")}
-		stored, err := c.prepareRow(approvalKey(snap.RequestRef, in.InteractionID), evt, 0)
-		if err != nil {
-			return err
-		}
-		if err := c.ledger.PutApproval(stored.ID.Hex(), appr); err != nil {
-			return err
-		}
-	}
-	for _, r := range snap.Resolved {
-		if err := c.editOutcome(approvalKey(snap.RequestRef, r.InteractionID), r); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// refreshApproval edits a posted approval whose answerability changed: the
-// pending interaction stopped, or started again, taking a remote answer, or
-// offers other options. The message and the reaction mapping change as one
-// recoverable step: the intended edit is recorded on the mapping first, then
-// prepared, then the mapping takes the new view. An edit a crash left
-// unfinished is finished before anything is compared, so the message and the
-// mapping always end in agreement.
-func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
-	in := snap.Interaction
-	if in == nil || in.Kind != "approval" || int(snap.Revision) < rc.Revision {
-		return nil
-	}
-	key := approvalKey(snap.RequestRef, in.InteractionID)
-	msg, appr, ok, err := c.postedApproval(key)
-	if err != nil || !ok {
-		return err // never posted: nothing to edit
-	}
-	want := appr
-	want.Disabled = !in.RemoteAnswer
-	if in.RemoteAnswer {
-		// An approval posted reject only takes ApproveProof with its ✅.
-		want.ApproveOption, want.RejectOption, want.ApproveProof = in.ApproveOption, in.RejectOption, in.ApproveProof
-	}
-	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
-		return nil
-	}
-	return c.editApproval(msg, appr, want, fmt.Sprintf("%s/edit/%08d", key, snap.Revision))
-}
-
-// postedApproval is the approval message stored under outbox key and its
-// mapping, with any edit a crash left unfinished finished first. ok is
-// false when it was never posted.
-func (c *Carrier) postedApproval(key string) (nostr.Event, Approval, bool, error) {
-	posted, ok, err := c.ledger.Prepared(key)
-	if err != nil || !ok {
-		return nostr.Event{}, Approval{}, false, err
-	}
-	var msg nostr.Event
-	if err := json.Unmarshal(posted.Event, &msg); err != nil {
-		return nostr.Event{}, Approval{}, false, err
-	}
-	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
-	if err != nil || !ok {
-		return nostr.Event{}, Approval{}, false, err
-	}
-	if appr.Pending != nil {
-		if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
-			return nostr.Event{}, Approval{}, false, err
-		}
-	}
-	return msg, appr, true, nil
-}
-
-// editApproval changes the approval message msg to show want, as one
-// recoverable step: the intended edit is recorded on the mapping first,
-// then prepared under editKey, then the mapping takes the new view.
-func (c *Carrier) editApproval(msg nostr.Event, appr, want Approval, editKey string) error {
-	now := c.now().Unix()
-	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
-		return ErrClockBehind
-	}
-	appr.Pending = &ApprovalEdit{View: want, Key: editKey, At: now}
-	if err := c.ledger.UpdateApproval(msg.ID.Hex(), appr); err != nil {
-		return err
-	}
-	_, err := c.finishApprovalEdit(msg, appr)
-	return err
-}
-
-// editOutcome edits the approval message under outbox key once with the
-// outcome r. A message never posted is not edited.
-func (c *Carrier) editOutcome(key string, r protocol.Resolution) error {
-	if _, done, err := c.ledger.Prepared(key + "/outcome"); err != nil || done {
-		return err
-	}
-	msg, appr, ok, err := c.postedApproval(key)
-	if err != nil || !ok {
-		return err
-	}
-	now := c.now().Unix()
-	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
-		return ErrClockBehind
-	}
-	edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(appr, outcomeText(r, appr))}
-	return c.prepare(key+"/outcome", edit)
-}
-
-// finishApprovalEdit prepares the edit recorded on appr, idempotently, and
-// then gives the mapping that edit's view, dated by the stored event.
-func (c *Carrier) finishApprovalEdit(msg nostr.Event, appr Approval) (Approval, error) {
-	p := appr.Pending
-	edit := nostr.Event{CreatedAt: nostr.Timestamp(p.At), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(p.View, "")}
-	if err := c.prepare(p.Key, edit); err != nil {
-		return appr, err
-	}
-	stored, ok, err := c.ledger.Prepared(p.Key)
-	if err != nil || !ok {
-		return appr, fmt.Errorf("approval edit %s not prepared: %v", p.Key, err)
-	}
-	var evt nostr.Event
-	if err := json.Unmarshal(stored.Event, &evt); err != nil {
-		return appr, err
-	}
-	approvalEditPrepared()
-	done := p.View
-	done.Pending, done.EditedAt = nil, int64(evt.CreatedAt)
-	return done, c.ledger.UpdateApproval(msg.ID.Hex(), done)
-}
-
-// approvalEditPrepared runs between preparing an approval edit and giving
-// the mapping its view; tests replace it to crash there.
-var approvalEditPrepared = func() {}
-
-// approvalText is an approval message: what the harness asks to do and how
-// to answer it, or, once resolved, the outcome instead of the instructions.
-func approvalText(a Approval, outcome string) string {
-	var b strings.Builder
-	label := a.RequestRef
-	if a.Thread != "" {
-		label = "a turn started in the terminal"
-	}
-	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", label, protocol.BoundPreview(a.Prompt))
-	switch {
-	case outcome != "":
-		b.WriteString("\n\n" + outcome)
-	case a.Disabled:
-		b.WriteString("\n\nIt can no longer be answered from Buzz. Answer in the terminal.")
-	case a.ApproveOption != "" && a.RejectOption != "":
-		b.WriteString("\n\nReact ✅ to approve or ❌ to reject. The first answer, here or in the terminal, wins.")
-	case a.ApproveOption != "":
-		b.WriteString("\n\nReact ✅ to approve, or answer in the terminal. The first answer wins.")
-	case a.RejectOption != "":
-		b.WriteString("\n\nReact ❌ to reject, or answer in the terminal. The first answer wins.")
-	default:
-		b.WriteString("\n\nAnswer in the terminal.")
-	}
-	return b.String()
-}
-
-// outcomeText is the owner-facing line for one resolution.
-func outcomeText(r protocol.Resolution, a Approval) string {
-	switch r.Outcome {
-	case protocol.ResolutionAnswered:
-		// The harness applies the first answer it receives, so a terminal
-		// answer given in the same moment can still be the one that applied.
-		const race = " If the terminal answered at the same moment, its answer applied."
-		switch r.Option {
-		case a.ApproveOption:
-			return "✅ Approve was sent from Buzz." + race
-		case a.RejectOption:
-			return "❌ Reject was sent from Buzz." + race
-		}
-		return fmt.Sprintf("Answer %q was sent from Buzz.", r.Option) + race
-	case protocol.ResolutionRunEnded:
-		return "The run ended before this was answered."
-	case protocol.ResolutionDeliveryUnknown:
-		return deliveryUnknownText
-	}
-	return "Closed outside Buzz: answered in the terminal, or the turn stopped."
-}
-
-// answerApproval turns an owner reaction on an approval message into the
-// endpoint's interaction.respond for exactly that interaction. The reaction
-// is one decision: it is claimed before the endpoint sees it, and a stale
-// or repeated reaction never answers again.
-func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approval, gesture string) error {
-	if appr.Disabled || appr.Pending != nil {
-		return nil // the message shows no remote answer now, or is changing
-	}
-	option := appr.RejectOption
-	if gesture == approveReaction {
-		option = appr.ApproveOption
-	}
-	if option == "" {
-		return nil // this approval offers no one-tap answer for the gesture
-	}
-	if appr.Thread != "" {
-		return c.answerThreadApproval(evt, messageID, appr, option)
-	}
-	// The approval belongs to a request this binding submitted: after a
-	// change of owner, channel or native session, old approvals are not
-	// answered.
-	if rc, owned, err := c.ledger.ReceiptFor(appr.RequestRef); err != nil || !owned || !c.ownsReceipt(rc) {
-		return err
-	}
-	cmd, _ := json.Marshal(map[string]string{"message": messageID, "ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
-	_, claim, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd)
-	if err != nil || !ok {
-		return err
-	}
-	// The stored claim is the decision. A replay after a crash answers only
-	// the approval and option first claimed, never whatever is pending now.
-	if claim.Op != OpRespond {
-		return nil
-	}
-	var first struct {
-		Message, Ref, Option string
-		InteractionID        string `json:"interaction_id"`
-	}
-	if json.Unmarshal(claim.Command, &first) != nil || first.InteractionID != appr.InteractionID || first.Option != option ||
-		first.Message != "" && first.Message != messageID {
-		stored, found, err := c.ledger.ApprovalFor(first.Message)
-		if err != nil || !found || stored.InteractionID != first.InteractionID {
-			return err
-		}
-		messageID, appr, option = first.Message, stored, first.Option
-	}
-	// An approve carries its proof: a harness that allows a call only with
-	// the owner's signature (Claude, for one) verifies it itself.
-	var evidence json.RawMessage
-	if gesture == approveReaction {
-		var err error
-		if evidence, err = c.approveEvidence(evt, messageID, appr); err != nil {
-			return err
-		}
-	}
-	st := Settlement{Op: OpRespond, RequestRef: appr.RequestRef}
-	out, err := c.handle(&protocol.Command{
-		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: appr.RequestRef,
-		TargetID: appr.Target, Epoch: appr.Epoch, InteractionID: appr.InteractionID, Option: option, Evidence: evidence,
-	}, c.source(evt.ID.Hex(), ""))
-	var refusal *protocol.Refusal
-	reply, _ := out.(protocol.Reply)
-	switch {
-	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && answeredWith(reply.Snapshot, appr.InteractionID, option):
-		// A replay after a crash: this reaction's answer was delivered.
-	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && resolvedAs(reply.Snapshot, appr.InteractionID) == protocol.ResolutionDeliveryUnknown:
-		// A replay whose answer may or may not have arrived: say exactly
-		// that, never that it was already answered.
-		return c.settleApprovalAnswer(evt, messageID, st, deliveryUnknownText)
-	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
-	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
-		// The endpoint says why: resolved, or an earlier answer in flight.
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(refusal.Message)+".")
-	case gesture == approveReaction && errors.As(err, &refusal) && (refusal.Code == protocol.CodeInvalid || refusal.Code == protocol.CodeNativeError):
-		// The harness could not verify the approve: it says why, in the
-		// owner's words. Nothing was answered, so ✅ again or ❌ still works.
-		return c.settleApprovalAnswer(evt, messageID, st, protocol.InertInline(refusal.Message))
-	case err != nil:
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(err.Error()))
-	}
-	// The outcome shows as an edit of the approval message when the record
-	// resolves the interaction.
-	_, err = c.ledger.Settle(evt.ID.Hex(), st)
-	return err
-}
-
-// threadApprovalKey is the outbox key of the message that shows thread
-// approval id; its edits extend it. It is its own ordering group.
-func threadApprovalKey(id string) string { return "row/" + id + "/approval" }
-
-// outboxKey is the outbox key of the message that shows a.
-func (a Approval) outboxKey() string {
-	if a.Thread != "" {
-		return threadApprovalKey(a.Thread)
-	}
-	return approvalKey(a.RequestRef, a.InteractionID)
-}
-
-// ThreadResponder answers a thread approval for the owner (the endpoint's
-// RespondThreadApproval).
-type ThreadResponder func(src core.Source, id, option string) error
-
-// SetThreadResponder installs the answer path of thread approvals. Until
-// it is set, a reaction on one is answered with a refusal.
-func (c *Carrier) SetThreadResponder(fn ThreadResponder) {
-	c.mu.Lock()
-	c.respondThread = fn
-	c.mu.Unlock()
-}
-
-// PublishThreadApproval shows a thread approval (core.ThreadApproval) in
-// the owner DM: a message when it opens, an edit when Buzz can no longer
-// answer it, and an edit with the outcome when it ends. No owner input
-// asked for it, so the message is a row of its own in the DM.
-func (c *Carrier) PublishThreadApproval(ta core.ThreadApproval) error {
-	if ta.TargetID != c.binding.Target || ta.NativeSession != c.binding.NativeSession || ta.Origin["carrier"] != "buzz" ||
-		ta.Origin["body"] != c.binding.Body || ta.Origin["channel"] != c.binding.Channel {
-		return fmt.Errorf("thread approval %s is not this Buzz carrier's", ta.ID)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	in, key := ta.Interaction, threadApprovalKey(ta.ID)
-	if ta.Resolution != nil {
-		if err := c.editOutcome(key, *ta.Resolution); err != nil {
-			return err
-		}
-		// A closed approval's message never answers again.
-		msg, appr, ok, err := c.postedApproval(key)
-		if err != nil || !ok || appr.Disabled {
-			return err
-		}
-		appr.Disabled = true
-		return c.ledger.UpdateApproval(msg.ID.Hex(), appr)
-	}
-	if !in.RemoteAnswer {
-		msg, appr, ok, err := c.postedApproval(key)
-		if err != nil || !ok || appr.Disabled {
-			return err
-		}
-		want := appr
-		want.Disabled = true
-		return c.editApproval(msg, appr, want, key+"/edit/disabled")
-	}
-	appr := Approval{Thread: ta.ID, InteractionID: in.InteractionID, Target: ta.TargetID, Epoch: ta.Epoch,
-		Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption}
-	evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.rowTags("", ""), Content: approvalText(appr, "")}
-	stored, err := c.prepareRow(key, evt, 0)
-	if err != nil {
-		return err
-	}
-	return c.ledger.PutApproval(stored.ID.Hex(), appr)
-}
-
-// answerThreadApproval sends the owner's answer to a thread approval. The
-// reaction is one decision, claimed before the endpoint sees it.
-func (c *Carrier) answerThreadApproval(evt nostr.Event, messageID string, appr Approval, option string) error {
-	// Shown under this binding: a message an earlier binding posted is
-	// never answered here.
-	if posted, ok, err := c.ledger.Prepared(appr.outboxKey()); err != nil || !ok || posted.Binding != c.share() {
-		return err
-	}
-	cmd, _ := json.Marshal(map[string]string{"message": messageID, "thread": appr.Thread, "interaction_id": appr.InteractionID, "option": option})
-	_, claim, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd)
-	if err != nil || !ok {
-		return err
-	}
-	// A replay answers only what was first claimed.
-	var first struct{ Message, Thread, Option string }
-	if claim.Op != OpRespond || json.Unmarshal(claim.Command, &first) != nil || first.Message != messageID || first.Thread != appr.Thread || first.Option != option {
-		return nil
-	}
-	c.mu.Lock()
-	respond := c.respondThread
-	c.mu.Unlock()
-	st := Settlement{Op: OpRespond}
-	if respond == nil {
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: answer in the terminal.")
-	}
-	err = respond(c.source(evt.ID.Hex(), ""), appr.Thread, option)
-	var refusal *protocol.Refusal
-	switch {
-	case err == nil:
-	case errors.As(err, &refusal):
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(refusal.Message)+".")
-	default:
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(err.Error()))
-	}
-	// The outcome shows as an edit of the approval message when the
-	// approval resolves.
-	_, err = c.ledger.Settle(evt.ID.Hex(), st)
-	return err
-}
-
-// resolvedAs is how the record says the interaction ended, or "".
-func resolvedAs(s protocol.Snapshot, interactionID string) protocol.ResolutionOutcome {
-	for _, r := range s.Resolved {
-		if r.InteractionID == interactionID {
-			return r.Outcome
-		}
-	}
-	return ""
-}
-
-// deliveryUnknownText is the owner-facing line for delivery_unknown.
-const deliveryUnknownText = "The answer may not have reached the terminal; check the session."
-
-// answeredWith reports whether the record says AMQ delivered option for the
-// interaction.
-func answeredWith(s protocol.Snapshot, interactionID, option string) bool {
-	for _, r := range s.Resolved {
-		if r.InteractionID == interactionID && r.Outcome == protocol.ResolutionAnswered && r.Option == option {
-			return true
-		}
-	}
-	return false
-}
-
-// settleApprovalAnswer replies under the approval message, then settles the
-// reaction. The approval message sits in the owner input's thread, so the
-// reply names that thread's root.
-func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Settlement, text string) error {
-	appr, ok, err := c.ledger.ApprovalFor(messageID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("approval message %s not stored", messageID)
-	}
-	msg, err := c.storedApproval(messageID, appr)
-	if err != nil {
-		return err
-	}
-	if err := c.reply(evt, c.replyTags(msg), text); err != nil {
-		return err
-	}
-	_, err = c.ledger.Settle(evt.ID.Hex(), st)
-	return err
-}
-
 // editPrepared runs between preparing an edit and saving its receipt; tests
 // crash the edge there.
 var editPrepared = func() {}
 
 // rootKey is a request's one root-row obligation. It is prepared before
-// any edit or approval message of the same request, so Flush sends it
+// any edit of the same request, so Flush sends it
 // first.
 func rootKey(ref string) string { return fmt.Sprintf("row/%s/%08d", ref, 0) }
 
@@ -1287,8 +701,7 @@ const (
 // or a lost connection stops the pass: the same stored bytes are sent again
 // next time, in order. A negative OK describes that attempt only, so the
 // output stays owed: its refusal and reason are recorded and it is retried
-// after a backoff. Order is kept per request: a request's root row, edits,
-// approval messages and their edits go out in the order they were prepared
+// after a backoff. Order is kept per request: a request's root row and edits go out in the order they were prepared
 // (the outbox sequence, never key text), and while an earlier output of a
 // request is owed (refused or not yet due), that request's later outputs
 // wait; other requests' outputs still go out. A root whose positive OK was
@@ -1408,7 +821,7 @@ func (c *Carrier) storedOnRelay(ctx context.Context, has EventLookup, id nostr.I
 }
 
 // outputGroup is the ordering scope of an outbox key: one request's rows
-// and approval messages ("row/<ref>/..."), or the key itself.
+// ("row/<ref>/..."), or the key itself.
 func outputGroup(key string) string {
 	if rest, ok := strings.CutPrefix(key, "row/"); ok {
 		if ref, _, ok := strings.Cut(rest, "/"); ok {
@@ -1478,4 +891,47 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 		b.WriteString("\n\n" + text)
 	}
 	return b.String()
+}
+
+// readStored reads every stored event matching filter, up to EOSE. The
+// relay client delivers only events whose id and signature verify and that
+// match the filter.
+func readStored(ctx context.Context, conn *relay.Conn, filter nostr.Filter) ([]nostr.Event, error) {
+	sub, err := conn.Subscribe(ctx, fmt.Sprintf("stored-event-%d", time.Now().UnixNano()), filter)
+	if err != nil {
+		return nil, err
+	}
+	defer sub.Close()
+	var out []nostr.Event
+	for {
+		select {
+		case evt := <-sub.Events:
+			out = append(out, evt)
+		case <-sub.EOSE:
+			// Stored events are queued before EOSE; drain them first.
+			for {
+				select {
+				case evt := <-sub.Events:
+					out = append(out, evt)
+				default:
+					return out, nil
+				}
+			}
+		case <-sub.Done():
+			return nil, fmt.Errorf("the read ended early: %v", sub.Err())
+		case <-ctx.Done():
+			return nil, errors.New("the read timed out")
+		}
+	}
+}
+
+// lastETag is the event a NIP-25 reaction targets: its last e tag.
+func lastETag(evt nostr.Event) string {
+	target := ""
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "e" {
+			target = t[1]
+		}
+	}
+	return target
 }

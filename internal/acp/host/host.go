@@ -49,7 +49,7 @@ const (
 )
 
 // AutonomyNotice is the one sentence the startup line and the README carry.
-const AutonomyNotice = "Every tool call the agent asks to run is rejected unless the agent's own arguments grant autonomy, for example Grok's --always-approve."
+const AutonomyNotice = "Every tool call the agent asks to run is rejected unless the owner allows it in Buzz or the agent's own arguments grant autonomy, for example Grok's --always-approve."
 
 // ActionRequiredError is a refusal the operator must resolve before the
 // host can run: a second host for the handle, an agent that needs a login,
@@ -422,12 +422,11 @@ type permissionRequest struct {
 // onRequest takes the agent's requests on the connection's reader, so a
 // request belongs to the turn in flight when it arrived; the function it
 // returns gives the answer. Only session/request_permission is served, and
-// it is always refused: the host's policy selects the first reject_once
-// option, else the first reject_always, else cancelled. The host advertises
-// no fs or terminal methods, so every other method is not found. During a
-// remote request's turn the owner sees an approval that offers reject_once
-// and may give it from the remote face first; the agent gets that same
-// reject either way.
+// the host advertises no fs or terminal methods, so every other method is not
+// found. A permission dialog is offered to the owner on the remote face with
+// every option the agent gave; the owner's first answer selects that option.
+// Without an answer (no remote binding, expiry) the host's policy refuses:
+// the first reject_once option, else the first reject_always, else cancelled.
 func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rpcError) {
 	if method != "session/request_permission" {
 		return func() (any, *rpcError) {
@@ -436,9 +435,6 @@ func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rp
 	}
 	h.mu.Lock()
 	turn := h.turn
-	if turn != nil {
-		turn.refused++
-	}
 	h.mu.Unlock()
 	var req permissionRequest
 	_ = json.Unmarshal(params, &req)
@@ -450,8 +446,7 @@ func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rp
 		}
 		return -1
 	}
-	once := first("reject_once")
-	policy := once
+	policy := first("reject_once")
 	if policy < 0 {
 		policy = first("reject_always")
 	}
@@ -460,14 +455,25 @@ func (h *Host) onRequest(method string, params json.RawMessage) func() (any, *rp
 		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": req.Options[i].OptionID}}
 	}
 	return func() (any, *rpcError) {
-		if policy < 0 {
+		chosen, ok, gone := h.askOwner(turn, req)
+		if gone {
 			return cancelled, nil
 		}
-		// The remote face offers only reject_once, never a wider scope.
-		if turn != nil && turn.bridge != nil && once >= 0 && !h.askOwner(turn, req, once) {
+		if !ok {
+			chosen = policy
+		}
+		if chosen >= 0 && ok && !strings.HasPrefix(req.Options[chosen].Kind, "reject") {
+			return selected(chosen), nil
+		}
+		if turn != nil {
+			h.mu.Lock()
+			turn.refused++
+			h.mu.Unlock()
+		}
+		if chosen < 0 || req.Options[chosen].OptionID == "" {
 			return cancelled, nil
 		}
-		return selected(policy), nil
+		return selected(chosen), nil
 	}
 }
 

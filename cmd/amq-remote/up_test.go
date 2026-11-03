@@ -303,13 +303,12 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 }
 
 // TestUpForwardedServeArgsThroughRealEntryPoint pins the forwarded serve
-// arguments as observed at the spawner boundary of the REAL up() entry point
-// (codex r3 note): the supervision loop must receive serve + root + me + the
-// user's flags with parsed values preserved, including an explicit false
-// (codex P1: --fake=false and --codex-approve=false were forwarded bare,
-// flipping an opt-out into an opt-in). One FlagSet registers up's and serve's
-// flags (codex P1: a redefinition panicked every real up); a flag neither
-// defines is a usage error.
+// arguments as observed at the spawner boundary of the REAL up() entry point:
+// the supervision loop must receive serve + root + me + the user's flags with
+// parsed values preserved, including an explicit false (a bare --fake once
+// flipped an opt-out into an opt-in). One FlagSet registers up's and serve's
+// flags (a redefinition once panicked every real up); a flag neither defines
+// is a usage error.
 func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "args-root")
@@ -329,7 +328,6 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 			"--root", root,
 			"--registry", regPath,
 			"--fake=false",
-			"--codex-approve=false",
 			"--poll", "2s",
 		}, io.Discard, io.Discard, func(string) spawner { return sp })
 		if code != 0 {
@@ -395,7 +393,7 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 		t.Fatalf("canonicalize root: %v", err)
 	}
 	got := sp.forwardedArgs()
-	want := []string{"serve", "--root", canonical, "--me", "remote", "--codex-approve=false", "--fake=false", "--poll=2s"}
+	want := []string{"serve", "--root", canonical, "--me", "remote", "--fake=false", "--poll=2s"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("serve args = %v, want %v (canonical root, verbatim values)", got, want)
 	}

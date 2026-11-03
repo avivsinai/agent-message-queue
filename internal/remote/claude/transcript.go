@@ -274,7 +274,7 @@ func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 }
 
 // decodeContentWalk is decodeContentBlocks plus each tool_use block's input
-// hash, which binds a DM approval to exactly that call. The input itself is
+// hash, which identifies the call a permission dialog is about. The input itself is
 // hashed, never kept.
 func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUseRef) {
 	if len(raw) == 0 {

@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -17,7 +15,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -50,12 +47,6 @@ type dmEdges struct {
 	// identity is the endpoint's in-process native session accessor, bound
 	// with handle.
 	identity func(target string) string
-	// respondThread is the endpoint's thread approval answer path, bound
-	// with handle.
-	respondThread buzzio.ThreadResponder
-	// pins are the DM-approval pins this process wrote (pinApprovals,
-	// pinNative).
-	pins []approvalPin
 	// shared names every target a relay share serves.
 	shared map[string]bool
 	// dupBodies are the bodies startup found enrolled for two shares.
@@ -173,7 +164,6 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 		return
 	}
 	ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.identityLate, d.handleLate)
-	ds.carrier.SetThreadResponder(d.respondThreadLate)
 	d.mu.Lock()
 	d.byBody[b.Body] = ds
 	d.state[sh.Session] = "configured"
@@ -182,11 +172,10 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 
 // removeShare drops a share removed from the manifest: its surfaces, its
 // body's startup duplicate mark (so the other share of the pair can recover
-// on its retry), and its approval pins, which it returns for the caller to
-// unpin once any replacement pin is written. Its owed Buzz
-// records stay owed, as after a restart without it. A target serves at most
-// one running share, so its shared mark goes with it.
-func (d *dmEdges) removeShare(sh manifest.Share, body string) []approvalPin {
+// on its retry). Its owed Buzz records stay owed, as after a restart without
+// it. A target serves at most one running share, so its shared mark goes
+// with it.
+func (d *dmEdges) removeShare(sh manifest.Share, body string) {
 	d.mu.Lock()
 	for b, ds := range d.byBody {
 		if ds.share.Session == sh.Session {
@@ -201,24 +190,7 @@ func (d *dmEdges) removeShare(sh manifest.Share, body string) []approvalPin {
 	delete(d.state, sh.Session)
 	delete(d.setupRefused, sh.Session)
 	delete(d.shared, sh.Target)
-	var gone, kept []approvalPin
-	for _, p := range d.pins {
-		if p.share == sh.Session {
-			gone = append(gone, p)
-		} else {
-			kept = append(kept, p)
-		}
-	}
-	d.pins = kept
 	d.mu.Unlock()
-	return gone
-}
-
-// unpin removes approval pins that removeShare returned.
-func unpin(pins []approvalPin) {
-	for _, p := range pins {
-		claude.UnpinApprovals(p.home, p.session, p.token)
-	}
 }
 
 // markRefused records that the share's setup refused a surface.
@@ -233,157 +205,6 @@ func (d *dmEdges) refused(session string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.setupRefused[session]
-}
-
-// approvalPin is one written DM-approval pin, removed at teardown.
-type approvalPin struct {
-	home, session, token string
-	// share is the relay share session that wrote the pin, "" for a
-	// native pin; target is the adapter's target.
-	share, target string
-}
-
-// pinApprovals pins, for each configured commands share whose target is a
-// Claude adapter with approve, the share's native session, so the
-// PermissionRequest hook of that session may answer from the DM. A pin
-// lives while this process does; the hook ignores a pin whose pid is dead.
-func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
-	d.mu.Lock()
-	shares := make([]manifest.Share, 0, len(d.byBody))
-	for _, ds := range d.byBody {
-		shares = append(shares, ds.share)
-	}
-	d.mu.Unlock()
-	for _, sh := range shares {
-		d.pinShare(sh, adapters, warn)
-	}
-}
-
-// pinShare writes the share's approval pin when it is a configured commands
-// share of a Claude adapter, then removes the target's native pin, which a
-// shared target does not get at startup. The share pin comes first, so the
-// session is never without a pin.
-func (d *dmEdges) pinShare(sh manifest.Share, adapters []manifest.Adapter, warn io.Writer) {
-	d.mu.Lock()
-	ds := d.forBodyLocked(sh.Session)
-	d.mu.Unlock()
-	for _, ad := range adapters {
-		if ds == nil || ad.Target != sh.Target || ad.Kind != "claude" || sh.NativeSessionID == "" {
-			continue
-		}
-		if err := d.pin(ad, sh.NativeSessionID, sh.Session, sh.OwnerPubKey); err != nil {
-			say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
-		}
-	}
-	d.mu.Lock()
-	var gone, kept []approvalPin
-	for _, p := range d.pins {
-		if p.share == "" && p.target == sh.Target {
-			gone = append(gone, p)
-		} else {
-			kept = append(kept, p)
-		}
-	}
-	d.pins = kept
-	d.mu.Unlock()
-	for _, p := range gone {
-		claude.UnpinApprovals(p.home, p.session, p.token)
-	}
-}
-
-// forBodyLocked returns the configured DM share of a share session. d.mu is
-// held.
-func (d *dmEdges) forBodyLocked(session string) *dmShare {
-	for _, ds := range d.byBody {
-		if ds.share.Session == session {
-			return ds
-		}
-	}
-	return nil
-}
-
-// pinNative pins, for a Claude adapter with approve that no relay share
-// serves, its native session with no owner, so its PermissionRequest hook
-// can take a deny from the Buzz Desktop agent (amq-acp) and never an allow.
-// An adapter with only observe_approvals gets an observe-only pin instead:
-// its approvals are
-// shown and never answered. Like a share pin it lives while this process
-// does.
-func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) {
-	d.mu.Lock()
-	shared := d.shared[ad.Target]
-	d.mu.Unlock()
-	if ad.Kind != "claude" || native == "" || shared {
-		return
-	}
-	if err := d.pin(ad, native, "", ""); err != nil {
-		say(warn, "%s: Buzz Desktop approvals disabled: %v", ad.Target, err)
-	}
-}
-
-// pin writes one approval pin for a Claude adapter with approve, or an
-// observe-only pin for one with only observe_approvals, and records it for
-// unpinApprovals. An adapter with neither pins nothing.
-func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
-	var cfg claudeApprovals
-	if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve && !cfg.Observe {
-		return nil
-	}
-	home := cfg.Home
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		home = h
-	}
-	write := func() (string, error) { return claude.PinApprovals(home, native, share, owner, os.Getpid()) }
-	if !cfg.Approve {
-		write = func() (string, error) { return claude.ObserveApprovals(home, native, os.Getpid()) }
-	}
-	token, err := write()
-	if err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.pins = append(d.pins, approvalPin{home: home, session: native, token: token, share: share, target: ad.Target})
-	d.mu.Unlock()
-	return nil
-}
-
-// claudeApprovals is the approval part of a Claude adapter config.
-type claudeApprovals struct {
-	Home    string `json:"home"`
-	Approve bool   `json:"approve"`
-	Observe bool   `json:"observe_approvals"`
-}
-
-// observeOnlyTargets names the Claude targets of the root's manifest whose
-// approvals are shown and never answered: observe_approvals without approve.
-func observeOnlyTargets(stateDir string) map[string]bool {
-	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
-	if err != nil {
-		return nil
-	}
-	out := map[string]bool{}
-	for _, ad := range mf.Adapters {
-		var cfg claudeApprovals
-		if ad.Kind == "claude" && json.Unmarshal(ad.Config, &cfg) == nil && cfg.Observe && !cfg.Approve {
-			out[ad.Target] = true
-		}
-	}
-	return out
-}
-
-// unpinApprovals removes every pin this process wrote.
-func (d *dmEdges) unpinApprovals() {
-	d.mu.Lock()
-	pins := d.pins
-	d.pins = nil
-	d.mu.Unlock()
-	for _, p := range pins {
-		claude.UnpinApprovals(p.home, p.session, p.token)
-	}
 }
 
 // enrolledGrant reads the session's current enrolled generation for each
@@ -507,57 +328,6 @@ func (d *dmEdges) bind(h buzzio.Handler, identity func(target string) string) {
 	d.mu.Lock()
 	d.handle, d.identity = h, identity
 	d.mu.Unlock()
-}
-
-// bindThreadApprovals attaches the endpoint's thread approval answer path
-// and returns where the endpoint shows thread approvals: the commands share
-// of the target whose approved native session is the approval's.
-func (d *dmEdges) bindThreadApprovals(respond buzzio.ThreadResponder) core.ThreadApprovalSink {
-	d.mu.Lock()
-	d.respondThread = respond
-	d.mu.Unlock()
-	return core.ThreadApprovalSink{Owner: d.threadOwner, Publish: d.publishThread}
-}
-
-// threadShare is the commands share of target pinned to native, or nil.
-func (d *dmEdges) threadShare(target, native string) *dmShare {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, ds := range d.byBody {
-		if ds.binding.Target == target && native != "" && ds.binding.NativeSession == native {
-			return ds
-		}
-	}
-	return nil
-}
-
-// threadOwner is the source of the share a thread approval belongs to.
-func (d *dmEdges) threadOwner(target, native string) (core.Source, bool) {
-	ds := d.threadShare(target, native)
-	if ds == nil {
-		return core.Source{}, false
-	}
-	return ds.carrier.ShareSource(), true
-}
-
-// publishThread shows a thread approval on its share, or leaves it owed.
-func (d *dmEdges) publishThread(ta core.ThreadApproval) error {
-	ds := d.threadShare(ta.TargetID, ta.NativeSession)
-	if ds == nil {
-		return fmt.Errorf("%w: no Buzz carrier for thread approval %s", errCarrierUnavailable, ta.ID)
-	}
-	return ds.carrier.PublishThreadApproval(ta)
-}
-
-// respondThreadLate is the endpoint's thread approval answer path.
-func (d *dmEdges) respondThreadLate(src core.Source, id, option string) error {
-	d.mu.Lock()
-	fn := d.respondThread
-	d.mu.Unlock()
-	if fn == nil {
-		return errors.New("endpoint not started")
-	}
-	return fn(src, id, option)
 }
 
 // identityLate is the native session of target, "" before bind.

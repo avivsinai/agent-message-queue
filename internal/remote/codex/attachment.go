@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,9 +16,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
-	"github.com/avivsinai/agent-message-queue/internal/remote/secretscan"
 )
 
 // ClientName is what the attachment reports to the app-server.
@@ -31,15 +33,13 @@ var Version = "dev"
 // turn is refused, never admitted.
 const confirmTimeout = 12 * time.Second
 
-// Approval methods the app-server sends as server requests. The DM answers
-// the decision approvals and shows the requests below them, which only the
-// terminal answers; the rest stay local-only.
+// Requests the app-server sends to every client of a thread. Each one is
+// opened as a dialog for the binding that serves the thread; the first
+// answer wins, from Buzz or from the Codex terminal.
 const (
-	methodCommandApproval    = "item/commandExecution/requestApproval"
-	methodFileChangeApproval = "item/fileChange/requestApproval"
-	methodLegacyExecApproval = "execCommand/approval"
-	// Requests answered with a shape other than {"decision": option}. The
-	// DM shows them, but only the terminal answers them.
+	methodCommandApproval     = "item/commandExecution/requestApproval"
+	methodFileChangeApproval  = "item/fileChange/requestApproval"
+	methodLegacyExecApproval  = "execCommand/approval"
 	methodPermissionsApproval = "item/permissions/requestApproval"
 	methodToolUserInput       = "item/tool/requestUserInput"
 	methodMcpElicitation      = "mcpServer/elicitation/request"
@@ -49,26 +49,14 @@ const (
 )
 
 type run struct {
-	key          requests.Key
-	epoch        string
-	turnID       string
-	state        protocol.State
-	text         strings.Builder
-	errText      string
-	nativeRef    string
-	local        bool
-	interaction  *protocol.Interaction
-	approvalReqs map[string]json.RawMessage
-	// sending is the interaction id whose answer Respond is sending. The
-	// resolution that answer causes can arrive before Respond returns, so
-	// onServerRequestResolved leaves it to Respond, which knows whether the
-	// send succeeded; resolvedWhileSending records that it arrived.
-	sending              string
-	resolvedWhileSending bool
-	// queued holds approvals that arrived while another was pending. The
-	// record shows one pending interaction, so they are shown one at a time,
-	// in arrival order, once the current one resolves.
-	queuedApprovals []*protocol.Interaction
+	key       requests.Key
+	epoch     string
+	turnID    string
+	state     protocol.State
+	text      strings.Builder
+	errText   string
+	nativeRef string
+	local     bool
 	// createdAt is when the run was bound, for the unconfirmed-shadow
 	// deadline: a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
@@ -105,7 +93,6 @@ type Attachment struct {
 	targetID string
 	epoch    string
 	cwd      string
-	approve  bool
 	now      func() time.Time
 	// codexHome is the daemon's Codex home that the thread's rollout path
 	// proves, or "" when thread/resume did not report one.
@@ -164,49 +151,79 @@ type Attachment struct {
 	// would look like fresh evidence and restart the ack loop. Bounded by the
 	// same FIFO eviction as ackedOrder.
 	ackedKeys map[requests.Key]bool
-	// questionMu orders approval events: every path that changes the
-	// pending approval holds it from the change through the emission, so
-	// the endpoint sees EventQuestion and EventQuestionResolved in the order
-	// the state changed. It is taken before mu, and never by a method the
-	// endpoint calls while holding its own lock.
-	questionMu sync.Mutex
-	// resolvedEarly remembers request ids that serverRequest/resolved named
+	// resolvedEarly holds request ids that serverRequest/resolved named
 	// before the request worker delivered the request itself; such a
-	// request is already answered and is never shown. FIFO-bounded.
-	resolvedEarly      map[string]bool
-	resolvedEarlyOrder []string
-	// threadApprovals are the open decision approvals of turns no run of
-	// ours owns, such as a turn the user started in the TUI, by threadKey.
-	// At most maxThreadApprovals; past that the TUI answers alone.
-	threadApprovals map[string]*threadApproval
+	// request is already answered and is never shown. seen holds ids the
+	// worker delivered whose resolution has not arrived, so a resolution of
+	// a dialog already closed is not mistaken for an early one. An id
+	// leaves either set when its pair arrives, so a later request that
+	// reuses it is shown.
+	resolvedEarly, seen idSet
+	// dialogs are the open server requests by compactID of their JSON-RPC
+	// id, each waiting for its first answer. At most maxDialogs; past that
+	// the terminal answers alone.
+	dialogs map[string]*openDialog
+	// dialogWG counts the running dialog waiters, so Close returns only
+	// after each one wrote its resolution.
+	dialogWG sync.WaitGroup
+	// fileChanges are the in-progress fileChange items by item id, so a
+	// file change approval, which names only its item, shows the paths and
+	// the diff. At most maxFileChanges, oldest dropped first.
+	fileChanges     map[string]string
+	fileChangeOrder []string
 }
 
-// maxResolvedEarly bounds Attachment.resolvedEarly.
-const maxResolvedEarly = 64
+// maxIDs bounds an idSet.
+const maxIDs = 64
 
-// maxThreadApprovals bounds Attachment.threadApprovals.
-const maxThreadApprovals = 64
-
-// threadApproval is one decision approval of a turn no run of ours owns.
-// sending and resolvedWhileSending work as on run.
-type threadApproval struct {
-	turnID               string
-	reqID                json.RawMessage
-	inter                *protocol.Interaction
-	sending              bool
-	resolvedWhileSending bool
+// idSet is a set of JSON-RPC ids that drops its oldest entry past maxIDs.
+type idSet struct {
+	has   map[string]bool
+	order []string
 }
 
-// threadKey names a thread approval by its turn and interaction id.
-func threadKey(turnID, interactionID string) string { return turnID + "\x00" + interactionID }
+func (s *idSet) add(id string) {
+	if s.has[id] {
+		return
+	}
+	if s.has == nil {
+		s.has = map[string]bool{}
+	}
+	s.has[id] = true
+	s.order = append(s.order, id)
+	for len(s.has) > maxIDs {
+		delete(s.has, s.order[0])
+		s.order = s.order[1:]
+	}
+	if len(s.order) > 2*maxIDs {
+		// Drop the order entries of ids taken since they were added.
+		kept, in := s.order[:0], map[string]bool{}
+		for _, o := range s.order {
+			if s.has[o] && !in[o] {
+				kept, in[o] = append(kept, o), true
+			}
+		}
+		s.order = kept
+	}
+}
+
+// take reports whether id is in the set and removes it.
+func (s *idSet) take(id string) bool {
+	if !s.has[id] {
+		return false
+	}
+	delete(s.has, id)
+	return true
+}
+
+// maxDialogs bounds Attachment.dialogs.
+const maxDialogs = 64
+
+// maxFileChanges bounds Attachment.fileChanges.
+const maxFileChanges = 64
 
 // Option configures Attach.
 type Option func(*Attachment)
-
-// WithApprovals advertises approve_tool and answers command approvals from
-// remote decisions. Off until fanout of approval requests to a second client
-// is verified live.
-func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on } }
 
 // WithTarget overrides the target id the endpoint addresses this attachment
 // under (.13: the manifest target is the address). The native codex thread id
@@ -266,14 +283,11 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	a.client.Store(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	init := map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}
-	if a.approve {
-		// Codex 0.160 strips additionalPermissions from approval requests
-		// sent to a client without the experimental API, and the approve
-		// guard reads that field: without it a command that also asks for
-		// more access would get a one-tap approve.
-		init["capabilities"] = map[string]bool{"experimentalApi": true}
-	}
+	// Without the experimental API, Codex strips additionalPermissions from
+	// approval requests and sends no request_user_input, so the dialog
+	// would show less than the terminal does.
+	init := map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"},
+		"capabilities": map[string]bool{"experimentalApi": true}}
 	if err := client.Call(ctx, "initialize", init, nil); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
@@ -324,6 +338,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		a.mu.Lock()
 		a.offline = true
 		a.mu.Unlock()
+		a.endDialogs("")
 		a.emit(core.NativeEvent{Type: core.EventStatus, Attachment: "offline"})
 	}()
 	return a, nil
@@ -363,8 +378,14 @@ func threadStatus(t string) string {
 	return "unknown"
 }
 
-// Close drops the connection. The thread keeps running in Codex.
-func (a *Attachment) Close() error { return a.client.Load().Close() }
+// Close drops the connection and resolves the open dialogs as expired
+// before it returns. The thread keeps running in Codex.
+func (a *Attachment) Close() error {
+	err := a.client.Load().Close()
+	a.endDialogs("")
+	a.dialogWG.Wait()
+	return err
+}
 
 // Inspect implements core.Attachment.
 func (a *Attachment) Inspect() protocol.Session {
@@ -374,44 +395,20 @@ func (a *Attachment) Inspect() protocol.Session {
 	if a.offline {
 		att, status = "offline", "offline"
 	}
-	// Ranging over the runs map and keeping the last interaction would pick
-	// whichever run the randomizer visited last, so the published
-	// PendingInteraction would flap between Inspect calls with no state
-	// change. The operator should answer the interaction that has been
-	// waiting the longest: pick the OLDEST
-	// interaction by run createdAt, ties broken by interaction id for full
-	// determinism.
-	var pending, active *string
-	var pendingAt time.Time
-	for _, r := range a.runs {
-		if r.interaction == nil {
-			continue
-		}
-		id := r.interaction.InteractionID
-		if pending == nil || r.createdAt.Before(pendingAt) ||
-			(r.createdAt.Equal(pendingAt) && id < *pending) {
-			// The request that waits on it, so a surface can name the
-			// approval it shows.
-			ref := protocol.EncodeRef(r.key.CreatorHost, r.key.TargetID, r.key.RequestID)
-			pending, active = &id, &ref
-			pendingAt = r.createdAt
-		}
-	}
 	return protocol.Session{
-		Schema:             protocol.SchemaSession,
-		TargetID:           a.targetID,
-		Epoch:              a.epoch,
-		Harness:            "codex",
-		DisplayName:        "codex " + a.threadID,
-		Project:            a.cwd,
-		Attachment:         att,
-		Status:             status,
-		PendingInteraction: pending,
-		ActiveRequestRef:   active,
-		ApprovalReviewer:   a.reviewer,
+		Schema:           protocol.SchemaSession,
+		TargetID:         a.targetID,
+		Epoch:            a.epoch,
+		Harness:          "codex",
+		DisplayName:      "codex " + a.threadID,
+		Project:          a.cwd,
+		Attachment:       att,
+		Status:           status,
+		ApprovalReviewer: a.reviewer,
+		// Approvals are answered through dialogs, never through Respond.
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: true, Steer: false,
-			ApproveTool: a.approve, AnswerQuestion: false, Terminal: "unavailable",
+			ApproveTool: false, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		Evidence:   &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"},
 		ObservedAt: protocol.FormatTime(time.Now()),
@@ -472,7 +469,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if err := a.call(sendBy, "turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
 		a.byClientID[clientIDFor(req.Key)] = r
@@ -485,7 +482,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if err := a.call(sendBy, "thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
 		a.byClientID[clientIDFor(req.Key)] = r
@@ -498,7 +495,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	// Idle turn/start. Register the run first so onItem can confirm our
 	// userMessage, then call unlocked, then require confirmation.
-	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{}), createdAt: a.now()}
+	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, confirmedCh: make(chan struct{}), createdAt: a.now()}
 	a.mu.Lock()
 	a.runs[req.Key] = r
 	a.byClientID[clientIDFor(req.Key)] = r
@@ -771,7 +768,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 			a.mu.Unlock()
 			return ev, nil
 		}
-		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
+		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local}
 		switch {
 		case r.confirmed || r.queued:
 			// A confirmed running turn, or a Codex-native-accepted queue item:
@@ -922,7 +919,6 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 			epoch:   epoch,
 			errText: errText, nativeRef: nativeRef,
 			confirmed: true, createdAt: a.now(),
-			approvalReqs: map[string]json.RawMessage{},
 		}
 		r.text.WriteString(text.String())
 		a.mu.Lock()
@@ -1016,184 +1012,18 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "interrupt sent for " + turnID}, nil
 }
 
-// Respond implements core.Attachment for command approvals.
-func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option string) (protocol.Code, error) {
-	a.mu.Lock()
-	r, ok := a.runs[key]
-	if !ok || r.epoch != epoch || r.interaction == nil || r.interaction.InteractionID != interactionID {
-		a.mu.Unlock()
-		return protocol.CodeAlreadyResolved, nil
-	}
-	reqID, ok := r.approvalReqs[interactionID]
-	if !ok {
-		a.mu.Unlock()
-		return protocol.CodeAlreadyResolved, nil
-	}
-	allowed := false
-	for _, o := range r.interaction.Options {
-		if o == option {
-			allowed = true
-		}
-	}
-	if !allowed {
-		a.mu.Unlock()
-		return protocol.CodeInvalid, nil
-	}
-	if r.sending != "" {
-		a.mu.Unlock()
-		return "", errAnswerInFlight
-	}
-	r.sending, r.resolvedWhileSending = interactionID, false
-	a.mu.Unlock()
-	err := a.client.Load().Respond(reqID, map[string]string{"decision": option})
-	// The send is done; from here the pending approval changes, so hold the
-	// question order until the events are out.
-	a.questionMu.Lock()
-	defer a.questionMu.Unlock()
-	if err != nil {
-		a.mu.Lock()
-		resolved := r.resolvedWhileSending
-		r.sending, r.resolvedWhileSending = "", false
-		var next *protocol.Interaction
-		if resolved {
-			// Another client answered while our send failed: resolved
-			// elsewhere, and our answer never reached the harness.
-			delete(r.approvalReqs, interactionID)
-			r.interaction = nil
-			next = r.advanceLocked()
-		}
-		a.mu.Unlock()
-		if resolved {
-			a.emitResolved(r, false, next)
-			return protocol.CodeAlreadyResolved, nil
-		}
-		return "", err
-	}
-	// Tear down the approval state ONLY after Respond succeeds. Tearing it
-	// down before the send would let a transport failure leave
-	// r.interaction == nil, and a retry would return CodeAlreadyResolved
-	// while the native question is still open.
-	a.mu.Lock()
-	_, open := r.approvalReqs[interactionID]
-	open = open || r.resolvedWhileSending
-	delete(r.approvalReqs, interactionID)
-	r.interaction, r.sending, r.resolvedWhileSending = nil, "", false
-	var next *protocol.Interaction
-	if open {
-		next = r.advanceLocked()
-	}
-	a.mu.Unlock()
-	if open {
-		a.emitResolved(r, true, next)
-	}
-	return "", nil
+// Respond implements core.Attachment. No run interaction is ever raised:
+// every server request is answered through its dialog, so there is nothing
+// for the endpoint to answer here.
+func (a *Attachment) Respond(requests.Key, string, string, string) (protocol.Code, error) {
+	return protocol.CodeAlreadyResolved, nil
 }
 
-// errAnswerInFlight refuses a second send of the same answer while the
-// first is in flight; the endpoint keeps that answer's intent. A different
-// answer never gets here: the endpoint refuses it first.
-var errAnswerInFlight = errors.New("an answer to this approval is already being sent")
-
-// RespondThread implements core.ThreadResponder: it answers a decision
-// approval of a turn no run of ours owns, as Respond answers one of ours.
-func (a *Attachment) RespondThread(turnID, interactionID, option string) (protocol.Code, error) {
-	k := threadKey(turnID, interactionID)
-	a.mu.Lock()
-	ta := a.threadApprovals[k]
-	switch {
-	case ta == nil:
-		a.mu.Unlock()
-		return protocol.CodeAlreadyResolved, nil
-	case offered(ta.inter.Options, option) == "":
-		a.mu.Unlock()
-		return protocol.CodeInvalid, nil
-	case ta.sending:
-		a.mu.Unlock()
-		return "", errAnswerInFlight
-	}
-	ta.sending, ta.resolvedWhileSending = true, false
-	a.mu.Unlock()
-	err := a.client.Load().Respond(ta.reqID, map[string]string{"decision": option})
-	a.questionMu.Lock()
-	defer a.questionMu.Unlock()
-	a.mu.Lock()
-	resolved, open := ta.resolvedWhileSending, a.threadApprovals[k] == ta
-	ta.sending, ta.resolvedWhileSending = false, false
-	if open && (err == nil || resolved) {
-		delete(a.threadApprovals, k)
-	}
-	a.mu.Unlock()
-	switch {
-	case err != nil && !resolved:
-		return "", err
-	case err != nil:
-		// Another client answered while our send failed.
-		a.emitThreadResolved(ta, false, "")
-		return protocol.CodeAlreadyResolved, nil
-	case open:
-		a.emitThreadResolved(ta, true, "")
-	}
-	return "", nil
-}
-
-// emitThreadResolved reports a thread approval resolved: by our answer
-// (remote), by the harness, or with outcome when it is set.
-func (a *Attachment) emitThreadResolved(ta *threadApproval, remote bool, outcome protocol.ResolutionOutcome) {
-	a.emit(core.NativeEvent{Type: core.EventThreadQuestionResolved, Turn: ta.turnID,
-		Interaction: &protocol.Interaction{InteractionID: ta.inter.InteractionID}, Remote: remote, Outcome: outcome})
-}
-
-// endThreadApprovals resolves every thread approval of a turn that ended
-// while it was open.
-func (a *Attachment) endThreadApprovals(turnID string) {
-	a.questionMu.Lock()
-	defer a.questionMu.Unlock()
-	a.mu.Lock()
-	var ended []*threadApproval
-	for k, ta := range a.threadApprovals {
-		if ta.turnID == turnID && !ta.sending {
-			ended = append(ended, ta)
-			delete(a.threadApprovals, k)
-		}
-	}
-	a.mu.Unlock()
-	for _, ta := range ended {
-		a.emitThreadResolved(ta, false, protocol.ResolutionRunEnded)
-	}
-}
-
-// advanceLocked makes the oldest queued approval that Codex still holds the
-// pending one, and returns it, or nil. The caller holds a.mu and has
-// cleared r.interaction.
-func (r *run) advanceLocked() *protocol.Interaction {
-	for len(r.queuedApprovals) > 0 {
-		next := r.queuedApprovals[0]
-		r.queuedApprovals = r.queuedApprovals[1:]
-		if _, open := r.approvalReqs[next.InteractionID]; open {
-			r.interaction = next
-			return next
-		}
-	}
-	return nil
-}
-
-// emitResolved reports the pending approval resolved, then the next queued
-// approval, if any, as the new pending one.
-func (a *Attachment) emitResolved(r *run, remote bool, next *protocol.Interaction) {
-	key, runID := r.key, a.runID(r)
-	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID, Remote: remote})
-	if next != nil {
-		a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: next})
-	}
-}
-
-// onServerRequestResolved clears an approval that another client, such as
-// the Codex terminal, answered first. The app-server drops a later answer
-// without an error, so without this a late remote answer would report
-// success for a decision it did not make.
+// onServerRequestResolved closes the dialog of a request that a client
+// answered. The app-server drops every answer after the first without an
+// error, so a dialog the terminal answered is resolved as terminal; one our
+// own answer closed is resolved by the dialog's waiter.
 func (a *Attachment) onServerRequestResolved(n Notification) {
-	a.questionMu.Lock()
-	defer a.questionMu.Unlock()
 	var p struct {
 		ThreadID  string          `json:"threadId"`
 		RequestID json.RawMessage `json:"requestId"`
@@ -1201,116 +1031,25 @@ func (a *Attachment) onServerRequestResolved(n Notification) {
 	if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID || len(p.RequestID) == 0 {
 		return
 	}
-	a.mu.Lock()
-	for _, r := range a.runs {
-		for id, reqID := range r.approvalReqs {
-			if !sameRequestID(reqID, p.RequestID) {
-				continue
-			}
-			if r.sending == id {
-				// Our answer is in flight: Respond reports the resolution
-				// once it knows whether the send succeeded.
-				r.resolvedWhileSending = true
-				a.mu.Unlock()
-				return
-			}
-			delete(r.approvalReqs, id)
-			if r.interaction == nil || r.interaction.InteractionID != id {
-				// A queued approval, never shown: nothing to report.
-				a.mu.Unlock()
-				return
-			}
-			r.interaction = nil
-			next := r.advanceLocked()
-			a.mu.Unlock()
-			a.emitResolved(r, false, next)
-			return
-		}
-	}
-	for k, ta := range a.threadApprovals {
-		if !sameRequestID(ta.reqID, p.RequestID) {
-			continue
-		}
-		if ta.sending {
-			ta.resolvedWhileSending = true
-			a.mu.Unlock()
-			return
-		}
-		delete(a.threadApprovals, k)
-		a.mu.Unlock()
-		a.emitThreadResolved(ta, false, "")
+	key := compactID(p.RequestID)
+	if key == "" {
 		return
 	}
-	// Server requests reach onServerRequest through a worker queue, so the
-	// resolution can overtake its own request. Remember it.
-	if key := compactID(p.RequestID); key != "" && !a.resolvedEarly[key] {
-		if a.resolvedEarly == nil {
-			a.resolvedEarly = map[string]bool{}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.seen.take(key) {
+		// Server requests reach onServerRequest through a worker queue, so
+		// the resolution can overtake its own request. Remember it.
+		a.resolvedEarly.add(key)
+		return
+	}
+	if d := a.dialogs[key]; d != nil {
+		if d.sending {
+			d.resolvedWhileSending = true
+			return
 		}
-		a.resolvedEarly[key] = true
-		a.resolvedEarlyOrder = append(a.resolvedEarlyOrder, key)
-		if len(a.resolvedEarlyOrder) > maxResolvedEarly {
-			delete(a.resolvedEarly, a.resolvedEarlyOrder[0])
-			a.resolvedEarlyOrder = a.resolvedEarlyOrder[1:]
-		}
+		d.endLocked(dialog.OutcomeTerminal, dialog.ByTerminal)
 	}
-	a.mu.Unlock()
-}
-
-// approvalPrompt is the owner-facing text of one approval request: what
-// Codex asks to do, where, and why.
-func approvalPrompt(method string, command any, cwd, reason string) string {
-	var b strings.Builder
-	switch c := command.(type) {
-	case string:
-		b.WriteString(c)
-	case nil:
-		if method == methodFileChangeApproval {
-			b.WriteString("apply a file change")
-		}
-	default:
-		if raw, err := json.Marshal(c); err == nil {
-			b.Write(raw)
-		}
-	}
-	if cwd != "" {
-		fmt.Fprintf(&b, "\nin %s", cwd)
-	}
-	if reason != "" {
-		fmt.Fprintf(&b, "\nreason: %s", reason)
-	}
-	return b.String()
-}
-
-// isAbsent reports whether an optional JSON field is missing or null.
-func isAbsent(raw json.RawMessage) bool {
-	return len(raw) == 0 || string(raw) == "null"
-}
-
-// offered returns option when options contains it, and "" otherwise.
-func offered(options []string, option string) string {
-	for _, o := range options {
-		if o == option {
-			return option
-		}
-	}
-	return ""
-}
-
-// sameRequestID compares two JSON-RPC ids by their compact encoding.
-func sameRequestID(x, y json.RawMessage) bool {
-	cx := compactID(x)
-	return cx != "" && cx == compactID(y)
-}
-
-// requestPart is a JSON-RPC id in the opaque grammar of an interaction id:
-// a string id as it is, a number in its compact form.
-func requestPart(id json.RawMessage) string {
-	var s string
-	if json.Unmarshal(id, &s) == nil {
-		return s
-	}
-	return compactID(id)
 }
 
 // compactID is the compact JSON encoding of a JSON-RPC id, or "".
@@ -1484,7 +1223,7 @@ func (a *Attachment) onNotification(n Notification) {
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
 			return
 		}
-		a.endThreadApprovals(p.Turn.ID)
+		a.endDialogs(p.Turn.ID)
 		a.mu.Lock()
 		if a.activeTurn == p.Turn.ID {
 			a.activeTurn = ""
@@ -1525,7 +1264,6 @@ func (a *Attachment) onNotification(n Notification) {
 			ev = core.NativeEvent{Type: core.EventRunFailed}
 		}
 		ev.Key, ev.RunID, ev.Result = r.key, r.runIDLocked(), r.result()
-		r.interaction, r.queuedApprovals = nil, nil
 		a.mu.Unlock()
 		a.emit(ev)
 	case "thread/status/changed":
@@ -1568,10 +1306,11 @@ func (a *Attachment) onItem(n Notification) {
 		ThreadID string `json:"threadId"`
 		TurnID   string `json:"turnId"`
 		Item     struct {
-			Type     string `json:"type"`
-			ID       string `json:"id"`
-			ClientID string `json:"clientId"`
-			Text     string `json:"text"`
+			Type     string       `json:"type"`
+			ID       string       `json:"id"`
+			ClientID string       `json:"clientId"`
+			Text     string       `json:"text"`
+			Changes  []fileChange `json:"changes"`
 		} `json:"item"`
 	}
 	if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
@@ -1596,6 +1335,22 @@ func (a *Attachment) onItem(n Notification) {
 			key, runID := r.key, r.runIDLocked()
 			go a.emit(core.NativeEvent{Type: core.EventLocalIntervention, Key: key, RunID: runID})
 		}
+	case "fileChange":
+		if n.Method == "item/completed" {
+			delete(a.fileChanges, p.Item.ID)
+			return
+		}
+		if a.fileChanges == nil {
+			a.fileChanges = map[string]string{}
+		}
+		if _, seen := a.fileChanges[p.Item.ID]; !seen {
+			a.fileChangeOrder = append(a.fileChangeOrder, p.Item.ID)
+		}
+		a.fileChanges[p.Item.ID] = fileChangeText(p.Item.Changes)
+		for len(a.fileChangeOrder) > maxFileChanges {
+			delete(a.fileChanges, a.fileChangeOrder[0])
+			a.fileChangeOrder = a.fileChangeOrder[1:]
+		}
 	case "agentMessage":
 		if r, ok := a.byTurn[p.TurnID]; ok && n.Method == "item/completed" {
 			r.text.Reset()
@@ -1605,202 +1360,551 @@ func (a *Attachment) onItem(n Notification) {
 }
 
 func (a *Attachment) onServerRequest(req ServerRequest) {
-	switch req.Method {
-	case methodCommandApproval, methodFileChangeApproval, methodLegacyExecApproval:
-	case methodPermissionsApproval, methodToolUserInput, methodMcpElicitation:
-		// These are shown, never dropped: otherwise a turn from the DM would
-		// wait for a terminal answer the owner never heard of.
-		a.questionMu.Lock()
-		defer a.questionMu.Unlock()
-		if turnID, inter := a.terminalQuestion(req); inter != nil {
-			a.raiseApproval(turnID, req.ID, inter)
-		}
-		return
-	default:
+	key := compactID(req.ID)
+	if key == "" {
 		return
 	}
-	a.questionMu.Lock()
-	defer a.questionMu.Unlock()
-	var p struct {
-		ThreadID   string `json:"threadId"`
-		TurnID     string `json:"turnId"`
-		ItemID     string `json:"itemId"`
-		ApprovalID string `json:"approvalId"`
-		Command    any    `json:"command"`
-		Cwd        string `json:"cwd"`
-		Reason     string `json:"reason"`
-		// Codex 0.160 mixes plain decisions with object decisions such as
-		// {"acceptWithExecpolicyAmendment": ...}; a []string decode would
-		// fail on the object and drop the whole request.
-		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
-		// Fields a one-tap approve cannot show; any of them withholds it.
-		Kind                  string          `json:"kind"`
-		GrantRoot             string          `json:"grantRoot"`
-		NetworkContext        json.RawMessage `json:"networkApprovalContext"`
-		AdditionalPermissions json.RawMessage `json:"additionalPermissions"`
-	}
-	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
-		return
-	}
-	// The id names this server request, not only its item: Codex sends a
-	// null approvalId for a shell approval and asks again under the same
-	// itemId (a retry without the sandbox, network access), so the item id
-	// alone would give the retry the closed approval's id and DM message.
-	// The app-server resends a pending request under its own
-	// request id, so the id is stable across a restart.
-	id := cmp.Or(p.ApprovalID, p.ItemID) + ":" + requestPart(req.ID)
-	// Only a plain decision can be sent back as {"decision": option}.
-	var options []string
-	for _, raw := range p.AvailableDecisions {
-		var o string
-		if json.Unmarshal(raw, &o) == nil {
-			options = append(options, o)
-		}
-	}
-	if len(p.AvailableDecisions) == 0 {
-		options = []string{"accept", "decline"}
-	}
-	// Reject declines when Codex offers it; otherwise cancel, which declines
-	// and stops the turn (Codex 0.160 offers no decline for some commands).
-	reject := offered(options, "decline")
-	if reject == "" {
-		reject = offered(options, "cancel")
-	}
-	// The DM shows the display form, so that form is screened too, and an
-	// approval that may hold a secret shows only that it waits.
-	// Approve needs the shown text to be what runs.
-	raw := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
-	prompt := secretscan.DisplayForm(raw)
-	shownWhole := prompt == raw
-	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
-		prompt, shownWhole = "Codex asks for approval; it may hold a secret, so only the terminal shows it.", false
-	}
-	if reject == "cancel" {
-		prompt += "\nReject also stops this turn."
-	}
-	// Approve is offered only for a plain command whose whole grant the
-	// prompt shows. A file change shows no paths or diff here, and a
-	// network, permission or write-root grant is not in the prompt, so those
-	// are approved in the terminal; reject is always safe to offer.
-	approve := ""
-	if _, isText := p.Command.(string); req.Method == methodCommandApproval && isText &&
-		(p.Kind == "" || p.Kind == "command") && p.GrantRoot == "" && isAbsent(p.NetworkContext) && isAbsent(p.AdditionalPermissions) &&
-		shownWhole && len(prompt) <= protocol.MaxApprovalPreview {
-		approve = offered(options, "accept")
-	}
-	a.raiseApproval(p.TurnID, req.ID, &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options,
-		RemoteAnswer: true, ApproveOption: approve, RejectOption: reject})
-}
-
-// raiseApproval makes inter the pending interaction of the run that owns
-// turnID, or queues it behind the pending one. An approval of a turn no run
-// of ours owns is a thread approval. The caller holds questionMu.
-func (a *Attachment) raiseApproval(turnID string, reqID json.RawMessage, inter *protocol.Interaction) {
 	a.mu.Lock()
-	if !a.approve {
-		// Approvals not advertised: the local TUI answers.
-		a.mu.Unlock()
-		return
+	early := a.resolvedEarly.take(key)
+	if !early {
+		a.seen.add(key)
 	}
-	if key := compactID(reqID); a.resolvedEarly[key] {
-		a.mu.Unlock()
-		return // another client answered it before it reached us
-	}
-	r, ok := a.byTurn[turnID]
-	if !ok {
-		a.raiseThreadLocked(turnID, reqID, inter)
-		return
-	}
-	r.approvalReqs[inter.InteractionID] = reqID
-	if r.interaction != nil {
-		r.queuedApprovals = append(r.queuedApprovals, inter)
-		a.mu.Unlock()
-		return
-	}
-	r.interaction = inter
-	key, runID := r.key, r.runIDLocked()
 	a.mu.Unlock()
-	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
-}
-
-// raiseThreadLocked records a decision approval of a turn no run of ours
-// owns, such as one the user started in the TUI, and reports it. A request
-// only the terminal answers is not reported: the owner can do nothing with
-// it from Buzz. The caller holds questionMu and a.mu, which it releases.
-func (a *Attachment) raiseThreadLocked(turnID string, reqID json.RawMessage, inter *protocol.Interaction) {
-	k := threadKey(turnID, inter.InteractionID)
-	if turnID == "" || len(inter.Options) == 0 || a.threadApprovals[k] != nil || len(a.threadApprovals) >= maxThreadApprovals {
+	d := a.dialogFor(req)
+	if early || d == nil {
+		return // another client answered it before it reached us, or no dialog
+	}
+	a.mu.Lock()
+	if a.dialogs[key] != nil || len(a.dialogs) >= maxDialogs {
+		// Already open, or past the bound: the terminal answers it alone.
 		a.mu.Unlock()
 		return
 	}
-	if a.threadApprovals == nil {
-		a.threadApprovals = map[string]*threadApproval{}
+	if a.dialogs == nil {
+		a.dialogs = map[string]*openDialog{}
 	}
-	ta := &threadApproval{turnID: turnID, reqID: reqID, inter: inter}
-	a.threadApprovals[k] = ta
-	epoch := a.epoch
+	a.dialogs[key] = d
+	a.dialogWG.Add(1)
 	a.mu.Unlock()
-	a.emit(core.NativeEvent{Type: core.EventThreadQuestion, Turn: turnID, Epoch: epoch, Interaction: inter})
+	go a.awaitDialog(key, d)
 }
 
-// asks names what each terminal-only request asks for, without its text.
-var asks = map[string]string{
-	methodPermissionsApproval: "Codex asks for permissions",
-	methodToolUserInput:       "Codex asks for input",
-	methodMcpElicitation:      "An MCP server asks for input",
+// openDialog is one server request of the thread, open as a dialog until
+// its first answer. The fields after done are guarded by Attachment.mu.
+type openDialog struct {
+	reqID  json.RawMessage
+	turnID string
+	req    dialog.Request
+	// reply maps the owner's answer to the app-server response, the
+	// resolution outcome and the chosen label; ok=false when the answer
+	// fits no choice of this request.
+	reply func(dialog.Answer) (result any, outcome, label string, ok bool)
+	// done closes once, when the request ended without our answer; outcome
+	// and by say how.
+	done        chan struct{}
+	outcome, by string
+	// sending is set while our answer is being sent. A resolution that
+	// arrives meanwhile may be our own answer's, so the waiter decides.
+	sending, resolvedWhileSending bool
 }
 
-// terminalQuestion is the interaction for a request only the terminal can
-// answer: what Codex asks, bounded, with no option, so the DM says to answer
-// in the terminal and a remote answer is refused as not offered. It is nil
-// for another thread or an unreadable request. Only the reason, question and
-// message text is shown: a URL or a requested schema may hold more than the
-// owner should see in a DM.
-func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Interaction) {
+// endLocked closes the dialog with how it ended, once.
+func (d *openDialog) endLocked(outcome, by string) {
+	if d.outcome != "" {
+		return
+	}
+	d.outcome, d.by = outcome, by
+	close(d.done)
+}
+
+// endDialogs ends the open dialogs of turnID, or every one for "", as
+// expired: the turn ended or the connection closed while they were open.
+func (a *Attachment) endDialogs(turnID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, d := range a.dialogs {
+		if (turnID == "" || d.turnID == turnID) && !d.sending {
+			d.endLocked(dialog.OutcomeExpired, dialog.ByTimeout)
+		}
+	}
+}
+
+// dialogPoll is how often a waiting dialog looks for the owner's answer.
+const dialogPoll = 250 * time.Millisecond
+
+// awaitDialog opens d for the binding that serves this thread, or for the
+// machine agent when none does, waits for the owner's answer or for the
+// request to end elsewhere, and answers the app-server with the owner's
+// choice. The first resolution written wins.
+func (a *Attachment) awaitDialog(key string, d *openDialog) {
+	defer a.dialogWG.Done()
+	defer func() {
+		a.mu.Lock()
+		if a.dialogs[key] == d {
+			delete(a.dialogs, key)
+		}
+		a.mu.Unlock()
+	}()
+	name, err := dialog.FindBinding("", "", a.threadID)
+	if err != nil {
+		return
+	}
+	if name == "" {
+		// No binding serves the thread: the machine agent posts it.
+		a.mu.Lock()
+		cwd := a.cwd
+		a.mu.Unlock()
+		name, d.req.Label = dialog.MachineBinding, "codex · "+filepath.Base(cmp.Or(cwd, "."))
+	}
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		return
+	}
+	d.req.OpenedAt = a.now().UTC()
+	if dialog.Open(dir, d.req) != nil {
+		return
+	}
+	tick := time.NewTicker(dialogPoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-d.done:
+			a.mu.Lock()
+			outcome, by := d.outcome, d.by
+			a.mu.Unlock()
+			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: d.req.ID, Outcome: outcome, By: by, At: a.now().UTC()})
+			return
+		case <-tick.C:
+		}
+		ans, ok, err := dialog.ReadAnswer(dir, d.req.ID)
+		if err != nil || !ok {
+			continue
+		}
+		result, outcome, label, ok := d.reply(ans)
+		if !ok {
+			// The answer fits no choice. Remove it, so the owner's next
+			// reply can be written, and keep waiting.
+			_ = dialog.RemoveAnswer(dir, d.req.ID)
+			continue
+		}
+		a.mu.Lock()
+		if d.outcome != "" {
+			a.mu.Unlock()
+			continue // ended meanwhile; the done case resolves it
+		}
+		d.sending = true
+		a.mu.Unlock()
+		sendErr := a.client.Load().Respond(d.reqID, result)
+		a.mu.Lock()
+		elsewhere := d.resolvedWhileSending
+		d.sending = false
+		a.mu.Unlock()
+		r := dialog.Resolved{ID: d.req.ID, Outcome: outcome, Label: label, By: dialog.ByBuzz, At: a.now().UTC()}
+		switch {
+		case sendErr != nil && elsewhere:
+			// Another client answered while our send failed.
+			r = dialog.Resolved{ID: d.req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: r.At}
+		case sendErr != nil:
+			r = dialog.Resolved{ID: d.req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: r.At}
+		}
+		_, _ = dialog.Resolve(dir, r)
+		return
+	}
+}
+
+// maxDialogText bounds the text of one dialog; the terminal shows the rest.
+const maxDialogText = 64 << 10
+
+// dialogFor is the dialog of one server request of this thread: what Codex
+// shows in its terminal, with Codex's own choices in Codex's order. It is
+// nil for another thread, an unreadable request, or a request that is not
+// a dialog.
+func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	var p struct {
 		ThreadID string `json:"threadId"`
 		TurnID   string `json:"turnId"`
 		ItemID   string `json:"itemId"`
+		Cwd      string `json:"cwd"`
+		Reason   string `json:"reason"`
+		// item/commandExecution/requestApproval, item/fileChange/requestApproval
+		Command        any    `json:"command"`
+		GrantRoot      string `json:"grantRoot"`
+		NetworkContext *struct {
+			Host     string `json:"host"`
+			Protocol string `json:"protocol"`
+		} `json:"networkApprovalContext"`
+		AdditionalPermissions json.RawMessage `json:"additionalPermissions"`
+		// Codex mixes plain decisions with object decisions such as
+		// {"acceptWithExecpolicyAmendment": ...}.
+		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 		// item/permissions/requestApproval
-		Cwd         string `json:"cwd"`
-		Reason      string `json:"reason"`
-		Permissions struct {
-			FileSystem *struct {
-				Entries []struct {
-					Access string `json:"access"`
-					Path   struct {
-						Path    string `json:"path"`
-						Pattern string `json:"pattern"`
-						Value   struct {
-							Kind string `json:"kind"`
-						} `json:"value"`
-					} `json:"path"`
-				} `json:"entries"`
-				Read  []string `json:"read"`
-				Write []string `json:"write"`
-			} `json:"fileSystem"`
-			Network *struct {
-				Enabled bool `json:"enabled"`
-			} `json:"network"`
-		} `json:"permissions"`
+		Permissions json.RawMessage `json:"permissions"`
 		// item/tool/requestUserInput
-		Questions []struct {
-			Header   string `json:"header"`
-			Question string `json:"question"`
-		} `json:"questions"`
+		Questions []userQuestion `json:"questions"`
 		// mcpServer/elicitation/request
-		ServerName string `json:"serverName"`
-		Message    string `json:"message"`
+		ServerName      string          `json:"serverName"`
+		Mode            string          `json:"mode"`
+		Message         string          `json:"message"`
+		URL             string          `json:"url"`
+		RequestedSchema json.RawMessage `json:"requestedSchema"`
 	}
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
-		return "", nil
+		return nil
 	}
-	id := p.ItemID
-	var prompt string
+	d := &openDialog{reqID: req.ID, turnID: p.TurnID, done: make(chan struct{}),
+		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, PID: os.Getpid()}}
+	var b strings.Builder
+	line := func(format string, args ...any) {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, format, args...)
+	}
+	where := func() {
+		if p.Cwd != "" {
+			line("in %s", p.Cwd)
+		}
+		if p.Reason != "" {
+			line("reason: %s", p.Reason)
+		}
+	}
 	switch req.Method {
+	case methodCommandApproval:
+		d.req.Tool = "exec"
+		switch c := p.Command.(type) {
+		case string:
+			line("$ %s", c)
+		case nil:
+		default:
+			if raw, err := json.Marshal(c); err == nil {
+				line("$ %s", raw)
+			}
+		}
+		where()
+		if n := p.NetworkContext; n != nil {
+			line("network: %s %s", n.Protocol, n.Host)
+		}
+		if p.GrantRoot != "" {
+			line("write access to %s", p.GrantRoot)
+		}
+		if g := grantsText(p.AdditionalPermissions); g != "" {
+			line("additional permissions:\n%s", g)
+		}
+		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
+	case methodFileChangeApproval:
+		d.req.Tool = "apply_patch"
+		a.mu.Lock()
+		changes := a.fileChanges[p.ItemID]
+		a.mu.Unlock()
+		if changes != "" {
+			line("%s", changes)
+		} else {
+			line("apply a file change")
+		}
+		where()
+		if p.GrantRoot != "" {
+			line("write access to %s", p.GrantRoot)
+		}
+		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "acceptForSession", "decline", "cancel")
 	case methodPermissionsApproval:
-		var grants []string
-		if fs := p.Permissions.FileSystem; fs != nil {
+		d.req.Tool = "permissions"
+		line("Codex asks for permissions:")
+		if g := grantsText(p.Permissions); g != "" {
+			line("%s", g)
+		}
+		where()
+		d.req.Options, d.reply = permissionChoices(p.Permissions)
+	case methodToolUserInput:
+		d.req.Tool = "request_user_input"
+		for _, q := range p.Questions {
+			if q.Header != "" {
+				line("%s: %s", q.Header, q.Question)
+			} else {
+				line("%s", q.Question)
+			}
+			for _, o := range q.Options {
+				if o.Description != "" {
+					line("- %s: %s", o.Label, o.Description)
+				} else {
+					line("- %s", o.Label)
+				}
+			}
+		}
+		if len(p.Questions) > 1 {
+			line("Reply with one line per question, in order.")
+		}
+		d.req.Options, d.req.FreeText, d.reply = userInputChoices(p.Questions)
+	case methodMcpElicitation:
+		d.req.Tool = "mcp_elicitation"
+		line("MCP server %s asks: %s", p.ServerName, p.Message)
+		if p.URL != "" {
+			line("%s", p.URL)
+		}
+		if len(p.RequestedSchema) > 0 && string(p.RequestedSchema) != "null" {
+			var pretty bytes.Buffer
+			if json.Indent(&pretty, p.RequestedSchema, "", "  ") == nil {
+				line("form:\n%s", pretty.String())
+			}
+		}
+		d.req.Options, d.req.FreeText, d.reply = elicitationChoices(p.Mode, p.RequestedSchema)
+	default:
+		return nil
+	}
+	text := b.String()
+	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
+		text = t + "\n… full text in the terminal"
+	}
+	d.req.Text = text
+	return d
+}
+
+// number gives options their 1-based numbers in order.
+func number(options []dialog.Option) []dialog.Option {
+	for i := range options {
+		options[i].N = i + 1
+	}
+	return options
+}
+
+// chosen is the option an answer picked, or false.
+func chosen(options []dialog.Option, ans dialog.Answer) (dialog.Option, bool) {
+	for _, o := range options {
+		if ans.Option != 0 && o.N == ans.Option {
+			return o, true
+		}
+	}
+	return dialog.Option{}, false
+}
+
+// decisions are a command or file change approval's choices: Codex's
+// availableDecisions in Codex's order, or fallback when Codex lists none.
+// An option's Value is the decision's JSON, which is sent back as it came.
+// Deny is decline, or cancel when Codex offers no decline.
+func decisions(raws []json.RawMessage, fallback ...string) ([]dialog.Option, func(dialog.Answer) (any, string, string, bool)) {
+	if len(raws) == 0 {
+		for _, f := range fallback {
+			raw, _ := json.Marshal(f)
+			raws = append(raws, raw)
+		}
+	}
+	var options []dialog.Option
+	deny := -1
+	for _, raw := range raws {
+		value := compactID(raw)
+		if value == "" {
+			continue
+		}
+		label := decisionLabel(raw)
+		var tok string
+		if json.Unmarshal(raw, &tok) == nil {
+			value = tok
+			if tok == "decline" || tok == "cancel" && deny < 0 {
+				deny = len(options)
+			}
+		}
+		options = append(options, dialog.Option{Label: label, Value: value})
+	}
+	if deny >= 0 {
+		options[deny].Deny = true
+	}
+	options = number(options)
+	return options, func(ans dialog.Answer) (any, string, string, bool) {
+		o, ok := chosen(options, ans)
+		if !ok {
+			return nil, "", "", false
+		}
+		decision := json.RawMessage(o.Value)
+		if !json.Valid(decision) || !strings.HasPrefix(o.Value, "{") {
+			decision, _ = json.Marshal(o.Value)
+		}
+		outcome := dialog.OutcomeAllowed
+		if o.Value == "decline" || o.Value == "cancel" || strings.Contains(o.Value, `"action":"deny"`) {
+			outcome = dialog.OutcomeDenied
+		}
+		return map[string]json.RawMessage{"decision": decision}, outcome, o.Label, true
+	}
+}
+
+// decisionLabel is how the dialog names one Codex decision.
+func decisionLabel(raw json.RawMessage) string {
+	var tok string
+	if json.Unmarshal(raw, &tok) == nil {
+		switch tok {
+		case "accept":
+			return "Allow once"
+		case "acceptForSession":
+			return "Allow for session"
+		case "decline":
+			return "Deny"
+		case "cancel":
+			return "Cancel turn"
+		}
+		return tok
+	}
+	var obj struct {
+		Exec *struct {
+			Amendment []string `json:"execpolicy_amendment"`
+		} `json:"acceptWithExecpolicyAmendment"`
+		Network *struct {
+			Amendment struct {
+				Action string `json:"action"`
+				Host   string `json:"host"`
+			} `json:"network_policy_amendment"`
+		} `json:"applyNetworkPolicyAmendment"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		switch {
+		case obj.Exec != nil:
+			return "Allow, and don't ask again for commands that start with: " + strings.Join(obj.Exec.Amendment, " ")
+		case obj.Network != nil:
+			return "Always " + obj.Network.Amendment.Action + " " + obj.Network.Amendment.Host
+		}
+	}
+	return compactID(raw)
+}
+
+// permissionChoices grant the requested permissions for this turn or for
+// the session, or grant none.
+func permissionChoices(requested json.RawMessage) ([]dialog.Option, func(dialog.Answer) (any, string, string, bool)) {
+	options := number([]dialog.Option{
+		{Label: "Allow for this turn", Value: "turn"},
+		{Label: "Allow for session", Value: "session"},
+		{Label: "Deny", Value: "deny", Deny: true},
+	})
+	if len(requested) == 0 || string(requested) == "null" {
+		requested = json.RawMessage(`{}`)
+	}
+	return options, func(ans dialog.Answer) (any, string, string, bool) {
+		o, ok := chosen(options, ans)
+		switch {
+		case !ok:
+			return nil, "", "", false
+		case o.Deny:
+			return map[string]any{"permissions": map[string]any{}, "scope": "turn"}, dialog.OutcomeDenied, o.Label, true
+		}
+		return map[string]any{"permissions": requested, "scope": o.Value}, dialog.OutcomeAllowed, o.Label, true
+	}
+}
+
+// userQuestion is one request_user_input question.
+type userQuestion struct {
+	ID       string `json:"id"`
+	Header   string `json:"header"`
+	Question string `json:"question"`
+	Options  []struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	} `json:"options"`
+}
+
+// userInputChoices answer request_user_input. A single question's choices
+// are options; any reply text is an answer too: the whole text for a single
+// question, one line per question, in order, for several.
+func userInputChoices(questions []userQuestion) ([]dialog.Option, bool, func(dialog.Answer) (any, string, string, bool)) {
+	var options []dialog.Option
+	if len(questions) == 1 {
+		for _, o := range questions[0].Options {
+			options = append(options, dialog.Option{Label: o.Label, Value: o.Label})
+		}
+	}
+	options = number(options)
+	answers := func(texts []string) any {
+		out := map[string]any{}
+		for i, q := range questions {
+			text := ""
+			if i < len(texts) {
+				text = strings.TrimSpace(texts[i])
+			}
+			out[q.ID] = map[string][]string{"answers": {text}}
+		}
+		return map[string]any{"answers": out}
+	}
+	return options, true, func(ans dialog.Answer) (any, string, string, bool) {
+		if o, ok := chosen(options, ans); ok {
+			return answers([]string{o.Value}), dialog.OutcomeAnswered, o.Label, true
+		}
+		if strings.TrimSpace(ans.Text) == "" || len(questions) == 0 {
+			return nil, "", "", false
+		}
+		texts := []string{ans.Text}
+		if len(questions) > 1 {
+			texts = strings.Split(ans.Text, "\n")
+		}
+		return answers(texts), dialog.OutcomeAnswered, "", true
+	}
+}
+
+// elicitationChoices answer an MCP elicitation: accept, decline or cancel,
+// as Codex offers them. A form also takes reply text as its content: a JSON
+// object as it is, or the value of the form's only field.
+func elicitationChoices(mode string, schema json.RawMessage) ([]dialog.Option, bool, func(dialog.Answer) (any, string, string, bool)) {
+	options := number([]dialog.Option{
+		{Label: "Accept", Value: "accept"},
+		{Label: "Decline", Value: "decline", Deny: true},
+		{Label: "Cancel", Value: "cancel"},
+	})
+	form := mode != "url" && mode != "openai/userVerification"
+	var fields struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	_ = json.Unmarshal(schema, &fields)
+	return options, form, func(ans dialog.Answer) (any, string, string, bool) {
+		if o, ok := chosen(options, ans); ok {
+			res := map[string]any{"action": o.Value}
+			outcome := dialog.OutcomeDenied
+			if o.Value == "accept" {
+				outcome = dialog.OutcomeAllowed
+				if form {
+					res["content"] = map[string]any{}
+				}
+			}
+			return res, outcome, o.Label, true
+		}
+		text := strings.TrimSpace(ans.Text)
+		if !form || text == "" {
+			return nil, "", "", false
+		}
+		var content map[string]any
+		if json.Unmarshal([]byte(text), &content) != nil {
+			if len(fields.Properties) != 1 {
+				return nil, "", "", false
+			}
+			for name := range fields.Properties {
+				content = map[string]any{name: text}
+			}
+		}
+		return map[string]any{"action": "accept", "content": content}, dialog.OutcomeAnswered, "", true
+	}
+}
+
+// grantsText lists a permission profile's grants, one per line; the
+// profile's JSON when it names none this reads.
+func grantsText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var p struct {
+		FileSystem *struct {
+			Entries []struct {
+				Access string `json:"access"`
+				Path   struct {
+					Path    string `json:"path"`
+					Pattern string `json:"pattern"`
+					Value   struct {
+						Kind string `json:"kind"`
+					} `json:"value"`
+				} `json:"path"`
+			} `json:"entries"`
+			Read  []string `json:"read"`
+			Write []string `json:"write"`
+		} `json:"fileSystem"`
+		Network *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"network"`
+	}
+	var grants []string
+	if json.Unmarshal(raw, &p) == nil {
+		if fs := p.FileSystem; fs != nil {
 			for _, e := range fs.Entries {
 				grants = append(grants, e.Access+" "+cmp.Or(e.Path.Path, e.Path.Pattern, e.Path.Value.Kind))
 			}
@@ -1811,43 +1915,49 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 				grants = append(grants, "write "+path)
 			}
 		}
-		if n := p.Permissions.Network; n != nil && n.Enabled {
+		if n := p.Network; n != nil && n.Enabled != nil && *n.Enabled {
 			grants = append(grants, "network")
 		}
-		prompt = "Codex asks for permissions:\n" + approvalPrompt(req.Method, strings.Join(grants, "\n"), p.Cwd, p.Reason)
-	case methodToolUserInput:
-		prompt = "Codex asks for input:"
-		for _, q := range p.Questions {
-			if q.Header != "" {
-				prompt += "\n" + q.Header + ": " + q.Question
-			} else {
-				prompt += "\n" + q.Question
-			}
+	}
+	if len(grants) == 0 {
+		if c := compactID(raw); c != "{}" {
+			return c
 		}
-	case methodMcpElicitation:
-		// An elicitation has no item id, and its url-mode elicitationId is
-		// the MCP server's own; the JSON-RPC request id is unique here.
-		if json.Unmarshal(req.ID, &id) != nil {
-			id = compactID(req.ID)
+		return ""
+	}
+	return strings.Join(grants, "\n")
+}
+
+// fileChangeText is a fileChange item's paths and diffs, as the terminal
+// shows them before the change applies.
+func fileChangeText(changes []fileChange) string {
+	var b strings.Builder
+	for _, c := range changes {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
 		}
-		prompt = "MCP server " + p.ServerName + " asks: " + p.Message
+		switch {
+		case c.Kind.Type == "update" && c.Kind.MovePath != "":
+			fmt.Fprintf(&b, "update %s -> %s", c.Path, c.Kind.MovePath)
+		default:
+			fmt.Fprintf(&b, "%s %s", cmp.Or(c.Kind.Type, "change"), c.Path)
+		}
+		if c.Diff != "" {
+			b.WriteByte('\n')
+			b.WriteString(strings.TrimRight(c.Diff, "\n"))
+		}
 	}
-	if id == "" {
-		return "", nil
-	}
-	// The asked text is the harness's or an MCP server's own words and may
-	// echo a credential: then the DM shows only that something waits. The
-	// DM shows the display form, so both are screened.
-	raw := prompt
-	prompt = secretscan.DisplayForm(raw)
-	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
-		prompt = asks[req.Method] + "; it may hold a secret, so only the terminal shows it."
-	}
-	// The owner sees that a long request was cut, as protocol.BoundPreview shows it.
-	if text, cut := protocol.TruncateText(prompt, protocol.MaxApprovalPreview); cut {
-		prompt = text + " …[shortened]"
-	}
-	return p.TurnID, &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, RemoteAnswer: true}
+	return b.String()
+}
+
+// fileChange is one change of a fileChange item.
+type fileChange struct {
+	Path string `json:"path"`
+	Diff string `json:"diff"`
+	Kind struct {
+		Type     string `json:"type"`
+		MovePath string `json:"move_path"`
+	} `json:"kind"`
 }
 
 // result returns the BOUNDED terminal evidence. The bound is owned HERE,

@@ -136,28 +136,23 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			hookFormFinding(form, s.TargetID, "Stop", "install-stop-hook", fail, note)
 		}
 	}
-	// A Codex target with approve whose thread runs Codex's automatic
-	// approvals reviewer gets few or no DM approvals: the reviewer answers
-	// them first. That is the owner's choice, so it is reported,
-	// not failed.
+	// A Codex thread that runs Codex's automatic approvals reviewer shows
+	// few or no dialogs in Buzz: the reviewer answers them first. That is
+	// the owner's choice, so it is reported, not failed.
 	reviewers := map[string]string{}
 	for _, s := range sessions {
-		if s.Harness == "codex" && s.Capabilities.ApproveTool && s.ApprovalReviewer != "" {
+		if s.Harness == "codex" && s.ApprovalReviewer != "" {
 			reviewers[s.TargetID] = "Codex's approvals reviewer " + s.ApprovalReviewer + " answers this thread's approvals itself, so few or none reach a remote client; for approvals from Buzz, start a new Codex thread with approvals_reviewer = \"user\" (config.toml or -c)"
 		}
 	}
 	if len(reviewers) > 0 {
 		report["approval_reviewer"] = reviewers
 	}
-	// DM approvals of a Claude target with approve need the PermissionRequest
-	// hook; without it every approval is answered in the terminal. A target
-	// with observe_approvals needs it too: the hook raises the approvals it
-	// shows.
-	observing := observeOnlyTargets(stateDir)
+	// Buzz shows a Claude dialog only through the PermissionRequest hook;
+	// without it every approval is answered in the terminal.
 	checked = map[string]bool{}
-	staleNoted := false
 	for _, s := range sessions {
-		if s.Harness != "claude_code" || !s.Capabilities.ApproveTool && !observing[s.TargetID] {
+		if s.Harness != "claude_code" {
 			continue
 		}
 		home, settings, herr := settingsOf(s.TargetID)
@@ -179,31 +174,9 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		case state == claude.StopHookDisabled:
 			report["claude_approval_hook"] = settings + " holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
-		// Allow from Buzz needs the owner pinned on the hook's command line,
-		// and the pin holds only while Claude cannot change it unprompted.
-		if serr == nil && state != claude.StopHookMissing && s.Capabilities.ApproveTool {
-			if pin := claude.PermissionHookPinAt(settings); pin.DesktopComplete() {
-				report["claude_approval_pin"] = map[string]string{"surface": pin.Surface, "owner": pin.Owner, "agent": pin.Body, "channel": pin.Channel}
-			} else if !pin.Complete() {
-				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz; for Buzz Desktop, run `amq-remote claude install-approval-hook --desktop --owner <pubkey> --body <agent pubkey> --channel <DM channel id>`"
-			} else {
-				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
-			}
-			if warns, werr := claude.PinWarnings(settings); werr == nil && len(warns) > 0 {
-				report["claude_approval_pin_warnings"] = warns
-			}
-		}
 		if serr == nil && state != claude.StopHookMissing {
 			form, _ := claude.PermissionHookForm(home, settings)
 			hookFormFinding(form, s.TargetID, "PermissionRequest", "install-approval-hook", fail, note)
-			// Records of a crashed serve hold the hook's gate open, or make
-			// a prompt typed in the terminal wait, until a bind sweeps them.
-			// They live under home, so they are reported once.
-			if stale := claude.StaleApprovalRecords(home); len(stale) > 0 && !staleNoted {
-				staleNoted = true
-				note("approval_records", s.TargetID, fmt.Sprintf("%d approval record(s) of a process that is gone: %s", len(stale), strings.Join(stale, ", ")),
-					"they are removed when an attachment with approve binds a session; restart `amq-remote serve` to remove them now")
-			}
 		}
 	}
 	// Body identity: per-session body keys, attestations, expiry

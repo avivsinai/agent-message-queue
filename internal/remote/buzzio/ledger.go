@@ -92,25 +92,6 @@ func (l *Ledger) Claim(c Claim) (Claim, bool, error) {
 	return out, created, nil
 }
 
-// ClaimFor returns the stored claim for an event, if one exists.
-func (l *Ledger) ClaimFor(eventID string) (Claim, bool, error) {
-	if !validHexID(eventID) {
-		return Claim{}, false, nil
-	}
-	raw, err := readBounded(filepath.Join(l.dir, "ingress", eventID+".json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return Claim{}, false, nil
-	}
-	if err != nil {
-		return Claim{}, false, err
-	}
-	var out Claim
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return Claim{}, false, fmt.Errorf("claim %s is unreadable: %w", eventID, err)
-	}
-	return out, true, nil
-}
-
 // Settlement is the decision an owner command reached, recorded once after
 // the endpoint answered it. A redelivered event with a settlement is never
 // sent to the endpoint again, so a busy rejection the owner already saw
@@ -493,82 +474,6 @@ func (l *Ledger) RequestForRow(rowEventID string) (string, bool, error) {
 		return "", false, err
 	}
 	return string(raw), true, nil
-}
-
-// Approval is one approval message this edge posted: the pending
-// interaction it shows and the request fields an answer must carry.
-type Approval struct {
-	RequestRef string `json:"request_ref"`
-	// Thread is the id of a thread approval (core.ThreadApproval), which
-	// no request owns; RequestRef is then empty.
-	Thread        string `json:"thread_approval,omitempty"`
-	InteractionID string `json:"interaction_id"`
-	Target        string `json:"target"`
-	Epoch         string `json:"epoch"`
-	Prompt        string `json:"prompt"`
-	ApproveOption string `json:"approve_option,omitempty"`
-	RejectOption  string `json:"reject_option,omitempty"`
-	// ApproveProof is the interaction's: an approve must be bound to this
-	// message in what the owner signed.
-	ApproveProof bool `json:"approve_proof,omitempty"`
-	// Disabled means the message now shows that a remote answer cannot
-	// apply; a reaction answers nothing. EditedAt is the second its latest
-	// edit is dated, so the next edit is dated strictly later.
-	Disabled bool  `json:"disabled,omitempty"`
-	EditedAt int64 `json:"edited_at,omitempty"`
-	// Pending is an edit recorded but not yet finished: its view, outbox
-	// key and date. The carrier finishes it before any other change.
-	Pending *ApprovalEdit `json:"pending,omitempty"`
-}
-
-// ApprovalEdit is one intended edit of an approval message.
-type ApprovalEdit struct {
-	View Approval `json:"view"`
-	Key  string   `json:"key"`
-	At   int64    `json:"at"`
-}
-
-// PutApproval maps an approval message's event id to what it shows, so an
-// owner reaction on that message answers exactly that interaction.
-func (l *Ledger) PutApproval(eventID string, a Approval) error {
-	if !validHexID(eventID) {
-		return fmt.Errorf("approval event id %q is not a hex id", eventID)
-	}
-	raw, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, _, err = createOnce(filepath.Join(l.dir, "receipts"), keyFile("approval/"+eventID), raw)
-	return err
-}
-
-// UpdateApproval replaces what an approval message shows after an edit.
-func (l *Ledger) UpdateApproval(eventID string, a Approval) error {
-	if !validHexID(eventID) {
-		return fmt.Errorf("approval event id %q is not a hex id", eventID)
-	}
-	raw, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, err = fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("approval/"+eventID), raw, 0o600)
-	return err
-}
-
-// ApprovalFor returns the approval shown by the message with this event id.
-func (l *Ledger) ApprovalFor(eventID string) (Approval, bool, error) {
-	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("approval/"+eventID)))
-	if errors.Is(err, os.ErrNotExist) {
-		return Approval{}, false, nil
-	}
-	if err != nil {
-		return Approval{}, false, err
-	}
-	var a Approval
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return Approval{}, false, fmt.Errorf("approval record is unreadable: %w", err)
-	}
-	return a, true, nil
 }
 
 // ReceiptFor returns the receipt for a request, if one exists.

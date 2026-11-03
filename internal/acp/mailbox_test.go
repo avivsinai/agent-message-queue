@@ -669,12 +669,17 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	turn := newTurn()
 	turn.channel = buzzChannel(prompt)
 	replied := false
+	status := false
 	result, rpcErr := s.runRemote("s", prompt, "", turn, func(any) error {
-		if !replied {
-			if ids := inboxPrompts(t, root); len(ids) == 1 {
-				replied = true
-				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
-			}
+		ids := inboxPrompts(t, root)
+		switch {
+		case len(ids) != 1:
+		case !status:
+			status = true
+			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "on it")
+		case !replied && len(posts) == 1:
+			replied = true
+			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
 		}
 		return nil
 	})
@@ -682,8 +687,32 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 		t.Fatal(rpcErr)
 	}
 	got := result.(remotePromptResult)
-	if len(posts) != 1 || posts[0].channel != "6eff60e4-32ab-48ec-bd3d-f4c97872f370" || posts[0].content != "hi back" || got.Meta.Remote.Posted != "posted" {
-		t.Fatalf("posts=%+v meta=%+v", posts, got.Meta.Remote)
+	want := []post{{"6eff60e4-32ab-48ec-bd3d-f4c97872f370", "agent: on it"}, {"6eff60e4-32ab-48ec-bd3d-f4c97872f370", "hi back"}}
+	if !slices.Equal(posts, want) || got.Meta.Remote.Posted != "posted" {
+		t.Fatalf("posts=%+v meta=%+v; want the status reply, then the final", posts, got.Meta.Remote)
+	}
+}
+
+// Regression: a Buzz Desktop prompt carries no Nostr event id, so no claim
+// was written and a final reply that arrived after the turn deadline never
+// reached the DM (seen 2026-11-02: a 20:02 reply to a 19:26 prompt). The
+// claim is keyed on the forwarded AMQ message id; the sweep posts it once.
+func TestLateReplyWithoutAnEventIDIsPostedOnce(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 300 * time.Millisecond
+	posts := recordPosts(t)
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	if _, rpcErr := s.runRemote("s", prompt, "", turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
+	for range 2 {
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if got := strings.Count(strings.Join(posts(), "|"), "late answer"); got != 1 {
+		t.Fatalf("late answer posted %d times; posts=%q", got, posts())
 	}
 }
 
@@ -1310,8 +1339,8 @@ func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if got := posts(); len(got) != 0 {
-		t.Fatalf("posted to the DM: %q", got)
+	if got := posts(); len(got) != 1 || got[0] != chanA+": agent: working" {
+		t.Fatalf("posted to the DM: %q; want only the status reply", got)
 	}
 	if last := shown[len(shown)-1]; last != "reply B" {
 		t.Fatalf("shown=%q; want the adopted reply B", shown)

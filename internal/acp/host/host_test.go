@@ -16,6 +16,8 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // fakeAgent is an ACP agent on two pipes. It answers initialize and
@@ -308,6 +310,7 @@ func TestHostAnswersAMessageOnItsThread(t *testing.T) {
 
 func TestHostRejectsAToolCall(t *testing.T) {
 	root := newRoot(t)
+	t.Setenv(binding.EnvPath, filepath.Join(bindingStore(t), "binding.json"))
 	send(t, root, "codex", format.KindTodo, "clean the build")
 	agent := &fakeAgent{askPermission: true}
 	startHost(t, root, agent)
@@ -523,39 +526,27 @@ func TestHostRunsARemoteRequest(t *testing.T) {
 	}
 }
 
-func TestHostTakesARejectFromTheRemoteFace(t *testing.T) {
+func TestHostTakesAnAllowFromTheRemoteFace(t *testing.T) {
 	root := newRoot(t)
+	dir := bindRemote(t, root)
 	agent := &fakeAgent{askPermission: true}
 	startHost(t, root, agent)
 	publishRequest(t, root, testRef, "clean the build")
 
-	events := waitEvent(t, root, testRef, "interaction")
-	ask := events[len(events)-1]
-	answer, err := json.Marshal(map[string]string{
-		"protocol": BridgeProtocol, "ref": testRef, "interaction_id": ask.InteractionID,
-		"manifest_hash": ask.ManifestHash, "option": ask.RejectOption,
-	})
-	if err != nil {
-		t.Fatal(err)
+	ask := waitDialog(t, dir)
+	if len(ask.Options) != 2 || ask.Options[0].Label != "Allow" || !ask.Options[1].Deny {
+		t.Fatalf("dialog options=%+v; want every agent option, Allow then the deny Reject", ask.Options)
 	}
-	answers := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "answers")
-	if err := os.MkdirAll(answers, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(answers, answerName(testRef, ask.InteractionID)), answer, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	answerDialog(t, dir, ask, 1)
 
-	events = waitEvent(t, root, testRef, "completed")
-	if !slices.ContainsFunc(events, func(ev bridgeEvent) bool {
-		return ev.Event == "interaction_resolved" && ev.Outcome == "answered" && ev.Option == ask.RejectOption
-	}) {
-		t.Fatalf("no interaction_resolved answered with the reject option; events=%+v", events)
-	}
+	waitEvent(t, root, testRef, "completed")
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
-	if agent.selected != "reject" {
-		t.Fatalf("host selected option %q; want the reject_once option", agent.selected)
+	if agent.selected != "allow" {
+		t.Fatalf("host selected option %q; want the allow_once option the owner chose", agent.selected)
+	}
+	if res, ok, _ := dialog.ReadResolved(dir, ask.ID); !ok || res.Outcome != dialog.OutcomeAllowed || res.By != dialog.ByBuzz {
+		t.Fatalf("resolved=%+v ok=%v; want allowed by buzz", res, ok)
 	}
 }
 
@@ -592,22 +583,49 @@ func (l bridgeLiveness) at() time.Time {
 	return at
 }
 
-// writeAnswer plays the remote face: it answers one approval with option.
-func writeAnswer(t *testing.T, root, ref string, ask bridgeEvent, option string) {
+// bindingStore is a throwaway binding store directory. The store refuses a
+// symlinked path, and the macOS temp dir is under the /var symlink (macOS CI
+// failed here).
+func bindingStore(t *testing.T) string {
 	t.Helper()
-	answer, err := json.Marshal(map[string]string{
-		"protocol": BridgeProtocol, "ref": ref, "interaction_id": ask.InteractionID,
-		"manifest_hash": ask.ManifestHash, "option": option,
-	})
+	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := filepath.Join(root, "agents", "grok", "extensions", extensionLayer, "answers")
-	if err := os.MkdirAll(answers, 0o700); err != nil {
+	return dir
+}
+
+// bindRemote binds a mailbox binding for the host's root and handle in a
+// throwaway store and returns that binding's dialog directory.
+func bindRemote(t *testing.T, root string) string {
+	t.Helper()
+	t.Setenv(binding.EnvPath, filepath.Join(bindingStore(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Name: "grok", Carrier: binding.CarrierMailbox, Root: root, Handle: "grok", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(answers, answerName(ref, ask.InteractionID)), answer, 0o600); err != nil {
+	dir, err := dialog.DirFor("grok")
+	if err != nil {
 		t.Fatal(err)
+	}
+	return dir
+}
+
+// waitDialog waits for the host to open one dialog and returns it.
+func waitDialog(t *testing.T, dir string) dialog.Request {
+	t.Helper()
+	var open []dialog.Request
+	waitFor(t, "the host to open a dialog", func() bool {
+		open, _ = dialog.Requests(dir)
+		return len(open) > 0
+	})
+	return open[0]
+}
+
+// answerDialog plays the remote face: it answers one dialog with option n.
+func answerDialog(t *testing.T, dir string, ask dialog.Request, n int) {
+	t.Helper()
+	if won, err := dialog.WriteAnswer(dir, dialog.Answer{ID: ask.ID, Option: n, By: dialog.ByBuzz, At: time.Now()}); !won || err != nil {
+		t.Fatalf("WriteAnswer = %v, %v", won, err)
 	}
 }
 
@@ -628,13 +646,14 @@ func assertNeverRan(t *testing.T, root, ref string) {
 // request's turn ran was admitted again once that turn ended, and ran.
 func TestHostNeverRunsARequestRefusedBusyDuringARemoteTurn(t *testing.T) {
 	root := newRoot(t)
+	dir := bindRemote(t, root)
 	agent := &fakeAgent{askPermission: true}
 	startHost(t, root, agent)
 	publishRequests(t, root, map[string]string{testRef: "do A", otherRef: "do B"})
-	events := waitEvent(t, root, testRef, "interaction")
+	ask := waitDialog(t, dir)
 	waitEvent(t, root, otherRef, "refused")
 
-	writeAnswer(t, root, testRef, events[len(events)-1], events[len(events)-1].RejectOption)
+	answerDialog(t, dir, ask, 2)
 	waitEvent(t, root, testRef, "completed")
 	// The serve loop would take B right after A's turn, in the same pass.
 	time.Sleep(300 * time.Millisecond)

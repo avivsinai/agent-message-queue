@@ -1,8 +1,6 @@
 package core
 
 import (
-	"encoding/json"
-
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -113,11 +111,6 @@ const (
 	EventLocalIntervention NativeEventType = "local_intervention"
 	EventEpochChanged      NativeEventType = "epoch_changed"
 	EventStatus            NativeEventType = "status"
-	// EventThreadQuestion and EventThreadQuestionResolved are an approval
-	// of a turn no request owns, such as one the user started in the
-	// harness's terminal, and its end. They carry Turn, never a Key.
-	EventThreadQuestion         NativeEventType = "thread_question"
-	EventThreadQuestionResolved NativeEventType = "thread_question_resolved"
 )
 
 // NativeEvent is one observation from an attachment. Key is set for events
@@ -140,8 +133,6 @@ type NativeEvent struct {
 	// that interaction id.
 	Outcome protocol.ResolutionOutcome
 	Option  string
-	// Turn is the native turn of a thread question.
-	Turn string
 }
 
 // Attachment is the native seam contract from the design. Implementations
@@ -209,24 +200,6 @@ type Attachment interface {
 	AcknowledgeResult(key requests.Key, epoch, digest string)
 	// Subscribe delivers native events until the returned function is called.
 	Subscribe(func(NativeEvent)) func()
-}
-
-// EvidenceResponder is an Attachment whose answers can carry a surface's
-// opaque evidence (protocol.Command.Evidence). The endpoint passes it
-// unread and its trust in the answer is unchanged; the attachment decides
-// what the evidence proves. A *protocol.Refusal error is a positive
-// refusal like a returned code, with its message as the reason: the answer
-// intent is cleared, so the answer can be sent again.
-type EvidenceResponder interface {
-	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
-}
-
-// OriginResponder is an Attachment that tells the harness where an answer
-// came from: a copy of the answering source's origin, as BoundRequest
-// carries the record's. The endpoint has already decided the source may
-// answer; the origin adds no authority.
-type OriginResponder interface {
-	RespondFrom(key requests.Key, epoch, interactionID, option string, origin map[string]string) (protocol.Code, error)
 }
 
 // AnswerRetirer is an Attachment that can report that the runtime refused a

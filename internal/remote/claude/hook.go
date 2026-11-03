@@ -125,27 +125,17 @@ var (
 	permissionSpec = hookSpec{event: permissionHookType, marker: permissionHookMarker}
 )
 
-// InstallPermissionHook adds the PermissionRequest hook that answers DM
-// approvals: one entry with no matcher (every tool, so a reject can reach
-// any call), marked AMQ_APPROVAL_HOOK=1, whose own deadline is wait and
-// whose installed timeout is wait plus PermissionHookGrace. It is inert in
-// a session no relay share with approve is serving, and its command starts
-// amq-remote only when some session has a pin file.
-//
-// pin.Owner, 64 lowercase hex, pins the owner pubkey on the hook's command
-// line: the only key whose signed reaction can allow a call;
-// pin.Root (and pin.Session) pin where the share is read.
-// Claude cannot edit its settings file without a prompt, so it cannot
-// change the pin on its own. An empty owner installs a reject-only hook.
-// A marked entry with another command is replaced; the same one is kept.
-func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
-	switch {
-	case pin.Surface == SurfaceDesktop && !pin.DesktopComplete():
-		return fmt.Errorf("a Desktop pin needs the owner, the agent pubkey and its DM channel, and nothing else: %+v", pin)
-	case pin.Surface != SurfaceDesktop && pin != (HookPin{}) && !pin.Complete():
-		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
+// InstallPermissionHook adds the PermissionRequest hook that carries tool
+// dialogs to Buzz: one entry with no matcher (every tool), marked
+// AMQ_APPROVAL_HOOK=1, whose own deadline is wait and whose installed
+// timeout is wait plus PermissionHookGrace. bin must be absolute: an
+// app-launched session's PATH may not hold it. A marked entry with another
+// command is replaced; the same one is kept.
+func InstallPermissionHook(home, bin string, wait time.Duration) error {
+	if !filepath.IsAbs(bin) {
+		return fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return replaceHook(SettingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait, pin))
+	return replaceHook(SettingsPath(home), permissionSpec, permissionHookEntry(home, bin, wait))
 }
 
 // replaceHook makes entry the only marked entry of spec's chain in the
@@ -238,100 +228,6 @@ func installedCommands(path string, spec hookSpec) ([]string, error) {
 			if strings.HasPrefix(h.Command, spec.marker) {
 				out = append(out, h.Command)
 			}
-		}
-	}
-	return out, nil
-}
-
-// pinFlagRe is one pin flag as permissionHookCommand writes it: a name and
-// a single-quoted value.
-var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
-
-// PermissionHookPin is the pin of the installed PermissionRequest hook,
-// empty when there is no hook, no pin, or more than one hook.
-func PermissionHookPin(home string) HookPin {
-	return PermissionHookPinAt(SettingsPath(home))
-}
-
-// PermissionHookPinAt is PermissionHookPin for the settings file at path.
-func PermissionHookPinAt(path string) HookPin {
-	cmds, err := installedCommands(path, permissionSpec)
-	if err != nil || len(cmds) != 1 {
-		return HookPin{}
-	}
-	var pin HookPin
-	for _, m := range pinFlagRe.FindAllStringSubmatch(cmds[0], -1) {
-		if f := pin.field(m[1]); f != nil {
-			*f = shellUnquote(m[2])
-		}
-	}
-	return pin
-}
-
-// pinFlags are the pin's command line flags, in the order written;
-// desktopPinFlags are a Desktop pin's.
-var (
-	pinFlags        = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
-	desktopPinFlags = []string{"surface", "owner", "body", "channel"}
-)
-
-func (p *HookPin) field(name string) *string {
-	switch name {
-	case "owner":
-		return &p.Owner
-	case "root":
-		return &p.Root
-	case "session":
-		return &p.Session
-	case "relay":
-		return &p.Relay
-	case "body":
-		return &p.Body
-	case "channel":
-		return &p.Channel
-	case "target":
-		return &p.Target
-	case "surface":
-		return &p.Surface
-	}
-	return nil
-}
-
-// PinWarnings names the user settings that defeat the owner pin: a
-// bypassPermissions or auto default mode, or a permissions.allow entry for
-// every Bash command. Each lets Claude rewrite its settings, or run
-// install-approval-hook with another owner, without a prompt. Only
-// ~/.claude/settings.json is read; managed settings can add the same, and a
-// session started with --permission-mode on the command line is not visible
-// here.
-func PinWarnings(settings string) ([]string, error) {
-	raw, err := readRegularBounded(settings, maxSettingsBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var st struct {
-		Permissions struct {
-			DefaultMode string   `json:"defaultMode"`
-			Allow       []string `json:"allow"`
-		} `json:"permissions"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, err
-	}
-	var out []string
-	if st.Permissions.DefaultMode == "bypassPermissions" {
-		out = append(out, "permissions.defaultMode is bypassPermissions: Claude can rewrite the approval hook's owner pin without a prompt")
-	}
-	if st.Permissions.DefaultMode == "auto" {
-		out = append(out, "permissions.defaultMode is auto: Claude can rewrite the approval hook's owner pin without a prompt")
-	}
-	for _, a := range st.Permissions.Allow {
-		if a := strings.TrimSpace(a); a == "Bash" || a == "Bash(*)" {
-			out = append(out, fmt.Sprintf("permissions.allow holds %q: Claude can rewrite the approval hook's owner pin without a prompt", a))
-			break
 		}
 	}
 	return out, nil
@@ -486,7 +382,7 @@ const (
 
 var (
 	stopHookBinRe       = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude stop-hook$`)
-	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook --wait ([0-9]+)`)
+	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook --wait ([0-9]+)$`)
 )
 
 // StopHookForm reports the form of the one installed Stop hook in the
@@ -503,7 +399,7 @@ func StopHookForm(home, settings string) (string, error) {
 }
 
 // PermissionHookForm is StopHookForm for the PermissionRequest hook; the
-// current form keeps the installed wait and pin.
+// current form keeps the installed wait.
 func PermissionHookForm(home, settings string) (string, error) {
 	return hookForm(settings, permissionSpec, func(cmd string) []byte {
 		m := permissionHookBinRe.FindStringSubmatch(cmd)
@@ -514,7 +410,7 @@ func PermissionHookForm(home, settings string) (string, error) {
 		if err != nil {
 			return nil
 		}
-		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second, PermissionHookPinAt(settings))
+		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second)
 	})
 }
 
@@ -682,32 +578,26 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// permissionHookCommand runs the PermissionRequest receiver with its wait
-// and the pin, exec'd so Claude's TERM reaches it, and only when some
-// session under home's amq-approve directory has a pin file: the receiver
-// decides nothing without a live pin. The glob runs inside sh; with no
-// match "$1" is the pattern itself, which does not exist.
-func permissionHookCommand(home, bin string, wait time.Duration, pin HookPin) string {
-	approve := filepath.Join(markerDir(home), "amq-approve")
-	cmd := permissionHookMarker + "set -- " + shellQuote(approve) + `/*/pin-*; [ ! -e "$1" ] || exec ` +
+// permissionHookCommand runs the PermissionRequest receiver by its
+// absolute path with its wait, exec'd so Claude's TERM reaches it, and only
+// when something can post a dialog: a machine agent's marker, or a binding
+// (the binding env path, the binding file, a named binding) under the AMQ
+// home that home resolves now. With none, no dialog can reach Buzz, so the
+// hook starts nothing and the terminal dialog decides. The globs run inside
+// sh; an unmatched one stays the pattern itself, which does not exist.
+func permissionHookCommand(home, bin string, wait time.Duration) string {
+	remote := filepath.Join(amqhome.Under(home), "remote")
+	return permissionHookMarker + `set -- "${` + binding.EnvPath + `-}" ` + shellQuote(filepath.Join(remote, "binding.json")) + " " +
+		shellQuote(filepath.Join(remote, "acp", "agents", "_machine")+"/") + "*.json " +
+		shellQuote(filepath.Join(remote, "bindings")+"/") + `*.json; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec ` +
 		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
-	if pin != (HookPin{}) {
-		flags := pinFlags
-		if pin.Surface == SurfaceDesktop {
-			flags = desktopPinFlags
-		}
-		for _, name := range flags {
-			cmd += " --" + name + " " + shellQuote(*pin.field(name))
-		}
-	}
-	return cmd
 }
 
 // permissionHookEntry is the PermissionRequest group: no matcher, and a
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
-func permissionHookEntry(home, bin string, wait time.Duration, pin HookPin) []byte {
-	return commandHookEntry(permissionHookCommand(home, bin, wait, pin), "", int((wait+PermissionHookGrace)/time.Second))
+func permissionHookEntry(home, bin string, wait time.Duration) []byte {
+	return commandHookEntry(permissionHookCommand(home, bin, wait), "", int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings

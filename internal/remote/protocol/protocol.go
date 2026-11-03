@@ -201,12 +201,6 @@ type Command struct {
 	Since         *int64       `json:"since,omitempty"`
 	InteractionID string       `json:"interaction_id,omitempty"`
 	Option        string       `json:"option,omitempty"`
-	// Evidence is a surface's opaque proof for an interaction answer, such
-	// as the owner's signed Buzz reaction for a Claude allow. It is
-	// in-process or on the local socket (ipc.Request.Evidence), never on
-	// the session wire, and grants nothing by itself:
-	// the attachment's own verifier decides what it proves.
-	Evidence json.RawMessage `json:"-"`
 }
 
 // State is the durable request state.
@@ -294,15 +288,6 @@ type Interaction struct {
 	Prompt        string   `json:"prompt,omitempty"`
 	Options       []string `json:"options"`
 	RemoteAnswer  bool     `json:"remote_answer,omitempty"`
-	// ApproveOption and RejectOption name the offered options that approve
-	// and reject an approval, so a surface can offer one-tap answers
-	// without knowing the harness's vocabulary. Empty means none.
-	ApproveOption string `json:"approve_option,omitempty"`
-	RejectOption  string `json:"reject_option,omitempty"`
-	// ApproveProof means the harness approves only with the owner's signed
-	// proof bound to the approval message: a reaction on it, or an approve
-	// typed in its thread. An unthreaded typed approve cannot prove it.
-	ApproveProof bool `json:"approve_proof,omitempty"`
 }
 
 // ResolutionOutcome is how a pending interaction stopped being pending.
@@ -325,11 +310,6 @@ const (
 	// nor a terminal resolution is claimed.
 	ResolutionDeliveryUnknown ResolutionOutcome = "delivery_unknown"
 )
-
-// MaxApprovalPreview is the longest prompt a surface shows whole. An
-// adapter offers a one-tap approve only for a prompt within it, so the
-// owner never approves text they could not see.
-const MaxApprovalPreview = 2000
 
 // MaxResolutions bounds Snapshot.Resolved to the most recent entries.
 const MaxResolutions = 8
@@ -1015,22 +995,6 @@ func TruncateText(text string, max int) (string, bool) {
 		end--
 	}
 	return text[:end], true
-}
-
-// BoundPreview shortens an approval prompt for display and removes control
-// characters other than newline and tab, so a surface shows what will run
-// and nothing hidden. Every surface that shows an approval bounds it here.
-func BoundPreview(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
-			return r
-		}
-		return -1
-	}, s)
-	if text, cut := TruncateText(s, MaxApprovalPreview); cut {
-		return text + " …[shortened]"
-	}
-	return s
 }
 
 // FormatTime renders a timestamp in the one form the protocol emits.

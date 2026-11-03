@@ -227,13 +227,10 @@ func TestInspectCapabilities(t *testing.T) {
 	if s.Harness != "pi" || s.Attachment != "live" {
 		t.Fatalf("session = %+v, want live pi projection", s)
 	}
-	// Revision 3 answers no approval; revision 4 advertises approve_tool.
-	if code, err := a.Respond(testKey("caps"), "gen-1", "tool-1", "Allow once"); err != nil || code != protocol.CodeAlreadyResolved {
-		t.Fatalf("revision 3 Respond = %q, %v, want already_resolved", code, err)
-	}
-	stampLivenessRevision(t, dir, ApproveBridgeRevision)
-	if c := a.Inspect().Capabilities; !c.ApproveTool {
-		t.Fatalf("revision 4 capabilities = %+v, want approve_tool", c)
+	// Approvals are Buzz dialogs, never a bridge capability.
+	stampLivenessRevision(t, dir, 5)
+	if c := a.Inspect().Capabilities; c.ApproveTool || !c.CancelRequest {
+		t.Fatalf("revision 5 capabilities = %+v, want cancel and no approve_tool", c)
 	}
 	// Stale heartbeat → offline.
 	stampLiveness(t, dir, fixedNow.Add(-time.Minute))
@@ -1101,5 +1098,26 @@ func TestOldBridgeNamesItsOwnRemedy(t *testing.T) {
 				t.Fatalf("reason = %q, want it to carry %q and not the stock install", reason, tc.want)
 			}
 		})
+	}
+}
+
+// stampLivenessRevision writes a fresh gen-1 liveness record at fixedNow
+// that advertises the given bridge_revision.
+func stampLivenessRevision(t *testing.T, dir string, revision int) {
+	t.Helper()
+	stampLivenessRevisionAt(t, dir, fixedNow, revision)
+}
+
+// stampLivenessRevisionAt writes a gen-1 liveness record fresh at at.
+func stampLivenessRevisionAt(t *testing.T, dir string, at time.Time, revision int) {
+	t.Helper()
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_generation":"gen-1","bridge_revision":%d,"session_id":"sess-1"}`,
+		ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid(), revision)
+	path := filepath.Join(dir, "bridge.liveness")
+	if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
 	}
 }

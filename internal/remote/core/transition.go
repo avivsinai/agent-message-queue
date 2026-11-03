@@ -12,17 +12,6 @@ import (
 func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// No defer: every early return below unlocks explicitly, and the
 	// native ack (the slow, untrusted call) runs after the final unlock.
-	//
-	// A thread question is not a request record's: it is shown outside
-	// e.mu, ordered by threadPubMu.
-	switch ev.Type {
-	case EventThreadQuestion:
-		e.onThreadQuestion(targetID, ev)
-		return
-	case EventThreadQuestionResolved:
-		e.onThreadResolved(targetID, ev)
-		return
-	}
 	e.mu.Lock()
 	if ev.Type == EventEpochChanged || ev.Type == EventStatus {
 		e.mu.Unlock()

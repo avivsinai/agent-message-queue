@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -74,26 +73,6 @@ type runRecord struct {
 	lastText  string
 	lastCut   bool
 	createdAt time.Time
-	// promptID is the promptId of the run's own delivery line: the prompt
-	// its tool calls and PermissionRequests carry. An absorbed delivery has
-	// none, so it gets no DM approval.
-	promptID string
-	// sessionID is the session whose transcript carried the run's delivery
-	// line; its approval files live in that session's directory.
-	sessionID string
-	// DM approvals (approvals.go): every one bound to the run by id, the
-	// open ones oldest first (open[0] is the one the endpoint shows), how
-	// each closed one ended, and the turn's tool calls.
-	approvals map[string]*approval
-	open      []*approval
-	outcomes  map[string]protocol.Resolution
-	calls     []*toolCall
-	// inflightSID is the session whose inflight/ holds this run's record
-	// until its prompt is claimed; "" when none was written.
-	inflightSID string
-	// marked: runs/<prompt_id> is written and the inflight record removed.
-	// Set by the poller's op outside a.mu.
-	marked atomic.Bool
 }
 
 // Submit implements core.Attachment over the pinned wire: the
@@ -168,25 +147,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	fromOff := transcriptSize(transcriptPath(a.configDir, reg.Cwd, reg.SessionID))
-	// A session with DM approvals learns of the run before the frame can
-	// reach it: a prompt with no run marker waits for one only while an
-	// inflight record is live, so the record exists before the write, and
-	// a run with none is not sent.
-	inflightSID := ""
-	if a.cfg.approvals() {
-		inflightSID = reg.SessionID
-		rec := inflightRecord{Owner: a.inflightOwner, PID: os.Getpid(), SessionID: inflightSID, MsgID: frame.MsgID,
-			ExpiresAt: protocol.FormatTime(a.now().Add(inflightClaimWindow))}
-		if err := writeInflight(a.home, rec); err != nil {
-			return refusal(fmt.Errorf("%w: record the run for DM approvals: %v", ErrNotSent, err)), nil
-		}
-	}
 	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter, req.NativeSession); err != nil {
-		if !errors.Is(err, errPartialWrite) {
-			// Definitively not sent. A partial write keeps the record: the
-			// run may still arrive, and the record expires on its own.
-			removeInflight(a.home, inflightSID, a.inflightOwner, frame.MsgID)
-		}
 		switch {
 		case errors.Is(err, errPartialWrite):
 			return core.Admission{}, err // delivery unknown: never a refusal
@@ -199,13 +160,12 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	rec := &runRecord{
-		key:         req.Key,
-		epoch:       req.Epoch,
-		msgID:       frame.MsgID,
-		state:       protocol.StateRunning,
-		fromOff:     fromOff,
-		createdAt:   a.now(),
-		inflightSID: inflightSID,
+		key:       req.Key,
+		epoch:     req.Epoch,
+		msgID:     frame.MsgID,
+		state:     protocol.StateRunning,
+		fromOff:   fromOff,
+		createdAt: a.now(),
 	}
 	a.mu.Lock()
 	a.runs[req.Key] = rec
@@ -310,13 +270,13 @@ func sanitizeAddr(s string) string {
 func evidenceFor(rec *runRecord) core.Evidence {
 	switch {
 	case rec.admitted:
-		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local, Interaction: rec.pendingApproval()}
+		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local}
 		if rec.terminal && rec.result != nil {
 			ev.Result = rec.result
 		}
 		return ev
 	default:
-		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local, Interaction: rec.pendingApproval()}
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local}
 	}
 }
 
@@ -458,20 +418,6 @@ func (a *Attachment) pollConfirmations() {
 	// transcript asynchronously, so the turn's final text can reach it only
 	// after the hook ran; the marker carries that text.
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
-	// The approval files are read BEFORE the transcript, so this poll's
-	// transcript read covers every request it discovers: a request found
-	// now binds only against lines read after it was found.
-	a.mu.Lock()
-	known, openIDs := a.approvalIDsLocked()
-	approve := a.cfg.approvals()
-	a.pollSeq++
-	seq := a.pollSeq
-	after := a.afterTranscriptRead
-	a.mu.Unlock()
-	var disk approvalDisk
-	if approve {
-		disk = a.readApprovalDisk(reg.SessionID, known, openIDs)
-	}
 
 	if cur.off < 0 {
 		// No run knows where its delivery starts: begin at the last chunk,
@@ -495,9 +441,6 @@ func (a *Attachment) pollConfirmations() {
 		truncated = true
 	}
 	cur.off, cur.skipping = rd.next, rd.skipping
-	if after != nil {
-		after()
-	}
 
 	var events []core.NativeEvent
 	var notes []ActivityNote
@@ -513,10 +456,6 @@ func (a *Attachment) pollConfirmations() {
 			continue
 		}
 		events = a.applyEntryLocked(e, events)
-		a.applyToolEntryLocked(e)
-		if e.Type == "user" && !e.Meta && e.Text != "" && !e.Absorbed {
-			a.claimPromptLocked(e, reg.SessionID)
-		}
 		if a.activitySink == nil {
 			continue
 		}
@@ -532,20 +471,12 @@ func (a *Attachment) pollConfirmations() {
 		a.activityPath = path
 		a.activityNext = rd.next
 	}
-	events = a.applyApprovalsLocked(reg.SessionID, disk, caughtUp, seq, events)
-	a.queueRunMarkersLocked()
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
 	sink := a.eventSink
 	activity := a.activitySink
-	ops := a.pendingOps
-	a.pendingOps = nil
 	a.mu.Unlock()
-
-	for _, op := range ops {
-		op()
-	}
 
 	if sink != nil {
 		for _, ev := range events {
@@ -749,12 +680,8 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 }
 
 // settleRunLocked ends rec in state with its turn's newest assistant text as
-// the result and emits typ. The run's end closes its open approvals first,
-// so the endpoint sees each resolution before the terminal outcome. Caller
-// holds a.mu.
+// the result and emits typ. Caller holds a.mu.
 func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ core.NativeEventType, events []core.NativeEvent) []core.NativeEvent {
-	events = a.endApprovalsLocked(rec, events)
-	a.queueRunEndLocked(rec)
 	rec.terminal = true
 	rec.state = state
 	rec.result = &protocol.Result{Text: rec.lastText, Truncated: rec.lastCut, NativeRef: rec.msgID}

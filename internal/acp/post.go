@@ -173,7 +173,7 @@ func hostChannel(line string) string {
 var buzzSelf string
 
 // captureBuzzIdentity records the credentials the buzz CLI needs, the agent's
-// own public key, and the agent's owner (approval.go).
+// own public key, and the agent's owner (dialog.go).
 func captureBuzzIdentity() {
 	buzzIdentity = nil
 	for _, key := range buzzIdentityKeys {
@@ -188,7 +188,6 @@ func captureBuzzIdentity() {
 		}
 	}
 	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
-	buzzRelay = agentRelay(os.Getenv("BUZZ_RELAY_URL"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
 	buzzRelayURL, buzzRelayKey = strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), relayKey(os.Getenv("BUZZ_RELAY_URL"))
 }
 

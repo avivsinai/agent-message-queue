@@ -25,7 +25,6 @@ and never from its own environment.
   requests/<ref>.json    adapter -> extension: one request per ref
   receipts/<ref>.json    extension -> adapter: admission proof
   events/<ref>.jsonl     extension -> adapter: lifecycle and terminal evidence
-  answers/<hash>.json    adapter -> extension: one tool-approval answer (revision 4)
   cancels/<ref>.json     adapter -> extension: cancel of one request (revision 5)
   activity/<session_id>.jsonl  extension -> adapter: whole-session activity
   bridge.liveness        extension -> adapter: heartbeat
@@ -41,7 +40,7 @@ adapter's temporary files.
 
 ## Ownership
 
-The adapter writes only `requests/`, `answers/`, and `cancels/`. The extension writes only
+The adapter writes only `requests/` and `cancels/`. The extension writes only
 `receipts/`, `events/`, and `bridge.liveness`. Neither side deletes or rewrites a file the
 other side owns. The extension never deletes or rewrites a request; the adapter
 never deletes a request it published. Cleanup of old files is an explicit
@@ -102,24 +101,16 @@ a check fails:
 
 ### The Buzz event
 
-A request's `event` and an answer's `subject` name the owner's Buzz event
-that caused them: the DM for a request, and the reaction or typed reply for
-an answer. The adapter writes them only for the Buzz carrier, with the value
-`nostr:<eventID>`. Each is a pointer, not proof. The adapter never holds the
-signed event, and any local process that can write `requests/` or `answers/`
-can write any value. The adapter never adds the id to `text`, and an
-extension keeps it out of the model's context, so a model cannot forge it as
-routing. An extension that ignores either field works as before, and a
-record without it is valid.
+A request's `event` names the owner's Buzz DM that caused it. The adapter
+writes it only for the Buzz carrier, with the value `nostr:<eventID>`. It is
+a pointer, not proof. The adapter never holds the signed event, and any local
+process that can write `requests/` can write any value. The adapter never
+adds the id to `text`, and an extension keeps it out of the model's context,
+so a model cannot forge it as routing. An extension that ignores the field
+works as before, and a record without it is valid.
 
-A layer that must know the owner wrote the request or the answer, for
-example to accept a gate answer from a pi session, fetches that event from
-the relay and checks it itself, as the
-[Claude Code approval hook](amq-remote-approvals.md#when-the-hook-answers)
-does: the pinned owner key and signature, the DM channel, the gate message in
-its `e` tags or thread, the gate's nonce in the content, the time window, the
-edit and deletion history, and single use. AMQ verifies nothing for the
-layer.
+A layer that must know the owner wrote the request fetches that event from
+the relay and checks it itself. AMQ verifies nothing for the layer.
 
 ## `receipts/<ref>.json`
 
@@ -236,13 +227,13 @@ may also publish `upgrade`, its own remedy for an owner whose bridge is too
 old (for example the command that updates the pi build that ships it). The
 adapter shows it, bounded, in the refusal instead of this repository's install
 line. The record may also carry `session_id` (see
-[Session identity](#session-identity)); from revision 4 it must.
+[session identity](#bridge-revision-4-session-identity)); from revision 4 it must.
 
 ## Bridge revision
 
 The protocol string names the file formats; `bridge_revision` names the
 extension rules the adapter relies on. Revision 3 is the rule set of every
-section except [Bridge revision 4](#bridge-revision-4-tool-approval): exact
+section except [Bridge revision 4](#bridge-revision-4-session-identity): exact
 generation addressing, busy refusal at the admission boundary, request ownership that ends at the next user message and completes
 only on a final answer, retained terminal and refusal decisions, and orphan
 recovery that retries until it succeeds. The protocol string stays
@@ -277,28 +268,18 @@ for that request. The adapter sends 3 on every request, also to a bridge of a
 later revision. A bridge implements every revision from 3 up to the one it
 advertises, so a revision-4 bridge accepts a request that carries 3 or 4. It
 refuses with reason `revision` only a request with no `bridge_revision`, one
-below 3, or one above the revision it advertises. The approval capability
-comes from liveness alone: the adapter advertises `approve_tool` only while
-the live record's `bridge_revision` is 4 or higher.
+below 3, or one above the revision it advertises.
 
 A rollout installs the extension, reloads every pi session, and restarts
 every running `amq-remote` process. The revision gates only new
 submissions: the adapter reads receipts and events already on disk from any
 revision.
 
-## Bridge revision 4: tool approval
+## Bridge revision 4: session identity
 
-Revision 4 is revision 3 plus a required session identity in liveness and one seam:
-the extension raises a tool approval under a ref it owns, and the adapter
-answers it from a remote face. Nothing in
-revision 3 changes, and the protocol string stays `amq:pi-bridge:v1`.
-
-A revision-4 extension must hold a tool call until a decision arrives from a
-local face or from `answers/`, and apply the first one. Stock pi exposes no
-approval that an extension can answer from outside, so the reference extension
-in this repository is revision 3.
-
-### Session identity
+Revision 4 is revision 3 plus a required session identity in liveness.
+Nothing in revision 3 changes, and the protocol string stays
+`amq:pi-bridge:v1`.
 
 A liveness record may carry `session_id`, and a revision-4 record must: pi's
 own session id, from
@@ -309,119 +290,6 @@ adapter reports it as the target's native session id, which a relay share
 pins; without a live record carrying a valid `session_id` the adapter reports
 none, and a share that needs one is refused. The reference extension in this
 repository publishes it.
-
-### Interaction lines
-
-Two more event lines go in `events/<ref>.jsonl`. The extension writes them only
-while it owns the ref: after the receipt and before the ref's terminal event.
-
-```json
-{"protocol":"amq:pi-bridge:v1","ref":"amqr1_...","event":"interaction","at":"...","interaction_id":"tool-1","kind":"approval","prompt":"run: go test ./...","options":["Allow once","Block"],"approve_option":"Allow once","reject_option":"Block","manifest_hash":"sha256:...","expires_at":"2026-01-01T00:05:00Z","presence":"remote"}
-{"protocol":"amq:pi-bridge:v1","ref":"amqr1_...","event":"interaction_resolved","at":"...","interaction_id":"tool-1","outcome":"answered","option":"Allow once"}
-```
-
-| `interaction` field | Meaning |
-| --- | --- |
-| `interaction_id` | The approval's id: 1 to 128 of `[A-Za-z0-9._-]`. Case is significant. |
-| `kind` | `approval`. |
-| `prompt` | What the tool call does, as the owner sees it. |
-| `options` | The options the extension accepts from a remote face. |
-| `approve_option`, `reject_option` | The members of `options` that approve and reject the call. |
-| `manifest_hash` | An opaque hash that names exactly this tool call. |
-| `expires_at` | RFC 3339. The extension applies no answer at or after it. |
-| `presence` | `remote` when a remote answer may approve; `local_only` when only a local face may approve. |
-
-The adapter shows one approval per ref at a time, the oldest open one first.
-It offers the remote face only `approve_option` and `reject_option`. It offers
-the approve option only when `presence` is `remote`, `prompt` is at most 2000
-bytes, and `options` contains `approve_option`; otherwise it offers
-`reject_option` alone and cuts `prompt` to 2000 bytes. It marks the approval
-answerable from a remote face only while a remote answer can apply: a live
-bridge of revision 4 or later, in the session generation of the ref's
-receipt, before `expires_at`. Otherwise the approval shows with no remote
-answer, and the adapter updates it when that changes. Any other `presence`
-reads as `local_only`. The adapter ignores a line with an invalid
-`interaction_id`, a second line for an id it already saw, and a line without
-`kind: approval`, a `manifest_hash`, a parseable `expires_at`, or a
-`reject_option` in `options`; the local face then answers that approval.
-
-`interaction_resolved` closes one open approval. `option` names the option that
-applied, when one did.
-
-| `outcome` | Meaning | Adapter |
-| --- | --- | --- |
-| `answered` | The answer from `answers/` applied. | resolved, answered from AMQ |
-| `answered_elsewhere` | A local face, a timeout, or a refusal of the answer file resolved it. | resolved elsewhere |
-| `run_ended` | The ref reached its terminal event with the approval open. | run ended |
-
-A terminal event, `uncertain` included, closes every open approval of its ref
-as `run_ended`. Neither line is terminal evidence: the first-terminal rule
-ignores both, and a ref with an open approval is still running.
-
-The open approval and how each approval ended, with its exact outcome and
-option, are evidence the adapter rebuilds from the event stream, on attach and
-on every lookup, like every other state. The adapter also publishes each
-change at once, but a published change can be lost, for example at shutdown;
-the next reconcile recovers it from the evidence. A reported outcome is
-recorded as given: an answer AMQ sent never turns `answered_elsewhere` or
-`run_ended` into `answered`.
-
-### `answers/<hash>.json`
-
-`<hash>` is the lowercase hex SHA-256 of the ref, one NUL byte, and the
-`interaction_id`. The name is bounded and does not depend on case, so two
-interaction ids that differ only in case never share a file. The record keeps
-the ref and the interaction id.
-
-```json
-{
-  "protocol": "amq:pi-bridge:v1",
-  "ref": "amqr1_...",
-  "interaction_id": "tool-1",
-  "manifest_hash": "sha256:...",
-  "option": "Allow once",
-  "subject": "nostr:4f1c...",
-  "at": "2026-01-01T00:01:00Z"
-}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `ref`, `interaction_id`, `manifest_hash` | Copied from the `interaction` line. |
-| `option` | The answer: one of the options the adapter offered. |
-| `subject` | Optional: `nostr:<eventID>` of the owner's Buzz reaction or typed reply that answered. The adapter writes it only for an answer from the Buzz carrier. The extension never checks it. See [The Buzz event](#the-buzz-event). |
-| `at` | RFC 3339 answer time; informational. |
-
-An answer file already on disk with the same `protocol`, `ref`,
-`interaction_id`, `manifest_hash` and `option` is delivered, whatever its
-`subject`: a replay of it
-succeeds whatever the bridge state is now, and whether it applied is for
-`interaction_resolved` to say. For a fresh answer the adapter writes only for
-the approval it shows for that ref, only with an offered option, and only
-while a remote answer can apply. It refuses otherwise and writes nothing:
-`attachment_lost` with no live bridge, `already_resolved` below revision 4, in
-another session generation, or for an approval that is not the one shown,
-`invalid` for an option not offered, and `expired` at or after `expires_at`. It
-publishes create-new, with the same steps as a request, and never rewrites an
-answer: any other answer finds the first one in place and is
-`already_resolved`. First-answer-wins across remote faces belongs to the
-`amq-remote` endpoint; the extension decides between the remote answer and the
-local faces.
-
-### Binding an answer to one call
-
-An allow is single use, bound to `interaction_id` + `manifest_hash`, valid only
-before `expires_at`. The extension applies an answer file only when all of
-these hold:
-
-- the ref is one it owns, and the approval is open under it;
-- `interaction_id` and `manifest_hash` equal the `interaction` line's;
-- the current time is before `expires_at`;
-- `option` is one of the options the line offered to a remote face.
-
-An allow grants that one tool call, never a wider scope. The extension applies
-the first decision from any face and reports the result with
-`interaction_resolved`. It never deletes or rewrites an answer file.
 
 ## Bridge revision 5: exact cancel
 
@@ -598,21 +466,13 @@ applies with these differences:
   an agent that exits are `failed`.
 - On start the host appends `uncertain` to every receipt without a terminal
   event.
-- The host ignores a request's `event` and an answer's `subject`.
-- Each `session/request_permission` during a request's turn is an
-  `interaction` line with `interaction_id` `tool-<n>`, `options` the names
-  of the offered ACP options, `approve_option` the first `allow_once`,
-  `reject_option` the first `reject_once`,
-  `manifest_hash` the SHA-256 of the ACP tool call as received, `expires_at`
-  five minutes out, and `presence: local_only`. The host's policy is its
-  local face: it rejects. The first of a matching answer file and the expiry
-  decides, and the agent receives the reject option either way; a remote
-  answer gives the owner the reject at once. An answer file that does not
-  match is refused as `answered_elsewhere`. A cancelled turn answers a
-  pending approval `cancelled` and writes no resolution; the terminal event
-  closes it. An approval with no `reject_once` option raises no line: the
-  host's policy answers at once with the first `reject_always`, else
-  `cancelled`. A message turn rejects at once and raises no line.
+- The host ignores a request's `event`.
+- Each `session/request_permission` writes a dialog request for Buzz (see
+  [approvals from Buzz](amq-remote-approvals.md)) with the options the agent
+  offered. The first of the owner's answer in Buzz and the terminal decides,
+  and the agent receives the chosen option. A cancelled turn answers a
+  pending approval `cancelled`; the terminal event closes it. An approval
+  with no offered option is answered `cancelled`.
 - A cancel file for the request in flight sends ACP `session/cancel`. The
   host checks the cancel file within a second, in the loop that runs that
   turn, so the cancel is for that turn only. It answers a pending approval
@@ -623,7 +483,8 @@ applies with these differences:
 
 ## Capabilities
 
-v1 supports inspect and submit with `deliver_as: followUp` only, tool
-approval through `answers/` from bridge revision 4, and exact cancel through
-`cancels/` from bridge revision 5. Steering, question answers, and terminal
-access are not part of the protocol; the adapter refuses a steer submit before it writes anything.
+v1 supports inspect and submit with `deliver_as: followUp` only, and exact
+cancel through `cancels/` from bridge revision 5. Steering, question answers,
+tool approvals, and terminal access are not part of the protocol; the adapter
+refuses a steer submit before it writes anything. A tool approval is a
+[dialog in Buzz](amq-remote-approvals.md).

@@ -44,7 +44,6 @@ type serveFlags struct {
 	useFake      *bool
 	codexSocket  *string
 	codexThread  *string
-	codexApprove *bool
 	manifestPath *string
 	discover     *bool
 	poll         *time.Duration
@@ -59,7 +58,6 @@ func defineServeFlags(fs *flag.FlagSet, meDefault string) serveFlags {
 		useFake:      fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)"),
 		codexSocket:  fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)"),
 		codexThread:  fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)"),
-		codexApprove: fs.Bool("codex-approve", false, "answer approvals of runs submitted to those Codex threads from remote clients; the first answer wins"),
 		manifestPath: fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)"),
 		discover:     fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)"),
 		poll:         fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval"),
@@ -73,7 +71,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	c := addCommon(fs)
 	sf := defineServeFlags(fs, amqio.DefaultHandle)
 	me, useFake, codexSocket, codexThread := sf.me, sf.useFake, sf.codexSocket, sf.codexThread
-	codexApprove, manifestPath, discover, poll := sf.codexApprove, sf.manifestPath, sf.discover, sf.poll
+	manifestPath, discover, poll := sf.manifestPath, sf.discover, sf.poll
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
@@ -146,10 +144,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		for _, id := range threads {
 			cfg, _ := json.Marshal(struct {
-				Socket  string `json:"socket"`
-				Thread  string `json:"thread"`
-				Approve bool   `json:"approve"`
-			}{Socket: *codexSocket, Thread: id, Approve: *codexApprove})
+				Socket string `json:"socket"`
+				Thread string `json:"thread"`
+			}{Socket: *codexSocket, Thread: id})
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
@@ -162,8 +159,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err == nil {
 		relayCfg = mfSnap.Relay
 		edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
-		edges.pinApprovals(mfSnap.Adapters, stderr)
-		defer edges.unpinApprovals()
 		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
 	if err != nil {
@@ -188,14 +183,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = ep.Close()
 		return 0, err
 	}
-	// Claude targets no relay share serves take Buzz Desktop denies
-	// through an owner-less pin: those attached at startup now,
-	// those attached later as they register.
-	pinNative := func(a manifest.Adapter) { edges.pinNative(a, ep.NativeSessionID(a.Target), stderr) }
-	for _, a := range mfSnap.Adapters {
-		pinNative(a)
-	}
-	server.SetRegistrar(liveRegistrar(c.root, stateDir, *me, ep, pinNative))
+	server.SetRegistrar(liveRegistrar(c.root, stateDir, *me, ep))
 	server.SetLinkHandler(links.request)
 	// amq-acp mirrors a Buzz-started request's native activity into Desktop.
 	server.SetActivityHandler(activity.MirrorHandler(ep))
@@ -215,7 +203,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// also for a serve that has no share yet.
 	edges.bind(ep.Handle, ep.NativeSessionID)
 	edges.bindAttachments(ep.AttachmentOf)
-	ep.SetThreadApprovals(edges.bindThreadApprovals(ep.RespondThreadApproval))
 	relays := newRelaySet(c.root, stateDir, manifestFile, edges, stderr)
 	relays.start(ctx, relayCfg)
 	if relayCfg != nil {

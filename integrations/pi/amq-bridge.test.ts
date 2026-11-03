@@ -150,6 +150,35 @@ test("an open extension prompt holds the wake doorbell until it ends", async () 
 	await h.done();
 });
 
+test("an open extension prompt is shown in Buzz as an option-less dialog until it ends", async () => {
+	const h = harness();
+	const store = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-remote-"));
+	process.env.AMQ_REMOTE_BINDING = path.join(store, "binding.json");
+	fs.mkdirSync(path.join(store, "bindings"), { recursive: true });
+	fs.writeFileSync(
+		path.join(store, "bindings", "pi-seat.json"),
+		JSON.stringify({ carrier: "mailbox", root: process.env.AM_ROOT, handle: "pi-seat", bound_at: "2026-11-02T00:00:00Z" }),
+	);
+	try {
+		await h.start();
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		const dir = path.join(store, "dialogs", "pi-seat");
+		const [file] = fs.readdirSync(path.join(dir, "requests")).filter((f) => f.endsWith(".json"));
+		const request = JSON.parse(fs.readFileSync(path.join(dir, "requests", file), "utf8"));
+		assert.equal(request.harness, "pi");
+		assert.deepEqual(request.options, []);
+		assert.equal(request.text, "Run it? (confirm)");
+		assert.equal(fs.existsSync(path.join(dir, "resolved", file)), false);
+		await h.emit("ui_prompt_end", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		const resolved = JSON.parse(fs.readFileSync(path.join(dir, "resolved", file), "utf8"));
+		assert.equal(resolved.id, request.id);
+		assert.equal(resolved.by, "terminal");
+	} finally {
+		delete process.env.AMQ_REMOTE_BINDING;
+	}
+	await h.done();
+});
+
 // #1199 review: pi awaits each extension's handler separately, so the end
 // of prompt A can reach this extension after prompt B started; it must not
 // remove B's marker.

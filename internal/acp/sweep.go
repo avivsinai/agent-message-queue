@@ -116,6 +116,30 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(machineDone)
 	}
+	// The dialogs of a machine agent or a pinned agent are posted at the
+	// same pace in a worker of their own, so a dialog never waits behind the
+	// sweep or the machine lifecycle, and neither waits behind a dialog.
+	dialogDone := make(chan struct{})
+	if s.dialogPin() != "" {
+		s.dialogs.quit = quit
+		go func() {
+			defer close(dialogDone)
+			tick := time.NewTicker(machineScanInterval)
+			defer tick.Stop()
+			for {
+				if s.dialogLead() {
+					s.dialogTick(time.Now())
+				}
+				select {
+				case <-quit:
+					return
+				case <-tick.C:
+				}
+			}
+		}()
+	} else {
+		close(dialogDone)
+	}
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
@@ -139,7 +163,12 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		cancelMachine()
 		<-done
 		<-machineDone
+		<-dialogDone
 		s.resign()
+		if s.dialogs.release != nil {
+			s.dialogs.release()
+			s.dialogs.release = nil
+		}
 		s.mu.Lock()
 		s.late.kick = nil
 		s.mu.Unlock()

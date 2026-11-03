@@ -20,8 +20,6 @@ package claude
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,15 +58,10 @@ type config struct {
 	Target string `json:"target,omitempty"`
 	// Home overrides the Claude home for tests; empty = os.UserHomeDir().
 	Home string `json:"home,omitempty"`
-	// Approve lets the owner answer tool approvals of AMQ runs from the
-	// Buzz DM, through the PermissionRequest hook.
+	// Approve is accepted from older manifests and changes nothing: tool
+	// dialogs reach Buzz through the PermissionRequest hook and the dialogs
+	// directory, not through the attachment.
 	Approve bool `json:"approve,omitempty"`
-	// ObserveApprovals shows the pending tool approval of an AMQ run as the
-	// request's interaction without letting any remote source answer it: the
-	// interaction takes no remote answer and Respond refuses. A session shared
-	// with a source that must never answer tool prompts sets it instead of
-	// Approve; Approve wins when both are set.
-	ObserveApprovals bool `json:"observe_approvals,omitempty"`
 }
 
 // dirs resolves the home that roots AMQ's markers and the config dir that
@@ -148,13 +141,6 @@ func ReplacesEntry(prev, next json.RawMessage) bool {
 	return err == nil && cur != nil && cur.SessionID != "" && (cur.Kind == "" || cur.Kind == "interactive")
 }
 
-// approvals reports whether the attachment follows the hook's approval
-// requests at all: to answer them (Approve) or only to show them.
-func (c config) approvals() bool { return c.Approve || c.ObserveApprovals }
-
-// observeOnly reports whether approvals are shown and never answered.
-func (c config) observeOnly() bool { return c.ObserveApprovals && !c.Approve }
-
 // sessionRegistry is the subset of ~/.claude/sessions/<pid>.json the
 // adapter reads. Unknown fields are ignored (forward-compatible).
 type sessionRegistry struct {
@@ -233,34 +219,23 @@ func Attach(cfg config) (*Attachment, error) {
 	if !protocol.ValidTargetID(target) {
 		return nil, fmt.Errorf("claude adapter: derived target id %q is not protocol-addressable (opaque grammar); set an explicit target in the manifest", target)
 	}
-	var owner [8]byte
-	if _, err := rand.Read(owner[:]); err != nil {
-		return nil, fmt.Errorf("claude adapter: %w", err)
-	}
 	att := &Attachment{
-		target:        target,
-		cfg:           cfg,
-		home:          home,
-		configDir:     configDir,
-		boundSession:  reg.SessionID,
-		inflightOwner: hex.EncodeToString(owner[:]),
-		allowFactory:  allowFactory,
-		runs:          map[requests.Key]*runRecord{},
-		cancelIntent:  map[requests.Key]bool{},
-		recoverFrom:   map[requests.Key]recoverScan{},
-		released:      map[requests.Key]struct{}{},
-		ctx:           context.Background(),
-
-		releasedOutcomes: map[requests.Key]map[string]protocol.Resolution{},
+		target:       target,
+		cfg:          cfg,
+		home:         home,
+		configDir:    configDir,
+		boundSession: reg.SessionID,
+		runs:         map[requests.Key]*runRecord{},
+		cancelIntent: map[requests.Key]bool{},
+		recoverFrom:  map[requests.Key]recoverScan{},
+		released:     map[requests.Key]struct{}{},
+		ctx:          context.Background(),
 	}
 	token, err := bindStopSession(home, reg.SessionID)
 	if err != nil && !errors.Is(err, errUnsupportedPlatform) {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
 	att.boundToken = token
-	if cfg.approvals() {
-		sweepApprovals(home)
-	}
 	return att, nil
 }
 
@@ -273,7 +248,7 @@ func deriveTarget(pid int, reg *sessionRegistry) string {
 	return "claude:" + strconv.Itoa(pid)
 }
 
-// markerDir holds AMQ's own markers (amq-stop, amq-bound, amq-approve). It
+// markerDir holds AMQ's own markers (amq-stop, amq-bound). It
 // is always home/.claude/sessions, whatever config dir a session uses: the
 // hook processes and the endpoint resolve it from home alone.
 func markerDir(home string) string {
@@ -364,9 +339,6 @@ type Attachment struct {
 	boundSession string
 	// boundToken is this attachment's sentinel file under amq-bound.
 	boundToken string
-	// inflightOwner names this attachment's inflight records; one process
-	// can replace its attachment, so the pid alone cannot.
-	inflightOwner string
 	// cur is the poller's transcript position; owner is the run that owns
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
@@ -399,26 +371,8 @@ type Attachment struct {
 	// restarted; the attachment is being replaced or shut down.
 	closed bool
 	ctx    context.Context
-	// turnPrompt is the promptId of the turn the cursor is inside; tool_use
-	// lines carry none, so they belong to this prompt's run.
-	turnPrompt string
-	// releasedOutcomes keeps how each approval of an acknowledged run
-	// ended, for an outcome the endpoint still owes. Bounded with released.
-	releasedOutcomes map[requests.Key]map[string]protocol.Resolution
-	// pendingOps are approval file writes decided under a.mu, run by the
-	// poller after it releases the lock.
-	pendingOps []func()
-	// clock replaces the wall clock in tests (SetNow).
+	// clock replaces the wall clock in tests.
 	clock func() time.Time
-	// allowFactory turns the hook pin into what verifies an allow from
-	// Buzz (RegisterAllowFactory; SetAllowFactory in tests).
-	allowFactory func(HookPin) AllowConfig
-	// pollSeq numbers the poller's passes: an approval binds only in a pass
-	// that read the approval files no earlier than the pass that found it.
-	pollSeq uint64
-	// afterTranscriptRead runs between a pass's transcript read and its
-	// apply; tests set it to write files at that moment.
-	afterTranscriptRead func()
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is
@@ -436,26 +390,20 @@ func (a *Attachment) Inspect() protocol.Session {
 	if status == "offline" {
 		att = "offline"
 	}
-	a.mu.Lock()
-	pending, active := a.pendingApprovalLocked()
-	a.mu.Unlock()
 	return protocol.Session{
-		Schema:             protocol.SchemaSession,
-		TargetID:           a.target,
-		Epoch:              SentinelUnpinned,
-		Harness:            "claude_code",
-		DisplayName:        "claude " + a.target,
-		Attachment:         att,
-		Status:             status,
-		PendingInteraction: pending,
-		ActiveRequestRef:   active,
+		Schema:      protocol.SchemaSession,
+		TargetID:    a.target,
+		Epoch:       SentinelUnpinned,
+		Harness:     "claude_code",
+		DisplayName: "claude " + a.target,
+		Attachment:  att,
+		Status:      status,
 		// Submit is true over the pinned socket wire; the rest stay
-		// false — no interrupt seam without keystrokes.
-		// ApproveTool: DM approvals through the PermissionRequest hook, when
-		// the manifest opts in.
+		// false — no interrupt seam without keystrokes. Tool dialogs reach
+		// Buzz through the PermissionRequest hook, not the endpoint.
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: false,
-			ApproveTool: a.cfg.Approve && noFollowSupported, AnswerQuestion: false, Steer: false,
+			ApproveTool: false, AnswerQuestion: false, Steer: false,
 			Terminal: "unavailable",
 		},
 		// Submit proves socket delivery; the transcript delivery line proves
@@ -513,12 +461,6 @@ func (a *Attachment) observe() (string, string) {
 	return normalizeStatus(reg.Status), reg.SessionID
 }
 
-// settingsPath is the session's settings.json, where the approval hook and
-// its pin are installed.
-func (a *Attachment) settingsPath() string {
-	return filepath.Join(a.configDir, "settings.json")
-}
-
 func (a *Attachment) now() time.Time {
 	if a.clock != nil {
 		return a.clock()
@@ -529,10 +471,6 @@ func (a *Attachment) now() time.Time {
 // trackBoundSession publishes sessionID for the Stop-hook receiver when the
 // live registry session changes. File IO stays under a.mu: the files are
 // tiny and the unsubscribe path clears the same field under that lock.
-//
-// With DM approvals it then drops this attachment's inflight records of the
-// old session and sweeps dead records, outside a.mu: the sweep waits on a
-// lock other processes hold.
 func (a *Attachment) trackBoundSession(sessionID string) {
 	a.mu.Lock()
 	if a.closed || a.boundSession == sessionID {
@@ -547,10 +485,6 @@ func (a *Attachment) trackBoundSession(sessionID string) {
 		unbindStopSession(a.home, prev, prevToken)
 	}
 	a.mu.Unlock()
-	if a.cfg.approvals() {
-		removeOwnerInflight(a.home, prev, a.inflightOwner)
-		sweepApprovals(a.home)
-	}
 }
 
 // Submit is implemented in submit.go over the pinned socket wire.
@@ -568,7 +502,11 @@ func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidenc
 	}, nil
 }
 
-// Respond and ResolvedInteraction are in approvals.go.
+// Respond implements core.Attachment. Tool dialogs are answered through the
+// PermissionRequest hook, so the endpoint has no interaction to answer.
+func (a *Attachment) Respond(requests.Key, string, string, string) (protocol.Code, error) {
+	return protocol.CodeUnsupported, nil
+}
 
 // AcknowledgeResult implements core.Attachment: nothing is retained, so
 // the release is a no-op.
@@ -577,36 +515,16 @@ func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidenc
 // adapter drops its record, so a restarted attachment's Unknown is honest.
 func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 	a.mu.Lock()
-	rec := a.runs[key]
 	delete(a.runs, key)
 	delete(a.recoverFrom, key)
 	if len(a.released) >= maxReleased {
 		for k := range a.released { // drop an arbitrary old entry
 			delete(a.released, k)
-			delete(a.releasedOutcomes, k)
 			break
 		}
 	}
 	a.released[key] = struct{}{}
-	var promptID string
-	var ids []string
-	sessionID := a.boundSession
-	if rec != nil {
-		promptID = rec.promptID
-		if rec.sessionID != "" {
-			sessionID = rec.sessionID
-		}
-		for id := range rec.approvals {
-			ids = append(ids, id)
-		}
-		if len(rec.outcomes) > 0 {
-			a.releasedOutcomes[key] = rec.outcomes
-		}
-	}
 	a.mu.Unlock()
-	if promptID != "" || len(ids) > 0 {
-		removeApprovalFiles(a.home, sessionID, promptID, ids)
-	}
 }
 
 // maxReleased bounds the released-key set; the endpoint acknowledges each
@@ -636,7 +554,6 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 		a.mu.Unlock()
 		if sid != "" {
 			unbindStopSession(a.home, sid, token)
-			removeOwnerInflight(a.home, sid, a.inflightOwner)
 		}
 		if stop != nil {
 			stop()

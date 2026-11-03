@@ -136,6 +136,8 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 				text = s.unpinnedReply(unpinned)
 			case errors.Is(err, errChannelNotConnected):
 				text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
+			case errors.Is(err, errApprovalsOnly):
+				text = "This channel shows approvals only. React ✅ or ❌ on one, or reply with an option's number."
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
@@ -560,12 +562,6 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	mirror := r.startMirror(snap.RequestRef)
 	defer mirror.finish(0)
 
-	// Pending tool approvals are shown in the DM while the turn runs.
-	// Deferred first, so watchers stop after the wait loop.
-	approvals := newApprovals(r, r.postChannel(), buzzOwner)
-	defer approvals.close()
-	approvals.observe(snap)
-
 	// The goroutine reads only these immutable values; snap belongs to the
 	// consumer loop below. It waits past each revision it saw, so a pending
 	// interaction ends a wait, and stops once the
@@ -616,7 +612,6 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 				return nil, newRPCError(codeInternalError, "decode request snapshot: %v", err)
 			}
 			snap = current
-			approvals.observe(snap)
 			if w.resp.TimedOut {
 				if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Still running on %s.", r.meta.Target)); err != nil {
 					return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
@@ -919,7 +914,8 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 // key, with one exception: a mailbox answer whose post failed before the
 // buzz CLI started is posted again by the late-reply sweep (finalUnsent). The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
-// eventIDsFromMeta), so it cannot leave the state dir. Without an event id
+// eventIDsFromMeta), or a mailbox turn's own AMQ message id (localEvent), so
+// it cannot leave the state dir. Without an event id
 // it just posts; without a channel it posts nothing and records nothing.
 func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
@@ -1001,13 +997,7 @@ func (r *remoteTurn) get() (protocol.Reply, error) {
 }
 
 func (r *remoteTurn) call(cmd *protocol.Command) (protocol.Reply, error) {
-	return r.callEvidence(cmd, nil)
-}
-
-// callEvidence is call with an answer's evidence, which the local socket
-// carries beside the command.
-func (r *remoteTurn) callEvidence(cmd *protocol.Command, evidence json.RawMessage) (protocol.Reply, error) {
-	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native, Evidence: evidence})
+	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native})
 	if err != nil {
 		return protocol.Reply{}, err
 	}
