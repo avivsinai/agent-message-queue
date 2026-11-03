@@ -1,6 +1,8 @@
 // Package dialog carries harness permission dialogs to Buzz and answers back.
 // A harness seam (a hook, an app-server client, a bridge) opens a request
-// for a live binding; the Buzz agent posts it and writes the owner's answer;
+// for the binding that serves its session, writing the session's own
+// dialogs binding when none does, so every dialog shows in the session's own
+// channel; the Buzz agent posts it and writes the owner's answer;
 // the seam applies the answer, unless the terminal answered first. The
 // first create of resolved/<id>.json decides how a dialog ended.
 //
@@ -30,6 +32,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -46,7 +49,6 @@ type Request struct {
 	ID       string    `json:"id"`                  // unique, filename-safe (NewID)
 	Harness  string    `json:"harness"`             // claude | codex | pi | acp
 	Session  string    `json:"session"`             // native session id when known
-	Label    string    `json:"label,omitempty"`     // which session asks, for a request no binding serves: "claude · <cwd base>"
 	Tool     string    `json:"tool"`                // e.g. Bash, Edit, mcp__srv__tool, exec, apply_patch
 	Text     string    `json:"text"`                // the dialog body as Buzz shows it
 	Options  []Option  `json:"options"`             // empty for a free-text dialog without choices
@@ -86,11 +88,6 @@ type Resolved struct {
 	At      time.Time `json:"at"`
 }
 
-// MachineBinding is the dialogs directory of requests no binding serves: a
-// session that never ran /amq-remote still mirrors its dialogs, and the
-// machine agent posts them.
-const MachineBinding = "_machine"
-
 // maxFileBytes bounds every dialog file read.
 const maxFileBytes = 256 << 10
 
@@ -105,19 +102,28 @@ func NewID() string {
 	return "d-" + hex.EncodeToString(b[:])
 }
 
-// DirFor returns the dialogs directory of a binding, or of MachineBinding,
-// creating it and its requests/, answers/ and resolved/ subdirectories.
-func DirFor(bindingName string) (string, error) {
-	if bindingName != binding.LegacyName && bindingName != MachineBinding {
-		if err := binding.ValidName(bindingName); err != nil {
-			return "", err
-		}
-	}
+// Root is the directory that holds every binding's dialogs directory.
+func Root() (string, error) {
 	path, err := binding.Path()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(filepath.Dir(path), "dialogs", bindingName)
+	return filepath.Join(filepath.Dir(path), "dialogs"), nil
+}
+
+// DirFor returns the dialogs directory of a binding, creating it and its
+// requests/, answers/ and resolved/ subdirectories.
+func DirFor(bindingName string) (string, error) {
+	if bindingName != binding.LegacyName {
+		if err := binding.ValidName(bindingName); err != nil {
+			return "", err
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, bindingName)
 	for _, sub := range []string{"requests", "answers", "resolved"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return "", err
@@ -231,6 +237,78 @@ func FindBinding(root, handle, session string) (string, error) {
 		return b.Name, nil
 	}
 	return "", nil
+}
+
+// Session is what a seam knows of the session its dialog comes from.
+type Session struct {
+	Harness string // claude | codex
+	// Root is the AMQ root: the session's AM_ROOT, or "" for DefaultRoot,
+	// the root attach --self --native uses for a session that is not on AMQ.
+	Root string
+	// Handle is the session's AMQ handle (AM_ME); "" for a session that is
+	// not an AMQ participant.
+	Handle string
+	Native string // native session id: Claude's session_id, a Codex thread
+	Target string // the amq-remote endpoint target that runs the session; "" when none does
+	Cwd    string // the session's working directory; "" when not known
+	// Holder is the process that runs the session, which proves it live.
+	Holder    launch.HolderIdentity
+	AppServer binding.AppServerThread
+}
+
+// DefaultRoot is the AMQ root of a session that is not on AMQ,
+// <binding store dir>/root (~/.amq/remote/root), made private when missing.
+func DefaultRoot() (string, error) {
+	path, err := binding.Path()
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Join(filepath.Dir(path), "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+// BindingFor returns the name of the binding that serves s: the live one
+// FindBinding finds, else s's own dialogs binding, written now with the
+// label, identity and name attach --self gives the same session. The
+// machine agent makes the channel of that binding as for any session, so
+// the dialog shows in the session's own channel; a later attach of the
+// session has the same identity and takes the binding over, keeping its
+// name and channel. Concurrent seams of one session write one binding:
+// binding.WriteSession reuses the name the session already holds.
+func BindingFor(s Session) (string, error) {
+	if name, err := FindBinding(s.Root, s.Handle, s.Native); err != nil || name != "" {
+		return name, err
+	}
+	if s.Native == "" {
+		return "", errors.New("a dialog with no native session has no binding of its own")
+	}
+	root := s.Root
+	if root == "" {
+		var err error
+		if root, err = DefaultRoot(); err != nil {
+			return "", err
+		}
+	}
+	machine := binding.Machine()
+	place, base := s.Harness, s.Harness
+	if s.Cwd != "" {
+		place = filepath.Base(filepath.Clean(s.Cwd))
+		base = s.Harness + "-" + place
+	}
+	b := binding.Binding{Carrier: binding.CarrierDialogs, Root: root, Target: s.Target, NativeSession: s.Native,
+		Display: place, Harness: s.Harness, Holder: s.Holder, Label: binding.SessionLabel(s.Harness, place, machine),
+		Machine: machine, AppServer: s.AppServer}
+	switch {
+	case s.Handle != "" && s.Root != "":
+		b.Identity = binding.MailboxIdentity(s.Handle, s.Root)
+	case s.Cwd != "":
+		b.Identity = binding.NativeIdentity(s.Harness, root, s.Cwd)
+	}
+	name, _, err := binding.WriteSession(b, binding.SanitizeName(base), binding.Binding.Liveness)
+	return name, err
 }
 
 // ParseAnswer maps a Buzz reply to an answer: "N" picks option N;

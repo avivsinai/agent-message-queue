@@ -33,16 +33,22 @@ const maxBindingBytes = 64 * 1024
 // Handle and completes on its final reply; the handle is the identity, and
 // noticing the message is the handle owner's business (a wake, a built-in
 // consumer, monitor, or the next drain). A native binding submits into the
-// exact native session through amq-remote. The zero value is native.
+// exact native session through amq-remote. The zero value is native. A
+// dialogs binding carries only the session's harness dialogs: a seam writes
+// it for a session that has no binding, so its dialogs reach its own channel;
+// a prompt in that channel is refused, and an attach of the session replaces
+// it.
 const (
 	CarrierMailbox = "mailbox"
 	CarrierNative  = "native"
+	CarrierDialogs = "dialogs"
 )
 
 // Binding names what the Buzz agent drives: an AMQ handle, or one native
 // session.
 type Binding struct {
-	// Carrier is CarrierMailbox or CarrierNative (empty means native).
+	// Carrier is CarrierMailbox, CarrierNative or CarrierDialogs (empty
+	// means native).
 	Carrier string `json:"carrier,omitempty"`
 	// Root is the AMQ root: the handle's queue, or the root whose
 	// amq-remote endpoint owns Target.
@@ -92,6 +98,9 @@ const (
 // Mailbox reports whether b delivers through an AMQ handle.
 func (b Binding) Mailbox() bool { return b.Carrier == CarrierMailbox }
 
+// DialogsOnly reports whether b carries only the session's dialogs.
+func (b Binding) DialogsOnly() bool { return b.Carrier == CarrierDialogs }
+
 // Same reports whether two bindings name the same destination.
 func (b Binding) Same(o Binding) bool {
 	if b.Mailbox() != o.Mailbox() {
@@ -115,9 +124,14 @@ func (b Binding) SessionIdentity() string {
 	case b.Identity != "":
 		return b.Identity
 	case b.Mailbox():
-		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
+		return MailboxIdentity(b.Handle, b.Root)
 	}
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
+}
+
+// MailboxIdentity is the session identity of the AMQ handle handle in root.
+func MailboxIdentity(handle, root string) string {
+	return "mailbox:" + handle + "@" + canonicalRoot(root)
 }
 
 // NativeIdentity is the session identity of a native session: its harness,
@@ -205,6 +219,25 @@ func Machine() string {
 	return out
 }
 
+// maxLabel bounds a label to the longest Buzz agent display name.
+const maxLabel = 120
+
+// SessionLabel is the human name of a session and of its Buzz agent,
+// "<harness> · <place> @ <machine>", at most maxLabel characters. A long
+// place is cut, never the machine, which tells two machines' agents apart.
+func SessionLabel(harness, place, machine string) string {
+	head, tail := harness+" · ", ""
+	if machine != "" {
+		tail = " @ " + machine
+	}
+	room := max(maxLabel-len([]rune(head))-len([]rune(tail)), 0)
+	if r := []rune(place); len(r) > room {
+		place = string(r[:room])
+	}
+	label := []rune(head + place + tail)
+	return string(label[:min(len(label), maxLabel)])
+}
+
 // canonicalRoot is root with its symlinks resolved, so one root reached
 // through two spellings is one identity; the clean path when it does not
 // resolve.
@@ -231,6 +264,11 @@ func (b Binding) Valid() error {
 	case "", CarrierNative:
 		if b.Target == "" || b.NativeSession == "" {
 			return errors.New("native binding needs a target and a native session")
+		}
+		return nil
+	case CarrierDialogs:
+		if b.NativeSession == "" || b.Handle != "" {
+			return errors.New("dialogs binding needs a native session and no handle")
 		}
 		return nil
 	}

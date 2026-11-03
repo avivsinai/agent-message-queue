@@ -16,11 +16,15 @@ request with every option the agent offered.
 
 That is all a Claude desktop-app user needs. Every Claude Code session on the
 machine (terminal, desktop app Code tab, IDE) then mirrors its dialogs to
-Buzz, with no `/amq-remote`. A session no binding serves posts in the
-"Approvals @ <machine>" channel, which the machine agent creates when the
-first such dialog waits. A connected session posts in its own channel, or in
-its DM for a pinned agent. `amq-remote claude uninstall-approval-hook`
-removes the hook.
+Buzz, with no `/amq-remote`. Each session posts in its own channel, as a
+connected session does, or in its DM for a pinned agent. A session that was
+never connected gets its channel at its first dialog: the hook binds the
+session for dialogs only, and the machine agent makes the channel, named
+like the session (`claude · <project> @ <machine>`). That channel shows
+approvals only; a message that answers no dialog gets "This session shows
+approvals only. Run /amq-remote in it to chat from Buzz." `/amq-remote` in
+the session keeps the same channel and makes it a chat.
+`amq-remote claude uninstall-approval-hook` removes the hook.
 
 ## The Buzz message
 
@@ -32,8 +36,9 @@ $ go test ./...
 (Run tests)
 
 1. Allow once
-2. Allow this session (Bash(go test:*))
+2. Allow this session
 3. Deny
+
 React ✅ = 1, ❌ = Deny, or reply a number / yes / no.
 ```
 
@@ -71,12 +76,14 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 
 - **Claude Code:** the `PermissionRequest` hook shows every dialog of every
   session: "Allow once", "Allow this session" when Claude suggests a
-  session-wide rule, and "Deny". It waits up to 600 seconds and then leaves
+  session-wide rule or the tool edits files, and "Deny". "Allow this
+  session" applies Claude's own suggestion for this session only. It waits up to 600 seconds and then leaves
   the dialog to the terminal. A terminal answer closes the Buzz message.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
   `availableDecisions`; a user-input or elicitation request takes the
-  owner's typed answer. Codex runs `PermissionRequest` hooks before it draws
+  owner's typed answer. A thread no binding serves is bound for dialogs
+  only, held by the app-server daemon, and posts in its own channel. Codex runs `PermissionRequest` hooks before it draws
   the TUI prompt, so AMQ installs no Codex hook, and a plain `codex` TUI
   session answers its approvals in the terminal.
 - **pi:** pi has no extension API that answers a prompt from outside. In a
@@ -89,16 +96,22 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 
 - Buzz shows commands as they are. The relay can read every dialog, so a
   command that holds a secret is visible to it.
-- In the machine channel, a typed answer may need an @mention of the agent
-  before Buzz delivers it to the agent. Reactions always work.
-- After `/clear`, the dialogs of a `--native` session go to the machine
-  channel.
+- In a channel the machine agent made, a typed answer may need an @mention
+  of the agent before Buzz delivers it to the agent. Reactions always work.
+- After `/clear`, a `--native` Claude session is bound for dialogs only: its
+  dialogs still show in its channel, and the channel takes approvals only
+  until `/amq-remote` runs in it again.
+- A Codex thread's dialogs binding ends with its app-server daemon, not with
+  the thread.
 
 ## Mechanism
 
 Each seam writes a request file under
-`~/.amq/remote/dialogs/<binding>/requests/`, or under `_machine/` when no
-binding serves the session. The Buzz agent (`amq-acp`) posts it and turns
+`~/.amq/remote/dialogs/<binding>/requests/`. A seam whose session no
+binding serves first writes the session's own binding with carrier
+`dialogs`, under the name, label and identity `amq-remote attach --self`
+gives that session, and the process that runs the session as its holder.
+The Buzz agent (`amq-acp`) posts it and turns
 the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides
 how the dialog ended. See [the compatibility manifest](remote-compat.md) for

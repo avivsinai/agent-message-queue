@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
@@ -101,7 +102,7 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	// The owner answers 2 in Buzz: allow, with the suggestion kept to this session.
 	wait := runHook(t, string(stdin))
 	req := openRequest(t, dir)
-	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || !strings.HasPrefix(req.Options[1].Label, "Allow this session") || !req.Options[2].Deny {
+	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || req.Options[1].Label != "Allow this session" || !req.Options[2].Deny {
 		t.Fatalf("request = %+v", req)
 	}
 	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 2, By: dialog.ByBuzz}); err != nil {
@@ -133,29 +134,51 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	}
 }
 
-// A Claude session with no AM_* (the desktop app, an IDE) reaches its own
-// channel when a native binding names its session id, and the machine's
-// dialogs otherwise, labelled with its working directory.
-func TestPermissionHookRoutesUnboundSessionsToTheMachine(t *testing.T) {
+// A Claude session no binding serves (the desktop app, an IDE, a terminal
+// session never connected) writes its own dialogs binding, as attach --self
+// --native names that session, once for two dialogs at a time, and opens
+// each dialog in that binding's directory.
+func TestPermissionHookWritesTheSessionsOwnBinding(t *testing.T) {
 	boundHookEnv(t)
 	t.Setenv("AM_ROOT", "")
 	t.Setenv("AM_ME", "")
-	if err := binding.WriteNamed(binding.Binding{Name: "native", Root: t.TempDir(), Target: "claude:native", NativeSession: "s-native", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
+	saved := claudeProcess
+	t.Cleanup(func() { claudeProcess = saved })
+	claudeProcess = os.Getpid
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	stdin := `{"session_id":"s-desktop","cwd":"/work/myproj","tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"summarize"}}`
+	waits := []func() string{runHook(t, stdin), runHook(t, stdin)}
+	dir, err := dialog.DirFor("claude-myproj")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for session, want := range map[string]string{"s-native": "native", "s-desktop": dialog.MachineBinding} {
-		dir, err := dialog.DirFor(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wait := runHook(t, `{"session_id":"`+session+`","cwd":"/work/myproj","tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"summarize"}}`)
-		req := openRequest(t, dir)
-		if req.Session != session || req.Label != "claude · myproj" || req.Text != "https://example.com\nsummarize" {
-			t.Fatalf("%s request in %s = %+v", session, want, req)
-		}
+	var open []dialog.Request
+	for deadline := time.Now().Add(3 * time.Second); len(open) < 2 && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		open, _ = dialog.Requests(dir)
+	}
+	if len(open) != 2 || open[0].Session != "s-desktop" || open[0].Text != "https://example.com\nsummarize" {
+		t.Fatalf("requests = %+v; want both dialogs in the session's own directory", open)
+	}
+	all, err := binding.List()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("bindings = %+v, %v; want the mailbox binding and one dialogs binding", all, err)
+	}
+	b, err := binding.ReadNamed("claude-myproj")
+	path, _ := binding.Path()
+	root := filepath.Join(filepath.Dir(path), "root")
+	if err != nil || !b.DialogsOnly() || b.NativeSession != "s-desktop" || b.Harness != "claude" || b.Holder != holder || b.Root != root ||
+		b.Label != binding.SessionLabel("claude", "myproj", binding.Machine()) || b.Identity != binding.NativeIdentity("claude", root, "/work/myproj") {
+		t.Fatalf("binding = %+v, %v", b, err)
+	}
+	for _, req := range open {
 		if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: len(req.Options), By: dialog.ByBuzz}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, wait := range waits {
 		if d := decisionOf(t, wait()); d["behavior"] != "deny" || d["message"] != "Denied from Buzz" {
 			t.Fatalf("decision = %v, want deny", d)
 		}

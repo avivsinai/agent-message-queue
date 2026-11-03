@@ -8,13 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -93,7 +94,10 @@ type Attachment struct {
 	targetID string
 	epoch    string
 	cwd      string
-	now      func() time.Time
+	// socket is the app-server daemon socket; root is the AMQ root of the
+	// endpoint that runs this attachment ("" when not known).
+	socket, root string
+	now          func() time.Time
 	// codexHome is the daemon's Codex home that the thread's rollout path
 	// proves, or "" when thread/resume did not report one.
 	codexHome string
@@ -238,6 +242,12 @@ func WithTarget(targetID string) Option {
 	}
 }
 
+// WithRoot names the AMQ root of the endpoint that runs the attachment: the
+// root of the thread's own dialogs binding when no binding serves it.
+func WithRoot(root string) Option {
+	return func(a *Attachment) { a.root = root }
+}
+
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
@@ -256,6 +266,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	a := &Attachment{
 		threadID:          threadID,
 		targetID:          TargetID(threadID),
+		socket:            socketPath,
 		epoch:             fmt.Sprintf("cx-%d", time.Now().UnixNano()),
 		status:            "unknown",
 		runs:              map[requests.Key]*run{},
@@ -1432,10 +1443,10 @@ func (a *Attachment) endDialogs(turnID string) {
 // dialogPoll is how often a waiting dialog looks for the owner's answer.
 const dialogPoll = 250 * time.Millisecond
 
-// awaitDialog opens d for the binding that serves this thread, or for the
-// machine agent when none does, waits for the owner's answer or for the
-// request to end elsewhere, and answers the app-server with the owner's
-// choice. The first resolution written wins.
+// awaitDialog opens d for the binding that serves this thread, writing the
+// thread's own dialogs binding when none does, waits for the owner's answer
+// or for the request to end elsewhere, and answers the app-server with the
+// owner's choice. The first resolution written wins.
 func (a *Attachment) awaitDialog(key string, d *openDialog) {
 	defer a.dialogWG.Done()
 	defer func() {
@@ -1445,16 +1456,9 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		}
 		a.mu.Unlock()
 	}()
-	name, err := dialog.FindBinding("", "", a.threadID)
+	name, err := dialog.BindingFor(a.dialogSession())
 	if err != nil {
 		return
-	}
-	if name == "" {
-		// No binding serves the thread: the machine agent posts it.
-		a.mu.Lock()
-		cwd := a.cwd
-		a.mu.Unlock()
-		name, d.req.Label = dialog.MachineBinding, "codex · "+filepath.Base(cmp.Or(cwd, "."))
 	}
 	dir, err := dialog.DirFor(name)
 	if err != nil {
@@ -1510,6 +1514,23 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		_, _ = dialog.Resolve(dir, r)
 		return
 	}
+}
+
+// dialogSession is this thread as attach --self --native records it. The
+// thread runs in the app-server daemon, so the daemon process is its holder
+// and the thread is recorded with it.
+func (a *Attachment) dialogSession() dialog.Session {
+	a.mu.Lock()
+	cwd := a.cwd
+	a.mu.Unlock()
+	s := dialog.Session{Harness: "codex", Root: a.root, Native: a.threadID, Target: a.targetID, Cwd: cwd}
+	if pid, err := DaemonPID(a.socket); err == nil {
+		if holder, err := launch.HolderOf(pid); err == nil {
+			s.Holder = holder
+			s.AppServer = binding.AppServerThread{Socket: a.socket, Thread: a.threadID, Daemon: holder}
+		}
+	}
+	return s
 }
 
 // maxDialogText bounds the text of one dialog; the terminal shows the rest.

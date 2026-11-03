@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
@@ -61,7 +62,7 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	now := time.Now()
 	s.dialogTick(now) // posts
 	s.dialogTick(now) // reads the ✅
-	want := dm + ": Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
+	want := dm + ": Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\n\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
 	if len(posts) != 1 || posts[0] != want {
 		t.Fatalf("posts = %q; want the dialog once", posts)
 	}
@@ -104,10 +105,11 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	}
 }
 
-// A dialog of a session never connected to Buzz makes the machine agent
-// create its approvals channel once, add the owner, and post the dialog
-// there under the session's own label.
-func TestUnboundDialogReachesTheApprovalsChannel(t *testing.T) {
+// A dialog of a session never connected to Buzz writes the session's own
+// dialogs binding; the machine agent makes that session's channel, posts the
+// dialog there under the session's label, and answers a chat prompt in it
+// with approvals only.
+func TestDialogsBindingGetsTheSessionsOwnChannel(t *testing.T) {
 	s, calls := machineServer(t)
 	calls.reply = func(args []string) ([]byte, error) {
 		if strings.Join(args[:2], " ") == "channels create" {
@@ -122,25 +124,34 @@ func TestUnboundDialogReachesTheApprovalsChannel(t *testing.T) {
 		posts = append(posts, channel+": "+content)
 		return strings.Repeat("f", 64), nil
 	}
-	dir, err := dialog.DirFor(dialog.MachineBinding)
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	name, err := dialog.BindingFor(dialog.Session{Harness: "claude", Native: "s-1", Cwd: "/work/proj", Holder: holder})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ make", Label: "claude · proj",
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ make",
 		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}, OpenedAt: time.Now(), PID: os.Getpid()}
 	if err := dialog.Open(dir, req); err != nil {
 		t.Fatal(err)
 	}
 	tick(s, time.Now())
 	s.dialogTick(time.Now())
-	if r := channelState(t, s, dialog.MachineBinding); r.State != channelActive || r.ChannelID != machineChanB || !strings.HasPrefix(r.Label, "Approvals") {
-		t.Fatalf("approvals record = %+v", r)
+	if r := channelState(t, s, name); r.State != channelActive || r.ChannelID != machineChanB {
+		t.Fatalf("record of %s = %+v", name, r)
 	}
-	if calls.count("channels create") != 1 || calls.count("channels add-member --channel "+machineChanB+" --pubkey "+buzzOwner) != 1 {
-		t.Fatalf("calls = %q; want one create and the owner added", calls.list())
+	label := binding.SessionLabel("claude", "proj", binding.Machine())
+	if len(posts) != 1 || !strings.HasPrefix(posts[0], machineChanB+": "+label+" wants to run Bash:\n$ make") {
+		t.Fatalf("posts = %q; want the dialog in the session's channel once", posts)
 	}
-	if len(posts) != 1 || !strings.HasPrefix(posts[0], machineChanB+": claude · proj wants to run Bash:\n$ make") {
-		t.Fatalf("posts = %q; want the dialog in the approvals channel once", posts)
+	if said := channelPrompt(t, s, machineChanB); said != "This session shows approvals only. Run /amq-remote in it to chat from Buzz." {
+		t.Fatalf("a chat prompt said %q", said)
 	}
 }
 

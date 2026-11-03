@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,7 +11,8 @@ import (
 )
 
 // dialogHarness is an attachment on a fake app-server whose binding store is
-// a temp dir; bound names the binding that serves thread t1, or "" for none.
+// a temp dir; bound names the binding that serves thread t1, or "" for none,
+// when the thread writes its own dialogs binding, codex-work.
 type dialogHarness struct {
 	t   *testing.T
 	att *Attachment
@@ -25,7 +27,7 @@ func newDialogHarness(t *testing.T, bound string) *dialogHarness {
 		t.Fatal(err)
 	}
 	t.Setenv(binding.EnvPath, filepath.Join(base, "remote", "binding.json"))
-	name := dialog.MachineBinding
+	name := "codex-work"
 	if bound != "" {
 		if err := binding.WriteNamed(binding.Binding{Name: bound, Root: base, Target: "codex:t1", NativeSession: "t1"}); err != nil {
 			t.Fatal(err)
@@ -127,13 +129,18 @@ func TestTUIRequestsOpenDialogsAndReplyWithTheAnswer(t *testing.T) {
 	}
 }
 
-// A thread no binding serves still mirrors its dialogs, to the machine
-// agent, named by the session's project.
-func TestUnboundThreadOpensMachineDialog(t *testing.T) {
+// A thread no binding serves writes its own dialogs binding, held by the
+// app-server daemon, and opens its dialog there.
+func TestUnboundThreadOpensDialogInItsOwnBinding(t *testing.T) {
 	h := newDialogHarness(t, "")
 	h.srv.sendServerRequest(t, "7", methodCommandApproval, `{"threadId":"t1","turnId":"tui-1","itemId":"c1","command":"ls"}`)
-	if req := h.opened(""); req.Label != "codex · work" || req.Text != "$ ls" {
-		t.Fatalf("dialog = %+v, want the machine dialog of codex · work", req)
+	if req := h.opened(""); req.Text != "$ ls" {
+		t.Fatalf("dialog = %+v, want the command", req)
+	}
+	b, err := binding.ReadNamed("codex-work")
+	if err != nil || !b.DialogsOnly() || b.NativeSession != "t1" || b.Target != "codex:t1" || b.Holder.PID != os.Getpid() ||
+		b.AppServer.Thread != "t1" || b.Label != binding.SessionLabel("codex", "work", binding.Machine()) {
+		t.Fatalf("binding = %+v, %v; want the thread's own dialogs binding", b, err)
 	}
 }
 

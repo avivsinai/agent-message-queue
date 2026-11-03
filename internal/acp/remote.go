@@ -137,7 +137,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			case errors.Is(err, errChannelNotConnected):
 				text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
 			case errors.Is(err, errApprovalsOnly):
-				text = "This channel shows approvals only. React ✅ or ❌ on one, or reply with an option's number."
+				text = "This session shows approvals only. Run /amq-remote in it to chat from Buzz."
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
@@ -334,8 +334,16 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 // refuses. An unpinned agent with several bindings never guesses, and the
 // helper never delivers: both answer with the bound sessions instead. A
 // machine agent resolves only through its channel route (machineBinding),
-// before any of these.
+// before any of these. A dialogs binding takes no prompt: errApprovalsOnly.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
+	b, err := s.promptBinding(sessionID)
+	if err == nil && b.DialogsOnly() {
+		return binding.Binding{}, errApprovalsOnly
+	}
+	return b, err
+}
+
+func (s *Server) promptBinding(sessionID string) (binding.Binding, error) {
 	if s.cfg.PinErr != nil {
 		return binding.Binding{}, s.cfg.PinErr
 	}

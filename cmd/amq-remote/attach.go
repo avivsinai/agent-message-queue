@@ -171,7 +171,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	machine := binding.Machine()
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
+		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
@@ -307,7 +307,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
+		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
 		AppServer: h.AppServer}
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
@@ -371,7 +371,7 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 }
 
 // writeBinding adds the named binding, removes any other binding for the
-// same session, so one session is one Buzz agent, and returns the name
+// same session (its dialogs binding too), so one session is one Buzz agent, and returns the name
 // written and whether this session already held that name. A defaulted name
 // never replaces another session's binding; an explicit --name is the
 // caller's choice and replaces. A defaulted name is the
@@ -399,8 +399,19 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 	if err != nil {
 		return "", false, err
 	}
-	_, err = binding.Retire(binding.RemovedMoved, func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
+	_, err = binding.Retire(binding.RemovedMoved, func(o binding.Binding) bool { return o.Name != b.Name && (o.Same(b) || dialogsOf(o, b)) })
 	return b.Name, reused, err
+}
+
+// dialogsOf reports whether o is the dialogs binding of b's session, which
+// a seam wrote before the session attached under another identity: it names
+// b's native session or Codex thread, or b's harness process holds it.
+func dialogsOf(o, b binding.Binding) bool {
+	if !o.DialogsOnly() {
+		return false
+	}
+	native := o.NativeSession != "" && (o.NativeSession == b.NativeSession || o.NativeSession == b.AppServer.Thread)
+	return native || b.Holder.PID > 0 && o.Holder == b.Holder
 }
 
 // heldBySession reports whether b's session already held the name b.Name,
@@ -449,25 +460,6 @@ func amqPlace(root string) (project, session string) {
 		session = filepath.Base(dir)
 	}
 	return filepath.Base(root), ""
-}
-
-// maxLabel bounds a label to the longest Buzz agent display name.
-const maxLabel = 120
-
-// sessionLabel is the human name of a session and of its Buzz agent,
-// "<harness> · <place> @ <machine>", at most maxLabel characters. A long
-// place is cut, never the machine, which tells two machines' agents apart.
-func sessionLabel(harness, place, machine string) string {
-	head, tail := harness+" · ", ""
-	if machine != "" {
-		tail = " @ " + machine
-	}
-	room := max(maxLabel-len([]rune(head))-len([]rune(tail)), 0)
-	if r := []rune(place); len(r) > room {
-		place = string(r[:room])
-	}
-	label := []rune(head + place + tail)
-	return string(label[:min(len(label), maxLabel)])
 }
 
 // harnessSession is what attach knows of the harness a session runs in.
@@ -920,7 +912,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if *self && c.root == "" {
 		if all, err := binding.List(); err == nil {
 			for _, b := range all {
-				if !b.Mailbox() {
+				if !b.Mailbox() && !b.DialogsOnly() {
 					c.root = b.Root
 					break
 				}

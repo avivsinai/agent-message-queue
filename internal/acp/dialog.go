@@ -217,8 +217,7 @@ func (s *Server) dialogStopped() bool {
 }
 
 // dialogTargets are the bindings this worker posts dialogs for: a machine
-// agent's live channels and its approvals channel, or a pinned agent's live
-// binding and its latest DM.
+// agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
 	if buzzSelf == "" {
 		return nil
@@ -230,10 +229,6 @@ func (s *Server) dialogTargets() []dialogTarget {
 		var out []dialogTarget
 		for _, r := range s.activeRecords() {
 			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
-				continue
-			}
-			if r.Name == dialog.MachineBinding {
-				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID})
 				continue
 			}
 			if b, err := binding.ReadNamed(r.Name); err == nil && b.SessionIdentity() == r.Identity && live(b) {
@@ -274,19 +269,17 @@ func live(b binding.Binding) bool {
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
 // ended, edits their posts, and removes the binding's dialogs once their
 // seams left (seamsLeft). A machine
-// agent does this for every binding, a pinned agent for its own; the
-// machine's own dialogs belong to no binding and are never removed.
+// agent does this for every binding, a pinned agent for its own.
 func (s *Server) dropGoneDialogs(now time.Time) {
-	base, err := dialog.DirFor(dialog.MachineBinding)
+	root, err := dialog.Root()
 	if err != nil {
 		return
 	}
-	root := filepath.Dir(base)
 	var names []string
 	if s.cfg.Machine {
 		entries, _ := os.ReadDir(root)
 		for _, e := range entries {
-			if e.IsDir() && e.Name() != dialog.MachineBinding {
+			if e.IsDir() {
 				names = append(names, e.Name())
 			}
 		}
@@ -300,7 +293,9 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		}
 		b, err := binding.ReadNamed(name)
 		switch {
-		case errors.Is(err, binding.ErrNone):
+		// A name no binding can have (an older machine's approvals
+		// dialogs) is gone too.
+		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
 		case err == nil && !live(b):
 		default:
 			continue
@@ -438,10 +433,7 @@ func reactionOption(req dialog.Request, rs []reaction) int {
 // other failure leaves the outcome unknown, and the dialog is not posted
 // again.
 func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
-	label := req.Label
-	if label == "" {
-		label = t.label
-	}
+	label := t.label
 	if label == "" {
 		label = "A session"
 	}
@@ -560,7 +552,9 @@ func dialogText(label string, req dialog.Request) string {
 	if len(how) == 0 {
 		how = append(how, "Answer in the terminal")
 	}
-	b.WriteString(strings.Join(how, ", ") + ".")
+	// A blank line ends the option list, so Buzz shows the hint as its own
+	// paragraph, not as part of the last option.
+	b.WriteString("\n" + strings.Join(how, ", ") + ".")
 	return b.String()
 }
 

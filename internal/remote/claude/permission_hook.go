@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -98,14 +99,9 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.HookEventName != "" && in.HookEventName != permissionHookType {
 		return 0
 	}
-	// A session no binding serves still mirrors its dialogs, to the
-	// machine's directory.
-	name, err := dialog.FindBinding(os.Getenv("AM_ROOT"), os.Getenv("AM_ME"), in.SessionID)
+	name, err := dialog.BindingFor(hookSession(in))
 	if err != nil {
 		return 0
-	}
-	if name == "" {
-		name = dialog.MachineBinding
 	}
 	dir, err := dialog.DirFor(name)
 	if err != nil {
@@ -115,7 +111,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	opened := h.now()
 	req := dialog.Request{
 		ID: dialog.NewID(), Harness: harnessClaude, Session: in.SessionID, Tool: in.ToolName,
-		Label: sessionLabel(in.Cwd), Text: dialogText(in.ToolName, in.ToolInput), Options: options,
+		Text: dialogText(in.ToolName, in.ToolInput), Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
 	// Claude signals no terminal approve: the call's tool_result in the
@@ -166,18 +162,35 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 }
 
-// sessionLabel says which session asks: "claude · <cwd base>".
-func sessionLabel(cwd string) string {
-	if base := filepath.Base(filepath.Clean(cwd)); cwd != "" && base != string(filepath.Separator) {
-		return harnessClaude + " · " + base
+// claudeProcess is the Claude Code process that runs the hook: the
+// installed command execs amq-remote from the shell Claude starts, so it is
+// the hook's parent. A variable so tests can name another process.
+var claudeProcess = os.Getppid
+
+// hookSession is the session the dialog comes from, as attach --self
+// --native records it: the Claude process is its holder, and that process's
+// session registry entry gives the working directory when it names this
+// session, else the hook's cwd.
+func hookSession(in permissionInput) dialog.Session {
+	s := dialog.Session{Harness: harnessClaude, Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Native: in.SessionID, Cwd: in.Cwd}
+	if s.Root == "" {
+		s.Handle = ""
 	}
-	return harnessClaude
+	pid := claudeProcess()
+	if holder, err := launch.HolderOf(pid); err == nil {
+		s.Holder = holder
+	}
+	if reg, err := SessionForPID(pid); err == nil && reg.ID == in.SessionID && reg.Cwd != "" {
+		s.Cwd = reg.Cwd
+	}
+	return s
 }
 
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
 // permission updates "Allow this session" applies. Claude offers it when
 // the dialog suggests updates (each echoed with destination session), and
-// for an edit tool without suggestions (accept edits for the session).
+// for an edit tool without suggestions (accept edits for the session). The
+// label never names the updates: they can hold paths and modes.
 func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow}}
 	var rules []json.RawMessage
@@ -186,15 +199,11 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 			rules = append(rules, r)
 		}
 	}
-	label := ""
-	if len(rules) > 0 {
-		label = "Allow this session (" + suggestionSummary(rules) + ")"
-	} else if editTool(in.ToolName) {
+	if len(rules) == 0 && editTool(in.ToolName) {
 		rules = []json.RawMessage{json.RawMessage(`{"type":"setMode","mode":"acceptEdits","destination":"session"}`)}
-		label = "Allow all edits this session"
 	}
-	if label != "" {
-		opts = append(opts, dialog.Option{N: 2, Label: label, Value: valueAllowSession})
+	if len(rules) > 0 {
+		opts = append(opts, dialog.Option{N: 2, Label: "Allow this session", Value: valueAllowSession})
 	}
 	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true}), rules
 }
@@ -217,41 +226,6 @@ func sessionScoped(raw json.RawMessage) (json.RawMessage, bool) {
 	m["destination"] = json.RawMessage(`"session"`)
 	out, err := json.Marshal(m)
 	return out, err == nil
-}
-
-// suggestionSummary names what the session updates allow, for the option
-// label: "Bash(rm -rf node_modules)", "mode acceptEdits", a directory.
-func suggestionSummary(rules []json.RawMessage) string {
-	var parts []string
-	for _, raw := range rules {
-		var r struct {
-			Type  string `json:"type"`
-			Mode  string `json:"mode"`
-			Rules []struct {
-				ToolName    string `json:"toolName"`
-				RuleContent string `json:"ruleContent"`
-			} `json:"rules"`
-			Directories []string `json:"directories"`
-		}
-		if json.Unmarshal(raw, &r) != nil {
-			continue
-		}
-		switch r.Type {
-		case "setMode":
-			parts = append(parts, "mode "+r.Mode)
-		case "addDirectories", "removeDirectories":
-			parts = append(parts, strings.Join(r.Directories, ", "))
-		default:
-			for _, rule := range r.Rules {
-				if rule.RuleContent == "" {
-					parts = append(parts, rule.ToolName)
-				} else {
-					parts = append(parts, rule.ToolName+"("+rule.RuleContent+")")
-				}
-			}
-		}
-	}
-	return truncateRunes(strings.Join(parts, "; "), 200)
 }
 
 func chosen(options []dialog.Option, n int) (dialog.Option, bool) {

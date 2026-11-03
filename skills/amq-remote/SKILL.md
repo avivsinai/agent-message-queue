@@ -99,7 +99,9 @@ command's own message. Do not work around a refusal.
    read its `failing` list; the exit code is not the signal. When a
    `native_capability` entry says the PermissionRequest hook is not
    installed, tell the user: "This adds one approval hook so Buzz shows every
-   approval dialog of this session; ✅ allows, ❌ denies, first answer wins.
+   approval dialog of each Claude Code session on this machine in that
+   session's own channel, connected or not; ✅ allows, ❌ denies, first answer
+   wins.
    `amq-remote claude uninstall-approval-hook` removes it." Ask once, then run
    `amq-remote claude install-approval-hook`. Codex needs no hook: its
    approvals reach Buzz only for a session on the Codex app-server (the
@@ -111,7 +113,7 @@ command's own message. Do not work around a refusal.
    - `--native`: "A message sent while this session is busy waits. Buzz Stop
      cannot interrupt a Claude turn."
    - Claude with the hook installed: "Every approval dialog of this session
-     shows in Buzz with its options. ✅ or ❌, or a reply with the option
+     shows in its Buzz channel with its options. ✅ or ❌, or a reply with the option
      number, answers it. The first answer, in Buzz or in the terminal,
      wins."
    - Codex on the app-server: the same line. A plain `codex` TUI session:
