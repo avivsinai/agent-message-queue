@@ -216,10 +216,8 @@ func (s *Server) dialogStopped() bool {
 	}
 }
 
-// dialogTargets are the bindings and session records this worker posts
-// dialogs for: a machine agent's live channels, with the session records
-// handed to a binding in that binding's channel, or a pinned agent's live
-// binding and its latest DM.
+// dialogTargets are the bindings this worker posts dialogs for: a machine
+// agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
 	if buzzSelf == "" {
 		return nil
@@ -233,17 +231,8 @@ func (s *Server) dialogTargets() []dialogTarget {
 			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
 				continue
 			}
-			if dialog.IsSessionName(r.Name) {
-				if rec, ok, _ := dialog.ReadSession(r.Name); ok && sessionIdentity(rec) == r.Identity {
-					out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: rec.Label})
-				}
-				continue
-			}
 			if b, err := binding.ReadNamed(r.Name); err == nil && b.SessionIdentity() == r.Identity && live(b) {
 				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b)})
-				for _, name := range handedDialogs(r.Name) {
-					out = append(out, dialogTarget{name: name, channel: r.ChannelID, label: sessionAgentName(b)})
-				}
 			}
 		}
 		return out
@@ -278,11 +267,9 @@ func live(b binding.Binding) bool {
 }
 
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
-// ended, and of each session record that is gone, edits their posts, and
-// removes their dialogs once their seams left (seamsLeft). The dialogs of a
-// session record handed to a live binding stay open; its directory goes
-// once they are resolved and their seams left. A machine agent does this
-// for every directory, a pinned agent for its own binding's.
+// ended, edits their posts, and removes the binding's dialogs once their
+// seams left (seamsLeft). A machine
+// agent does this for every binding, a pinned agent for its own.
 func (s *Server) dropGoneDialogs(now time.Time) {
 	root, err := dialog.Root()
 	if err != nil {
@@ -304,54 +291,24 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		if _, err := os.Lstat(dir); err != nil {
 			continue
 		}
-		gone, handed := dialogsFate(name)
-		if !gone && !handed {
+		b, err := binding.ReadNamed(name)
+		switch {
+		// A name no binding can have serves nothing.
+		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
+		case err == nil && !live(b):
+		default:
 			continue
 		}
-		if gone {
-			reqs, _ := dialog.Requests(dir)
-			for _, req := range reqs {
-				_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
-			}
-			s.dialogClose(name, dir, nil)
+		reqs, _ := dialog.Requests(dir)
+		for _, req := range reqs {
+			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
 		}
+		s.dialogClose(name, dir, nil)
 		if seamsLeft(dir, now) {
-			if dialog.IsSessionName(name) {
-				if removed, _ := dialog.RemoveSessionDir(name); !removed {
-					continue
-				}
-			} else {
-				_ = os.RemoveAll(dir)
-			}
+			_ = os.RemoveAll(dir)
 			_ = os.RemoveAll(s.dialogPostDir(name))
 		}
 	}
-}
-
-// dialogsFate is what serves the dialogs directory name: gone when nothing
-// does (no session record, or a binding that is gone or ended), handed when
-// it is a session record handed to a binding that still serves. Every name
-// that is neither a binding name nor a session record name is gone.
-func dialogsFate(name string) (gone, handed bool) {
-	if dialog.IsSessionName(name) {
-		rec, ok, err := dialog.ReadSession(name)
-		switch {
-		case err != nil:
-			return binding.ValidName(strings.TrimPrefix(name, "~")) != nil, false
-		case !ok:
-			return true, false
-		case rec.Binding == "":
-			return false, false
-		}
-		name = rec.Binding
-		b, err := binding.ReadNamed(name)
-		if errors.Is(err, binding.ErrNone) || err == nil && !live(b) {
-			return true, false
-		}
-		return false, err == nil
-	}
-	b, err := binding.ReadNamed(name)
-	return errors.Is(err, binding.ErrNone) || binding.ValidName(name) != nil || err == nil && !live(b), false
 }
 
 // seamGrace is how long a resolved dialog's directory stays while its seam
@@ -679,46 +636,34 @@ func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, boo
 	if buzzOwner == "" || eventSender(prompt) != buzzOwner {
 		return "", dialog.Answer{}, false
 	}
-	// The channel's own dialogs, and those of the session records handed
-	// to its binding, which still post there.
-	names := []string{name}
-	if s.cfg.Machine {
-		names = append(names, handedDialogs(name)...)
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		return "", dialog.Answer{}, false
+	}
+	reqs, err := dialog.Requests(dir)
+	if err != nil {
+		return "", dialog.Answer{}, false
 	}
 	refs := threadRefs(prompt)
-	type openDialog struct {
-		dir string
-		req dialog.Request
-	}
-	var here []openDialog
-	for _, n := range names {
-		dir, err := dialog.DirFor(n)
-		if err != nil {
+	var here []dialog.Request
+	for _, req := range reqs {
+		p, found := readDialogPost(filepath.Join(s.dialogPostDir(name), req.ID+".json"))
+		if !found || p.Channel != channel {
 			continue
 		}
-		reqs, err := dialog.Requests(dir)
-		if err != nil {
-			continue
+		if p.Event != "" && slices.Contains(refs, p.Event) {
+			here = []dialog.Request{req}
+			break
 		}
-		for _, req := range reqs {
-			p, found := readDialogPost(filepath.Join(s.dialogPostDir(n), req.ID+".json"))
-			if !found || p.Channel != channel {
-				continue
-			}
-			if p.Event != "" && slices.Contains(refs, p.Event) {
-				a, ok := dialog.ParseAnswer(req, ownerWords(prompt))
-				return dir, a, ok
-			}
-			if len(refs) == 0 {
-				here = append(here, openDialog{dir, req})
-			}
+		if len(refs) == 0 {
+			here = append(here, req)
 		}
 	}
 	if len(here) != 1 {
 		return "", dialog.Answer{}, false
 	}
-	a, ok := dialog.ParseAnswer(here[0].req, ownerWords(prompt))
-	return here[0].dir, a, ok
+	a, ok := dialog.ParseAnswer(here[0], ownerWords(prompt))
+	return dir, a, ok
 }
 
 // answerDialog writes a typed answer, tells the owner it was taken, and ends

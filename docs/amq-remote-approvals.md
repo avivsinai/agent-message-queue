@@ -18,13 +18,15 @@ That is all a Claude desktop-app user needs. Every Claude Code session on the
 machine (terminal, desktop app Code tab, IDE) then mirrors its dialogs to
 Buzz, with no `/amq-remote`. Each session posts in its own channel, as a
 connected session does, or in its DM for a pinned agent. A session that was
-never connected gets its channel at its first dialog: the hook records the
-session, and the machine agent makes the channel, named like the session
-(`claude · <project> @ <machine>`), while the session's Claude process runs.
-That channel shows approvals only; a message that answers no dialog gets
-"This session shows approvals only. Run /amq-remote in it to chat from
-Buzz." `/amq-remote` in the session keeps the same channel and makes it a
-chat. The channel is archived when the Claude process exits.
+never connected gets its channel at its first dialog: the hook binds the
+session as `/amq-remote` does, and the machine agent makes its channel,
+named like the session, and archives it when the session ends. An AMQ
+session (`AM_ROOT` and `AM_ME` set) gets its mailbox binding, so a message in
+the channel reaches its AMQ inbox. Any other session (the desktop app, a
+plain terminal) gets the native binding of `attach --self --native`, named
+`claude · <project> @ <machine>`; a message there is not submitted until
+`/amq-remote --native` runs in the session. A later `/amq-remote` keeps the
+same binding and channel.
 `amq-remote claude uninstall-approval-hook` removes the hook.
 
 ## The Buzz message
@@ -82,10 +84,9 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
   each path as Claude gives it with the home directory written `~`: "Allow
   this session: Bash(rm -rf ~/other/node_modules)", "Allow edits in ~/proj
   this session", "Stop allowing edits in ~/proj this session", or "Accept
-  edits this session". A session keeps its channel when its session id
-  changes (`/clear`): the hook finds the binding whose holder is a process
-  it runs under, matched by pid, start time and boot. It waits up to 600 seconds and then
-  leaves the dialog to the terminal. A terminal answer closes the Buzz message.
+  edits this session". After `/clear` the same Claude process binds again
+  with its new session id, so the session keeps its binding and channel. It
+  waits up to 600 seconds and then leaves the dialog to the terminal. A terminal answer closes the Buzz message.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
   `availableDecisions`; a user-input or elicitation request takes the
@@ -111,17 +112,14 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 ## Mechanism
 
 Each seam writes a request file under
-`~/.amq/remote/dialogs/<binding>/requests/`. The Claude hook whose session
-no binding serves writes it under `dialogs/~<harness>-<project>/` instead,
-beside `session.json`, the session record: harness, session id, label, and
-its holder, the nearest process above the hook that is not a shell (with
-none, the terminal decides). The machine agent gives each record whose
-process runs a channel, and retires it and drops the record when the
-process is gone. Once the session attaches, the binding whose holder is that
-process takes the channel: it gets the binding's label and the message "This
-channel now reaches <label>; chat from Buzz works.", and the record's open
-dialogs are still answered there until they resolve. The Buzz
-agent (`amq-acp`) posts it and turns
+`~/.amq/remote/dialogs/<binding>/requests/`. When no binding serves a
+Claude session, the hook first writes the session's binding as `amq-remote
+attach --self` does: the mailbox binding of `AM_ME` in `AM_ROOT` for an AMQ
+session; else the native binding in the machine root `~/.amq/remote/root`,
+with target `claude:<pid>`, the session's label and identity, and the Claude
+process as its holder. That process is the hook's nearest ancestor whose Claude session registry entry
+names the session, else the nearest that is `claude` or has an entry; with
+none, the terminal decides. The Buzz agent (`amq-acp`) posts it and turns
 the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides
 how the dialog ended. See [the compatibility manifest](remote-compat.md) for

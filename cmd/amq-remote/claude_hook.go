@@ -109,5 +109,12 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 		<-sigs
 		close(done)
 	}()
-	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second)
+	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second, hookMailboxBinding)
+}
+
+// hookMailboxBinding writes the mailbox binding of an AMQ session that no
+// binding serves, as attach --self does, for its first approval dialog.
+func hookMailboxBinding(root, handle string) (string, error) {
+	_, name, _, err := bindMailbox(root, handle, "", io.Discard)
+	return name, err
 }

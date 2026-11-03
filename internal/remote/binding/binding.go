@@ -165,7 +165,9 @@ func (b Binding) Liveness() (State, string) {
 		return Unknown, err.Error()
 	}
 	h := b.Holder
-	h.PID = b.HolderPID()
+	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && h.PID <= 0 && !b.Mailbox() {
+		h.PID, _ = strconv.Atoi(pid)
+	}
 	if h.PID <= 0 {
 		return Unknown, "no holder recorded"
 	}
@@ -177,20 +179,6 @@ func (b Binding) Liveness() (State, string) {
 	default:
 		return Unknown, evidence
 	}
-}
-
-// HolderPID is the pid of the process that runs b's session: its holder's,
-// else, for a native Claude binding written before holders were recorded,
-// the pid in its target; 0 when neither is known.
-func (b Binding) HolderPID() int {
-	if b.Holder.PID > 0 {
-		return b.Holder.PID
-	}
-	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && !b.Mailbox() {
-		n, _ := strconv.Atoi(pid)
-		return n
-	}
-	return 0
 }
 
 // Machine is this machine's short name for labels: the first label of the
@@ -234,6 +222,41 @@ func SessionLabel(harness, place, machine string) string {
 	}
 	label := []rune(head + place + tail)
 	return string(label[:min(len(label), maxLabel)])
+}
+
+// MachineRoot is the per-machine root, ~/.amq/remote/root: the root a link
+// lives in unless --root names another, and the root of a native session
+// outside AMQ (attach --self --native, and the approval hook).
+func MachineRoot() (string, error) {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "remote", "root"), nil
+}
+
+// EnsureMachineRoot creates the machine root, each directory 0700, and
+// refuses a symlink or non-directory on the way.
+func EnsureMachineRoot() (string, error) {
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		return "", err
+	}
+	dir := home
+	for _, part := range []string{"remote", "root"} {
+		dir = filepath.Join(dir, part)
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("%s is not a plain directory; refusing", dir)
+		}
+	}
+	return dir, nil
 }
 
 // canonicalRoot is root with its symlinks resolved, so one root reached

@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -382,6 +383,48 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 
 // attachMailboxAs runs attach --self --json as the AMQ handle claude of the
 // session at root, pinned as a real session is, and returns the bound name.
+// An AMQ session that never ran /amq-remote gets its mailbox binding from
+// its first approval dialog, as attach --self writes it, and the dialog
+// opens there; a later attach --self keeps that one binding.
+func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session1")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
+	done, ended := make(chan struct{}), make(chan int)
+	go func() {
+		ended <- claude.RunPermissionHook(strings.NewReader(`{"session_id":"s-1","tool_name":"Bash","tool_input":{"command":"make"}}`),
+			io.Discard, done, time.Minute, hookMailboxBinding)
+	}()
+	ddir, err := dialog.DirFor("claude-p-session1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var open []dialog.Request
+	for deadline := time.Now().Add(3 * time.Second); len(open) == 0 && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		open, _ = dialog.Requests(ddir)
+	}
+	close(done)
+	<-ended
+	if len(open) != 1 || open[0].Text != "$ make" {
+		t.Fatalf("open dialogs = %+v; want the dialog in the mailbox binding's directory", open)
+	}
+	b, err := binding.ReadNamed("claude-p-session1")
+	if err != nil || !b.Mailbox() || b.Root != root || b.Handle != "claude" || b.Label != binding.SessionLabel("claude", "p/session1", binding.Machine()) {
+		t.Fatalf("binding = %+v, %v; want the mailbox binding attach --self writes", b, err)
+	}
+	if got := attachMailboxAs(t, root); got != "claude-p-session1" {
+		t.Fatalf("attach --self wrote %q; want the hook's binding", got)
+	}
+	if all, _ := binding.List(); len(all) != 1 {
+		t.Fatalf("bindings = %+v; want one", all)
+	}
+}
+
 func attachMailboxAs(t *testing.T, root string) string {
 	t.Helper()
 	pinMailboxSession(t, root)

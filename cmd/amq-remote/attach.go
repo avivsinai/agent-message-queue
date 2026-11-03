@@ -241,8 +241,8 @@ func linkAttachRoot(c *common, link string, cand registry.Candidate, want string
 	} else if b != nil {
 		return "", protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --self, then attach --self --link %s again", b.Root, b.Name, link)
 	}
-	if m, err := machineRoot(); err == nil && sameRoot(root, m) {
-		if _, err := ensureMachineRoot(); err != nil {
+	if m, err := binding.MachineRoot(); err == nil && sameRoot(root, m) {
+		if _, err := binding.EnsureMachineRoot(); err != nil {
 			return "", err
 		}
 	}
@@ -284,19 +284,43 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 // required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
+	b, name, reused, err := bindMailbox(root, handle, name, stderr)
+	if err != nil {
+		if protocol.RefusalCode(err) == protocol.CodeInvalid {
+			return protocol.ExitUsage, err
+		}
+		return protocol.ExitActionRequired, err
+	}
+	v := viewOf(b, name, reused)
+	if asJSON {
+		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
+		emitJSON(stdout, connectedJSON(out, v))
+		return 0, nil
+	}
+	connected(stdout, v)
+	return 0, nil
+}
+
+// bindMailbox writes the mailbox binding of handle in root, the AMQ session
+// this process runs in, as attach --self makes it: the session pin must name
+// root, the Buzz handle joins the root's roster, and the harness found above
+// this process is the holder. It returns the binding as built, the name
+// written and whether the session already held it. The approval hook calls
+// it for an AMQ session that no binding serves yet.
+func bindMailbox(root, handle, name string, stderr io.Writer) (b binding.Binding, written string, reused bool, err error) {
 	if root == "" || handle == "" {
-		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
+		return b, "", false, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
 	if !filepath.IsAbs(root) {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
+		return b, "", false, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-		return protocol.ExitActionRequired, fmt.Errorf("AMQ root %s is not a directory", root)
+		return b, "", false, fmt.Errorf("AMQ root %s is not a directory", root)
 	}
 	// The inherited session pin must name this root, exactly as a direct
 	// amq-acp mailbox checks it.
 	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
-		return protocol.ExitActionRequired, err
+		return b, "", false, err
 	}
 	explicit := name != ""
 	if !explicit {
@@ -306,27 +330,20 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 	h := detectHarness(codexes, root, handle)
 	project, session := amqPlace(root)
 	machine := binding.Machine()
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
+	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
 		AppServer: h.AppServer}
 	if err := listBuzzInRoster(root); err != nil {
-		return protocol.ExitActionRequired, err
+		return b, "", false, err
 	}
 	inspect := inspectOutsideLock(codexes)
-	name, reused, err := writeBinding(b, explicit, false, inspect)
+	written, reused, err = writeBinding(b, explicit, false, inspect)
 	if err != nil {
-		return protocol.ExitActionRequired, err
+		return b, "", false, err
 	}
 	pruneAfterAttach(inspect)
 	recordAttachIdentity(stderr, root, handle, h.Kind)
-	v := viewOf(b, name, reused)
-	if asJSON {
-		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
-		emitJSON(stdout, connectedJSON(out, v))
-		return 0, nil
-	}
-	connected(stdout, v)
-	return 0, nil
+	return b, written, reused, nil
 }
 
 func emitJSON(w io.Writer, v any) {

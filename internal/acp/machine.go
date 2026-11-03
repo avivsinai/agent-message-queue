@@ -17,7 +17,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
@@ -129,10 +128,6 @@ type channelRecord struct {
 	// Doubted records that a create outcome was once unknown: no create is
 	// ever sent again for this record.
 	Doubted bool `json:"doubted,omitempty"`
-	// Handed is set when the channel of a session record moved to its
-	// session's binding, until the channel carries the binding's label and
-	// says it now reaches the session (announceHandover).
-	Handed bool `json:"handed,omitempty"`
 	// ArchiveSent is written before the channel's archive is sent, so a
 	// restore unarchives a channel that may be archived although no archive
 	// was confirmed.
@@ -259,9 +254,8 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // machineTick runs every machineScanInterval in the worker that leads the
 // machine identity, until ctx ends. It writes the marker first, before any
 // relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions and the session records
-// (sessions.go), and every lateReplyInterval works through the retired
-// store.
+// that are gone, provisions the live sessions, and every lateReplyInterval
+// works through the retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
@@ -280,10 +274,6 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.applyResets(now)
 	s.retireGone(now)
 	all, err := binding.List()
-	// Session records first: a session that attached hands its channel to
-	// its binding before the binding would make its own. Without a binding
-	// list nothing is handed over, and the records are still served.
-	s.provisionSessions(all, err == nil, now)
 	if err == nil {
 		for _, b := range all {
 			if s.stopped() {
@@ -346,9 +336,6 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 		}
 		ok = false
 	}
-	if ok && r.Handed {
-		s.announceHandover(&r, now)
-	}
 	if !ok {
 		if s.restore(b, now) || s.stopped() {
 			return
@@ -404,9 +391,6 @@ func (s *Server) advance(r *channelRecord, now time.Time) {
 func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	if s.stopped() || !s.unchanged(r) {
 		return false
-	}
-	if dialog.IsSessionName(r.Name) {
-		return s.sessionServes(r, now)
 	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {
@@ -601,9 +585,6 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 		return
 	}
 	welcome := "AMQ Remote: this channel reaches " + r.Label + ". Write here to talk to that session."
-	if dialog.IsSessionName(r.Name) {
-		welcome = "AMQ Remote: this channel shows the approvals of " + r.Label + ". React ✅ or ❌, or reply with an option's number. Run /amq-remote in that session to chat from Buzz."
-	}
 	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", buzzOwner) {
 		return
 	}
@@ -738,15 +719,8 @@ func (s *Server) retireGone(now time.Time) {
 			s.finishRetire(r, now)
 			continue
 		}
-		if dialog.IsSessionName(r.Name) {
-			if _, ok, err := dialog.ReadSession(r.Name); err == nil && !ok {
-				s.retire(r, retiredEnded, now)
-			}
-			continue
-		}
 		b, err := binding.ReadNamed(r.Name)
-		// A record under a name that is neither a binding's nor a session
-		// record's serves nothing.
+		// A record under a name no binding can have serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
 			s.retire(r, goneReason(r), now)
 		} else if err == nil {
@@ -1018,10 +992,6 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 	return channelRecord{}, false
 }
 
-// errApprovalsOnly refuses a prompt in the channel of a session record that
-// answers no open dialog.
-var errApprovalsOnly = errors.New("this session's channel takes only answers to its dialogs")
-
 // errChannelNotConnected refuses a prompt from a channel whose record names
 // a session identity that the binding no longer has.
 var errChannelNotConnected = errors.New("this channel's session is not connected")
@@ -1047,9 +1017,6 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	r, ok := s.channelRoute(route)
 	if !ok {
 		return binding.Binding{}, &unpinnedError{machine: true}
-	}
-	if dialog.IsSessionName(r.Name) {
-		return binding.Binding{}, errApprovalsOnly
 	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {

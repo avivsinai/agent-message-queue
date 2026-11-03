@@ -136,8 +136,6 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 				text = s.unpinnedReply(unpinned)
 			case errors.Is(err, errChannelNotConnected):
 				text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
-			case errors.Is(err, errApprovalsOnly):
-				text = "This session shows approvals only. Run /amq-remote in it to chat from Buzz."
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}

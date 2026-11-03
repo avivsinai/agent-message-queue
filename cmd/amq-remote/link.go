@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -378,41 +377,6 @@ func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (a
 	return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "unknown link subcommand %q", args[0])
 }
 
-// machineRoot is the per-machine root, ~/.amq/remote/root: the root a link
-// lives in unless --root names another, and the one native attach uses
-// outside AMQ (skills/amq-remote/SKILL.md).
-func machineRoot() (string, error) {
-	home, err := amqhome.Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "remote", "root"), nil
-}
-
-// ensureMachineRoot creates the machine root, each directory 0700, and
-// refuses a symlink or non-directory on the way.
-func ensureMachineRoot() (string, error) {
-	home, err := amqhome.EnsureDir()
-	if err != nil {
-		return "", err
-	}
-	dir := home
-	for _, part := range []string{"remote", "root"} {
-		dir = filepath.Join(dir, part)
-		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return "", err
-		}
-		info, err := os.Lstat(dir)
-		if err != nil {
-			return "", err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", fmt.Errorf("%s is not a plain directory; refusing", dir)
-		}
-	}
-	return dir, nil
-}
-
 // sameRoot reports whether two roots name one directory, canonicalized the
 // way up canonicalizes a root before it takes the root's lock.
 func sameRoot(a, b string) bool {
@@ -433,7 +397,7 @@ func (c *common) linkRoots() ([]string, error) {
 		}
 		return []string{c.root}, nil
 	}
-	m, err := machineRoot()
+	m, err := binding.MachineRoot()
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +586,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	}
 	root := c.root
 	if !c.rootSet {
-		if root, err = machineRoot(); err != nil {
+		if root, err = binding.MachineRoot(); err != nil {
 			return nil, protocol.ExitError, err
 		}
 	} else if _, err := c.stateDir(); err != nil {
@@ -631,7 +595,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	// One name in two roots would be ambiguous for every later command; the
 	// device key's O_EXCL guards only its own root.
 	others := []string{}
-	if m, err := machineRoot(); err == nil {
+	if m, err := binding.MachineRoot(); err == nil {
 		others = append(others, m)
 	}
 	if am := os.Getenv("AM_ROOT"); am != "" && filepath.IsAbs(am) {
@@ -650,7 +614,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		}
 	}
 	if !c.rootSet {
-		if root, err = ensureMachineRoot(); err != nil {
+		if root, err = binding.EnsureMachineRoot(); err != nil {
 			return nil, protocol.ExitError, err
 		}
 	}
@@ -731,7 +695,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		offerLocalKey(stateDir, name, in, stdin, stdout)
 	}
 	rootArg := ""
-	if m, err := machineRoot(); err != nil || !sameRoot(root, m) {
+	if m, err := binding.MachineRoot(); err != nil || !sameRoot(root, m) {
 		rootArg = " --root " + root
 	}
 	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s%s", name, rootArg)
@@ -1041,7 +1005,7 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 	if len(v.Links) == 0 {
 		say(w, "No links. Link this machine with amq-remote link add.")
 	}
-	machine, _ := machineRoot()
+	machine, _ := binding.MachineRoot()
 	for _, l := range v.Links {
 		say(w, "%s  %s  %s", l.Name, l.Status.State, l.URL)
 		if machine == "" || !sameRoot(l.Root, machine) {
