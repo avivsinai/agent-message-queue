@@ -587,7 +587,13 @@ func (l bridgeLiveness) at() time.Time {
 // throwaway store and returns that binding's dialog directory.
 func bindRemote(t *testing.T, root string) string {
 	t.Helper()
-	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	// The binding store refuses a symlinked path, and the macOS temp dir is
+	// under the /var symlink (macOS CI failed here).
+	store, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(binding.EnvPath, filepath.Join(store, "binding.json"))
 	if err := binding.WriteNamed(binding.Binding{Name: "grok", Carrier: binding.CarrierMailbox, Root: root, Handle: "grok", BoundAt: "2026-11-02T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}

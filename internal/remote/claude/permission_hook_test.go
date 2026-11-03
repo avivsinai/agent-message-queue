@@ -18,7 +18,13 @@ import (
 func boundHookEnv(t *testing.T) string {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	// The binding store refuses a symlinked path, and the macOS temp dir is
+	// under the /var symlink (macOS CI failed here).
+	store, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(binding.EnvPath, filepath.Join(store, "binding.json"))
 	root := t.TempDir()
 	t.Setenv("AM_ROOT", root)
 	t.Setenv("AM_ME", "agent")
