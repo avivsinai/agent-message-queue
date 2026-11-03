@@ -258,7 +258,7 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 	att.Subscribe(func(ev core.NativeEvent) { events <- ev })
 
 	s := att.Inspect()
-	if s.Harness != "codex" || s.Status != "idle" || s.Project != "/work" || !s.Capabilities.Submit || !s.Capabilities.ApproveTool {
+	if s.Harness != "codex" || s.Status != "idle" || s.Project != "/work" || !s.Capabilities.Submit || s.Capabilities.ApproveTool {
 		t.Fatalf("unexpected session: %+v", s)
 	}
 

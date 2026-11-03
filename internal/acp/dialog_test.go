@@ -132,7 +132,7 @@ func TestUnboundDialogReachesTheApprovalsChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	tick(s, time.Now())
-	tick(s, time.Now())
+	s.dialogTick(time.Now())
 	if r := channelState(t, s, dialog.MachineBinding); r.State != channelActive || r.ChannelID != machineChanB || !strings.HasPrefix(r.Label, "Approvals") {
 		t.Fatalf("approvals record = %+v", r)
 	}
@@ -141,5 +141,90 @@ func TestUnboundDialogReachesTheApprovalsChannel(t *testing.T) {
 	}
 	if len(posts) != 1 || !strings.HasPrefix(posts[0], machineChanB+": claude · proj wants to run Bash:\n$ make") {
 		t.Fatalf("posts = %q; want the dialog in the approvals channel once", posts)
+	}
+}
+
+// buzzPrompt is a buzz-acp DM prompt in dm whose event from sender (a hex
+// pubkey, or "" for no From line) carries content.
+func buzzPrompt(dm, sender, content string) string {
+	from := ""
+	if sender != "" {
+		from = "From: Someone (npub: npub1x, hex: " + sender + ")\n"
+	}
+	return "<context>\nScope: dm\nChannel: DM (#" + dm + ")\n</context>\n<buzz-event type=\"@mention\">\nEvent ID: " + strings.Repeat("a", 64) +
+		"\n" + from + "Content: " + content + "\nTags: [[\"h\",\"" + dm + "\"]]\n</buzz-event>"
+}
+
+// Regression (review of the dialog poster): a ✅ reaction became the literal
+// answer of a free-text dialog, a reply with no known sender answered it, and
+// a two-line answer to a two-question dialog reached it as one line. Only the
+// owner's typed reply answers a free-text dialog, with its line breaks.
+func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
+	const dm = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	withBuzzSelf(t)
+	owner := strings.Repeat("0b", 32)
+	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
+	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
+	buzzOwner = owner
+	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
+	readReactions = func(string, time.Duration) ([]reaction, error) {
+		return []reaction{{Emoji: "✅", PubKeys: []string{owner}}, {Emoji: "❌", PubKeys: []string{owner}}}, nil
+	}
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s.lastChannel = dm
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := dialog.Request{ID: dialog.NewID(), Harness: "codex", Text: "Which database?\nMigrate now?", FreeText: true, OpenedAt: time.Now()}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	s.dialogTick(time.Now()) // posts
+	s.dialogTick(time.Now()) // reads the reactions
+	if a, ok, _ := dialog.ReadAnswer(dir, req.ID); ok {
+		t.Fatalf("a reaction answered a free-text dialog: %+v", a)
+	}
+	for _, sender := range []string{"", strings.Repeat("0c", 32)} {
+		if _, a, ok := s.dialogReply(dm, buzzPrompt(dm, sender, "1")); ok {
+			t.Fatalf("sender %q answered: %+v", sender, a)
+		}
+	}
+	_, a, ok := s.dialogReply(dm, buzzPrompt(dm, owner, "postgres\nyes"))
+	if !ok || a.Text != "postgres\nyes" {
+		t.Fatalf("owner answer = %+v, %v; want the two lines", a, ok)
+	}
+}
+
+// Regression (review of the dialog poster): the dialogs of a gone binding
+// were expired and removed in one tick, so the seam still waiting never read
+// its resolution. The directory stays while the seam runs, for seamGrace.
+func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	s := NewServer(Config{RemoteBinding: true, Pin: "gone", StateDir: canonicalTempDir(t)}, "test")
+	dir, err := dialog.DirFor("gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(), PID: os.Getpid()}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.dropGoneDialogs(now)
+	if res, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || res.Outcome != dialog.OutcomeExpired {
+		t.Fatalf("resolution = %+v, %v; want expired", res, ok)
+	}
+	s.dropGoneDialogs(now)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the dialogs went while the seam runs: %v", err)
+	}
+	s.dropGoneDialogs(now.Add(seamGrace + time.Second))
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the dialogs stayed after seamGrace: %v", err)
 	}
 }

@@ -151,11 +151,14 @@ type Attachment struct {
 	// would look like fresh evidence and restart the ack loop. Bounded by the
 	// same FIFO eviction as ackedOrder.
 	ackedKeys map[requests.Key]bool
-	// resolvedEarly remembers request ids that serverRequest/resolved named
+	// resolvedEarly holds request ids that serverRequest/resolved named
 	// before the request worker delivered the request itself; such a
-	// request is already answered and is never shown. FIFO-bounded.
-	resolvedEarly      map[string]bool
-	resolvedEarlyOrder []string
+	// request is already answered and is never shown. seen holds ids the
+	// worker delivered whose resolution has not arrived, so a resolution of
+	// a dialog already closed is not mistaken for an early one. An id
+	// leaves either set when its pair arrives, so a later request that
+	// reuses it is shown.
+	resolvedEarly, seen idSet
 	// dialogs are the open server requests by compactID of their JSON-RPC
 	// id, each waiting for its first answer. At most maxDialogs; past that
 	// the terminal answers alone.
@@ -170,8 +173,48 @@ type Attachment struct {
 	fileChangeOrder []string
 }
 
-// maxResolvedEarly bounds Attachment.resolvedEarly.
-const maxResolvedEarly = 64
+// maxIDs bounds an idSet.
+const maxIDs = 64
+
+// idSet is a set of JSON-RPC ids that drops its oldest entry past maxIDs.
+type idSet struct {
+	has   map[string]bool
+	order []string
+}
+
+func (s *idSet) add(id string) {
+	if s.has[id] {
+		return
+	}
+	if s.has == nil {
+		s.has = map[string]bool{}
+	}
+	s.has[id] = true
+	s.order = append(s.order, id)
+	for len(s.has) > maxIDs {
+		delete(s.has, s.order[0])
+		s.order = s.order[1:]
+	}
+	if len(s.order) > 2*maxIDs {
+		// Drop the order entries of ids taken since they were added.
+		kept, in := s.order[:0], map[string]bool{}
+		for _, o := range s.order {
+			if s.has[o] && !in[o] {
+				kept, in[o] = append(kept, o), true
+			}
+		}
+		s.order = kept
+	}
+}
+
+// take reports whether id is in the set and removes it.
+func (s *idSet) take(id string) bool {
+	if !s.has[id] {
+		return false
+	}
+	delete(s.has, id)
+	return true
+}
 
 // maxDialogs bounds Attachment.dialogs.
 const maxDialogs = 64
@@ -362,9 +405,10 @@ func (a *Attachment) Inspect() protocol.Session {
 		Attachment:       att,
 		Status:           status,
 		ApprovalReviewer: a.reviewer,
+		// Approvals are answered through dialogs, never through Respond.
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: true, Steer: false,
-			ApproveTool: true, AnswerQuestion: false, Terminal: "unavailable",
+			ApproveTool: false, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		Evidence:   &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"},
 		ObservedAt: protocol.FormatTime(time.Now()),
@@ -993,26 +1037,18 @@ func (a *Attachment) onServerRequestResolved(n Notification) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.seen.take(key) {
+		// Server requests reach onServerRequest through a worker queue, so
+		// the resolution can overtake its own request. Remember it.
+		a.resolvedEarly.add(key)
+		return
+	}
 	if d := a.dialogs[key]; d != nil {
 		if d.sending {
 			d.resolvedWhileSending = true
 			return
 		}
 		d.endLocked(dialog.OutcomeTerminal, dialog.ByTerminal)
-		return
-	}
-	// Server requests reach onServerRequest through a worker queue, so the
-	// resolution can overtake its own request. Remember it.
-	if !a.resolvedEarly[key] {
-		if a.resolvedEarly == nil {
-			a.resolvedEarly = map[string]bool{}
-		}
-		a.resolvedEarly[key] = true
-		a.resolvedEarlyOrder = append(a.resolvedEarlyOrder, key)
-		if len(a.resolvedEarlyOrder) > maxResolvedEarly {
-			delete(a.resolvedEarly, a.resolvedEarlyOrder[0])
-			a.resolvedEarlyOrder = a.resolvedEarlyOrder[1:]
-		}
 	}
 }
 
@@ -1324,15 +1360,23 @@ func (a *Attachment) onItem(n Notification) {
 }
 
 func (a *Attachment) onServerRequest(req ServerRequest) {
-	d := a.dialogFor(req)
 	key := compactID(req.ID)
-	if d == nil || key == "" {
+	if key == "" {
 		return
 	}
 	a.mu.Lock()
-	if a.resolvedEarly[key] || a.dialogs[key] != nil || len(a.dialogs) >= maxDialogs {
-		// Answered before it reached us, already open, or past the bound:
-		// the terminal answers it alone.
+	early := a.resolvedEarly.take(key)
+	if !early {
+		a.seen.add(key)
+	}
+	a.mu.Unlock()
+	d := a.dialogFor(req)
+	if early || d == nil {
+		return // another client answered it before it reached us, or no dialog
+	}
+	a.mu.Lock()
+	if a.dialogs[key] != nil || len(a.dialogs) >= maxDialogs {
+		// Already open, or past the bound: the terminal answers it alone.
 		a.mu.Unlock()
 		return
 	}
@@ -1438,6 +1482,9 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		}
 		result, outcome, label, ok := d.reply(ans)
 		if !ok {
+			// The answer fits no choice. Remove it, so the owner's next
+			// reply can be written, and keep waiting.
+			_ = dialog.RemoveAnswer(dir, d.req.ID)
 			continue
 		}
 		a.mu.Lock()

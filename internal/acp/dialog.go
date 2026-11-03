@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
@@ -161,6 +162,8 @@ type dialogTarget struct {
 // runs dialogTick.
 type dialogState struct {
 	polled map[string]time.Time // dialog id -> last reaction read
+	// quit closes when the dialog worker stops; nil outside it.
+	quit <-chan struct{}
 	// release drops a pinned agent's dialog lead; nil when not held.
 	release func()
 }
@@ -175,7 +178,7 @@ const dialogKeep = time.Hour
 // binding that is gone expire and are removed.
 func (s *Server) dialogTick(now time.Time) {
 	for _, t := range s.dialogTargets() {
-		if s.stopped() {
+		if s.dialogStopped() {
 			return
 		}
 		dir, err := dialog.DirFor(t.name)
@@ -198,8 +201,18 @@ func (s *Server) dialogTick(now time.Time) {
 		s.dialogClose(t.name, dir, open)
 		s.pruneDialogs(t.name, dir, now)
 	}
-	if !s.stopped() {
+	if !s.dialogStopped() {
 		s.dropGoneDialogs(now)
+	}
+}
+
+// dialogStopped reports whether the dialog worker is stopping.
+func (s *Server) dialogStopped() bool {
+	select {
+	case <-s.dialogs.quit:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -211,6 +224,9 @@ func (s *Server) dialogTargets() []dialogTarget {
 		return nil
 	}
 	if s.cfg.Machine {
+		if buzzRelayKey == "" || buzzOwner == "" {
+			return nil
+		}
 		var out []dialogTarget
 		for _, r := range s.activeRecords() {
 			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
@@ -256,7 +272,8 @@ func live(b binding.Binding) bool {
 }
 
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
-// ended, edits their posts, and removes the binding's dialogs. A machine
+// ended, edits their posts, and removes the binding's dialogs once their
+// seams left (seamsLeft). A machine
 // agent does this for every binding, a pinned agent for its own; the
 // machine's own dialogs belong to no binding and are never removed.
 func (s *Server) dropGoneDialogs(now time.Time) {
@@ -293,9 +310,42 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
 		}
 		s.dialogClose(name, dir, nil)
-		_ = os.RemoveAll(dir)
-		_ = os.RemoveAll(s.dialogPostDir(name))
+		if seamsLeft(dir, now) {
+			_ = os.RemoveAll(dir)
+			_ = os.RemoveAll(s.dialogPostDir(name))
+		}
 	}
+}
+
+// seamGrace is how long a resolved dialog's directory stays while its seam
+// process still runs, so the seam reads how its dialog ended.
+const seamGrace = 2 * time.Minute
+
+// seamsLeft reports whether every dialog in dir is resolved and its seam has
+// read that or cannot any more: its process is gone, or the resolution is
+// older than seamGrace. Removing the directory earlier would let a seam that
+// still waits write into a directory that comes back.
+func seamsLeft(dir string, now time.Time) bool {
+	entries, err := os.ReadDir(filepath.Join(dir, "requests"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok {
+			continue
+		}
+		res, resolved, err := dialog.ReadResolved(dir, id)
+		if err != nil || !resolved {
+			return false
+		}
+		var req dialog.Request
+		if raw, err := readSmallRegular(filepath.Join(dir, "requests", e.Name())); err == nil && json.Unmarshal(raw, &req) == nil &&
+			req.PID > 0 && pidAlive(req.PID) && now.Sub(res.At) < seamGrace {
+			return false
+		}
+	}
+	return true
 }
 
 // pruneDialogs removes the files of each dialog resolved more than
@@ -357,15 +407,30 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 	if err != nil {
 		return
 	}
-	for _, emoji := range []string{"❌", "✅"} {
-		if !reacted(rs, buzzOwner, emoji) {
-			continue
-		}
-		if a, ok := dialog.ParseAnswer(req, emoji); ok {
-			_, _ = dialog.WriteAnswer(dir, a)
-			return
+	if n := reactionOption(req, rs); n != 0 {
+		_, _ = dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: n, By: dialog.ByBuzz, At: now.UTC()})
+	}
+}
+
+// reactionOption is the option the owner's reaction picks: ❌ the deny
+// option, which beats ✅, option 1. A reaction never answers a dialog
+// without that option; 0 means no answer.
+func reactionOption(req dialog.Request, rs []reaction) int {
+	if reacted(rs, buzzOwner, "❌") {
+		for _, o := range req.Options {
+			if o.Deny {
+				return o.N
+			}
 		}
 	}
+	if reacted(rs, buzzOwner, "✅") {
+		for _, o := range req.Options {
+			if o.N == 1 {
+				return 1
+			}
+		}
+	}
+	return 0
 }
 
 // postDialog claims req's post record, posts it and records the message. A
@@ -521,14 +586,29 @@ func outcomeLine(r dialog.Resolved) string {
 	return "→ " + label + " (Buzz)"
 }
 
-// dialogLead reports whether this pinned agent's worker posts its dialogs:
-// the worker that holds <pin>/<self>.dialog.lock. A machine agent's dialogs
-// are posted by its machine leader instead.
+// dialogPin is the marker directory name whose dialog lock elects the
+// worker that posts dialogs: the machine agent's, or a pinned agent's pin;
+// "" when this agent posts none.
+func (s *Server) dialogPin() string {
+	switch {
+	case s.cfg.Machine:
+		return machineName
+	case !s.cfg.Helper && s.cfg.Pin != "" && s.cfg.PinErr == nil:
+		return s.cfg.Pin
+	}
+	return ""
+}
+
+// dialogLead reports whether this worker posts its agent's dialogs: the
+// worker that holds <dialogPin>/<self>.dialog.lock.
 func (s *Server) dialogLead() bool {
 	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
-	dir := s.agentMarkerDir(s.cfg.Pin)
+	if buzzSelf == "" {
+		return false
+	}
+	dir := s.agentMarkerDir(s.dialogPin())
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -543,8 +623,9 @@ func (s *Server) dialogLead() bool {
 // dialogReply returns the answer that an owner's Buzz message in channel
 // gives to an open dialog posted there, and the dialog's directory. A thread
 // reply to a dialog's post answers that dialog; any other message answers
-// only when exactly one dialog is open in channel. A message from someone
-// other than the owner never answers.
+// only when exactly one dialog is open in channel. Only a message whose Buzz
+// event names the owner as its sender answers, as only the owner's
+// reactions do.
 func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, bool) {
 	if channel == "" {
 		return "", dialog.Answer{}, false
@@ -559,7 +640,7 @@ func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, boo
 	} else if s.cfg.Helper || name == "" || s.cfg.PinErr != nil {
 		return "", dialog.Answer{}, false
 	}
-	if from := eventSender(prompt); from != "" && buzzOwner != "" && from != buzzOwner {
+	if buzzOwner == "" || eventSender(prompt) != buzzOwner {
 		return "", dialog.Answer{}, false
 	}
 	dir, err := dialog.DirFor(name)
@@ -625,7 +706,7 @@ func buzzEvent(prompt string) string {
 
 // ownerWords is the text the owner typed: the Content of the prompt's one
 // Buzz event, else what follows the <context> block, with leading mentions
-// dropped.
+// dropped. Line breaks stay: one line can answer each question of a dialog.
 func ownerWords(prompt string) string {
 	text := prompt
 	if evt := buzzEvent(prompt); evt != "" {
@@ -644,11 +725,14 @@ func ownerWords(prompt string) string {
 	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
 		text = after
 	}
-	fields := strings.Fields(text)
-	for len(fields) > 1 && (strings.HasPrefix(fields[0], "@") || strings.HasPrefix(fields[0], "nostr:")) {
-		fields = fields[1:]
+	text = strings.TrimSpace(text)
+	for {
+		end := strings.IndexFunc(text, unicode.IsSpace)
+		if end < 0 || (!strings.HasPrefix(text, "@") && !strings.HasPrefix(text, "nostr:")) {
+			return text
+		}
+		text = strings.TrimSpace(text[end:])
 	}
-	return strings.Join(fields, " ")
 }
 
 // eventSender is the hex pubkey on the From line of the prompt's Buzz

@@ -180,6 +180,19 @@ func ReadAnswer(dir, id string) (Answer, bool, error) {
 	return a, ok, err
 }
 
+// RemoveAnswer removes answers/<id>.json, so the next answer can be written.
+// A seam calls it for an answer it cannot apply.
+func RemoveAnswer(dir, id string) error {
+	if !idRe.MatchString(id) {
+		return fmt.Errorf("dialog id %q is not one NewID mints", id)
+	}
+	err := os.Remove(filepath.Join(dir, "answers", id+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // Resolve writes resolved/<id>.json; false when the dialog was resolved first
 // by someone else.
 func Resolve(dir string, r Resolved) (bool, error) {

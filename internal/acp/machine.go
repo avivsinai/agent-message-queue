@@ -255,8 +255,8 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // machineTick runs every machineScanInterval in the worker that leads the
 // machine identity, until ctx ends. It writes the marker first, before any
 // relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions, posts their dialogs, and every
-// lateReplyInterval works through the retired store.
+// that are gone, provisions the live sessions and the approvals channel, and
+// every lateReplyInterval works through the retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
@@ -287,9 +287,6 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	}
 	if !s.stopped() {
 		s.provisionApprovals(now)
-	}
-	if !s.stopped() {
-		s.dialogTick(now)
 	}
 	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)

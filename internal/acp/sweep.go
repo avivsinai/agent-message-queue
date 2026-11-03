@@ -113,11 +113,17 @@ func (s *Server) startLateReplySweep() (stop func()) {
 				}
 			}
 		}()
-	} else if !s.cfg.Helper && s.cfg.Pin != "" && s.cfg.PinErr == nil {
-		// A pinned agent posts its session's dialogs at the same pace, in a
-		// worker of its own, so a dialog never waits behind the sweep.
+	} else {
+		close(machineDone)
+	}
+	// The dialogs of a machine agent or a pinned agent are posted at the
+	// same pace in a worker of their own, so a dialog never waits behind the
+	// sweep or the machine lifecycle, and neither waits behind a dialog.
+	dialogDone := make(chan struct{})
+	if s.dialogPin() != "" {
+		s.dialogs.quit = quit
 		go func() {
-			defer close(machineDone)
+			defer close(dialogDone)
 			tick := time.NewTicker(machineScanInterval)
 			defer tick.Stop()
 			for {
@@ -132,7 +138,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			}
 		}()
 	} else {
-		close(machineDone)
+		close(dialogDone)
 	}
 	go func() {
 		defer close(done)
@@ -157,6 +163,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		cancelMachine()
 		<-done
 		<-machineDone
+		<-dialogDone
 		s.resign()
 		if s.dialogs.release != nil {
 			s.dialogs.release()
