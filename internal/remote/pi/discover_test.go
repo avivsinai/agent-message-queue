@@ -18,7 +18,7 @@ func TestDiscoverListsLiveChatWithItsSessionID(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stampLivenessRevisionAt(t, dir, fixedNow, ApproveBridgeRevision)
+	stampLivenessRevisionAt(t, dir, fixedNow, 4)
 
 	cands, err := discoverer{now: func() time.Time { return fixedNow }}.Discover(context.Background(), registry.DiscoverRequest{Root: root})
 	if err != nil || len(cands) != 1 {

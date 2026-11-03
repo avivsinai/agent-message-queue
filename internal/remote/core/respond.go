@@ -1,8 +1,6 @@
 package core
 
 import (
-	"errors"
-	"maps"
 	"slices"
 	"sync"
 
@@ -44,11 +42,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	if !exists {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	// A local request may reach the reads below, which change nothing, so
-	// an answer that lost the race hears already_resolved; whether it may
-	// answer is decided under the lock, before the intent is recorded.
-	owner := fromOwnerShare(src, rec)
-	if !owner && !localSubmitted(src, rec) {
+	if !fromOwnerShare(src, rec) {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
 	}
 	if t == nil {
@@ -112,12 +106,6 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
-	if !owner && (e.targets[targetID] != t || !localAnswer(src, rec, t, cmd)) {
-		// A local answer is rechecked on this read: the attachment or the
-		// interaction may have been replaced since the first.
-		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
-	}
 	// An exact replay of the durable answer intent goes to the attachment,
 	// which recognizes an answer it already published, even when the
 	// interaction no longer offers that option (it expired or its session
@@ -151,30 +139,14 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	}
 	e.mu.Unlock()
 
-	var code protocol.Code
-	var rerr error
-	var reason string
-	if er, ok := t.att.(EvidenceResponder); ok && len(cmd.Evidence) > 0 {
-		code, rerr = er.RespondWithEvidence(key, cmd.Epoch, cmd.InteractionID, cmd.Option, cmd.Evidence)
-		// A refusal is a positive refusal that names its reason.
-		var refusal *protocol.Refusal
-		if errors.As(rerr, &refusal) {
-			code, reason, rerr = refusal.Code, refusal.Message, nil
-		}
-	} else if or, ok := t.att.(OriginResponder); ok {
-		code, rerr = or.RespondFrom(key, cmd.Epoch, cmd.InteractionID, cmd.Option, maps.Clone(src.Origin))
-	} else {
-		code, rerr = t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
-	}
+	code, rerr := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
 	if rerr != nil {
 		// The native call itself errored without a disposition: the intent
 		// stays (the answer may have landed), so the replay path — not a
 		// fresh answer — decides. Surface the failure.
 		return protocol.Reply{}, rerr
 	}
-	if reason == "" {
-		reason = bareReason(code)
-	}
+	reason := bareReason(code)
 	if code != "" && replay {
 		// A replay never clears the intent it found: the earlier answer may
 		// have landed, as a second ✅ after an allow. Already resolved
@@ -503,8 +475,7 @@ func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence,
 // sameInteraction reports whether two views of an interaction are equal.
 func sameInteraction(a, b protocol.Interaction) bool {
 	return a.InteractionID == b.InteractionID && a.Kind == b.Kind && a.Prompt == b.Prompt &&
-		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer &&
-		a.ApproveOption == b.ApproveOption && a.RejectOption == b.RejectOption
+		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer
 }
 
 // recordResolution appends how the interaction id stopped being pending,

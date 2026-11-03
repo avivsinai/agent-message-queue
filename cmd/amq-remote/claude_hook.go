@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -26,7 +27,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		return 0 // fail-open even on home resolution failure
 	}
 	switch args[0] {
-	case "install-stop-hook", "uninstall-stop-hook", "uninstall-approval-hook":
+	case "install-stop-hook", "uninstall-stop-hook", "install-approval-hook", "uninstall-approval-hook":
 		// They take no options: --help or a stray argument changes nothing.
 		// Only the bare command acts; a lone -- parses clean.
 		if len(args) > 1 {
@@ -60,35 +61,23 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		say(stdout, "stop hook removed\n")
 		return 0
 	case "permission-hook":
-		// No decision on any error: exit 0 with no output. TERM, INT and HUP
-		// end the wait, and the terminal dialog decides.
-		fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
-		var pin claude.HookPin
-		fs.StringVar(&pin.Owner, "owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
-		fs.StringVar(&pin.Root, "root", "", "AMQ root holding the pinned share's enrolled body key")
-		fs.StringVar(&pin.Session, "session", "", "pinned share session")
-		fs.StringVar(&pin.Relay, "relay", "", "pinned relay URL the hook reads the approval message's history from")
-		fs.StringVar(&pin.Body, "body", "", "pinned body pubkey (64 lowercase hex) of the share")
-		fs.StringVar(&pin.Channel, "channel", "", "pinned DM channel id of the share")
-		fs.StringVar(&pin.Target, "target", "", "pinned target id of the share")
-		fs.StringVar(&pin.Surface, "surface", "", "desktop for a Buzz Desktop agent's DM pin (owner, agent pubkey as body, channel)")
-		if fs.Parse(args[1:]) != nil {
-			return 0
-		}
-		done := make(chan struct{})
-		sigs := make(chan os.Signal, 1)
-		signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-		defer signal.Stop(sigs)
-		go func() {
-			<-sigs
-			close(done)
-		}()
-		allow := allowConfig(pin)
-		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, allow)
+		return permissionHook(args[1:], stdin, stdout)
 	case "install-approval-hook":
-		return installApprovalHook(home, args[1:], stdout, os.Stderr)
+		// The absolute path of this binary: a session the desktop app or an
+		// IDE starts may not have its directory on PATH.
+		bin, err := os.Executable()
+		if err == nil {
+			bin, err = filepath.Abs(bin)
+		}
+		if err == nil {
+			err = claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait)
+		}
+		if err != nil {
+			say(os.Stderr, "install-approval-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "approval hook installed: tool dialogs of every Claude Code session on this machine appear in Buzz; the first answer, there or in the terminal, decides\n")
+		return 0
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {
 			say(os.Stderr, "uninstall-approval-hook: %v\n", err)
@@ -100,4 +89,25 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		say(os.Stderr, "unknown claude subcommand %q\n", args[0])
 		return protocol.ExitUsage
 	}
+}
+
+// permissionHook runs the PermissionRequest receiver. It makes no decision
+// on any error: exit 0 with no output. TERM, INT and HUP end the wait, and
+// the terminal dialog decides.
+func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
+	fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+	if fs.Parse(args) != nil {
+		return 0
+	}
+	done := make(chan struct{})
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	go func() {
+		<-sigs
+		close(done)
+	}()
+	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second)
 }

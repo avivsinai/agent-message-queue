@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
@@ -254,8 +255,8 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // machineTick runs every machineScanInterval in the worker that leads the
 // machine identity, until ctx ends. It writes the marker first, before any
 // relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions, and every lateReplyInterval
-// works through the retired store.
+// that are gone, provisions the live sessions, posts their dialogs, and every
+// lateReplyInterval works through the retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
@@ -283,6 +284,12 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 				s.provision(b, now)
 			}
 		}
+	}
+	if !s.stopped() {
+		s.provisionApprovals(now)
+	}
+	if !s.stopped() {
+		s.dialogTick(now)
 	}
 	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
@@ -350,11 +357,17 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 			return
 		}
 	}
+	s.advance(&r, now)
+}
+
+// advance moves r one or more steps toward active: it resolves a create a
+// stopped worker left pending, creates the channel, and sets it up.
+func (s *Server) advance(r *channelRecord, now time.Time) {
 	if r.Pending {
 		// A create was sent and its result never written: the worker
 		// stopped while it ran.
 		r.State, r.Pending, r.Doubted, r.LastError = channelUncertain, false, true, "the outcome of a create was not recorded"
-		_ = s.save(&r, now)
+		_ = s.save(r, now)
 		return
 	}
 	switch r.State {
@@ -366,16 +379,61 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 			return
 		}
 	case channelUncertain:
-		if !due(r.LastTry, channelRetryGap, now) || !s.lookup(&r, now) {
+		if !due(r.LastTry, channelRetryGap, now) || !s.lookup(r, now) {
 			return
 		}
 	default:
 		return
 	}
-	if r.ChannelID == "" && !s.create(&r, now) {
+	if r.ChannelID == "" && !s.create(r, now) {
 		return
 	}
-	s.finishSetup(&r, now)
+	s.finishSetup(r, now)
+}
+
+// approvalsIdentity is the identity of the machine approvals channel's
+// record: it serves no session, so it never changes.
+const approvalsIdentity = "approvals"
+
+// provisionApprovals makes the machine approvals channel, "Approvals @
+// <machine>", once a dialog that no binding serves is waiting: the channel
+// that shows the dialogs of sessions never connected to Buzz. Its record is
+// kept under dialog.MachineBinding like a session's, and is never retired
+// for a missing binding.
+func (s *Server) provisionApprovals(now time.Time) {
+	r, ok, err := loadChannelRecord(s.slotPath(dialog.MachineBinding))
+	if err != nil {
+		return
+	}
+	if ok && r.State == channelRetired {
+		if _, moved := s.finishRetire(r, now); !moved {
+			return
+		}
+		ok = false
+	}
+	if !ok {
+		dir, err := dialog.DirFor(dialog.MachineBinding)
+		if err != nil {
+			return
+		}
+		if reqs, err := dialog.Requests(dir); err != nil || len(reqs) == 0 {
+			return
+		}
+		reg, err := newReg()
+		if err != nil {
+			return
+		}
+		label := "Approvals"
+		if m := binding.Machine(); m != "" {
+			label += " @ " + m
+		}
+		r = channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, Name: dialog.MachineBinding, Identity: approvalsIdentity,
+			Label: label, Reg: reg, State: channelCreating}
+		if s.save(&r, now) != nil {
+			return
+		}
+	}
+	s.advance(&r, now)
 }
 
 // stillServes re-reads r and its binding before a step. A binding proven gone
@@ -385,6 +443,9 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	if s.stopped() || !s.unchanged(r) {
 		return false
+	}
+	if r.Name == dialog.MachineBinding {
+		return true
 	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {
@@ -579,6 +640,9 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 		return
 	}
 	welcome := "AMQ Remote: this channel reaches " + r.Label + ". Write here to talk to that session."
+	if r.Name == dialog.MachineBinding {
+		welcome = "AMQ Remote: the approvals of sessions on this machine that are not connected to Buzz appear here. React ✅ or ❌, or reply with an option's number."
+	}
 	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", buzzOwner) {
 		return
 	}
@@ -711,6 +775,9 @@ func (s *Server) retireGone(now time.Time) {
 		}
 		if r.State == channelRetired {
 			s.finishRetire(r, now)
+			continue
+		}
+		if r.Name == dialog.MachineBinding {
 			continue
 		}
 		b, err := binding.ReadNamed(r.Name)
@@ -985,6 +1052,10 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 	return channelRecord{}, false
 }
 
+// errApprovalsOnly refuses a prompt in the machine approvals channel that
+// answers no open dialog.
+var errApprovalsOnly = errors.New("the approvals channel takes only answers to dialogs")
+
 // errChannelNotConnected refuses a prompt from a channel whose record names
 // a session identity that the binding no longer has.
 var errChannelNotConnected = errors.New("this channel's session is not connected")
@@ -1010,6 +1081,9 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	r, ok := s.channelRoute(route)
 	if !ok {
 		return binding.Binding{}, &unpinnedError{machine: true}
+	}
+	if r.Name == dialog.MachineBinding {
+		return binding.Binding{}, errApprovalsOnly
 	}
 	b, err := binding.ReadNamed(r.Name)
 	switch {

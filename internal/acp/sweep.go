@@ -113,6 +113,24 @@ func (s *Server) startLateReplySweep() (stop func()) {
 				}
 			}
 		}()
+	} else if !s.cfg.Helper && s.cfg.Pin != "" && s.cfg.PinErr == nil {
+		// A pinned agent posts its session's dialogs at the same pace, in a
+		// worker of its own, so a dialog never waits behind the sweep.
+		go func() {
+			defer close(machineDone)
+			tick := time.NewTicker(machineScanInterval)
+			defer tick.Stop()
+			for {
+				if s.dialogLead() {
+					s.dialogTick(time.Now())
+				}
+				select {
+				case <-quit:
+					return
+				case <-tick.C:
+				}
+			}
+		}()
 	} else {
 		close(machineDone)
 	}
@@ -140,6 +158,10 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		<-done
 		<-machineDone
 		s.resign()
+		if s.dialogs.release != nil {
+			s.dialogs.release()
+			s.dialogs.release = nil
+		}
 		s.mu.Lock()
 		s.late.kick = nil
 		s.mu.Unlock()

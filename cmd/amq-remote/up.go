@@ -533,7 +533,7 @@ func backoff(failureCount int, base, maxDelay time.Duration) time.Duration {
 // --me plus every serve flag the user set, preserving parsed values —
 // including explicit false. Go's flag package accepts --flag=false, so serve
 // parses the forwarded form fine; dropping the value would silently flip an
-// explicit --fake=false or --codex-approve=false back to opt-in.
+// explicit --fake=false back to opt-in.
 func buildServeArgs(fs *flag.FlagSet, root, me string) []string {
 	args := []string{"serve", "--root", root, "--me", me}
 	fs.Visit(func(f *flag.Flag) {

@@ -92,16 +92,16 @@ func TestReconcileUnregisteredTargetNoDeadlock(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- submitWait(ep, id) }()
 
-	// Dispatch, then unregister the target so Lookup is skipped: reconcileLive
-	// hits the `!ok` uncertain sub-branch with an uncertain record — the exact
-	// early return that leaked the lock.
+	// Dispatch, then restart with the target gone so Lookup is skipped:
+	// reconcileLive hits the `!ok` uncertain sub-branch with an uncertain
+	// record — the exact early return that leaked the lock.
 	if !waitUntil(func() bool { return rt.Snapshot().Dispatches == 1 }) {
 		t.Fatal("request never dispatched")
 	}
-	ep.UnregisterAll()
 	if err := <-done; err != nil {
 		t.Fatalf("submit errored: %v", err)
 	}
+	ep = core.New(core.Config{Store: store, Now: now})
 	// Reconcile now: first pass flips the record to uncertain via the `!ok`
 	// branch (previously: self-deadlock here).
 	if err := reconcileWithTimeout(ep); err != nil {

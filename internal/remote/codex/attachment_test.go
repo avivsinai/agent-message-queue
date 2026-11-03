@@ -77,24 +77,6 @@ func waitLostStateGen(t *testing.T, att *Attachment, want uint64) {
 	t.Fatalf("lostStateGen never reached %d", want)
 }
 
-// waitInteraction waits until the run for key carries a registered
-// interaction (deterministic sync point replacing sleep).
-func waitInteraction(t *testing.T, att *Attachment, key requests.Key) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		att.mu.Lock()
-		r, ok := att.runs[key]
-		set := ok && r.interaction != nil
-		att.mu.Unlock()
-		if set {
-			return
-		}
-		runtime.Gosched()
-	}
-	t.Fatal("interaction never registered for run")
-}
-
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 	dir, err := os.MkdirTemp("", "amqcx")
 	if err != nil {
@@ -276,7 +258,7 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 	att.Subscribe(func(ev core.NativeEvent) { events <- ev })
 
 	s := att.Inspect()
-	if s.Harness != "codex" || s.Status != "idle" || s.Project != "/work" || !s.Capabilities.Submit || s.Capabilities.ApproveTool {
+	if s.Harness != "codex" || s.Status != "idle" || s.Project != "/work" || !s.Capabilities.Submit || !s.Capabilities.ApproveTool {
 		t.Fatalf("unexpected session: %+v", s)
 	}
 
@@ -926,81 +908,6 @@ done:
 	if !interruptSeen {
 		t.Fatal("turn/interrupt was never sent (CancelExact must issue the interrupt for a live recovered run)")
 	}
-}
-
-// Regression: agent-message-queue-611.22.36. Respond must not clear approvalReqs or
-// r.interaction before client.Respond succeeds. A transport failure must
-// leave the state intact so a retry can send.
-func TestApprovalStateNotTornDownBeforeSend(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithApprovals(true))
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b08"}
-	epoch := s.Epoch
-
-	// Submit and drive to a running turn with an interaction.
-	done := make(chan error, 1)
-	go func() {
-		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- err
-	}()
-	<-srv.calls // turn/start arrives
-	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
-	if err := <-done; err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-
-	// Send a server request (approval question). This is a JSON-RPC request
-	// (has ID + method), not a notification.
-	srv.sendServerRequest(t, "1", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"tool1","command":{"prompt":"approve?"},"availableDecisions":["accept","decline"]}`)
-
-	// Deterministic: wait until the req worker has
-	// processed the approval and registered the interaction.
-	waitInteraction(t, att, key)
-
-	// Verify the interaction is set.
-	att.mu.Lock()
-	r, ok := att.runs[key]
-	if !ok || r.interaction == nil {
-		att.mu.Unlock()
-		t.Fatal("interaction not set after notification")
-	}
-	interactionID := r.interaction.InteractionID
-	att.mu.Unlock()
-
-	// Close the connection so Respond fails (write to closed conn).
-	_ = srv.ws.close()
-	<-att.client.Load().Done()
-
-	// Respond must fail (connection is closed). The specific error/code
-	// depends on the transport; the key assertion is below: state must be
-	// intact for retry.
-	_, _ = att.Respond(key, epoch, interactionID, "accept")
-
-	// The state must STILL be intact — retry must find the interaction.
-	att.mu.Lock()
-	r, ok = att.runs[key]
-	if !ok {
-		att.mu.Unlock()
-		t.Fatal("run disappeared after failed Respond")
-	}
-	if r.interaction == nil {
-		att.mu.Unlock()
-		t.Fatal("interaction was cleared before send succeeded (state must be intact on failure so retry can send)")
-	}
-	if _, hasReq := r.approvalReqs[interactionID]; !hasReq {
-		att.mu.Unlock()
-		t.Fatal("approvalReq was deleted before send succeeded (state must be intact on failure so retry can send)")
-	}
-	att.mu.Unlock()
 }
 
 // TestTerminalMemoEvictionIsFIFO pins the eviction mechanism

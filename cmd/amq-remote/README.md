@@ -99,10 +99,10 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 
 | Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Optional `approve` advertises `ApproveTool`: the Buzz DM can deny a tool call through the PermissionRequest hook, and allow one when the hook pins the owner (see [Approvals from the Buzz DM](#approvals-from-the-buzz-dm)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
-| `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
-| `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` only while the live bridge advertises `bridge_revision` 5 or higher. Submit evidence is `submitted`. |
-| `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `ApproveTool`, reject only: the owner can reject a tool call from Buzz; the host's policy rejects at expiry. `CancelRequest`: `amq-remote cancel` or `/cancel` stops the request's ACP turn, or keeps a request that has not run from running. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Dialogs reach Buzz through the PermissionRequest hook (see [Approvals from the Buzz DM](#approvals-from-the-buzz-dm)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
+| `codex` | `socket` and `thread`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
+| `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `CancelRequest` only while the live bridge advertises `bridge_revision` 5 or higher. Submit evidence is `submitted`. |
+| `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `CancelRequest`: `amq-remote cancel` or `/cancel` stops the request's ACP turn, or keeps a request that has not run from running. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
 | `mailbox` | `handle`: an AMQ handle in serve's own root whose `agents/<handle>/inbox` already exists; the adapter never creates it. Optional `reply_timeout` (default `10m`, at most `24h`). The handle must not be `buzz`, `amq-remote` or serve's `--me`, and `--me` must not be `buzz` or `amq-remote`. Unknown config fields are refused. | `Inspect`, `Submit` and `CancelRequest`. Each request is one AMQ message to the handle: from `buzz` on thread `cockpit/<channel>` with the label `nostr:<event>` for a Buzz DM, else from `amq-remote` on thread `remote/<creator host>`. The handle answers with `amq reply --id <id>`; when the endpoint next looks, the newest of its replies that is not `--kind status` and has a body is the request's result; later replies stay unread in the carrier inbox. With no such reply within `reply_timeout` the request fails, and the message stays in the inbox. A cancel after delivery ends the request as delivered and no longer waited for. Several requests can be open at once; each is its own message, answered by its own id, so a second message never waits for the first or comes back busy. The handle cannot ask the owner a question through the share: a mailbox has no interaction seam. Submit evidence is `submitted`. See [Strict share in one owner step](#strict-share-in-one-owner-step). |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
@@ -123,7 +123,7 @@ adapters that attached, writes `refusals.json`, and prints the refusal.
     {
       "kind": "codex",
       "target": "cx-1",
-      "config": {"socket": "/absolute/path/codex.sock", "thread": "THREAD", "approve": false}
+      "config": {"socket": "/absolute/path/codex.sock", "thread": "THREAD"}
     },
     {
       "kind": "pi",
@@ -143,8 +143,8 @@ Two serve flags append to this file's adapter list instead of editing it.
 `--fake` adds kind `fake`, target `fake`. `--codex-socket PATH` attaches the
 daemon's loaded threads, or only `--codex-thread ID` when that flag is set.
 Those sugar targets look like `codex:` plus the thread id with hyphens
-removed. `--codex-approve` sets `approve` on those sugar entries. A target
-id that appears both in the file and in the flags is exit 2.
+removed. A target id that appears both in the file and in the flags is
+exit 2.
 
 `serve --discover` and `up --discover` list running sessions and exit. They
 attach nothing and write nothing, so they work while an endpoint already
@@ -212,8 +212,7 @@ it applies the shares as a restart would:
   as at startup. A share whose target or enrolled body a running share
   still holds is refused whole until that share is removed or `serve`
   restarts.
-- A share removed stops. Its approval pins go, and the other shares are not
-  touched.
+- A share removed stops. The other shares are not touched.
 - A share whose entry changed in any field keeps its running values. `serve`
   logs once that you must restart `serve`, or remove and re-add the share,
   to adopt the change.
@@ -355,8 +354,7 @@ refuses those submits. `"min_evidence": "submitted"` on the share, written by `s
 --min-evidence submitted`, accepts the weaker evidence. Until the request
 ends, the result row says so: once the request runs, that it reached the
 session and its start is not proven; before that, only that the share
-accepts submitted evidence. An approval message that stops taking a remote
-answer is edited to say so, and a reaction on it then answers nothing.
+accepts submitted evidence.
 
 | Owner sends | Result |
 | --- | --- |
@@ -364,18 +362,6 @@ answer is edited to say so, and a reaction on it then answers nothing.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
-| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. A Codex permission, input or MCP elicitation request shows with no reaction to take: answer it in the terminal. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. Claude targets with `approve` and the PermissionRequest hook; ✅ only when the hook pins the owner. |
-| `yes` or `no` typed in the DM (also `y`, `n`, `approve`, `reject`, ✅, ❌) | Answers a pending approval as ✅ or ❌ does. In the approval message's thread it answers that approval; in the main DM it answers the target's pending approval once the owner could have seen it. A Claude approval takes a typed yes only in its thread; a yes in the main DM is not sent, and the reply says how to allow. |
-
-A Codex target with `approve` also shows approvals of turns started in the
-Codex TUI, on the share whose `native_session_id` is the thread. Each has
-its own DM message, outside any request's thread. ✅ and ❌, or `yes` and
-`no` typed in that message's thread, answer it as above, only from that
-share and for one hour; then the message says to answer in the terminal.
-A permission, input or MCP elicitation request of such a turn is not shown.
-After an endpoint restart, the app-server sends a still-pending approval
-again, and its DM message answers it again. An approval that closed while
-the endpoint was down keeps its old text, and a reaction on it is not sent.
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
@@ -516,7 +502,6 @@ flag list; the `share` flags are in the table below.
 | `--fake` | false | Append the fake runtime as target `fake`. |
 | `--codex-socket PATH` | empty | Unix socket of a running Codex app-server. |
 | `--codex-thread ID` | empty | With `--codex-socket`, attach only this thread. |
-| `--codex-approve` | false | Answer approvals of those Codex threads from remote clients: runs this endpoint submitted, and turns started in the Codex TUI on a thread a relay share pins. |
 | `--manifest PATH` | `<root>/extensions/remote/manifest.json` | Adapter manifest path. |
 | `--discover` | false | List candidates and exit. |
 | `--poll DURATION` | `500ms` | Import and reconciliation interval. |
@@ -783,7 +768,7 @@ With a relay configured, doctor also reports each share's connection state
 as `serve` last wrote it (`auth_pending`, `authenticated` or `unavailable`),
 its DM surface under `commands`, and its `presence` and `discovery`.
 
-A Codex target with `approve` whose thread runs Codex's automatic approvals
+A Codex target whose thread runs Codex's automatic approvals
 reviewer (`approvals_reviewer` `auto_review` or `guardian_subagent`) is
 listed under `approval_reviewer`: that reviewer answers the thread's
 approvals before a remote client sees them. It is the owner's setting, so
@@ -798,7 +783,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
 | `amq_route` | The endpoint handle (`--me`, default `remote`) is not listed in the root's `config.json`, so other agents cannot route to it. |
 | `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
-| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook, or a Claude target with `approve` has no AMQ PermissionRequest hook, so Buzz cannot block its tool calls. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` or `claude_approval_hook` instead, because project or managed settings decide the effective state. |
+| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook, or it has no AMQ PermissionRequest hook, so Buzz shows none of its dialogs. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` or `claude_approval_hook` instead, because project or managed settings decide the effective state. |
 | `body_key` | A share's body key or enrolled generation cannot be used. |
 | `tag_expiry` | A share's enrolled grants have expired. |
 | `relay_auth` | A share is not `authenticated`. |
@@ -850,50 +835,27 @@ reads `uncertain`.
 
 ### Approvals from the Buzz DM
 
-A Claude target with `"approve": true`, shared by a relay share with
-commands and `native_session_id`, shows a tool approval of a request that
-the share submitted in the owner's DM. ❌ on it denies that one call. ✅
-allows it, but only when the hook pins the owner's public key. It needs one
-more hook:
+Every dialog a connected session raises in its terminal also shows in the
+session's Buzz channel or DM: a command, a file edit, a network or permission
+grant, an MCP call, a question. The message carries the dialog text and its
+options as the harness shows them, so the owner reads what the terminal
+shows. ✅ takes the first option, ❌ the deny option, a reply `1`, `2`, ...
+takes that option, `yes` and `no` work as ✅ and ❌, and a dialog that asks for
+text takes any reply. The first answer wins, in Buzz or in the terminal, and
+the message is edited with the outcome.
+
+Once the Claude hook is installed, every Claude Code session on the machine
+(terminal, desktop app Code tab, IDE) mirrors its dialogs to Buzz, with or
+without `/amq-remote`: a connected session posts in its own channel, an
+unconnected one in the "Approvals @ <machine>" channel. Install it once:
 
 ```text
-amq-remote claude install-approval-hook [--owner <hex|npub>] [--root <dir>] [--session <name>] [--manifest <path>]   # adds a PermissionRequest hook to ~/.claude/settings.json
-amq-remote claude uninstall-approval-hook                                                                         # removes only that hook
+amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~/.claude/settings.json
+amq-remote claude uninstall-approval-hook   # removes only that hook
 ```
 
-Without `--owner` the installer pins the one owner of the relay shares in
-the manifest (`--root` or `AM_ROOT`, or `--manifest`). With no owner found
-it installs a reject-only hook. With an owner it pins that owner's one relay
-share with a DM channel (or the `--session` one) on the hook's command line.
-Run the installer again after the share's relay, channel or body changes.
-
-For a Claude session that a Buzz Desktop agent drives with `--native` (no
-relay share), pin that agent's DM instead:
-
-```text
-amq-remote claude install-approval-hook --desktop --owner <hex|npub> --body <agent hex|npub> --channel <DM channel id>
-```
-
-The agent shows this command with its values under each deny-only approval
-in the DM; check the values the installer prints against it. The hook then allows a call on
-the owner's ✅ only with the agent's signed grant; an approval from another
-agent or channel can only deny. See
-[Claude Code approvals from Buzz](../../docs/amq-remote-approvals.md#buzz-desktop).
-
-The DM offers ✅ only for a Bash call it shows whole, when the installed hook
-pins the share's owner and the approval is bound to one tool call; otherwise
-it offers ❌ only. A call that may contain a secret shows "Command hidden: it
-may contain a secret. Check the terminal.", and a call too long to show
-whole shows "Command too long: check the terminal." The first answer wins, in
-Buzz or in the terminal, and the message is edited with the outcome. A
-request that Claude absorbed into a running turn gets no DM approval. When an
-approval cannot be verified, nothing is answered and the DM says why.
-
-The pin holds only while Claude cannot change settings or run commands
-without a prompt. Each of these defeats it: a click on "allow Claude to edit
-.claude for this session", `bypassPermissions` mode, or a `permissions.allow`
-rule that allows every Bash command. `amq-remote doctor` reports the pinned
-owner and share and warns on the last two in `~/.claude/settings.json`.
-
-The checks the hook and the endpoint run before an allow are in
-[Claude Code approvals from Buzz](../../docs/amq-remote-approvals.md).
+Codex needs no hook: Codex approvals reach Buzz only for a session on the
+Codex app-server (`codex app-server daemon start`, then `codex --remote
+unix://`), and a plain `codex` TUI session answers them in the terminal. A hook
+never blocks a dialog it cannot show: the terminal decides. [Approvals from Buzz](../../docs/amq-remote-approvals.md)
+describes the request, answer and resolution files.

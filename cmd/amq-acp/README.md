@@ -250,22 +250,10 @@ can pin it; the identity is not part of the session schema.
   posts to the DM but is not sent to the activity view a second time.
   Activity in the moment between admission and the start of the stream can
   be missing, and an endpoint without the stream leaves the turn as before.
-- A pending Claude tool approval of the request is posted to the DM once.
-  The owner's ❌ denies the call. ✅ allows it only when the Claude
-  approval hook carries a Desktop pin for this agent and its DM
-  ([Buzz Desktop approvals](../../docs/amq-remote-approvals.md#buzz-desktop)):
-  amq-acp then signs in to `BUZZ_RELAY_URL` with the agent key and
-  `BUZZ_AUTH_TAG`, reads the stored approval message, the owner's signed
-  reactions and the message's edits and deletions, and hands the endpoint the
-  ✅, the message and a grant signed with the agent key. A ❌ beats a ✅ up
-  to the observation cutoff: amq-acp reads the reactions again after the
-  history checks and signs the grant only when that read finds no ❌ and the
-  same ✅; a ❌ stored after it races the allow, and the first answer wins.
-  An edited or deleted approval message never allows. An approval that
-  offers allow for any other pin (a relay share or another Desktop DM) stays
-  deny-only here. Without the pin the
-  approval says Buzz can deny only and shows the `install-approval-hook
-  --desktop` command with this agent's owner, key and DM channel.
+- Every open dialog of the pinned session is posted to the DM once, with
+  its numbered options. The owner's ✅ or ❌, or a typed number, `yes` or
+  `no`, answers it, and the message is edited with the outcome (see
+  [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
 - A submit whose outcome is unknown is reconciled by its exact request
   reference. When the record cannot be read, `_meta.remote.state` is
   `uncertain` and the message says not to resend.
@@ -289,7 +277,8 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
 
 - A mailbox binding (the default) delivers the prompt as an AMQ message from
   `buzz` to the bound handle, then waits for a reply that refs it. A `status`
-  reply is progress; any other reply is the final answer. The first delivery
+  reply is posted as its own message and the turn stays open; any other
+  reply is the final answer. The first delivery
   of an event claims one message id, and a redelivery reuses it and publishes
   only if the message is absent. Delivery never creates the handle's mailbox
   or inbox; it completes the other folders of an existing one. When the
@@ -312,12 +301,7 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   amq-acp never holds the signed event on this path, and any local process
   can write an AMQ message with any label. A layer that must know the owner
   wrote the DM, for example to accept a gate answer, fetches that event from
-  the relay and checks it itself, as the
-  [Claude Code approval hook](../../docs/amq-remote-approvals.md#when-the-hook-answers)
-  does: the pinned owner key and signature, the DM channel, the gate message
-  in its `e` tags or thread, the gate's nonce in the content, the time window,
-  the edit and deletion history, and single use. AMQ verifies nothing for
-  the layer.
+  the relay and checks it itself. AMQ verifies nothing for the layer.
 - Follow-up DMs: a second `session/prompt` while a turn is open is still
   refused, but `initialize` advertises `_meta.steering.supported: true` in
   binding mode, so Buzz sends a follow-up as `_session/steering`. Once the
@@ -398,9 +382,9 @@ worker stops, its relay call in flight is cut off and no new step starts.
   was ever sent) and becomes active only after the unarchive is accepted and
   the session is still attached; then it posts "Connected again". An
   archived channel stays in Buzz history.
-- A tool approval in a channel can only be denied (❌); allow stays in the
-  terminal. A Desktop approval pin names one agent and one DM, and never
-  widens to a channel.
+- Each session's dialogs post in its channel with every option. Dialogs of
+  sessions no binding serves post in the "Approvals @ <machine>" channel
+  (see [Approvals from Buzz](../../docs/amq-remote-approvals.md)).
 
 A pinned agent keeps its Buzz identity in step with its binding. On each
 tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`
@@ -473,8 +457,8 @@ manifest block.
 - The machine agent runs 4 workers, and a mailbox turn holds one until its
   final reply. A fifth concurrent turn across all sessions waits inside
   buzz-acp, where AMQ cannot see or bound it.
-- A tool approval in a machine agent's channel offers deny only; allow it in
-  the terminal.
+- In a machine agent's channel, a typed answer to a dialog may need an
+  @mention of the agent before Buzz delivers it; reactions always work.
 
 ## Host mode
 
@@ -504,8 +488,9 @@ receive a reply in this root (a bridged `peer/handle`, an empty or invalid
 handle) or that has no thread is drained the same way. A file that does not
 parse moves to the DLQ with a `dlq` receipt, as `amq drain` does.
 
-Every tool call the agent asks to run is rejected unless the agent's own
-arguments grant autonomy, for example Grok's `--always-approve`. The host
+Every tool call the agent asks to run is rejected unless the owner allows it
+in Buzz or the agent's own arguments grant autonomy, for example Grok's
+`--always-approve`. The host
 advertises no file or terminal methods and never calls `authenticate`; an
 agent that needs a login is a refusal with exit code 6, and you log in once
 with the harness's own CLI. An agent that does not answer `initialize` and
@@ -534,9 +519,10 @@ attaches to the host through files under the same directory (see
 [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire)). A
 remote request runs only while no turn is in flight and the inbox is empty,
 and is otherwise refused `busy`. Its text goes to the agent verbatim, and the
-answer comes back as the request's result. A tool call during a remote
-request shows in Buzz as an approval the owner can reject; the host rejects
-it anyway after five minutes, and approve from Buzz is not offered.
+answer comes back as the request's result. Each permission request
+of the agent shows in Buzz with every option the agent offered, and the agent
+receives the owner's choice; with no answer within five minutes the host
+rejects it.
 Cancelling the request from Buzz (`/cancel <ref>`) or with
 `amq-remote cancel` sends ACP `session/cancel` for that turn only; a request
 that has not run never runs.

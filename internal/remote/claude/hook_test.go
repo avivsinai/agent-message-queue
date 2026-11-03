@@ -84,23 +84,6 @@ func TestStopHookBoundSessionAppendsUntilUnsubscribe(t *testing.T) {
 	}
 }
 
-func TestPinWarningsNamesAutoMode(t *testing.T) {
-	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(SettingsPath(home)), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(SettingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	warns, err := PinWarnings(SettingsPath(home))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "auto") {
-		t.Fatalf("warnings = %q, want one naming auto mode", warns)
-	}
-}
-
 // Regression: #855, the installed hook is a matcher group whose
 // nested command runs the quoted amq-remote binary (the marker is an env
 // assignment in front of it, not the command word).
@@ -383,5 +366,35 @@ func TestStopHookIgnoresATombstoneNamingTheSession(t *testing.T) {
 	RunStopHookReceiver(home, strings.NewReader(`{"session_id":"session-y","hook_event_name":"Stop"}`), io.Discard)
 	if _, err := os.Stat(stopMarkerPath(home, sid)); !os.IsNotExist(err) {
 		t.Fatalf("a detached session's tombstone wrote a Stop marker: %v", err)
+	}
+}
+
+// Install adds one PermissionRequest entry beside the Stop hook, gated on a
+// machine agent or a binding, running the absolute binary with --wait 600.
+// Uninstall keeps the Stop hook.
+func TestInstallApprovalHookBesideStopHook(t *testing.T) {
+	home := t.TempDir()
+	if err := InstallStopHook(home, "/opt/amq-remote"); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait); err != nil {
+		t.Fatal(err)
+	}
+	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
+	if err != nil || len(cmds) != 1 || !strings.HasPrefix(cmds[0], `AMQ_APPROVAL_HOOK=1 set -- "${AMQ_REMOTE_BINDING-}" '`+home+`/.amq/remote/binding.json' '`+home+`/.amq/remote/acp/agents/_machine/'*.json`) ||
+		!strings.HasSuffix(cmds[0], `; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec '/opt/amq-remote' claude permission-hook --wait 600`) {
+		t.Fatalf("approval hook commands = %q, %v", cmds, err)
+	}
+	if form, err := PermissionHookForm(home, SettingsPath(home)); err != nil || form != HookFormCurrent {
+		t.Fatalf("form = %q, %v; want current", form, err)
+	}
+	if err := UninstallPermissionHook(home); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := PermissionHookState(SettingsPath(home)); state != StopHookMissing {
+		t.Fatalf("after uninstall the approval hook state = %q, want missing", state)
+	}
+	if state, _ := StopHookState(home); state != StopHookPresent {
+		t.Fatalf("after uninstall the Stop hook state = %q, want it kept", state)
 	}
 }

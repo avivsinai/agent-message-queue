@@ -135,15 +135,6 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		}
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
-	if cand.Kind == "claude" && *linkName == "" {
-		// A Claude session shows its tool approvals in the Buzz DM, where
-		// the owner can deny them. A session shared with a link never gains
-		// answering authority: no
-		// remote source answers the agent's prompts.
-		if reg.Config, err = withApprove(cand.Config); err != nil {
-			return protocol.ExitActionRequired, err
-		}
-	}
 	session, err := registerTarget(stateDir, reg)
 	if isEndpointUnreachable(err) {
 		// No endpoint yet: record the target where startup reads it, then
@@ -1259,8 +1250,9 @@ func nativeSessionOf(stateDir, target string) (string, error) {
 
 // persistAdapter adds a manifest entry for a so a restart attaches it again.
 // An existing entry for the target is kept as it is, except that a Claude
-// entry gains approve or moves to the config dir that now holds its pid's
-// session; upgraded reports that change.
+// entry moves to the config dir that now holds its pid's session;
+// upgraded reports that change. A legacy approve key never makes two
+// entries of one session differ.
 func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err error) {
 	if !lock.AdvisoryLockAvailable() {
 		return false, errors.New("refusing to update the manifest without an advisory file lock")
@@ -1283,14 +1275,13 @@ func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err err
 			if existing.Kind != a.Kind || existing.Epoch != a.Epoch {
 				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
 			}
-			if sameJSON(existing.Config, a.Config) {
+			if sameJSON(existing.Config, a.Config) || a.Kind == "claude" && sameJSON(withoutApprove(existing.Config), withoutApprove(a.Config)) {
 				return nil
 			}
-			// The same Claude session attached before approvals existed
-			// gains approve. An entry whose config dir holds no registry
-			// entry for the pid, while the new config dir holds this
-			// session's, is replaced. Anything else names another session.
-			if upgraded, err := withApprove(existing.Config); a.Kind != "claude" || (err != nil || !sameJSON(upgraded, a.Config)) && !claude.ReplacesEntry(existing.Config, a.Config) {
+			// An entry whose config dir holds no registry entry for the pid,
+			// while the new config dir holds this session's, is replaced.
+			// Anything else names another session.
+			if a.Kind != "claude" || !claude.ReplacesEntry(existing.Config, a.Config) {
 				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
 			}
 			for i := range f.Adapters {
@@ -1318,13 +1309,12 @@ func persistAdapter(stateDir string, a manifest.Adapter) (upgraded bool, err err
 
 // liveRegistrar attaches one adapter to the running endpoint the way startup
 // attaches manifest entries, after persisting it for restarts.
-// A Claude target gets its native approval pin from pin when non-nil. A
-// target attached already is built again when its entry gained approve, so
-// the running endpoint answers approvals as a restart would; the replaced
-// attachment ends when the endpoint unsubscribes it. The target stays due
-// for that rebuild until one succeeds: the manifest already holds approve,
-// so a retry after a failed build reports no change.
-func liveRegistrar(root, stateDir, me string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
+// A target attached already is built again when its entry moved to another
+// config dir, as a restart would; the replaced attachment ends when the
+// endpoint unsubscribes it. The target stays due for that rebuild until one
+// succeeds: the manifest already holds the new entry, so a retry after a
+// failed build reports no change.
+func liveRegistrar(root, stateDir, me string, ep *core.Endpoint) ipc.Registrar {
 	var mu sync.Mutex
 	rebuild := map[string]bool{} // targets whose running attachment predates their entry
 	return func(r ipc.RegisterRequest) (protocol.Session, error) {
@@ -1349,9 +1339,6 @@ func liveRegistrar(root, stateDir, me string, ep *core.Endpoint, pin func(manife
 			}
 			ep.Register(out[0].Attachment)
 			delete(rebuild, r.Target)
-			if pin != nil {
-				pin(a)
-			}
 		}
 		for _, s := range ep.Sessions() {
 			if s.TargetID == r.Target {
@@ -1362,16 +1349,18 @@ func liveRegistrar(root, stateDir, me string, ep *core.Endpoint, pin func(manife
 	}
 }
 
-// withApprove is a Claude adapter config with approve set.
-func withApprove(config json.RawMessage) (json.RawMessage, error) {
+// withoutApprove is a Claude adapter config without the legacy approve key.
+func withoutApprove(config json.RawMessage) json.RawMessage {
 	cfg := map[string]any{}
-	if len(config) > 0 {
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, fmt.Errorf("claude adapter config: %w", err)
-		}
+	if len(config) == 0 || json.Unmarshal(config, &cfg) != nil {
+		return config
 	}
-	cfg["approve"] = true
-	return json.Marshal(cfg)
+	delete(cfg, "approve")
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return config
+	}
+	return out
 }
 
 // sameJSON compares two config blocks by value.

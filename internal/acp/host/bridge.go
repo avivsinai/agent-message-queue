@@ -8,8 +8,7 @@ package host
 //	<root>/agents/<me>/extensions/acp-host/
 //	  requests/<ref>.json    adapter -> host: one request per ref
 //	  receipts/<ref>.json    host -> adapter: admission proof
-//	  events/<ref>.jsonl     host -> adapter: lifecycle, approvals, outcome
-//	  answers/<hash>.json    adapter -> host: one approval answer
+//	  events/<ref>.jsonl     host -> adapter: lifecycle and outcome
 //	  cancels/<ref>.json     adapter -> host: cancel of one request
 //	  bridge.liveness        host -> adapter: heartbeat
 //
@@ -20,7 +19,6 @@ package host
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // BridgeProtocol is the protocol string of every receipt, event line,
@@ -43,14 +42,14 @@ const BridgeProtocol = "amq:acp-host:v1"
 
 const (
 	// bridgeRevision is the rule set the host implements: revision 3 plus
-	// tool approvals through answers/ (revision 4) and exact cancel through
-	// cancels/ (revision 5).
+	// exact cancel through cancels/. Tool approvals are dialogs on the
+	// binding's dialog store, not part of this seam.
 	bridgeRevision = 5
 	// minRequestRevision is the lowest revision a request may require.
 	minRequestRevision = 3
 	livenessInterval   = 2 * time.Second
-	// approvalTTL is how long an approval waits for the owner before the
-	// host's policy (reject) answers it.
+	// approvalTTL is how long a permission dialog waits for the owner before
+	// the host's policy (reject) answers it.
 	approvalTTL  = 5 * time.Minute
 	answerPoll   = 250 * time.Millisecond
 	maxEventText = 256 * 1024
@@ -80,24 +79,13 @@ type bridgeReceipt struct {
 }
 
 type bridgeEvent struct {
-	Protocol      string   `json:"protocol"`
-	Ref           string   `json:"ref"`
-	Event         string   `json:"event"`
-	Text          string   `json:"text,omitempty"`
-	Error         string   `json:"error,omitempty"`
-	Reason        string   `json:"reason,omitempty"`
-	At            string   `json:"at"`
-	InteractionID string   `json:"interaction_id,omitempty"`
-	Kind          string   `json:"kind,omitempty"`
-	Prompt        string   `json:"prompt,omitempty"`
-	Options       []string `json:"options,omitempty"`
-	ApproveOption string   `json:"approve_option,omitempty"`
-	RejectOption  string   `json:"reject_option,omitempty"`
-	ManifestHash  string   `json:"manifest_hash,omitempty"`
-	ExpiresAt     string   `json:"expires_at,omitempty"`
-	Presence      string   `json:"presence,omitempty"`
-	Outcome       string   `json:"outcome,omitempty"`
-	Option        string   `json:"option,omitempty"`
+	Protocol string `json:"protocol"`
+	Ref      string `json:"ref"`
+	Event    string `json:"event"`
+	Text     string `json:"text,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	At       string `json:"at"`
 }
 
 type bridgeLiveness struct {
@@ -117,21 +105,11 @@ type bridgeCancel struct {
 	Ref      string `json:"ref"`
 }
 
-type bridgeAnswer struct {
-	Protocol      string `json:"protocol"`
-	Ref           string `json:"ref"`
-	InteractionID string `json:"interaction_id"`
-	ManifestHash  string `json:"manifest_hash"`
-	Option        string `json:"option"`
-}
-
 // bridgeTurn is the remote request a turn serves.
 type bridgeTurn struct {
 	ref string
-	// next numbers the turn's approvals; ended is set once the terminal
-	// event is written, after which no approval line may follow. Both are
-	// guarded by Host.eventMu.
-	next  int
+	// ended is set once the terminal event is written, after which no
+	// approval line may follow. Guarded by Host.eventMu.
 	ended bool
 }
 
@@ -525,90 +503,98 @@ func requestOutcome(res turnResult, exitStatus func() string) (bridgeEvent, erro
 	}
 }
 
-// askOwner shows one tool approval of a remote request's turn on the remote
-// face and waits for the owner's answer until it expires. The host offers
-// the remote face only the reject_once option (presence local_only), and the
-// host's own policy, which also rejects, answers at expiry. It returns false
-// when the turn is cancelled or ends meanwhile: the approval then answers
-// cancelled.
-func (h *Host) askOwner(turn *turnCollect, req permissionRequest, reject int) bool {
-	bt := turn.bridge
-	h.eventMu.Lock()
-	bt.next++
-	id := fmt.Sprintf("tool-%d", bt.next)
-	h.eventMu.Unlock()
-
-	names := make([]string, len(req.Options))
-	approve := ""
+// askOwner opens the agent's permission dialog on the remote face, offering
+// every option the agent gave, and waits for the first answer: the owner's
+// from Buzz, or the host's own policy at expiry. It returns the chosen option
+// index, ok=false when no answer applies (no binding serves this host, the
+// dialog cannot be opened, or it expires), so the caller applies its policy,
+// and cancelled=true when the turn is cancelled or ends meanwhile.
+func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, ok, cancelled bool) {
+	name, err := dialog.FindBinding(h.cfg.Root, h.cfg.Me, h.sessionID)
+	if err != nil || name == "" {
+		return 0, false, false
+	}
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		return 0, false, false
+	}
+	options := make([]dialog.Option, len(req.Options))
 	for i, option := range req.Options {
-		names[i] = option.Name
-		if names[i] == "" {
-			names[i] = option.OptionID
+		label := option.Name
+		if label == "" {
+			label = option.OptionID
 		}
-		if approve == "" && option.Kind == "allow_once" {
-			approve = names[i]
-		}
+		options[i] = dialog.Option{N: i + 1, Label: label, Value: option.OptionID, Deny: strings.HasPrefix(option.Kind, "reject")}
 	}
-	rejectName := names[reject]
-	sum := sha256.Sum256(req.ToolCall)
-	hash := "sha256:" + hex.EncodeToString(sum[:])
-	expires := time.Now().Add(approvalTTL)
-	line := bridgeEvent{
-		Event:         "interaction",
-		InteractionID: id,
-		Kind:          "approval",
-		Prompt:        cutUTF8(approvalPrompt(req.ToolCall), maxPrompt),
-		Options:       names,
-		ApproveOption: approve,
-		RejectOption:  rejectName,
-		ManifestHash:  hash,
-		ExpiresAt:     expires.UTC().Format(time.RFC3339Nano),
-		Presence:      "local_only",
+	r := dialog.Request{
+		ID:       dialog.NewID(),
+		Harness:  "acp",
+		Session:  h.sessionID,
+		Tool:     toolTitle(req.ToolCall),
+		Text:     cutUTF8(approvalPrompt(req.ToolCall), maxPrompt),
+		Options:  options,
+		OpenedAt: time.Now().UTC(),
+		PID:      os.Getpid(),
 	}
-	if err := h.withRoot(func(root *fsq.DeliveryRoot) error { return h.appendEvent(root, bt.ref, bt, line) }); err != nil {
-		return true
+	if dialog.Open(dir, r) != nil {
+		return 0, false, false
 	}
-	resolve := func(outcome string) {
-		_ = h.withRoot(func(root *fsq.DeliveryRoot) error {
-			return h.appendEvent(root, bt.ref, bt, bridgeEvent{Event: "interaction_resolved", InteractionID: id, Outcome: outcome, Option: rejectName})
-		})
+	resolve := func(outcome, label, by string) bool {
+		won, err := dialog.Resolve(dir, dialog.Resolved{ID: r.ID, Outcome: outcome, Label: label, By: by, At: time.Now().UTC()})
+		return won && err == nil
 	}
-	answerFile := bridgePath(h.cfg.Me, "answers", answerName(bt.ref, id))
-	timer := time.NewTimer(time.Until(expires))
+	var cancelCh, doneCh <-chan struct{}
+	if turn != nil {
+		cancelCh, doneCh = turn.cancelled, turn.done
+	}
+	timer := time.NewTimer(approvalTTL)
 	defer timer.Stop()
 	poll := time.NewTicker(answerPoll)
 	defer poll.Stop()
 	for {
 		select {
-		case <-turn.cancelled:
-			return false
-		case <-turn.done:
-			return false
+		case <-cancelCh:
+			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
+			return 0, false, true
+		case <-doneCh:
+			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
+			return 0, false, true
 		case <-timer.C:
-			resolve("answered_elsewhere")
-			return true
+			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
+			return 0, false, false
 		case <-poll.C:
-			var data []byte
-			if h.withRoot(func(root *fsq.DeliveryRoot) error {
-				var err error
-				data, err = root.ReadFile(answerFile)
-				return err
-			}) != nil {
+			ans, found, err := dialog.ReadAnswer(dir, r.ID)
+			if err != nil || !found {
 				continue
 			}
-			var ans bridgeAnswer
-			valid := json.Unmarshal(data, &ans) == nil && ans.Protocol == BridgeProtocol && ans.Ref == bt.ref &&
-				ans.InteractionID == id && ans.ManifestHash == hash && ans.Option == rejectName
-			if valid {
-				resolve("answered")
-			} else {
-				// An answer the host cannot apply is refused; the policy
-				// answers instead.
-				resolve("answered_elsewhere")
+			if ans.Option < 1 || ans.Option > len(options) {
+				// An answer the host cannot apply leaves the policy to decide.
+				resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
+				return 0, false, false
 			}
-			return true
+			picked := options[ans.Option-1]
+			outcome := dialog.OutcomeAllowed
+			if picked.Deny {
+				outcome = dialog.OutcomeDenied
+			}
+			if !resolve(outcome, picked.Label, dialog.ByBuzz) {
+				return 0, false, false
+			}
+			return ans.Option - 1, true, false
 		}
 	}
+}
+
+// toolTitle is the tool call's title, "tool call" when it has none.
+func toolTitle(toolCall json.RawMessage) string {
+	var call struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(toolCall, &call)
+	if t := strings.TrimSpace(call.Title); t != "" {
+		return t
+	}
+	return "tool call"
 }
 
 // approvalPrompt is what the owner sees: the tool call's title, then its raw
@@ -627,11 +613,4 @@ func approvalPrompt(toolCall json.RawMessage) string {
 		text = "a tool call"
 	}
 	return text
-}
-
-// answerName is the answer file for one approval: the lowercase hex SHA-256
-// of the ref, a NUL byte, and the interaction id.
-func answerName(ref, interactionID string) string {
-	sum := sha256.Sum256([]byte(ref + "\x00" + interactionID))
-	return hex.EncodeToString(sum[:]) + ".json"
 }

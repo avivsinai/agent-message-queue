@@ -5,6 +5,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 export const PROTOCOL = "amq:pi-bridge:v1";
@@ -94,20 +95,32 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	// marker follows one count of open prompts, which does not depend on
 	// order: it exists exactly while the count is above zero.
 	let openPrompts = 0;
+	// The same prompt is shown in Buzz as a dialog with no options: pi
+	// exposes no way to answer a prompt from an extension (the prompt events
+	// carry only its kind and title), so the owner answers in the terminal and
+	// the dialog closes when the prompt ends.
 	pi.on("project_trust", () => {
 		openWakeDialog(WAKE_DIALOG_TRUST, "select");
+		openRemoteDialog("select", "Trust project folder?", "");
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
-		if (++openPrompts === 1) openWakeDialog(WAKE_DIALOG_PROMPT, event.kind);
+		if (++openPrompts === 1) {
+			openWakeDialog(WAKE_DIALOG_PROMPT, event.kind);
+			openRemoteDialog(event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
+		}
 	});
 	pi.on("ui_prompt_end", () => {
-		if (--openPrompts <= 0) closeWakeDialog();
+		if (--openPrompts <= 0) {
+			closeWakeDialog();
+			closeRemoteDialog();
+		}
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		openPrompts = 0;
 		closeWakeDialog();
+		closeRemoteDialog();
 		stop(bridge, "restart");
 		bridge = start(pi, ctx);
 		if (bridge) scan(pi, bridge);
@@ -116,6 +129,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
 		closeWakeDialog();
+		closeRemoteDialog();
 		stop(bridge, event.reason);
 		bridge = null;
 	});
@@ -751,6 +765,97 @@ function closeWakeDialog(): void {
 		if ((marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi") fs.unlinkSync(file);
 	} catch {
 		// No marker, or one this extension did not write.
+	}
+}
+
+// The remote dialog store is <store>/dialogs/<binding>/{requests,resolved}
+// (internal/remote/dialog). A seam shows a dialog in Buzz only when a mailbox
+// binding names this AM_ROOT and AM_ME; without one it does nothing. The Go
+// liveness rule also compares the holder's pid and process start token, which
+// Node cannot read portably, so only a binding whose root is gone counts as
+// ended here.
+let remoteDialog: { dir: string; id: string } | null = null;
+
+function remoteStore(): string {
+	const file = process.env.AMQ_REMOTE_BINDING?.trim();
+	return file ? path.dirname(file) : path.join(os.homedir(), ".amq", "remote");
+}
+
+function realPath(p: string): string {
+	try {
+		return fs.realpathSync(p);
+	} catch {
+		return path.resolve(p);
+	}
+}
+
+// remoteBinding is the name of the mailbox binding that serves this pi.
+function remoteBinding(store: string): string {
+	const root = process.env.AM_ROOT ?? "";
+	const handle = process.env.AM_ME ?? "";
+	if (!root || !handle) return "";
+	const want = realPath(root);
+	let names: string[] = [];
+	try {
+		names = fs.readdirSync(path.join(store, "bindings"));
+	} catch {
+		return "";
+	}
+	for (const file of names.sort()) {
+		const name = file.replace(/\.json$/, "");
+		if (name === file || file.endsWith(".ended.json")) continue;
+		try {
+			const b = JSON.parse(fs.readFileSync(path.join(store, "bindings", file), "utf8")) as { carrier?: string; root?: string; handle?: string };
+			if (b.carrier === "mailbox" && b.handle === handle && b.root && fs.existsSync(b.root) && realPath(b.root) === want) return name;
+		} catch {
+			// An unreadable binding serves nothing.
+		}
+	}
+	return "";
+}
+
+// openRemoteDialog writes a request with no options, so Buzz shows the prompt
+// and says to answer in the terminal.
+function openRemoteDialog(kind: string, title: string, session: string): void {
+	closeRemoteDialog();
+	const store = remoteStore();
+	const name = remoteBinding(store);
+	if (!name) return;
+	const dir = path.join(store, "dialogs", name);
+	const id = `d-${randomUUID().replace(/-/g, "")}`;
+	const text = `${title || "a prompt"} (${kind})`;
+	const request = { id, harness: "pi", session, tool: "", text, options: [], opened_at: new Date().toISOString(), pid: process.pid };
+	try {
+		for (const sub of ["requests", "answers", "resolved"]) fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
+		const temp = path.join(dir, "requests", `.${id}.tmp-${randomUUID()}`);
+		fs.writeFileSync(temp, JSON.stringify(request), { flag: "wx", mode: 0o600 });
+		fs.renameSync(temp, path.join(dir, "requests", `${id}.json`));
+		remoteDialog = { dir, id };
+	} catch {
+		// A dialog that cannot be shown leaves the prompt to the terminal.
+	}
+}
+
+// closeRemoteDialog records that the terminal answered. The record is linked
+// into place whole and never replaces an earlier resolution.
+function closeRemoteDialog(): void {
+	const open = remoteDialog;
+	remoteDialog = null;
+	if (!open) return;
+	const resolved = { id: open.id, outcome: "terminal", by: "terminal", at: new Date().toISOString() };
+	const sub = path.join(open.dir, "resolved");
+	const temp = path.join(sub, `.${open.id}.tmp-${randomUUID()}`);
+	try {
+		fs.writeFileSync(temp, JSON.stringify(resolved), { flag: "wx", mode: 0o600 });
+		fs.linkSync(temp, path.join(sub, `${open.id}.json`));
+	} catch {
+		// Already resolved, or the store is gone.
+	} finally {
+		try {
+			fs.unlinkSync(temp);
+		} catch {
+			// No temp file left.
+		}
 	}
 }
 

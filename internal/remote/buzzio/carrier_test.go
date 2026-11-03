@@ -3,11 +3,8 @@ package buzzio
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -364,100 +361,6 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 	now = now.Add(time.Minute)
 	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {
 		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the row then its edit", err, sent)
-	}
-	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
-		t.Fatalf("pending after flush = %d, want 0", len(pending))
-	}
-}
-
-// Regression: #971, Flush ordered a
-// request's outputs by key text, so a newer revision ("row/R/00000003")
-// sorted before a refused approval message ("row/R/approval/ffff…") and
-// went out first, also after the ledger was reopened. A request's outputs
-// go out in the order they were prepared. Outputs written before
-// sequence numbers (seq 0) have no provable order, so a refused one holds
-// its request's other old outputs.
-func TestRefusedApprovalHoldsItsRequestsNewerRows(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) { refusedApprovalHoldsNewerRows(t, legacy) })
-	}
-}
-
-func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
-	c, owner, stateDir := busyCarrier(t)
-	now := time.Now()
-	c.now = func() time.Time { return now }
-	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "go", now)); err != nil {
-		t.Fatal(err)
-	}
-	var sent []nostr.Event
-	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
-	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 1 {
-		t.Fatalf("flush root: err = %v, sent = %d", err, len(sent))
-	}
-	pending, _ := c.ledger.Pending()
-	ref, _, _ := c.ledger.RequestForRow(sent[0].ID.Hex())
-	origin := c.source(tagValue(sent[0], "e"), "").Origin
-	if len(pending) != 0 || ref == "" {
-		t.Fatalf("root not accepted: pending = %d, ref = %q", len(pending), ref)
-	}
-	interaction := strings.Repeat("f", 32)
-	now = now.Add(2 * time.Second)
-	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateRunning,
-		Interaction: &protocol.Interaction{InteractionID: interaction, Kind: "approval", Prompt: "run ls", Options: []string{"yes", "no"}, RemoteAnswer: true, ApproveOption: "yes", RejectOption: "no"}}, origin); err != nil {
-		t.Fatal(err)
-	}
-	sent = nil
-	refuseApproval := func(_ context.Context, evt nostr.Event) error {
-		sent = append(sent, evt)
-		if evt.Kind == KindDM {
-			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: "rate-limited"}
-		}
-		return nil
-	}
-	if err := c.Flush(context.Background(), refuseApproval, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	// The terminal resolves the interaction; the newer revision is prepared
-	// by a reopened ledger while the approval waits out its backoff.
-	reopened, err := OpenLedger(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.ledger = reopened
-	now = now.Add(2 * time.Second)
-	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 3, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"},
-		Resolved: []protocol.Resolution{{InteractionID: interaction, Outcome: protocol.ResolutionElsewhere}}}, origin); err != nil {
-		t.Fatal(err)
-	}
-	if legacy {
-		// Rewrite the owed outputs as an earlier build wrote them: no seq.
-		files, _ := filepath.Glob(filepath.Join(stateDir, "buzz", "outbox", "*.json"))
-		if len(files) == 0 {
-			t.Fatal("no outbox files to rewrite")
-		}
-		for _, f := range files {
-			raw, _ := os.ReadFile(f)
-			var o map[string]any
-			if json.Unmarshal(raw, &o) == nil {
-				delete(o, "seq")
-				raw, _ = json.Marshal(o)
-				_ = os.WriteFile(f, raw, 0o600)
-			}
-		}
-		if c.ledger, err = OpenLedger(stateDir); err != nil {
-			t.Fatal(err)
-		}
-	}
-	sent = nil
-	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 0 {
-		t.Fatalf("flush during the approval's backoff: err = %v, sent = %+v, want nothing sent", err, sent)
-	}
-	now = now.Add(time.Minute)
-	// Old outputs have no provable order, so after the backoff only their
-	// delivery is guaranteed, not the approval going first.
-	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) == 0 || !legacy && sent[0].Kind != KindDM {
-		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the approval message first", err, sent)
 	}
 	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))

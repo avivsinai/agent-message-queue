@@ -150,8 +150,8 @@ func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The target disappears entirely: unregistered, no resolver anywhere.
-	ep.UnregisterAll()
+	// The endpoint restarts without the target: no resolver anywhere.
+	ep = core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
 	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
 	if err := ep.Reconcile(); err != nil {

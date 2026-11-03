@@ -73,6 +73,13 @@ type mailboxOutcome struct {
 // the handle notices the message (a wake, a built-in consumer, monitor, or
 // its next drain) is the handle owner's business, not this bridge's.
 func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, turn *turnState, emit func(any) error) (any, *rpcError) {
+	if eventID == "" {
+		key, err := s.localEvent(b)
+		if err != nil {
+			return nil, newRPCError(codeInternalError, "mailbox event: %v", err)
+		}
+		eventID = key
+	}
 	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
 	s.mu.Lock()
 	threadID := ""
@@ -118,7 +125,8 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			// This attempt published nothing, but a replay may follow an
 			// earlier delivery. A timeout before acquiring the lock has not
 			// even read the claim, so absence is never proven for an event.
-			if eventID != "" {
+			// A local event is never replayed.
+			if !isLocalEvent(eventID) {
 				return r.failed(remoteUncertain, errors.New("the turn ran out of time before delivery could be confirmed"))
 			}
 			r.meta.Reason = "reply_timeout"
@@ -175,6 +183,9 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", threadID, err)
 		}
 		for _, note := range progress {
+			// buzz-acp shows thought chunks only as "typing…", so the owner
+			// reads a status reply only as a post.
+			s.postProgress(eventID, r.postChannel(), note)
 			if err := emitText(emit, sessionID, "agent_thought_chunk", note); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 			}
@@ -405,12 +416,16 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 
 // mailboxClaim returns the message id and time for this prompt, and whether
 // this call created the claim. With an event id it is claimed exclusively
-// under the publish lock, and a redelivery reuses it.
+// under the publish lock, and a redelivery reuses it. A local event's key is
+// the message id.
 func (s *Server) mailboxClaim(eventID, threadID, channel string, deadline time.Time) (mailboxClaim, bool, error) {
 	now := time.Now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		return mailboxClaim{}, false, err
+	id := eventID
+	if !isLocalEvent(eventID) {
+		var err error
+		if id, err = format.NewMessageID(now); err != nil {
+			return mailboxClaim{}, false, err
+		}
 	}
 	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel, Deadline: deadline.UTC().Format(time.RFC3339Nano)}
 	if eventID == "" {
@@ -437,6 +452,48 @@ func (s *Server) mailboxClaim(eventID, threadID, channel string, deadline time.T
 		return mailboxClaim{}, false, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
 	return claim, created, nil
+}
+
+// isLocalEvent reports whether eventID is a local event key (localEvent), not
+// a Nostr event id.
+func isLocalEvent(eventID string) bool {
+	return eventID != "" && !nostrEventIDRe.MatchString(eventID)
+}
+
+// localEvent keys a prompt that carries no Nostr event id (Buzz Desktop sends
+// none) on the AMQ message id it is forwarded as, and claims it for b and this
+// agent as turnBinding claims an event. The late-reply sweep finds the claim,
+// so a final reply that arrives after the turn ends is still posted, once. A
+// local event is never redelivered.
+func (s *Server) localEvent(b binding.Binding) (string, error) {
+	key, err := format.NewMessageID(time.Now())
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
+	if err != nil {
+		return "", err
+	}
+	won, err := createExclusive(filepath.Join(s.eventDir(key), key+".json"), raw)
+	if err != nil {
+		return "", err
+	}
+	if !won {
+		return "", fmt.Errorf("event %s is already claimed", key)
+	}
+	return key, nil
+}
+
+// postProgress posts one status reply into channel, never after the event's
+// final text. The forwarding claim (mailboxWatch.recover) hands each reply
+// over once.
+func (s *Server) postProgress(eventID, channel, text string) {
+	_ = s.withPostLock(eventID, func() error {
+		if _, final := s.mailboxAnswered(eventID); !final {
+			s.publish(channel, text)
+		}
+		return nil
+	})
 }
 
 // errStoppedBeforePublish means the turn was cancelled or left before the
@@ -563,7 +620,7 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, created time.T
 	}
 	defer func() { _ = root.Close() }()
 	labels := []string{"acp", "buzz"}
-	if eventID != "" {
+	if eventID != "" && !isLocalEvent(eventID) {
 		labels = append(labels, "nostr:"+eventID)
 	}
 	return PublishMailboxPrompt(root, id, created, MailboxPrompt{

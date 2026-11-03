@@ -245,7 +245,7 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 		}
 	}
 	for _, run := range removed {
-		rs.stopShare(run, mf.Adapters)
+		rs.stopShare(run)
 		say(rs.stderr, "relay share %s: removed from the manifest; stopped", run.share.Session)
 	}
 	for _, run := range retried {
@@ -254,8 +254,8 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 		if rs.collision(run.share, run.body, run.share.Session) != "" {
 			continue
 		}
-		rs.stopShare(run, mf.Adapters)
-		rs.addShare(want[run.share.Session], mf.Adapters)
+		rs.stopShare(run)
+		rs.addShare(want[run.share.Session])
 	}
 	var added []manifest.Share
 	for session, sh := range want {
@@ -264,7 +264,7 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 		}
 	}
 	for _, sh := range added {
-		if rs.addShare(sh, mf.Adapters) {
+		if rs.addShare(sh) {
 			say(rs.stderr, "relay share %s: added from the manifest", sh.Session)
 		}
 	}
@@ -275,7 +275,7 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 // share already holds is refused whole: no surface, pin or client, so it
 // never takes over the running share's target, profile or presence.
 // It reports false then.
-func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) bool {
+func (rs *relaySet) addShare(sh manifest.Share) bool {
 	body := ""
 	if creds, err := sharestate.Load(rs.root, sh.Session); err == nil {
 		body = creds.Body.PublicKeyHex()
@@ -286,7 +286,6 @@ func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) boo
 	}
 	delete(rs.said, "share:"+sh.Session)
 	rs.edges.addShare(rs.root, rs.stateDir, sh, false, rs.stderr)
-	rs.edges.pinShare(sh, adapters, rs.stderr)
 	rs.startShare(sh)
 	return true
 }
@@ -306,9 +305,8 @@ func (rs *relaySet) collision(sh manifest.Share, body, self string) string {
 	return ""
 }
 
-// stopShare closes a share's client, drops its surfaces and pins, and
-// gives an attached Claude target the owner-less native pin a restart would.
-func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
+// stopShare closes a share's client and drops its surfaces.
+func (rs *relaySet) stopShare(run *relayRun) {
 	run.cancel()
 	select {
 	case <-run.done:
@@ -319,15 +317,7 @@ func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
 	delete(rs.running, run.share.Session)
 	rs.mu.Unlock()
 	delete(rs.said, "share:"+run.share.Session)
-	gone := rs.edges.removeShare(run.share, run.body)
-	// The native pin is written before the share's pins go, so the session
-	// is never without a pin.
-	for _, ad := range adapters {
-		if ad.Target == run.share.Target {
-			rs.edges.pinNative(ad, rs.edges.identityLate(ad.Target), rs.stderr)
-		}
-	}
-	unpin(gone)
+	rs.edges.removeShare(run.share, run.body)
 }
 
 // startShare starts one share's client with its surfaces' hooks.

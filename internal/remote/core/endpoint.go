@@ -192,15 +192,6 @@ type Endpoint struct {
 	// holds or waits for it.
 	answering map[answerKey]*answerLock
 	consent   ConsentCheck
-	// threadApprovals are the open approvals of turns no request owns, by
-	// id, and threadSink is where they are shown.
-	threadApprovals map[string]*threadApproval
-	threadSink      ThreadApprovalSink
-	// threadOwed are thread approval publications that failed, by id.
-	threadOwed map[string]ThreadApproval
-	// threadPubMu orders thread approval publications: it is taken before
-	// e.mu and held from a state change through its publication.
-	threadPubMu sync.Mutex
 }
 
 // Config configures New.
@@ -237,8 +228,6 @@ func New(cfg Config) *Endpoint {
 		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
 		answering:        map[answerKey]*answerLock{},
-		threadApprovals:  map[string]*threadApproval{},
-		threadOwed:       map[string]ThreadApproval{},
 		consent:          cfg.Consent,
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
@@ -290,19 +279,6 @@ func (e *Endpoint) Register(att Attachment) {
 	t := &target{att: att}
 	t.unsubscribe = att.Subscribe(func(ev NativeEvent) { e.onNative(s.TargetID, ev) })
 	e.targets[s.TargetID] = t
-}
-
-// UnregisterAll unsubscribes every attachment without closing the store:
-// reconcile tests use it to drop a target mid-flight (the restart shape).
-func (e *Endpoint) UnregisterAll() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for id, t := range e.targets {
-		if t.unsubscribe != nil {
-			t.unsubscribe()
-		}
-		delete(e.targets, id)
-	}
 }
 
 // Close transitions the endpoint to draining, waits for in-flight handlers

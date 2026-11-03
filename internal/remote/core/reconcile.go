@@ -413,7 +413,6 @@ func (e *Endpoint) ackNative(att Attachment, key requests.Key, epoch, digest str
 // Tick retries deferred admissions and expiry; carriers call it on a timer
 // and when a target comes back online.
 func (e *Endpoint) Tick() error {
-	e.tickThreadApprovals()
 	return e.Reconcile()
 }
 

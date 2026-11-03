@@ -153,7 +153,7 @@ func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 	approval := Snapshot{
 		Schema: SchemaRequest, RequestRef: ref, RequestID: "11111111-1111-4111-8111-111111111101",
 		CreatorHost: "hostA", TargetID: "t_fake1", Epoch: "e_1", Revision: 6, State: StateRunning,
-		Interaction: &Interaction{InteractionID: "i_2", Kind: "approval", Options: []string{"accept", "decline"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "decline"},
+		Interaction: &Interaction{InteractionID: "i_2", Kind: "approval", Options: []string{"accept", "decline"}, RemoteAnswer: true},
 		Resolved:    []Resolution{{InteractionID: "i_1", Outcome: ResolutionAnswered, Option: "accept"}},
 		ObservedAt:  "2026-09-01T00:00:00Z",
 	}

@@ -141,10 +141,7 @@ func TestFailedAnswerIsRecoveredOnRedelivery(t *testing.T) {
 	if err := r.c.Ingest(dm); !errors.Is(err, ErrNoGrant) {
 		t.Fatalf("first delivery: err=%v, want the signing failure", err)
 	}
-	// The failure came after admission: the command is claimed, not settled.
-	if _, claimed, err := r.l.ClaimFor(dm.ID.Hex()); err != nil || !claimed {
-		t.Fatalf("first delivery left no claim: %v", err)
-	}
+	// The failure came after admission: the command is not settled.
 	if _, settled, err := r.l.Settled(dm.ID.Hex()); err != nil || settled {
 		t.Fatalf("failed answer settled the command: settled=%v err=%v", settled, err)
 	}

@@ -5,17 +5,15 @@
 //	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
 //	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
-//	answers/<hash>.json   publishAnswer — one approval answer, create-new (protocol: bridge revision 4)
+//	cancels/<ref>.json    publishCancel — exact cancel, create-new (protocol: bridge revision 5)
 //	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
-// The adapter writes ONLY requests/ and answers/ (protocol: ownership); every
+// The adapter writes ONLY requests/ and cancels/ (protocol: ownership); every
 // other path is read-only. The file names use the sanitized ref, with ':'
 // and '/' replaced by '_' (protocol: identity and layout).
 package pi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,11 +67,6 @@ func addressedGeneration(epoch string) (string, bool) {
 // on. A live bridge without the marker, or below it, gets no new
 // submissions (protocol: bridge revision).
 const MinBridgeRevision = 3
-
-// ApproveBridgeRevision is the lowest bridge_revision that raises tool
-// approvals as interaction lines and reads answers/ (protocol: bridge
-// revision 4). Below it the adapter advertises no approve_tool.
-const ApproveBridgeRevision = 4
 
 // CancelBridgeRevision is the lowest bridge_revision that reads cancels/
 // and cancels the request it names (protocol: bridge revision 5). Below it
@@ -167,32 +160,6 @@ type event struct {
 	Error    string `json:"error,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	At       string `json:"at,omitempty"`
-
-	// Revision 4 interaction fields (protocol: bridge revision 4).
-	InteractionID string   `json:"interaction_id,omitempty"`
-	Kind          string   `json:"kind,omitempty"`
-	Prompt        string   `json:"prompt,omitempty"`
-	Options       []string `json:"options,omitempty"`
-	ApproveOption string   `json:"approve_option,omitempty"`
-	RejectOption  string   `json:"reject_option,omitempty"`
-	ManifestHash  string   `json:"manifest_hash,omitempty"`
-	ExpiresAt     string   `json:"expires_at,omitempty"`
-	Presence      string   `json:"presence,omitempty"`
-	Outcome       string   `json:"outcome,omitempty"`
-	Option        string   `json:"option,omitempty"`
-}
-
-// answerRecord is the answers/<hash>.json contract (see answerName). Subject
-// is nostr:<eventID> of the Buzz gesture that answered, or empty; the
-// extension never checks it.
-type answerRecord struct {
-	Protocol      string `json:"protocol"`
-	Ref           string `json:"ref"`
-	InteractionID string `json:"interaction_id"`
-	ManifestHash  string `json:"manifest_hash"`
-	Option        string `json:"option"`
-	Subject       string `json:"subject,omitempty"`
-	At            string `json:"at"`
 }
 
 // validInteractionID reports whether id is 1 to 128 of [A-Za-z0-9._-]
@@ -223,15 +190,6 @@ func validSessionID(id string) bool {
 	return alnum(id[0]) && alnum(id[len(id)-1])
 }
 
-// answerName is the answer file name for one interaction of one ref: the
-// lowercase hex SHA-256 of the ref, a NUL byte, and the interaction id. It
-// is bounded and case-independent, so two interaction ids that differ only
-// in case never share a file on a case-insensitive filesystem.
-func answerName(ref, interactionID string) string {
-	sum := sha256.Sum256([]byte(ref + "\x00" + interactionID))
-	return hex.EncodeToString(sum[:]) + ".json"
-}
-
 // cancelRecord is the cancels/<ref>.json contract (protocol: bridge
 // revision 5).
 type cancelRecord struct {
@@ -249,40 +207,6 @@ func (b bridgeDir) publishCancel(ref string, now time.Time) error {
 		return fmt.Errorf("pi: marshal cancel %s: %v", ref, err)
 	}
 	return writeAtomicNew(filepath.Join(b.dir, "cancels", refSanitize(ref)+".json"), payload)
-}
-
-// answerPath is the answer file for one interaction of one ref.
-func (b bridgeDir) answerPath(ref, interactionID string) string {
-	return filepath.Join(b.dir, "answers", answerName(ref, interactionID))
-}
-
-// publishAnswer writes one answer create-new (the writeAtomicNew rules). An
-// existing file returns ErrAlreadyDelivered and is never rewritten.
-func (b bridgeDir) publishAnswer(ans answerRecord) error {
-	payload, err := json.Marshal(ans)
-	if err != nil {
-		return fmt.Errorf("pi: marshal answer %s: %v", ans.InteractionID, err)
-	}
-	return writeAtomicNew(b.answerPath(ans.Ref, ans.InteractionID), payload)
-}
-
-// answerPublished reports whether the answer file for ans already holds
-// exactly ans: the same protocol, ref, interaction id, manifest hash and
-// option. An absent file is false; any other answer on disk is false.
-func (b bridgeDir) answerPublished(ans answerRecord) (bool, error) {
-	data, err := os.ReadFile(b.answerPath(ans.Ref, ans.InteractionID))
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("pi: read answer %s: %v", ans.InteractionID, err)
-	}
-	var prior answerRecord
-	if err := json.Unmarshal(data, &prior); err != nil {
-		return false, fmt.Errorf("pi: parse answer %s: %v", ans.InteractionID, err)
-	}
-	return prior.Protocol == ans.Protocol && prior.Ref == ans.Ref && prior.InteractionID == ans.InteractionID &&
-		prior.ManifestHash == ans.ManifestHash && prior.Option == ans.Option, nil
 }
 
 // maxEventText bounds one event line's text to the contract's 256 KiB cap
