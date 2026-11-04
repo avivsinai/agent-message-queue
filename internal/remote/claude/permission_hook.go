@@ -78,6 +78,8 @@ type Seat struct {
 	// zero when none was found.
 	Holder launch.HolderIdentity
 	Cwd    string // the hook's cwd, for a session with no registry entry
+	// Transcript is the hook's transcript_path when it is absolute; "" else.
+	Transcript string
 }
 
 // Binder writes the binding of a seat that no binding serves, as /amq-remote
@@ -190,6 +192,9 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 // none, "" and the terminal decides.
 func (h permissionHook) dialogName(in permissionInput) (string, error) {
 	seat := Seat{Root: os.Getenv("AM_ROOT"), Handle: os.Getenv("AM_ME"), Session: in.SessionID, Cwd: in.Cwd}
+	if filepath.IsAbs(in.TranscriptPath) {
+		seat.Transcript = filepath.Clean(in.TranscriptPath)
+	}
 	name, err := dialog.FindBinding(seat.Root, seat.Handle, seat.Session)
 	if err != nil || name != "" {
 		return name, err

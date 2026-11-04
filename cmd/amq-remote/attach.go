@@ -218,7 +218,8 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 	}
 	machine := binding.Machine()
 	nb := binding.Binding{Root: root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
-		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
+		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
+		Transcript: h.Transcript}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
@@ -298,7 +299,7 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 // required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
-	b, name, reused, err := bindMailbox(root, handle, name, stderr, false)
+	b, name, reused, err := bindMailbox(root, handle, name, stderr, false, "")
 	if err != nil {
 		if protocol.RefusalCode(err) == protocol.CodeInvalid {
 			return protocol.ExitUsage, err
@@ -322,7 +323,9 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 // written and whether the session already held it. The approval hook calls
 // it for an AMQ session that no binding serves yet, with fromHook: then a
 // session whose process the owner detached gets nothing (ownerDetached).
-func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool) (b binding.Binding, written string, reused bool, err error) {
+// transcript is the session's transcript as the hook was told it; "" lets
+// the harness registry name it.
+func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, transcript string) (b binding.Binding, written string, reused bool, err error) {
 	if root == "" || handle == "" {
 		return b, "", false, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -347,7 +350,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool) (b 
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript)}
 	if fromHook {
 		if err := ownerDetached(b.Holder); err != nil {
 			return b, "", false, err
@@ -493,6 +496,8 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
+	// Transcript is a Claude session's transcript; empty when not known.
+	Transcript string
 	// Holder is the exact identity captured while proving a Codex ancestor.
 	Holder launch.HolderIdentity
 	// AppServer is a Codex session's thread, which proves its liveness in
@@ -526,7 +531,7 @@ func nativeHarness(codexes *codexView, cand registry.Candidate) harnessSession {
 	switch cand.Kind {
 	case "claude":
 		if s, err := claudeSession(h.PID); err == nil {
-			h.Cwd = s.Cwd
+			h.Cwd, h.Transcript = s.Cwd, s.Transcript
 		}
 	case "pi":
 		h.Cwd, _ = processCwd(h.PID)
@@ -778,7 +783,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 	ancestors, _ := ancestorPIDs(os.Getpid())
 	for _, pid := range ancestors {
 		if s, err := claudeSession(pid); err == nil {
-			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd}
+			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd, Transcript: s.Transcript}
 		}
 	}
 	return wakeOwnerSession(root, handle)

@@ -73,6 +73,10 @@ type Binding struct {
 	// AppServer is the Codex app-server thread that runs the session, which
 	// has no session process to hold; zero for other harnesses.
 	AppServer AppServerThread `json:"app_server,omitzero"`
+	// Transcript is the Claude session's transcript as the session itself
+	// named it when the binding was written; empty when it was not known.
+	// The session mirror reads it when the session registry names none.
+	Transcript string `json:"transcript,omitempty"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
