@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -12,15 +13,9 @@ import (
 )
 
 // codexSource reads a Codex thread's rollout file, which attach records as
-// the binding's Transcript. Codex has no registry that follows the thread,
-// so the record is the one the mirror already reads, else the binding's.
+// the binding's Transcript.
 var codexSource = Source{
-	Locate: func(b binding.Binding, saved string) string {
-		if saved != "" {
-			return saved
-		}
-		return b.Transcript
-	},
+	Locate: codexLocate,
 	Time: func(line string) int64 {
 		if l, ok := codex.ParseRolloutLine(line); ok {
 			return l.TS
@@ -34,6 +29,26 @@ var codexSource = Source{
 		}
 		return FoldCodex(st, l, carried)
 	},
+}
+
+// codexLocate is the current rollout file of the binding's thread, which
+// a thread/revert moves to a new file in the sessions directory that holds
+// the binding's Transcript; else the binding's Transcript, so a rebind
+// takes effect; else the record the mirror already reads (saved). "" when
+// the current file exists only compressed. It reads only the date folders
+// from the newest file of the thread it knows, so a tick's work does not
+// grow with the host's Codex history.
+func codexLocate(b binding.Binding, saved string) string {
+	sessions := codex.SessionsDir(b.Transcript)
+	thread := strings.ToLower(cmp.Or(b.AppServer.Thread, codex.RolloutThread(b.Transcript)))
+	known := b.Transcript
+	if codex.RolloutThread(saved) == thread && codex.SessionsDir(saved) == sessions {
+		known = saved
+	}
+	if path, ok := codex.CurrentRolloutSince(sessions, thread, known, time.Now()); ok {
+		return path
+	}
+	return cmp.Or(b.Transcript, saved)
 }
 
 // CodexCarriedID is the carrier record of a Codex clientUserMessageId: its
@@ -79,6 +94,10 @@ func FoldCodex(st State, l codex.RolloutLine, carried Carried) (State, []Event) 
 		kind := EndDone
 		if l.Error {
 			kind = EndError
+			// A turn that failed before any work still shows that it failed.
+			if len(o.MessageIDs) == 0 {
+				o.MessageIDs = append(o.MessageIDs, o.ID)
+			}
 		}
 		return st, st.end(kind, nil)
 	case "turn_aborted":
@@ -123,22 +142,24 @@ func (st *State) codexStart(l codex.RolloutLine) []Event {
 }
 
 // codexItem adds a completed item to the turn it names: the open turn, or
-// the last ended one, which then reports a Continued event. An item of any
-// other turn is skipped.
+// the last ended one, which then reports a Continued event when the item
+// changes its post (an answer or a counted tool). An item of any other turn
+// is skipped.
 func (st *State) codexItem(l codex.RolloutLine, carried Carried) []Event {
+	it := l.Item
+	tool := codexToolName(it)
+	answer := it.Type == "AgentMessage" || tool != ""
 	t := st.Open
 	switch {
 	case t != nil && t.ID == l.TurnID:
-	case st.Last != nil && st.Last.ID == l.TurnID:
+	case st.Last != nil && st.Last.ID == l.TurnID && answer:
 		t = st.Last
 	default:
 		return nil
 	}
-	it := l.Item
 	t.touch(l.TS)
-	answered := false
-	switch it.Type {
-	case "UserMessage":
+	switch {
+	case it.Type == "UserMessage":
 		first := !t.Prompted
 		t.Prompted = true
 		switch {
@@ -155,31 +176,26 @@ func (st *State) codexItem(l codex.RolloutLine, carried Carried) []Event {
 				t.Cause = cause
 			}
 		}
-	case "AgentMessage":
+	case it.Type == "AgentMessage":
 		if it.Text != "" && (it.Phase == "final_answer" || !t.Final) {
 			t.Text, t.Final = bound(it.Text), it.Phase == "final_answer"
 		}
-		answered = true
-	default:
-		if name := codexToolName(it); name != "" {
-			t.count(name)
-			answered = true
-		}
+	case tool != "":
+		t.count(tool)
 	}
-	if answered {
-		if t.FirstAssistantTS == 0 {
-			t.FirstAssistantTS = l.TS
-		}
-		if len(t.MessageIDs) == 0 {
-			t.MessageIDs = append(t.MessageIDs, cmp.Or(it.ID, t.ID))
-		}
-		if t == st.Open {
-			t.Resumed = t.Reopened != ""
-		}
+	if !answer {
+		return nil
+	}
+	if t.FirstAssistantTS == 0 {
+		t.FirstAssistantTS = l.TS
+	}
+	if len(t.MessageIDs) == 0 {
+		t.MessageIDs = append(t.MessageIDs, cmp.Or(it.ID, t.ID))
 	}
 	if t == st.Last {
 		return []Event{{Kind: Continued, Turn: t.clone()}}
 	}
+	t.Resumed = t.Reopened != ""
 	return nil
 }
 

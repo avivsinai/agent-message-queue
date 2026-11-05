@@ -2,8 +2,13 @@ package mirror
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
 // rollout is one synthetic Codex rollout event line, n seconds after base.
@@ -16,17 +21,26 @@ func codexItem(n int, turn string, item map[string]any) string {
 	return rollout(n, map[string]any{"type": "item_completed", "thread_id": "th", "turn_id": turn, "item": item})
 }
 
+func codexPrompt(n int, text string, extra map[string]any) string {
+	item := map[string]any{"type": "UserMessage", "id": "u1", "content": []any{map[string]any{"type": "text", "text": text}}}
+	for k, v := range extra {
+		item[k] = v
+	}
+	return codexItem(n, "t1", item)
+}
+
 // A finished Codex turn makes one post: its prompt, its tool count and its
 // last answer, never a command, its output or a file change. A turn the
 // Buzz carrier sent (its client_id carried) shows the first two lines only.
 func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 	const clientID = "amqr1_local_codex-1_00000000-0000-4000-8000-000000000001"
 	carried := func(id string) bool { return id == CodexCarriedID(clientID) }
-	turn := func(user map[string]any) []string {
+	start := rollout(0, map[string]any{"type": "task_started", "turn_id": "t1", "turn_attribution": map[string]any{"turn_id": "t1", "turn_trigger": "user"}})
+	turn := func(user string) []string {
 		return []string{
 			`{"timestamp":"` + at(0) + `","type":"session_meta","payload":{"id":"th","history_mode":"paginated","base_instructions":{"text":"SECRET"}}}`,
-			rollout(0, map[string]any{"type": "task_started", "turn_id": "t1", "turn_attribution": map[string]any{"turn_id": "t1", "turn_trigger": "user"}}),
-			codexItem(0, "t1", user),
+			start,
+			user,
 			codexItem(1, "t1", map[string]any{"type": "AgentMessage", "id": "a1", "phase": "commentary", "content": []any{map[string]any{"type": "Text", "text": "Running them."}}}),
 			codexItem(4, "t1", map[string]any{"type": "CommandExecution", "id": "c1", "source": "agent", "command": []any{"SECRET"}, "aggregated_output": "SECRET", "status": "completed"}),
 			codexItem(5, "t1", map[string]any{"type": "CommandExecution", "id": "c2", "source": "user_shell", "command": []any{"SECRET"}, "status": "completed"}),
@@ -36,36 +50,98 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 			rollout(12, map[string]any{"type": "task_complete", "turn_id": "t1", "last_agent_message": "All green.", "error": nil}),
 		}
 	}
+	const finished = "▶ run the tests\n✓ 3 tools (command ×2, edit) · 12s\nAll green."
 	rows := []struct {
-		name string
-		user map[string]any
-		post string
+		name   string
+		lines  []string
+		events []string
+		post   string
 	}{{
-		name: "terminal prompt",
-		user: map[string]any{"type": "UserMessage", "id": "u1", "content": []any{map[string]any{"type": "text", "text": "run the tests\nand fix them"}}},
-		post: "▶ run the tests\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
+		name:   "terminal prompt",
+		lines:  turn(codexPrompt(0, "run the tests\nand fix them", nil)),
+		events: []string{Ended},
+		post:   finished,
 	}, {
-		name: "Buzz prompt",
-		user: map[string]any{"type": "UserMessage", "id": "u1", "client_id": clientID, "content": []any{map[string]any{"type": "text", "text": "run the tests"}}},
-		post: "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
+		name:   "Buzz prompt",
+		lines:  turn(codexPrompt(0, "run the tests", map[string]any{"client_id": clientID})),
+		events: []string{Ended},
+		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
+	}, {
+		// agent-message-queue-7fz review: reasoning and subagent items after
+		// the end edited the post with no new work.
+		name: "items after the end that change no post",
+		lines: append(turn(codexPrompt(0, "run the tests", nil)),
+			codexItem(14, "t1", map[string]any{"type": "Reasoning", "id": "r1", "summary_text": []any{"x"}}),
+			codexItem(15, "t1", map[string]any{"type": "SubAgentActivity", "id": "s1", "kind": "started"}),
+			codexItem(16, "t1", map[string]any{"type": "UserMessage", "id": "u2", "content": []any{map[string]any{"type": "text", "text": "later"}}})),
+		events: []string{Ended},
+		post:   finished,
+	}, {
+		// agent-message-queue-7fz review: a turn that failed before any work
+		// made no post.
+		name:   "error before any work",
+		lines:  []string{start, codexPrompt(0, "hi", nil), rollout(2, map[string]any{"type": "task_complete", "turn_id": "t1", "last_agent_message": nil, "error": map[string]any{"message": "SECRET"}})},
+		events: []string{Ended},
+		post:   "▶ hi\n✗ error · 2s",
 	}}
 	src := SourceFor("codex")
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			var st State
-			var events []Event
-			for _, l := range turn(row.user) {
+			var kinds []string
+			post := ""
+			for _, l := range row.lines {
 				var evs []Event
 				st, evs = src.Fold(st, l, carried)
-				events = append(events, evs...)
+				for _, ev := range evs {
+					kinds = append(kinds, ev.Kind)
+					post = Render(ev.Turn)
+				}
 			}
-			if len(events) != 1 || events[0].Kind != Ended {
-				t.Fatalf("events = %+v, want one Ended", events)
+			if !slices.Equal(kinds, row.events) {
+				t.Fatalf("events = %q, want %q", kinds, row.events)
 			}
-			post := Render(events[0].Turn)
 			if post != row.post || strings.Contains(post, "SECRET") {
 				t.Fatalf("post =\n%s\nwant\n%s", post, row.post)
 			}
 		})
+	}
+}
+
+// The mirror reads the Codex thread's current rollout file: the binding's
+// Transcript after a rebind, and the file a thread/revert moved the thread
+// to, as Codex picks it.
+func TestCodexLocateFollowsTheThread(t *testing.T) {
+	const thread = "01a18747-db9a-7e92-9cdf-08f39de60875"
+	day := filepath.Join(t.TempDir(), "sessions", "2026", "11", "05")
+	if err := os.MkdirAll(day, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := func(name string) string {
+		path := filepath.Join(day, name)
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	orig := file("rollout-2026-11-05T09-00-00-" + thread + ".jsonl")
+	other := file("rollout-2026-11-05T09-30-00-01a18747-db9a-7e92-9cdf-08f39de60876.jsonl")
+	// agent-message-queue-7fz review: a rebind kept reading the old file.
+	if got := codexLocate(binding.Binding{Transcript: other}, orig); got != other {
+		t.Fatalf("after a rebind: %q, want the new Transcript %q", got, other)
+	}
+	// agent-message-queue-7fz review: the file a thread/revert moved the
+	// thread to was never read.
+	reverted := file("rollout-2026-11-05T09-10-00-" + thread + "_01a18747-0000-7000-8000-000000000001.jsonl")
+	file("rollout-2026-11-05T09-10-00-" + thread + "_01a18747-0000-7000-8000-000000000000.jsonl")
+	b := binding.Binding{Transcript: orig}
+	if got := codexLocate(b, orig); got != reverted {
+		t.Fatalf("after a revert: %q, want the newest file %q", got, reverted)
+	}
+	if err := os.Rename(orig, orig+".zst"); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexLocate(b, orig); got != reverted {
+		t.Fatalf("original compressed: %q, want %q", got, reverted)
 	}
 }

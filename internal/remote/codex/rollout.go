@@ -3,9 +3,12 @@ package codex
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -178,21 +181,15 @@ func rawString(raw json.RawMessage) string {
 // mode; the session_meta line carries the session's base instructions.
 const rolloutHeadMax = 4 << 20
 
-// Rollout is the rollout file of thread under codexHome:
-// sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl, when exactly one
-// matches and its session_meta line names the paginated history mode, the
-// one that keeps completed items. "" otherwise.
+// Rollout is the current rollout file of thread under codexHome (see
+// CurrentRollout), when its session_meta line names the paginated history
+// mode, the one that keeps completed items. "" otherwise.
 func Rollout(codexHome, thread string) string {
-	if codexHome == "" || thread == "" || strings.ContainsAny(thread, `/\*?[`) {
+	if codexHome == "" {
 		return ""
 	}
-	matches, err := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*-"+thread+".jsonl"))
-	if err != nil || len(matches) != 1 {
-		return ""
-	}
-	path := matches[0]
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
+	path, _ := CurrentRollout(filepath.Join(codexHome, "sessions"), thread)
+	if path == "" {
 		return ""
 	}
 	f, err := os.Open(path)
@@ -200,8 +197,7 @@ func Rollout(codexHome, thread string) string {
 		return ""
 	}
 	defer func() { _ = f.Close() }()
-	r := bufio.NewReader(io.LimitReader(f, rolloutHeadMax))
-	head, err := r.ReadString('\n')
+	head, err := bufio.NewReader(io.LimitReader(f, rolloutHeadMax)).ReadString('\n')
 	if err != nil {
 		return ""
 	}
@@ -210,4 +206,192 @@ func Rollout(codexHome, thread string) string {
 		return ""
 	}
 	return path
+}
+
+// rolloutName is a parsed rollout file name:
+// rollout-<YYYY-MM-DDThh-mm-ss>-<thread>[_<rollout id>].jsonl[.zst]. A
+// thread's first file has no rollout id (it equals the thread id); a
+// thread/revert moves the thread to a new file with its own rollout id.
+type rolloutName struct {
+	time, thread, rollout string
+	compressed            bool
+}
+
+// hyphenatedUUID is the form Codex writes a thread or rollout id in a file
+// name.
+var hyphenatedUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func parseRolloutName(name string) (rolloutName, bool) {
+	var n rolloutName
+	name, n.compressed = strings.CutSuffix(name, ".zst")
+	core, ok := strings.CutPrefix(name, "rollout-")
+	if !ok {
+		return n, false
+	}
+	if core, ok = strings.CutSuffix(core, ".jsonl"); !ok || len(core) < 20 || core[19] != '-' {
+		return n, false
+	}
+	n.time = core[:19]
+	if _, err := time.Parse("2006-01-02T15-04-05", n.time); err != nil {
+		return n, false
+	}
+	thread, rollout, found := strings.Cut(core[20:], "_")
+	if !found {
+		rollout = thread
+	}
+	if !hyphenatedUUID.MatchString(thread) || !hyphenatedUUID.MatchString(rollout) {
+		return n, false
+	}
+	n.thread, n.rollout = strings.ToLower(thread), strings.ToLower(rollout)
+	return n, true
+}
+
+// RolloutThread is the thread id a rollout file's name carries, "" when the
+// name is not a rollout file's.
+func RolloutThread(path string) string {
+	n, ok := parseRolloutName(filepath.Base(path))
+	if !ok {
+		return ""
+	}
+	return n.thread
+}
+
+// SessionsDir is the sessions directory that holds the rollout file path,
+// written as <sessions>/YYYY/MM/DD/<file>; "" for any other path.
+func SessionsDir(path string) string {
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	dir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+	if filepath.Base(dir) != "sessions" {
+		return ""
+	}
+	return dir
+}
+
+// rolloutPick keeps the file Codex reads for one thread among the files it
+// is shown, by Codex's own rule (find_thread_path_by_id_from_filenames in
+// codex-rs/rollout/src/list.rs): the newest name time, then the greatest
+// rollout id; a compressed file whose plain sibling exists is the same file.
+type rolloutPick struct {
+	thread string
+	best   rolloutName
+	path   string
+	found  bool
+}
+
+func (k *rolloutPick) consider(path string, d fs.DirEntry) {
+	if !d.Type().IsRegular() {
+		return
+	}
+	n, match := parseRolloutName(d.Name())
+	if !match || n.thread != k.thread {
+		return
+	}
+	b := k.best
+	if !k.found || n.time > b.time || n.time == b.time && n.rollout > b.rollout {
+		k.best, k.path, k.found = n, path, true
+	} else if n.time == b.time && n.rollout == b.rollout && b.compressed && !n.compressed {
+		k.best, k.path = n, path
+	}
+}
+
+// result is the picked plain file; "" when it exists only compressed,
+// which the mirror does not read.
+func (k *rolloutPick) result() (string, bool) {
+	if !k.found || k.best.compressed {
+		return "", k.found
+	}
+	return k.path, true
+}
+
+// CurrentRollout is the rollout file Codex reads for thread, of the regular
+// files at any depth under sessions (see rolloutPick). It reads the whole
+// sessions directory. ok is false when no file matches or the directory
+// cannot be read; path is "" when the current file exists only compressed.
+func CurrentRollout(sessions, thread string) (path string, ok bool) {
+	if sessions == "" || !hyphenatedUUID.MatchString(thread) {
+		return "", false
+	}
+	k := rolloutPick{thread: strings.ToLower(thread)}
+	err := filepath.WalkDir(sessions, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if p != sessions && errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		k.consider(p, d)
+		return nil
+	})
+	if err != nil {
+		return "", false
+	}
+	return k.result()
+}
+
+// CurrentRolloutSince is CurrentRollout read only from the date folders
+// where a file newer than known can be, with known a rollout file of thread
+// under sessions. Codex names a new rollout file, a thread/revert's
+// included, and its sessions/YYYY/MM/DD folder by one local time of its
+// creation (precompute_new_rollout_path in codex-rs/rollout/src/recorder.rs),
+// so a newer file is in a folder from known's date through today. The range
+// is widened by a day on each side for a time zone change. The folder of
+// known itself is always read. It never reads the whole sessions directory,
+// which grows with the host's history: with no valid known file, or no file
+// of thread in those folders, it reports none.
+func CurrentRolloutSince(sessions, thread, known string, now time.Time) (path string, ok bool) {
+	n, valid := parseRolloutName(filepath.Base(known))
+	if sessions == "" || !valid || n.thread != strings.ToLower(thread) || SessionsDir(known) != sessions {
+		return "", false
+	}
+	from, err := time.Parse("2006-01-02", n.time[:10])
+	if err != nil {
+		return "", false
+	}
+	lo, hi := from.AddDate(0, 0, -1).Format("2006-01-02"), now.AddDate(0, 0, 1).Format("2006-01-02")
+	k := rolloutPick{thread: n.thread}
+	scan := func(dir string) {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			k.consider(filepath.Join(dir, e.Name()), e)
+		}
+	}
+	knownDir := filepath.Dir(known)
+	scan(knownDir)
+	for _, y := range dirNames(sessions, 4) {
+		if y < lo[:4] || y > hi[:4] {
+			continue
+		}
+		for _, m := range dirNames(filepath.Join(sessions, y), 2) {
+			if ym := y + "-" + m; ym < lo[:7] || ym > hi[:7] {
+				continue
+			}
+			for _, d := range dirNames(filepath.Join(sessions, y, m), 2) {
+				dir := filepath.Join(sessions, y, m, d)
+				if ymd := y + "-" + m + "-" + d; ymd < lo || ymd > hi || dir == knownDir {
+					continue
+				}
+				scan(dir)
+			}
+		}
+	}
+	if !k.found {
+		return "", false
+	}
+	return k.result()
+}
+
+// dirNames lists the names of dir's subdirectories that are digits of
+// length width.
+func dirNames(dir string, width int) []string {
+	entries, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() && len(name) == width && strings.Trim(name, "0123456789") == "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
