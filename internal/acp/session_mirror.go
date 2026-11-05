@@ -281,7 +281,7 @@ func (s *Server) mirrorRead(dir string, st *mirrorFile, path string, now time.Ti
 			newest = now.UnixMilli()
 		}
 		st.Watermark = max(st.Watermark, newest)
-		st.File, st.Offset = c.File, c.Next
+		st.File, st.Offset, st.Skipping = c.File, c.Next, c.Skipping
 		return true
 	}
 	c, err := claude.ReadTranscript(path, st.Offset, st.Skipping)
