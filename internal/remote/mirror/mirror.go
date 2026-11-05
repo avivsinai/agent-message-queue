@@ -7,6 +7,7 @@
 package mirror
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -482,6 +483,24 @@ func Render(t Turn) string {
 	if t.Earlier > 0 {
 		fmt.Fprintf(&b, "\n(+%d earlier turns not shown)", t.Earlier)
 	}
+	return unmention(b.String())
+}
+
+// wordJoiner is invisible and is not a name character.
+const wordJoiner = "\u2060"
+
+// unmention puts a word joiner after each "@" that starts a word, so a post
+// never mentions anyone. Buzz reads "@name" after a space or at the start
+// as a mention: it refuses a post whose name matches no channel member, and
+// pings a member whose name matches.
+func unmention(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		b.WriteRune(r)
+		if r == '@' && (i == 0 || strings.IndexByte(" \t\n\v\f\r", s[i-1]) >= 0) {
+			b.WriteString(wordJoiner)
+		}
+	}
 	return b.String()
 }
 
@@ -540,6 +559,45 @@ func Root() (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(path), "mirror"), nil
+}
+
+// offFile is present in a binding's mirror directory while the owner has
+// the mirror off.
+const offFile = "off"
+
+// Off reports whether the mirror of the binding whose mirror directory is
+// dir is off.
+func Off(dir string) bool {
+	fi, err := os.Lstat(filepath.Join(dir, offFile))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// SetOff turns the mirror of binding name off or on. The machine agent
+// reads the switch on every tick: while it is off the fold still runs and
+// nothing is queued, so turning it on posts no turn from the off time.
+func SetOff(name string, off bool) error {
+	dir, err := DirFor(name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, offFile)
+	if !off {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // DirFor is binding name's mirror directory; it is not created.
