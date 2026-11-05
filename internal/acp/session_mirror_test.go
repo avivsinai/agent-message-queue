@@ -76,6 +76,8 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 // A Claude turn is posted when its first assistant line arrives, shown as
 // running, edited at most once every mirrorEditGap while it runs, and edited
 // a last time with its answer. A tick that changes nothing sends nothing.
+// The second turn's tick crashes after its post: the post still gets its
+// final edit (agent-message-queue-07h review).
 func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
@@ -111,9 +113,11 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	now := time.Now()
 	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
 
+	dir, _ := mirror.DirFor("alpha")
 	steps := []struct {
 		lines []string
 		after time.Duration
+		crash bool // state.json is lost after the post
 		want  []string
 	}{{
 		lines: []string{
@@ -133,13 +137,31 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		want:  []string{"edit: ▶ run the tests\n✓ 2 tools (Bash, Read) · 6s\nAll pass."},
 	}, {
 		after: 9 * time.Second,
+	}, {
+		lines: []string{
+			`{"type":"user","uuid":"o2","promptId":"p2","timestamp":"2026-11-04T09:02:00Z","message":{"content":"commit"}}`,
+			`{"type":"assistant","uuid":"b1","timestamp":"2026-11-04T09:02:01Z","message":{"id":"n1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{}}]}}`,
+		},
+		after: 12 * time.Second,
+		crash: true,
+		want:  []string{"post: ▶ commit\n… running · 1 tool (Bash) · 1s"},
+	}, {
+		lines: []string{`{"type":"assistant","uuid":"b2","timestamp":"2026-11-04T09:02:03Z","message":{"id":"n2","stop_reason":"end_turn","content":[{"type":"text","text":"Committed."}]}}`},
+		after: 15 * time.Second,
+		want:  []string{"edit: ▶ commit\n✓ 1 tool (Bash) · 3s\nCommitted."},
 	}}
 	for i, step := range steps {
 		if step.lines != nil {
 			appendLines(step.lines...)
 		}
 		sent = nil
+		saved, _, _ := readMirrorFile(dir)
 		s.mirrorBinding(target, b, now.Add(step.after), false)
+		if step.crash {
+			if err := writeMirrorFile(dir, saved); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if !slices.Equal(sent, step.want) {
 			t.Fatalf("step %d at +%s: sent %q; want %q", i+1, step.after, sent, step.want)
 		}

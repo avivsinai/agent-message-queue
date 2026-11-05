@@ -61,8 +61,9 @@ func result(id string, failed bool) map[string]any {
 }
 
 // Each row is one transcript shape measured in real sessions, written by
-// hand. Fold must report the turn events in order, and the final post of
-// each turn (the value of its last event) must match.
+// hand. Fold must report the turn events in order, and the latest post of
+// each turn (the value of its last event), in the order the turns first
+// reported, must match.
 func TestFoldRendersEachMeasuredShape(t *testing.T) {
 	const carried = "6f1d2c3b-0000-5000-8000-000000000001"
 	envelope := "<cross-session-message from=\"amq-peer\">\nhello\n</cross-session-message>"
@@ -149,8 +150,19 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 2, nil, text("[Request interrupted by user for tool use]")),
 			assistant("m2", "end_turn", 3, nil, text("Running a dry run instead.")),
 		},
-		events: []string{Opened, Ended},
+		events: []string{Opened, Progress, Ended},
 		posts:  []string{"▶ clean the tree\n✓ 1 tool (Bash) · 3s\nRunning a dry run instead."},
+	}, {
+		// agent-message-queue-07h review: an interrupted turn kept showing
+		// "running" while the session sat idle.
+		name: "an interrupt with no answer after it",
+		lines: []string{
+			prompt("o1", "p1", 0, "run the suite"),
+			assistant("m1", "tool_use", 1, nil, tool("Bash")),
+			user("p1", 2, nil, text("[Request interrupted by user]")),
+		},
+		events: []string{Opened, Progress},
+		posts:  []string{"▶ run the suite\n✗ interrupted · 1 tool (Bash) · 2s"},
 	}, {
 		name: "an auto-continuation",
 		lines: []string{
@@ -264,7 +276,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 				st, evs = Fold(st, l, isCarried)
 				for _, ev := range evs {
 					kinds = append(kinds, ev.Kind)
-					if ev.Kind == Ended {
+					if _, seen := posts[ev.Turn.ID]; !seen {
 						order = append(order, ev.Turn.ID)
 					}
 					posts[ev.Turn.ID] = Render(ev.Turn)

@@ -89,8 +89,11 @@ type Turn struct {
 	// Earlier counts the turns of a backlog that were dropped before it.
 	Earlier int `json:"earlier,omitempty"`
 
-	// Interrupted is set once the turn saw the interrupt text.
+	// Interrupted is set once the turn saw the interrupt text; Halted from
+	// that text until the turn's next assistant line, while the running
+	// turn shows as interrupted.
 	Interrupted bool `json:"interrupted,omitempty"`
+	Halted      bool `json:"halted,omitempty"`
 	// ClosingEnd is the end kind of the turn's closing message, "" until
 	// one arrived; Closing is that message's id. The turn ends at the
 	// message's text, or at the first line that is not part of it.
@@ -110,6 +113,14 @@ type Turn struct {
 
 func (t Turn) clone() Turn {
 	t.MessageIDs = append([]string(nil), t.MessageIDs...)
+	t.Tools = append([]ToolCount(nil), t.Tools...)
+	return t
+}
+
+// view is t as a running turn's event carries it: without its message ids,
+// which only the fold reads, so an event costs no more as the turn grows.
+func (t Turn) view() Turn {
+	t.MessageIDs = nil
 	t.Tools = append([]ToolCount(nil), t.Tools...)
 	return t
 }
@@ -149,6 +160,20 @@ func (st State) clone() State {
 	return st
 }
 
+// fork is st for the next line of a Claude transcript. Message ids are only
+// appended, so the new state shares them with st: folding one line costs
+// no more as a turn grows. A state must be folded once; fold its fork.
+func (st State) fork() State {
+	for _, t := range []**Turn{&st.Open, &st.Last} {
+		if *t != nil {
+			c := **t
+			c.Tools = append([]ToolCount(nil), c.Tools...)
+			*t = &c
+		}
+	}
+	return st
+}
+
 // Carried reports whether a frame msg_id is one the binding's carrier sent.
 type Carried func(msgID string) bool
 
@@ -158,11 +183,13 @@ func (c Carried) has(msgID string) bool { return c != nil && msgID != "" && c(ms
 // classified, so a line that ends a turn waiting for its closing text is
 // then classified with no turn open. A sidechain line and every type other
 // than user and assistant (an absorbed frame parses as user) is skipped.
+// The returned state shares storage with st, which must not be folded
+// again.
 func Fold(st State, l claude.TranscriptLine, carried Carried) (State, []Event) {
 	if l.Sidechain || l.Type != "user" && l.Type != "assistant" {
 		return st, nil
 	}
-	st = st.clone()
+	st = st.fork()
 	var out []Event
 	if o := st.Open; o != nil && o.ClosingEnd != "" && (l.Type == "user" || l.MessageID != o.Closing) {
 		out = st.end(o.ClosingEnd, out)
@@ -240,7 +267,7 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	if t == st.Last {
 		return append(out, Event{Kind: Continued, Turn: t.clone()})
 	}
-	t.Resumed = t.Reopened != ""
+	t.Resumed, t.Halted = t.Reopened != "", false
 	if l.MessageID == "" && len(t.MessageIDs) == 0 {
 		// An assistant line with no id still makes the turn one with an
 		// answer.
@@ -254,11 +281,10 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	if t.ClosingEnd != "" && l.MessageID == t.Closing && text != "" {
 		return st.end(t.ClosingEnd, out)
 	}
-	ev := Progress
 	if first {
-		ev = Opened
+		return append(out, Event{Kind: Opened, Turn: t.clone()})
 	}
-	return append(out, Event{Kind: ev, Turn: t.clone()})
+	return append(out, Event{Kind: Progress, Turn: t.view()})
 }
 
 func (t *Turn) count(name string) {
@@ -314,8 +340,10 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		}
 		return out
 	case o != nil && l.PromptID != "" && l.PromptID == o.PromptID:
-		o.Interrupted = o.Interrupted || strings.HasPrefix(text, claude.InterruptPrefix)
 		o.touch(l.TS)
+		if strings.HasPrefix(text, claude.InterruptPrefix) {
+			return o.halt(out)
+		}
 		return out
 	case o == nil && strings.HasPrefix(text, "<bash-input>"):
 		// A shell command typed with no turn open starts one, which posts
@@ -333,8 +361,8 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		// The interrupt text can carry the next prompt's promptId: it marks
 		// the running turn and never starts one.
 		if o != nil {
-			o.Interrupted = true
 			o.touch(l.TS)
+			return o.halt(out)
 		}
 		return out
 	case !hasText || result || l.CompactSummary || l.VisibleOnly || l.Meta && !metaOpener(l):
@@ -366,6 +394,18 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		t.Cause = promptCause(text)
 	}
 	return out
+}
+
+// halt marks the running turn interrupted. A turn the mirror shows (one
+// with an assistant line) reports Progress the first time, so its post
+// stops showing it running.
+func (t *Turn) halt(out []Event) []Event {
+	t.Interrupted = true
+	if t.Halted || t.FirstAssistantTS == 0 {
+		return out
+	}
+	t.Halted = true
+	return append(out, Event{Kind: Progress, Turn: t.view()})
 }
 
 // metaOpener reports whether a harness-injected (meta) line starts a turn:
@@ -470,11 +510,16 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<final assistant text>
 //
 // A turn that still runs (no End) or that the carrier already answered
-// shows the first two lines only.
+// shows the first two lines only; a running turn the user interrupted
+// shows as interrupted.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
-	parts := []string{endMark(t.End)}
+	mark := endMark(t.End)
+	if t.End == "" && t.Halted {
+		mark = endMark(EndInterrupted)
+	}
+	parts := []string{mark}
 	if n := toolTotal(t.Tools); n > 0 {
 		names := make([]string, 0, len(t.Tools))
 		for _, c := range t.Tools {

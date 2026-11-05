@@ -453,8 +453,9 @@ var turnIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 var errMirrorWait = errors.New("the mirror edit waits for the edit gap")
 
 // mirrorSend sends the queue from its head and reports whether it was sent
-// out. An Opened or an Ended with no claim posts the turn; a Progress or an
-// Ended of the live turn, and a Continued, edit its post. A send proved not
+// out. An Opened or an Ended with no claim posts the turn; a Progress of the
+// live turn, and an Ended or Continued whose claim holds an event id, edit
+// its post. A send proved not
 // sent keeps the event at the head and backs the binding off. Any other
 // failure leaves the outcome unknown: a post's claim stays with no event id
 // and the turn is never sent again; the final edit of a turn is tried once
@@ -479,7 +480,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 			if event, err = s.mirrorPost(claim, t, b, ev.Turn); err == nil && event != "" {
 				st.Live, sent = id, true
 			}
-		case id == st.Live && (ev.Kind == mirror.Progress || ev.Kind == mirror.Ended), ev.Kind == mirror.Continued:
+		case id == st.Live && ev.Kind == mirror.Progress, final && mirrorPosted(claim):
 			edit = true
 			sent, err = s.mirrorEdit(claim, t, b, ev.Turn, ready)
 		case ev.Kind == mirror.Ended && ev.Turn.LastTS > st.Watermark:
@@ -521,6 +522,12 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 		delete(s.mirrors.backoff, t.name)
 	}
 	return true
+}
+
+// mirrorPosted reports whether claim holds the event id of a post.
+func mirrorPosted(claim string) bool {
+	p, found := readDialogPost(claim)
+	return found && p.Event != ""
 }
 
 // mirrorPost claims turn's post, posts it and records its event id. A turn
