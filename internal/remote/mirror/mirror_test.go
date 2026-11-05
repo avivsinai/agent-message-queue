@@ -62,7 +62,7 @@ func result(id string, failed bool) map[string]any {
 
 // Each row is one transcript shape measured in real sessions, written by
 // hand. Fold must report the turn events in order, and the final post of
-// each turn (its Ended value, replaced by each Continued) must match.
+// each turn (the value of its last event) must match.
 func TestFoldRendersEachMeasuredShape(t *testing.T) {
 	const carried = "6f1d2c3b-0000-5000-8000-000000000001"
 	envelope := "<cross-session-message from=\"amq-peer\">\nhello\n</cross-session-message>"
@@ -82,7 +82,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			assistant("m3", "end_turn", 70, nil, thinking()),
 			assistant("m3", "end_turn", 74, nil, text("Fixed the off-by-one; all tests pass.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Progress, Progress, Ended},
 		posts:  []string{"▶ run the tests and fix the failure\n✓ 3 tools (Bash ×2, Read) · 1m12s\nFixed the off-by-one; all tests pass."},
 	}, {
 		name: "a peer line between the two lines of the closing message",
@@ -92,7 +92,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p2", 2, map[string]any{"origin": map[string]any{"kind": "peer", "msg_id": "peer-1"}}, text(envelope)),
 			assistant("m1", "end_turn", 3, nil, text("Summary.")),
 		},
-		events: []string{Ended, Continued},
+		events: []string{Opened, Ended, Continued},
 		posts:  []string{"▶ summarize\n✓ 3s\nSummary."},
 	}, {
 		name: "a shell command typed during a turn",
@@ -104,7 +104,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 4, nil, result("t-Read", false)),
 			assistant("m2", "end_turn", 6, nil, text("Build is clean.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Ended},
 		posts:  []string{"▶ check the build\n✓ 1 tool (Read) · 6s\nBuild is clean."},
 	}, {
 		name: "a local slash command",
@@ -125,7 +125,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p2", 3, map[string]any{"isCompactSummary": true, "isVisibleInTranscriptOnly": true}, text("This session is being continued from a previous conversation.")),
 			assistant("m2", "end_turn", 9, nil, text("Refactored.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Ended},
 		posts:  []string{"▶ refactor the parser\n✓ 1 tool (Edit) · 9s\nRefactored."},
 	}, {
 		name: "a Stop hook that refused the stop",
@@ -137,7 +137,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 4, nil, result("t-Bash", false)),
 			assistant("m3", "end_turn", 5, nil, text("Tests pass; shipped.")),
 		},
-		events: []string{Ended, Continued},
+		events: []string{Ended, Progress, Continued},
 		posts:  []string{"▶ ship it\n✓ 1 tool (Bash) · 5s\nTests pass; shipped."},
 	}, {
 		name: "a deny with feedback, then the interrupt text and an answer",
@@ -149,7 +149,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 2, nil, text("[Request interrupted by user for tool use]")),
 			assistant("m2", "end_turn", 3, nil, text("Running a dry run instead.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Ended},
 		posts:  []string{"▶ clean the tree\n✓ 1 tool (Bash) · 3s\nRunning a dry run instead."},
 	}, {
 		name: "an auto-continuation",
@@ -226,7 +226,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 4, nil, result("t-Task", false)),
 			assistant("m2", "end_turn", 5, nil, text("The bug is in cache.go.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Ended},
 		posts:  []string{"▶ find the bug\n✓ 1 tool (Task) · 5s\nThe bug is in cache.go."},
 	}, {
 		name: "a Buzz frame absorbed into the running turn",
@@ -238,7 +238,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			user("p1", 3, nil, result("t-Bash", false)),
 			assistant("m2", "end_turn", 4, nil, text("Deployed.")),
 		},
-		events: []string{Ended},
+		events: []string{Opened, Ended},
 		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s"},
 	}, {
 		name: "an API error end",

@@ -862,9 +862,12 @@ amq-remote claude uninstall-approval-hook   # removes only that hook
 
 ### Turns in the session's channel
 
-The machine agent's channel of a Claude session also shows each turn the
-session finishes, wherever it started: the terminal, the desktop app, a Buzz
-message, a peer session or a background task. One message shows one turn:
+The machine agent's channel of a Claude session also shows each turn of the
+session, wherever it started: the terminal, the desktop app, a Buzz message,
+a peer session or a background task. One message shows one turn. It appears
+when the model first answers, shows `… running` with the tools used so far
+while the turn runs, is updated at most once every 3 seconds, and shows the
+answer when the turn ends:
 
 ```text
 ▶ run the tests and fix the failure
@@ -900,7 +903,8 @@ An owner message in the channel that is exactly `mirror off` or `mirror on`
 (case ignored) switches this for that session and is not delivered to it.
 `amq-remote mirror on|off|status --self` (or `--name NAME`) is the same
 switch from the session's terminal. While it is off, turns that end are not
-shown later.
+shown later. A turn that runs when the mirror is turned off ends its message
+with `■ ended (mirror off)`, and that message is not updated again.
 
 Codex needs no hook: Codex approvals reach Buzz only for a session on the
 Codex app-server (`codex app-server daemon start`, then `codex --remote

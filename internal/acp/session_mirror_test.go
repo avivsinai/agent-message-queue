@@ -73,6 +73,79 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 	}
 }
 
+// A Claude turn is posted when its first assistant line arrives, shown as
+// running, edited at most once every mirrorEditGap while it runs, and edited
+// a last time with its answer. A tick that changes nothing sends nothing.
+func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendLines := func(lines ...string) {
+		t.Helper()
+		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString(strings.Join(lines, "\n") + "\n")
+		_ = f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var sent []string
+	savedPost, savedEdit := postAnswer, editMessage
+	t.Cleanup(func() { postAnswer, editMessage = savedPost, savedEdit })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		sent = append(sent, "post: "+content)
+		return strings.Repeat("a", 64), nil
+	}
+	editMessage = func(_, content string, _ time.Duration) error {
+		sent = append(sent, "edit: "+content)
+		return nil
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: transcript}
+	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
+	target := dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
+	now := time.Now()
+	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
+
+	steps := []struct {
+		lines []string
+		after time.Duration
+		want  []string
+	}{{
+		lines: []string{
+			`{"type":"user","uuid":"o1","promptId":"p1","timestamp":"2026-11-04T09:01:00Z","message":{"content":"run the tests"}}`,
+			`{"type":"assistant","uuid":"a1","timestamp":"2026-11-04T09:01:02Z","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}`,
+		},
+		want: []string{"post: ▶ run the tests\n… running · 1 tool (Bash) · 2s"},
+	}, {
+		lines: []string{`{"type":"assistant","uuid":"a2","timestamp":"2026-11-04T09:01:04Z","message":{"id":"m2","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t2","name":"Read","input":{}}]}}`},
+		after: time.Second,
+	}, {
+		after: 3 * time.Second,
+		want:  []string{"edit: ▶ run the tests\n… running · 2 tools (Bash, Read) · 4s"},
+	}, {
+		lines: []string{`{"type":"assistant","uuid":"a3","timestamp":"2026-11-04T09:01:06Z","message":{"id":"m3","stop_reason":"end_turn","content":[{"type":"text","text":"All pass."}]}}`},
+		after: 6 * time.Second,
+		want:  []string{"edit: ▶ run the tests\n✓ 2 tools (Bash, Read) · 6s\nAll pass."},
+	}, {
+		after: 9 * time.Second,
+	}}
+	for i, step := range steps {
+		if step.lines != nil {
+			appendLines(step.lines...)
+		}
+		sent = nil
+		s.mirrorBinding(target, b, now.Add(step.after), false)
+		if !slices.Equal(sent, step.want) {
+			t.Fatalf("step %d at +%s: sent %q; want %q", i+1, step.after, sent, step.want)
+		}
+	}
+}
+
 // agent-message-queue-6r9 review: a /resume to an older session after the
 // mirror first saw an empty transcript posted that session's old turns.
 func TestMirrorResumeToOlderSessionPostsNoOldTurn(t *testing.T) {

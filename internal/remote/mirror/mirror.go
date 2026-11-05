@@ -1,7 +1,8 @@
-// Package mirror is the view of a session's finished turns in its Buzz
-// channel. Fold assigns transcript lines to turns by the ids their writer
-// put on them (message.id on an assistant line, promptId on a user line),
-// never by line order alone. Render makes the one post that shows a turn.
+// Package mirror is the view of a session's turns in its Buzz channel.
+// Fold assigns transcript lines to turns by the ids their writer put on them
+// (message.id on an assistant line, promptId on a user line), never by line
+// order alone. Render makes the one post that shows a turn, running or
+// ended.
 // Both are pure: no clock, file or network. The machine agent's tick reads
 // the transcript, claims each post and sends it.
 package mirror
@@ -33,19 +34,28 @@ const (
 	EndRefused        = "refused"
 	EndSessionEnded   = "session ended"
 	EndSessionCleared = "session cleared"
+	// EndMirrorOff ends the post of a running turn when the owner turns the
+	// mirror off.
+	EndMirrorOff = "mirror off"
 )
 
 // Event kinds. Ended is a turn's first end; Continued changes a turn that
-// already ended.
+// already ended. Opened is a Claude turn's first assistant line that does
+// not end it, Progress each later one: the turn still runs.
 const (
+	Opened    = "opened"
+	Progress  = "progress"
 	Ended     = "ended"
 	Continued = "continued"
 )
 
 // Event is one turn change Fold reports, with the turn's value at that line.
+// Tries counts the sends of the event whose outcome was unknown; Fold never
+// sets it.
 type Event struct {
-	Kind string `json:"kind"`
-	Turn Turn   `json:"turn"`
+	Kind  string `json:"kind"`
+	Turn  Turn   `json:"turn"`
+	Tries int    `json:"tries,omitempty"`
 }
 
 // ToolCount is how often a turn used one tool.
@@ -196,7 +206,8 @@ func (st *State) end(kind string, out []Event) []Event {
 
 // assistant adds the line to the turn that owns its message.id, else to
 // the open turn, which then owns the id. A line on the last ended turn
-// changes that turn.
+// changes that turn. A line on the open turn that does not end it reports
+// Opened when it is the turn's first assistant line, else Progress.
 func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	t := st.Open
 	switch {
@@ -221,7 +232,8 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	if text != "" {
 		t.Text = bound(text)
 	}
-	if t.FirstAssistantTS == 0 {
+	first := t.FirstAssistantTS == 0
+	if first {
 		t.FirstAssistantTS = l.TS
 	}
 	t.touch(l.TS)
@@ -240,9 +252,13 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 		}
 	}
 	if t.ClosingEnd != "" && l.MessageID == t.Closing && text != "" {
-		out = st.end(t.ClosingEnd, out)
+		return st.end(t.ClosingEnd, out)
 	}
-	return out
+	ev := Progress
+	if first {
+		ev = Opened
+	}
+	return append(out, Event{Kind: ev, Turn: t.clone()})
 }
 
 func (t *Turn) count(name string) {
@@ -453,7 +469,8 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<mark> <N tools (names)> · <duration>
 //	<final assistant text>
 //
-// A turn the carrier already answered shows the first two lines only.
+// A turn that still runs (no End) or that the carrier already answered
+// shows the first two lines only.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
@@ -484,7 +501,7 @@ func Render(t Turn) string {
 		}
 		b.WriteString(" · " + p)
 	}
-	if text := t.Text; text != "" && !t.Answered {
+	if text := t.Text; text != "" && t.End != "" && !t.Answered {
 		b.WriteString("\n" + cut(text))
 	}
 	if t.Earlier > 0 {
@@ -513,9 +530,11 @@ func unmention(s string) string {
 
 func endMark(kind string) string {
 	switch kind {
+	case "":
+		return "… running"
 	case EndDone:
 		return "✓"
-	case EndSessionEnded, EndSessionCleared:
+	case EndSessionEnded, EndSessionCleared, EndMirrorOff:
 		return "■ ended (" + kind + ")"
 	}
 	return "✗ " + kind
