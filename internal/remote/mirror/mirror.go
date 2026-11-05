@@ -335,10 +335,11 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		t.Cause = "continued"
 	case l.TurnOrigin == "scheduled":
 		t.Cause = "scheduled task"
-	case strings.TrimSpace(text) == harness.Doorbell:
-		t.Cause = CauseMail
 	default:
 		t.Cause = promptCause(text)
+		if t.Cause == harness.Doorbell {
+			t.Cause = CauseMail
+		}
 	}
 	return out
 }

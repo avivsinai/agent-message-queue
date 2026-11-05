@@ -187,7 +187,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Ended},
 		posts:  []string{"▶ fix the build\n✓ 1s\nFixed."},
 	}, {
-		// Live 2026-11-05: a doorbell turn posted the doorbell text itself.
+		// agent-message-queue-6r9 live check: a doorbell turn posted the doorbell text itself.
 		name: "a turn the AMQ doorbell started",
 		lines: []string{
 			prompt("o1", "p1", 0, harness.Doorbell),
