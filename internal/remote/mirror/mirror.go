@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
@@ -325,7 +326,7 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	t := st.open(l, "")
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
-		t.Cause, t.Answered = "Buzz", true
+		t.Cause, t.Answered = CauseBuzz, true
 	case l.OriginKind == "peer", l.OriginKind == "" && l.CrossSession:
 		t.Cause = "message from another session"
 	case l.OriginKind == "task-notification":
@@ -334,6 +335,8 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		t.Cause = "continued"
 	case l.TurnOrigin == "scheduled":
 		t.Cause = "scheduled task"
+	case strings.TrimSpace(text) == harness.Doorbell:
+		t.Cause = CauseMail
 	default:
 		t.Cause = promptCause(text)
 	}
@@ -366,6 +369,15 @@ func hasPrefix(s string, prefixes ...string) bool {
 	}
 	return false
 }
+
+// CauseBuzz names a turn that answered a Buzz message. CauseMail names a
+// turn the AMQ doorbell started: the doorbell text cannot tell whose mail
+// it was, so the machine agent turns CauseMail into CauseBuzz once it sees
+// the turn's reply in the buzz inbox.
+const (
+	CauseBuzz = "Buzz"
+	CauseMail = "AMQ message"
+)
 
 // causeMax bounds the prompt text a post shows, in characters.
 const causeMax = 200

@@ -380,7 +380,7 @@ const (
 	wakeRetryUntilDrained      = "drained"
 	wakeRetryUntilInjected     = "injected"
 
-	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
+	coopWakeDoorbell = harness.Doorbell
 
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond

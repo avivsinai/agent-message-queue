@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -185,6 +186,15 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		},
 		events: []string{Ended},
 		posts:  []string{"▶ fix the build\n✓ 1s\nFixed."},
+	}, {
+		// Live 2026-11-05: a doorbell turn posted the doorbell text itself.
+		name: "a turn the AMQ doorbell started",
+		lines: []string{
+			prompt("o1", "p1", 0, harness.Doorbell),
+			assistant("m1", "end_turn", 2, nil, text("Drained one message.")),
+		},
+		events: []string{Ended},
+		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
 	}, {
 		name: "sidechain lines of a subagent",
 		lines: []string{

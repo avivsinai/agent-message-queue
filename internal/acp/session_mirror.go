@@ -462,6 +462,9 @@ func (s *Server) mirrorAnswered(name string, b binding.Binding, turn *mirror.Tur
 			}
 			if created, err := time.Parse(time.RFC3339Nano, h.Created); err == nil && !created.Before(from) && !created.After(to) {
 				turn.Answered = true
+				if turn.Cause == mirror.CauseMail {
+					turn.Cause = mirror.CauseBuzz
+				}
 				return
 			}
 		}
