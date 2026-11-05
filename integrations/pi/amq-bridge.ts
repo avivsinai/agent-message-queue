@@ -25,8 +25,9 @@ const MAX_EVENT_TEXT = 256 * 1024;
 // Activity records are a bounded, best-effort view of the whole session for
 // the relay's session panel and the session mirror
 // (docs/pi-bridge-protocol.md, activity). Text is cut to the relay frame's
-// plaintext cap. The file is truncated past 4 MiB only when a run starts, so
-// a run never spans a truncation; past 16 MiB it is truncated at any record.
+// plaintext cap. Past 4 MiB, a starting run replaces the file with the
+// records of the run before it, so a reader that has not read that run's end
+// still finds it; past 16 MiB the file is truncated at any record.
 const MAX_ACTIVITY_TEXT = 48000;
 const MAX_ACTIVITY_FILE = 4 * 1024 * 1024;
 const MAX_ACTIVITY_FILE_HARD = 16 * 1024 * 1024;
@@ -72,6 +73,9 @@ type Bridge = {
 	runs: number;
 	// runOutcome is the open run's last agent_before_settle outcome.
 	runOutcome: string;
+	// runStartAt is the byte offset in the activity file where the last
+	// run_start record was written, -1 before the first.
+	runStartAt: number;
 	// requestUser is the ref of the in-flight request whose own user
 	// message started and has not ended yet.
 	requestUser: string;
@@ -277,6 +281,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		run: "",
 		runs: 0,
 		runOutcome: "",
+		runStartAt: -1,
 		requestUser: "",
 	};
 	writeLiveness(b, true);
@@ -622,8 +627,49 @@ function appendActivity(b: Bridge, f: ActivityFields): void {
 	if (f.text) rec.text = f.text;
 	if (f.tool) rec.tool = f.tool;
 	if (f.status) rec.status = f.status;
-	const max = f.kind === "run_start" ? MAX_ACTIVITY_FILE : MAX_ACTIVITY_FILE_HARD;
-	appendLine(path.join(b.dir, "activity", `${b.sessionId}.jsonl`), `${JSON.stringify(rec)}\n`, max);
+	const file = path.join(b.dir, "activity", `${b.sessionId}.jsonl`);
+	if (f.kind === "run_start") b.runStartAt = keepLastRun(file, b.runStartAt);
+	appendLine(file, `${JSON.stringify(rec)}\n`, MAX_ACTIVITY_FILE_HARD);
+}
+
+// keepLastRun replaces an activity file past MAX_ACTIVITY_FILE with its bytes
+// from offset from on (the last run, which has settled), through a renamed
+// temporary file, so a reader sees either the old file or the new one. It
+// returns the file's size, where the next record starts.
+function keepLastRun(file: string, from: number): number {
+	let size: number;
+	try {
+		size = fs.statSync(file).size;
+	} catch {
+		return 0;
+	}
+	if (size <= MAX_ACTIVITY_FILE) return size;
+	const tail = Buffer.alloc(from >= 0 && from < size ? size - from : 0);
+	const tmp = `${file}.tmp`;
+	try {
+		const fd = fs.openSync(file, "r");
+		try {
+			if (tail.length > 0 && fs.readSync(fd, tail, 0, tail.length, from) !== tail.length) throw new Error("short read");
+		} finally {
+			fs.closeSync(fd);
+		}
+		const out = fs.openSync(tmp, "w", 0o600);
+		try {
+			if (tail.length > 0) writeAll(out, tail.toString("utf8"));
+			fs.fsyncSync(out);
+		} finally {
+			fs.closeSync(out);
+		}
+		fs.renameSync(tmp, file);
+		return tail.length;
+	} catch {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Nothing was left behind.
+		}
+		return size;
+	}
 }
 
 // activityHooks records the whole session, not only remote requests: runs,

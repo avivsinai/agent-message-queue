@@ -68,8 +68,7 @@ non-empty protocol string instead of guessing its meaning:
   "not_after": "2026-01-01T00:00:00.123456789Z",
   "epoch_hint": "3f0c...",
   "created_at": "2026-01-01T00:00:00Z",
-  "bridge_revision": 3,
-  "activity": 2
+  "bridge_revision": 3
 }
 ```
 
@@ -211,9 +210,11 @@ run.
   `agent_before_settle` (`completed`, `aborted`, or `error`), else `error`.
 - The `user` record of a request's own user message carries the request's
   `ref` as `id`.
-- The extension truncates the file past 4 MiB only when it writes
-  `run_start`, so a run never spans a truncation; past 16 MiB it truncates at
-  any record.
+- Past 4 MiB, the extension writes `run_start` after it replaces the file
+  (a temporary file plus rename) with the records of the run before it, so a
+  reader that has not read that run's `settled` record still finds it. A run
+  never spans this replacement; past 16 MiB the extension truncates the file
+  at any record.
 
 The adapter tails the file from its end when it starts observing, reads it
 only as a regular file in a plain `activity/` directory (never through a
@@ -232,7 +233,8 @@ nothing: it never decides a request outcome.
   "pid": 4242,
   "surface": "tui",
   "session_generation": "3f0c...",
-  "bridge_revision": 3
+  "bridge_revision": 3,
+  "activity": 2
 }
 ```
 
