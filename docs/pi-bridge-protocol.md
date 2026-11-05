@@ -68,7 +68,8 @@ non-empty protocol string instead of guessing its meaning:
   "not_after": "2026-01-01T00:00:00.123456789Z",
   "epoch_hint": "3f0c...",
   "created_at": "2026-01-01T00:00:00Z",
-  "bridge_revision": 3
+  "bridge_revision": 3,
+  "activity": 2
 }
 ```
 
@@ -186,13 +187,33 @@ never fabricates a state.
 ## `activity/<session_id>.jsonl`
 
 The extension records the whole pi session, not only remote requests, for the
-relay's read-only session panel. `<session_id>` is pi's own session id. One
-JSON object per line: `protocol`, `seq`, `at`, `session` (the same session
-id), `turn`, `kind`, and optional
-`id`, `text`, `tool`, `status`. `kind` is `turn_start`, `turn_end`, `user`,
-`assistant`, `tool_start`, or `tool_end`. Messages are whole, never deltas.
-`text` is at most 48000 bytes; a longer tool result is cut and ends with
-`[truncated]`. The extension truncates the file when it passes 4 MiB.
+relay's read-only session panel and the session mirror. `<session_id>` is pi's
+own session id. The extension creates the file at its first record. One JSON
+object per line: `protocol`, `seq`, `at`, `session` (the same session id),
+`turn`, `kind`, and optional `run`, `id`, `text`, `tool`, `status`. `kind` is
+`turn_start`, `turn_end`, `user`, `assistant`, `tool_start`, `tool_end`,
+`run_start`, or `settled`. Messages are whole, never deltas. `text` is at most
+48000 bytes; a longer tool result is cut and ends with `[truncated]`. Readers
+skip a kind they do not know.
+
+Activity version 2 adds runs. A run is one prompt: pi's `turn_start` and
+`turn_end` mark one model round each, and `agent_end` can repeat inside one
+prompt when pi retries; `agent_settled` comes once, when nothing more will
+run.
+
+- The first `agent_start` after a settle opens a run. Its id is
+  `<first 8 characters of the session generation>-r<n>`, and every record
+  from then until the run's `settled` record, inclusive, carries it as `run`.
+  `agent_start` inside an open run opens nothing.
+- `run_start` is written when the run opens.
+- `settled` is written at `agent_settled`. Its `status` is `aborted` when the
+  event reports an abort, else the outcome of the run's last
+  `agent_before_settle` (`completed`, `aborted`, or `error`), else `error`.
+- The `user` record of a request's own user message carries the request's
+  `ref` as `id`.
+- The extension truncates the file past 4 MiB only when it writes
+  `run_start`, so a run never spans a truncation; past 16 MiB it truncates at
+  any record.
 
 The adapter tails the file from its end when it starts observing, reads it
 only as a regular file in a plain `activity/` directory (never through a
@@ -228,6 +249,9 @@ old (for example the command that updates the pi build that ships it). The
 adapter shows it, bounded, in the refusal instead of this repository's install
 line. The record may also carry `session_id` (see
 [session identity](#bridge-revision-4-session-identity)); from revision 4 it must.
+`activity` is the version of the activity records the extension writes; a
+record without it writes version 1, which has no runs. The activity version is
+separate from `bridge_revision`, which names the request rules.
 
 ## Bridge revision
 

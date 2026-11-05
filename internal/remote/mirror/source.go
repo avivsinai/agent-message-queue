@@ -16,6 +16,9 @@ type Source struct {
 	Time func(line string) int64
 	// Fold applies one record line to the fold.
 	Fold func(st State, line string, carried Carried) (State, []Event)
+	// Lazy is set when the record may not exist yet: its writer creates it
+	// at its first line, so a missing record is an empty one.
+	Lazy bool
 }
 
 // SourceFor is the source of a harness the mirror shows, nil for any other.
@@ -23,6 +26,8 @@ func SourceFor(harness string) *Source {
 	switch harness {
 	case "claude":
 		return &claudeSource
+	case "pi":
+		return &piSource
 	}
 	return nil
 }

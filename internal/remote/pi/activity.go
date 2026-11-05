@@ -16,11 +16,14 @@ import (
 
 // ActivityNote is one session activity record the bridge wrote to
 // activity/<session_id>.jsonl (docs/pi-bridge-protocol.md, activity). Kind is
-// turn_start, turn_end, user, assistant, tool_start, or tool_end. At is Unix
-// milliseconds, 0 when the record carries no parsable time.
+// turn_start, turn_end, user, assistant, tool_start, tool_end, run_start, or
+// settled. Run is the run the record belongs to, "" from a bridge that
+// writes no runs. At is Unix milliseconds, 0 when the record carries no
+// parsable time.
 type ActivityNote struct {
 	SessionID string
 	TurnID    string
+	Run       string
 	Kind      string
 	ID        string
 	Text      string
@@ -34,6 +37,7 @@ type activityRecord struct {
 	At       string `json:"at"`
 	Session  string `json:"session"`
 	Turn     string `json:"turn"`
+	Run      string `json:"run"`
 	Kind     string `json:"kind"`
 	ID       string `json:"id"`
 	Text     string `json:"text"`
@@ -118,21 +122,44 @@ func (a *Attachment) tailActivity(session string, off int64, cb func(ActivityNot
 		return off
 	}
 	for _, line := range bytes.Split(buf[:end], []byte{'\n'}) {
-		var rec activityRecord
-		if len(line) == 0 || json.Unmarshal(line, &rec) != nil {
-			continue
-		}
-		if rec.Protocol != "" && rec.Protocol != a.dir.names.protocol || rec.Session != session {
+		note, ok := parseActivityLine(line, a.dir.names.protocol)
+		if !ok || note.SessionID != session {
 			continue // only the pinned session's own records
-		}
-		note := ActivityNote{SessionID: session, TurnID: rec.Turn, Kind: rec.Kind, ID: rec.ID,
-			Text: rec.Text, Tool: rec.Tool, Status: rec.Status}
-		if at, err := time.Parse(time.RFC3339Nano, rec.At); err == nil {
-			note.At = at.UnixMilli()
 		}
 		cb(note)
 	}
 	return off + int64(end)
+}
+
+// ParseActivityLine parses one line of a pi bridge's activity file. It
+// reports false for a line that does not parse or carries another protocol.
+func ParseActivityLine(line string) (ActivityNote, bool) {
+	return parseActivityLine([]byte(line), piWire.protocol)
+}
+
+func parseActivityLine(line []byte, protocol string) (ActivityNote, bool) {
+	var rec activityRecord
+	if len(line) == 0 || json.Unmarshal(line, &rec) != nil {
+		return ActivityNote{}, false
+	}
+	if rec.Protocol != "" && rec.Protocol != protocol {
+		return ActivityNote{}, false
+	}
+	note := ActivityNote{SessionID: rec.Session, TurnID: rec.Turn, Run: rec.Run, Kind: rec.Kind, ID: rec.ID,
+		Text: rec.Text, Tool: rec.Tool, Status: rec.Status}
+	if at, err := time.Parse(time.RFC3339Nano, rec.At); err == nil {
+		note.At = at.UnixMilli()
+	}
+	return note, true
+}
+
+// ActivityFile is the activity file of pi session sessionID that the bridge
+// of handle under root writes, "" when handle or sessionID is not valid.
+func ActivityFile(root, handle, sessionID string) string {
+	if fsq.ValidateHandle(handle) != nil || !validSessionID(sessionID) {
+		return ""
+	}
+	return filepath.Join(bridgePath(root, handle, piWire), "activity", sessionID+".jsonl")
 }
 
 // errNotActivityFile refuses an activity path that is not a plain file in a

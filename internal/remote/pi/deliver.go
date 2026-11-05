@@ -235,6 +235,9 @@ type livenessRecord struct {
 	// Upgrade is the extension's own remedy for an owner whose bridge is too
 	// old, for example the command that updates the pi build that ships it.
 	Upgrade string `json:"upgrade,omitempty"`
+	// Activity is the activity record version the extension writes; 0 means
+	// the record carries none (protocol: activity).
+	Activity int `json:"activity,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -282,6 +285,7 @@ type livenessState struct {
 	revision  int    // the live bridge's bridge_revision (0 = not published)
 	sessionID string // the live bridge's pi session id ("" = not published)
 	upgrade   string // the live bridge's own remedy, bounded ("" = not published)
+	activity  int    // the live bridge's activity version (0 = not published)
 }
 
 // publishRequest publishes one request: atomic write (unique temp name,
@@ -433,7 +437,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade, activity: rec.Activity}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

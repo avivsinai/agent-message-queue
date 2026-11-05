@@ -32,6 +32,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
@@ -795,6 +796,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // When the harness execs directly (pi does), the holder is the harness; a
 // wrapper that forks is the holder itself, and the binding follows the
 // wrapper's lifetime. Without a recorded owner the holder stays unknown.
+// The holder is pi when the handle's live pi bridge runs in it.
 func wakeOwnerSession(root, handle string) harnessSession {
 	owner, ok := amqcli.WakeOwner(root, handle)
 	if !ok {
@@ -807,7 +809,11 @@ func wakeOwnerSession(root, handle string) harnessSession {
 		cur.PIDNamespace != owner.PIDNamespace || !launch.RunsUnderProcess(cur) {
 		return harnessSession{}
 	}
-	return harnessSession{PID: cur.PID, Holder: cur}
+	h := harnessSession{PID: cur.PID, Holder: cur}
+	if pid, _, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
+		h.Kind = "pi"
+	}
+	return h
 }
 
 // pruneAfterAttach prunes the bindings of ended sessions once attach has

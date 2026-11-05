@@ -565,12 +565,15 @@ test("an old adapter's requests are refused with one upgrade notice in pi", asyn
 test("session activity is recorded to activity/<session_id>.jsonl", async () => {
 	const h = harness();
 	await h.start();
+	await h.emit("agent_start");
 	await h.emit("turn_start", { turnIndex: 0 });
 	await h.emit("message_end", userMessage("hello"));
 	await h.emit("tool_execution_start", { toolCallId: "c1", toolName: "read", args: {} });
 	await h.emit("tool_execution_end", { toolCallId: "c1", toolName: "read", result: { content: [{ type: "text", text: "file body" }] }, isError: false });
 	await h.emit("message_end", assistantMessage("done"));
 	await h.emit("turn_end", { turnIndex: 0 });
+	await h.emit("agent_before_settle", { outcome: "completed" });
+	await h.emit("agent_settled", { aborted: false });
 	const lines = fs
 		.readFileSync(path.join(h.dir, "activity", "pi-session-1.jsonl"), "utf8")
 		.trim()
@@ -579,14 +582,18 @@ test("session activity is recorded to activity/<session_id>.jsonl", async () => 
 	assert.deepEqual(
 		lines.map((l) => [l.kind, l.text, l.tool, l.status]),
 		[
+			["run_start", undefined, undefined, undefined],
 			["turn_start", undefined, undefined, undefined],
 			["user", "hello", undefined, undefined],
 			["tool_start", undefined, "read", undefined],
 			["tool_end", "file body", "read", "completed"],
 			["assistant", "done", undefined, undefined],
 			["turn_end", undefined, undefined, undefined],
+			["settled", undefined, undefined, "completed"],
 		],
 	);
-	assert.equal(lines[1].turn, lines[0].turn);
+	assert.equal(lines[2].turn, lines[1].turn);
+	assert.match(lines[0].run, /^[0-9a-f]{8}-r1$/);
+	assert.deepEqual(new Set(lines.map((l) => l.run)), new Set([lines[0].run]));
 	await h.done();
 });

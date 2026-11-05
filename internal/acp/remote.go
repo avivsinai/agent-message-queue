@@ -156,6 +156,10 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		switch b.Harness {
 		case "claude":
 			_ = mirror.RecordCarried(b.Name, claude.FrameMsgID(ipc.LocalHost, target, id))
+		case "pi":
+			// The pi bridge records the request's reference on the run's
+			// user record.
+			_ = mirror.RecordCarried(b.Name, protocol.EncodeRef(ipc.LocalHost, target, id))
 		}
 	}
 	r := &remoteTurn{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -243,8 +244,10 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 // the new file from its start; a binding seen for the first time starts at
 // the end of its transcript. A file replaced in place (another identity, or
 // shorter than the offset) is read from its start again: the claims and the
-// watermark stop the turns already posted. It reports whether path could be
-// read.
+// watermark stop the turns already posted. For a Lazy source a missing file
+// is an empty record: seen first that way, it is read from its start once it
+// appears, and turns that end after now are posted. It reports whether path
+// could be read.
 func (s *Server) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path string, now time.Time) bool {
 	first := st.Path == ""
 	if st.Path != path {
@@ -262,6 +265,10 @@ func (s *Server) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path
 		// resumed older session, a replaced file) never posts a turn from
 		// before it.
 		c, err := claude.TranscriptTail(path)
+		if src.Lazy && errors.Is(err, fs.ErrNotExist) {
+			st.Watermark = max(st.Watermark, now.UnixMilli())
+			return true
+		}
 		if err != nil {
 			st.Path = ""
 			return false
@@ -278,6 +285,9 @@ func (s *Server) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path
 		return true
 	}
 	c, err := claude.ReadTranscript(path, st.Offset, st.Skipping)
+	if src.Lazy && errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	if err != nil {
 		return false
 	}

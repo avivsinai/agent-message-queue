@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // End kinds of a turn.
@@ -614,14 +616,16 @@ func DirFor(name string) (string, error) {
 	return filepath.Join(root, name), nil
 }
 
-var msgIDRe = regexp.MustCompile(`^[0-9a-f-]{1,64}$`)
+// msgIDRe matches what a native carrier sends a request as: a frame msg_id,
+// or a request reference.
+var msgIDRe = regexp.MustCompile(`^(?:[0-9a-f-]{1,64}|` + protocol.RefPrefix + `[a-z2-7]{16,` + strconv.Itoa(protocol.MaxRefLen) + `})$`)
 
 // RecordCarried records, synced, that the native carrier of binding name
 // sends a frame with msgID. It is written before the frame is sent, so a
 // transcript line with that msg_id always finds it.
 func RecordCarried(name, msgID string) error {
 	if !msgIDRe.MatchString(msgID) {
-		return fmt.Errorf("msg_id %q is not a frame msg_id", msgID)
+		return fmt.Errorf("msg_id %q is not a frame msg_id or a request reference", msgID)
 	}
 	dir, err := DirFor(name)
 	if err != nil {
