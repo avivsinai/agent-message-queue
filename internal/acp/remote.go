@@ -153,7 +153,8 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		root, target, native = b.Root, b.Target, b.NativeSession
 		// The session mirror tells this turn's frame from a peer's by its
 		// msg_id, recorded before the endpoint can send the frame.
-		if b.Harness == "claude" {
+		switch b.Harness {
+		case "claude":
 			_ = mirror.RecordCarried(b.Name, claude.FrameMsgID(ipc.LocalHost, target, id))
 		}
 	}

@@ -95,6 +95,9 @@ type mirrorFile struct {
 	// Noted is set once the note was posted, to the locator it was posted
 	// for ("" for none).
 	Noted *string `json:"noted,omitempty"`
+	// Harness names the source of the record, so a binding that is gone
+	// can still be read to its end.
+	Harness string `json:"harness,omitempty"`
 }
 
 // mirrorStopped reports whether the mirror worker is stopping.
@@ -138,7 +141,7 @@ func (s *Server) mirrorTick(now time.Time) {
 			return
 		}
 		served[t.name] = true
-		if b, err := binding.ReadNamed(t.name); err == nil && b.Harness == "claude" {
+		if b, err := binding.ReadNamed(t.name); err == nil && mirror.SourceFor(b.Harness) != nil {
 			s.mirrorBinding(t, b, now, false)
 		}
 	}
@@ -204,18 +207,25 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	}
 	st, saved, _ := readMirrorFile(dir)
 	st.Channel = t.channel
+	if b.Harness != "" {
+		st.Harness = b.Harness
+	}
+	src := mirror.SourceFor(st.Harness)
+	if src == nil {
+		return true
+	}
 	off := mirror.Off(dir)
-	switch path := mirrorLocate(b, st.Path); {
+	switch path := src.Locate(b, st.Path); {
 	case ended:
 		if st.Path != "" {
-			s.mirrorRead(dir, &st, st.Path, now)
+			s.mirrorRead(dir, src, &st, st.Path, now)
 		}
 		var evs []mirror.Event
 		st.Fold, evs = mirror.Close(st.Fold, mirror.EndSessionEnded)
 		st.Queue = append(st.Queue, evs...)
 	case path == "":
 		s.mirrorUnavailable(dir, &st, "", off)
-	case !s.mirrorRead(dir, &st, path, now):
+	case !s.mirrorRead(dir, src, &st, path, now):
 		s.mirrorUnavailable(dir, &st, path, off)
 	}
 	st.Queue = mergeQueue(st.Queue, st.Watermark)
@@ -228,21 +238,6 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	return s.mirrorSend(dir, t, b, &st, now)
 }
 
-// mirrorLocate is the binding's transcript: the one the holder's session
-// registry entry names when that file exists, else the transcript the
-// mirror already reads (saved), else, the first time, the binding's own
-// Transcript. A registry entry that cannot be read for a moment never moves
-// the cursor back to an older file.
-func mirrorLocate(b binding.Binding, saved string) string {
-	if path := claude.SessionTranscript(b.Transcript, b.Holder.PID); path != "" {
-		return path
-	}
-	if saved != "" {
-		return saved
-	}
-	return b.Transcript
-}
-
 // mirrorRead reads the new lines of path and queues the turn events they
 // make. A changed path ends the open turn as "session cleared" and reads
 // the new file from its start; a binding seen for the first time starts at
@@ -250,7 +245,7 @@ func mirrorLocate(b binding.Binding, saved string) string {
 // shorter than the offset) is read from its start again: the claims and the
 // watermark stop the turns already posted. It reports whether path could be
 // read.
-func (s *Server) mirrorRead(dir string, st *mirrorFile, path string, now time.Time) bool {
+func (s *Server) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path string, now time.Time) bool {
 	first := st.Path == ""
 	if st.Path != path {
 		if !first {
@@ -273,9 +268,7 @@ func (s *Server) mirrorRead(dir string, st *mirrorFile, path string, now time.Ti
 		}
 		newest := int64(0)
 		for _, raw := range c.Lines {
-			if l, ok := claude.ParseTranscriptLine(raw); ok {
-				newest = max(newest, l.TS)
-			}
+			newest = max(newest, src.Time(raw))
 		}
 		if newest == 0 {
 			newest = now.UnixMilli()
@@ -305,12 +298,8 @@ func (s *Server) mirrorRead(dir string, st *mirrorFile, path string, now time.Ti
 			st.Skipped++
 		}
 		for _, raw := range c.Lines {
-			l, ok := claude.ParseTranscriptLine(raw)
-			if !ok {
-				continue
-			}
 			var evs []mirror.Event
-			st.Fold, evs = mirror.Fold(st.Fold, l, carried)
+			st.Fold, evs = src.Fold(st.Fold, raw, carried)
 			st.Queue = append(st.Queue, evs...)
 		}
 		read += c.Next - st.Offset
@@ -566,7 +555,7 @@ func (s *Server) mirrorSwitch(channel, prompt string) (name string, on bool, ok 
 	if !found {
 		return "", false, false
 	}
-	if b, err := binding.ReadNamed(r.Name); err != nil || b.Harness != "claude" || b.SessionIdentity() != r.Identity || !live(b) {
+	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !live(b) {
 		return "", false, false
 	}
 	return r.Name, on, true

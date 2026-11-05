@@ -62,16 +62,16 @@ func mirrorCommand(args []string, stdout io.Writer, probe ...*jsonProbe) (int, e
 		Channel bool   `json:"channel"`
 	}
 	var results []result
-	claudeOnly := matched[:0:0]
+	shown := matched[:0:0]
 	for _, b := range matched {
-		if b.Harness == "claude" {
-			claudeOnly = append(claudeOnly, b)
+		if mirror.SourceFor(b.Harness) != nil {
+			shown = append(shown, b)
 		}
 	}
-	if len(claudeOnly) == 0 {
-		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "the mirror shows Claude sessions only; %s is a %s session", matched[0].Name, matched[0].Harness)
+	if len(shown) == 0 {
+		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "the mirror does not show %s sessions yet; %s is one", matched[0].Harness, matched[0].Name)
 	}
-	for _, b := range claudeOnly {
+	for _, b := range shown {
 		if verb != "status" {
 			if err := mirror.SetOff(b.Name, verb == "off"); err != nil {
 				return protocol.ExitActionRequired, err
