@@ -207,6 +207,16 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Ended},
 		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
 	}, {
+		// agent-message-queue-07h design review: Buzz refuses a post with an
+		// "@name" that matches no channel member, so the turn was lost.
+		name: "a name after @ in the prompt and the answer",
+		lines: []string{
+			prompt("o1", "p1", 0, "@amit check user@host"),
+			assistant("m1", "end_turn", 1, nil, text("Asked @amit.")),
+		},
+		events: []string{Ended},
+		posts:  []string{"▶ @\u2060amit check user@host\n✓ 1s\nAsked @\u2060amit."},
+	}, {
 		name: "sidechain lines of a subagent",
 		lines: []string{
 			prompt("o1", "p1", 0, "find the bug"),

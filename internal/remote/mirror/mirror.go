@@ -483,6 +483,24 @@ func Render(t Turn) string {
 	if t.Earlier > 0 {
 		fmt.Fprintf(&b, "\n(+%d earlier turns not shown)", t.Earlier)
 	}
+	return unmention(b.String())
+}
+
+// wordJoiner is invisible and is not a name character.
+const wordJoiner = "\u2060"
+
+// unmention puts a word joiner after each "@" that starts a word, so a post
+// never mentions anyone. Buzz reads "@name" after a space or at the start
+// as a mention: it refuses a post whose name matches no channel member, and
+// pings a member whose name matches.
+func unmention(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		b.WriteRune(r)
+		if r == '@' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\n' || s[i-1] == '\t' || s[i-1] == '\r') {
+			b.WriteString(wordJoiner)
+		}
+	}
 	return b.String()
 }
 
