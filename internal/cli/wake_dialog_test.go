@@ -118,27 +118,54 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	}
 }
 
-// field: agy busy turns showed held notices (2026-10-26). A working marker
-// younger than wakeDialogQuietHold holds without a desktop notice or
-// terminal attention.
-func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
+// How a marker holds the doorbell by its kind and age.
+func TestWakeDialogHoldByMarkerAge(t *testing.T) {
+	agyBusy := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
+	permission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	staleLog := `amq wake: the dialog marker is older than 10m0s and closes only when the turn ends; ringing the doorbell (marker event="PermissionRequest" kind="" harness="claude" tool="Bash" age=11m0s transcript=none)`
 	for _, tt := range []struct {
-		name    string
-		age     time.Duration
-		notices int
+		name   string
+		marker string
+		// age is the marker's age when the message arrives; later, if set,
+		// is how long the clock then runs with no new message.
+		age, later time.Duration
+		claudeHook bool
+		notices    int
+		rings      int
+		log        string
 	}{
-		{"younger than the quiet hold", wakeDialogQuietHold - time.Minute, 0},
+		// field: agy busy turns showed held notices (2026-10-26). A working
+		// marker younger than wakeDialogQuietHold holds without a desktop
+		// notice or terminal attention.
+		{"agy busy turn younger than the quiet hold", agyBusy, wakeDialogQuietHold - time.Minute, 0, false, 0, 0, ""},
+		// field agent-message-queue-zu3 (2026-11-05): a permission marker,
+		// which only the turn's end closes, held a Claude Code doorbell for
+		// an hour-long turn, attention only. Past the quiet hold it rings,
+		// also for a doorbell held while the marker was fresh.
+		{"Claude permission marker older than the quiet hold", permission, wakeDialogQuietHold + time.Minute, 0, true, 0, 1, staleLog},
+		{"Claude permission marker ages past the quiet hold while held", permission, wakeDialogQuietHold - time.Minute, 2 * time.Minute, true, 1, 1, staleLog},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			if tt.claudeHook {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("CLAUDE_CONFIG_DIR", "")
+				bin := filepath.Join(t.TempDir(), "amq")
+				if err := os.WriteFile(bin, nil, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := claude.InstallCommandHooks(home, wakeDialogHooks(bin, wakeDialogHookEventsFor(claudeVersion{}, false))); err != nil {
+					t.Fatal(err)
+				}
+			}
 			agentDir, err := openWakeAgentDir(h.root, "codex")
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
 			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-			raw := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
-			if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+			if err := os.WriteFile(marker, []byte(tt.marker), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			opened := h.now.Add(-tt.age)
@@ -149,6 +176,7 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 			attention := 0
 			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
+			h.cfg.dialogHoldDetail = wakeDialogHoldDetailInDir(agentDir)
 			h.cfg.settings.heldNotice = true
 			h.cfg.desktopNotify = func(title, body string) error {
 				notices = append(notices, body)
@@ -159,15 +187,25 @@ func TestWakeDialogBusyTurnHoldsQuietly(t *testing.T) {
 				return len(p), nil
 			}
 			h.send("a", format.PriorityNormal)
-			h.scan(h.cfg)
-			if len(h.injected) != 0 {
-				t.Fatalf("typed %q into a busy agy", h.injected)
+			_, stderr, _ := captureEnvOutput(t, func() error {
+				h.scan(h.cfg)
+				if tt.later > 0 {
+					if got := h.rings(); got != 0 {
+						t.Fatalf("doorbells while the marker is fresh = %d, want 0", got)
+					}
+					h.advance(tt.later)
+					h.scan(h.cfg)
+				}
+				return nil
+			})
+			if got := h.rings(); got != tt.rings {
+				t.Fatalf("doorbells = %d (injected %q), want %d; wake log %q", got, h.injected, tt.rings, stderr)
 			}
-			if len(notices) != tt.notices || (attention > 0) != (tt.notices > 0) {
+			if len(notices) != tt.notices || (tt.rings == 0 && (attention > 0) != (tt.notices > 0)) {
 				t.Fatalf("notices = %q, attention writes = %d, want %d notices", notices, attention, tt.notices)
 			}
-			if tt.notices > 0 && !strings.Contains(notices[0], "Antigravity is busy") {
-				t.Fatalf("notice = %q, want the busy reason", notices[0])
+			if tt.log != "" && !strings.Contains(stderr, tt.log) {
+				t.Fatalf("wake log = %q, want %q", stderr, tt.log)
 			}
 		})
 	}

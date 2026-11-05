@@ -1207,13 +1207,16 @@ func deliverNewMessageNotification(
 		// Hold before the attempt starts, so a hold is neither a
 		// ledger record nor an input attempt.
 		state, readErr := cfg.dialogState()
-		if state != wakeDialogClosed {
+		if state.holdsInput() {
 			return holdWakeForDialog(cfg, state, readErr, notice.output, len(currentPending))
 		}
-		if cfg.dialogHold != wakeDialogClosed {
+		if cfg.dialogHold.holdsInput() {
 			cfg.doorbell.endHeldNotice()
 		}
-		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
+		if state == wakeDialogStale && cfg.dialogHold != wakeDialogStale {
+			logWakeDialogStale(cfg)
+		}
+		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = state, false, ""
 	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
@@ -2097,7 +2100,7 @@ func (err *wakeTerminalAuthorityError) Unwrap() error {
 func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
 	// A dialog that opened after the doorbell was planned parks the
 	// next byte, even mid-doorbell.
-	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
+	if state, _ := cfg.dialogState(); state.holdsInput() {
 		return false, nil
 	}
 	if cfg.controlStop != nil {

@@ -177,7 +177,10 @@ type wakeDialogMarker struct {
 // unknown, and so holds input, only while the dialog guard of the harness
 // that wrote it (else harnessName) is on (dialogGuardEnabled). Without the
 // guard it reads as closed: the default wake is a plain doorbell that never
-// stays held by a marker nothing will close.
+// stays held by a marker nothing will close. With the guard, a marker that
+// only a turn or session event closes (turnClosedMarker) reads as stale
+// once older than wakeDialogQuietHold and holds no input: its hold would
+// otherwise last the whole turn.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
@@ -209,11 +212,28 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time
 			modTime = info.ModTime()
 		}
 		state, stateErr := classifyWakeDialogMarker(modTime, exists, readErr, now)
-		if state == wakeDialogUnknown {
-			return unknown(raw, stateErr)
+		if state != wakeDialogUnknown {
+			return state, stateErr
+		}
+		state, stateErr = unknown(raw, stateErr)
+		if state == wakeDialogUnknown && readErr == nil && now.Sub(modTime) >= wakeDialogQuietHold && turnClosedMarker(raw) {
+			return wakeDialogStale, nil
 		}
 		return state, stateErr
 	}
+}
+
+// turnClosedMarker reports a marker that only a turn or session event
+// closes: one with no tool call id that is not a Startup marker, such as a
+// Claude Code or Codex permission marker or a Cursor tool call marker. A
+// marker with a tool call id has its own close (its PostToolUse or the
+// transcript's tool_result), and a Startup marker closes on its trust
+// record or startup hook.
+func turnClosedMarker(raw []byte) bool {
+	var marker wakeDialogMarker
+	return json.Unmarshal(raw, &marker) == nil &&
+		marker.ToolUseID == "" &&
+		marker.Event != wakeDialogStartupEvent
 }
 
 // wakeStartupTrustReleaseInDir reports whether the agent's Startup marker
@@ -713,7 +733,7 @@ func runWakeInstallDialogHook(args []string) error {
 		"~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json",
 		"(Codex runs them once you trust them in /hooks),",
 		"or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session",
-		"starts; it holds the doorbell from a tool call to the end of that turn).",
+		"starts; it holds the doorbell from a tool call to the end of that turn, at most 10m).",
 		"",
 		"While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,",
 		"the hooks keep a marker in the agent's mailbox and every wake of that agent",

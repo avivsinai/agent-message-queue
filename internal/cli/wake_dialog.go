@@ -10,7 +10,7 @@ import "time"
 // holds the result of the marker's own tool call. No shared state releases a
 // Codex Startup marker: only a prompt hook of its launch does. Doorbell text
 // and its CR would answer the dialog, so no input byte is written while the
-// marker is present.
+// marker holds input (wakeDialogState.holdsInput).
 
 type wakeDialogState uint8
 
@@ -19,12 +19,24 @@ const (
 	wakeDialogOpen
 	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
 	// the future, or one that cannot be read, while the dialog guard of its
-	// harness is on (without it such a marker reads as closed). It may still
-	// hide an open dialog, so input stays held; held attempts follow the input retry
+	// harness is on (without it such a marker reads as closed), except a
+	// stale turn marker (wakeDialogStale). It may still hide an
+	// open dialog, so input stays held; held attempts follow the input retry
 	// ladder (5 s doubling to 2 min) instead of the 2-second recheck, and
 	// the held notice follows the attention ladder.
 	wakeDialogUnknown
+	// wakeDialogStale is a marker that only a turn or session event closes
+	// (a permission or approval marker with no tool call id) older than
+	// wakeDialogQuietHold. It can outlast its dialog by a whole turn, so it
+	// holds no input, and the doorbell rings as with no marker.
+	wakeDialogStale
 )
+
+// holdsInput reports whether a marker in this state keeps the doorbell's
+// input held.
+func (s wakeDialogState) holdsInput() bool {
+	return s == wakeDialogOpen || s == wakeDialogUnknown
+}
 
 const (
 	wakeDialogFileName = ".wake.dialog"
@@ -32,8 +44,9 @@ const (
 	// this long after the dialog closes.
 	wakeDialogRecheck = 2 * time.Second
 	// After this long a marker no longer proves a dialog: a closing hook may
-	// not have fired (Esc is a user interrupt with no Stop event). Input
-	// stays held; the wake stops the 2-second recheck.
+	// not have fired (Esc is a user interrupt with no Stop event). A stale
+	// turn marker releases input; any other marker keeps it held
+	// and the wake stops the 2-second recheck.
 	wakeDialogQuietHold = 10 * time.Minute
 )
 
@@ -125,6 +138,16 @@ func holdWakeForDialog(
 	cfg.doorbell.recordDeferredInputAttempt(now)
 	persistWakeDoorbellStatusBestEffort(cfg)
 	return nil
+}
+
+// logWakeDialogStale writes the wake log line for a doorbell that rings past
+// a stale marker, naming the marker's event and age.
+func logWakeDialogStale(cfg *wakeConfig) {
+	var detail string
+	if cfg.dialogHoldDetail != nil {
+		detail = " (" + cfg.dialogHoldDetail(cfg.wakeDoorbellNow()) + ")"
+	}
+	_ = writeWakeDiagnostic(cfg, "amq wake: the dialog marker is older than %s and closes only when the turn ends; ringing the doorbell%s\n", wakeDialogQuietHold, detail)
 }
 
 // wakeDialogHoldCause says why the marker holds input. marker is false when
