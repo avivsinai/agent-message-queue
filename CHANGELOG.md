@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.127.2](https://github.com/avivsinai/agent-message-queue/compare/v0.127.1...v0.127.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **wake:** a doorbell no longer waits for a whole long turn ([#1343](https://github.com/avivsinai/agent-message-queue/issues/1343)) ([af2932d](https://github.com/avivsinai/agent-message-queue/commit/af2932decdb3e755bbb7bca0929bd0f8fa2f474a))
+
 ## [0.127.1](https://github.com/avivsinai/agent-message-queue/compare/v0.127.0...v0.127.1) (2026-11-05)
 
 
