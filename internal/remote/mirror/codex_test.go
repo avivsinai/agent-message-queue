@@ -144,4 +144,11 @@ func TestCodexLocateFollowsTheThread(t *testing.T) {
 	if got := codexLocate(b, orig); got != reverted {
 		t.Fatalf("original compressed: %q, want %q", got, reverted)
 	}
+	// agent-message-queue-7fz review: a binding moved to a thread with no
+	// rollout kept reading the old thread's file into the new channel.
+	moved := binding.Binding{}
+	moved.AppServer.Thread = "01a18747-db9a-7e92-9cdf-08f39de60877"
+	if got := codexLocate(moved, reverted); got != "" {
+		t.Fatalf("moved to a thread with no rollout: %q, want none", got)
+	}
 }

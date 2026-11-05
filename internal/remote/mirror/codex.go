@@ -48,7 +48,16 @@ func codexLocate(b binding.Binding, saved string) string {
 	if path, ok := codex.CurrentRolloutSince(sessions, thread, known, time.Now()); ok {
 		return path
 	}
-	return cmp.Or(b.Transcript, saved)
+	if b.Transcript != "" {
+		return b.Transcript
+	}
+	// The saved file is read only while it is the bound thread's: a binding
+	// moved to a thread with no rollout gets the note, never the old
+	// thread's turns.
+	if thread != "" && codex.RolloutThread(saved) == thread {
+		return saved
+	}
+	return ""
 }
 
 // CodexCarriedID is the carrier record of a Codex clientUserMessageId: its
