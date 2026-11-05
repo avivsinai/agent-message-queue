@@ -135,8 +135,8 @@ func writeTurnDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), codexStartupMarkerBytes)
 }
 
-// codexStartupMarkerBytes reports a Codex Startup marker.
-func codexStartupMarkerBytes(raw []byte) bool {
+// codexStartupMarkerBytes reports a Codex Startup marker, whatever its age.
+func codexStartupMarkerBytes(raw []byte, _ time.Time) bool {
 	var marker wakeDialogMarker
 	return json.Unmarshal(raw, &marker) == nil && marker.Event == wakeDialogStartupEvent && marker.Harness == launch.CodexProvider
 }

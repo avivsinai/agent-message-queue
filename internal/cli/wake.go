@@ -1203,6 +1203,7 @@ func deliverNewMessageNotification(
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return err
 	}
+	staleDialog := false
 	if cfg.injectMode != wakeInjectModeNone {
 		// Hold before the attempt starts, so a hold is neither a
 		// ledger record nor an input attempt.
@@ -1217,6 +1218,13 @@ func deliverNewMessageNotification(
 			logWakeDialogStale(cfg)
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = state, false, ""
+		// A bare Enter would answer a dialog that a stale marker may still
+		// show, so every ring past one types the full doorbell and none
+		// confirms the presentation.
+		if staleDialog = state == wakeDialogStale; staleDialog {
+			cfg.doorbell.presentationConfirmed = false
+			plan.submitOnly = false
+		}
 	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
@@ -1262,7 +1270,7 @@ func deliverNewMessageNotification(
 			if startupUnconfirmed && wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.startupReleaseAttempted = true
 			}
-			if !plan.submitOnly && !startupUnconfirmed &&
+			if !plan.submitOnly && !startupUnconfirmed && !staleDialog &&
 				(!plan.contentChange || !retainedInputPending) &&
 				wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.doorbell.confirmPresentation()

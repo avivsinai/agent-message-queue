@@ -295,18 +295,24 @@ version supports it.
   close a dialog that still shows. A doorbell that would land mid-turn after
   a permission dialog lands when the turn ends, when the person types, or
   once the marker is 10 minutes old, whichever comes first. A permission
-  marker of that age holds no input: the wake rings the full doorbell as if
-  no marker existed, and Claude Code queues it as a message while the turn
-  runs. The accepted risk: a permission dialog that has really been open
-  for 10 minutes can be answered by the doorbell. The first ring past such
-  a marker logs one line in `.wake.log` with the marker's event and age.
+  marker of that age holds no input: the wake rings as if no marker
+  existed, also for the terminal write check and the `coop named` command.
+  Each ring past it types the full doorbell text, never a bare Enter. While
+  the turn runs, Claude Code has been observed to queue the doorbell as a
+  user message. The accepted risk: a permission dialog that has really been
+  open for 10 minutes can be answered by the doorbell. The first ring past
+  such a marker logs one line in `.wake.log` with the marker's event and
+  age. Only the marker shapes its writers record as closing on a turn count:
+  a Claude Code or Codex `PermissionRequest` marker and a Cursor
+  `preToolUse` marker; any other marker keeps the aged hold below.
 - **AskUserQuestion and ExitPlanMode.** A marker that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
   so a marker it writes, also one right after such a `PreToolUse`, is a
   permission marker (below): the `PreToolUse` marker it replaces can belong
   to another call of the same tool. A tool call's open never replaces a
-  present marker without a tool call id; the check and the replacement
+  present marker without a tool call id, except a permission marker older
+  than 10 minutes, which holds no input; the check and the replacement
   share the marker lock. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps

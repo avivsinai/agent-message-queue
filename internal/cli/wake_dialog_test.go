@@ -130,23 +130,46 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// is how long the clock then runs with no new message.
 		age, later time.Duration
 		claudeHook bool
-		notices    int
-		rings      int
-		log        string
+		// rangBefore rings the doorbell for the message before the marker
+		// opens; ask then opens an AskUserQuestion through the hook writer.
+		rangBefore, ask bool
+		notices         int
+		rings           int
+		log             string
 	}{
 		// field: agy busy turns showed held notices (2026-10-26). A working
 		// marker younger than wakeDialogQuietHold holds without a desktop
 		// notice or terminal attention.
-		{"agy busy turn younger than the quiet hold", agyBusy, wakeDialogQuietHold - time.Minute, 0, false, 0, 0, ""},
+		{name: "agy busy turn younger than the quiet hold", marker: agyBusy, age: wakeDialogQuietHold - time.Minute},
 		// field agent-message-queue-zu3 (2026-11-05): a permission marker,
 		// which only the turn's end closes, held a Claude Code doorbell for
 		// an hour-long turn, attention only. Past the quiet hold it rings,
 		// also for a doorbell held while the marker was fresh.
-		{"Claude permission marker older than the quiet hold", permission, wakeDialogQuietHold + time.Minute, 0, true, 0, 1, staleLog},
-		{"Claude permission marker ages past the quiet hold while held", permission, wakeDialogQuietHold - time.Minute, 2 * time.Minute, true, 1, 1, staleLog},
+		{name: "Claude permission marker older than the quiet hold", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, rings: 1, log: staleLog},
+		{name: "Claude permission marker ages past the quiet hold while held", marker: permission, age: wakeDialogQuietHold - time.Minute,
+			later: 2 * time.Minute, claudeHook: true, notices: 1, rings: 1, log: staleLog},
+		// Pre-merge review of agent-message-queue-zu3: a doorbell shown
+		// before the marker opened made the ring past the stale marker a
+		// bare Enter, which approves an open permission dialog.
+		{name: "ring past a stale marker after a shown doorbell types the full doorbell", marker: permission,
+			later: wakeDialogQuietHold + time.Minute, claudeHook: true, rangBefore: true, notices: 1, rings: 1, log: staleLog},
+		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
+		// that opened past a stale permission marker kept that marker, so
+		// the doorbell answered a dialog seconds old.
+		{name: "AskUserQuestion after a stale permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
+			claudeHook: true, ask: true, notices: 1},
+		// Pre-merge review of agent-message-queue-zu3: a marker of no known
+		// writer read as stale and rang.
+		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, notices: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			if tt.ask {
+				// The hook writer ages markers by the real clock.
+				h.now = time.Now()
+			}
 			if tt.claudeHook {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
@@ -164,6 +187,16 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
+			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
+			if tt.rangBefore {
+				h.send("a", format.PriorityNormal)
+				h.scan(h.cfg)
+				if got := h.rings(); got != 1 {
+					t.Fatalf("doorbells before the marker = %d, want 1", got)
+				}
+				// The reminder is due as the marker opens, so it is held.
+				h.advance(wakeDoorbellRetryBase)
+			}
 			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
 			if err := os.WriteFile(marker, []byte(tt.marker), 0o600); err != nil {
 				t.Fatal(err)
@@ -172,9 +205,15 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			if err := os.Chtimes(marker, opened, opened); err != nil {
 				t.Fatal(err)
 			}
+			if tt.ask {
+				if err := agentDir.withFD(func(dirfd int) error {
+					return writeWakeDialogMarker(dirfd, agentDir, wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"})
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var notices []string
 			attention := 0
-			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)
 			h.cfg.dialogHoldDetail = wakeDialogHoldDetailInDir(agentDir)
 			h.cfg.settings.heldNotice = true
@@ -186,7 +225,9 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				attention++
 				return len(p), nil
 			}
-			h.send("a", format.PriorityNormal)
+			if !tt.rangBefore {
+				h.send("a", format.PriorityNormal)
+			}
 			_, stderr, _ := captureEnvOutput(t, func() error {
 				h.scan(h.cfg)
 				if tt.later > 0 {
