@@ -268,7 +268,11 @@ lock. No wake cleanup removes it. A marker that is unreadable, dated in the
 future, behind a non-canonical agent directory, or older than the quiet hold
 blocks input only while the AMQ dialog hook of the harness that wrote it
 (Claude Code, Codex trusted, or Cursor) is installed with its amq binary
-present; an agy or pi marker never does. Otherwise it reads as closed. Source anchors: `wake_dialog.go`,
+present; an agy or pi marker never does. Otherwise it reads as closed. A
+marker with no tool call id and no `Startup` event (a Claude Code or Codex
+permission marker, a Cursor tool call marker) closes only at a turn or
+session event, so past the quiet hold it never blocks input: the doorbell
+rings as with no marker. Source anchors: `wake_dialog.go`,
 `wake_dialog_unix.go` and `coop_exec_trust.go`.
 
 ## `.wake.lifecycle.lock`: mutation serialization

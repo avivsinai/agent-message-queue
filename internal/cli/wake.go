@@ -1203,17 +1203,28 @@ func deliverNewMessageNotification(
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return err
 	}
+	staleDialog := false
 	if cfg.injectMode != wakeInjectModeNone {
 		// Hold before the attempt starts, so a hold is neither a
 		// ledger record nor an input attempt.
 		state, readErr := cfg.dialogState()
-		if state != wakeDialogClosed {
+		if state.holdsInput() {
 			return holdWakeForDialog(cfg, state, readErr, notice.output, len(currentPending))
 		}
-		if cfg.dialogHold != wakeDialogClosed {
+		if cfg.dialogHold.holdsInput() {
 			cfg.doorbell.endHeldNotice()
 		}
-		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
+		if state == wakeDialogStale && cfg.dialogHold != wakeDialogStale {
+			logWakeDialogStale(cfg)
+		}
+		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = state, false, ""
+		// A bare Enter would answer a dialog that a stale marker may still
+		// show, so every ring past one types the full doorbell and none
+		// confirms the presentation.
+		if staleDialog = state == wakeDialogStale; staleDialog {
+			cfg.doorbell.presentationConfirmed = false
+			plan.submitOnly = false
+		}
 	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
@@ -1259,7 +1270,7 @@ func deliverNewMessageNotification(
 			if startupUnconfirmed && wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.startupReleaseAttempted = true
 			}
-			if !plan.submitOnly && !startupUnconfirmed &&
+			if !plan.submitOnly && !startupUnconfirmed && !staleDialog &&
 				(!plan.contentChange || !retainedInputPending) &&
 				wakeInputAttemptConfirmed(cfg, deliveryErr) {
 				cfg.doorbell.confirmPresentation()
@@ -2097,7 +2108,7 @@ func (err *wakeTerminalAuthorityError) Unwrap() error {
 func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
 	// A dialog that opened after the doorbell was planned parks the
 	// next byte, even mid-doorbell.
-	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
+	if state, _ := cfg.dialogState(); state.holdsInput() {
 		return false, nil
 	}
 	if cfg.controlStop != nil {

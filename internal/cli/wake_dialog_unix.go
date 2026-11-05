@@ -177,7 +177,10 @@ type wakeDialogMarker struct {
 // unknown, and so holds input, only while the dialog guard of the harness
 // that wrote it (else harnessName) is on (dialogGuardEnabled). Without the
 // guard it reads as closed: the default wake is a plain doorbell that never
-// stays held by a marker nothing will close.
+// stays held by a marker nothing will close. With the guard, a marker that
+// only a turn or session event closes (turnClosedMarker) reads as stale
+// once older than wakeDialogQuietHold and holds no input: its hold would
+// otherwise last the whole turn.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
@@ -209,11 +212,37 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time
 			modTime = info.ModTime()
 		}
 		state, stateErr := classifyWakeDialogMarker(modTime, exists, readErr, now)
-		if state == wakeDialogUnknown {
-			return unknown(raw, stateErr)
+		if state != wakeDialogUnknown {
+			return state, stateErr
+		}
+		state, stateErr = unknown(raw, stateErr)
+		if state == wakeDialogUnknown && readErr == nil && now.Sub(modTime) >= wakeDialogQuietHold && turnClosedMarker(raw) {
+			return wakeDialogStale, nil
 		}
 		return state, stateErr
 	}
+}
+
+// turnClosedMarker reports a marker that only a turn or session event
+// closes, as its writer records it: a Claude Code permission marker (event
+// PermissionRequest, no harness or "claude", no tool_use_id), a Codex
+// approval marker (event PermissionRequest, harness "codex") or a Cursor
+// tool call marker (event preToolUse, harness "cursor"). Every other marker
+// has its own close or an unknown one and keeps the aged hold.
+func turnClosedMarker(raw []byte) bool {
+	var marker wakeDialogMarker
+	if json.Unmarshal(raw, &marker) != nil {
+		return false
+	}
+	switch marker.Harness {
+	case "", harness.Claude:
+		return marker.Event == "PermissionRequest" && marker.ToolUseID == ""
+	case harness.Codex:
+		return marker.Event == "PermissionRequest"
+	case harness.Cursor:
+		return marker.Event == "preToolUse"
+	}
+	return false
 }
 
 // wakeStartupTrustReleaseInDir reports whether the agent's Startup marker
@@ -460,10 +489,13 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	}
 	// A tool call's open keeps a present marker without a tool_use_id: that
 	// hold closes only on a turn or session event, and the decision shares
-	// the marker lock with the replacement.
-	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte) bool {
+	// the marker lock with the replacement. A stale turn marker holds no
+	// input, so the new dialog's marker replaces it and holds.
+	now := time.Now()
+	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte, modTime time.Time) bool {
 		var marker wakeDialogMarker
-		return json.Unmarshal(current, &marker) == nil && marker.ToolUseID == ""
+		return json.Unmarshal(current, &marker) == nil && marker.ToolUseID == "" &&
+			(now.Sub(modTime) < wakeDialogQuietHold || !turnClosedMarker(current))
 	})
 }
 
@@ -476,9 +508,9 @@ func replaceWakeDialogMarkerAt(dirfd int, agentDir *wakeAgentDir, data []byte) e
 }
 
 // replaceWakeDialogMarkerUnlessAt is replaceWakeDialogMarkerAt that keeps
-// the present marker when keep accepts its bytes; the read and the
+// the present marker when keep accepts its bytes and mtime; the read and the
 // replacement share the marker lock.
-func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []byte, keep func(current []byte) bool) error {
+func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []byte, keep func(current []byte, modTime time.Time) bool) error {
 	const label = "wake dialog marker"
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -510,12 +542,12 @@ func replaceWakeDialogMarkerUnlessAt(dirfd int, agentDir *wakeAgentDir, data []b
 			return err
 		}
 		if keep != nil {
-			current, _, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, label,
+			current, info, exists, err := readWakeRepairMetadataAt(dirfd, wakeDialogFileName, label,
 				filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
 			if err != nil {
 				return err
 			}
-			if exists && keep(current) {
+			if exists && keep(current, info.ModTime()) {
 				return nil
 			}
 		}
@@ -713,7 +745,7 @@ func runWakeInstallDialogHook(args []string) error {
 		"~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json",
 		"(Codex runs them once you trust them in /hooks),",
 		"or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session",
-		"starts; it holds the doorbell from a tool call to the end of that turn).",
+		"starts; it holds the doorbell from a tool call to the end of that turn, at most 10m).",
 		"",
 		"While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,",
 		"the hooks keep a marker in the agent's mailbox and every wake of that agent",

@@ -733,14 +733,15 @@ Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
   Code dialog hook (amq wake install-dialog-hook), the wake writes no input
   while AskUserQuestion, ExitPlanMode, or a permission dialog is open, and
   rings about 2s after it closes; after a permission dialog it rings when
-  the turn ends or the person types. While the hook stays installed, a
-  marker older than 10m gets attention output, still no input. --harness
-  codex and --harness cursor guard their approval prompts until the turn
-  ends once their hooks are installed. Dialogs without a hook (workspace
-  trust, pickers, MCP elicitation, Cursor prompts before a tool call) are
-  not guarded. amq wake dialog is the hook receiver; amq wake
-  uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce
-  zero synthetic input; stderr output may scribble until redraw.
+  the turn ends, the person types, or the marker is 10m old. While the
+  hook stays installed, any other marker older than 10m gets attention
+  output, still no input. --harness codex and --harness cursor guard their
+  approval prompts until the turn ends, for at most 10m, once their hooks
+  are installed. Dialogs without a hook (workspace trust, pickers, MCP
+  elicitation, Cursor prompts before a tool call) are not guarded. amq wake
+  dialog is the hook receiver; amq wake uninstall-dialog-hook removes the
+  hooks. Use none when AMQ must enforce zero synthetic input; stderr output
+  may scribble until redraw.
 
 Self-upgrade: eligible co-op wakes observe their stable launch symlink and
   replace the running image only with a strictly newer installed AMQ while
@@ -1631,7 +1632,7 @@ Install the wake dialog guard hooks in $CLAUDE_CONFIG_DIR/settings.json (default
 ~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json
 (Codex runs them once you trust them in /hooks),
 or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session
-starts; it holds the doorbell from a tool call to the end of that turn).
+starts; it holds the doorbell from a tool call to the end of that turn, at most 10m).
 
 While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
 the hooks keep a marker in the agent's mailbox and every wake of that agent
