@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,6 +145,18 @@ func ReadTranscript(path string, off int64, skipping bool) (TranscriptChunk, err
 	}
 	id, _ := fsq.StableFileIdentityInfo(r.info)
 	return TranscriptChunk{Lines: r.lines, Next: r.next, Skipping: r.skipping, Size: r.size, File: id}, nil
+}
+
+// TranscriptTail is the first read of a cursor that starts at the end of
+// path: the complete lines of its last chunk, with Next after the last
+// complete line.
+func TranscriptTail(path string) (TranscriptChunk, error) {
+	r, err := readTranscriptFrom(path, math.MaxInt64, false)
+	if err != nil {
+		return TranscriptChunk{}, err
+	}
+	off, skipping := transcriptStartOffset(r.size)
+	return ReadTranscript(path, off, skipping)
 }
 
 // SessionTranscript is the transcript that the registry entry of the Claude

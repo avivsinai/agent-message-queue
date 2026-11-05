@@ -196,6 +196,17 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Ended},
 		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
 	}, {
+		// agent-message-queue-6r9 review: a native wake sends the doorbell
+		// as a peer frame, which posted as a message from another session.
+		name: "a doorbell a native wake sent as a peer frame",
+		lines: []string{
+			user("p1", 0, map[string]any{"uuid": "o1", "isMeta": true, "origin": map[string]any{"kind": "peer", "msg_id": "0d0b0e11-0000-4000-8000-000000000001"}},
+				text("<cross-session-message from=\"amq-doorbell\" from-session=\"amq\" from-name=\"amq-wake\" from-mode=\"code\">\n"+harness.Doorbell+"\n</cross-session-message>")),
+			assistant("m1", "end_turn", 2, nil, text("Drained one message.")),
+		},
+		events: []string{Ended},
+		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
+	}, {
 		name: "sidechain lines of a subagent",
 		lines: []string{
 			prompt("o1", "p1", 0, "find the bug"),

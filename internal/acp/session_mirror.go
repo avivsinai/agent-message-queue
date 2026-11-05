@@ -88,8 +88,9 @@ type mirrorFile struct {
 	Fold     mirror.State `json:"fold"`
 	// Queue holds the turn events not yet sent, oldest first.
 	Queue []mirror.Event `json:"queue,omitempty"`
-	// Watermark is the last line time of the newest turn sent: a turn that
-	// ends at or before it is never posted.
+	// Watermark is the time the mirror first saw the transcript, then the
+	// last line time of the newest turn sent: a turn that ends at or before
+	// it is never posted.
 	Watermark int64 `json:"watermark,omitempty"`
 	// Noted is set once the note was posted, to the locator it was posted
 	// for ("" for none).
@@ -207,14 +208,14 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	switch path := mirrorLocate(b, st.Path); {
 	case ended:
 		if st.Path != "" {
-			s.mirrorRead(dir, &st, st.Path)
+			s.mirrorRead(dir, &st, st.Path, now)
 		}
 		var evs []mirror.Event
 		st.Fold, evs = mirror.Close(st.Fold, mirror.EndSessionEnded)
 		st.Queue = append(st.Queue, evs...)
 	case path == "":
 		s.mirrorUnavailable(dir, &st, "", off)
-	case !s.mirrorRead(dir, &st, path):
+	case !s.mirrorRead(dir, &st, path, now):
 		s.mirrorUnavailable(dir, &st, path, off)
 	}
 	st.Queue = mergeQueue(st.Queue, st.Watermark)
@@ -249,7 +250,7 @@ func mirrorLocate(b binding.Binding, saved string) string {
 // shorter than the offset) is read from its start again: the claims and the
 // watermark stop the turns already posted. It reports whether path could be
 // read.
-func (s *Server) mirrorRead(dir string, st *mirrorFile, path string) bool {
+func (s *Server) mirrorRead(dir string, st *mirrorFile, path string, now time.Time) bool {
 	first := st.Path == ""
 	if st.Path != path {
 		if !first {
@@ -261,11 +262,26 @@ func (s *Server) mirrorRead(dir string, st *mirrorFile, path string) bool {
 		st.Path, st.File, st.Offset, st.Skipping = path, "", 0, false
 	}
 	if first {
-		c, err := claude.ReadTranscript(path, 1<<62, false)
+		// The watermark is the newest line time at first sight, or now for a
+		// transcript with no timed line, so a later read from the start (a
+		// resumed older session, a replaced file) never posts a turn from
+		// before it.
+		c, err := claude.TranscriptTail(path)
 		if err != nil {
+			st.Path = ""
 			return false
 		}
-		st.File, st.Offset = c.File, c.Size
+		newest := int64(0)
+		for _, raw := range c.Lines {
+			if l, ok := claude.ParseTranscriptLine(raw); ok {
+				newest = max(newest, l.TS)
+			}
+		}
+		if newest == 0 {
+			newest = now.UnixMilli()
+		}
+		st.Watermark = max(st.Watermark, newest)
+		st.File, st.Offset = c.File, c.Next
 		return true
 	}
 	c, err := claude.ReadTranscript(path, st.Offset, st.Skipping)

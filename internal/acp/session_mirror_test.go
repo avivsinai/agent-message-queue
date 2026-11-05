@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,54 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 	want := channel + ": ▶ run the tests\n✓ 2s\nAll pass."
 	if !slices.Equal(posts[1:], []string{want}) {
 		t.Fatalf("posts = %q; want the turn posted once: %q", posts[1:], want)
+	}
+}
+
+// agent-message-queue-6r9 review: a /resume to an older session after the
+// mirror first saw an empty transcript posted that session's old turns.
+func TestMirrorResumeToOlderSessionPostsNoOldTurn(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	cfg := canonicalTempDir(t)
+	proj := filepath.Join(cfg, "projects", "-work-proj")
+	for _, d := range []string{proj, filepath.Join(cfg, "sessions")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := `{"type":"user","uuid":"h1","promptId":"hp1","timestamp":"2026-11-04T08:00:00Z","origin":{"kind":"human"},"message":{"content":"old prompt"}}` + "\n" +
+		`{"type":"assistant","uuid":"ha1","timestamp":"2026-11-04T08:00:02Z","message":{"id":"hm1","stop_reason":"end_turn","content":[{"type":"text","text":"old answer"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(proj, "old.jsonl"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "cur.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	session := func(id string) {
+		entry := `{"pid":` + strconv.Itoa(pid) + `,"sessionId":"` + id + `","cwd":"/work/proj"}`
+		if err := os.WriteFile(filepath.Join(cfg, "sessions", strconv.Itoa(pid)+".json"), []byte(entry), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var posts []string
+	savedPost := postAnswer
+	t.Cleanup(func() { postAnswer = savedPost })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		posts = append(posts, content)
+		return strings.Repeat("a", 64), nil
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: filepath.Join(proj, "cur.jsonl")}
+	b.Holder.PID = pid
+	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
+	target := dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
+	now := time.Now()
+
+	session("cur")
+	s.mirrorBinding(target, b, now, false)
+	session("old")
+	s.mirrorBinding(target, b, now.Add(time.Minute), false)
+	if len(posts) != 0 {
+		t.Fatalf("posts = %q; want none: the resumed session's turns are from before first sight", posts)
 	}
 }
 

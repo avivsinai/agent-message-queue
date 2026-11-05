@@ -327,6 +327,9 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
 		t.Cause, t.Answered = CauseBuzz, true
+	case promptCause(text) == harness.Doorbell:
+		// Typed into the terminal, or sent as a peer frame by a native wake.
+		t.Cause = CauseMail
 	case l.OriginKind == "peer", l.OriginKind == "" && l.CrossSession:
 		t.Cause = "message from another session"
 	case l.OriginKind == "task-notification":
@@ -337,9 +340,6 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		t.Cause = "scheduled task"
 	default:
 		t.Cause = promptCause(text)
-		if t.Cause == harness.Doorbell {
-			t.Cause = CauseMail
-		}
 	}
 	return out
 }
