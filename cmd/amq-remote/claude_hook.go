@@ -126,7 +126,7 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 // gets nothing.
 func hookBinding(s claude.Seat) (string, error) {
 	if s.Root != "" && s.Handle != "" {
-		_, name, _, err := bindMailbox(s.Root, s.Handle, "", io.Discard, true)
+		_, name, _, err := bindMailbox(s.Root, s.Handle, "", io.Discard, true, s.Transcript)
 		return name, err
 	}
 	if s.Holder.PID <= 0 {
@@ -148,6 +148,7 @@ func hookBinding(s claude.Seat) (string, error) {
 		return "", fmt.Errorf("this session is attached through %s (binding %s)", b.Root, b.Name)
 	}
 	nb, _, codexes := nativeBinding(root, filepath.Join(root, stateDirName), cand, s.Session, nonEmpty(cand.Display, "claude "+cand.Target), "", false, s.Cwd)
+	nb.Transcript = nonEmpty(s.Transcript, nb.Transcript)
 	if err := ownerDetached(s.Holder, nb.Holder); err != nil {
 		return "", err
 	}

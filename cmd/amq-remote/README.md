@@ -860,6 +860,46 @@ amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~
 amq-remote claude uninstall-approval-hook   # removes only that hook
 ```
 
+### Turns in the session's channel
+
+The machine agent's channel of a Claude session also shows each turn the
+session finishes, wherever it started: the terminal, the desktop app, a Buzz
+message, a peer session or a background task. One message shows one turn:
+
+```text
+▶ run the tests and fix the failure
+✓ 4 tools (Bash ×2, Read, Edit) · 1m12s
+<the turn's final answer>
+```
+
+The first line is what started the turn: the first line of a typed prompt (at
+most 200 characters, harness markup left out), a slash command's name,
+`image`, `pasted text`, `message from a teammate`, `Buzz`, `message from
+another session`, `background task finished`, `scheduled task`, `shell
+command`, or `continued`. The second line is how
+the turn ended (`✓`; `✗ interrupted`, `unfinished`, `error` or `refused`;
+`■ ended` when the session ended or was cleared), the tools it used by name
+and count, and how long it ran. Tool input never leaves the machine. An
+answer longer than 3,500 bytes is cut and says so. A turn whose answer Buzz
+already got (a Buzz message, or a reply the session sent to Buzz during the
+turn) shows the first two lines only. A shell command typed with `!` shows only
+when the model answers it, and never with the command itself; local slash
+commands and a subagent's own steps are not shown. When a Stop hook
+makes the session go on after a turn, that turn's message is edited.
+
+The machine agent reads the session's transcript, which Claude Code names in
+its session registry and in each approval hook; attach, and the approval hook
+when it connects a session, record it in the binding. A session whose transcript cannot be read gets one
+message, "This session's activity is not available here". Turns that ended
+before the machine agent first saw the session are not shown, and after a
+long stop the newest turn is shown with the number of turns left out. Each
+turn is posted at most once; a post whose outcome is unknown is not posted
+again.
+
+An owner message in the channel that is exactly `mirror off` or `mirror on`
+(case ignored) switches this for that session and is not delivered to it.
+While it is off, turns that end are not shown later.
+
 Codex needs no hook: Codex approvals reach Buzz only for a session on the
 Codex app-server (`codex app-server daemon start`, then `codex --remote
 unix://`), and a plain `codex` TUI session answers them in the terminal. A hook

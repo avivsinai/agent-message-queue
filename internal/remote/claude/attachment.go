@@ -263,7 +263,8 @@ func defaultConfigDir(home string) string {
 
 // sessionConfigDir is the Claude config dir of the session this process
 // runs in: CLAUDE_CONFIG_DIR when set, else home/.claude. Only code that
-// runs inside the session calls it. A relative value is refused, never
+// runs inside the session calls it, and SessionTranscript, which uses what
+// it names only when that file exists. A relative value is refused, never
 // resolved against a guessed directory.
 func sessionConfigDir(home string) (string, error) {
 	dir := harness.ClaudeConfigDir(home)
@@ -597,6 +598,9 @@ func SessionIDForPID(pid int) (string, error) {
 // session: the session id, its working directory, and its name.
 type Session struct {
 	ID, Cwd, Name string
+	// Transcript is the session's transcript when it is a regular file;
+	// "" otherwise.
+	Transcript string
 }
 
 // SessionForPID reads the registry entry of the Claude process pid from
@@ -618,5 +622,14 @@ func SessionForPID(pid int) (Session, error) {
 	if reg == nil {
 		return Session{}, fmt.Errorf("no Claude session registry entry for pid %d", pid)
 	}
-	return Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}, nil
+	s := Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}
+	if path := transcriptPath(dir, reg.Cwd, reg.SessionID); regularFile(path) {
+		s.Transcript = path
+	}
+	return s, nil
+}
+
+func regularFile(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.Mode().IsRegular()
 }

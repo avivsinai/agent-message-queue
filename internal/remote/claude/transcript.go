@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // transcriptPath maps cwd+sessionId to the target's JSONL transcript:
@@ -49,6 +53,8 @@ type transcriptRead struct {
 	// skipping is true when the read ended inside a line longer than one
 	// chunk; the caller keeps discarding until that line's newline.
 	skipping bool
+	// info is the fstat of the open description.
+	info os.FileInfo
 }
 
 // readTranscriptFrom returns the complete lines appended at or after byte
@@ -66,7 +72,7 @@ func readTranscriptFrom(path string, off int64, skipping bool) (transcriptRead, 
 	}
 	defer func() { _ = f.Close() }()
 	size := fi.Size()
-	out := transcriptRead{next: off, size: size, skipping: skipping}
+	out := transcriptRead{next: off, size: size, skipping: skipping, info: fi}
 	if off >= size {
 		return out, nil
 	}
@@ -92,7 +98,7 @@ func readTranscriptFrom(path string, off int64, skipping bool) (transcriptRead, 
 	}
 	last := bytes.LastIndexByte(buf[pos:], '\n')
 	if last < 0 {
-		if int64(len(buf)) == transcriptChunkBytes {
+		if int64(len(buf)-pos) == transcriptChunkBytes {
 			// One line longer than a whole chunk: discard it in pieces.
 			out.next = off + int64(len(buf))
 			out.skipping = true
@@ -112,6 +118,80 @@ func readTranscriptFrom(path string, off int64, skipping bool) (transcriptRead, 
 	}
 	out.next = off + int64(end) + 1
 	return out, nil
+}
+
+// TranscriptChunk is one bounded read of complete transcript lines.
+type TranscriptChunk struct {
+	Lines []string
+	// Next is the offset the next read starts at. Skipping is set while the
+	// read is inside a line longer than one chunk: the next read discards up
+	// to that line's newline.
+	Next     int64
+	Skipping bool
+	// Size is the file size; File the file's identity (device and inode),
+	// "" when the platform gives none.
+	Size int64
+	File string
+}
+
+// ReadTranscript is the bounded read of complete lines from off that the
+// adapter's own cursor makes: at most one chunk, a partial last line left
+// for the next read, and a line longer than a chunk skipped without its
+// bytes being kept.
+func ReadTranscript(path string, off int64, skipping bool) (TranscriptChunk, error) {
+	r, err := readTranscriptFrom(path, off, skipping)
+	if err != nil {
+		return TranscriptChunk{}, err
+	}
+	id, _ := fsq.StableFileIdentityInfo(r.info)
+	return TranscriptChunk{Lines: r.lines, Next: r.next, Skipping: r.skipping, Size: r.size, File: id}, nil
+}
+
+// TranscriptTail is the first read of a cursor that starts at the end of
+// path: the complete lines of its last chunk, with Next after the last
+// complete line.
+func TranscriptTail(path string) (TranscriptChunk, error) {
+	r, err := readTranscriptFrom(path, math.MaxInt64, false)
+	if err != nil {
+		return TranscriptChunk{}, err
+	}
+	off, skipping := transcriptStartOffset(r.size)
+	return ReadTranscript(path, off, skipping)
+}
+
+// SessionTranscript is the transcript that the registry entry of the Claude
+// process pid names, read under the config dir that holds transcript (its
+// third parent, <config dir>/projects/<slug>/<id>.jsonl), or, when
+// transcript is "", under this process's own config dir. It follows /clear
+// and /resume, which change the entry's sessionId. "" when pid has no entry
+// there or the transcript it names is not a regular file.
+func SessionTranscript(transcript string, pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	var dir string
+	switch {
+	case transcript == "":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		if dir, err = sessionConfigDir(home); err != nil {
+			return ""
+		}
+	case filepath.IsAbs(transcript):
+		dir = filepath.Dir(filepath.Dir(filepath.Dir(transcript)))
+	default:
+		return ""
+	}
+	reg, err := readSessionRegistry(dir, pid)
+	if err != nil || reg == nil {
+		return ""
+	}
+	if path := transcriptPath(dir, reg.Cwd, reg.SessionID); regularFile(path) {
+		return path
+	}
+	return ""
 }
 
 // transcriptStartOffset is where a fresh cursor starts when no run carries
@@ -165,6 +245,25 @@ type transcriptEntry struct {
 	// ToolResults the tool_use ids its tool_result blocks answer.
 	ToolUses    []toolUseRef
 	ToolResults []string
+	// OriginKind is the harness's origin.kind for the input (human, peer,
+	// task-notification, auto-continuation); "" when the line has none.
+	OriginKind string
+	// TurnOrigin is turnOrigin: "scheduled" on the prompt of a /loop or
+	// cron fire.
+	TurnOrigin string
+	// CrossSession marks text that holds a complete cross-session envelope,
+	// with or without an origin record.
+	CrossSession bool
+	// Sidechain, CompactSummary and VisibleOnly are isSidechain,
+	// isCompactSummary and isVisibleInTranscriptOnly.
+	Sidechain, CompactSummary, VisibleOnly bool
+	// MessageID and StopReason are message.id and message.stop_reason of an
+	// assistant line. Claude writes one line per content block of a message,
+	// each with the same id and stop reason.
+	MessageID, StopReason string
+	// APIError is isApiErrorMessage: a synthetic assistant line for a
+	// failed API call.
+	APIError bool
 }
 
 // toolUseRef is one tool_use block: its id, tool name and actionHash of
@@ -189,27 +288,36 @@ type peerOrigin struct {
 // untyped lines.
 func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	var raw struct {
-		SessionID  string      `json:"sessionId"`
-		UUID       string      `json:"uuid"`
-		Type       string      `json:"type"`
-		IsMeta     bool        `json:"isMeta"`
-		Timestamp  string      `json:"timestamp"`
-		PromptID   string      `json:"promptId"`
-		Origin     *peerOrigin `json:"origin"`
-		Attachment *struct {
+		SessionID     string      `json:"sessionId"`
+		UUID          string      `json:"uuid"`
+		Type          string      `json:"type"`
+		IsMeta        bool        `json:"isMeta"`
+		IsSidechain   bool        `json:"isSidechain"`
+		IsCompact     bool        `json:"isCompactSummary"`
+		IsVisibleOnly bool        `json:"isVisibleInTranscriptOnly"`
+		IsAPIError    bool        `json:"isApiErrorMessage"`
+		Timestamp     string      `json:"timestamp"`
+		PromptID      string      `json:"promptId"`
+		TurnOrigin    string      `json:"turnOrigin"`
+		Origin        *peerOrigin `json:"origin"`
+		Attachment    *struct {
 			Type   string      `json:"type"`
 			Prompt string      `json:"prompt"`
 			Origin *peerOrigin `json:"origin"`
 		} `json:"attachment"`
 		Message struct {
-			Content json.RawMessage `json:"content"`
+			ID         string          `json:"id"`
+			StopReason string          `json:"stop_reason"`
+			Content    json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil || raw.Type == "" {
 		return transcriptEntry{}, false
 	}
 	text, blocks, uses := decodeContentWalk(raw.Message.Content)
-	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses}
+	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
+		TurnOrigin: raw.TurnOrigin, Sidechain: raw.IsSidechain, CompactSummary: raw.IsCompact, VisibleOnly: raw.IsVisibleOnly,
+		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError}
 	for _, b := range blocks {
 		if b.Type == "tool_result" && b.ID != "" {
 			e.ToolResults = append(e.ToolResults, b.ID)
@@ -223,6 +331,11 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 			e.Blocks = []TranscriptBlock{{Type: "text", Text: e.Text}}
 		}
 	}
+	if origin != nil {
+		e.OriginKind = origin.Kind
+	}
+	body, cross := crossSessionBodies(e.Text)
+	e.CrossSession = cross
 	if origin != nil && origin.Kind == "peer" {
 		e.MsgID = origin.MsgID
 		// A peer delivery is input, whatever its meta flag: v2.1.280 marks
@@ -231,7 +344,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.Meta = false
 		// The activity view shows the prompt the sender wrote, not the
 		// envelope and harness prose. Text keeps the raw content.
-		if body, ok := crossSessionBodies(e.Text); ok {
+		if cross {
 			blocks := []TranscriptBlock{{Type: "text", Text: body}}
 			for _, b := range e.Blocks {
 				if b.Type != "text" {
@@ -326,7 +439,8 @@ func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUs
 	return strings.Join(parts, "\n"), out, uses
 }
 
-// TranscriptLine is the activity view of one parsed transcript line.
+// TranscriptLine is the activity and mirror view of one parsed transcript
+// line. An absorbed frame (Absorbed) has Type "user" and no PromptID.
 type TranscriptLine struct {
 	Type      string
 	Meta      bool
@@ -334,6 +448,36 @@ type TranscriptLine struct {
 	UUID      string
 	TS        int64
 	Blocks    []TranscriptBlock
+	// PromptID is the user line's promptId; MsgID the origin.msg_id of a
+	// peer delivery; OriginKind its origin.kind; TurnOrigin its turnOrigin.
+	PromptID, MsgID, OriginKind, TurnOrigin string
+	// Absorbed marks input folded into the running turn (a queued_command
+	// attachment).
+	Absorbed bool
+	// CrossSession marks text that holds a cross-session envelope.
+	CrossSession bool
+	// Sidechain, CompactSummary and VisibleOnly are the line's
+	// isSidechain, isCompactSummary and isVisibleInTranscriptOnly.
+	Sidechain, CompactSummary, VisibleOnly bool
+	// MessageID, StopReason and APIError are an assistant line's message.id,
+	// message.stop_reason and isApiErrorMessage.
+	MessageID, StopReason string
+	APIError              bool
+}
+
+// InterruptPrefix opens the user line Claude Code writes when the user
+// interrupts a turn, plain or "for tool use".
+const InterruptPrefix = interruptPrefix
+
+// line is the exported view of e.
+func (e transcriptEntry) line() TranscriptLine {
+	return TranscriptLine{
+		Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
+		Blocks: e.Blocks, PromptID: e.PromptID, MsgID: e.MsgID, OriginKind: e.OriginKind, TurnOrigin: e.TurnOrigin,
+		Absorbed: e.Absorbed, CrossSession: e.CrossSession, Sidechain: e.Sidechain,
+		CompactSummary: e.CompactSummary, VisibleOnly: e.VisibleOnly,
+		MessageID: e.MessageID, StopReason: e.StopReason, APIError: e.APIError,
+	}
 }
 
 // ActivityNote is one parsed transcript line plus the cursor's session and
@@ -352,8 +496,5 @@ func ParseTranscriptLine(line string) (TranscriptLine, bool) {
 	if !ok {
 		return TranscriptLine{}, false
 	}
-	return TranscriptLine{
-		Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
-		Blocks: e.Blocks,
-	}, true
+	return e.line(), true
 }

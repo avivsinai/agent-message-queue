@@ -580,10 +580,7 @@ func (a *Attachment) activityNoteLocked(e transcriptEntry, cursorSession string)
 		session = e.SessionID
 	}
 	return ActivityNote{
-		Line: TranscriptLine{
-			Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
-			Blocks: e.Blocks,
-		},
+		Line:      e.line(),
 		SessionID: session,
 		TurnID:    a.activityTurn,
 	}
@@ -761,6 +758,12 @@ func readStopMarkers(path string, from int64) stopMarkers {
 		out.lines = append(out.lines, stopObs{ts: m.TS, text: m.Text, cut: m.Truncated, end: end})
 	}
 	return out
+}
+
+// FrameMsgID is the msg_id of the frame that request requestID from host to
+// target travels in, so a carrier can record the frame before it is sent.
+func FrameMsgID(host, target, requestID string) string {
+	return frameMsgID(requests.Key{CreatorHost: host, TargetID: target, RequestID: requestID})
 }
 
 // frameMsgID derives the frame msg_id from the request key: the first 16

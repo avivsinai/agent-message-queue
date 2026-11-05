@@ -26,6 +26,11 @@ const (
 	Other = "other"
 )
 
+// Doorbell is the prompt a wake types into a harness when mail arrives. A
+// reader of the harness's transcript knows a turn the doorbell started by
+// this exact text.
+const Doorbell = ": AMQ doorbell run amq drain --include-body then act on it"
+
 // ResumeSyntax is how a harness's argv asks to resume a conversation.
 type ResumeSyntax uint8
 

@@ -140,6 +140,29 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(dialogDone)
 	}
+	// A machine agent mirrors its sessions' finished turns in a worker of
+	// its own, so a slow post never delays a dialog.
+	mirrorDone := make(chan struct{})
+	if s.cfg.Machine {
+		s.mirrors.quit = quit
+		go func() {
+			defer close(mirrorDone)
+			tick := time.NewTicker(mirrorInterval)
+			defer tick.Stop()
+			for {
+				if s.mirrorLead() {
+					s.mirrorTick(time.Now())
+				}
+				select {
+				case <-quit:
+					return
+				case <-tick.C:
+				}
+			}
+		}()
+	} else {
+		close(mirrorDone)
+	}
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
@@ -164,10 +187,15 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		<-done
 		<-machineDone
 		<-dialogDone
+		<-mirrorDone
 		s.resign()
 		if s.dialogs.release != nil {
 			s.dialogs.release()
 			s.dialogs.release = nil
+		}
+		if s.mirrors.release != nil {
+			s.mirrors.release()
+			s.mirrors.release = nil
 		}
 		s.mu.Lock()
 		s.late.kick = nil
