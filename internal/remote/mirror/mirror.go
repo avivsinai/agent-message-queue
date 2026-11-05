@@ -497,7 +497,7 @@ func unmention(s string) string {
 	var b strings.Builder
 	for i, r := range s {
 		b.WriteRune(r)
-		if r == '@' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\n' || s[i-1] == '\t' || s[i-1] == '\r') {
+		if r == '@' && (i == 0 || strings.IndexByte(" \t\n\v\f\r", s[i-1]) >= 0) {
 			b.WriteString(wordJoiner)
 		}
 	}

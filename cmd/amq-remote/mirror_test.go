@@ -23,9 +23,11 @@ func TestMirrorOffThenOnFromTheCLI(t *testing.T) {
 			t.Fatalf("mirror %s: exit %d: %s", step.verb, code, out.String())
 		}
 		var got struct {
-			Mirror string `json:"mirror"`
+			Sessions []struct {
+				Mirror string `json:"mirror"`
+			} `json:"sessions"`
 		}
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Mirror != step.want {
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Sessions) != 1 || got.Sessions[0].Mirror != step.want {
 			t.Fatalf("mirror %s: output %q (%v); want mirror %q", step.verb, out.String(), err, step.want)
 		}
 	}

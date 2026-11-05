@@ -45,45 +45,62 @@ func mirrorCommand(args []string, stdout io.Writer, probe ...*jsonProbe) (int, e
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	var b binding.Binding
-	found := false
-	for _, x := range all {
-		if match(x) {
-			b, found = x, true
-			break
+	// One session can hold a mailbox and a native binding; the switch
+	// applies to each, as detach --self removes each.
+	var matched []binding.Binding
+	for _, b := range all {
+		if match(b) {
+			matched = append(matched, b)
 		}
 	}
-	if !found {
+	if len(matched) == 0 {
 		return protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "not connected: run /amq-remote (amq-remote attach --self) first")
 	}
-	if b.Harness != "claude" {
-		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "the mirror shows Claude sessions only; %s is a %s session", b.Name, b.Harness)
+	type result struct {
+		Name    string `json:"name"`
+		Mirror  string `json:"mirror"`
+		Channel bool   `json:"channel"`
 	}
-	if verb != "status" {
-		if err := mirror.SetOff(b.Name, verb == "off"); err != nil {
-			return protocol.ExitActionRequired, err
+	var results []result
+	claudeOnly := matched[:0:0]
+	for _, b := range matched {
+		if b.Harness == "claude" {
+			claudeOnly = append(claudeOnly, b)
 		}
 	}
-	dir, err := mirror.DirFor(b.Name)
-	if err != nil {
-		return protocol.ExitActionRequired, err
+	if len(claudeOnly) == 0 {
+		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "the mirror shows Claude sessions only; %s is a %s session", matched[0].Name, matched[0].Harness)
 	}
-	state := "on"
-	if mirror.Off(dir) {
-		state = "off"
+	for _, b := range claudeOnly {
+		if verb != "status" {
+			if err := mirror.SetOff(b.Name, verb == "off"); err != nil {
+				return protocol.ExitActionRequired, err
+			}
+		}
+		dir, err := mirror.DirFor(b.Name)
+		if err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		state := "on"
+		if mirror.Off(dir) {
+			state = "off"
+		}
+		_, served := acp.MachineChannelOf(b)
+		results = append(results, result{Name: b.Name, Mirror: state, Channel: served})
+		if c.json {
+			continue
+		}
+		label := b.Label
+		if label == "" {
+			label = b.Name
+		}
+		say(stdout, "Mirror %s for %s.", state, label)
+		if !served {
+			say(stdout, "The machine agent does not serve a channel for this session, so nothing is posted until it does.")
+		}
 	}
-	_, served := acp.MachineChannelOf(b)
 	if c.json {
-		emitJSON(stdout, map[string]any{"name": b.Name, "mirror": state, "channel": served})
-		return 0, nil
-	}
-	label := b.Label
-	if label == "" {
-		label = b.Name
-	}
-	say(stdout, "Mirror %s for %s.", state, label)
-	if !served {
-		say(stdout, "The machine agent does not serve a channel for this session, so nothing is posted until it does.")
+		emitJSON(stdout, map[string]any{"sessions": results})
 	}
 	return 0, nil
 }
