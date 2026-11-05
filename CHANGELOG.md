@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.127.1](https://github.com/avivsinai/agent-message-queue/compare/v0.127.0...v0.127.1) (2026-11-05)
+
+
+### Features
+
+* **remote:** turn the session mirror on or off from the CLI and skill ([#1340](https://github.com/avivsinai/agent-message-queue/issues/1340)) ([6e8c956](https://github.com/avivsinai/agent-message-queue/commit/6e8c956649c097528f543f9879f43b07c5110764))
+
 ## [0.127.0](https://github.com/avivsinai/agent-message-queue/compare/v0.126.1...v0.127.0) (2026-11-05)
 
 
