@@ -497,7 +497,8 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
-	// Transcript is a Claude session's transcript; empty when not known.
+	// Transcript is a Claude session's transcript or a Codex thread's
+	// rollout file; empty when not known.
 	Transcript string
 	// Holder is the exact identity captured while proving a Codex ancestor.
 	Holder launch.HolderIdentity
@@ -543,7 +544,7 @@ func nativeHarness(codexes *codexView, cand registry.Candidate) harnessSession {
 		}
 		if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Socket != "" && cfg.Thread != "" {
 			h.AppServer = loadedThread(codexes, cfg.Socket, cfg.Thread)
-			h.Cwd, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
+			h.Cwd, h.Transcript, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
 		}
 	}
 	return h
@@ -555,6 +556,7 @@ var (
 	claudeSession      = claude.SessionForPID
 	processCwd         = launch.ProcessCwd
 	codexThreadCwd     = codex.ThreadCwd
+	codexRollout       = homeCodexRollout
 	codexLoadedThreads = func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }
 	codexDefaultSocket = codex.DefaultControlSocket
 	codexDaemonPID     = codex.DaemonPID
@@ -562,6 +564,16 @@ var (
 	processExecutable  = launch.ProcessExecutable
 	processArgs        = launch.ProcessArgs
 )
+
+// homeCodexRollout is the rollout file of a plain Codex TUI thread under
+// $CODEX_HOME, else ~/.codex.
+func homeCodexRollout(thread string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return codex.Rollout(harness.CodexHome(home), thread)
+}
 
 // codexView asks each Codex app-server daemon at most once per command:
 // one daemon pid and one loaded-thread list per socket, reused by every
@@ -748,7 +760,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 		if sock, err := codexDefaultSocket(); err == nil {
 			h.AppServer = loadedThread(codexes, sock, thread)
 			if h.AppServer.Thread != "" {
-				h.Cwd, _ = codexThreadCwd(sock, thread)
+				h.Cwd, h.Transcript, _ = codexThreadCwd(sock, thread)
 				return h
 			}
 		}
@@ -777,6 +789,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 				continue
 			}
 			h.PID, h.Holder = pid, holder
+			h.Transcript = codexRollout(thread)
 			return h
 		}
 		return h

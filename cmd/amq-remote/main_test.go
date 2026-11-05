@@ -62,7 +62,8 @@ func init() {
 		return claude.Session{}, errors.New("tests read no Claude registry")
 	}
 	processCwd = func(int) (string, error) { return "", errors.New("tests read no process") }
-	codexThreadCwd = func(string, string) (string, error) { return "", errors.New("tests dial no app-server") }
+	codexThreadCwd = func(string, string) (string, string, error) { return "", "", errors.New("tests dial no app-server") }
+	codexRollout = func(string) string { return "" }
 	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	codexDaemonPID = func(string) (int, error) { return 0, errors.New("tests dial no app-server") }

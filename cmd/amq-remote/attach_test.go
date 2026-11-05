@@ -845,7 +845,7 @@ func TestAttachRefusesAClaudeSessionWithoutTheStopHook(t *testing.T) {
 func TestNativeHarnessUsesTheSessionsOwnCwd(t *testing.T) {
 	savedThread, savedProc := codexThreadCwd, processCwd
 	t.Cleanup(func() { codexThreadCwd, processCwd = savedThread, savedProc })
-	codexThreadCwd = func(string, string) (string, error) { return "/work/codex-proj", nil }
+	codexThreadCwd = func(string, string) (string, string, error) { return "/work/codex-proj", "", nil }
 	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
 	for _, row := range []struct {
 		cand registry.Candidate
@@ -909,7 +909,7 @@ func TestDetectHarnessFindsCodexSession(t *testing.T) {
 		}
 		return launch.HolderIdentity{PID: pid, ProcessStart: "daemon"}, nil
 	}
-	codexThreadCwd = func(string, string) (string, error) { return "/project", nil }
+	codexThreadCwd = func(string, string) (string, string, error) { return "/project", "", nil }
 	for _, row := range []struct {
 		name   string
 		loaded []string

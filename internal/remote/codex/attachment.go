@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -739,6 +740,13 @@ func (a *Attachment) runID(r *run) string {
 // byClientID map is keyed by it.
 func clientIDFor(key requests.Key) string {
 	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
+}
+
+// ClientUserMessageID is the clientUserMessageId the attachment sends for
+// request requestID from host to target; the thread's rollout records it as
+// the user message's client_id.
+func ClientUserMessageID(host, target, requestID string) string {
+	return clientIDFor(requests.Key{CreatorHost: host, TargetID: target, RequestID: requestID})
 }
 
 func refusal(err error) core.Admission {
@@ -1985,32 +1993,40 @@ func (r *run) result() *protocol.Result {
 
 // ThreadCwd is the working directory the app-server daemon at socketPath
 // captured for thread: the session's own directory, not that of one of its
-// tool calls.
-func ThreadCwd(socketPath, thread string) (string, error) {
+// tool calls. rollout is the thread's rollout file, "" for an ephemeral
+// thread, one with no path, or one whose history mode is not paginated:
+// only the paginated mode keeps completed items.
+func ThreadCwd(socketPath, thread string) (cwd, rollout string, err error) {
 	// Request-only connection: no notifications are consumed.
 	client, err := Dial(socketPath, Handlers{})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version}}, nil); err != nil {
-		return "", err
+		return "", "", err
 	}
 	var res struct {
 		Thread struct {
-			ID  string `json:"id"`
-			Cwd string `json:"cwd"`
+			ID          string `json:"id"`
+			Cwd         string `json:"cwd"`
+			Path        string `json:"path"`
+			Ephemeral   bool   `json:"ephemeral"`
+			HistoryMode string `json:"historyMode"`
 		} `json:"thread"`
 	}
 	if err := client.Call(ctx, "thread/read", map[string]any{"threadId": thread}, &res); err != nil {
-		return "", fmt.Errorf("thread/read %s: %w", thread, err)
+		return "", "", fmt.Errorf("thread/read %s: %w", thread, err)
 	}
 	if res.Thread.ID != thread || res.Thread.Cwd == "" {
-		return "", fmt.Errorf("thread/read %s returned no working directory for it", thread)
+		return "", "", fmt.Errorf("thread/read %s returned no working directory for it", thread)
 	}
-	return res.Thread.Cwd, nil
+	if !res.Thread.Ephemeral && res.Thread.HistoryMode == "paginated" && filepath.IsAbs(res.Thread.Path) {
+		rollout = res.Thread.Path
+	}
+	return res.Thread.Cwd, rollout, nil
 }
 
 // LoadedThreads lists the threads the daemon currently has running, so the

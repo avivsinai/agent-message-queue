@@ -14,9 +14,11 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -537,6 +539,44 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	}
 	if second := run(b, "B"); first != "result from A" || second != first {
 		t.Fatalf("first=%q second=%q; the redelivery must return the first session's result", first, second)
+	}
+}
+
+// keyRecorder is a fake runtime that reports the key of each submit.
+type keyRecorder struct {
+	*fake.Runtime
+	keys chan requests.Key
+}
+
+func (k *keyRecorder) Submit(req core.BoundRequest) (core.Admission, error) {
+	k.keys <- req.Key
+	return k.Runtime.Submit(req)
+}
+
+// The session mirror tells a Codex turn the Buzz carrier sent by its user
+// message's client_id. The carrier must record the clientUserMessageId the
+// Codex attachment sends for the request the endpoint admitted.
+func TestCodexCarrierRecordsTheClientUserMessageID(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	rt := &keyRecorder{Runtime: fake.New("fake", "e_1"), keys: make(chan requests.Key, 1)}
+	bound := remoteServer(t, rt, nil)
+	withBuzzSelf(t)
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+	if err := binding.WriteNamed(binding.Binding{Name: "alpha", Root: bound.cfg.Root, Target: "fake", NativeSession: "fake", Harness: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	eventID := strings.Repeat("7", 64)
+	id, _ := remoteRequestID(eventID)
+	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "done"); return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	key := <-rt.keys
+	dir, err := mirror.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent := codex.ClientUserMessageID(key.CreatorHost, key.TargetID, key.RequestID); !mirror.CarriedIn(dir)(mirror.CodexCarriedID(sent)) {
+		t.Fatalf("no carrier record for clientUserMessageId %q", sent)
 	}
 }
 

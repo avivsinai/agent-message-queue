@@ -26,6 +26,8 @@ func SourceFor(harness string) *Source {
 	switch harness {
 	case "claude":
 		return &claudeSource
+	case "codex":
+		return &codexSource
 	case "pi":
 		return &piSource
 	}
