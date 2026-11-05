@@ -7,6 +7,7 @@
 package mirror
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -540,6 +541,45 @@ func Root() (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(path), "mirror"), nil
+}
+
+// offFile is present in a binding's mirror directory while the owner has
+// the mirror off.
+const offFile = "off"
+
+// Off reports whether the mirror of the binding whose mirror directory is
+// dir is off.
+func Off(dir string) bool {
+	fi, err := os.Lstat(filepath.Join(dir, offFile))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// SetOff turns the mirror of binding name off or on. The machine agent
+// reads the switch on every tick: while it is off the fold still runs and
+// nothing is queued, so turning it on posts no turn from the off time.
+func SetOff(name string, off bool) error {
+	dir, err := DirFor(name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, offFile)
+	if !off {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // DirFor is binding name's mirror directory; it is not created.

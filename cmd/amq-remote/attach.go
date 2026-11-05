@@ -938,39 +938,12 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach needs exactly one of --self, --name <name> or --all")
 	}
 	var match func(binding.Binding) bool
-	// A native binding made outside AMQ used a fallback root; detach finds it
-	// in the binding itself, so off needs no --root.
-	if *self && c.root == "" {
-		if all, err := binding.List(); err == nil {
-			for _, b := range all {
-				if !b.Mailbox() {
-					c.root = b.Root
-					break
-				}
-			}
-		}
-	}
 	if *self {
-		handle := strings.TrimSpace(os.Getenv("AM_ME"))
-		mailbox := handle != "" && c.root != ""
-		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: handle}
-		native := func(binding.Binding) bool { return false }
-		stateDir, err := c.stateDir()
-		if err != nil && !mailbox {
-			return protocol.ExitUsage, err
+		var code int
+		var err error
+		if match, code, err = selfMatch(c); err != nil {
+			return code, err
 		}
-		if err == nil {
-			target, id, err := selfIdentity(c.root, stateDir)
-			switch {
-			case err == nil:
-				if native, err = selfNativeMatch(c.root, c.rootSet, target, id); err != nil {
-					return protocol.ExitActionRequired, err
-				}
-			case !mailbox:
-				return protocol.ExitActionRequired, err
-			}
-		}
-		match = func(b binding.Binding) bool { return (mailbox && mine.Same(b)) || native(b) }
 	}
 	if *name != "" {
 		match = func(b binding.Binding) bool { return b.Name == *name }
@@ -1009,6 +982,43 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
 	return 0, nil
+}
+
+// selfMatch reports whether a binding is the invoking session's: its
+// mailbox binding (AM_ME at the root) or its native binding. A native
+// binding made outside AMQ used a fallback root; selfMatch finds it in the
+// binding itself, so --self needs no --root.
+func selfMatch(c *common) (func(binding.Binding) bool, int, error) {
+	if c.root == "" {
+		if all, err := binding.List(); err == nil {
+			for _, b := range all {
+				if !b.Mailbox() {
+					c.root = b.Root
+					break
+				}
+			}
+		}
+	}
+	handle := strings.TrimSpace(os.Getenv("AM_ME"))
+	mailbox := handle != "" && c.root != ""
+	mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: handle}
+	native := func(binding.Binding) bool { return false }
+	stateDir, err := c.stateDir()
+	if err != nil && !mailbox {
+		return nil, protocol.ExitUsage, err
+	}
+	if err == nil {
+		target, id, err := selfIdentity(c.root, stateDir)
+		switch {
+		case err == nil:
+			if native, err = selfNativeMatch(c.root, c.rootSet, target, id); err != nil {
+				return nil, protocol.ExitActionRequired, err
+			}
+		case !mailbox:
+			return nil, protocol.ExitActionRequired, err
+		}
+	}
+	return func(b binding.Binding) bool { return (mailbox && mine.Same(b)) || native(b) }, 0, nil
 }
 
 // findSelf finds the invoking native session. It is a variable because the

@@ -204,7 +204,7 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	}
 	st, saved, _ := readMirrorFile(dir)
 	st.Channel = t.channel
-	off := mirrorOff(dir)
+	off := mirror.Off(dir)
 	switch path := mirrorLocate(b, st.Path); {
 	case ended:
 		if st.Path != "" {
@@ -540,13 +540,6 @@ func writeMirrorFile(dir string, st mirrorFile) error {
 	return err
 }
 
-// mirrorOff reports whether the owner turned the mirror of the binding in
-// dir off.
-func mirrorOff(dir string) bool {
-	fi, err := os.Lstat(filepath.Join(dir, "off"))
-	return err == nil && fi.Mode().IsRegular()
-}
-
 // Replies to the owner's mirror switch.
 const (
 	mirrorOffReply = "Mirror off for this session. Type `mirror on` to start it again."
@@ -582,20 +575,7 @@ func (s *Server) mirrorSwitch(channel, prompt string) (name string, on bool, ok 
 // setMirror turns the mirror of binding name on or off and returns the
 // reply for the owner.
 func setMirror(name string, on bool) string {
-	dir, err := mirror.DirFor(name)
-	if err == nil {
-		err = os.MkdirAll(dir, 0o700)
-	}
-	if err == nil {
-		path := filepath.Join(dir, "off")
-		if on {
-			if err = os.Remove(path); errors.Is(err, os.ErrNotExist) {
-				err = nil
-			}
-		} else {
-			_, err = createExclusive(path, nil)
-		}
-	}
+	err := mirror.SetOff(name, !on)
 	switch {
 	case err != nil:
 		return "The mirror could not be switched: " + err.Error()

@@ -898,7 +898,9 @@ again.
 
 An owner message in the channel that is exactly `mirror off` or `mirror on`
 (case ignored) switches this for that session and is not delivered to it.
-While it is off, turns that end are not shown later.
+`amq-remote mirror on|off|status --self` (or `--name NAME`) is the same
+switch from the session's terminal. While it is off, turns that end are not
+shown later.
 
 Codex needs no hook: Codex approvals reach Buzz only for a session on the
 Codex app-server (`codex app-server daemon start`, then `codex --remote

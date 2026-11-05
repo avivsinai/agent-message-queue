@@ -51,6 +51,9 @@ Commands:
   bindings                 Bound sessions: live, unknown, or ended (pruned)
   channel reset NAME       Give up session NAME's Buzz channel; the machine
                            agent makes a new one
+  mirror on|off|status --self|--name N
+                           Show or stop each finished turn of a Claude
+                           session in its Buzz channel
   service install|uninstall|status [--root R]
                            Start amq-remote up for R (default the machine
                            root) at login: launchd on macOS, systemd on Linux
@@ -265,6 +268,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = bindings(rest, stdout, probe)
 	case "channel":
 		code, err = channelCommand(rest, stdout, probe)
+	case "mirror":
+		code, err = mirrorCommand(rest, stdout, probe)
 	case "service":
 		code, err = service(rest, stdout, probe)
 	case "doctor":
