@@ -89,6 +89,11 @@ type Turn struct {
 	// next end is a Continued event, or, with nothing new, its old end.
 	Reopened string `json:"reopened,omitempty"`
 	Resumed  bool   `json:"resumed,omitempty"`
+
+	// Prompted is set once a Codex turn read its first user message, Final
+	// once its Text is a final answer, which commentary never replaces.
+	Prompted bool `json:"prompted,omitempty"`
+	Final    bool `json:"final,omitempty"`
 }
 
 func (t Turn) clone() Turn {

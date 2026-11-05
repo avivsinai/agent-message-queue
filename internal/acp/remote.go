@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -156,6 +157,8 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		switch b.Harness {
 		case "claude":
 			_ = mirror.RecordCarried(b.Name, claude.FrameMsgID(ipc.LocalHost, target, id))
+		case "codex":
+			_ = mirror.RecordCarried(b.Name, mirror.CodexCarriedID(codex.ClientUserMessageID(ipc.LocalHost, target, id)))
 		}
 	}
 	r := &remoteTurn{
