@@ -865,9 +865,10 @@ amq-remote claude uninstall-approval-hook   # removes only that hook
 The machine agent's channel of a Claude session also shows each turn of the
 session, wherever it started: the terminal, the desktop app, a Buzz message,
 a peer session or a background task. One message shows one turn. It appears
-when the model first answers, shows `… running` with the tools used so far
-while the turn runs, is updated at most once every 3 seconds, and shows the
-answer when the turn ends:
+when the model first answers and shows `… running` with the tools used so
+far. While the turn runs it is updated at most every 30 s while it changes
+(new tools or an interrupt; elapsed time alone is no change), at most 10
+times, and it shows the answer as soon as the turn ends:
 
 ```text
 ▶ run the tests and fix the failure
