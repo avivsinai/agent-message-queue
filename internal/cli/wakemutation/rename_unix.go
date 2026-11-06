@@ -54,3 +54,16 @@ func (lease *Lease) RenameNoReplaceAtWith(
 		return rename(fromDirFD, from, toDirFD, to)
 	})
 }
+
+// RenameExchangeAt swaps two existing names in one step, so neither path
+// is ever absent.
+func (lease *Lease) RenameExchangeAt(
+	fromDirFD int,
+	from string,
+	toDirFD int,
+	to string,
+) error {
+	return lease.withEffect(func() error {
+		return unixRenameExchangeAt(fromDirFD, from, toDirFD, to)
+	})
+}

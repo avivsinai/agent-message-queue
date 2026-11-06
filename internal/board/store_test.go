@@ -582,6 +582,10 @@ func checkLegacyIdentityMigration(t *testing.T, store Store, ctx context.Context
 	if _, err = fsq.WriteFileAtomic(store.Dir, "snapshot.json", legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A v1 store is one snapshot file with no journal.
+	if err = os.Remove(filepath.Join(store.Dir, journalName)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	migrated, err := store.Read()
 	if err != nil {
 		t.Fatal(err)

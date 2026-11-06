@@ -17,7 +17,9 @@ import (
 // ReadHistory uses AMQ's metadata enumeration and existing full-body export.
 // A missing export is a coverage gap, including commands that warned but
 // returned success. Nothing here consumes mail or infers task identity.
-func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result, []board.Message, [][]byte) {
+// Message ids that pruned reports are pruned history and are not exported;
+// a nil pruned exports all history.
+func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id string) bool) (board.Result, []board.Message, [][]byte) {
 	ctx, cancel := context.WithTimeout(ctx, board.SourceTimeout)
 	defer cancel()
 	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Feeds: []board.Column{board.ColumnRequests}}
@@ -63,6 +65,27 @@ func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result,
 	var blobs [][]byte
 	messagesByID := map[string]board.Message{}
 	copyFacts := map[string][]board.MessageCopy{}
+	if pruned != nil {
+		threads := index.Threads[:0]
+		for _, record := range index.Threads {
+			roots := record.Roots[:0]
+			for _, root := range record.Roots {
+				ids := root.MessageIDs[:0]
+				for _, id := range root.MessageIDs {
+					if !pruned(id) {
+						ids = append(ids, id)
+					}
+				}
+				if root.MessageIDs = ids; len(ids) > 0 {
+					roots = append(roots, root)
+				}
+			}
+			if record.Roots = roots; len(roots) > 0 {
+				threads = append(threads, record)
+			}
+		}
+		index.Threads = threads
+	}
 	for _, record := range index.Threads {
 		for _, root := range record.Roots {
 			for _, id := range root.MessageIDs {

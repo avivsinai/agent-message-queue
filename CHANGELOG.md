@@ -8,6 +8,27 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.127.3](https://github.com/avivsinai/agent-message-queue/compare/v0.127.2...v0.127.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **wake:** restore the dialog hold that never types into an open dialog ([0527d6b](https://github.com/avivsinai/agent-message-queue/commit/0527d6be0967a074d303000d5a0d8373454646ae))
+
+## [0.127.2](https://github.com/avivsinai/agent-message-queue/compare/v0.127.1...v0.127.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **wake:** a doorbell no longer waits for a whole long turn ([#1343](https://github.com/avivsinai/agent-message-queue/issues/1343)) ([af2932d](https://github.com/avivsinai/agent-message-queue/commit/af2932decdb3e755bbb7bca0929bd0f8fa2f474a))
+
+## [0.127.1](https://github.com/avivsinai/agent-message-queue/compare/v0.127.0...v0.127.1) (2026-11-05)
+
+
+### Features
+
+* **remote:** turn the session mirror on or off from the CLI and skill ([#1340](https://github.com/avivsinai/agent-message-queue/issues/1340)) ([6e8c956](https://github.com/avivsinai/agent-message-queue/commit/6e8c956649c097528f543f9879f43b07c5110764))
+
 ## [0.127.0](https://github.com/avivsinai/agent-message-queue/compare/v0.126.1...v0.127.0) (2026-11-05)
 
 
