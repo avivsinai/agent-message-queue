@@ -454,6 +454,14 @@ func (s *Spool) Reap(before time.Time, limit int) (int, error) {
 	return n, err
 }
 
+// Reaping reports whether the last Reap stopped at its bound inside a pass:
+// the pass goes on with the next call.
+func (s *Spool) Reaping() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reapDir != nil
+}
+
 func (s *Spool) reapLocked(before time.Time, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil

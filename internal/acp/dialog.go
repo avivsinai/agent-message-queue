@@ -307,11 +307,13 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		if _, err := os.Lstat(dir); err != nil {
 			continue
 		}
-		b, ok := snap.binding(name)
-		var err error
-		if !ok {
-			b, err = binding.ReadNamed(name)
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier name's relay call runs.
+		if b, ok := snap.binding(name); ok && live(b) {
+			continue
 		}
+		b, err := binding.ReadNamed(name)
 		switch {
 		// A name no binding can have serves nothing.
 		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:

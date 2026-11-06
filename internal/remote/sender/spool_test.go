@@ -367,6 +367,41 @@ func TestSenderReapSettled(t *testing.T) {
 	}
 }
 
+// Regression (agent-message-queue-udg review): a reap examines a bounded
+// number of entries, so a spool that settles faster than one bound per pass
+// grew without limit. Reaping reports a pass that stopped at its bound, and
+// the calls that follow finish the pass.
+func TestSenderReapPassContinuesPastItsBound(t *testing.T) {
+	now := time.Now()
+	spool := newTestSpool(t, func() time.Time { return now })
+	for i := 0; i < 3; i++ {
+		cmd := testCommand(validUUID(i), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+		if err := spool.Create(&Envelope{RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake", Epoch: "e_1",
+			NotAfter: cmd.NotAfter, Command: cmd, Destination: "ipc:state"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := spool.MarkDispatched(Key{CreatorHost: "local", RequestID: cmd.RequestID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reaped := 0
+	n, err := spool.Reap(now.Add(7*time.Hour), 2)
+	if err != nil || !spool.Reaping() {
+		t.Fatalf("first call: err=%v reaping=%v, want a pass stopped at its bound", err, spool.Reaping())
+	}
+	reaped += n
+	for calls := 0; spool.Reaping() && calls < 5; calls++ {
+		n, err := spool.Reap(now.Add(7*time.Hour), 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reaped += n
+	}
+	if spool.Reaping() || reaped != 3 {
+		t.Fatalf("after the pass: reaping=%v reaped=%d, want an ended pass and 3 reaped", spool.Reaping(), reaped)
+	}
+}
+
 // TestSenderRefusalClassification is a regression: the
 // endpoint returns a refusal as a protocol.Reply VALUE with Outcome.Code and
 // a nil error. Before the fix, classifyReply asserted reply.(*protocol.Reply),

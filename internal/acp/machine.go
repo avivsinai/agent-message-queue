@@ -726,11 +726,13 @@ func (s *Server) retireGone(now time.Time) {
 			s.finishRetire(r, now)
 			continue
 		}
-		b, ok := snap.binding(r.Name)
-		var err error
-		if !ok {
-			b, err = binding.ReadNamed(r.Name)
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier record's relay call runs.
+		if b, ok := snap.binding(r.Name); ok && live(b) {
+			continue
 		}
+		b, err := binding.ReadNamed(r.Name)
 		// A record under a name no binding can have serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
 			s.retire(r, goneReason(r), now)

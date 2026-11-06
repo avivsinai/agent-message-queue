@@ -34,10 +34,10 @@ import (
 // chance to observe the outcome, bounding the spool's growth.
 const spoolReapHorizon = 6 * time.Hour
 
-// The reaper runs once every spoolReapPolls polls (each minute at the
-// default poll) and examines at most spoolReapBatch envelopes per run, so a
-// spool that holds many settled entries costs the same each run, and a full
-// pass spans runs.
+// A reaper pass starts once every spoolReapPolls polls (each minute at the
+// default poll) and examines at most spoolReapBatch envelopes per poll; a
+// pass that reaches the bound goes on at the next poll until it ends, so the
+// reaper keeps up with any settle rate the drainer can produce.
 const (
 	spoolReapPolls = 120
 	spoolReapBatch = 256
@@ -224,15 +224,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		defer t.Stop()
 		reap := time.NewTicker(spoolReapPolls * *poll)
 		defer reap.Stop()
+		reapDue := false
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-reap.C:
-				// Reap independent of Drain activity: a live submit settles
-				// its own envelope, so Drain finds nothing, and the settled
-				// envelopes must still go once they pass the horizon.
-				_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), spoolReapBatch)
+				reapDue = true
 			case <-t.C:
 				if _, err := carrier.ImportOnce(); err != nil {
 					say(stderr, "import: %v", err)
@@ -246,6 +244,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				// companion was down).
 				if _, derr := drainer.Drain(ctx); derr != nil {
 					say(stderr, "drain: %v", derr)
+				}
+				// Reap independent of Drain activity: a live submit settles
+				// its own envelope, so Drain finds nothing, and the settled
+				// envelopes must still go once they pass the horizon.
+				if reapDue {
+					_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), spoolReapBatch)
+					reapDue = spool.Reaping()
 				}
 			}
 		}

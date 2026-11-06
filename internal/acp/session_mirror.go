@@ -155,8 +155,12 @@ func (s *Server) mirrorTick(now time.Time) {
 			return
 		}
 		served[t.name] = true
-		if mirror.SourceFor(t.binding.Harness) != nil {
-			s.mirrorBinding(t, t.binding, now, false)
+		// A mirrored binding is read fresh: it names the transcript to post.
+		if mirror.SourceFor(t.binding.Harness) == nil {
+			continue
+		}
+		if b, err := binding.ReadNamed(t.name); err == nil && mirror.SourceFor(b.Harness) != nil {
+			s.mirrorBinding(t, b, now, false)
 		}
 	}
 	if !s.mirrorStopped() {
@@ -179,11 +183,13 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
 		if !e.IsDir() || served[name] {
 			continue
 		}
-		b, ok := snap.binding(name)
-		var err error
-		if !ok {
-			b, err = binding.ReadNamed(name)
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier name's relay call runs.
+		if b, ok := snap.binding(name); ok && live(b) {
+			continue
 		}
+		b, err := binding.ReadNamed(name)
 		switch {
 		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
 		case err == nil && !live(b):

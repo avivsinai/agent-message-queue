@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
@@ -186,5 +187,61 @@ func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 	s.dropGoneDialogs(now.Add(seamGrace + time.Second))
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("the dialogs stayed after seamGrace: %v", err)
+	}
+}
+
+// Regression (agent-message-queue-udg review): dropGoneDialogs judged each
+// name from the snapshot it took before a loop of relay calls. Session bbb
+// attached again during aaa's edit, and its open dialog was expired as the
+// dialog of an ended session.
+func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
+	liveRoot := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(liveRoot, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	// bbb: old binding, ended (root gone).
+	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: filepath.Join(liveRoot, "gone"), Handle: "agent", Holder: holder, Name: "bbb", Label: "old"}
+	if err := binding.WriteNamed(old); err != nil {
+		t.Fatal(err)
+	}
+	// aaa: no binding, one resolved dialog with a post, so dialogClose edits it.
+	aDir, _ := dialog.DirFor("aaa")
+	aReq := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now()}
+	if err := dialog.Open(aDir, aReq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dialog.Resolve(aDir, dialog.Resolved{ID: aReq.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(dialogPost{Channel: "c", Event: "ev", Text: "t"})
+	if _, err := fsq.WriteFileAtomic(s.dialogPostDir("aaa"), aReq.ID+".json", raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// bbb: open dialog.
+	bDir, _ := dialog.DirFor("bbb")
+	bReq := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(), PID: os.Getpid()}
+	if err := dialog.Open(bDir, bReq); err != nil {
+		t.Fatal(err)
+	}
+	saved := editMessage
+	t.Cleanup(func() { editMessage = saved })
+	editMessage = func(string, string, time.Duration) error {
+		// During aaa's relay call, bbb re-attaches: a live binding.
+		nb := old
+		nb.Root = liveRoot
+		if err := binding.WriteNamed(nb); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	s.dropGoneDialogs(time.Now())
+	if res, ok, _ := dialog.ReadResolved(bDir, bReq.ID); ok {
+		t.Fatalf("the open dialog of live session bbb was resolved: %+v", res)
 	}
 }
