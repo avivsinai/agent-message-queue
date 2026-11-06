@@ -295,6 +295,17 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   reply's post fails before the Buzz CLI starts (for example, no CLI is
   found), the same sweep posts it once the CLI works; a post that started
   and then failed is uncertain and is not repeated.
+- An image the owner sends reaches both carriers as a local file. Each
+  NIP-92 `imeta` tag of the event (else each Blossom URL on the relay's host)
+  is fetched as the agent with `buzz media get`, at most 8 per message, 20
+  MiB each, and 60 s for all of them. A PNG, JPEG, GIF, WebP or HEIC image,
+  checked on its content, is stored as
+  `<root>/agents/buzz/remote-files/<sha256>.<ext>` (mode 0600; the same
+  sha256 reuses the file), and the prompt gains a line `[image: <path>]`.
+  Any other file, or a failed fetch, gives `[image not attached: <reason>]`,
+  and the turn still runs. `amq cleanup --history-older-than` and
+  `--history-max-size` remove these files with the read history.
+  `promptCapabilities.image` stays false: buzz-acp sends the event as text.
 - When Buzz names the event, the prompt and each follow-up carry the label
   `nostr:<eventID>`: the id of the owner's Buzz DM event that caused the
   message, the same on every redelivery. The label is a pointer, not proof.

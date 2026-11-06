@@ -157,6 +157,10 @@ Do the work, then answer with `amq reply --id <that message id>`. Use
 `--kind status` for an interim update. Keep the final answer short; it is
 read in a chat.
 
+An image the owner sent arrives as a line `[image: <absolute path>]`: open
+that file to see it. `[image not attached: <reason>]` means the image did not
+arrive; say so in the answer and ask the owner to send it again if it matters.
+
 ## `/amq-remote off`
 
 Run `amq-remote detach --self` and show its output. The session keeps
