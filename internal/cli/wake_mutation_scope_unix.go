@@ -94,6 +94,12 @@ func wakeRenameNoReplaceAt(fromDirFD int, from string, toDirFD int, to string) e
 	return lease.RenameNoReplaceAt(fromDirFD, from, toDirFD, to)
 }
 
+func wakeRenameExchangeAt(fromDirFD int, from string, toDirFD int, to string) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.RenameExchangeAt(fromDirFD, from, toDirFD, to)
+}
+
 func wakeLinkAt(fromDirFD int, from string, toDirFD int, to string, flags int) error {
 	lease := wakemutation.New(nil)
 	defer func() { _ = lease.Close() }()

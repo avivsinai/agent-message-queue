@@ -733,14 +733,15 @@ Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
   Code dialog hook (amq wake install-dialog-hook), the wake writes no input
   while AskUserQuestion, ExitPlanMode, or a permission dialog is open, and
   rings about 2s after it closes; after a permission dialog it rings when
-  the turn ends or the person types. While the hook stays installed, a
-  marker older than 10m gets attention output, still no input. --harness
-  codex and --harness cursor guard their approval prompts until the turn
-  ends once their hooks are installed. Dialogs without a hook (workspace
-  trust, pickers, MCP elicitation, Cursor prompts before a tool call) are
-  not guarded. amq wake dialog is the hook receiver; amq wake
-  uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce
-  zero synthetic input; stderr output may scribble until redraw.
+  the session transcript shows a new assistant message, the turn ends, or
+  the person types. While the hook stays installed, a marker older than
+  10m gets attention output, still no input. --harness codex and --harness
+  cursor guard their approval prompts until the turn ends once their hooks
+  are installed. Dialogs without a hook (workspace trust, pickers, MCP
+  elicitation, Cursor prompts before a tool call) are not guarded. amq wake
+  dialog is the hook receiver; amq wake uninstall-dialog-hook removes the
+  hooks. Use none when AMQ must enforce zero synthetic input; stderr output
+  may scribble until redraw.
 
 Self-upgrade: eligible co-op wakes observe their stable launch symlink and
   replace the running image only with a strictly newer installed AMQ while
