@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.127.3](https://github.com/avivsinai/agent-message-queue/compare/v0.127.2...v0.127.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **wake:** restore the dialog hold that never types into an open dialog ([0527d6b](https://github.com/avivsinai/agent-message-queue/commit/0527d6be0967a074d303000d5a0d8373454646ae))
+
 ## [0.127.2](https://github.com/avivsinai/agent-message-queue/compare/v0.127.1...v0.127.2) (2026-11-05)
 
 
