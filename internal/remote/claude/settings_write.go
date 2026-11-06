@@ -174,6 +174,20 @@ type HookOptIn struct {
 	Settings string     `json:"settings"`
 	Approval *HookShape `json:"approval,omitempty"`
 	Stop     *HookShape `json:"stop,omitempty"`
+	// ApprovalRemoved and StopRemoved record that the owner removed that
+	// hook with its uninstall command: the machine agent neither restores
+	// it nor warns about it.
+	ApprovalRemoved bool `json:"approval_removed,omitempty"`
+	StopRemoved     bool `json:"stop_removed,omitempty"`
+}
+
+// Removed reports whether the owner removed the hook of kind from this
+// file with its uninstall command, and has not installed it since.
+func (in HookOptIn) Removed(kind string) bool {
+	if kind == HookApproval {
+		return in.ApprovalRemoved
+	}
+	return in.StopRemoved
 }
 
 // HookShape is the binary a hook runs and, for the approval hook, its wait.
@@ -211,9 +225,9 @@ func ReadHookOptIn(path string) (HookOptIn, error) {
 	return in, nil
 }
 
-// setHookOptIn records (shape not nil) or clears (nil) the opt-in of kind
-// for the settings file at path. The caller holds the file's lock. An
-// unchanged record is not written.
+// setHookOptIn records (shape not nil) the opt-in of kind for the settings
+// file at path, or (nil) replaces it with the owner's removal. The caller
+// holds the file's lock. An unchanged record is not written.
 func setHookOptIn(path, kind string, shape *HookShape) error {
 	file, err := optInPath(path)
 	if err != nil {
@@ -226,17 +240,12 @@ func setHookOptIn(path, kind string, shape *HookShape) error {
 	before := in
 	in.Settings = canonicalSettings(path)
 	if kind == HookApproval {
-		in.Approval = shape
+		in.Approval, in.ApprovalRemoved = shape, shape == nil
 	} else {
-		in.Stop = shape
+		in.Stop, in.StopRemoved = shape, shape == nil
 	}
-	if in.Approval == nil && in.Stop == nil {
-		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	if sameShape(before.Approval, in.Approval) && sameShape(before.Stop, in.Stop) && before.Settings == in.Settings {
+	if sameShape(before.Approval, in.Approval) && sameShape(before.Stop, in.Stop) && before.Settings == in.Settings &&
+		before.ApprovalRemoved == in.ApprovalRemoved && before.StopRemoved == in.StopRemoved {
 		return nil
 	}
 	raw, err := json.MarshalIndent(in, "", "  ")
@@ -275,7 +284,7 @@ func OptInStopHook(home, settings, bin string) (bool, error) {
 }
 
 // OptOutHook removes the hook of kind from the settings file settings and
-// clears its opt-in, under one lock.
+// records the owner's removal in place of its opt-in, under one lock.
 func OptOutHook(settings, kind string) error {
 	spec := permissionSpec
 	if kind == HookStop {

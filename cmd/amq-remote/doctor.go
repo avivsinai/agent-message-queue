@@ -114,7 +114,20 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["endpoint"] = "reachable"
 		report["targets"] = len(sessions)
 	}
-	doctorNativeCapability(stateDir, sessions, report, fail)
+	// A native_capability row repeats a hooks row of the same file for
+	// older clients; the text output prints that link once.
+	repeat := func(boundary, subject, detail, remedy string) {
+		failing = append(failing, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy, repeat: true})
+	}
+	hooksFailed := func(settings string) bool {
+		for _, f := range failing {
+			if f.Boundary == "hooks" && f.Subject != "" && canonicalDir(filepath.Dir(f.Subject)) == canonicalDir(filepath.Dir(settings)) {
+				return true
+			}
+		}
+		return false
+	}
+	doctorNativeCapability(stateDir, sessions, report, fail, repeat, hooksFailed)
 	doctorRequestStore(stateDir, report, fail)
 	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
@@ -175,7 +188,7 @@ func hookFormFinding(form, subject, hook, remedy string, fail, note reportFunc) 
 // claude_approval_hook) next to the hooks rows: a Claude target completes
 // a request only through the Stop hook, and Buzz shows a dialog only
 // through the PermissionRequest hook.
-func doctorNativeCapability(stateDir string, sessions []protocol.Session, report map[string]any, fail reportFunc) {
+func doctorNativeCapability(stateDir string, sessions []protocol.Session, report map[string]any, failNew, repeat reportFunc, hooksFailed func(settings string) bool) {
 	settingsOf := claudeTargetSettings(stateDir)
 	type hookRow struct {
 		state     func(string) (string, error)
@@ -206,6 +219,10 @@ func doctorNativeCapability(stateDir string, sessions []protocol.Session, report
 				continue
 			}
 			checked[settings] = true
+			fail := failNew
+			if err == nil && hooksFailed(settings) {
+				fail = repeat
+			}
 			state := ""
 			if err == nil {
 				state, err = row.state(settings)
@@ -443,7 +460,9 @@ func printDoctor(w io.Writer, r doctorReport) {
 	}
 	failing, _ := r["failing"].([]boundaryFailure)
 	for _, f := range failing {
-		line("FAIL", f)
+		if !f.repeat {
+			line("FAIL", f)
+		}
 	}
 	notes, _ := r["notes"].([]boundaryFailure)
 	for _, n := range notes {
@@ -489,6 +508,9 @@ type boundaryFailure struct {
 	Subject  string `json:"subject,omitempty"`
 	Detail   string `json:"detail"`
 	Remedy   string `json:"remedy,omitempty"`
+	// repeat marks a row that repeats another link's row for older JSON
+	// clients; the text output leaves it out.
+	repeat bool
 }
 
 func errSuffix(e string) string {

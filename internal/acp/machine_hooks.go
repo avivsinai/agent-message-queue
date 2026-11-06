@@ -1,13 +1,18 @@
 package acp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
@@ -44,21 +49,25 @@ type hookReader struct {
 	native  bool
 }
 
-// watchHooks checks the settings file of each served Claude session whose
-// binding records its config_dir.
-func (s *Server) watchHooks() {
+// watchHooks checks the settings file of each Claude session among the
+// bindings all (the ones this tick read) that has an active channel of
+// this machine agent and records its config_dir.
+func (s *Server) watchHooks(all []binding.Binding) {
 	readers := map[string][]hookReader{}
 	var order []string
-	for _, t := range s.dialogTargets() {
-		b, err := binding.ReadNamed(t.name)
-		if err != nil || b.ConfigDir == "" || !filepath.IsAbs(b.ConfigDir) {
+	for _, b := range all {
+		if b.ConfigDir == "" || !filepath.IsAbs(b.ConfigDir) || binding.ValidName(b.Name) != nil {
+			continue
+		}
+		r, ok := readChannelRecord(s.slotPath(b.Name))
+		if !ok || !routable(r) || !serves(r, b) {
 			continue
 		}
 		path := filepath.Join(filepath.Clean(b.ConfigDir), "settings.json")
 		if _, seen := readers[path]; !seen {
 			order = append(order, path)
 		}
-		readers[path] = append(readers[path], hookReader{channel: t.channel, native: !b.Mailbox()})
+		readers[path] = append(readers[path], hookReader{channel: r.ChannelID, native: !b.Mailbox()})
 	}
 	if s.machine.settings == nil {
 		s.machine.settings = map[string]settingsSeen{}
@@ -154,20 +163,26 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		if state, err := h.state(path); err != nil || state != claude.StopHookMissing {
 			continue
 		}
-		text := fmt.Sprintf(h.lost, path, changed)
+		restored := false
 		// With no installed amq-remote the hook is not written: a hook that
 		// runs a missing binary does nothing, and the warning says what to do.
 		if bin, err := remoteExecutable(); err == nil {
-			restored, err := claude.RestoreHook(home, path, h.kind, bin)
+			var err error
+			restored, err = claude.RestoreHook(home, path, h.kind, bin)
 			if errors.Is(err, claude.ErrSettingsBusy) {
 				// Another writer holds the file: check it again next tick.
 				delete(s.machine.settings, path)
 				return
 			}
-			if err == nil && restored {
-				text = fmt.Sprintf(hookRestoredLine, h.name, path, changed)
-				restoredAny = true
-			}
+			restored = err == nil && restored
+		}
+		text := fmt.Sprintf(hookRestoredLine, h.name, path, changed)
+		if restored {
+			restoredAny = true
+		} else if !s.warnOnce(path, h.kind, info) {
+			continue
+		} else {
+			text = fmt.Sprintf(h.lost, path, changed)
 		}
 		for _, channel := range channels {
 			_, _ = postAnswer(channel, mirror.Unmention(text), s.cfg.PostTimeout)
@@ -178,4 +193,41 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		// read the file again.
 		s.machine.settings[path] = settingsSeen{info: statSettings(path)}
 	}
+}
+
+// warnOnce reports whether the warning that the hook of kind left the
+// settings file at path is due, and records it as given: never after the
+// owner removed that hook with its uninstall command, and once per version
+// of the file (identity, size and mtime), kept in the state directory so a
+// restart of the agent does not repeat it.
+func (s *Server) warnOnce(path, kind string, info os.FileInfo) bool {
+	if in, err := claude.ReadHookOptIn(path); err != nil || in.Removed(kind) {
+		return false
+	}
+	sum := sha256.Sum256([]byte(path))
+	file := filepath.Join(s.cfg.StateDir, "hook-warnings", hex.EncodeToString(sum[:12])+".json")
+	warned := map[string]string{}
+	if raw, err := readSmallRegular(file); err == nil {
+		_ = json.Unmarshal(raw, &warned)
+	}
+	version := settingsVersion(info)
+	if warned[kind] == version {
+		return false
+	}
+	warned["settings"], warned[kind] = path, version
+	raw, err := json.Marshal(warned)
+	if err != nil {
+		return false
+	}
+	_, _ = fsq.WriteFileAtomic(filepath.Dir(file), filepath.Base(file), append(raw, '\n'), 0o600)
+	return true
+}
+
+// settingsVersion names one version of a settings file: its identity, size
+// and mtime, or "none" when there is no file.
+func settingsVersion(info os.FileInfo) string {
+	if info == nil {
+		return "none"
+	}
+	return fileIdentity(info) + ":" + strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
 }

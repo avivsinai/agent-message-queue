@@ -121,6 +121,27 @@ func TestMachineAgentOnlyWarnsWithoutTheOptIn(t *testing.T) {
 	if len(got) != 1 || !strings.HasPrefix(got[0], machineChanA+" Approvals of this session stay in the terminal: the AMQ approval hook left "+settings) {
 		t.Fatalf("posts = %q; want one warning", got)
 	}
+	// Review of the machine agent's warning: a restart (Buzz Desktop, or
+	// another leader) repeated it for the same file.
+	s.resign()
+	tick(newMachineServer(t, s.cfg.StateDir), time.Now())
+	if got := posts(); len(got) != 1 {
+		t.Fatalf("posts after a restart = %q; want the one warning only", got)
+	}
+}
+
+// Review of the machine agent's warning: an owner who removed the hook
+// with uninstall-approval-hook was warned about it on every restart.
+func TestMachineAgentNeverWarnsAfterTheOwnerRemovedTheHook(t *testing.T) {
+	s, settings, _, posts := hookWatchSession(t, true)
+	tick(s, time.Now())
+	if err := claude.OptOutHook(settings, claude.HookApproval); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, time.Now())
+	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookMissing || len(posts()) != 0 {
+		t.Fatalf("after uninstall: hook %q, posts %q; want neither", state, posts())
+	}
 }
 
 // A writer that holds the settings file's lock never stalls the machine

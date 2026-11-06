@@ -216,6 +216,18 @@ func (s *Server) dialogStopped() bool {
 	}
 }
 
+// routable reports whether r is an active channel record of this machine
+// agent on its relay.
+func routable(r channelRecord) bool {
+	return r.State == channelActive && r.ChannelID != "" && r.Machine == buzzSelf && r.Relay == normalizeRelay(buzzRelayURL)
+}
+
+// serves reports whether the routable record r is the channel of b's live
+// session.
+func serves(r channelRecord, b binding.Binding) bool {
+	return b.SessionIdentity() == r.Identity && live(b)
+}
+
 // dialogTargets are the bindings this worker posts dialogs for: a machine
 // agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
@@ -228,10 +240,10 @@ func (s *Server) dialogTargets() []dialogTarget {
 		}
 		var out []dialogTarget
 		for _, r := range s.activeRecords() {
-			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
+			if !routable(r) {
 				continue
 			}
-			if b, err := binding.ReadNamed(r.Name); err == nil && b.SessionIdentity() == r.Identity && live(b) {
+			if b, err := binding.ReadNamed(r.Name); err == nil && serves(r, b) {
 				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b)})
 			}
 		}

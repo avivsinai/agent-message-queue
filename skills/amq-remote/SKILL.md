@@ -109,7 +109,10 @@ command's own message. Do not work around a refusal.
    - `unreadable`: say that the Claude settings file cannot be read, and that
      `amq-remote doctor` names it and the reason.
    - `stale`: say the installed hook is an older form, then run
-     `amq-remote doctor --fix`, which migrates it and prints each change.
+     `amq-remote claude install-approval-hook`, which replaces only that
+     entry. You may offer `amq-remote doctor --fix` as a question (it also
+     installs the other hooks, the login service and the machine agent's
+     import file); never run it without a yes.
    - `missing`: tell the user: "This adds one approval hook. The first
      approval dialog of each Claude Code session on this machine connects
      that session to its own Buzz channel, even one that never ran

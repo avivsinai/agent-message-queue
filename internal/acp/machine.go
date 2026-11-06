@@ -285,8 +285,8 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 			}
 		}
 	}
-	if !s.stopped() {
-		s.watchHooks()
+	if err == nil && !s.stopped() {
+		s.watchHooks(all)
 	}
 	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)

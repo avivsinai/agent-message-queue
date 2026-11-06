@@ -945,7 +945,8 @@ amq-remote claude uninstall-approval-hook   # removes only that hook
 The hook runs the `amq-remote` on PATH when that is this binary. Install
 also records, under `~/.amq/remote/hooks/`, that the owner wants this hook
 in this settings file; `install-stop-hook` and `doctor --fix` record the
-same for theirs, and the uninstall commands clear it.
+same for theirs, and the uninstall commands replace it with the owner's
+removal.
 
 The machine agent watches the settings file of each Claude session it
 serves (the `config_dir` its binding records); a file that did not change
@@ -956,9 +957,12 @@ the agent puts the hook back through the same locked writer, running the
 no installed `amq-remote` it only warns), and posts once
 in the session's channel: "The AMQ approval hook was missing from <path>
 (changed <mtime>); restored." With no opt-in it changes nothing and posts
-once per change of the file: "Approvals of this session stay in the
-terminal: the AMQ approval hook left <path> at <mtime>. Run `amq-remote
-doctor --fix`."
+once per version of the file, across restarts of the agent: "Approvals of
+this session stay in the terminal: the AMQ approval hook left <path> at
+<mtime>. Run `amq-remote doctor --fix`." After `uninstall-approval-hook` (or
+`uninstall-stop-hook`) it never warns about that hook in that file. A hook
+removed any other way while the opt-in exists, Claude Code's `/hooks` menu
+included, comes back; the uninstall command is the way to stop it.
 
 ### Turns in the session's channel
 

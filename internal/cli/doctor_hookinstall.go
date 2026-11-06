@@ -143,7 +143,7 @@ func hookConfigErrorRemedy(path, agent string, err error) string {
 	if strings.Contains(msg, "parse ") || strings.Contains(msg, "invalid") ||
 		strings.Contains(msg, "unexpected") || strings.Contains(msg, "JSON") ||
 		strings.Contains(msg, "syntax") {
-		return fmt.Sprintf("restore from the newest %s.bak-* backup or fix the JSON by hand, then rerun amq-keepalive install-hook --agent %s", path, agent)
+		return fmt.Sprintf("fix the JSON of %s by hand, then rerun amq-keepalive install-hook --agent %s", path, agent)
 	}
 	return fmt.Sprintf("rerun amq-keepalive install-hook --agent %s", agent)
 }
