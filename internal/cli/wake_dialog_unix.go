@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -879,11 +880,55 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 
 // ClaudeDialogGuardAt reports the wake dialog guard in the Claude settings
 // file settings: its state and, when it is not ok, why and the remedy. It
-// assumes an unknown Claude Code version, so it starts no process.
+// gives amq doctor's verdict: the events it requires follow the installed
+// Claude Code version, read once per process.
 func ClaudeDialogGuardAt(settings string) (state, detail string) {
-	check, state := claudeDialogHookCheckAt(settings, claudeVersion{}, false)
+	version, known := installedClaudeVersionOnce()
+	check, state := claudeDialogHookCheckAt(settings, version, known)
 	return state, check.Message
 }
+
+// InstallClaudeDialogGuardAt installs or migrates the wake dialog guard,
+// run by the amq binary bin, in the Claude settings file settings, with
+// the events the installed Claude Code version knows. It reports whether
+// it changed the file.
+func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
+	bin = installedGuardBin(settings, wakeDialogHookEvents, wakeDialogHookBinRe, bin)
+	return claude.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
+}
+
+// installedGuardBin is the amq binary the installed guard entries in the
+// hooks file path all run, when that binary exists, else bin. A repair
+// keeps the binary an install chose, so two installers never rewrite the
+// file back and forth (and Codex never asks for trust again for nothing).
+func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
+	found := ""
+	for _, event := range events {
+		commands, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
+		if err != nil {
+			return bin
+		}
+		for _, command := range commands {
+			match := binRe.FindStringSubmatch(command)
+			if match == nil {
+				return bin
+			}
+			got := strings.ReplaceAll(match[1], `'\''`, `'`)
+			if found != "" && got != found {
+				return bin
+			}
+			found = got
+		}
+	}
+	if info, err := os.Stat(found); found == "" || err != nil || info.IsDir() {
+		return bin
+	}
+	return found
+}
+
+// installedClaudeVersionOnce is installedClaudeVersion, run once per
+// process: one doctor run checks many settings files.
+var installedClaudeVersionOnce = sync.OnceValues(installedClaudeVersion)
 
 // claudeDialogHookCheckAt checks the dialog guard in the settings file at
 // path and returns the doctor check with its guard state.

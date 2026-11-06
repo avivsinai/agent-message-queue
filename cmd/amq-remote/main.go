@@ -73,7 +73,8 @@ Commands:
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,
                            --idempotency-key K; resume K after a lost answer)
   mcp --link NAME          Serve a linked server's tools as a stdio MCP server
-  doctor                   Diagnose the endpoint chain
+  doctor [--fix]           Check every link to the owner; --fix repairs hooks,
+                           the machine agent's import file and the login service
   version                  Print the version
 
 Common options:

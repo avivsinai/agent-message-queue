@@ -30,11 +30,21 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs, probe...)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
+	fix := fs.Bool("fix", false, "repair what doctor can repair (hooks, the machine agent's import file, the login service), then check")
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	if err := fsq.ValidateHandle(*me); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "invalid handle %q: %v", *me, err)
+	}
+	if c.root == "" {
+		// The onboarding shell has no AM_ROOT: check the machine root, the
+		// one the login service and native sessions use.
+		root, err := binding.MachineRoot()
+		if err != nil {
+			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root or AM_ROOT is required: %v", err)
+		}
+		c.root = root
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -67,6 +77,9 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	all, err := binding.List()
 	if err != nil {
 		fail("bindings", "", "cannot list the bindings: "+err.Error(), "check the permissions of the AMQ home's remote directory")
+	}
+	if *fix {
+		report["fixed"] = doctorFix(stateDir, all, fail)
 	}
 	doctorMachine(stateDir, all, report, fail, note)
 	// A Buzz agent can keep running an amq-acp that an upgrade replaced, so
@@ -101,6 +114,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["endpoint"] = "reachable"
 		report["targets"] = len(sessions)
 	}
+	doctorNativeCapability(stateDir, sessions, report, fail)
 	doctorRequestStore(stateDir, report, fail)
 	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
@@ -153,6 +167,63 @@ func hookFormFinding(form, subject, hook, remedy string, fail, note reportFunc) 
 		note("hook_form", subject, "the "+hook+" hook is an older form that starts amq-remote in every Claude session on this machine", remedy)
 	case claude.HookFormStale:
 		fail("hooks", subject, "the "+hook+" hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", remedy)
+	}
+}
+
+// doctorNativeCapability keeps the per-target rows and keys a client of
+// an older doctor reads (native_capability, claude_stop_hook,
+// claude_approval_hook) next to the hooks rows: a Claude target completes
+// a request only through the Stop hook, and Buzz shows a dialog only
+// through the PermissionRequest hook.
+func doctorNativeCapability(stateDir string, sessions []protocol.Session, report map[string]any, fail reportFunc) {
+	settingsOf := claudeTargetSettings(stateDir)
+	type hookRow struct {
+		state     func(string) (string, error)
+		form      func(home, settings string) (string, error)
+		key       string
+		installer string
+		missing   func(protocol.Session) string
+	}
+	rows := []hookRow{
+		{claude.StopHookStateAt, claude.StopHookForm, "claude_stop_hook", "install-stop-hook", func(protocol.Session) string {
+			return "the Claude Stop hook is not installed, so requests are admitted but never complete"
+		}},
+		{claude.PermissionHookState, claude.PermissionHookForm, "claude_approval_hook", "install-approval-hook", func(s protocol.Session) string {
+			if !s.Capabilities.ApproveTool {
+				return "the PermissionRequest hook is not installed, so a shared source never sees a tool approval"
+			}
+			return "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval"
+		}},
+	}
+	for _, row := range rows {
+		checked := map[string]bool{}
+		for _, s := range sessions {
+			if s.Harness != "claude_code" {
+				continue
+			}
+			home, settings, err := settingsOf.lookup(s.TargetID)
+			if err == nil && checked[settings] {
+				continue
+			}
+			checked[settings] = true
+			state := ""
+			if err == nil {
+				state, err = row.state(settings)
+			}
+			switch {
+			case err != nil:
+				fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+err.Error(), "repair "+settings)
+			case state == claude.StopHookMissing:
+				fail("native_capability", s.TargetID, row.missing(s), "run `amq-remote claude "+row.installer+"`")
+			case state == claude.StopHookDisabled:
+				report[row.key] = settings + " holds the hook and sets disableAllHooks; project or managed settings decide whether it runs"
+			}
+			if err == nil && state != claude.StopHookMissing {
+				if form, _ := row.form(home, settings); form == claude.HookFormStale {
+					fail("native_capability", s.TargetID, "the hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", "run `amq-remote claude "+row.installer+"`")
+				}
+			}
+		}
 	}
 }
 
@@ -366,6 +437,10 @@ func printDoctor(w io.Writer, r doctorReport) {
 		}
 		say(w, "%s", text)
 	}
+	fixed, _ := r["fixed"].([]string)
+	for _, f := range fixed {
+		say(w, "FIXED %s", f)
+	}
 	failing, _ := r["failing"].([]boundaryFailure)
 	for _, f := range failing {
 		line("FAIL", f)
@@ -373,6 +448,35 @@ func printDoctor(w io.Writer, r doctorReport) {
 	notes, _ := r["notes"].([]boundaryFailure)
 	for _, n := range notes {
 		line("NOTE", n)
+	}
+	// The fields that are reported, not failed, one line each.
+	keys := make([]string, 0, len(r))
+	for k := range r {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch v := r[k].(type) {
+		case string:
+			say(w, "INFO %s: %s", k, v)
+		case map[string]string:
+			subjects := make([]string, 0, len(v))
+			for s := range v {
+				subjects = append(subjects, s)
+			}
+			sort.Strings(subjects)
+			for _, s := range subjects {
+				say(w, "INFO %s %s: %s", k, s, v[s])
+			}
+		default:
+			switch k {
+			case "failing", "notes", "fixed", "hooks", "machine_agent", "channels", "mailboxes":
+				continue
+			}
+			if raw, err := json.Marshal(v); err == nil {
+				say(w, "INFO %s: %s", k, raw)
+			}
+		}
 	}
 	if len(failing) == 0 {
 		say(w, "OK: no failing link")

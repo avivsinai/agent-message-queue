@@ -65,7 +65,8 @@ func claudeSettingsFiles(stateDir string, all []binding.Binding) []string {
 	var dirs []string
 	dirs = append(dirs, harness.ClaudeConfigDir(home))
 	for _, b := range all {
-		if b.ConfigDir != "" {
+		// A session that is not proven live may never read its file again.
+		if state, _ := b.Liveness(); b.ConfigDir != "" && state == binding.Live {
 			dirs = append(dirs, b.ConfigDir)
 		}
 	}
@@ -148,10 +149,16 @@ const (
 // doctorHooks checks the approval hook, the Stop hook and the wake dialog
 // guard in each settings file, and that the installed approval command
 // reaches amq-remote. A missing or stale entry fails, except a missing Stop
-// hook while native is false, which is a note; disableAllHooks is a note,
+// hook while native is false, and a missing approval hook or guard while no
+// binding and no machine agent exists (the hook's gate stays closed then, so
+// nothing can reach Buzz yet), which are notes; disableAllHooks is a note,
 // because a project or managed setting can turn hooks on again.
 func doctorHooks(files []string, all []binding.Binding, native bool, machine agentInfo, fail, note reportFunc) []hookFile {
 	home, _ := os.UserHomeDir()
+	gateReport := note
+	if len(all) > 0 || machine.State != agentMissing {
+		gateReport = fail
+	}
 	envDir := canonicalDir(harness.ClaudeConfigDir(home))
 	rows := make([]hookFile, 0, len(files))
 	for _, path := range files {
@@ -174,7 +181,7 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 		row.Approval = approval
 		switch approval {
 		case claude.StopHookMissing:
-			fail("hooks", path, "the AMQ approval hook (PermissionRequest) is not installed, so every tool approval of a Claude session that reads this file stays in the terminal", fix("amq-remote claude install-approval-hook"))
+			gateReport("hooks", path, "the AMQ approval hook (PermissionRequest) is not installed, so every tool approval of a Claude session that reads this file stays in the terminal", fix("amq-remote claude install-approval-hook"))
 		default:
 			row.ApprovalForm, _ = claude.PermissionHookForm(home, path)
 			hookFormFinding(row.ApprovalForm, path, "approval (PermissionRequest)", fix("amq-remote claude install-approval-hook"), fail, note)
@@ -195,10 +202,10 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 		row.Guard, detail = amqcli.ClaudeDialogGuardAt(path)
 		switch row.Guard {
 		case amqcli.DialogGuardMissing:
-			fail("hooks", path, "the wake dialog guard is not installed, so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
+			gateReport("hooks", path, "the wake dialog guard is not installed, so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
 		case amqcli.DialogGuardIncomplete, amqcli.DialogGuardUnreadable:
 			detail, _, _ = strings.Cut(detail, "; remedy:")
-			fail("hooks", path, "the wake dialog guard is "+row.Guard+" ("+detail+"), so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
+			gateReport("hooks", path, "the wake dialog guard is "+row.Guard+" ("+detail+"), so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
 		}
 		if row.DisableAllHooks, _ = claude.HooksDisabledAt(path); row.DisableAllHooks {
 			note("hooks", path, "it sets disableAllHooks, so Claude Code runs none of its hooks unless a project or managed setting turns them on", "remove disableAllHooks from "+path)
@@ -315,8 +322,12 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 	row.Name = nonEmpty(machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
 	row.RelayKey = machine.RelayKey != ""
 	if machine.State != agentRunning {
-		fail("machine_agent", row.Name, "the machine agent is "+machine.State+": its marker is not fresh, so it makes no channel and posts no dialog",
-			"in Buzz Desktop: Agents, "+row.Name+", Start")
+		why := "its marker is not fresh"
+		if machine.State == agentIdle {
+			why = "its worker is gone while Buzz Desktop still runs it, and only a message to the agent starts a worker again"
+		}
+		fail("machine_agent", row.Name, "the machine agent is "+machine.State+": "+why+", so it makes no channel and posts no dialog",
+			"in Buzz Desktop: Agents, "+row.Name+", Stop and Start")
 	} else if !row.RelayKey {
 		fail("machine_agent", row.Name, "the machine agent records no relay key: it started without a usable BUZZ_RELAY_URL, so it makes no channel",
 			"check the agent's relay in Buzz Desktop (Agents, "+row.Name+"), then Stop and Start it")
@@ -512,13 +523,4 @@ var doctorWakeCheck = func(root, handle string) (wakeView, error) {
 
 // installedAMQ is the amq beside this amq-remote, symlinks resolved, else
 // the amq on PATH.
-func installedAMQ() (string, error) {
-	if self, err := os.Executable(); err == nil {
-		if real, err := filepath.EvalSymlinks(self); err == nil {
-			if amq := filepath.Join(filepath.Dir(real), "amq"); fileExists(amq) {
-				return amq, nil
-			}
-		}
-	}
-	return exec.LookPath("amq")
-}
+func installedAMQ() (string, error) { return siblingBinary("amq") }

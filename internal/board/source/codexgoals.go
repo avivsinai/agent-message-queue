@@ -41,11 +41,11 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	}
 	home := source.Home
 	if home == "" {
-		userHome, err := os.UserHomeDir()
+		dir, err := harness.UserCodexHome()
 		if err != nil {
 			return fail(err)
 		}
-		home = harness.CodexHome(userHome)
+		home = dir
 	}
 	home, err := filepath.Abs(home)
 	if err != nil {

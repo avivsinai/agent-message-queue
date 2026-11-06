@@ -443,7 +443,7 @@ func installTrustedCodexDialogHookForTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
+	if _, err := claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
 		t.Fatal(err)
 	}
 	writeCodexConfigForTest(t, filepath.Join(filepath.Dir(path), "config.toml"), "")

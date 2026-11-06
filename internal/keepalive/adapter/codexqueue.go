@@ -3,7 +3,6 @@ package adapter
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -144,11 +143,11 @@ func (c CodexQueue) codexHome() (string, error) {
 	if strings.TrimSpace(c.Home) != "" {
 		return c.Home, nil
 	}
-	home, err := os.UserHomeDir()
+	dir, err := harness.UserCodexHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve CODEX_HOME: %w", err)
 	}
-	return harness.CodexHome(home), nil
+	return dir, nil
 }
 
 func (c CodexQueue) runner() CommandRunner {

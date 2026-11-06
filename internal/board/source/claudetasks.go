@@ -41,12 +41,12 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	home := source.Home
 	if home == "" {
-		user, err := os.UserHomeDir()
+		dir, err := harness.UserClaudeConfigDir()
 		if err != nil {
 			gap(err.Error())
 			return result
 		}
-		home = harness.ClaudeConfigDir(user)
+		home = dir
 	}
 	absolute, err := filepath.Abs(home)
 	if err != nil {

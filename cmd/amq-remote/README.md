@@ -63,7 +63,7 @@ amq-remote link tools [--link NAME]
 amq-remote link call TOOL --args JSON [--link NAME]
 amq-remote mcp --link NAME
 amq-remote service install|uninstall|status [--root ROOT]
-amq-remote doctor
+amq-remote doctor [--fix] [--root ROOT]
 amq-remote version
 amq-remote claude install-stop-hook | uninstall-stop-hook
 amq-remote claude install-approval-hook | uninstall-approval-hook
@@ -764,19 +764,24 @@ in `internal/remote/protocol` returns those codes. It does not return 5.
 ## Doctor
 
 `amq-remote doctor --root <absolute-root>` checks every link between the
-owner and the sessions of this machine. It runs these checks with or
-without an endpoint state directory:
+owner and the sessions of this machine; without `--root` or `AM_ROOT` it
+checks the machine root. It runs these checks with or without an endpoint
+state directory:
 
 - The Claude hooks in each settings file the machine's sessions read: the
   one the environment names (`$CLAUDE_CONFIG_DIR/settings.json`, else
   `~/.claude/settings.json`), `~/.claude/settings.json` when it is another
-  file, and the file of each `config_dir` a binding or a manifest entry
-  records. Each needs the approval hook and the wake dialog guard in the
-  form their installers write now, and the Stop hook when native mode is in
-  use. Doctor runs the installed
-  approval command through `sh -c` with `AMQ_HOOK_PROBE=1` and
-  `AMQ_REMOTE_BINDING` set to an existing binding, so its gate opens; the
-  receiver then prints its version and binds and posts nothing. A command
+  file, and the file of each `config_dir` a manifest entry or the binding
+  of a live session records. Each needs the approval hook and the wake
+  dialog guard in the form their installers write now, and the Stop hook
+  when native mode is in use. While no binding and no machine agent exists,
+  nothing can reach Buzz yet, so a missing approval hook or guard is a
+  note. Doctor runs the installed
+  approval command through `sh -c` with `AMQ_HOOK_PROBE=1`, an empty stdin
+  and `AMQ_REMOTE_BINDING` set to an existing binding, so its gate opens;
+  the receiver then prints its version and binds and posts nothing. A
+  receiver with a payload on stdin is a real dialog and ignores
+  `AMQ_HOOK_PROBE`. A command
   that prints nothing did not reach amq-remote (`probe` `closed`). A file
   that sets `disableAllHooks` is a note.
 - The machine agent: its marker is fresh, it records a relay key, and Buzz
@@ -808,8 +813,40 @@ doctor reports it and does not fail. A new thread started with
 `notes` lists advice in the same shape. Doctor exits 6 exactly when
 `failing` is not empty. The text output prints one line per entry,
 `FAIL <link> <subject>: <detail>; fix: <remedy>`, then each note as `NOTE`,
-or `OK: no failing link`. `--json` prints the report with its rows:
-`hooks`, `machine_agent`, `channels` and `mailboxes`.
+then each reported value as `INFO <key>: <value>` (such as
+`approval_reviewer`), then `OK: no failing link` when nothing fails.
+`--json` prints the report with its rows: `hooks`, `machine_agent`,
+`channels` and `mailboxes`. For a Claude target of the endpoint, the
+`native_capability` rows and the `claude_stop_hook` and
+`claude_approval_hook` keys stay beside the `hooks` rows for clients that
+read them.
+
+### Repair
+
+`amq-remote doctor --fix` repairs what it can before it checks, and prints
+one `FIXED <link> <subject>: <what>` line per change (`fixed` in JSON). Each
+step is idempotent: a second run changes nothing.
+
+- In the settings file the environment names (created when missing) and in
+  every settings file the hook check reads, it installs or migrates the
+  approval hook, the Stop hook (where native mode needs it, or to migrate an
+  installed one) and the wake dialog guard. A hook in the current form keeps
+  its binary and wait. The hooks run the `amq-remote` and `amq` on PATH when
+  those are the installed binaries, so an upgrade keeps them working.
+- With a Codex home, it installs or migrates the Codex wake dialog guard in
+  `$CODEX_HOME/hooks.json` and prints the trust step: Codex runs a new or
+  changed hook only after you trust it in `/hooks`.
+- While this machine has no machine agent, it writes the import file
+  `~/Downloads/AMQ Remote machine.agent.json` with `amq-acp setup --machine`
+  (which also writes the AMQ Remote harness that file names). Then in Buzz
+  Desktop: Agents, +, Import that file, Start, and turn on Auto-start.
+- While no login service is installed, it installs the one that runs
+  `amq-remote up` for the machine root.
+
+An approval or Stop hook that `--fix` installs or keeps records the owner's
+opt-in (see the approval hook below). `--fix` never restarts amq-acp or a
+wake, never deletes a request record, and never writes Buzz Desktop's own
+agent list.
 
 | Link | Fails when |
 | --- | --- |
@@ -865,7 +902,14 @@ amq-remote claude uninstall-stop-hook   # removes only that hook
 Without the hook a request is admitted but never completes. Install edits
 `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when that is
 set; the same applies to every settings path below) in place and keeps every
-other byte. Uninstall
+other byte. Every AMQ writer of a settings or hooks file (these installers,
+`doctor --fix`, the wake dialog guard, the keepalive SessionStart hook and
+the machine agent) takes one lock per file under `~/.amq/locks/` and reads
+the file again before it replaces it; when another program changed it in
+between, the edit is applied again to what that program wrote. A command
+waits at most 10 seconds for the lock and then names the lock file; the
+machine agent waits at most 50 ms and checks a busy file again on its next
+tick. Uninstall
 removes only the AMQ hook and leaves any empty `Stop` or `hooks` container
 behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight
@@ -897,6 +941,24 @@ Install it once:
 amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~/.claude/settings.json
 amq-remote claude uninstall-approval-hook   # removes only that hook
 ```
+
+The hook runs the `amq-remote` on PATH when that is this binary. Install
+also records, under `~/.amq/remote/hooks/`, that the owner wants this hook
+in this settings file; `install-stop-hook` and `doctor --fix` record the
+same for theirs, and the uninstall commands clear it.
+
+The machine agent watches the settings file of each Claude session it
+serves (the `config_dir` its binding records); a file that did not change
+costs one stat per tick. When a changed file has lost the approval hook (or,
+for a native session, the Stop hook) and the opt-in for that file exists,
+the agent puts the hook back through the same locked writer, running the
+`amq-remote` installed now (never a recorded path an upgrade removed; with
+no installed `amq-remote` it only warns), and posts once
+in the session's channel: "The AMQ approval hook was missing from <path>
+(changed <mtime>); restored." With no opt-in it changes nothing and posts
+once per change of the file: "Approvals of this session stay in the
+terminal: the AMQ approval hook left <path> at <mtime>. Run `amq-remote
+doctor --fix`."
 
 ### Turns in the session's channel
 

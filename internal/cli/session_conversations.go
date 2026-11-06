@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -70,11 +69,8 @@ func loadConversationSources(now time.Time) conversationSources {
 }
 
 func claudeConfigDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return harness.ClaudeConfigDir(home)
+	dir, _ := harness.UserClaudeConfigDir()
+	return dir
 }
 
 // forSession lists the conversations of the session at sessionRoot.

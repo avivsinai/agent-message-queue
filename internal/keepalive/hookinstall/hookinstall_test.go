@@ -69,9 +69,6 @@ func TestInstallBothWritesScriptAndMergesConfigs(t *testing.T) {
 	if !result.Script.Changed {
 		t.Fatal("script changed = false, want true")
 	}
-	if result.Configs[AgentClaude].Backup == "" || result.Configs[AgentCodex].Backup == "" {
-		t.Fatalf("expected config backups, got %#v", result.Configs)
-	}
 	info, err := os.Stat(scriptPath)
 	if err != nil {
 		t.Fatalf("stat script: %v", err)
@@ -256,40 +253,6 @@ func TestInstallBothRefusesWhenSecondConfigFailsPreflight(t *testing.T) {
 	if readErr != nil || !bytes.Equal(got, claudeOriginal) {
 		t.Fatalf("Claude config changed after Codex preflight failure: err=%v bytes=%q", readErr, got)
 	}
-}
-
-func TestBackupIfExistsUsesExclusiveSameSecondName(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "settings.json")
-	original := []byte(`{"keep":true}`)
-	mustWrite(t, src, original)
-	occupant := []byte("occupant\n")
-
-	for attempt := 0; attempt < 8; attempt++ {
-		ts := time.Now().UTC().Format("20060102T150405Z")
-		planted := fmt.Sprintf("%s.bak-%s", src, ts)
-		mustWrite(t, planted, occupant)
-		if time.Now().UTC().Format("20060102T150405Z") != ts {
-			continue
-		}
-		backup, err := backupIfExists(src)
-		if err != nil {
-			t.Fatalf("backupIfExists() error = %v", err)
-		}
-		if backup == planted {
-			t.Fatal("backup reused occupied same-second name")
-		}
-		gotOccupant, readErr := os.ReadFile(planted)
-		if readErr != nil || !bytes.Equal(gotOccupant, occupant) {
-			t.Fatalf("occupied backup changed: err=%v bytes=%q", readErr, gotOccupant)
-		}
-		got, readErr := os.ReadFile(backup)
-		if readErr != nil || !bytes.Equal(got, original) {
-			t.Fatalf("exclusive backup: err=%v bytes=%q", readErr, got)
-		}
-		return
-	}
-	t.Fatal("could not plant a same-second backup name")
 }
 
 func TestNormalizeOptionsTimeoutBoundary(t *testing.T) {

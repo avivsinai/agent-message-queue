@@ -96,7 +96,12 @@ command's own message. Do not work around a refusal.
    If the JSON has `warning`, show it too.
 4. **Claude Code only: the approval hook** (default and `--native`, after
    a successful attach). Read `approval_hook` from the attach JSON: `ok`,
-   `missing`, `stale`, `disabled` or `unreadable`.
+   `missing`, `stale`, `disabled` or `unreadable`. An older amq-remote
+   gives no `approval_hook`: then run `amq-remote doctor --json` and use its
+   `hooks` row for this session's settings file (`approval`: `installed`
+   is `ok`, `missing` is `missing`; `approval_form` `stale` is `stale`), or
+   with an even older doctor treat a `native_capability` failure that names
+   the PermissionRequest hook as `missing` and anything else as `ok`.
    - `ok`: nothing to do.
    - `disabled`: say that this session's Claude settings set
      `disableAllHooks`, so approvals stay in the terminal unless a project
@@ -104,7 +109,7 @@ command's own message. Do not work around a refusal.
    - `unreadable`: say that the Claude settings file cannot be read, and that
      `amq-remote doctor` names it and the reason.
    - `stale`: say the installed hook is an older form, then run
-     `amq-remote claude install-approval-hook`.
+     `amq-remote doctor --fix`, which migrates it and prints each change.
    - `missing`: tell the user: "This adds one approval hook. The first
      approval dialog of each Claude Code session on this machine connects
      that session to its own Buzz channel, even one that never ran

@@ -98,6 +98,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	_ = os.Setenv("HOME", home)
+	// No claude on PATH: doctor asks the installed Claude Code for its
+	// version once per process, and the developer's must not decide a test.
+	_ = os.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
 	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", binding.EnvPath} {
 		_ = os.Unsetenv(name)
 	}

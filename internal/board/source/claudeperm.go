@@ -53,12 +53,11 @@ func (ClaudePermissions) Read(ctx context.Context, env board.Env) (res board.Res
 			res.Coverage.Detail = fmt.Sprintf("%d unmapped sessions outside the 36h discovery window", res.Coverage.Skipped)
 		}
 	}()
-	userHome, err := os.UserHomeDir()
+	home, err := harness.UserClaudeConfigDir()
 	if err != nil {
 		fail(err)
 		return res
 	}
-	home := harness.ClaudeConfigDir(userHome)
 	dir, err := os.Open(filepath.Join(home, "sessions"))
 	if err != nil {
 		if os.IsNotExist(err) {

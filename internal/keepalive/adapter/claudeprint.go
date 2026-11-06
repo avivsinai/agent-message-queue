@@ -262,11 +262,11 @@ func (c ClaudePrint) configDir() (string, error) {
 	if strings.TrimSpace(c.ConfigDir) != "" {
 		return c.ConfigDir, nil
 	}
-	home, err := os.UserHomeDir()
+	dir, err := harness.UserClaudeConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve CLAUDE_CONFIG_DIR: %w", err)
 	}
-	return harness.ClaudeConfigDir(home), nil
+	return dir, nil
 }
 
 func (c ClaudePrint) stateDir() (string, error) {

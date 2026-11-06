@@ -107,11 +107,11 @@ func defaultRunOperatorCodexNotify(ctx context.Context, name string, args []stri
 
 // codexHomeDir is CODEX_HOME, or ~/.codex.
 func codexHomeDir() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := harness.UserCodexHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve Codex home: %w", err)
 	}
-	return harness.CodexHome(home), nil
+	return dir, nil
 }
 
 func loadOperatorCodexNotify() ([]string, error) {

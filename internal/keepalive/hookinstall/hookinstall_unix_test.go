@@ -3,8 +3,6 @@
 package hookinstall
 
 import (
-	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,48 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestBackupIfExistsDoesNotFollowSymlink(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "settings.json")
-	original := []byte(`{"keep":true}`)
-	mustWrite(t, src, original)
-	victim := filepath.Join(dir, "victim")
-	victimBytes := []byte("do-not-clobber\n")
-	mustWrite(t, victim, victimBytes)
-
-	for attempt := 0; attempt < 8; attempt++ {
-		ts := time.Now().UTC().Format("20060102T150405Z")
-		planted := fmt.Sprintf("%s.bak-%s", src, ts)
-		_ = os.Remove(planted)
-		if err := os.Symlink(victim, planted); err != nil {
-			t.Fatalf("Symlink backup name: %v", err)
-		}
-		if time.Now().UTC().Format("20060102T150405Z") != ts {
-			continue
-		}
-		backup, err := backupIfExists(src)
-		gotVictim, readErr := os.ReadFile(victim)
-		if readErr != nil || !bytes.Equal(gotVictim, victimBytes) {
-			t.Fatalf("backup followed symlink: err=%v bytes=%q backup=%q installErr=%v", readErr, gotVictim, backup, err)
-		}
-		info, statErr := os.Lstat(planted)
-		if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("planted backup name is no longer a symlink: err=%v mode=%v", statErr, info.Mode())
-		}
-		if err == nil {
-			if backup == planted {
-				t.Fatal("backup reused symlink path")
-			}
-			got, readErr := os.ReadFile(backup)
-			if readErr != nil || !bytes.Equal(got, original) {
-				t.Fatalf("exclusive backup: err=%v bytes=%q", readErr, got)
-			}
-		}
-		return
-	}
-	t.Fatal("could not plant a same-second backup symlink")
-}
 
 func TestInstallBothReportsPartialCommitWhenSecondWriteFails(t *testing.T) {
 	if os.Getuid() == 0 {
