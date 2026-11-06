@@ -2,6 +2,7 @@ package acp
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -74,10 +75,14 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 }
 
 // A Claude turn is posted when its first assistant line arrives, shown as
-// running, edited at most once every mirrorEditGap while it runs, and edited
-// a last time with its answer. A tick that changes nothing sends nothing.
-// The second turn's tick crashes after its post: the post still gets its
-// final edit (agent-message-queue-07h review).
+// running, edited only when what it shows changed and at most once every
+// mirrorEditGap, and edited at once with its answer. A tick that changes
+// nothing sends nothing. The second turn's tick crashes after its post: the
+// post still gets its final edit (agent-message-queue-07h review). The third
+// turn changes 12 times and gets mirrorProgressMax progress edits, then
+// still shows the interrupt (review: the cap kept it "running"). The fourth
+// turn is continued by a Stop hook 20 times in 60 s and is edited once per
+// gap, ending with its last answer (review: 21 stored events).
 func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
@@ -95,6 +100,22 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Lines at sec seconds after 09:01:00.
+	ts := func(sec int) string {
+		return time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).Add(time.Duration(sec) * time.Second).Format(time.RFC3339)
+	}
+	opener := func(id string, sec int, prompt string) string {
+		return `{"type":"user","uuid":"` + id + `","promptId":"p` + id + `","timestamp":"` + ts(sec) + `","message":{"content":"` + prompt + `"}}`
+	}
+	assistant := func(id string, sec int, stop, block string) string {
+		return `{"type":"assistant","uuid":"a` + id + `","timestamp":"` + ts(sec) + `","message":{"id":"` + id + `","stop_reason":"` + stop + `","content":[` + block + `]}}`
+	}
+	toolUse := func(id string, sec int, name string) string {
+		return assistant(id, sec, "tool_use", `{"type":"tool_use","id":"t`+id+`","name":"`+name+`","input":{}}`)
+	}
+	say := func(id string, sec int, stop, text string) string {
+		return assistant(id, sec, stop, `{"type":"text","text":"`+text+`"}`)
 	}
 	var sent []string
 	savedPost, savedEdit := postAnswer, editMessage
@@ -114,56 +135,68 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
 
 	dir, _ := mirror.DirFor("alpha")
-	steps := []struct {
+	type step struct {
 		lines []string
-		after time.Duration
+		after int  // tick time, seconds after now
 		crash bool // state.json is lost after the post
 		want  []string
-	}{{
-		lines: []string{
-			`{"type":"user","uuid":"o1","promptId":"p1","timestamp":"2026-11-04T09:01:00Z","message":{"content":"run the tests"}}`,
-			`{"type":"assistant","uuid":"a1","timestamp":"2026-11-04T09:01:02Z","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}`,
-		},
-		want: []string{"post: ▶ run the tests\n… running · 1 tool (Bash) · 2s"},
-	}, {
-		lines: []string{`{"type":"assistant","uuid":"a2","timestamp":"2026-11-04T09:01:04Z","message":{"id":"m2","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t2","name":"Read","input":{}}]}}`},
-		after: time.Second,
-	}, {
-		after: 3 * time.Second,
-		want:  []string{"edit: ▶ run the tests\n… running · 2 tools (Bash, Read) · 4s"},
-	}, {
-		lines: []string{`{"type":"assistant","uuid":"a3","timestamp":"2026-11-04T09:01:06Z","message":{"id":"m3","stop_reason":"end_turn","content":[{"type":"text","text":"All pass."}]}}`},
-		after: 6 * time.Second,
-		want:  []string{"edit: ▶ run the tests\n✓ 2 tools (Bash, Read) · 6s\nAll pass."},
-	}, {
-		after: 9 * time.Second,
-	}, {
-		lines: []string{
-			`{"type":"user","uuid":"o2","promptId":"p2","timestamp":"2026-11-04T09:02:00Z","message":{"content":"commit"}}`,
-			`{"type":"assistant","uuid":"b1","timestamp":"2026-11-04T09:02:01Z","message":{"id":"n1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{}}]}}`,
-		},
-		after: 12 * time.Second,
-		crash: true,
-		want:  []string{"post: ▶ commit\n… running · 1 tool (Bash) · 1s"},
-	}, {
-		lines: []string{`{"type":"assistant","uuid":"b2","timestamp":"2026-11-04T09:02:03Z","message":{"id":"n2","stop_reason":"end_turn","content":[{"type":"text","text":"Committed."}]}}`},
-		after: 15 * time.Second,
-		want:  []string{"edit: ▶ commit\n✓ 1 tool (Bash) · 3s\nCommitted."},
-	}}
+	}
+	steps := []step{
+		{lines: []string{opener("o1", 0, "run the tests"), toolUse("m1", 2, "Bash")}, after: 0,
+			want: []string{"post: ▶ run the tests\n… running · 1 tool (Bash) · 2s"}},
+		{lines: []string{toolUse("m2", 10, "Read")}, after: 10},
+		{lines: []string{toolUse("m3", 35, "Grep")}, after: 35,
+			want: []string{"edit: ▶ run the tests\n… running · 3 tools (Bash, Read, Grep) · 35s"}},
+		{lines: []string{say("m4", 40, "tool_use", "Still checking.")}, after: 40},
+		{after: 70},
+		{lines: []string{say("m5", 72, "end_turn", "All pass.")}, after: 72,
+			want: []string{"edit: ▶ run the tests\n✓ 3 tools (Bash, Read, Grep) · 1m12s\nAll pass."}},
+		{after: 75},
+		{lines: []string{opener("o2", 100, "commit"), toolUse("n1", 101, "Bash")}, after: 100, crash: true,
+			want: []string{"post: ▶ commit\n… running · 1 tool (Bash) · 1s"}},
+		{lines: []string{say("n2", 103, "end_turn", "Committed.")}, after: 103,
+			want: []string{"edit: ▶ commit\n✓ 1 tool (Bash) · 3s\nCommitted."}},
+		{lines: []string{opener("o3", 200, "loop"), toolUse("k0", 201, "Bash")}, after: 200,
+			want: []string{"post: ▶ loop\n… running · 1 tool (Bash) · 1s"}},
+	}
+	for i := 1; i <= 12; i++ {
+		st := step{lines: []string{toolUse("k"+strconv.Itoa(i), 201+31*i, "Bash")}, after: 200 + 31*i}
+		if i <= mirrorProgressMax {
+			st.want = []string{fmt.Sprintf("edit: ▶ loop\n… running · %d tools (Bash ×%d) · %s", i+1, i+1, time.Duration(1+31*i)*time.Second)}
+		}
+		steps = append(steps, st)
+	}
+	interrupt := `{"type":"user","uuid":"i3","promptId":"po3","timestamp":"` + ts(574) + `","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`
+	steps = append(steps,
+		step{lines: []string{interrupt}, after: 574,
+			want: []string{"edit: ▶ loop\n✗ interrupted · 13 tools (Bash ×13) · 6m14s"}},
+		step{lines: []string{say("k13", 580, "end_turn", "Done.")}, after: 580,
+			want: []string{"edit: ▶ loop\n✓ 13 tools (Bash ×13) · 6m20s\nDone."}},
+		step{lines: []string{opener("o4", 700, "ship"), say("h0", 701, "end_turn", "done 0")}, after: 701,
+			want: []string{"post: ▶ ship\n✓ 1s\ndone 0"}})
+	for i := 1; i <= 20; i++ {
+		hook := `{"type":"user","uuid":"g` + strconv.Itoa(i) + `","promptId":"po4","isMeta":true,"timestamp":"` + ts(700+3*i) + `","message":{"content":[{"type":"text","text":"Stop hook feedback: keep going"}]}}`
+		st := step{lines: []string{hook, say("h"+strconv.Itoa(i), 701+3*i, "end_turn", "done "+strconv.Itoa(i))}, after: 702 + 3*i}
+		if i%10 == 0 {
+			st.want = []string{fmt.Sprintf("edit: ▶ ship\n✓ %s\ndone %d", time.Duration(1+3*i)*time.Second, i)}
+		}
+		steps = append(steps, st)
+	}
+	steps = append(steps, step{after: 800})
 	for i, step := range steps {
 		if step.lines != nil {
 			appendLines(step.lines...)
 		}
 		sent = nil
 		saved, _, _ := readMirrorFile(dir)
-		s.mirrorBinding(target, b, now.Add(step.after), false)
+		s.mirrorBinding(target, b, now.Add(time.Duration(step.after)*time.Second), false)
 		if step.crash {
 			if err := writeMirrorFile(dir, saved); err != nil {
 				t.Fatal(err)
 			}
 		}
 		if !slices.Equal(sent, step.want) {
-			t.Fatalf("step %d at +%s: sent %q; want %q", i+1, step.after, sent, step.want)
+			t.Fatalf("step %d at +%ds: sent %q; want %q", i+1, step.after, sent, step.want)
 		}
 	}
 }

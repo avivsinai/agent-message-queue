@@ -558,8 +558,9 @@ func maintainWakeSelfUpgrade(
 	}
 	different, comparisonErr := inspectWakeSelfUpgradeLiveDifference(inspection, probe)
 	if comparisonErr != nil {
-		// Inconclusive identity is transient (Homebrew Cellar unlink, proc_pidpath
-		// ESRCH). Do not remember the probe or write refusal memory; retry next tick.
+		// Inconclusive identity can be transient (a racing replacement or a
+		// process exit). Do not remember the probe or write refusal memory; retry
+		// next tick.
 		decision.Action = wakeSelfUpgradeActionDeferred
 		decision.Reason = wakeRestartReasonWithRemedy(
 			"live wake image identity is unknown or ambiguous: "+comparisonErr.Error(),
@@ -630,6 +631,17 @@ func publishWakeSelfUpgradePending(
 		existing, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
 		if err != nil {
 			return err
+		}
+		if exists {
+			if orphaned, reason := wakeRestartRequestOrphaned(existing.Record); orphaned {
+				if err := refuseWakeRestartRecordAt(scope, existing.Record, reason); err != nil {
+					return fmt.Errorf("retire orphaned wake restart request: %w", err)
+				}
+				existing, exists, err = readWakeRestartRecordSnapshotAt(dirfd, agentDir)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		if exists {
 			switch {

@@ -555,6 +555,18 @@ func Render(t Turn) string {
 	return Unmention(b.String())
 }
 
+// Fingerprint is what Render shows of t that can change while it runs:
+// its tools by name and count, whether it is interrupted, and its end. The
+// elapsed time is not part of it.
+func Fingerprint(t Turn) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%t", t.End, t.Halted)
+	for _, c := range t.Tools {
+		fmt.Fprintf(&b, "|%s×%d", c.Name, c.N)
+	}
+	return b.String()
+}
+
 // wordJoiner is invisible and is not a name character.
 const wordJoiner = "\u2060"
 

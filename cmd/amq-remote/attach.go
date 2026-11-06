@@ -579,6 +579,7 @@ var (
 	processCwd         = launch.ProcessCwd
 	codexThreadCwd     = codex.ThreadCwd
 	codexRollout       = homeCodexRollout
+	codexHolderRollout = codex.HolderRollout
 	codexLoadedThreads = func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }
 	codexDefaultSocket = codex.DefaultControlSocket
 	codexDaemonPID     = codex.DaemonPID
@@ -812,6 +813,9 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 			}
 			h.PID, h.Holder = pid, holder
 			h.Transcript = codexRollout(thread)
+			if h.Transcript == "" {
+				h.Transcript = codexHolderRollout(holder)
+			}
 			return h
 		}
 		return h

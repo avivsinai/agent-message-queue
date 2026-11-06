@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -65,6 +66,7 @@ func init() {
 	processCwd = func(int) (string, error) { return "", errors.New("tests read no process") }
 	codexThreadCwd = func(string, string) (string, string, error) { return "", "", errors.New("tests dial no app-server") }
 	codexRollout = func(string) string { return "" }
+	codexHolderRollout = func(launch.HolderIdentity) string { return "" }
 	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	codexDaemonPID = func(string) (int, error) { return 0, errors.New("tests dial no app-server") }

@@ -161,3 +161,27 @@ func TestAppleScriptStringEscapesQuotesAndBackslashes(t *testing.T) {
 		t.Fatalf("appleScriptString = %s, want %s", got, want)
 	}
 }
+
+// A wake log holds one line per repeated notice plus a count, not the notice
+// again on every re-ring (.wake.log repeated identical lines, bead
+// agent-message-queue-9df).
+func TestWakeLogFoldsRepeatedNotices(t *testing.T) {
+	var log strings.Builder
+	cfg := &wakeConfig{
+		me:             "codex",
+		logNotices:     &wakeLogNoticeFold{},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(b []byte) (int, error) { return log.Write(b) },
+	}
+	for _, text := range []string{"AMQ: message from claude - a", "AMQ: message from claude - a", "AMQ: message from claude - a", "AMQ: message from claude - b"} {
+		if err := emitWakeAttention(cfg, wakePayload{text: text, provenance: wakePayloadPeerHeaders}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(log.String(), "\n"), "\n")
+	if len(lines) != 3 || lines[0] != "AMQ: message from claude - a" ||
+		!strings.HasSuffix(lines[1], "Z amq wake: the notice above repeated 2 more times") ||
+		lines[2] != "AMQ: message from claude - b" {
+		t.Fatalf("wake log = %q", lines)
+	}
+}

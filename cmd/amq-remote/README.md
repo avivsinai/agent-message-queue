@@ -437,7 +437,7 @@ running one:
 
 - macOS: the launchd user agent
   `~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`, logging to
-  `ROOT/extensions/remote/up.log`. Over SSH, with no login session to start it
+  `ROOT/extensions/remote/up.log` (see [Endpoint log](#endpoint-log)). Over SSH, with no login session to start it
   in, install writes it and it starts at the next login.
 - Linux: the systemd user unit
   `$XDG_CONFIG_HOME/systemd/user/amq-remote.service` (default `~/.config`),
@@ -516,6 +516,16 @@ flag list; the `share` flags are in the table below.
 
 `up` takes no positional arguments. A flag `serve` does not define, other
 than `--self`, `--registry`, and `--max-restarts`, is exit 2.
+
+### Endpoint log
+
+When the output of `up` and its `serve` child is `up.log` in the state
+directory (the login service on macOS, or an endpoint that attach starts),
+each line starts with the UTC time. A link logs one line when its state
+changes (online, or a new failure), not one per redial. Before a write would
+take `up.log` past 1 MiB, its content moves to `up.log.1` and `up.log` starts
+empty, so the log keeps at most 2 MiB. Other destinations, such as a terminal
+or the systemd journal, get the lines unchanged.
 
 ### `submit TARGET`
 
@@ -604,7 +614,8 @@ publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
-background (log: `up.log` in the state directory). Claude needs the
+background (log: `up.log` in the state directory; see
+[Endpoint log](#endpoint-log)). Claude needs the
 [Stop hook](#claude-code) on this path: without it a task never finishes, so
 attach of a Claude session (`--native` or `--link`) whose
 `~/.claude/settings.json` has no AMQ Stop hook exits 6 and names
@@ -969,9 +980,11 @@ included, comes back; the uninstall command is the way to stop it.
 The machine agent's channel of a Claude session also shows each turn of the
 session, wherever it started: the terminal, the desktop app, a Buzz message,
 a peer session or a background task. One message shows one turn. It appears
-when the model first answers, shows `… running` with the tools used so far
-while the turn runs, is updated at most once every 3 seconds, and shows the
-answer when the turn ends:
+when the model first answers and shows `… running` with the tools used so
+far. While the turn runs it is updated at most every 30 s while it changes
+(new tools or an interrupt; elapsed time alone is no change), at most 10
+times plus one to show an interrupt, and it shows the answer as soon as the
+turn ends:
 
 ```text
 ▶ run the tests and fix the failure
@@ -992,7 +1005,8 @@ already got (a Buzz message, or a reply the session sent to Buzz during the
 turn) shows the first two lines only. A shell command typed with `!` shows only
 when the model answers it, and never with the command itself; local slash
 commands and a subagent's own steps are not shown. When a Stop hook
-makes the session go on after a turn, that turn's message is edited.
+makes the session go on after a turn, that turn's message is edited, at
+most every 30 s, ending with the last answer.
 
 The machine agent reads the session's transcript, which Claude Code names in
 its session registry and in each approval hook; attach, and the approval hook

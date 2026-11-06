@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -112,7 +113,7 @@ func inspectDarwinWakeMappedImage(pid int) (darwinMappedWakeImage, error) {
 	if !filepath.IsAbs(firstPath) || filepath.Clean(firstPath) != firstPath {
 		return darwinMappedWakeImage{}, fmt.Errorf("wake process executable path is not canonical and absolute")
 	}
-	first, err := scanDarwinWakeMappedImage(pid, firstPath)
+	first, err := scanDarwinWakeMappedImage(pid, mappedAtDarwinPath(firstPath))
 	if err != nil {
 		return darwinMappedWakeImage{Path: firstPath}, err
 	}
@@ -124,7 +125,7 @@ func inspectDarwinWakeMappedImage(pid int) (darwinMappedWakeImage, error) {
 	if secondPath != firstPath {
 		return darwinMappedWakeImage{}, fmt.Errorf("wake process executable path changed during mapped-image inspection")
 	}
-	second, err := scanDarwinWakeMappedImage(pid, secondPath)
+	second, err := scanDarwinWakeMappedImage(pid, mappedAtDarwinPath(secondPath))
 	if err != nil {
 		return darwinMappedWakeImage{Path: secondPath}, err
 	}
@@ -134,7 +135,50 @@ func inspectDarwinWakeMappedImage(pid int) (darwinMappedWakeImage, error) {
 	return first, nil
 }
 
-func scanDarwinWakeMappedImage(pid int, executablePath string) (darwinMappedWakeImage, error) {
+// inspectDarwinWakeUnlinkedImage reads the mapped executable of a process
+// whose image file has no name left. proc_pidpath reports ENOENT once the last
+// link of a running executable is removed, for example when a package manager
+// deletes the old version, while the mapped vnode keeps its device and inode.
+// The scan selects that vnode by the expected device and inode, so a process
+// that does not map that exact file yields no candidate and stays unproven.
+func inspectDarwinWakeUnlinkedImage(pid int, device, inode uint64) (darwinMappedWakeImage, error) {
+	if device == 0 || inode == 0 {
+		return darwinMappedWakeImage{}, fmt.Errorf("expected wake image identity is incomplete")
+	}
+	match := func(_ string, stat darwinVInfoStat) bool {
+		return uint64(stat.Device) == device && stat.Inode == inode
+	}
+	var images [2]darwinMappedWakeImage
+	for i := range images {
+		if _, err := readDarwinProcessExecutablePath(pid); err == nil {
+			return darwinMappedWakeImage{}, fmt.Errorf("wake process executable has a name again")
+		} else if !errors.Is(err, unix.ENOENT) {
+			return darwinMappedWakeImage{}, fmt.Errorf("recheck removed wake process executable: %w", err)
+		}
+		image, err := scanDarwinWakeMappedImage(pid, match)
+		if err != nil {
+			return darwinMappedWakeImage{}, err
+		}
+		images[i] = image
+	}
+	if images[0] != images[1] {
+		return darwinMappedWakeImage{}, fmt.Errorf("wake mapped executable identity changed during inspection")
+	}
+	return images[0], nil
+}
+
+func mappedAtDarwinPath(executablePath string) func(string, darwinVInfoStat) bool {
+	return func(mappedPath string, _ darwinVInfoStat) bool {
+		return mappedPath == executablePath
+	}
+}
+
+// scanDarwinWakeMappedImage requires exactly one executable regular-file
+// vnode selected by match among the process's mapped regions.
+func scanDarwinWakeMappedImage(
+	pid int,
+	match func(mappedPath string, stat darwinVInfoStat) bool,
+) (darwinMappedWakeImage, error) {
 	if pid <= 0 {
 		return darwinMappedWakeImage{}, fmt.Errorf("invalid process id %d", pid)
 	}
@@ -169,11 +213,11 @@ func scanDarwinWakeMappedImage(pid int, executablePath string) (darwinMappedWake
 			}
 			mappedPath := string(region.Vnode.Path[:pathEnd])
 			stat := region.Vnode.Info.Stat
-			if mappedPath == executablePath &&
-				region.Vnode.Info.Type == darwinVnodeTypeRegular &&
-				stat.Mode&darwinModeTypeMask == darwinModeRegular {
+			if region.Vnode.Info.Type == darwinVnodeTypeRegular &&
+				stat.Mode&darwinModeTypeMask == darwinModeRegular &&
+				match(mappedPath, stat) {
 				candidate := darwinMappedWakeImage{
-					Path: executablePath,
+					Path: mappedPath,
 					Identity: wakeFileIdentity{
 						Device:    uint64(stat.Device),
 						Inode:     stat.Inode,

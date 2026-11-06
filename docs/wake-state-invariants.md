@@ -243,7 +243,10 @@ Source anchor: `wake_settings_unix.go`.
 ## `.wake.dialog`: open harness dialog
 
 **Owns:** whether a harness dialog, startup screen or busy turn holds this
-agent's doorbell, as one JSON line, mode 0600. Its writers:
+agent's doorbell, as one JSON line, mode 0600: one file, or a directory with
+one such file per open Claude Code dialog, keyed by session, subagent and
+tool call, plus `legacy.json` for a single-file marker it absorbed. Its
+writers:
 
 - the hook receiver `amq wake dialog open|close`, run by the AMQ dialog hooks
   of Claude Code, Codex and Cursor;
@@ -263,10 +266,19 @@ that proves no open dialog holds only while the AMQ dialog hook of its
 harness is installed.
 
 The wake reads the marker before each delivery attempt and each terminal
-write and never infers it from other wake state. It writes no marker; it
-removes only a Claude Code tool call marker whose session transcript shows
-that call's result, and only the exact version it read, under the marker
-lock. No wake cleanup removes it. A marker that is unreadable, dated in the
+write and never infers it from other wake state. The doorbell is held while
+any entry holds; each entry closes only by its own dialog's facts, and a
+session's events close only that session's entries. An entry whose recorded
+Claude Code host process is proven gone closes; one whose host is unknown
+holds. The directory replaces
+a single file only by an atomic exchange and is removed only when empty, so
+the path is never absent while a dialog is open. It writes no marker; it
+removes only a Claude Code marker whose session transcript proves its
+dialog gone (a tool call marker by that call's result, a permission marker
+by a newer non-synthetic assistant message of its own chain: the main chain,
+or for a subagent's marker only that subagent's transcript, found once
+at the layout Claude Code writes), and only the exact version it
+read, under the marker lock. A marker's age never releases input. No wake cleanup removes it. A marker that is unreadable, dated in the
 future, behind a non-canonical agent directory, or older than the quiet hold
 blocks input only while the AMQ dialog hook of the harness that wrote it
 (Claude Code, Codex trusted, or Cursor) is installed with its amq binary
