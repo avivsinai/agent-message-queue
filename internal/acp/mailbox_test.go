@@ -884,9 +884,13 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	// The turn budget also bounds delivery, so the turn ends on the agent's
+	// reply, never on the budget: a 100 ms budget delivered nothing on a
+	// loaded CI runner (run 42218900008).
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: time.Minute, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
 	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
 	live.read()
+	roots := map[string]string{"a": rootA, "b": rootB}
 	for i, name := range []string{"a", "b"} {
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{"cwd":"/tmp"}}`, 10+i))
 		created := live.read()["result"].(map[string]any)
@@ -899,9 +903,21 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 			t.Fatalf("set_model %s: %v", name, reply)
 		}
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"for %s"}]}}`, 30+i, sid, name))
+		var ids []string
+		for deadline := time.Now().Add(5 * time.Second); len(ids) == 0 && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			ids = inboxPrompts(t, roots[name])
+		}
+		if len(ids) != 1 {
+			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
+		}
+		prompt, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(roots[name], "agent"), ids[0]+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		replyAs(t, roots[name], prompt.Header.Thread, ids[0], format.KindAnswer, "done")
 		live.readUntilResult()
 	}
-	for name, root := range map[string]string{"a": rootA, "b": rootB} {
+	for name, root := range roots {
 		if ids := inboxPrompts(t, root); len(ids) != 1 {
 			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
 		}
