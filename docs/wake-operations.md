@@ -19,6 +19,17 @@ A non-TTY agent must preserve a live wake unless the check reports
 command revalidates the current process, target, generation, root, and owner
 state before it changes anything.
 
+`amq wake restart` asks the live wake, through its control endpoint, to
+restart itself. On macOS the wake accepts a requester that presents the owner
+token and either runs in the owner's OS session or descends from the exact
+owner process, so a harness tool that runs commands in a session of its own
+under the agent qualifies. When the wake refuses, the requester's error and the
+wake log name the reason, and the request is marked refused so it does not hold
+a later restart or self-upgrade. A pending request whose requester exited
+before the wake took it is marked refused at the wake's next self-upgrade
+check. A wake from an older release refuses without a reason; its request
+stays pending until the next `amq wake restart` adopts it.
+
 `wake check` and `doctor` JSON has two schemas. Schema 1 is the default and is
 byte-compatible for a missing lock; a live or stale lock adds
 `wake_generation`, `wake_target_digest`, `started_at` (the lock's start time),
@@ -790,7 +801,12 @@ that path at a strictly newer release image, the wake waits for a quiescent
 delivery boundary and replaces its running image in place: the PID, terminal
 ownership, and unread work stay. On Darwin, a running wake whose mapped
 executable still has the recorded device and inode counts as the same image
-after the package manager removes the old path. On Homebrew or Scoop installs,
+after the package manager removes the old path. When that removal deletes the
+last name of the running file, macOS reports no executable path for the
+process; AMQ then selects the mapped executable by the recorded device and
+inode, and treats a process that does not map exactly that file as unproven.
+The wake's identity (lock, generation, process start, and owner) is proven
+separately and does not depend on its image path. On Homebrew or Scoop installs,
 `amq upgrade` delegates to the package manager.
 
 - **Candidates.** The wake reads the candidate's version from the recorded

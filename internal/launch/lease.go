@@ -406,7 +406,13 @@ func runsUnderProcess(holder HolderIdentity) bool {
 // intermediate parent that exits frees its pid for another process, and a
 // walk that followed that pid would reach an unrelated holder.
 func RunsUnderProcess(holder HolderIdentity) bool {
-	child := inspectProcess(os.Getpid())
+	return ProcessRunsUnder(os.Getpid(), holder)
+}
+
+// ProcessRunsUnder reports whether process pid is holder's process or
+// descends from it, under the same rules as RunsUnderProcess.
+func ProcessRunsUnder(pid int, holder HolderIdentity) bool {
+	child := inspectProcess(pid)
 	if !child.Running || child.StartToken == "" {
 		return false
 	}
