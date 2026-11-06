@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -40,10 +41,10 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		return nil, protocol.ExitUsage, err
 	}
 	report := map[string]any{"root": c.root, "state_dir": stateDir, "socket": ipc.SocketPath(stateDir)}
-	// failing names each broken boundary between the owner and the native
-	// session: AMQ route, endpoint, registration, native capability,
-	// body key, tag expiry, relay auth, DM surface, publication, presence,
-	// discovery.
+	// failing names each broken link between the owner and a session:
+	// hooks, machine agent, channel, mailbox, stale harness, AMQ route,
+	// endpoint, registration, body key, tag expiry, relay auth, DM surface,
+	// publication, presence, discovery.
 	// Doctor exits 6 exactly when it is not empty.
 	var failing []boundaryFailure
 	fail := func(boundary, subject, detail, remedy string) {
@@ -63,10 +64,23 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	note := func(boundary, subject, detail, remedy string) {
 		notes = append(notes, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy})
 	}
+	all, err := binding.List()
+	if err != nil {
+		fail("bindings", "", "cannot list the bindings: "+err.Error(), "check the permissions of the AMQ home's remote directory")
+	}
+	doctorMachine(stateDir, all, report, fail, note)
+	// A Buzz agent can keep running an amq-acp that an upgrade replaced, so
+	// it answers from the removed binding contract.
+	noteStaleACP(fail, note)
 	if _, err := os.Stat(stateDir); err != nil {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
-		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
-		noteStaleACP(note)
+		// Only a native session needs the endpoint: a mailbox binding
+		// delivers through the AMQ queue.
+		if nativeThrough(all, c.root) {
+			fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
+		} else {
+			note("endpoint", "", "no state directory: no native session is attached through this root", "a native session (/amq-remote --native) starts the endpoint")
+		}
 		if len(notes) > 0 {
 			report["notes"] = notes
 		}
@@ -102,40 +116,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["refusals_error"] = loadErr.Error()
 		fail("registration", "refusals.json", loadErr.Error(), "restart serve; it rewrites refusals.json on every start")
 	}
-	// Native capability: a Claude target completes a request only through
-	// the Stop hook. Each target's hooks live in its session's settings.json,
-	// which is checked once.
-	settingsOf := claudeTargetSettings(stateDir)
-	checked := map[string]bool{}
-	for _, s := range sessions {
-		if s.Harness != "claude_code" {
-			continue
-		}
-		home, settings, herr := settingsOf(s.TargetID)
-		if herr == nil && checked[settings] {
-			continue
-		}
-		checked[settings] = true
-		state, serr := "", herr
-		if herr == nil {
-			state, serr = claude.StopHookStateAt(settings)
-		}
-		switch {
-		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+settings)
-		case state == claude.StopHookMissing:
-			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
-		case state == claude.StopHookDisabled:
-			// Only the user file was read; a project or managed setting can
-			// override disableAllHooks, so the effective state is unknown and
-			// is reported, not failed.
-			report["claude_stop_hook"] = settings + " holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
-		}
-		if serr == nil && state != claude.StopHookMissing {
-			form, _ := claude.StopHookForm(home, settings)
-			hookFormFinding(form, s.TargetID, "Stop", "install-stop-hook", fail, note)
-		}
-	}
 	// A Codex thread that runs Codex's automatic approvals reviewer shows
 	// few or no dialogs in Buzz: the reviewer answers them first. That is
 	// the owner's choice, so it is reported, not failed.
@@ -148,37 +128,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	if len(reviewers) > 0 {
 		report["approval_reviewer"] = reviewers
 	}
-	// Buzz shows a Claude dialog only through the PermissionRequest hook;
-	// without it every approval is answered in the terminal.
-	checked = map[string]bool{}
-	for _, s := range sessions {
-		if s.Harness != "claude_code" {
-			continue
-		}
-		home, settings, herr := settingsOf(s.TargetID)
-		if herr == nil && checked[settings] {
-			continue
-		}
-		checked[settings] = true
-		state, serr := "", herr
-		if herr == nil {
-			state, serr = claude.PermissionHookState(settings)
-		}
-		switch {
-		case serr != nil:
-			fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+serr.Error(), "repair "+settings)
-		case state == claude.StopHookMissing && !s.Capabilities.ApproveTool:
-			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so a shared source never sees a tool approval", "run `amq-remote claude install-approval-hook`")
-		case state == claude.StopHookMissing:
-			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval", "run `amq-remote claude install-approval-hook`")
-		case state == claude.StopHookDisabled:
-			report["claude_approval_hook"] = settings + " holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
-		}
-		if serr == nil && state != claude.StopHookMissing {
-			form, _ := claude.PermissionHookForm(home, settings)
-			hookFormFinding(form, s.TargetID, "PermissionRequest", "install-approval-hook", fail, note)
-		}
-	}
 	// Body identity: per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
 	// dir reports nothing — sessions without remote sharing are normal.
@@ -187,12 +136,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// is distinct: auth_pending is not authenticated, and authenticated is
 	// not proof the relay materialized ownership.
 	doctorRelay(stateDir, report, fail, note)
-	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
-	// upgrade replaced, so it answers from the removed binding contract.
-	// A different identity can also be a byte-identical copy or another
-	// binary with the same name, so this is advice, not a failure: it lands
-	// in notes and never makes doctor exit non-zero.
-	noteStaleACP(note)
 	noteNoService(note, c.root, stateDir)
 	if len(notes) > 0 {
 		report["notes"] = notes
@@ -204,14 +147,24 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 // installer writes now. An ungated hook still works and costs an amq-remote
 // start at every event in every session, so it is advice. A stale gate can
 // skip a state the receiver reads, so it fails.
-func hookFormFinding(form, target, event, installer string, fail, note func(boundary, subject, detail, remedy string)) {
-	remedy := "run `amq-remote claude " + installer + "`"
+func hookFormFinding(form, subject, hook, remedy string, fail, note reportFunc) {
 	switch form {
 	case claude.HookFormUngated:
-		note("hook_form", target, "the "+event+" hook is an older form that starts amq-remote in every Claude session on this machine", remedy)
+		note("hook_form", subject, "the "+hook+" hook is an older form that starts amq-remote in every Claude session on this machine", remedy)
 	case claude.HookFormStale:
-		fail("native_capability", target, "the "+event+" hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", remedy)
+		fail("hooks", subject, "the "+hook+" hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", remedy)
 	}
+}
+
+// nativeThrough reports whether a native binding names root, so its
+// session needs root's endpoint.
+func nativeThrough(all []binding.Binding, root string) bool {
+	for _, b := range all {
+		if !b.Mailbox() && sameRoot(b.Root, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // doctorRequestStore counts the request records and fails each one that
@@ -394,6 +347,38 @@ func doctorAMQRoute(root, handle string, fail, note func(boundary, subject, deta
 	}
 }
 
+// doctorReport is the doctor report; JSON prints it as it is, and text
+// prints one line per failing link and per note.
+type doctorReport map[string]any
+
+// printDoctor prints each failing link as `FAIL <link> <subject>: <detail>;
+// fix: <remedy>`, then each note the same way with NOTE, or one OK line when
+// nothing fails.
+func printDoctor(w io.Writer, r doctorReport) {
+	line := func(kind string, f boundaryFailure) {
+		head := kind + " " + f.Boundary
+		if f.Subject != "" {
+			head += " " + f.Subject
+		}
+		text := head + ": " + f.Detail
+		if f.Remedy != "" {
+			text += "; fix: " + f.Remedy
+		}
+		say(w, "%s", text)
+	}
+	failing, _ := r["failing"].([]boundaryFailure)
+	for _, f := range failing {
+		line("FAIL", f)
+	}
+	notes, _ := r["notes"].([]boundaryFailure)
+	for _, n := range notes {
+		line("NOTE", n)
+	}
+	if len(failing) == 0 {
+		say(w, "OK: no failing link")
+	}
+}
+
 // boundaryFailure is one broken boundary doctor names, with what to do.
 type boundaryFailure struct {
 	Boundary string `json:"boundary"`
@@ -409,24 +394,33 @@ func errSuffix(e string) string {
 	return ": " + e
 }
 
-// claudeTargetSettings returns a lookup of a Claude target's home and the
-// settings.json of its session: the manifest entry's recorded config_dir,
-// else home/.claude. Like the endpoint, it never reads CLAUDE_CONFIG_DIR.
-func claudeTargetSettings(stateDir string) func(target string) (home, settings string, err error) {
-	configs := map[string]json.RawMessage{}
+// claudeTargets is the Claude entries of a manifest and a lookup of each
+// one's home and the settings.json of its session: the entry's recorded
+// config_dir, else home/.claude. Like the endpoint, it never reads
+// CLAUDE_CONFIG_DIR.
+type claudeTargets struct {
+	targets []string
+	configs map[string]json.RawMessage
+}
+
+func claudeTargetSettings(stateDir string) claudeTargets {
+	t := claudeTargets{configs: map[string]json.RawMessage{}}
 	if mf, err := manifest.Load(manifest.DefaultPath(stateDir)); err == nil {
 		for _, ad := range mf.Adapters {
 			if ad.Kind == "claude" {
-				configs[ad.Target] = ad.Config
+				t.targets = append(t.targets, ad.Target)
+				t.configs[ad.Target] = ad.Config
 			}
 		}
 	}
-	return func(target string) (string, string, error) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", "", err
-		}
-		settings, err := claude.TargetSettingsPath(configs[target])
-		return home, settings, err
+	return t
+}
+
+func (t claudeTargets) lookup(target string) (home, settings string, err error) {
+	home, err = os.UserHomeDir()
+	if err != nil {
+		return "", "", err
 	}
+	settings, err = claude.TargetSettingsPath(t.configs[target])
+	return home, settings, err
 }

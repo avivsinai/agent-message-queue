@@ -192,6 +192,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	v := viewOf(nb, nb.Name, reused)
 	if c.json {
 		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
+		if cand.Kind == harness.Claude {
+			out["approval_hook"] = approvalHookState()
+		}
 		emitJSON(stdout, withWarning(connectedJSON(out, v), hookWarning))
 		return 0, nil
 	}
@@ -220,7 +223,7 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 	machine := binding.Machine()
 	nb := binding.Binding{Root: root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
-		Transcript: h.Transcript}
+		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind)}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
@@ -310,6 +313,9 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 	v := viewOf(b, name, reused)
 	if asJSON {
 		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
+		if b.Harness == harness.Claude {
+			out["approval_hook"] = approvalHookState()
+		}
 		emitJSON(stdout, connectedJSON(out, v))
 		return 0, nil
 	}
@@ -351,7 +357,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript)}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind)}
 	if fromHook {
 		if err := ownerDetached(b.Holder); err != nil {
 			return b, "", false, err
@@ -368,6 +374,22 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	pruneAfterAttach(inspect)
 	recordAttachIdentity(stderr, root, handle, h.Kind)
 	return b, written, reused, nil
+}
+
+// sessionConfigDir is the Claude configuration directory of the session
+// this process runs in, for a Claude session: attach --self and the approval
+// hook both run inside it, so they inherit its CLAUDE_CONFIG_DIR. Other
+// harnesses, and a directory that does not resolve to an absolute path,
+// get "".
+func sessionConfigDir(kind string) string {
+	if kind != harness.Claude {
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	if dir := harness.ClaudeConfigDir(home); filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return ""
 }
 
 func emitJSON(w io.Writer, v any) {
@@ -1072,6 +1094,38 @@ func requireStopHook() (warning string, err error) {
 		return "the Claude user settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
 	}
 	return "", nil
+}
+
+// Approval hook states attach reports (approvalHookState).
+const (
+	approvalHookOK         = "ok"
+	approvalHookMissing    = "missing"
+	approvalHookStale      = "stale"
+	approvalHookDisabled   = "disabled"
+	approvalHookUnreadable = "unreadable"
+)
+
+// approvalHookState is the AMQ approval hook in the settings file of the
+// Claude session this process runs in: ok (installed; an older ungated form
+// still works), missing, stale (not the one entry the installer writes now),
+// disabled (the file sets disableAllHooks), or unreadable. It only reads.
+func approvalHookState() string {
+	home, _ := os.UserHomeDir()
+	settings := claude.SettingsPath(home)
+	state, err := claude.PermissionHookState(settings)
+	switch {
+	case err != nil:
+		return approvalHookUnreadable
+	case state == claude.StopHookMissing:
+		return approvalHookMissing
+	case state == claude.StopHookDisabled:
+		return approvalHookDisabled
+	}
+	switch form, _ := claude.PermissionHookForm(home, settings); form {
+	case claude.HookFormCurrent, claude.HookFormUngated:
+		return approvalHookOK
+	}
+	return approvalHookStale
 }
 
 // withWarning adds a warning to a JSON result when there is one.

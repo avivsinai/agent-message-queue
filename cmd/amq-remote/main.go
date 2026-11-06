@@ -274,6 +274,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = service(rest, stdout, probe)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
+		if m, ok := out.(map[string]any); ok {
+			out = doctorReport(m)
+		}
 	case "link":
 		out, code, err = link(rest, stdin, stdout, probe)
 	case "mcp":
@@ -396,6 +399,8 @@ func printHuman(w io.Writer, out any) {
 		printSession(w, v)
 	case linkStatusOut:
 		printLinkStatus(w, v)
+	case doctorReport:
+		printDoctor(w, v)
 	default:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")

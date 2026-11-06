@@ -367,6 +367,16 @@ func PermissionHookState(settings string) (string, error) {
 	return hookState(settings, permissionSpec)
 }
 
+// PermissionHookCommand is the command of the one marked PermissionRequest
+// hook in the settings file settings, "" when it does not hold exactly one.
+func PermissionHookCommand(settings string) (string, error) {
+	cmds, err := installedCommands(settings, permissionSpec)
+	if err != nil || len(cmds) != 1 {
+		return "", err
+	}
+	return cmds[0], nil
+}
+
 // Forms of an installed hook command (StopHookForm, PermissionHookForm).
 const (
 	// HookFormCurrent is what the installer writes now for that binary.
@@ -494,7 +504,12 @@ func hookState(path string, spec hookSpec) (string, error) {
 // disableAllHooks, so Claude Code runs none of its hooks unless a project
 // or managed setting turns them on again.
 func HooksDisabled(home string) (bool, error) {
-	raw, err := readRegularBounded(SettingsPath(home), maxSettingsBytes)
+	return HooksDisabledAt(SettingsPath(home))
+}
+
+// HooksDisabledAt is HooksDisabled for the settings file at path.
+func HooksDisabledAt(path string) (bool, error) {
+	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

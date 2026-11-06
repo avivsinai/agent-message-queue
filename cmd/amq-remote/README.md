@@ -678,8 +678,13 @@ marker's display name, else the label, else `AMQ: <name>`) whenever there is
 an agent, and `machine_name` whenever there is a machine agent. When the
 machine agent serves the session, it also reports `channel` (`active`,
 `creating`, `uncertain` or `failed`), `channel_name`, and, when uncertain or
-failed, `channel_error` and `channel_retry` (AMQ creates again by itself). A
-link share prints its own lines; a link has no Buzz agent.
+failed, `channel_error` and `channel_retry` (AMQ creates again by itself).
+For a Claude session it reports `approval_hook`, the AMQ approval hook in
+the session's own settings file: `ok`, `missing`, `stale` (not the form the
+installer writes now), `disabled` (the file sets `disableAllHooks`) or
+`unreadable`. The binding records the session's Claude `config_dir`, so
+doctor checks that file. A link share prints its own lines; a link has no
+Buzz agent.
 
 `amq-remote channel reset <name>` gives up the machine agent's channel of
 session `<name>`. It is the only way to allow a new create after one that
@@ -753,16 +758,40 @@ in `internal/remote/protocol` returns those codes. It does not return 5.
 | 2 | Usage. Includes a bad flag, a relative or missing root, manifest validation, and a duplicate target. |
 | 3 | `not_found`. |
 | 4 | `wait` reached `--timeout`, or `wait` is looking at a snapshot that is not `completed`, `failed`, `cancelled`, `rejected`, or `uncertain`. |
-| 6 | Action required. Refusal codes: `busy`, `unsupported`, `unshared`, `expired`, `stale_epoch`, `request_conflict`, `storage_full`, `attachment_lost`, `result_expired`, `already_resolved`, `endpoint_already_running`, `endpoint_unreachable`, `store_closed`, `draining`. A snapshot in `rejected` or `uncertain` is also 6. `doctor` uses 6 when the state directory is missing or the endpoint is not reachable. `share` returns 6 for symlink, key-loading, and mint failures, and that explicit code is kept. |
+| 6 | Action required. Refusal codes: `busy`, `unsupported`, `unshared`, `expired`, `stale_epoch`, `request_conflict`, `storage_full`, `attachment_lost`, `result_expired`, `already_resolved`, `endpoint_already_running`, `endpoint_unreachable`, `store_closed`, `draining`. A snapshot in `rejected` or `uncertain` is also 6. `doctor` uses 6 when any link fails (see Doctor). `share` returns 6 for symlink, key-loading, and mint failures, and that explicit code is kept. |
 | 130 | `wait` was interrupted. The request keeps running. |
 
 ## Doctor
 
-`amq-remote doctor --root <absolute-root>` reports the state directory, the
-socket path, whether the endpoint answered `session.list`, record counts by
-state, and any persisted adapter refusals. No state directory yet means the
-endpoint has never been started: the report says to run `amq-remote serve`
-once. `amq-remote up` starts that same `serve` child.
+`amq-remote doctor --root <absolute-root>` checks every link between the
+owner and the sessions of this machine. It runs these checks with or
+without an endpoint state directory:
+
+- The Claude hooks in each settings file the machine's sessions read: the
+  one the environment names (`$CLAUDE_CONFIG_DIR/settings.json`, else
+  `~/.claude/settings.json`), `~/.claude/settings.json` when it is another
+  file, and the file of each `config_dir` a binding or a manifest entry
+  records. Each needs the approval hook and the wake dialog guard in the
+  form their installers write now, and the Stop hook when native mode is in
+  use. Doctor runs the installed
+  approval command through `sh -c` with `AMQ_HOOK_PROBE=1` and
+  `AMQ_REMOTE_BINDING` set to an existing binding, so its gate opens; the
+  receiver then prints its version and binds and posts nothing. A command
+  that prints nothing did not reach amq-remote (`probe` `closed`). A file
+  that sets `disableAllHooks` is a note.
+- The machine agent: its marker is fresh, it records a relay key, and Buzz
+  Desktop starts it when it opens (`start_on_app_launch` in Buzz Desktop's
+  `agents/managed-agents.json`; when that file cannot be read, a note).
+- The channel of each binding the machine agent serves is `active`.
+- Each mailbox binding: its handle is registered, and `amq wake check`
+  reports a live wake on the current image.
+
+No state directory means the endpoint has never been started. That fails
+only when a native binding names this root; a mailbox binding needs no
+endpoint. `amq-remote up` starts the same `serve` child. With a state
+directory, doctor also reports the socket path, whether the endpoint
+answered `session.list`, record counts by state, and any persisted adapter
+refusals.
 
 With a relay configured, doctor also reports each share's connection state
 as `serve` last wrote it (`auth_pending`, `authenticated` or `unavailable`),
@@ -775,15 +804,23 @@ approvals before a remote client sees them. It is the owner's setting, so
 doctor reports it and does not fail. A new thread started with
 `approvals_reviewer = "user"` sends its approvals to Buzz.
 
-`failing` lists each broken boundary with a subject, the detail, and a
-remedy. Doctor exits 6 exactly when `failing` is not empty.
+`failing` lists each broken link with a subject, the detail, and a remedy;
+`notes` lists advice in the same shape. Doctor exits 6 exactly when
+`failing` is not empty. The text output prints one line per entry,
+`FAIL <link> <subject>: <detail>; fix: <remedy>`, then each note as `NOTE`,
+or `OK: no failing link`. `--json` prints the report with its rows:
+`hooks`, `machine_agent`, `channels` and `mailboxes`.
 
-| Boundary | Fails when |
+| Link | Fails when |
 | --- | --- |
-| `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
+| `hooks` | A settings file lacks the approval hook or the wake dialog guard, holds one in a stale form, cannot be read, or its approval command does not reach amq-remote. It also fails without the Stop hook when a native binding or an endpoint manifest entry exists; on a mailbox-only machine that is a note. The subject is the settings file; the remedy names its `CLAUDE_CONFIG_DIR`. |
+| `machine_agent` | The machine agent is not running, records no relay key, or Buzz Desktop does not start it on launch. |
+| `channel` | A binding's channel is `uncertain` or `failed`. |
+| `mailbox` | A mailbox binding's handle is unregistered, or its wake is not live or runs another image. |
+| `stale_harness` | A running amq-acp runs an executable that an upgrade deleted. |
+| `endpoint` | No state directory while a native binding names this root, or the endpoint does not answer `session.list`. |
 | `amq_route` | The endpoint handle (`--me`, default `remote`) is not listed in the root's `config.json`, so other agents cannot route to it. |
 | `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
-| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook, or it has no AMQ PermissionRequest hook, so Buzz shows none of its dialogs. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` or `claude_approval_hook` instead, because project or managed settings decide the effective state. |
 | `body_key` | A share's body key or enrolled generation cannot be used. |
 | `tag_expiry` | A share's enrolled grants have expired. |
 | `relay_auth` | A share is not `authenticated`. |
@@ -802,12 +839,13 @@ number of refused attempts and the next try. The output stays owed and is
 retried with a backoff, in order per request. Do not send the message again
 from Buzz: that starts a new request.
 
-`stale_harness` is advice, not a failure: it is reported under `notes` and
-never makes doctor exit non-zero. It names each running amq-acp process
-whose executable differs from the installed one, with the installed path, and
-asks the operator to decide, since a different identity can also be a
-byte-identical copy. A process whose executable cannot be read within the
-probe deadline is reported as unknown, never as current.
+`stale_harness` is advice when the executable still exists: it is reported
+under `notes`. It names each running amq-acp process whose executable
+differs from the installed one, with the installed path, and asks the
+operator to decide, since a different identity can also be a
+byte-identical copy. A process whose executable an upgrade deleted runs a
+version no file holds, so it fails. A process whose executable cannot be
+read within the probe deadline is reported as unknown, never as current.
 
 ## Claude Code
 

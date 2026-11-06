@@ -42,7 +42,7 @@ func (r txtRecord) strict() (execIdentity, error) {
 	if !r.haveDev {
 		return execIdentity{}, errors.New("first txt record has no parseable device")
 	}
-	return execIdentity{Dev: r.dev, Inode: r.ino}, nil
+	return execIdentity{Dev: r.dev, Inode: r.ino, Path: r.name}, nil
 }
 
 // processIdentityOS reads a running process's executable identity on macOS

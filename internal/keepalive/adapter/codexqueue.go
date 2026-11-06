@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
@@ -143,14 +144,11 @@ func (c CodexQueue) codexHome() (string, error) {
 	if strings.TrimSpace(c.Home) != "" {
 		return c.Home, nil
 	}
-	if v := strings.TrimSpace(os.Getenv("CODEX_HOME")); v != "" {
-		return v, nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve CODEX_HOME: %w", err)
 	}
-	return filepath.Join(home, ".codex"), nil
+	return harness.CodexHome(home), nil
 }
 
 func (c CodexQueue) runner() CommandRunner {

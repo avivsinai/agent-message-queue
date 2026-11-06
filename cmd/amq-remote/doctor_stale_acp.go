@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,9 @@ import (
 type execIdentity struct {
 	Dev   uint64
 	Inode uint64
+	// Path is the executable's name as the system reports it for a running
+	// process; "" when it is not known. It is not part of the identity.
+	Path string
 }
 
 // acpProcess is one running amq-acp candidate with its launch name.
@@ -30,9 +34,12 @@ type acpProcess struct {
 // could not be read. Unknown is not current: it never counts as fine and
 // is reported, never guessed.
 type staleProbe struct {
-	PID    int
-	Stale  bool
-	Reason string // set when the identity could not be read
+	PID   int
+	Stale bool
+	// Deleted is a stale process whose executable no longer exists: an
+	// upgrade removed it, so the process runs a version no file holds.
+	Deleted bool
+	Reason  string // set when the identity could not be read
 }
 
 // staleInspection is what one pass of the stale harness check collected,
@@ -121,12 +128,26 @@ func staleACPInspect(ctx context.Context) staleInspection {
 			case err != nil:
 				probe.Reason = err.Error()
 			case !idSame(id, installed):
-				probe.Stale = true
+				probe.Stale, probe.Deleted = true, imageDeleted(id.Path)
 			}
 		}
 		insp.Probes = append(insp.Probes, probe)
 	}
 	return insp
+}
+
+// imageDeleted reports whether a running process's executable, named path,
+// is gone: Linux marks it " (deleted)", and elsewhere the name no longer
+// exists. An unknown name is not evidence.
+func imageDeleted(path string) bool {
+	if path == "" {
+		return false
+	}
+	if strings.HasSuffix(path, " (deleted)") {
+		return true
+	}
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // staleACPNotes turns probe outcomes into advice notes: one per stale
@@ -140,6 +161,8 @@ func staleACPNotes(probes []staleProbe, path string) []boundaryFailure {
 	reasonPids := map[string][]int{}
 	for _, p := range probes {
 		switch {
+		case p.Deleted:
+			// staleACPFailures reports it.
 		case p.Stale:
 			notes = append(notes, boundaryFailure{
 				Boundary: "stale_harness",
@@ -203,14 +226,32 @@ func staleInspectionNotes(insp staleInspection) []boundaryFailure {
 	return notes
 }
 
+// staleACPFailures names each amq-acp process whose executable was
+// deleted. Its identity differs from the installed one and no file holds
+// what it runs, so it is not a copy: it answers from a removed version.
+func staleACPFailures(probes []staleProbe) []boundaryFailure {
+	var out []boundaryFailure
+	for _, p := range probes {
+		if p.Deleted {
+			out = append(out, boundaryFailure{
+				Boundary: "stale_harness",
+				Subject:  fmt.Sprintf("pid %d", p.PID),
+				Detail:   fmt.Sprintf("amq-acp pid %d runs an executable that an upgrade deleted, so it answers from a removed version", p.PID),
+				Remedy:   "If this is a Buzz Desktop agent, Stop and Start it (Agents, the agent) so it runs the installed amq-acp",
+			})
+		}
+	}
+	return out
+}
+
 // noteStaleACP feeds the stale probe's advice into doctor's note closure.
 // Both early and full doctor paths call it: a mailbox-only setup that never
 // ran serve takes the early return, and that is exactly the setup that
 // hits a stale harness. It never returns silently: a failed ps, an
 // unresolvable installed amq-acp, or an unreadable identity each surface
 // as one non-failing note, and the outcomes already collected are still
-// reported. No doctor failure is ever added.
-func noteStaleACP(note func(boundary, subject, detail, remedy string)) {
+// reported. Only a process whose executable was deleted is a failure.
+func noteStaleACP(fail, note func(boundary, subject, detail, remedy string)) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	insp := staleACPInspect(ctx)
@@ -223,5 +264,8 @@ func noteStaleACP(note func(boundary, subject, detail, remedy string)) {
 	}
 	for _, n := range staleACPNotes(insp.Probes, path) {
 		note(n.Boundary, n.Subject, n.Detail, n.Remedy)
+	}
+	for _, f := range staleACPFailures(insp.Probes) {
+		fail(f.Boundary, f.Subject, f.Detail, f.Remedy)
 	}
 }

@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/execidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
@@ -70,14 +70,11 @@ func loadConversationSources(now time.Time) conversationSources {
 }
 
 func claudeConfigDir() string {
-	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
-		return dir
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".claude")
+	return harness.ClaudeConfigDir(home)
 }
 
 // forSession lists the conversations of the session at sessionRoot.

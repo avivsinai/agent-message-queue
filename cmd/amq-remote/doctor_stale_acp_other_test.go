@@ -13,7 +13,7 @@ func TestNoteStaleACPIsQuietOnUnsupportedPlatforms(t *testing.T) {
 	note := func(boundary, subject, detail, remedy string) {
 		notes = append(notes, boundary+"/"+subject+": "+detail)
 	}
-	noteStaleACP(note)
+	noteStaleACP(note, note)
 	if len(notes) != 0 {
 		t.Fatalf("unsupported platform must add zero notes, got %v", notes)
 	}

@@ -95,10 +95,20 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	}
 }
 
+// hookProbeEnv set to 1 makes the PermissionRequest receiver a probe: it
+// prints its version and exits, before it reads stdin, binds a session or
+// posts a dialog. Doctor runs the installed hook command this way to prove
+// that the command reaches this receiver.
+const hookProbeEnv = "AMQ_HOOK_PROBE"
+
 // permissionHook runs the PermissionRequest receiver. It makes no decision
 // on any error: exit 0 with no output. TERM, INT and HUP end the wait, and
 // the terminal dialog decides.
 func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
+	if os.Getenv(hookProbeEnv) == "1" {
+		say(stdout, "amq-remote %s", version)
+		return 0
+	}
 	fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")

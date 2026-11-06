@@ -15,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // ClaudePermissions reads only Claude Code's live session status files. It
@@ -52,15 +53,12 @@ func (ClaudePermissions) Read(ctx context.Context, env board.Env) (res board.Res
 			res.Coverage.Detail = fmt.Sprintf("%d unmapped sessions outside the 36h discovery window", res.Coverage.Skipped)
 		}
 	}()
-	home := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			fail(err)
-			return res
-		}
-		home = filepath.Join(userHome, ".claude")
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		fail(err)
+		return res
 	}
+	home := harness.ClaudeConfigDir(userHome)
 	dir, err := os.Open(filepath.Join(home, "sessions"))
 	if err != nil {
 		if os.IsNotExist(err) {

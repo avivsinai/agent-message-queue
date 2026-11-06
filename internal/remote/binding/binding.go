@@ -78,6 +78,12 @@ type Binding struct {
 	// written; empty when it was not known. The session mirror reads it when
 	// the Claude session registry names none, and always for Codex.
 	Transcript string `json:"transcript,omitempty"`
+	// ConfigDir is the Claude configuration directory of a Claude session
+	// ($CLAUDE_CONFIG_DIR, else ~/.claude) as the session's own environment
+	// named it when the binding was written; empty for other harnesses and
+	// in a binding written before it was recorded. Doctor checks the hooks
+	// in its settings.json.
+	ConfigDir string `json:"config_dir,omitempty"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -568,6 +574,23 @@ func ReadNamed(name string) (Binding, error) {
 	}
 	b.Name = name
 	return b, nil
+}
+
+// FilePath is the file that holds the binding called name: the binding file
+// for LegacyName, else <name>.json in the bindings directory. The file may
+// not exist.
+func FilePath(name string) (string, error) {
+	if name == LegacyName {
+		return Path()
+	}
+	if err := ValidName(name); err != nil {
+		return "", err
+	}
+	dir, err := namedDir(false)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name+".json"), nil
 }
 
 // NameTakenError is returned by WriteNamedIf when the binding of that name is

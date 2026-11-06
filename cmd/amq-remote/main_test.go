@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -70,6 +71,8 @@ func init() {
 	serviceRun = func(string, ...string) error { return errors.New("tests run no service manager") }
 	serviceRunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
 	claudeStopHookState = func() (string, error) { return "", errors.New("tests read no Claude settings") }
+	doctorWakeCheck = func(string, string) (wakeView, error) { return wakeView{}, errors.New("tests run no wake check") }
+	runHookProbe = func(string, string) (string, error) { return "", errors.New("tests run no hook") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
@@ -80,6 +83,27 @@ func init() {
 		lastRecordingFake.Store(rf)
 		return rf, nil
 	})
+}
+
+// TestMain runs the package in a home of its own: doctor reads the
+// bindings, Claude settings and Buzz Desktop files under the home, and no
+// test may read the developer's.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "amqr-home")
+	if err == nil {
+		home, err = filepath.EvalSymlinks(home)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	_ = os.Setenv("HOME", home)
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", binding.EnvPath} {
+		_ = os.Unsetenv(name)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
 }
 
 // startServeWithArgs starts serve with explicit arguments and the same

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -106,14 +107,11 @@ func defaultRunOperatorCodexNotify(ctx context.Context, name string, args []stri
 
 // codexHomeDir is CODEX_HOME, or ~/.codex.
 func codexHomeDir() (string, error) {
-	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
-		return codexHome, nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve Codex home: %w", err)
 	}
-	return filepath.Join(home, ".codex"), nil
+	return harness.CodexHome(home), nil
 }
 
 func loadOperatorCodexNotify() ([]string, error) {
