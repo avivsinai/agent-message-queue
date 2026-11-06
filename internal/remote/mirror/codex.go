@@ -33,23 +33,29 @@ var codexSource = Source{
 
 // codexLocate is the current rollout file of the binding's thread, which
 // a thread/revert moves to a new file in the sessions directory that holds
-// the binding's Transcript; else the binding's Transcript, so a rebind
-// takes effect; else the record the mirror already reads (saved). "" when
-// the current file exists only compressed. It reads only the date folders
-// from the newest file of the thread it knows, so a tick's work does not
-// grow with the host's Codex history.
+// the thread's file; else that file. The thread's file is the binding's
+// Transcript, so a rebind takes effect, or, for a binding with none, the one
+// rollout its proven holder process keeps open; else the record the mirror
+// already reads (saved) while it is the bound thread's. "" when none is
+// known, or when the current file exists only compressed. It reads only the
+// date folders from the newest file of the thread it knows, so a tick's
+// work does not grow with the host's Codex history.
 func codexLocate(b binding.Binding, saved string) string {
-	sessions := codex.SessionsDir(b.Transcript)
-	thread := strings.ToLower(cmp.Or(b.AppServer.Thread, codex.RolloutThread(b.Transcript)))
-	known := b.Transcript
+	transcript := b.Transcript
+	if transcript == "" {
+		transcript = codex.HolderRollout(b.Holder)
+	}
+	sessions := codex.SessionsDir(transcript)
+	thread := strings.ToLower(cmp.Or(b.AppServer.Thread, codex.RolloutThread(transcript)))
+	known := transcript
 	if codex.RolloutThread(saved) == thread && codex.SessionsDir(saved) == sessions {
 		known = saved
 	}
 	if path, ok := codex.CurrentRolloutSince(sessions, thread, known, time.Now()); ok {
 		return path
 	}
-	if b.Transcript != "" {
-		return b.Transcript
+	if transcript != "" {
+		return transcript
 	}
 	// The saved file is read only while it is the bound thread's: a binding
 	// moved to a thread with no rollout gets the note, never the old
