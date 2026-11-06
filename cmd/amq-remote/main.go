@@ -73,6 +73,8 @@ Commands:
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,
                            --idempotency-key K; resume K after a lost answer)
   mcp --link NAME          Serve a linked server's tools as a stdio MCP server
+  pi bridge-path           Write this version's pi extension to
+                           ~/.amq/pi/amq-bridge.ts and print its path
   doctor [--fix]           Check every link to the owner; --fix repairs hooks,
                            the machine agent's import file and the login service
   version                  Print the version
@@ -282,6 +284,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, code, err = link(rest, stdin, stdout, probe)
 	case "mcp":
 		code, err = mcpServe(rest, stdin, stdout, stderr, probe)
+	case "pi":
+		return piSubcommand(rest, stdout, stderr)
 	case "claude":
 		// Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —

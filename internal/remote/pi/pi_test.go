@@ -588,9 +588,6 @@ func TestFirstContactAddressesLiveGeneration(t *testing.T) {
 // and refuse a submit with the install and reload text, writing nothing, and
 // the endpoint reads the same text through core.SubmitBlocker.
 func TestOldBridgeRevisionRefusesSubmit(t *testing.T) {
-	saved := Version
-	Version = "0.85.0"
-	defer func() { Version = saved }()
 	withdrawn, err := os.ReadFile(filepath.Join("..", "..", "..", "integrations", "pi", "testdata", "withdrawn-r2", "bridge.liveness"))
 	if err != nil {
 		t.Fatal(err)
@@ -602,9 +599,9 @@ func TestOldBridgeRevisionRefusesSubmit(t *testing.T) {
 	}{
 		{"no revision", []byte(fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-1"}`,
 			ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())),
-			[]string{"pi install git:github.com/avivsinai/agent-message-queue@v0.85.0", "reload the pi session"}},
+			[]string{`pi -e "$(amq-remote pi bridge-path)"`, "reload the pi session"}},
 		{"withdrawn revision 2", withdrawn,
-			[]string{"is bridge_revision 2", "pi install git:github.com/avivsinai/agent-message-queue", "reload the pi session"}},
+			[]string{"is bridge_revision 2", "amq-remote pi bridge-path", "reload the pi session"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, dir := newTestAttachment(t)
@@ -1094,7 +1091,7 @@ func TestOldBridgeNamesItsOwnRemedy(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, reason := a.InspectSubmit()
-			if !strings.Contains(reason, tc.want) || strings.Contains(reason, "pi install git:") {
+			if !strings.Contains(reason, tc.want) || strings.Contains(reason, "pi bridge-path") {
 				t.Fatalf("reason = %q, want it to carry %q and not the stock install", reason, tc.want)
 			}
 		})

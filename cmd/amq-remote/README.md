@@ -67,6 +67,7 @@ amq-remote doctor [--fix] [--root ROOT]
 amq-remote version
 amq-remote claude install-stop-hook | uninstall-stop-hook
 amq-remote claude install-approval-hook | uninstall-approval-hook
+amq-remote pi bridge-path
 ```
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
@@ -489,7 +490,7 @@ flag list; the `share` flags are in the table below.
 
 | Flag | Default | Commands |
 | --- | --- | --- |
-| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
+| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
 | `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `attach`, `detach`, `bindings`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
