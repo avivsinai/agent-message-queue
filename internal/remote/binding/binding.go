@@ -533,7 +533,7 @@ func namedDir(create bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(filepath.Dir(path), "bindings")
+	dir := filepath.Join(filepath.Dir(path), bindingsDirName)
 	fi, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		if !create {
@@ -552,6 +552,20 @@ func namedDir(create bool) (string, error) {
 	}
 	return dir, nil
 }
+
+// WatchPaths are the binding file and the bindings directory, unchecked. A
+// reader may watch them for change; it still reads through List or
+// ReadNamed, which check them.
+func WatchPaths() (file, dir string, err error) {
+	file, err = Path()
+	if err != nil {
+		return "", "", err
+	}
+	return file, filepath.Join(filepath.Dir(file), bindingsDirName), nil
+}
+
+// bindingsDirName is the bindings directory beside the binding file.
+const bindingsDirName = "bindings"
 
 // ReadNamed returns the binding called name, or ErrNone.
 func ReadNamed(name string) (Binding, error) {

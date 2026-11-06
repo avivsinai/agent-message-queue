@@ -2907,7 +2907,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		desktopNotify:           wakeDesktopNotifier(),
 		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir),
 		settingsObserved:        startupSettings.observed,
-		machineSettingsSource:   readMachineWakeSettings,
+		machineSettingsSource:   machineWakeSettingsSource(),
 		machineSettingsObserved: startupSettings.machineObserved,
 		machineSettingsPath:     s.machineSettingsPath,
 		settingsLayers:          startupSettings.layers,

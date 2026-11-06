@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -98,7 +99,9 @@ type Envelope struct {
 	// SettledAt is set when the spool entry is reaped (dispatched + settled
 	// or expired). Settled entries are reaped on the next sweep.
 	SettledAt string `json:"settled_at,omitempty"`
-	// Attempt is the dispatch attempt count (retries on transient failure).
+	// Attempt counts the dispatch outcomes recorded on the envelope: each
+	// settle and each change of its transient refusal. A refusal repeated
+	// with the same code on later ticks is not written again.
 	Attempt int `json:"attempt,omitempty"`
 	// LastError records the last dispatch failure (cleared on success).
 	LastError string `json:"last_error,omitempty"`
@@ -142,6 +145,9 @@ type Spool struct {
 	lockPath string
 	now      func() time.Time
 	mu       sync.Mutex
+	// reapDir is the directory a bounded Reap pass reads on from; nil
+	// starts a new pass.
+	reapDir *os.File
 }
 
 // Option configures Open.
@@ -306,6 +312,25 @@ func (s *Spool) List() ([]*Envelope, error) {
 	return out, nil
 }
 
+// reread reads the envelopes of keys again and returns, in keys order,
+// those that are still pending and valid.
+func (s *Spool) reread(keys []Key) ([]*Envelope, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*Envelope
+	err := s.withLock(func() error {
+		for _, k := range keys {
+			env, exists, err := s.get(k)
+			if err != nil || !exists || env.State != StatePending || validateEnvelope(env) != nil {
+				continue
+			}
+			out = append(out, env)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // MarkDispatched settles an envelope: the endpoint accepted the command and
 // owns the record. Settled entries are reaped by Reap.
 func (s *Spool) MarkDispatched(k Key) error {
@@ -360,7 +385,8 @@ func (s *Spool) markFailedLocked(k Key, errMsg string) error {
 }
 
 // MarkAttempt records a transient dispatch failure (the drainer will retry).
-// The envelope stays pending; the attempt count and last error are updated.
+// The envelope stays pending. Only a change of the refusal is written: a
+// refusal repeated on every tick leaves the envelope as it is.
 func (s *Spool) MarkAttempt(k Key, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -375,7 +401,7 @@ func (s *Spool) markAttemptLocked(k Key, errMsg string) error {
 	if !exists {
 		return protocol.Refuse(protocol.CodeNotFound, "envelope does not exist")
 	}
-	if env.State.Terminal() {
+	if env.State.Terminal() || env.LastError == errMsg {
 		return nil
 	}
 	env.Attempt++
@@ -410,10 +436,12 @@ func (s *Spool) markExpiredLocked(k Key) error {
 	return s.write(env)
 }
 
-// Reap removes settled envelopes older than before. It bounds the spool's
-// growth: dispatched/expired/failed entries are removed once they are old
-// enough that the caller has had a chance to observe the outcome. Returns
-// the count reaped.
+// Reap removes settled envelopes older than before and returns the count
+// removed. It examines at most limit directory entries, reading on from
+// where the last call stopped, so its cost is bounded whatever the spool
+// holds; a pass over the whole spool spans calls and the next pass starts
+// again from the top. An entry a pass misses while the directory changes is
+// examined in the next pass.
 func (s *Spool) Reap(before time.Time, limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -427,15 +455,27 @@ func (s *Spool) Reap(before time.Time, limit int) (int, error) {
 }
 
 func (s *Spool) reapLocked(before time.Time, limit int) (int, error) {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return 0, fmt.Errorf("reap sender spool: %w", err)
+	if limit <= 0 {
+		return 0, nil
+	}
+	if s.reapDir == nil {
+		f, err := os.Open(s.dir)
+		if err != nil {
+			return 0, fmt.Errorf("reap sender spool: %w", err)
+		}
+		s.reapDir = f
+	}
+	entries, err := s.reapDir.ReadDir(limit)
+	if err != nil || len(entries) < limit {
+		// The end of a pass, or a read error: the next call starts a new pass.
+		_ = s.reapDir.Close()
+		s.reapDir = nil
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, fmt.Errorf("reap sender spool: %w", err)
+		}
 	}
 	n := 0
 	for _, e := range entries {
-		if n >= limit {
-			break
-		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), spoolSuffix) || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}

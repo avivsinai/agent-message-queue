@@ -34,6 +34,15 @@ import (
 // chance to observe the outcome, bounding the spool's growth.
 const spoolReapHorizon = 6 * time.Hour
 
+// The reaper runs once every spoolReapPolls polls (each minute at the
+// default poll) and examines at most spoolReapBatch envelopes per run, so a
+// spool that holds many settled entries costs the same each run, and a full
+// pass spans runs.
+const (
+	spoolReapPolls = 120
+	spoolReapBatch = 256
+)
+
 // serveFlags holds pointers to the flags serve defines beyond the common
 // root/json pair. defineServeFlags is the single registration site: serve()
 // reads them to run, and up()'s FlagSet registers the same set so serve's
@@ -213,10 +222,17 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	go func() {
 		t := time.NewTicker(*poll)
 		defer t.Stop()
+		reap := time.NewTicker(spoolReapPolls * *poll)
+		defer reap.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-reap.C:
+				// Reap independent of Drain activity: a live submit settles
+				// its own envelope, so Drain finds nothing, and the settled
+				// envelopes must still go once they pass the horizon.
+				_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), spoolReapBatch)
 			case <-t.C:
 				if _, err := carrier.ImportOnce(); err != nil {
 					say(stderr, "import: %v", err)
@@ -227,14 +243,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				links.tick()
 				relays.tick()
 				// Replay durable sender envelopes (CLI submits persisted while the
-				// companion was down), then reap settled ones older than the reap
-				// horizon so the spool is bounded. Reap on every tick,
-				// independent of Drain activity — a live submit settles its own
-				// envelope so Drain returns zero forever, and Reap must still run.
+				// companion was down).
 				if _, derr := drainer.Drain(ctx); derr != nil {
 					say(stderr, "drain: %v", derr)
 				}
-				_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), 64)
 			}
 		}
 	}()

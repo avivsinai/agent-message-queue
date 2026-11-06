@@ -274,7 +274,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	}
 	s.applyResets(now)
 	s.retireGone(now)
-	all, err := binding.List()
+	all, err := s.snapshot().list()
 	if err == nil {
 		for _, b := range all {
 			if s.stopped() {
@@ -717,7 +717,8 @@ func left(r channelRecord) bool {
 // retireGone retires each record whose binding is proven gone or ended, and
 // finishes the move of a record a stopped worker left half retired.
 func (s *Server) retireGone(now time.Time) {
-	for _, r := range s.activeRecords() {
+	snap := s.snapshot()
+	for _, r := range snap.activeRecords() {
 		if s.stopped() {
 			return
 		}
@@ -725,7 +726,11 @@ func (s *Server) retireGone(now time.Time) {
 			s.finishRetire(r, now)
 			continue
 		}
-		b, err := binding.ReadNamed(r.Name)
+		b, ok := snap.binding(r.Name)
+		var err error
+		if !ok {
+			b, err = binding.ReadNamed(r.Name)
+		}
 		// A record under a name no binding can have serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
 			s.retire(r, goneReason(r), now)
@@ -739,16 +744,24 @@ func (s *Server) retireGone(now time.Time) {
 
 // activeRecords reads every good record in the name slots.
 func (s *Server) activeRecords() []channelRecord {
+	records, _ := s.readSlots()
+	return records
+}
+
+// readSlots reads every good record in the name slots, also by slot name.
+func (s *Server) readSlots() ([]channelRecord, map[string]channelRecord) {
 	entries, _ := os.ReadDir(s.channelDir())
 	var out []channelRecord
+	slots := map[string]channelRecord{}
 	for _, e := range entries {
-		if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".json") {
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok && e.Type().IsRegular() {
 			if r, ok := readChannelRecord(filepath.Join(s.channelDir(), e.Name())); ok {
 				out = append(out, r)
+				slots[name] = r
 			}
 		}
 	}
-	return out
+	return out, slots
 }
 
 // retiredRecords reads the retired store.

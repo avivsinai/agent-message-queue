@@ -23,15 +23,34 @@ package sender
 import (
 	"context"
 	"errors"
+	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
+// drainReconcile is the longest a drainer goes without a full read of the
+// spool.
+const drainReconcile = time.Minute
+
 // Drainer replays pending envelopes through the endpoint.
+//
+// It keeps the keys of the pending envelopes its last full read of the
+// spool found, with the version of the spool directory taken before that
+// read. Every write to the spool, by any process, renames a file into the
+// directory and so changes its version. While the version is unchanged and
+// settled and the read is younger than drainReconcile, a drain reads only
+// those envelopes again; otherwise it reads the whole spool. A Drainer
+// belongs to one goroutine.
 type Drainer struct {
 	spool *Spool
 	ep    *core.Endpoint
+
+	pendingKeys []Key
+	pendingDir  fsq.FileVersion
+	pendingAt   time.Time
+	pendingOK   bool
 }
 
 // NewDrainer returns a drainer that replays pending envelopes in spool through
@@ -48,7 +67,7 @@ func NewDrainer(spool *Spool, ep *core.Endpoint) *Drainer {
 // A per-envelope error never aborts the sweep: one bad envelope must not stop
 // another's recovery (mirrors the carrier's ImportOnce contract).
 func (d *Drainer) Drain(_ context.Context) (int, error) {
-	envs, err := d.spool.List()
+	envs, err := d.pending()
 	if err != nil {
 		return 0, err
 	}
@@ -93,6 +112,35 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 		}
 	}
 	return n, errors.Join(errs...)
+}
+
+// pending returns the pending envelopes, oldest first: the ones the last
+// full read found, each read again, while the spool directory is unchanged;
+// else a full read of the spool.
+func (d *Drainer) pending() ([]*Envelope, error) {
+	now := d.spool.now()
+	dir, stable, verr := fsq.LstatVersion(d.spool.dir, now)
+	if verr == nil && stable && d.pendingOK && dir == d.pendingDir && now.Sub(d.pendingAt) < drainReconcile {
+		if len(d.pendingKeys) == 0 {
+			return nil, nil
+		}
+		return d.spool.reread(d.pendingKeys)
+	}
+	d.pendingOK = false
+	envs, err := d.spool.List()
+	if err != nil {
+		return nil, err
+	}
+	var out []*Envelope
+	var keys []Key
+	for _, env := range envs {
+		if env.State == StatePending {
+			out = append(out, env)
+			keys = append(keys, env.key())
+		}
+	}
+	d.pendingKeys, d.pendingDir, d.pendingAt, d.pendingOK = keys, dir, now, verr == nil && stable
+	return out, nil
 }
 
 // classifyReply extracts the Outcome.Code from the endpoint's reply. The

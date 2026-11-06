@@ -175,9 +175,10 @@ holds no identity, generation, or transport state.
 **Commit domain:** the file is written atomically on the agent directory
 descriptor, by `amq wake config` (including `--reset`), by a fresh `amq wake` with
 explicit settings flags, or once by a resume that finds no file and has
-explicit settings flags, under the lifecycle guard. A running wake only reads it, at
-each inbox scan and every 2 seconds, and validates it before it swaps the
-settings. A present file always wins over argv on a resume. A refused file never changes the running settings. A wake never
+explicit settings flags, under the lifecycle guard. A running wake only reads it:
+it checks the file's version (inode, size, mtime and ctime) at each inbox scan
+and every 2 seconds, reads the file when the version changed or at least once a
+minute, and validates it before it swaps the settings. A present file always wins over argv on a resume. A refused file never changes the running settings. A wake never
 derives identity from it, and no wake cleanup (release, retire, repair,
 self-upgrade, or `doctor --fix-wake-locks`) removes it.
 
@@ -197,7 +198,8 @@ transport state.
 
 **Commit domain:** the operator writes it through `amq wake config --machine`,
 under an exclusive lock on `~/.amq/wake.settings.lock`. Wakes only read it
-(each inbox scan and every 2 seconds), with the same trust checks as the agent
+(they check its version and that of `~/.amq` at each inbox scan and every 2
+seconds, and read it when either changed), with the same trust checks as the agent
 file (`~/.amq` must be a real directory owned by the user and not
 group-writable or world-writable; a missing file always means no machine
 layer), and never write it. A refused file keeps the last good machine layer in a

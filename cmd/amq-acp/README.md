@@ -335,9 +335,10 @@ and `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
 The system prompt line `AMQ Remote machine` makes the agent this machine's
 machine agent, one agent for every session. It never uses a pin, a selected
 model or the only binding; a role line beside a session pin or beside the
-helper line refuses every prompt. Its lifecycle leader reads the bindings
-every 2 s and makes a private channel for each named binding whose session
-is proven live and that has no agent of its own that runs or is idle:
+helper line refuses every prompt. Its lifecycle leader checks the bindings
+every 2 s, reading them again when they changed, and makes a private
+channel for each named binding whose session is proven live and that has
+no agent of its own that runs or is idle:
 `channels create` (type stream, visibility private, the session's label as
 its name, and `amq-remote <reg>` as its description), then `channels
 add-member` for the owner as an admin, then a welcome that mentions the

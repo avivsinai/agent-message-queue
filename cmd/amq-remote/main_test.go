@@ -771,7 +771,7 @@ func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
 	out, errBuf := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
 	go func() {
-		done <- run([]string{"serve", "--fake", "--root", root}, strings.NewReader(""), out, errBuf)
+		done <- run([]string{"serve", "--fake", "--root", root, "--poll", "10ms"}, strings.NewReader(""), out, errBuf)
 	}()
 	t.Cleanup(func() {
 		select {
@@ -791,8 +791,8 @@ func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
 	return "", nil, nil
 }
 
-// TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on every
-// serve tick, independent of Drain activity.
+// TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on its own
+// serve cadence, independent of Drain activity.
 func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	root, serveOut, serveErr := startServeCaptured(t)
 	stateDir := filepath.Join(root, "extensions", "remote")
@@ -862,7 +862,7 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	// stderr/stdout (tick/import/drain errors). No retries, no loop.
 	after, _ := os.ReadFile(envPath)
 	var report strings.Builder
-	report.WriteString("envelope was not reaped within 5s (B4: Reap not running on every tick)\n")
+	report.WriteString("envelope was not reaped within 5s (B4: Reap not running on its cadence)\n")
 	if len(after) > 0 {
 		var fin sender.Envelope
 		if err := json.Unmarshal(after, &fin); err == nil {

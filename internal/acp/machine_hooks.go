@@ -55,11 +55,12 @@ type hookReader struct {
 func (s *Server) watchHooks(all []binding.Binding) {
 	readers := map[string][]hookReader{}
 	var order []string
+	snap := s.snapshot()
 	for _, b := range all {
 		if b.ConfigDir == "" || !filepath.IsAbs(b.ConfigDir) || binding.ValidName(b.Name) != nil {
 			continue
 		}
-		r, ok := readChannelRecord(s.slotPath(b.Name))
+		r, ok := snap.slot(b.Name)
 		if !ok || !routable(r) || !serves(r, b) {
 			continue
 		}
