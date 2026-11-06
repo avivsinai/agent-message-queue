@@ -149,6 +149,13 @@ func TestDarwinWakeRestartControlAcceptsPeerUnderOwnerInAnotherSession(t *testin
 func TestMaintainWakeSelfUpgradeProceedsAfterUnfinishableRestartRequest(t *testing.T) {
 	for name, leave := range map[string]func(t *testing.T, fixture wakeRestartFixture){
 		"refused by the wake": func(t *testing.T, fixture wakeRestartFixture) {
+			record := fixture.record
+			record.Requester = &fixture.owner
+			if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
+				return writeWakeRestartRecordAt(scope, record)
+			}); err != nil {
+				t.Fatal(err)
+			}
 			previousObserve := observeAuthoritativeWakeOwner
 			observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
 				return wakeOwnerObservation{State: wakeOwnerUnknown, Reason: "test owner unknown"}, nil
@@ -226,5 +233,53 @@ func TestDarwinWakeRestartNotifyReportsTheWakeRefusalReason(t *testing.T) {
 	err = notifyWakeRestartPlatform(agentDir, inspectWakeLock(root, agent), record)
 	if err == nil || !strings.Contains(err.Error(), "not owner session") {
 		t.Fatalf("notify error = %v, want the wake's session refusal", err)
+	}
+}
+
+// Review of agent-message-queue-5bu: an ACK wrote nothing to the record, so a
+// requester that exited right after its ACK had its accepted request retired.
+func TestMaintainWakeSelfUpgradeKeepsTakenRequestAfterRequesterExits(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	requester := fixture.owner
+	requester.PID++
+	record := fixture.record
+	record.Requester = &requester
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restartSignals := make(chan os.Signal, 1)
+	cleanup, _, _, err := startWakeControlListenerInDirWithRestart(
+		fixture.agentDir, fixture.root, fixture.agent, fixture.lock.Lock, restartSignals, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	response := sendDarwinOwnerControlRequest(t, fixture.root, fixture.agent, fixture.lock.Lock, wakeControlOwnerRequest{
+		Generation: record.Generation,
+		RequestID:  record.RequestID,
+		Owner:      &record.Owner,
+		Operation:  wakeControlRestartOperation,
+	})
+	if response != "ACK" {
+		t.Fatalf("restart response = %q, want ACK", response)
+	}
+	previousObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got == requester {
+			return wakeOwnerObservation{State: wakeOwnerDead, Reason: "owner process is not running"}, nil
+		}
+		return previousObserve(got)
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = previousObserve })
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionRestartPending {
+		t.Fatalf("decision=%#v err=%v, want the taken request kept", decision, err)
 	}
 }

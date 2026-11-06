@@ -42,22 +42,24 @@ const (
 )
 
 type wakeRestartRecord struct {
-	Schema              int                               `json:"schema"`
-	Source              string                            `json:"source,omitempty"`
-	RequestID           string                            `json:"request_id"`
-	Status              string                            `json:"status"`
-	Root                string                            `json:"root"`
-	Agent               string                            `json:"agent"`
-	Generation          string                            `json:"generation"`
-	SuccessorGeneration string                            `json:"successor_generation,omitempty"`
-	Owner               wakeOwner                         `json:"owner"`
-	Requester           *wakeOwner                        `json:"requester,omitempty"`
-	Candidate           wakeImageEvidenceV1               `json:"candidate"`
-	StagePath           string                            `json:"stage_path,omitempty"`
-	BoundImage          *wakeImageEvidenceV1              `json:"bound_image,omitempty"`
-	PreviousBoundImage  *wakeImageEvidenceV1              `json:"previous_bound_image,omitempty"`
-	RefusedCandidates   []wakeSelfUpgradeRefusedCandidate `json:"refused_candidates,omitempty"`
-	Reason              string                            `json:"reason,omitempty"`
+	Schema              int        `json:"schema"`
+	Source              string     `json:"source,omitempty"`
+	RequestID           string     `json:"request_id"`
+	Status              string     `json:"status"`
+	Root                string     `json:"root"`
+	Agent               string     `json:"agent"`
+	Generation          string     `json:"generation"`
+	SuccessorGeneration string     `json:"successor_generation,omitempty"`
+	Owner               wakeOwner  `json:"owner"`
+	Requester           *wakeOwner `json:"requester,omitempty"`
+	// Taken means the wake accepted the request; it is never orphaned after.
+	Taken              bool                              `json:"taken,omitempty"`
+	Candidate          wakeImageEvidenceV1               `json:"candidate"`
+	StagePath          string                            `json:"stage_path,omitempty"`
+	BoundImage         *wakeImageEvidenceV1              `json:"bound_image,omitempty"`
+	PreviousBoundImage *wakeImageEvidenceV1              `json:"previous_bound_image,omitempty"`
+	RefusedCandidates  []wakeSelfUpgradeRefusedCandidate `json:"refused_candidates,omitempty"`
+	Reason             string                            `json:"reason,omitempty"`
 }
 
 type wakeResumeBootstrap struct {
@@ -1043,13 +1045,13 @@ func refuseWakeRestartRecordAt(
 }
 
 // wakeRestartRequestOrphaned reports a pending request that no one can
-// complete: its recorded requester is conclusively gone and no wake took it.
+// complete: no wake took it and its recorded requester is conclusively gone.
 // A request without a requester identity, or with a requester whose state is
 // unknown, is not orphaned.
 func wakeRestartRequestOrphaned(record wakeRestartRecord) (bool, string) {
 	if record.Schema != wakeRestartSchemaV1 || record.Status != wakeRestartPending ||
 		record.Source == wakeRestartSourceSelf || record.SuccessorGeneration != "" ||
-		record.Requester == nil {
+		record.Taken || record.Requester == nil {
 		return false, ""
 	}
 	observation, err := observeAuthoritativeWakeOwner(*record.Requester)

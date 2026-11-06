@@ -301,8 +301,10 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 		t.Fatalf("restart control changed owner claim: %#v", current)
 	}
 	observed, exists := readDarwinWakeRestartRecordForTest(t, root, agent)
-	if !exists || !sameWakeRestartRecord(record, observed) {
-		t.Fatalf("restart control changed pending record: exists=%v record=%#v", exists, observed)
+	taken := record
+	taken.Taken = true
+	if !exists || !sameWakeRestartRecord(taken, observed) {
+		t.Fatalf("accepted restart record = %#v (exists=%v), want the pending record marked taken", observed, exists)
 	}
 }
 
@@ -398,7 +400,8 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 		name string
 		// reason is part of the NACK the requester and the wake log get.
 		reason string
-		// finished means the wake marks the named request refused.
+		// finished means the wake marks the named request refused. These
+		// records name no requester, so no peer can finish them.
 		finished bool
 		mutate   func(
 			t *testing.T,
@@ -439,7 +442,7 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 		{
 			name:     "session",
 			reason:   "not owner session",
-			finished: true,
+			finished: false,
 			mutate: func(_ *testing.T, _, _ string, owner wakeOwner, _ wakeLock, _ wakeRestartRecord, _ *wakeControlOwnerRequest, peerSession *int) {
 				*peerSession = owner.SessionID + 1
 			},

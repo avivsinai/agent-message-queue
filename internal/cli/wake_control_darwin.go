@@ -683,7 +683,10 @@ func handleDarwinWakeRestartControl(
 				peerPID,
 				peerUID,
 			); err != nil {
-				finishRefusedDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, root, me, lock, request, err)
+				finishRefusedDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, root, me, lock, request, peerPID, err)
+				return err
+			}
+			if err := markDarwinWakeRestartTakenAt(scope, dirfd, scopedAgentDir, request); err != nil {
 				return err
 			}
 			return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
@@ -735,9 +738,10 @@ func wakeRestartControlReason(reason error) string {
 }
 
 // finishRefusedDarwinWakeRestartAt marks the exact pending request refused
-// so it does not hold later restarts or self-upgrades. Only the record this
-// request names, with its owner token, for this live generation, changes; a
-// request that names no such record leaves wake state untouched.
+// so it does not hold later restarts or self-upgrades. Only the requester
+// that published the record can have it finished: the record's id, owner
+// token, and generation are readable by any same-user process, so they do
+// not prove authorship. Any other peer gets its refusal and changes nothing.
 func finishRefusedDarwinWakeRestartAt(
 	scope *wakeMutationScope,
 	dirfd int,
@@ -745,6 +749,7 @@ func finishRefusedDarwinWakeRestartAt(
 	root, me string,
 	lock wakeLock,
 	request wakeControlOwnerRequest,
+	peerPID int,
 	reason error,
 ) {
 	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
@@ -761,10 +766,49 @@ func finishRefusedDarwinWakeRestartAt(
 		record.RequestID == "" || record.RequestID != request.RequestID ||
 		request.Owner == nil || !sameWakeOwner(request.Owner, &record.Owner) ||
 		record.Generation != lock.Generation ||
-		record.Root != canonicalWakeRoot(root) || record.Agent != me {
+		record.Root != canonicalWakeRoot(root) || record.Agent != me ||
+		!wakeRestartPeerIsRequester(peerPID, record.Requester) {
 		return
 	}
 	_ = refuseWakeRestartRecordAt(scope, record, wakeRestartControlReason(reason))
+}
+
+// wakeRestartPeerIsRequester reports whether the connected peer is the exact
+// process recorded as the request's requester.
+func wakeRestartPeerIsRequester(peerPID int, requester *wakeOwner) bool {
+	if requester == nil || peerPID <= 0 || requester.PID != peerPID {
+		return false
+	}
+	peer := inspectWakeProcess(peerPID)
+	return peer.Running && peer.StartToken != "" &&
+		peer.StartToken == requester.ProcessStart &&
+		compareWakeBootID(requester.BootID, peer) == bootIDMatch
+}
+
+// markDarwinWakeRestartTakenAt records that this wake accepted the request
+// before it queues the restart, so the request is never retired as orphaned
+// once its requester exits.
+func markDarwinWakeRestartTakenAt(
+	scope *wakeMutationScope,
+	dirfd int,
+	agentDir *wakeAgentDir,
+	request wakeControlOwnerRequest,
+) error {
+	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
+	if err != nil {
+		return err
+	}
+	if !exists || record.Status != wakeRestartPending || record.RequestID != request.RequestID {
+		return fmt.Errorf("wake restart request changed before it was taken")
+	}
+	if record.Taken {
+		return nil
+	}
+	record.Taken = true
+	if err := writeWakeRestartRecordAt(scope, record); err != nil {
+		return fmt.Errorf("record taken wake restart request: %w", err)
+	}
+	return nil
 }
 
 func startWakeControlListenerInDirWithRestart(
