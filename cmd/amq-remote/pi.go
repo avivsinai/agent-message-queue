@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -42,6 +44,15 @@ func piSubcommand(args []string, stdout, stderr io.Writer) int {
 func writePiBridge(amqHome string) (string, error) {
 	dir := filepath.Join(amqHome, "pi")
 	path := filepath.Join(dir, "amq-bridge.ts")
+	// pi runs this file as code: write it only into a plain directory.
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	if info, err := os.Lstat(dir); err != nil {
+		return "", err
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("%s is not a plain directory", dir)
+	}
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, pibridge.Source) {
 		return path, nil
 	}

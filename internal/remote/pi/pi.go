@@ -136,10 +136,6 @@ type Attachment struct {
 	submitWait time.Duration
 }
 
-// Version is stamped by the binary. It names the release tag an owner
-// installs the extension from when the live bridge is too old.
-var Version = "dev"
-
 // oldBridgeMessage is the refusal an owner sees when the live extension
 // predates MinBridgeRevision.
 func oldBridgeMessage(names wireNames, handle string, live livenessState, hint string) string {
@@ -160,10 +156,7 @@ func oldBridgeMessage(names wireNames, handle string, live livenessState, hint s
 	} else if r := remedyText(hint); r != "" {
 		remedy = r + " (suggested by this target's manifest)"
 	} else {
-		remedy = "install the pi extension from this repo (pi install git:github.com/avivsinai/agent-message-queue)"
-		if v := strings.TrimPrefix(Version, "v"); v != "" && v != "dev" {
-			remedy = fmt.Sprintf("install the pi extension from this repo at the release tag (pi install git:github.com/avivsinai/agent-message-queue@v%s)", v)
-		}
+		remedy = `load the pi extension this amq-remote carries (pi -e "$(amq-remote pi bridge-path)")`
 	}
 	return fmt.Sprintf("the pi bridge extension for handle %q %s; this amq-remote needs bridge_revision %d or later: %s, then reload the pi session",
 		handle, have, MinBridgeRevision, remedy)

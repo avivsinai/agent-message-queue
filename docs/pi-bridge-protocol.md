@@ -277,9 +277,8 @@ The fence holds in both directions, and a missing field is revision 0, never
 - **Old extension, new adapter.** The adapter sends new requests only to a
   live bridge whose `bridge_revision` is at least 3. Below the minimum,
   `Inspect` advertises no submit and `Submit` refuses `unsupported` with the
-  fix: install the extension from this repository at the adapter's release
-  tag (`pi install git:github.com/avivsinai/agent-message-queue@v<version>`)
-  and reload the pi session.
+  fix: load the extension that the adapter's `amq-remote` carries
+  (`pi -e "$(amq-remote pi bridge-path)"`) and reload the pi session.
 - **Old adapter, new extension.** Every request carries the
   `bridge_revision` its adapter requires. The extension refuses a request
   without it, or outside the revisions it implements, with a `refused` event
