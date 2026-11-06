@@ -165,10 +165,7 @@ left.
 A marker that does not prove an open dialog (older than 10 minutes, dated
 in the future, unreadable, or behind an agent directory that is no longer
 canonical) holds input only while the AMQ dialog hook of the harness that
-wrote it is installed: Claude Code, Codex (trusted) or Cursor. A marker
-that only a turn or session event closes (a Claude Code or Codex
-permission marker, a Cursor tool call marker) never holds input once it is
-older than 10 minutes (see "Hold after a permission dialog"). A Claude
+wrote it is installed: Claude Code, Codex (trusted) or Cursor. A Claude
 Code hook marker names no harness; a marker that cannot be read falls back
 to the wake's `--harness`. The wake cannot see the agy relay or the pi
 extension, so an agy or pi marker holds only while it proves an open prompt
@@ -288,31 +285,19 @@ version supports it.
   (default `true`) turns the desktop notification off; the terminal floor
   stays. During the moment before `amq coop exec` writes or clears the
   `Startup` marker, the wake holds without a notice.
-- **Hold after a permission dialog.** Permission hook input has no
+- **Whole-turn hold after a permission dialog.** Permission hook input has no
   tool call id, so only `UserPromptSubmit`, `Stop` or a session event clears
   a permission marker. A tool call's `PostToolUse` does not: a call that
   Claude Code allows without asking, with the same tool and input, would
   close a dialog that still shows. A doorbell that would land mid-turn after
-  a permission dialog lands when the turn ends, when the person types, or
-  once the marker is 10 minutes old, whichever comes first. A permission
-  marker of that age holds no input: the wake rings as if no marker
-  existed, also for the terminal write check and the `coop named` command.
-  Each ring past it types the full doorbell text, never a bare Enter. While
-  the turn runs, Claude Code has been observed to queue the doorbell as a
-  user message. The accepted risk: a permission dialog that has really been
-  open for 10 minutes can be answered by the doorbell. The first ring past
-  such a marker logs one line in `.wake.log` with the marker's event and
-  age. Only the marker shapes its writers record as closing on a turn count:
-  a Claude Code or Codex `PermissionRequest` marker and a Cursor
-  `preToolUse` marker; any other marker keeps the aged hold below.
+  a permission dialog lands when the turn ends or the person types.
 - **AskUserQuestion and ExitPlanMode.** A marker that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
   so a marker it writes, also one right after such a `PreToolUse`, is a
   permission marker (below): the `PreToolUse` marker it replaces can belong
   to another call of the same tool. A tool call's open never replaces a
-  present marker without a tool call id, except a permission marker older
-  than 10 minutes, which holds no input; the check and the replacement
+  present marker without a tool call id; the check and the replacement
   share the marker lock. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
@@ -325,14 +310,13 @@ version supports it.
   says so.
 - **Esc on a permission dialog, and stale markers.** Esc or a deny on a
   permission dialog runs no hook, and no transcript record names the marker,
-  so the marker stays until the person's next prompt, the turn's end, or 10
-  minutes, as above. While the hook stays installed, any other marker older
-  than 10 minutes (an AskUserQuestion or ExitPlanMode marker, or a
-  `Startup` marker), dated in the future, or one the wake cannot read, still
-  blocks input. The wake then stops the 2-second recheck and retries on the
-  input retry ladder (5 seconds, doubling to 2 minutes), with the
-  held-doorbell notice on the attention cadence. No timer releases that
-  hold. Each hold line in
+  so the marker stays until the person's next prompt. While the hook stays
+  installed, a marker older than 10 minutes, dated in the future, or one the
+  wake cannot read, still blocks input. The wake then stops the 2-second
+  recheck and retries on the input retry ladder (5 seconds, doubling to 2
+  minutes), with the held-doorbell notice on the attention cadence. No timer
+  releases the hold, because Enter on an open permission dialog approves the
+  tool call. Each hold line in
   `.wake.log` starts with the UTC time and names the marker's event, kind,
   harness, tool, age, and transcript state.
 
@@ -542,9 +526,7 @@ and enabled, the guard is off and the seat gets the plain doorbell.
   `SessionEnd`. A tool call's `PostToolUse` does not: Codex gives a prompt
   no call token, and a parallel call that Codex allowed without asking can
   finish with the same tool and input as the call whose prompt still shows.
-  A doorbell due mid-turn after an approval waits for the turn's end, or
-  rings once the marker is 10 minutes old, as for a Claude Code permission
-  marker.
+  A doorbell due mid-turn after an approval waits for the turn's end.
   `Interrupt` and `SessionEnd` have a 1 second timeout, the rest 5 seconds.
 - **Identity.** Codex hooks run in the Codex process environment under the
   user's `$SHELL`. With `AM_ME` set (an embedded Codex started by
@@ -595,8 +577,7 @@ sessions after an install.
   does not: parallel calls
   share no prompt token, and Cursor reports a rejected call as a
   `postToolUse` too. The doorbell therefore waits from a turn's first tool
-  call to the end of that turn, prompt or not, and at most until the marker
-  is 10 minutes old, as for a Claude Code permission marker. Every entry has a 5 second
+  call to the end of that turn, prompt or not. Every entry has a 5 second
   timeout and ends by printing `{}`: Cursor fails a hook whose stdout is not
   JSON, and the empty object gives no permission, follow-up or environment
   verdict.
