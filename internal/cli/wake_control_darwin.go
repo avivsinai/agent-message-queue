@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
 
@@ -612,15 +613,26 @@ func authorizeDarwinWakeRestartControlAt(
 	if observation.State != wakeOwnerSame {
 		return fmt.Errorf("wake restart control owner is %s: %s", observation.State, observation.Reason)
 	}
-	peerSession, err := getWakeProcessSID(peerPID)
-	if err != nil {
-		return fmt.Errorf("wake restart control peer session unavailable: %w", err)
-	}
-	if peerSession != current.Lock.ResumeOwner.SessionID {
+	// A harness tool often runs its commands in a new session under the
+	// owner process, so a peer proves it acts for the owner by sharing the
+	// owner's session or by descending from the exact owner process.
+	peerSession, sessionErr := getWakeProcessSID(peerPID)
+	if (sessionErr != nil || peerSession != current.Lock.ResumeOwner.SessionID) &&
+		!wakeProcessRunsUnderOwner(peerPID, *current.Lock.ResumeOwner) {
+		if sessionErr != nil {
+			return fmt.Errorf(
+				"wake restart control peer pid %d session is unavailable (%v) and it does not run under owner pid %d",
+				peerPID,
+				sessionErr,
+				current.Lock.ResumeOwner.PID,
+			)
+		}
 		return fmt.Errorf(
-			"wake restart control peer session %d does not match owner session %d",
+			"wake restart control peer pid %d is in session %d, not owner session %d, and does not run under owner pid %d",
+			peerPID,
 			peerSession,
 			current.Lock.ResumeOwner.SessionID,
+			current.Lock.ResumeOwner.PID,
 		)
 	}
 
@@ -650,13 +662,14 @@ func handleDarwinWakeRestartControl(
 	restartSignals chan<- os.Signal,
 ) {
 	if restartSignals == nil {
+		refuseDarwinWakeRestartControl(conn, me, fmt.Errorf("this wake does not accept restart requests"))
 		return
 	}
 	err := withWakeMutationScopeInDir(
 		agentDir,
 		wakeGuardExistingNoWait,
 		func(scope *wakeMutationScope) error {
-			dirfd, _, err := scope.location()
+			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err
 			}
@@ -670,15 +683,88 @@ func handleDarwinWakeRestartControl(
 				peerPID,
 				peerUID,
 			); err != nil {
+				finishRefusedDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, root, me, lock, request, err)
 				return err
 			}
 			return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
 		},
 	)
 	if err != nil {
+		refuseDarwinWakeRestartControl(conn, me, err)
 		return
 	}
 	_, _ = conn.Write([]byte("ACK\n"))
+}
+
+// wakeProcessRunsUnderOwner reports whether pid is the owner process or
+// descends from it through parent edges with stable identities.
+func wakeProcessRunsUnderOwner(pid int, owner wakeOwner) bool {
+	return launch.ProcessRunsUnder(pid, launch.HolderIdentity{
+		PID:          owner.PID,
+		ProcessStart: owner.ProcessStart,
+		BootID:       owner.BootID,
+	})
+}
+
+// wakeRestartControlNACK prefixes a refusal line; the rest of the line is
+// the reason. A wake that predates it closes the connection without a line.
+const wakeRestartControlNACK = "NACK "
+
+const wakeRestartControlReplyMaxBytes = 2048
+
+// refuseDarwinWakeRestartControl tells the requester and the wake log why a
+// restart request was refused.
+func refuseDarwinWakeRestartControl(conn *net.UnixConn, me string, reason error) {
+	text := wakeRestartControlReason(reason)
+	if !wakeDiagnosticIsTerminal(nil) {
+		_ = writeWakeLogLine("amq wake: refused a restart request for %s: %s\n", me, text)
+	}
+	_, _ = conn.Write([]byte(wakeRestartControlNACK + text + "\n"))
+}
+
+func wakeRestartControlReason(reason error) string {
+	text := "restart refused"
+	if reason != nil {
+		text = strings.Join(strings.Fields(reason.Error()), " ")
+	}
+	limit := wakeRestartControlReplyMaxBytes - len(wakeRestartControlNACK) - 1
+	if len(text) > limit {
+		text = strings.ToValidUTF8(text[:limit], "")
+	}
+	return text
+}
+
+// finishRefusedDarwinWakeRestartAt marks the exact pending request refused
+// so it does not hold later restarts or self-upgrades. Only the record this
+// request names, with its owner token, for this live generation, changes; a
+// request that names no such record leaves wake state untouched.
+func finishRefusedDarwinWakeRestartAt(
+	scope *wakeMutationScope,
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root, me string,
+	lock wakeLock,
+	request wakeControlOwnerRequest,
+	reason error,
+) {
+	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
+	if err != nil || !exists {
+		return
+	}
+	current := inspectWakeLockAt(dirfd, agentDir, root, me)
+	if !current.Exists || !current.IdentityConfirmed ||
+		current.Lock.Generation != lock.Generation ||
+		request.Generation != lock.Generation ||
+		record.Status != wakeRestartPending ||
+		record.Schema != wakeRestartSchemaV1 ||
+		record.SuccessorGeneration != "" ||
+		record.RequestID == "" || record.RequestID != request.RequestID ||
+		request.Owner == nil || !sameWakeOwner(request.Owner, &record.Owner) ||
+		record.Generation != lock.Generation ||
+		record.Root != canonicalWakeRoot(root) || record.Agent != me {
+		return
+	}
+	_ = refuseWakeRestartRecordAt(scope, record, wakeRestartControlReason(reason))
 }
 
 func startWakeControlListenerInDirWithRestart(
@@ -869,6 +955,9 @@ func handleDarwinWakeControlConn(
 		}
 		peerPID, err := darwinPeerPID(conn)
 		if err != nil {
+			if request.Operation == wakeControlRestartOperation {
+				refuseDarwinWakeRestartControl(conn, me, fmt.Errorf("wake restart control peer pid unavailable: %w", err))
+			}
 			return
 		}
 		switch request.Operation {

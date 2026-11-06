@@ -51,6 +51,7 @@ type wakeRestartRecord struct {
 	Generation          string                            `json:"generation"`
 	SuccessorGeneration string                            `json:"successor_generation,omitempty"`
 	Owner               wakeOwner                         `json:"owner"`
+	Requester           *wakeOwner                        `json:"requester,omitempty"`
 	Candidate           wakeImageEvidenceV1               `json:"candidate"`
 	StagePath           string                            `json:"stage_path,omitempty"`
 	BoundImage          *wakeImageEvidenceV1              `json:"bound_image,omitempty"`
@@ -187,6 +188,11 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		Owner:     *owner,
 		Candidate: candidate,
 	}
+	// The requester's identity lets the wake retire this request once the
+	// requester is gone without the wake having taken it.
+	if requester, err := captureAuthoritativeCurrentWakeOwner(); err == nil {
+		record.Requester = &requester
+	}
 	stagePath, err := planWakeRestartStageForRecordPlatform(record)
 	if err != nil {
 		result.Reason = err.Error()
@@ -255,6 +261,14 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 
 	if needsNotify {
 		if err := wakeRestartNotify(agentDir, expected, record); err != nil {
+			var refused wakeRestartRefusedByWakeError
+			if errors.As(err, &refused) {
+				// The wake did not queue this request. Finish it so it does
+				// not hold a later restart or self-upgrade.
+				if finishErr := refuseWakeRestartRecord(agentDir, record, refused.Reason); finishErr != nil {
+					err = errors.Join(err, fmt.Errorf("finish refused wake restart request: %w", finishErr))
+				}
+			}
 			result.Reason = err.Error()
 			return result, err
 		}
@@ -709,6 +723,11 @@ func validateWakeRestartRecord(record wakeRestartRecord) error {
 	if record.Source != "" && record.Source != wakeRestartSourceForeign && record.Source != wakeRestartSourceSelf {
 		return fmt.Errorf("wake restart source is invalid")
 	}
+	if record.Requester != nil {
+		if err := validateAuthoritativeWakeOwner(*record.Requester); err != nil {
+			return fmt.Errorf("wake restart requester is invalid: %w", err)
+		}
+	}
 	if record.Status == wakeRestartPending && record.Reason != "" {
 		return fmt.Errorf("pending wake restart contains a refusal reason")
 	}
@@ -968,6 +987,19 @@ func removeWakeRestartRecordSnapshotAt(
 	return nil
 }
 
+// wakeRestartRefusedByWakeError is the wake's explicit refusal of a restart
+// request: the wake did not queue it.
+type wakeRestartRefusedByWakeError struct {
+	Reason string
+}
+
+func (e wakeRestartRefusedByWakeError) Error() string {
+	if e.Reason == "" {
+		return "wake restart control request refused"
+	}
+	return "wake restart control request refused: " + e.Reason
+}
+
 func refuseWakeRestartRecord(agentDir *wakeAgentDir, expected wakeRestartRecord, reason string) error {
 	return withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
 		return refuseWakeRestartRecordAt(scope, expected, reason)
@@ -991,6 +1023,9 @@ func refuseWakeRestartRecordAt(
 	if err != nil || !exists {
 		return err
 	}
+	if current.Status == wakeRestartRefused && sameWakeRestartAttemptIdentity(expected, current) {
+		return nil
+	}
 	if expected.Schema != wakeRestartSchemaV1 || expected.Status != wakeRestartPending ||
 		current.Schema != wakeRestartSchemaV1 || current.Status != wakeRestartPending ||
 		!sameWakeRestartAttemptIdentity(expected, current) {
@@ -1005,6 +1040,28 @@ func refuseWakeRestartRecordAt(
 	current.Status = wakeRestartRefused
 	current.Reason = wakeRestartReasonWithRemedy(reason, current.Root, current.Agent)
 	return writeWakeRestartRecordAt(scope, current)
+}
+
+// wakeRestartRequestOrphaned reports a pending request that no one can
+// complete: its recorded requester is conclusively gone and no wake took it.
+// A request without a requester identity, or with a requester whose state is
+// unknown, is not orphaned.
+func wakeRestartRequestOrphaned(record wakeRestartRecord) (bool, string) {
+	if record.Schema != wakeRestartSchemaV1 || record.Status != wakeRestartPending ||
+		record.Source == wakeRestartSourceSelf || record.SuccessorGeneration != "" ||
+		record.Requester == nil {
+		return false, ""
+	}
+	observation, err := observeAuthoritativeWakeOwner(*record.Requester)
+	closeErr := observation.Close()
+	if err != nil || closeErr != nil || observation.State != wakeOwnerDead {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"the restart requester (pid %d) exited before the wake took the request: %s",
+		record.Requester.PID,
+		observation.Reason,
+	)
 }
 
 func sameWakeRestartAttemptIdentity(expected, current wakeRestartRecord) bool {
