@@ -512,7 +512,9 @@ applies with these differences:
 ## Embedding
 
 A host application can load the reference extension unmodified and call
-`registerAmqBridge(pi, options)` instead of its default export. Every option
+`registerAmqBridge(pi, options)` instead of its default export. It loads the
+file that `amq-remote pi bridge-path` prints: the extension built into the
+installed `amq-remote`, so the bridge and the adapter come from one release. Every option
 is optional; without options the extension behaves as described above.
 
 | Option | Default | Host value |

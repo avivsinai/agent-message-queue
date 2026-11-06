@@ -8,7 +8,17 @@ sees its admission, its completion, and session changes. The wire contract is
 
 ## Install
 
-Install the package from a release tag:
+Load the extension that matches the installed `amq-remote`:
+
+```bash
+pi -e "$(amq-remote pi bridge-path)"
+```
+
+`amq-remote pi bridge-path` writes the extension built into that binary to
+`~/.amq/pi/amq-bridge.ts` and prints the path. After an AMQ upgrade, the next
+pi start loads the new bridge.
+
+Or install the package from a release tag:
 
 ```bash
 pi install git:github.com/avivsinai/agent-message-queue@<tag>
@@ -37,7 +47,7 @@ it is active it creates
 ## Embed in a host application
 
 A host application that runs pi with its own identity or prompt queue loads
-this file unmodified and calls `registerAmqBridge(pi, options)` instead of
+the file that `amq-remote pi bridge-path` prints, unmodified, and calls `registerAmqBridge(pi, options)` instead of
 the default export:
 
 - `identity(ctx)` returns `{root, handle}` instead of `AM_ROOT` and `AM_ME`.
