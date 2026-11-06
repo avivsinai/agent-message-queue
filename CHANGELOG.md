@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.130.0](https://github.com/avivsinai/agent-message-queue/compare/v0.129.0...v0.130.0) (2026-11-06)
+
+
+### Features
+
+* **remote:** an image sent in Buzz reaches the agent as a local file ([#1354](https://github.com/avivsinai/agent-message-queue/issues/1354)) ([02ca3da](https://github.com/avivsinai/agent-message-queue/commit/02ca3daa0c80b4c2d826e01cd9f8c0fee0c3340f))
+
 ## [0.129.0](https://github.com/avivsinai/agent-message-queue/compare/v0.128.0...v0.129.0) (2026-11-06)
 
 
