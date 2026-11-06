@@ -347,9 +347,10 @@ func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError fu
 }
 
 // openObligationIDs are the ids of the openers that `thread open --max-age 0`
-// lists as open under root.
+// lists as open under root, and of every message whose refs name one: a
+// reply that acknowledges an opener decides its state.
 func openObligationIDs(root string) (map[string]bool, error) {
-	_, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(string, error) error { return nil })
+	scan, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(string, error) error { return nil })
 	if err != nil {
 		return nil, err
 	}
@@ -357,6 +358,18 @@ func openObligationIDs(root string) (map[string]bool, error) {
 	ids := make(map[string]bool, len(open))
 	for _, ob := range open {
 		ids[ob.opener.ID] = true
+	}
+	var replies []string
+	for _, entry := range scan.Entries {
+		for _, ref := range entry.Refs {
+			if ids[ref] {
+				replies = append(replies, entry.ID)
+				break
+			}
+		}
+	}
+	for _, id := range replies {
+		ids[id] = true
 	}
 	return ids, nil
 }

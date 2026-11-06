@@ -68,3 +68,37 @@ func TestCleanupHistoryKeepsOpenObligations(t *testing.T) {
 		t.Fatalf("open obligations after cleanup = %d, want 1", len(after.Obligations))
 	}
 }
+
+// History cleanup also keeps the status reply that acknowledges an open
+// question, in the same session and across sessions, so thread open still
+// shows it acknowledged (an acknowledged question turned pending after
+// --history-max-size 1B, review of bead agent-message-queue-9df).
+func TestCleanupHistoryKeepsRepliesToOpenObligations(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	for _, session := range []string{"s1", "s2"} {
+		base := filepath.Join(t.TempDir(), defaultCoopRoot)
+		start := time.Now().UTC().Add(-3 * 24 * time.Hour)
+		ids, _ := writeThreadOpenMessages(t, base, []threadOpenMessage{
+			{name: "q", from: "alpha@s1", to: "beta@" + session, kind: format.KindQuestion},
+			{name: "st", from: "beta@" + session, to: "alpha@s1", kind: format.KindStatus, refs: []string{"q"}},
+		}, func(i int, _ threadOpenMessage) time.Time { return start.Add(time.Duration(i) * time.Hour) })
+		s1, rs := filepath.Join(base, "s1"), filepath.Join(base, session)
+		for _, move := range [][3]string{{rs, "beta", ids["q"]}, {s1, "alpha", ids["st"]}} {
+			if err := os.Rename(filepath.Join(fsq.AgentInboxNew(move[0], move[1]), move[2]+".md"), filepath.Join(fsq.AgentInboxCur(move[0], move[1]), move[2]+".md")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, root := range []string{s1, rs} {
+			if _, _, err := captureEnvOutput(t, func() error {
+				return runCleanup([]string{"--history-max-size", "1B", "--root", root, "--yes"})
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if after := runThreadOpenJSON(t, base); len(after.Obligations) != 1 || after.Obligations[0].State != "acknowledged" {
+			t.Fatalf("%s: obligations after cleanup = %+v, want one acknowledged", session, after.Obligations)
+		}
+	}
+}
