@@ -157,6 +157,13 @@ func AgentBase(root, agent string) string {
 	return filepath.Join(root, "agents", agent)
 }
 
+// AgentRemoteFiles holds the files an agent fetched for a remote prompt,
+// such as the images an owner sent in Buzz. They are history: amq cleanup
+// removes them by age and size like read mail.
+func AgentRemoteFiles(root, agent string) string {
+	return filepath.Join(AgentBase(root, agent), "remote-files")
+}
+
 func AgentInboxTmp(root, agent string) string {
 	return AgentMailboxPath(root, agent, MailboxInboxTmp)
 }

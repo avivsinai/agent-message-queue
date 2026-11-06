@@ -144,6 +144,9 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
 		}
+		// Both carriers name the images of the owner's message as local
+		// files.
+		text = attachImages(b.Root, text)
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}

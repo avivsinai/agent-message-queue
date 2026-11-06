@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent) or
-// receipt in an agent mailbox.
+// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent),
+// receipt or remote file (remote-files) in an agent mailbox.
 type HistoryFile struct {
 	Path    string
 	Agent   string
@@ -35,7 +35,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 	for _, agent := range agents {
 		var files []HistoryFile
 		var total int64
-		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent)} {
+		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent), AgentRemoteFiles(root, agent)} {
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				if os.IsNotExist(err) {

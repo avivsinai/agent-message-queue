@@ -24,11 +24,21 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 		"receipts/2026-01-03T00-00-00.000Z_pid1_c__claude__drained.json": "receipt1",
 		"inbox/cur/2026-02-01T00-00-00.000Z_pid1_d.md":                   "new read",
 		"inbox/new/2025-01-01T00-00-00.000Z_pid1_e.md":                   "unread!!",
+		"remote-files/" + strings.Repeat("f", 64) + ".png":               "an image",
 	}
 	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(base, rel)), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(base, rel), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A remote file's age is its modification time (Buzz images kept
+	// forever, bead agent-message-queue-ho2).
+	imageTime := time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(base, "remote-files", strings.Repeat("f", 64)+".png"), imageTime, imageTime); err != nil {
+		t.Fatal(err)
 	}
 	if _, _, err := captureEnvOutput(t, func() error {
 		return runCleanup([]string{"--history-max-size", "10B", "--root", rootPath, "--yes"})

@@ -451,8 +451,9 @@ Usage:
   amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
 
 --history-older-than and --history-max-size remove history from every agent
-mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent)
-and receipts, oldest first by the creation stamp in the message id. A size
+mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),
+receipts, and fetched remote files such as Buzz images (remote-files), oldest
+first by the creation stamp in the message id, else the modification time. A size
 (B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,
 dead letters, extension data, and every copy of a message that
 'amq thread open --max-age 0' lists as open, with the replies that ref it,
@@ -480,9 +481,9 @@ Options:
   -dry-run
         Show what would be removed without deleting
   -history-max-size string
-        Remove the oldest read messages, sent copies and receipts until each mailbox's history fits this size (e.g. 100MB)
+        Remove the oldest read messages, sent copies, receipts and remote files until each mailbox's history fits this size (e.g. 100MB)
   -history-older-than string
-        Remove read messages, sent copies and receipts older than this duration (e.g. 720h)
+        Remove read messages, sent copies, receipts and remote files older than this duration (e.g. 720h)
   -json
         Emit JSON output
   -launch-journal
