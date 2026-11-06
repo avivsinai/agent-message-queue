@@ -239,7 +239,9 @@ version supports it.
   AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
   runs on `PostToolUse` and `PostToolUseFailure` for the same two tools (it
   removes only the marker of that tool call), and on `UserPromptSubmit`,
-  `Stop`, `SessionStart`, and `SessionEnd`. The receiver exits 0 once its
+  `Stop`, `SessionStart`, and `SessionEnd`; a subagent's permission marker
+  closes only on `SessionEnd` or a `SessionStart` from `startup` or
+  `resume` (below). The receiver exits 0 once its
   arguments parse and prints nothing, so it never decides a tool call or a
   permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
@@ -299,8 +301,25 @@ version supports it.
   the marker opened, whose message has no record dated at or before that.
   The marker opened by the end of its `opened_at` second or at its mtime,
   whichever is later. Subagent (sidechain) records run alongside a dialog,
-  and a later record of the message that asked belongs to the same batch,
-  so neither proves anything. A doorbell that would land mid-turn after a
+  a later record of the message that asked belongs to the same batch, and a
+  record whose `model` is `<synthetic>` (an API error Claude Code writes
+  itself) can land while a dialog shows, so none of them proves anything.
+  A dialog of a subagent (the hook input names its `agent_id`) blocks only
+  that subagent while the main chain runs on, so the main transcript never
+  proves it; only an assistant record in the subagent's own transcript
+  does, by the same rule without the sidechain filter. A permission hook
+  gives no `agent_transcript_path`, so the wake reads the transcript where
+  Claude Code writes it: `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl`
+  or one subdirectory deeper, beside the session transcript
+  `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
+  no symbolic link, found exactly once at either depth; none, several, or
+  an unreadable file is no proof. A subagent can outlive the main thread's
+  turn, so the main thread's `Stop`, `UserPromptSubmit` and a `SessionStart`
+  from `clear`, `compact` or `fork` do not clear its marker, and a later
+  permission open keeps it while it is not proven closed. It clears on its
+  proof, on `SessionEnd`, or on a `SessionStart` from `startup` or `resume`,
+  which is a new Claude Code process that cannot show the old one's
+  dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
   permission dialog lands once the turn moves on, the turn ends, or the
   person types.
 - **AskUserQuestion and ExitPlanMode.** A marker that the call's own

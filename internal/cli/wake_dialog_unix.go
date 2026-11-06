@@ -129,6 +129,13 @@ type wakeDialogHookInput struct {
 	ToolUseID      string `json:"tool_use_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Cwd            string `json:"cwd"`
+	// AgentID names the subagent a Claude Code hook fires in; it is absent
+	// on the main thread.
+	AgentID             string `json:"agent_id"`
+	AgentTranscriptPath string `json:"agent_transcript_path"`
+	// Source is why a SessionStart fired: startup, resume, clear, compact
+	// or fork.
+	Source string `json:"source"`
 	// TurnID is the Codex turn (wake_dialog_codex_unix.go).
 	TurnID string `json:"turn_id"`
 	// ownIdentity reports a hook whose AM_ROOT and AM_ME came from its own
@@ -154,6 +161,10 @@ type wakeDialogMarker struct {
 	// TranscriptPath is the Claude Code session transcript the wake reads
 	// for proof that Esc or a deny closed the tool call's dialog.
 	TranscriptPath string `json:"transcript_path,omitempty"`
+	// AgentID names the Claude Code subagent whose dialog this is; only
+	// its own transcript (AgentTranscriptPath) can prove the dialog closed.
+	AgentID             string `json:"agent_id,omitempty"`
+	AgentTranscriptPath string `json:"agent_transcript_path,omitempty"`
 	// TurnID is the Codex turn that asked, for diagnosis.
 	TurnID    string `json:"turn_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -169,7 +180,7 @@ type wakeDialogMarker struct {
 // decision (a Codex one never does), so the doorbell rings without a
 // SessionStart hook. A Claude Code marker whose session transcript proves
 // its dialog gone (claudeDialogAnswered: a result for its tool call, or for
-// a permission marker a new main-chain assistant message) is removed; a missing or
+// a permission marker a new assistant message of its own chain) is removed; a missing or
 // unreadable transcript, a busy lock or a changed marker keeps the hold
 // until the next recheck.
 //
@@ -446,19 +457,31 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 // replaces: that marker can belong to another call of the same tool.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	raw, err := json.Marshal(wakeDialogMarker{
-		Schema:         1,
-		Event:          in.Event,
-		Tool:           in.Tool,
-		ToolUseID:      in.ToolUseID,
-		TranscriptPath: in.TranscriptPath,
-		SessionID:      in.SessionID,
-		OpenedAt:       time.Now().UTC().Format(time.RFC3339),
+		Schema:              1,
+		Event:               in.Event,
+		Tool:                in.Tool,
+		ToolUseID:           in.ToolUseID,
+		TranscriptPath:      in.TranscriptPath,
+		AgentID:             in.AgentID,
+		AgentTranscriptPath: in.AgentTranscriptPath,
+		SessionID:           in.SessionID,
+		OpenedAt:            time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
 	}
 	if in.ToolUseID == "" {
-		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
+		// A permission open keeps a present subagent marker unless its own
+		// transcript proves it closed: a main-chain marker in its place
+		// could be proven closed while the subagent's dialog still shows.
+		return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte, modTime time.Time) bool {
+			var marker wakeDialogMarker
+			if json.Unmarshal(current, &marker) != nil || marker.AgentID == "" {
+				return false
+			}
+			closed, err := claudeDialogAnswered(marker, modTime)
+			return err != nil || !closed
+		})
 	}
 	// A tool call's open keeps a present marker without a tool_use_id unless
 	// its transcript proves it closed: the wake would remove that marker and
@@ -641,6 +664,14 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		}
 		if decoded && marker.Harness == "cursor" {
 			return cursorDialogCloseMatches(marker, in)
+		}
+		if decoded && marker.AgentID != "" && !in.emptyInput {
+			// A subagent's dialog can outlive the main thread's turn, so
+			// only the end of its process closes it here: SessionEnd, or a
+			// SessionStart of a new process (startup or resume). Its
+			// transcript proof closes it in the wake.
+			return in.Event == "SessionEnd" ||
+				in.Event == "SessionStart" && (in.Source == "startup" || in.Source == "resume")
 		}
 		return in.ToolUseID == "" || marker.ToolUseID == in.ToolUseID
 	})

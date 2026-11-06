@@ -124,12 +124,21 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	agyBusy := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
 	// TRANSCRIPT is replaced by the row's transcript path.
 	permission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	// TRANSCRIPT and AGENT_TRANSCRIPT are replaced by the row's paths.
+	subagentPermission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","agent_id":"a1","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	subagentPermissionWithTranscript := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","agent_id":"a1","agent_transcript_path":"AGENT_TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	record := func(id, model string, sidechain bool, at time.Time) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"timestamp":%q,"message":{"id":%q,"model":%q,"content":[]}}`,
+			sidechain, at.UTC().Format(time.RFC3339Nano), id, model) + "\n"
+	}
 	assistant := func(id string, sidechain bool, at time.Time) string {
-		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"timestamp":%q,"message":{"id":%q,"content":[]}}`,
-			sidechain, at.UTC().Format(time.RFC3339Nano), id) + "\n"
+		return record(id, "claude-opus-5-5", sidechain, at)
 	}
 	// asked is the main-chain message whose tool call opened the dialog.
 	asked := func(opened time.Time) string { return assistant("msg_asked", false, opened.Add(-time.Second)) }
+	subagentMovedOn := func(opened time.Time) string {
+		return assistant("msg_sub_asked", true, opened.Add(-time.Second)) + assistant("msg_sub_next", true, opened.Add(5*time.Minute))
+	}
 	movedOn := func(opened time.Time) string {
 		return asked(opened) + assistant("msg_next", false, opened.Add(5*time.Minute))
 	}
@@ -139,11 +148,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// age is the marker's age when the message arrives.
 		age        time.Duration
 		claudeHook bool
-		// transcript is the session transcript for a marker opened at
-		// opened; nil leaves the file missing.
-		transcript func(opened time.Time) string
-		// ask opens an AskUserQuestion through the hook writer.
-		ask     bool
+		// transcript and agentTranscript are the session and subagent
+		// transcripts for a marker opened at opened; nil leaves a file
+		// missing.
+		transcript, agentTranscript func(opened time.Time) string
+		// hook runs through the hook receiver after the marker is written.
+		hook    wakeDialogHookInput
 		notices int
 		rings   int
 		log     string
@@ -169,11 +179,39 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			}},
 		{name: "an unreadable transcript proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, notices: 1, log: "transcript=unreadable, holding"},
+		// Pre-merge review of agent-message-queue-zu3 (session 21fde719): a
+		// subagent's Bash dialog stayed open 5869 s while the main chain
+		// wrote 53 new assistant messages, each a false proof.
+		{name: "a newer main-chain message proves no subagent dialog", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: movedOn, notices: 1, log: "transcript=unreadable, holding"},
+		{name: "a newer message in the subagent's own transcript rings", marker: subagentPermissionWithTranscript, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1, agentTranscript: subagentMovedOn},
+		{name: "a newer message in the subagent transcript Claude Code lays out rings", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1, agentTranscript: subagentMovedOn},
+		// The main thread's Stop and permission dialogs left a background
+		// subagent's open dialog unguarded.
+		{name: "a main-thread Stop keeps a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: movedOn, hook: wakeDialogHookInput{Event: "Stop", SessionID: "s1"}, notices: 1},
+		{name: "a new process's SessionStart clears a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, hook: wakeDialogHookInput{Event: "SessionStart", Source: "startup", SessionID: "s1"}, rings: 1},
+		{name: "a compaction's SessionStart keeps a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: movedOn, hook: wakeDialogHookInput{Event: "SessionStart", Source: "compact", SessionID: "s1"}, notices: 1},
+		{name: "a main-thread permission keeps an unproven subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: func(opened time.Time) string {
+				return asked(opened) + assistant("msg_next", false, opened.Add(wakeDialogQuietHold+2*time.Minute))
+			}, hook: wakeDialogHookInput{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1"}, notices: 1},
+		// Pre-merge review of agent-message-queue-zu3: a synthetic API-error
+		// record landed about 0.5 s before a rejected tool call's result.
+		{name: "a synthetic assistant record proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, notices: 1, transcript: func(opened time.Time) string {
+				return asked(opened) + record("msg_error", "<synthetic>", false, opened.Add(5*time.Minute))
+			}},
 		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
 		// that opened past a permission marker kept that marker, so the
 		// doorbell answered a dialog seconds old once that marker released.
 		{name: "AskUserQuestion after a closed permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
-			claudeHook: true, transcript: movedOn, ask: true, notices: 1},
+			claudeHook: true, transcript: movedOn, notices: 1,
+			hook: wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"}},
 		// Pre-merge review of agent-message-queue-zu3: a marker of no known
 		// writer read as stale and rang.
 		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
@@ -181,7 +219,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
-			if tt.ask {
+			if wakeDialogHookVerb(tt.hook.Event) == "open" {
 				// The hook writer ages markers by the real clock.
 				h.now = time.Now()
 			}
@@ -204,22 +242,36 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			t.Cleanup(func() { _ = agentDir.Close() })
 			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
 			opened := h.now.Add(-tt.age)
-			transcript := filepath.Join(t.TempDir(), "session.jsonl")
-			if tt.transcript != nil {
-				if err := os.WriteFile(transcript, []byte(tt.transcript(opened)), 0o600); err != nil {
+			paths := t.TempDir()
+			// The session s1 and its subagent a1, as Claude Code lays them out.
+			transcript := filepath.Join(paths, "s1.jsonl")
+			agentTranscript := filepath.Join(paths, "s1", "subagents", "agent-a1.jsonl")
+			for path, content := range map[string]func(time.Time) string{transcript: tt.transcript, agentTranscript: tt.agentTranscript} {
+				if content == nil {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content(opened)), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
+			raw := strings.NewReplacer("AGENT_TRANSCRIPT", agentTranscript, "TRANSCRIPT", transcript).Replace(tt.marker)
 			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-			if err := os.WriteFile(marker, []byte(strings.ReplaceAll(tt.marker, "TRANSCRIPT", transcript)), 0o600); err != nil {
+			if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Chtimes(marker, opened, opened); err != nil {
 				t.Fatal(err)
 			}
-			if tt.ask {
+			if in := tt.hook; in.Event != "" {
 				if err := agentDir.withFD(func(dirfd int) error {
-					return writeWakeDialogMarker(dirfd, agentDir, wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"})
+					if wakeDialogHookVerb(in.Event) == "open" {
+						in.TranscriptPath = transcript
+						return writeWakeDialogMarker(dirfd, agentDir, in)
+					}
+					return clearWakeDialogMarker(dirfd, agentDir, in)
 				}); err != nil {
 					t.Fatal(err)
 				}

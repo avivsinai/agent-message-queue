@@ -264,7 +264,9 @@ The wake reads the marker before each delivery attempt and each terminal
 write and never infers it from other wake state. It writes no marker; it
 removes only a Claude Code marker whose session transcript proves its
 dialog gone (a tool call marker by that call's result, a permission marker
-by a newer main-chain assistant message), and only the exact version it
+by a newer non-synthetic assistant message of its own chain: the main chain,
+or for a subagent's marker only that subagent's transcript, found once
+at the layout Claude Code writes), and only the exact version it
 read, under the marker lock. A marker's age never releases input. No wake cleanup removes it. A marker that is unreadable, dated in the
 future, behind a non-canonical agent directory, or older than the quiet hold
 blocks input only while the AMQ dialog hook of the harness that wrote it
