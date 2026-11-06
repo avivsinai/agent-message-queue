@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // RolloutLine is the part of one rollout JSONL line that the session mirror
@@ -36,8 +38,12 @@ type RolloutLine struct {
 	Error bool
 	// LastAgentMessage is a task_complete's final assistant text.
 	LastAgentMessage string
-	// HistoryMode is a session_meta line's history mode.
-	HistoryMode string
+	// HistoryMode is a session_meta line's history mode; MetaSource its
+	// source when that is a name ("cli", not a subagent's object), and
+	// ThreadSource its thread_source ("user" for a thread the user started).
+	HistoryMode  string
+	MetaSource   string
+	ThreadSource string
 	// Item is the item of an item_completed event.
 	Item RolloutItem
 }
@@ -78,6 +84,8 @@ func ParseRolloutLine(line string) (RolloutLine, bool) {
 			Error            json.RawMessage `json:"error"`
 			LastAgentMessage *string         `json:"last_agent_message"`
 			HistoryMode      string          `json:"history_mode"`
+			Source           json.RawMessage `json:"source"`
+			ThreadSource     string          `json:"thread_source"`
 			Item             *struct {
 				Type     string          `json:"type"`
 				ID       string          `json:"id"`
@@ -101,7 +109,7 @@ func ParseRolloutLine(line string) (RolloutLine, bool) {
 	}
 	switch raw.Type {
 	case "session_meta":
-		l.HistoryMode = p.HistoryMode
+		l.HistoryMode, l.MetaSource, l.ThreadSource = p.HistoryMode, rawString(p.Source), p.ThreadSource
 		return l, true
 	case "event_msg":
 	default:
@@ -189,23 +197,73 @@ func Rollout(codexHome, thread string) string {
 		return ""
 	}
 	path, _ := CurrentRollout(filepath.Join(codexHome, "sessions"), thread)
-	if path == "" {
-		return ""
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = f.Close() }()
-	head, err := bufio.NewReader(io.LimitReader(f, rolloutHeadMax)).ReadString('\n')
-	if err != nil {
-		return ""
-	}
-	l, ok := ParseRolloutLine(strings.TrimSpace(head))
-	if !ok || l.Type != "session_meta" || l.HistoryMode != "paginated" {
+	if meta, ok := rolloutMeta(path); !ok || meta.HistoryMode != "paginated" {
 		return ""
 	}
 	return path
+}
+
+// rolloutMeta is the session_meta line that starts the regular file path.
+func rolloutMeta(path string) (RolloutLine, bool) {
+	if path == "" {
+		return RolloutLine{}, false
+	}
+	lfi, err := os.Lstat(path)
+	if err != nil || !lfi.Mode().IsRegular() {
+		return RolloutLine{}, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return RolloutLine{}, false
+	}
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !os.SameFile(fi, lfi) {
+		return RolloutLine{}, false
+	}
+	head, err := bufio.NewReader(io.LimitReader(f, rolloutHeadMax)).ReadString('\n')
+	if err != nil {
+		return RolloutLine{}, false
+	}
+	l, ok := ParseRolloutLine(strings.TrimSpace(head))
+	return l, ok && l.Type == "session_meta"
+}
+
+// HolderRollout is the rollout file that the Codex process holder keeps
+// open for appending (the rollout recorder holds its thread's file open), of
+// the thread the user started in it: a regular file named as a rollout in a
+// sessions/YYYY/MM/DD folder whose session_meta names source "cli",
+// thread_source "user" and the paginated history mode. A subagent's or a
+// guardian's thread, open in the same process, is not one. "" unless
+// exactly one file is, or when holder is not the proven running process
+// (pid and start time) before and after its files are read.
+func HolderRollout(holder launch.HolderIdentity) string {
+	proven := func() bool {
+		state, _ := launch.InspectHolder(holder)
+		return holder.ProcessStart != "" && state == launch.LeaseValid
+	}
+	if !proven() {
+		return ""
+	}
+	paths, err := openFilePaths(holder.PID)
+	if err != nil || !proven() {
+		return ""
+	}
+	found := ""
+	for _, path := range paths {
+		n, ok := parseRolloutName(filepath.Base(path))
+		if !ok || n.compressed || path == found || SessionsDir(path) == "" {
+			continue
+		}
+		meta, ok := rolloutMeta(path)
+		if !ok || meta.MetaSource != "cli" || meta.ThreadSource != "user" || meta.HistoryMode != "paginated" {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = path
+	}
+	return found
 }
 
 // rolloutName is a parsed rollout file name:

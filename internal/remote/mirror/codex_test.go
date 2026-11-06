@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -113,7 +115,11 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 // to, as Codex picks it.
 func TestCodexLocateFollowsTheThread(t *testing.T) {
 	const thread = "01a18747-db9a-7e92-9cdf-08f39de60875"
-	day := filepath.Join(t.TempDir(), "sessions", "2026", "11", "05")
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := filepath.Join(tmp, "sessions", "2026", "11", "05")
 	if err := os.MkdirAll(day, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -150,5 +156,43 @@ func TestCodexLocateFollowsTheThread(t *testing.T) {
 	moved.AppServer.Thread = "01a18747-db9a-7e92-9cdf-08f39de60877"
 	if got := codexLocate(moved, reverted); got != "" {
 		t.Fatalf("moved to a thread with no rollout: %q, want none", got)
+	}
+
+	// agent-message-queue-7fz live check: a plain Codex TUI's binding had no
+	// Transcript, so its turns were never read. The rollout is the one this
+	// binding's holder (here the test process) keeps open; a guardian's
+	// thread open beside it is not, and two user threads are not one.
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return
+	}
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(name, source, threadSource string) string {
+		path := filepath.Join(day, name)
+		meta := `{"timestamp":"2026-11-05T10:00:00Z","type":"session_meta","payload":{"id":"x","source":` + source + `,"thread_source":"` + threadSource + `","history_mode":"paginated"}}` + "\n"
+		if err := os.WriteFile(path, []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return path
+	}
+	held := binding.Binding{Holder: holder}
+	if got := codexLocate(held, ""); got != "" {
+		t.Fatalf("holder with no open rollout: %q, want none", got)
+	}
+	user := open("rollout-2026-11-05T10-00-00-01a18747-db9a-7e92-9cdf-08f39de60880.jsonl", `"cli"`, "user")
+	open("rollout-2026-11-05T10-00-01-01a18747-db9a-7e92-9cdf-08f39de60881.jsonl", `{"subagent":{"other":"guardian"}}`, "guardian_review")
+	if got := codexLocate(held, ""); got != user {
+		t.Fatalf("holder with one open user rollout: %q, want %q", got, user)
+	}
+	open("rollout-2026-11-05T10-00-02-01a18747-db9a-7e92-9cdf-08f39de60882.jsonl", `"cli"`, "user")
+	if got := codexLocate(held, ""); got != "" {
+		t.Fatalf("holder with two open user rollouts: %q, want none", got)
 	}
 }
