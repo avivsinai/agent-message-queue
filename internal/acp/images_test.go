@@ -30,8 +30,9 @@ func TestAttachImagesStoresTheImageAndNamesIt(t *testing.T) {
 	sum := sha256.Sum256(buf.Bytes())
 	sha := hex.EncodeToString(sum[:])
 	url := "https://relay.example/" + sha + ".png"
-	saved := buzzCall
-	t.Cleanup(func() { buzzCall = saved })
+	saved, savedRelay := buzzCall, buzzRelayURL
+	t.Cleanup(func() { buzzCall, buzzRelayURL = saved, savedRelay })
+	buzzRelayURL = "wss://relay.example"
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))

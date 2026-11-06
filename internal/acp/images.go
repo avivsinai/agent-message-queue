@@ -128,12 +128,8 @@ func promptMedia(prompt string) []eventMedia {
 	if len(media) > 0 {
 		return media
 	}
-	relay, err := url.Parse(buzzRelayURL)
-	if err != nil || relay.Hostname() == "" {
-		return nil
-	}
 	for _, raw := range blossomURLRe.FindAllString(evt, -1) {
-		if u, err := url.Parse(raw); err == nil && strings.EqualFold(u.Hostname(), relay.Hostname()) && !seen[raw] {
+		if u, err := url.Parse(raw); err == nil && onRelay(raw) && !seen[raw] {
 			seen[raw] = true
 			// A Blossom URL names the blob by its sha256.
 			sha, _, _ := strings.Cut(path.Base(u.Path), ".")
@@ -141,6 +137,16 @@ func promptMedia(prompt string) []eventMedia {
 		}
 	}
 	return media
+}
+
+// onRelay reports that raw is an https URL on the host of the agent's relay.
+func onRelay(raw string) bool {
+	relay, err := url.Parse(buzzRelayURL)
+	if err != nil || relay.Hostname() == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), relay.Hostname())
 }
 
 // storeImage returns the stored file of m: the file already stored under its
@@ -152,6 +158,11 @@ func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, err
 	}
 	if m.mime != "" && !strings.HasPrefix(m.mime, "image/") {
 		return "", fmt.Errorf("%s is not an image", m.mime)
+	}
+	// The download is signed with the agent's key, so it goes only to the
+	// agent's own relay.
+	if !onRelay(m.url) {
+		return "", errors.New("it is not on this agent's relay")
 	}
 	if sha256HexRe.MatchString(m.sha) {
 		if stored, ok := storedImage(dir, m.sha); ok {
