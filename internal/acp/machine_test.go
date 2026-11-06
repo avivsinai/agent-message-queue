@@ -176,6 +176,42 @@ func channelPrompt(t *testing.T, s *Server, channel string) string {
 	}
 }
 
+// The workers keep one read of the bindings and records while their files
+// are unchanged; a binding written after that read is served on the next
+// tick. The test waits out fsq.FileVersionSettle so the first read is kept.
+func TestMachineServesABindingWrittenAfterTheSnapshot(t *testing.T) {
+	s, _ := machineServer(t)
+	root := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Holder: holder,
+		Label: "claude · proj/alpha @ box", Name: "alpha"}
+	activeChannel(t, s, b, machineChanA)
+	_, dir, err := binding.WatchPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(fsq.FileVersionSettle + 100*time.Millisecond)
+	if got := s.dialogTargets(); len(got) != 0 {
+		t.Fatalf("targets before the binding = %+v, want none", got)
+	}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	got := s.dialogTargets()
+	if len(got) != 1 || got[0].name != "alpha" || got[0].channel != machineChanA {
+		t.Fatalf("targets after the binding = %+v, want alpha in its channel", got)
+	}
+}
+
 // The machine leader makes a private channel for a live session, adds the
 // owner as an admin, welcomes them with a mention, and activates it.
 //

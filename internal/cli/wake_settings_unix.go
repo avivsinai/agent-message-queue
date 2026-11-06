@@ -10,14 +10,18 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
 	// A settings write waits this long for the lifecycle guard, covering
 	// startup contention with readiness publication or repair.
 	wakeSettingsGuardTimeout = 5 * time.Second
-	// The running wake re-reads .wake.settings this often. One small read
-	// every 2 s bounds the latency of a live change for a held cohort.
+	// The running wake checks .wake.settings this often, and reads it when
+	// its version changed. This bounds the latency of a live change for a
+	// held cohort.
 	wakeSettingsPollInterval = 2 * time.Second
 	// A read that a concurrent rename changed is retried this often.
 	wakeSettingsReadRetries    = 5
@@ -51,6 +55,80 @@ func readWakeSettingsFile(agentDir *wakeAgentDir) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return raw, exists, readErr
+}
+
+// wakeSettingsGate keeps the last read of one settings file with the
+// version the file had before that read. While the version is unchanged and
+// settled, the read is not repeated, for at most wakeSettingsReconcile:
+// equal settled versions mean the file was not written, replaced or changed
+// in mode or owner in between. Only a read without error is kept, so a
+// refused or changing file is read on each tick.
+type wakeSettingsGate struct {
+	version wakeSettingsVersion
+	raw     []byte
+	exists  bool
+	kept    bool
+	at      time.Time
+}
+
+// wakeSettingsReconcile is the longest a kept settings read is used.
+const wakeSettingsReconcile = time.Minute
+
+// wakeSettingsVersion is the version of a settings file and, for the
+// machine file, of the directory that holds it.
+type wakeSettingsVersion struct {
+	dir, file fsq.FileVersion
+}
+
+// read returns the kept read while version is the kept one, else read's
+// result, which it keeps when version and the read are good.
+func (g *wakeSettingsGate) read(
+	version wakeSettingsVersion,
+	settled bool,
+	read func() ([]byte, bool, error),
+) ([]byte, bool, error) {
+	now := time.Now()
+	if settled && g.kept && version == g.version && now.Sub(g.at) < wakeSettingsReconcile {
+		return g.raw, g.exists, nil
+	}
+	raw, exists, err := read()
+	g.version, g.raw, g.exists, g.kept, g.at = version, raw, exists, settled && err == nil, now
+	return raw, exists, err
+}
+
+// gatedWakeSettingsFile is readWakeSettingsFile behind gate.
+func gatedWakeSettingsFile(agentDir *wakeAgentDir, gate *wakeSettingsGate) ([]byte, bool, error) {
+	var raw []byte
+	var exists bool
+	var readErr error
+	if err := agentDir.withFD(func(dirfd int) error {
+		file, settled, err := fsq.VersionAt(dirfd, wakeSettingsFileName, time.Now())
+		raw, exists, readErr = gate.read(wakeSettingsVersion{file: file}, settled && err == nil, func() ([]byte, bool, error) {
+			return readWakeSettingsFileAt(dirfd, agentDir)
+		})
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+	return raw, exists, readErr
+}
+
+// machineWakeSettingsSource is the running wake's reader of the machine
+// file: readMachineWakeSettings behind a gate on the versions of ~/.amq and
+// of the file.
+func machineWakeSettingsSource() func() ([]byte, bool, error) {
+	var gate wakeSettingsGate
+	return func() ([]byte, bool, error) {
+		dir, err := amqhome.Dir()
+		if err != nil {
+			return readMachineWakeSettings()
+		}
+		now := time.Now()
+		dirV, dirSettled, dirErr := fsq.LstatVersion(dir, now)
+		fileV, fileSettled, fileErr := fsq.LstatVersion(filepath.Join(dir, wakeMachineSettingsFileName), now)
+		settled := dirSettled && fileSettled && dirErr == nil && fileErr == nil
+		return gate.read(wakeSettingsVersion{dir: dirV, file: fileV}, settled, readMachineWakeSettings)
+	}
 }
 
 func writeWakeSettingsFileAt(dirfd int, agentDir *wakeAgentDir, raw []byte) error {
@@ -232,12 +310,13 @@ func wakeSettingsSourceInDir(
 	inspection wakeLockInspection,
 	seed []byte,
 ) func() ([]byte, bool, error) {
+	var gate wakeSettingsGate
 	return func() ([]byte, bool, error) {
 		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
 			return nil, false, &wakeSettingsSourceUnavailableError{err: err}
 		}
 		if seed == nil {
-			return readWakeSettingsFile(agentDir)
+			return gatedWakeSettingsFile(agentDir, &gate)
 		}
 		raw, exists, readErr, seedErr := seedWakeSettingsFile(agentDir, inspection, seed)
 		if seedErr != nil {

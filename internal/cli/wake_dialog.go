@@ -12,6 +12,17 @@ import "time"
 // and its CR would answer the dialog, so no input byte is written while the
 // marker is present.
 
+// Claude dialog guard states in one settings file (ClaudeDialogGuardAt).
+const (
+	// DialogGuardUnsupported: this platform has no wake, so no guard.
+	DialogGuardUnsupported = "unsupported"
+	DialogGuardOK          = "ok"
+	DialogGuardMissing     = "missing"
+	DialogGuardIncomplete  = "incomplete" // some events, a stale form, or a missing amq binary
+	DialogGuardDisabled    = "disabled"   // installed, but the file sets disableAllHooks
+	DialogGuardUnreadable  = "unreadable"
+)
+
 type wakeDialogState uint8
 
 const (

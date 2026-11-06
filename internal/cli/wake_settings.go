@@ -464,8 +464,10 @@ func wakeSettingsDigest(raw []byte, exists bool) string {
 
 // wakeSettingsObservation is the last read of one settings file the wake
 // acted on.
-// Change detection compares bytes (and the read error), never stat fields:
-// inode reuse and mtime granularity can hide a fast same-size rewrite.
+// Change detection compares bytes (and the read error). A running wake's
+// source may skip a read only when the file's settled version (inode, size,
+// mtime and ctime) is unchanged; the bytes it then returns are the bytes it
+// read last, so the comparison stays the authority.
 type wakeSettingsObservation struct {
 	seen    bool
 	exists  bool

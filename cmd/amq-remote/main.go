@@ -73,7 +73,8 @@ Commands:
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,
                            --idempotency-key K; resume K after a lost answer)
   mcp --link NAME          Serve a linked server's tools as a stdio MCP server
-  doctor                   Diagnose the endpoint chain
+  doctor [--fix]           Check every link to the owner; --fix repairs hooks,
+                           the machine agent's import file and the login service
   version                  Print the version
 
 Common options:
@@ -274,6 +275,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = service(rest, stdout, probe)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
+		if m, ok := out.(map[string]any); ok {
+			out = doctorReport(m)
+		}
 	case "link":
 		out, code, err = link(rest, stdin, stdout, probe)
 	case "mcp":
@@ -396,6 +400,8 @@ func printHuman(w io.Writer, out any) {
 		printSession(w, v)
 	case linkStatusOut:
 		printLinkStatus(w, v)
+	case doctorReport:
+		printDoctor(w, v)
 	default:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")

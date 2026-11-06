@@ -193,6 +193,34 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 	}
 }
 
+// A drainer whose last read of the spool found no pending work dispatches
+// an envelope the CLI wrote since, through its own spool instance. The rig's
+// clock is an hour ahead, so every directory version is settled and the
+// drainer keeps its view between drains.
+func TestSenderDrainSeesAnotherWritersEnvelope(t *testing.T) {
+	now := time.Now()
+	r := newDrainRig(t, now.Add(time.Hour))
+	d := NewDrainer(r.spool, r.ep)
+	if n, err := d.Drain(context.Background()); err != nil || n != 0 {
+		t.Fatalf("empty spool: drained n=%d err=%v", n, err)
+	}
+	cli, err := Open(r.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+	if err := cli.Create(&Envelope{RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake", Epoch: "e_1",
+		NotAfter: cmd.NotAfter, Command: cmd, Destination: "ipc:state"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := d.Drain(context.Background()); err != nil || n != 1 {
+		t.Fatalf("after the CLI write: drained n=%d err=%v, want 1", n, err)
+	}
+	if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
+		t.Fatalf("state=%s, want dispatched", got.State)
+	}
+}
+
 // TestSenderExpireWithoutDispatch proves an envelope whose admission window
 // closed before the endpoint saw it is expired WITHOUT dispatch: the caller
 // is told the request expired before the endpoint could admit it, never that
@@ -339,6 +367,41 @@ func TestSenderReapSettled(t *testing.T) {
 	}
 }
 
+// Regression (agent-message-queue-udg review): a reap examines a bounded
+// number of entries, so a spool that settles faster than one bound per pass
+// grew without limit. Reaping reports a pass that stopped at its bound, and
+// the calls that follow finish the pass.
+func TestSenderReapPassContinuesPastItsBound(t *testing.T) {
+	now := time.Now()
+	spool := newTestSpool(t, func() time.Time { return now })
+	for i := 0; i < 3; i++ {
+		cmd := testCommand(validUUID(i), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+		if err := spool.Create(&Envelope{RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake", Epoch: "e_1",
+			NotAfter: cmd.NotAfter, Command: cmd, Destination: "ipc:state"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := spool.MarkDispatched(Key{CreatorHost: "local", RequestID: cmd.RequestID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reaped := 0
+	n, err := spool.Reap(now.Add(7*time.Hour), 2)
+	if err != nil || !spool.Reaping() {
+		t.Fatalf("first call: err=%v reaping=%v, want a pass stopped at its bound", err, spool.Reaping())
+	}
+	reaped += n
+	for calls := 0; spool.Reaping() && calls < 5; calls++ {
+		n, err := spool.Reap(now.Add(7*time.Hour), 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reaped += n
+	}
+	if spool.Reaping() || reaped != 3 {
+		t.Fatalf("after the pass: reaping=%v reaped=%d, want an ended pass and 3 reaped", spool.Reaping(), reaped)
+	}
+}
+
 // TestSenderRefusalClassification is a regression: the
 // endpoint returns a refusal as a protocol.Reply VALUE with Outcome.Code and
 // a nil error. Before the fix, classifyReply asserted reply.(*protocol.Reply),
@@ -450,6 +513,15 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 			}
 			if r.rt.HasRun(cmd.RequestID) {
 				t.Fatal("tick 1: the refused submit ran")
+			}
+			// The same refusal on the next tick is not written again
+			// (agent-message-queue-udg: one rewrite per tick per stuck
+			// envelope).
+			if n := r.drain(); n != 1 {
+				t.Fatalf("tick 1b: drained n=%d, want 1", n)
+			}
+			if got := r.envelope(cmd.RequestID); got.Attempt != 1 || got.LastError != string(tc.code) {
+				t.Fatalf("tick 1b: attempt=%d last_error=%s, want 1/%s", got.Attempt, got.LastError, tc.code)
 			}
 
 			// Tick 2: the target is free; the same envelope dispatches.

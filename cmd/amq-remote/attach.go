@@ -32,6 +32,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
@@ -191,6 +192,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	v := viewOf(nb, nb.Name, reused)
 	if c.json {
 		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
+		if cand.Kind == harness.Claude {
+			out["approval_hook"] = approvalHookState()
+		}
 		emitJSON(stdout, withWarning(connectedJSON(out, v), hookWarning))
 		return 0, nil
 	}
@@ -219,7 +223,7 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 	machine := binding.Machine()
 	nb := binding.Binding{Root: root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
-		Transcript: h.Transcript}
+		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind)}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
@@ -309,6 +313,9 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Wri
 	v := viewOf(b, name, reused)
 	if asJSON {
 		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
+		if b.Harness == harness.Claude {
+			out["approval_hook"] = approvalHookState()
+		}
 		emitJSON(stdout, connectedJSON(out, v))
 		return 0, nil
 	}
@@ -350,7 +357,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript)}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind)}
 	if fromHook {
 		if err := ownerDetached(b.Holder); err != nil {
 			return b, "", false, err
@@ -367,6 +374,22 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	pruneAfterAttach(inspect)
 	recordAttachIdentity(stderr, root, handle, h.Kind)
 	return b, written, reused, nil
+}
+
+// sessionConfigDir is the Claude configuration directory of the session
+// this process runs in, for a Claude session: attach --self and the approval
+// hook both run inside it, so they inherit its CLAUDE_CONFIG_DIR. Other
+// harnesses, and a directory that does not resolve to an absolute path,
+// get "".
+func sessionConfigDir(kind string) string {
+	if kind != harness.Claude {
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	if dir := harness.ClaudeConfigDir(home); filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return ""
 }
 
 func emitJSON(w io.Writer, v any) {
@@ -496,7 +519,8 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
-	// Transcript is a Claude session's transcript; empty when not known.
+	// Transcript is a Claude session's transcript or a Codex thread's
+	// rollout file; empty when not known.
 	Transcript string
 	// Holder is the exact identity captured while proving a Codex ancestor.
 	Holder launch.HolderIdentity
@@ -542,7 +566,7 @@ func nativeHarness(codexes *codexView, cand registry.Candidate) harnessSession {
 		}
 		if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Socket != "" && cfg.Thread != "" {
 			h.AppServer = loadedThread(codexes, cfg.Socket, cfg.Thread)
-			h.Cwd, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
+			h.Cwd, h.Transcript, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
 		}
 	}
 	return h
@@ -554,6 +578,8 @@ var (
 	claudeSession      = claude.SessionForPID
 	processCwd         = launch.ProcessCwd
 	codexThreadCwd     = codex.ThreadCwd
+	codexRollout       = homeCodexRollout
+	codexHolderRollout = codex.HolderRollout
 	codexLoadedThreads = func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }
 	codexDefaultSocket = codex.DefaultControlSocket
 	codexDaemonPID     = codex.DaemonPID
@@ -561,6 +587,16 @@ var (
 	processExecutable  = launch.ProcessExecutable
 	processArgs        = launch.ProcessArgs
 )
+
+// homeCodexRollout is the rollout file of a plain Codex TUI thread under
+// $CODEX_HOME, else ~/.codex.
+func homeCodexRollout(thread string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return codex.Rollout(harness.CodexHome(home), thread)
+}
 
 // codexView asks each Codex app-server daemon at most once per command:
 // one daemon pid and one loaded-thread list per socket, reused by every
@@ -747,7 +783,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 		if sock, err := codexDefaultSocket(); err == nil {
 			h.AppServer = loadedThread(codexes, sock, thread)
 			if h.AppServer.Thread != "" {
-				h.Cwd, _ = codexThreadCwd(sock, thread)
+				h.Cwd, h.Transcript, _ = codexThreadCwd(sock, thread)
 				return h
 			}
 		}
@@ -776,6 +812,10 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 				continue
 			}
 			h.PID, h.Holder = pid, holder
+			h.Transcript = codexRollout(thread)
+			if h.Transcript == "" {
+				h.Transcript = codexHolderRollout(holder)
+			}
 			return h
 		}
 		return h
@@ -795,6 +835,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // When the harness execs directly (pi does), the holder is the harness; a
 // wrapper that forks is the holder itself, and the binding follows the
 // wrapper's lifetime. Without a recorded owner the holder stays unknown.
+// The holder is pi when the handle's live pi bridge runs in it.
 func wakeOwnerSession(root, handle string) harnessSession {
 	owner, ok := amqcli.WakeOwner(root, handle)
 	if !ok {
@@ -807,7 +848,11 @@ func wakeOwnerSession(root, handle string) harnessSession {
 		cur.PIDNamespace != owner.PIDNamespace || !launch.RunsUnderProcess(cur) {
 		return harnessSession{}
 	}
-	return harnessSession{PID: cur.PID, Holder: cur}
+	h := harnessSession{PID: cur.PID, Holder: cur}
+	if pid, _, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
+		h.Kind = "pi"
+	}
+	return h
 }
 
 // pruneAfterAttach prunes the bindings of ended sessions once attach has
@@ -1053,6 +1098,38 @@ func requireStopHook() (warning string, err error) {
 		return "the Claude user settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
 	}
 	return "", nil
+}
+
+// Approval hook states attach reports (approvalHookState).
+const (
+	approvalHookOK         = "ok"
+	approvalHookMissing    = "missing"
+	approvalHookStale      = "stale"
+	approvalHookDisabled   = "disabled"
+	approvalHookUnreadable = "unreadable"
+)
+
+// approvalHookState is the AMQ approval hook in the settings file of the
+// Claude session this process runs in: ok (installed; an older ungated form
+// still works), missing, stale (not the one entry the installer writes now),
+// disabled (the file sets disableAllHooks), or unreadable. It only reads.
+func approvalHookState() string {
+	home, _ := os.UserHomeDir()
+	settings := claude.SettingsPath(home)
+	state, err := claude.PermissionHookState(settings)
+	switch {
+	case err != nil:
+		return approvalHookUnreadable
+	case state == claude.StopHookMissing:
+		return approvalHookMissing
+	case state == claude.StopHookDisabled:
+		return approvalHookDisabled
+	}
+	switch form, _ := claude.PermissionHookForm(home, settings); form {
+	case claude.HookFormCurrent, claude.HookFormUngated:
+		return approvalHookOK
+	}
+	return approvalHookStale
 }
 
 // withWarning adds a warning to a JSON result when there is one.

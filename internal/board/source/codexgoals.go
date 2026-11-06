@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // CodexGoals reads the versioned Codex goals store in place. Objectives are
@@ -40,14 +41,11 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	}
 	home := source.Home
 	if home == "" {
-		home = os.Getenv("CODEX_HOME")
-	}
-	if home == "" {
-		userHome, err := os.UserHomeDir()
+		dir, err := harness.UserCodexHome()
 		if err != nil {
 			return fail(err)
 		}
-		home = filepath.Join(userHome, ".codex")
+		home = dir
 	}
 	home, err := filepath.Abs(home)
 	if err != nil {

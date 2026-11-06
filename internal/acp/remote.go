@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -153,8 +154,15 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		root, target, native = b.Root, b.Target, b.NativeSession
 		// The session mirror tells this turn's frame from a peer's by its
 		// msg_id, recorded before the endpoint can send the frame.
-		if b.Harness == "claude" {
+		switch b.Harness {
+		case "claude":
 			_ = mirror.RecordCarried(b.Name, claude.FrameMsgID(ipc.LocalHost, target, id))
+		case "codex":
+			_ = mirror.RecordCarried(b.Name, mirror.CodexCarriedID(codex.ClientUserMessageID(ipc.LocalHost, target, id)))
+		case "pi":
+			// The pi bridge records the request's reference on the run's
+			// user record.
+			_ = mirror.RecordCarried(b.Name, protocol.EncodeRef(ipc.LocalHost, target, id))
 		}
 	}
 	r := &remoteTurn{

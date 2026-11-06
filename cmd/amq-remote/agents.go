@@ -40,6 +40,10 @@ type agentInfo struct {
 	// Ready is true for a running helper whose control channel is set up
 	// with the owner in it, so it can send Desktop a create draft.
 	Ready bool
+	// PubKey, RelayKey and Path are those of the marker in the best state,
+	// the newest among equals: its file name (the agent's public key), the
+	// relay key it records, and its file.
+	PubKey, RelayKey, Path string
 }
 
 // helperOf reports this machine's helper agent.
@@ -62,7 +66,8 @@ func agentOf(dirName string, now time.Time) agentInfo {
 	}
 	dir := filepath.Join(filepath.Dir(path), "acp", "agents", dirName)
 	entries, _ := os.ReadDir(dir)
-	var newest time.Time
+	var newest, bestAt time.Time
+	bestRank := -1
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -78,6 +83,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 			OwnerAdded bool                  `json:"owner_added"`
 			Worker     launch.HolderIdentity `json:"worker"`
 			Parent     launch.HolderIdentity `json:"parent"`
+			RelayKey   string                `json:"relay_key"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil {
 			continue
@@ -95,6 +101,11 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		}
 		if updated.After(newest) {
 			newest, info.Display = updated, m.DisplayName
+		}
+		if rank := stateRank[state]; rank > bestRank || rank == bestRank && updated.After(bestAt) {
+			bestRank, bestAt = rank, updated
+			info.PubKey, info.RelayKey = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey
+			info.Path = filepath.Join(dir, e.Name())
 		}
 	}
 	return info

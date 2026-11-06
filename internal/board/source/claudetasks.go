@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // ClaudeTasks reads Claude Code filesystem task lists of any producer
@@ -40,15 +41,12 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	home := source.Home
 	if home == "" {
-		home = os.Getenv("CLAUDE_CONFIG_DIR")
-	}
-	if home == "" {
-		user, err := os.UserHomeDir()
+		dir, err := harness.UserClaudeConfigDir()
 		if err != nil {
 			gap(err.Error())
 			return result
 		}
-		home = filepath.Join(user, ".claude")
+		home = dir
 	}
 	absolute, err := filepath.Abs(home)
 	if err != nil {

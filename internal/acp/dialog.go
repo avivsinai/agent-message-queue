@@ -156,6 +156,8 @@ type dialogPost struct {
 // dialogTarget is one binding whose dialogs this worker posts, and where.
 type dialogTarget struct {
 	name, channel, label string
+	// binding is the target's binding as dialogTargets read it.
+	binding binding.Binding
 }
 
 // dialogState is the poster's state, owned by the one worker goroutine that
@@ -216,6 +218,18 @@ func (s *Server) dialogStopped() bool {
 	}
 }
 
+// routable reports whether r is an active channel record of this machine
+// agent on its relay.
+func routable(r channelRecord) bool {
+	return r.State == channelActive && r.ChannelID != "" && r.Machine == buzzSelf && r.Relay == normalizeRelay(buzzRelayURL)
+}
+
+// serves reports whether the routable record r is the channel of b's live
+// session.
+func serves(r channelRecord, b binding.Binding) bool {
+	return b.SessionIdentity() == r.Identity && live(b)
+}
+
 // dialogTargets are the bindings this worker posts dialogs for: a machine
 // agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
@@ -227,12 +241,13 @@ func (s *Server) dialogTargets() []dialogTarget {
 			return nil
 		}
 		var out []dialogTarget
-		for _, r := range s.activeRecords() {
-			if r.State != channelActive || r.ChannelID == "" || r.Machine != buzzSelf || r.Relay != normalizeRelay(buzzRelayURL) {
+		snap := s.snapshot()
+		for _, r := range snap.activeRecords() {
+			if !routable(r) {
 				continue
 			}
-			if b, err := binding.ReadNamed(r.Name); err == nil && b.SessionIdentity() == r.Identity && live(b) {
-				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b)})
+			if b, ok := snap.binding(r.Name); ok && serves(r, b) {
+				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b})
 			}
 		}
 		return out
@@ -256,7 +271,7 @@ func (s *Server) dialogTargets() []dialogTarget {
 	if channel == "" {
 		return nil
 	}
-	return []dialogTarget{{name: s.cfg.Pin, channel: channel, label: sessionAgentName(b)}}
+	return []dialogTarget{{name: s.cfg.Pin, channel: channel, label: sessionAgentName(b), binding: b}}
 }
 
 // live reports whether b's session may still run: it is not proven ended.
@@ -286,9 +301,16 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 	} else if s.cfg.Pin != "" {
 		names = []string{s.cfg.Pin}
 	}
+	snap := s.snapshot()
 	for _, name := range names {
 		dir := filepath.Join(root, name)
 		if _, err := os.Lstat(dir); err != nil {
+			continue
+		}
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier name's relay call runs.
+		if b, ok := snap.binding(name); ok && live(b) {
 			continue
 		}
 		b, err := binding.ReadNamed(name)

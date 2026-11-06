@@ -15,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 const (
@@ -243,7 +244,6 @@ type Options struct {
 type FileResult struct {
 	Path    string `json:"path"`
 	Changed bool   `json:"changed"`
-	Backup  string `json:"backup,omitempty"`
 }
 
 type Result struct {
@@ -314,7 +314,7 @@ func Install(opts Options) (Result, error) {
 
 	scriptResult := FileResult{Path: normalized.ScriptPath}
 	if !normalized.DryRun {
-		if err := preflightHookConfigs(normalized, command, hookTimeoutSeconds); err != nil {
+		if err := preflightHookConfigs(normalized); err != nil {
 			return Result{}, err
 		}
 		changed, err := writeExecutableIfChanged(normalized.ScriptPath, []byte(SessionStartScript))
@@ -326,14 +326,14 @@ func Install(opts Options) (Result, error) {
 	result.Script = scriptResult
 
 	if !normalized.DryRun && (normalized.Agent == AgentClaude || normalized.Agent == AgentBoth) {
-		fileResult, err := installHook(normalized.ClaudeConfig, normalized.ScriptPath, sessionStartEntry(AgentClaude, command, hookTimeoutSeconds))
+		fileResult, err := installHook(normalized.ClaudeConfig, normalized.ScriptPath, AgentClaude, command, hookTimeoutSeconds)
 		if err != nil {
 			return result, err
 		}
 		result.Configs[AgentClaude] = fileResult
 	}
 	if !normalized.DryRun && (normalized.Agent == AgentCodex || normalized.Agent == AgentBoth) {
-		fileResult, err := installHook(normalized.CodexConfig, normalized.ScriptPath, sessionStartEntry(AgentCodex, command, hookTimeoutSeconds))
+		fileResult, err := installHook(normalized.CodexConfig, normalized.ScriptPath, AgentCodex, command, hookTimeoutSeconds)
 		if err != nil {
 			if result.Configs[AgentClaude].Changed {
 				return result, fmt.Errorf("partial hookinstall commit: %s updated; %s failed: %w", AgentClaude, AgentCodex, err)
@@ -348,14 +348,14 @@ func Install(opts Options) (Result, error) {
 	return result, nil
 }
 
-func preflightHookConfigs(opts Options, command string, hookTimeoutSeconds int) error {
+func preflightHookConfigs(opts Options) error {
 	if opts.Agent == AgentClaude || opts.Agent == AgentBoth {
-		if _, _, err := prepareHook(opts.ClaudeConfig, opts.ScriptPath, sessionStartEntry(AgentClaude, command, hookTimeoutSeconds)); err != nil {
+		if err := validateHookConfig(opts.ClaudeConfig); err != nil {
 			return err
 		}
 	}
 	if opts.Agent == AgentCodex || opts.Agent == AgentBoth {
-		if _, _, err := prepareHook(opts.CodexConfig, opts.ScriptPath, sessionStartEntry(AgentCodex, command, hookTimeoutSeconds)); err != nil {
+		if err := validateHookConfig(opts.CodexConfig); err != nil {
 			return err
 		}
 	}
@@ -424,96 +424,57 @@ func NormalizeOptions(opts Options) (Options, error) {
 	return opts, nil
 }
 
-func installHook(path, scriptPath string, entry map[string]interface{}) (FileResult, error) {
-	doc, changed, err := prepareHook(path, scriptPath, entry)
+// installHook makes the hook for scriptPath the only owned SessionStart
+// entry of the config at path, through the one locked settings writer,
+// which edits the file's bytes in place: other content is kept as it is
+// and no backup is needed. The entry replaces every owned hook for
+// scriptPath and every owned hook whose script is gone; an owned hook it
+// cannot read, or one for another script that exists, stays.
+func installHook(path, scriptPath, agent, command string, hookTimeoutSeconds int) (FileResult, error) {
+	if err := validateHookConfig(path); err != nil {
+		return FileResult{}, err
+	}
+	changed, err := claude.InstallCommandHooksAt(path, []claude.CommandHook{{
+		Event:   "SessionStart",
+		Matcher: sessionStartMatcher,
+		Command: command,
+		Timeout: hookTimeoutSeconds,
+		Async:   agent == AgentClaude,
+		Owns:    ownsForScript(scriptPath),
+	}})
 	if err != nil {
 		return FileResult{}, err
 	}
-	return saveJSONIfChanged(path, doc, changed)
+	return FileResult{Path: path, Changed: changed}, nil
 }
 
-func prepareHook(path, scriptPath string, entry map[string]interface{}) (map[string]interface{}, bool, error) {
+// validateHookConfig refuses a config the installer must not edit: one that
+// does not parse as one JSON object, or whose hooks, SessionStart or inner
+// hook lists have the wrong type.
+func validateHookConfig(path string) error {
 	doc, err := loadJSONObject(path)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	hooks, err := objectField(doc, "hooks")
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	sessionStart, err := arrayField(hooks, "SessionStart")
 	if err != nil {
-		return nil, false, err
+		return err
 	}
-	if err := validateSessionStartEntries(sessionStart); err != nil {
-		return nil, false, err
-	}
-	sessionStart, healed := selfHealSessionStart(sessionStart)
-	sessionStart, placed := placeOwnedEntry(sessionStart, scriptPath, entry)
-	hooks["SessionStart"] = sessionStart
-	doc["hooks"] = hooks
-	return doc, healed || placed, nil
+	return validateSessionStartEntries(sessionStart)
 }
 
-// placeOwnedEntry makes entry the only SessionStart registration of the owned
-// hook for scriptPath. When exactly one owned hook names scriptPath and its
-// whole group already equals entry, nothing changes, so a rerun is a no-op
-// and a changed matcher, timeout or async field still reaches old installs.
-// Otherwise every owned hook for scriptPath is removed from whatever group
-// holds it, a group is dropped only when that removal emptied it (foreign
-// hooks that shared an old group stay), and entry is appended.
-func placeOwnedEntry(sessionStart []interface{}, scriptPath string, entry map[string]interface{}) ([]interface{}, bool) {
-	matches := 0
-	current := false
-	for _, group := range sessionStart {
-		obj, ok := group.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for _, hook := range interfaceArray(obj["hooks"]) {
-			if ownedHookForScript(hook, scriptPath) {
-				matches++
-				current = sameJSON(obj, entry)
-			}
-		}
+// ownsForScript reports the owned SessionStart commands an install for
+// scriptPath replaces: the ones for scriptPath, and the ones whose script
+// does not exist (classifyHook's stale rule).
+func ownsForScript(scriptPath string) func(command string) bool {
+	return func(command string) bool {
+		class := classifyHook(map[string]interface{}{"command": command})
+		return class.scriptPath != "" && (class.scriptPath == scriptPath || class.stale)
 	}
-	if matches == 1 && current {
-		return sessionStart, false
-	}
-	out := make([]interface{}, 0, len(sessionStart)+1)
-	for _, group := range sessionStart {
-		obj, ok := group.(map[string]interface{})
-		if !ok {
-			out = append(out, group)
-			continue
-		}
-		inner := interfaceArray(obj["hooks"])
-		kept := make([]interface{}, 0, len(inner))
-		for _, hook := range inner {
-			if !ownedHookForScript(hook, scriptPath) {
-				kept = append(kept, hook)
-			}
-		}
-		if len(kept) == len(inner) {
-			out = append(out, group)
-			continue
-		}
-		if len(kept) == 0 {
-			continue
-		}
-		obj["hooks"] = kept
-		out = append(out, obj)
-	}
-	return append(out, entry), true
-}
-
-func ownedHookForScript(hook interface{}, scriptPath string) bool {
-	hookObj, ok := hook.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	parsed, ok := parseHookCommand(strings.TrimSpace(fmt.Sprint(hookObj["command"])))
-	return ok && parsed.ScriptPath == scriptPath
 }
 
 func sameJSON(a, b interface{}) bool {
@@ -745,77 +706,6 @@ func consumeSingleSpace(s string) (rest string, ok bool) {
 	return s[1:], true
 }
 
-// selfHealSessionStart prunes stale AMQ-owned hooks from every SessionStart
-// entry. Foreign hooks are preserved verbatim. AMQ-owned hooks whose script
-// path does not exist are dropped, and duplicate AMQ-owned hooks referencing
-// the same existing script path are de-duplicated to the first occurrence.
-// Owned hooks that cannot be parsed are preserved (never deleted unread).
-// Returns the (possibly same) slice and whether any entry changed.
-func selfHealSessionStart(sessionStart []interface{}) ([]interface{}, bool) {
-	changed := false
-	for i, entry := range sessionStart {
-		obj, ok := entry.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		inner, err := innerHookList(obj)
-		if err != nil || len(inner) == 0 {
-			continue
-		}
-		pruned, entryChanged := pruneStaleAMQHooks(inner)
-		if entryChanged {
-			obj["hooks"] = pruned
-			sessionStart[i] = obj
-			changed = true
-		}
-	}
-	return sessionStart, changed
-}
-
-// pruneStaleAMQHooks filters the inner hooks list of a single SessionStart
-// entry. Non-AMQ hooks are preserved verbatim. AMQ-owned hooks whose script
-// path is missing are dropped; duplicates referencing the same existing script
-// path are collapsed to the first occurrence. Owned hooks that cannot be parsed
-// are preserved, not dropped. Uses classifyHook so it agrees with the doctor
-// scan.
-func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
-	// Duplicate collapse keys on the exact full command string: only
-	// byte-identical commands collapse here. Live owned hooks for the script
-	// being installed are reduced to one by placeOwnedEntry, not by self-heal.
-	seen := make(map[string]bool)
-	filtered := make([]interface{}, 0, len(hooks))
-	changed := false
-	for _, hook := range hooks {
-		hookObj, ok := hook.(map[string]interface{})
-		if !ok {
-			filtered = append(filtered, hook)
-			continue
-		}
-		class := classifyHook(hookObj)
-		if !class.owned {
-			filtered = append(filtered, hook)
-			continue
-		}
-		if class.scriptPath == "" {
-			// Owned but unparseable: preserve verbatim.
-			filtered = append(filtered, hook)
-			continue
-		}
-		command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
-		if seen[command] {
-			changed = true
-			continue
-		}
-		if class.stale {
-			changed = true
-			continue
-		}
-		seen[command] = true
-		filtered = append(filtered, hook)
-	}
-	return filtered, changed
-}
-
 // StaleSessionStartHook describes an AMQ-owned SessionStart hook command whose
 // script path does not exist. It is used by amq doctor to flag dead hooks.
 type StaleSessionStartHook struct {
@@ -996,82 +886,6 @@ func loadJSONObject(path string) (map[string]interface{}, error) {
 		doc = map[string]interface{}{}
 	}
 	return doc, nil
-}
-
-func saveJSONIfChanged(path string, doc map[string]interface{}, changed bool) (FileResult, error) {
-	result := FileResult{Path: path, Changed: changed}
-	if !changed {
-		return result, nil
-	}
-	// The hook command holds shell operators; keep && readable in the file
-	// instead of the default \u0026 escape.
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(doc); err != nil {
-		return FileResult{}, err
-	}
-	data := buf.Bytes()
-	backup, err := backupIfExists(path)
-	if err != nil {
-		return FileResult{}, err
-	}
-	if err := writeFileAtomic(path, data, 0o600); err != nil {
-		return FileResult{}, err
-	}
-	result.Backup = backup
-	return result, nil
-}
-
-func backupIfExists(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	for i := 0; i < 100; i++ {
-		backup := fmt.Sprintf("%s.bak-%s", path, ts)
-		if i > 0 {
-			backup = fmt.Sprintf("%s.bak-%s-%d", path, ts, i)
-		}
-		err := writeExclusiveRegularFile(backup, data, 0o600)
-		if err == nil {
-			return backup, nil
-		}
-		if !os.IsExist(err) {
-			return "", err
-		}
-	}
-	return "", fmt.Errorf("create backup %s.bak-%s: names exhausted", path, ts)
-}
-
-func writeExclusiveRegularFile(path string, data []byte, mode os.FileMode) (err error) {
-	file, err := os.OpenFile(path, exclusiveCreateFlags(), mode)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		cerr := file.Close()
-		if err != nil {
-			_ = os.Remove(path)
-			return
-		}
-		if cerr != nil {
-			_ = os.Remove(path)
-			err = cerr
-		}
-	}()
-	if err = file.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err = file.Write(data); err != nil {
-		return err
-	}
-	return file.Sync()
 }
 
 func writeExecutableIfChanged(path string, data []byte) (bool, error) {

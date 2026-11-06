@@ -200,6 +200,30 @@ func ClaudeConfigDir(home string) string {
 	return filepath.Join(home, ".claude")
 }
 
+// UserClaudeConfigDir is ClaudeConfigDir for this process's user:
+// $CLAUDE_CONFIG_DIR when set, even when the home cannot be resolved, else
+// ~/.claude.
+func UserClaudeConfigDir() (string, error) {
+	return userDir("CLAUDE_CONFIG_DIR", ClaudeConfigDir)
+}
+
+// UserCodexHome is CodexHome for this process's user: $CODEX_HOME when
+// set, even when the home cannot be resolved, else ~/.codex.
+func UserCodexHome() (string, error) {
+	return userDir("CODEX_HOME", CodexHome)
+}
+
+func userDir(env string, under func(home string) string) (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(env)); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return under(home), nil
+}
+
 // CodexHome is the directory where Codex reads hooks.json and config.toml
 // and keeps its daemon socket: $CODEX_HOME when set, else home/.codex.
 func CodexHome(home string) string {

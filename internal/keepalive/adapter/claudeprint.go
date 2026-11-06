@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -261,14 +262,11 @@ func (c ClaudePrint) configDir() (string, error) {
 	if strings.TrimSpace(c.ConfigDir) != "" {
 		return c.ConfigDir, nil
 	}
-	if v := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); v != "" {
-		return v, nil
-	}
-	home, err := os.UserHomeDir()
+	dir, err := harness.UserClaudeConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve CLAUDE_CONFIG_DIR: %w", err)
 	}
-	return filepath.Join(home, ".claude"), nil
+	return dir, nil
 }
 
 func (c ClaudePrint) stateDir() (string, error) {

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -917,9 +918,69 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	if err != nil {
 		return doctorCheck{}, false
 	}
-	if info, err := os.Stat(filepath.Dir(claude.SettingsPath(home))); err != nil || !info.IsDir() {
+	path := claude.SettingsPath(home)
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() {
 		return doctorCheck{}, false
 	}
+	check, _ := claudeDialogHookCheckAt(path, version, known)
+	return check, true
+}
+
+// ClaudeDialogGuardAt reports the wake dialog guard in the Claude settings
+// file settings: its state and, when it is not ok, why and the remedy. It
+// gives amq doctor's verdict: the events it requires follow the installed
+// Claude Code version, read once per process.
+func ClaudeDialogGuardAt(settings string) (state, detail string) {
+	version, known := installedClaudeVersionOnce()
+	check, state := claudeDialogHookCheckAt(settings, version, known)
+	return state, check.Message
+}
+
+// InstallClaudeDialogGuardAt installs or migrates the wake dialog guard,
+// run by the amq binary bin, in the Claude settings file settings, with
+// the events the installed Claude Code version knows. It reports whether
+// it changed the file.
+func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
+	bin = installedGuardBin(settings, wakeDialogHookEvents, wakeDialogHookBinRe, bin)
+	return claude.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
+}
+
+// installedGuardBin is the amq binary the installed guard entries in the
+// hooks file path all run, when that binary exists, else bin. A repair
+// keeps the binary an install chose, so two installers never rewrite the
+// file back and forth (and Codex never asks for trust again for nothing).
+func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
+	found := ""
+	for _, event := range events {
+		commands, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
+		if err != nil {
+			return bin
+		}
+		for _, command := range commands {
+			match := binRe.FindStringSubmatch(command)
+			if match == nil {
+				return bin
+			}
+			got := strings.ReplaceAll(match[1], `'\''`, `'`)
+			if found != "" && got != found {
+				return bin
+			}
+			found = got
+		}
+	}
+	if info, err := os.Stat(found); found == "" || err != nil || info.IsDir() {
+		return bin
+	}
+	return found
+}
+
+// installedClaudeVersionOnce is installedClaudeVersion, run once per
+// process: one doctor run checks many settings files.
+var installedClaudeVersionOnce = sync.OnceValues(installedClaudeVersion)
+
+// claudeDialogHookCheckAt checks the dialog guard in the settings file at
+// path and returns the doctor check with its guard state.
+func claudeDialogHookCheckAt(path string, version claudeVersion, known bool) (doctorCheck, string) {
 	check := doctorCheck{Name: "Claude dialog hook", Status: "warn"}
 	type installed struct{ event, command string }
 	var commands []installed
@@ -929,10 +990,10 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 		supported[event] = true
 	}
 	for _, event := range wakeDialogHookEvents {
-		found, err := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
+		found, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
 		if err != nil {
 			check.Message = fmt.Sprintf("read Claude settings: %v", err)
-			return check, true
+			return check, DialogGuardUnreadable
 		}
 		if len(found) == 0 && supported[event] {
 			missing = append(missing, event)
@@ -943,38 +1004,39 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	}
 	if len(commands) == 0 {
 		check.Message = "not installed: a wake doorbell can answer an open Claude Code dialog; remedy: amq wake install-dialog-hook"
-		return check, true
+		return check, DialogGuardMissing
 	}
 	if len(missing) > 0 {
 		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
-		return check, true
+		return check, DialogGuardIncomplete
 	}
-	if disabled, err := claude.HooksDisabled(home); err != nil || disabled {
+	if disabled, err := claude.HooksDisabledAt(path); err != nil || disabled {
 		check.Message = "installed, but the user settings set disableAllHooks, so Claude Code does not run it and the wake rings a plain doorbell"
 		if err != nil {
 			check.Message = fmt.Sprintf("read Claude settings: %v", err)
+			return check, DialogGuardUnreadable
 		}
-		return check, true
+		return check, DialogGuardDisabled
 	}
 	for _, hook := range commands {
 		match := wakeDialogHookBinRe.FindStringSubmatch(hook.command)
 		if match == nil {
 			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, true
+			return check, DialogGuardIncomplete
 		}
 		bin := strings.ReplaceAll(match[1], `'\''`, `'`)
 		if _, err := os.Stat(bin); err != nil {
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)
-			return check, true
+			return check, DialogGuardIncomplete
 		}
 		if hook.command != wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, true
+			return check, DialogGuardIncomplete
 		}
 	}
 	check.Status = "ok"
 	check.Message = "installed"
-	return check, true
+	return check, DialogGuardOK
 }
 
 // dialogGuardEnabled reports whether the AMQ dialog hook of the harness

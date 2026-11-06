@@ -22,5 +22,6 @@ func processIdentityOS(ctx context.Context, pid int) (execIdentity, error) {
 	if !ok {
 		return execIdentity{}, errors.New("no stat identity")
 	}
-	return execIdentity{Dev: uint64(st.Dev), Inode: st.Ino}, nil
+	path, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	return execIdentity{Dev: uint64(st.Dev), Inode: st.Ino, Path: path}, nil
 }

@@ -1282,6 +1282,23 @@ func (a *Attachment) NativeSessionID() string {
 	return live.sessionID
 }
 
+// LiveBridge reads the liveness of the pi bridge of handle under root: its
+// process, its pi session id ("" when it publishes none that is valid) and
+// the activity version it writes. ok is false without a live bridge.
+func LiveBridge(root, handle string, now time.Time) (pid int, sessionID string, activity int, ok bool) {
+	if fsq.ValidateHandle(handle) != nil {
+		return 0, "", 0, false
+	}
+	live := bridgeDir{dir: bridgePath(root, handle, piWire), names: piWire}.liveness(now)
+	if !live.live {
+		return 0, "", 0, false
+	}
+	if validSessionID(live.sessionID) {
+		sessionID = live.sessionID
+	}
+	return live.pid, sessionID, live.activity, true
+}
+
 // AcknowledgeResult implements core.Attachment: releases the retained
 // terminal evidence for the key once the digest matches exactly.
 func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {

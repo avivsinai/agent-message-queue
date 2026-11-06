@@ -23,10 +23,18 @@ const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a
 const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by then dropped it
 const MAX_EVENT_TEXT = 256 * 1024;
 // Activity records are a bounded, best-effort view of the whole session for
-// the relay's session panel (docs/pi-bridge-protocol.md, activity). Text is
-// cut to the relay frame's plaintext cap; the file is truncated at 4 MiB.
+// the relay's session panel and the session mirror
+// (docs/pi-bridge-protocol.md, activity). Text is cut to the relay frame's
+// plaintext cap. Past 4 MiB, a starting run replaces the file with the
+// records of the run before it, so a reader that has not read that run's end
+// still finds it; past 16 MiB the file is truncated at any record.
 const MAX_ACTIVITY_TEXT = 48000;
 const MAX_ACTIVITY_FILE = 4 * 1024 * 1024;
+const MAX_ACTIVITY_FILE_HARD = 16 * 1024 * 1024;
+// ACTIVITY_VERSION is the activity record version liveness publishes: 2
+// records runs (run, run_start, settled) and the request ref on its user
+// record.
+const ACTIVITY_VERSION = 2;
 const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/;
 const REQUEST_FILE = /^(amqr1_[a-z2-7]{16,472})\.json$/;
 const HANDLE = /^[a-z0-9_][a-z0-9_-]*$/;
@@ -59,6 +67,18 @@ type Bridge = {
 	turns: number;
 	// seq numbers activity records within this runtime.
 	seq: number;
+	// run is the id of the open run, from the first agent_start after a
+	// settle to the next agent_settled; "" outside one. runs counts runs.
+	run: string;
+	runs: number;
+	// runOutcome is the open run's last agent_before_settle outcome.
+	runOutcome: string;
+	// runStartAt is the byte offset in the activity file where the last
+	// run_start record was written, -1 before the first.
+	runStartAt: number;
+	// requestUser is the ref of the in-flight request whose own user
+	// message started and has not ended yet.
+	requestUser: string;
 };
 
 type Inflight = {
@@ -166,6 +186,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 			f.lastError = "";
 			f.finalText = "";
 			f.outcome = "";
+			b.requestUser = f.ref;
 			appendEvent(b.dir, f.ref, { event: "started" });
 		}
 	});
@@ -257,6 +278,11 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		turn: "",
 		turns: 0,
 		seq: 0,
+		run: "",
+		runs: 0,
+		runOutcome: "",
+		runStartAt: -1,
+		requestUser: "",
 	};
 	writeLiveness(b, true);
 	b.orphansPending = !closeOrphanedReceipts(b);
@@ -459,6 +485,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		session_generation: b.generation,
 		bridge_revision: BRIDGE_REVISION,
 		session_id: sessionIdOf(b.ctx) || undefined,
+		activity: ACTIVITY_VERSION,
 	});
 	try {
 		const tmp = writeTemp(b.dir, body);
@@ -593,21 +620,89 @@ type ActivityFields = { kind: string; id?: string; text?: string; tool?: string;
 // the record.
 function appendActivity(b: Bridge, f: ActivityFields): void {
 	if (!b.sessionId) return;
-	const rec: Record<string, string | number> = { protocol: PROTOCOL, seq: ++b.seq, at: new Date().toISOString(), session: b.sessionId, turn: b.turn, kind: f.kind };
+	const rec: Record<string, string | number> = { protocol: PROTOCOL, seq: ++b.seq, at: new Date().toISOString(), session: b.sessionId, turn: b.turn };
+	if (b.run) rec.run = b.run;
+	rec.kind = f.kind;
 	if (f.id) rec.id = f.id;
 	if (f.text) rec.text = f.text;
 	if (f.tool) rec.tool = f.tool;
 	if (f.status) rec.status = f.status;
-	appendLine(path.join(b.dir, "activity", `${b.sessionId}.jsonl`), `${JSON.stringify(rec)}\n`, MAX_ACTIVITY_FILE);
+	const file = path.join(b.dir, "activity", `${b.sessionId}.jsonl`);
+	if (f.kind === "run_start") b.runStartAt = keepLastRun(file, b.runStartAt);
+	appendLine(file, `${JSON.stringify(rec)}\n`, MAX_ACTIVITY_FILE_HARD);
 }
 
-// activityHooks records the whole session, not only remote requests: turn
-// boundaries, whole user and assistant messages, and tool calls with their
-// results. Event names and payloads are pi-coding-agent
+// keepLastRun replaces an activity file past MAX_ACTIVITY_FILE with its bytes
+// from offset from on (the last run, which has settled), through a renamed
+// temporary file, so a reader sees either the old file or the new one. It
+// returns the file's size, where the next record starts.
+function keepLastRun(file: string, from: number): number {
+	let size: number;
+	try {
+		size = fs.statSync(file).size;
+	} catch {
+		return 0;
+	}
+	if (size <= MAX_ACTIVITY_FILE) return size;
+	const tail = Buffer.alloc(from >= 0 && from < size ? size - from : 0);
+	const tmp = `${file}.tmp`;
+	try {
+		const fd = fs.openSync(file, "r");
+		try {
+			if (tail.length > 0 && fs.readSync(fd, tail, 0, tail.length, from) !== tail.length) throw new Error("short read");
+		} finally {
+			fs.closeSync(fd);
+		}
+		const out = fs.openSync(tmp, "w", 0o600);
+		try {
+			if (tail.length > 0) writeAll(out, tail.toString("utf8"));
+			fs.fsyncSync(out);
+		} finally {
+			fs.closeSync(out);
+		}
+		fs.renameSync(tmp, file);
+		return tail.length;
+	} catch {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Nothing was left behind.
+		}
+		return size;
+	}
+}
+
+// activityHooks records the whole session, not only remote requests: runs,
+// turn boundaries, whole user and assistant messages, and tool calls with
+// their results. Event names and payloads are pi-coding-agent
 // dist/core/extensions/types.d.ts: turn_start/turn_end :790-:802,
-// message_end :816, tool_execution_start :821, tool_execution_end :840.
+// message_end :816, tool_execution_start :821, tool_execution_end :840;
+// agent_start, agent_before_settle and agent_settled are src/core/extensions/
+// types.ts AgentStartEvent, AgentBeforeSettleEvent and AgentSettledEvent.
 // Streaming deltas are not recorded.
+//
+// A run is one prompt: agent_start repeats inside it when pi continues or
+// retries, and agent_settled comes once, when nothing more will run.
 function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
+	pi.on("agent_start", () => {
+		const b = get();
+		if (!b || b.run) return;
+		b.run = `${b.generation.slice(0, 8)}-r${++b.runs}`;
+		b.runOutcome = "";
+		appendActivity(b, { kind: "run_start" });
+	});
+	pi.on("agent_before_settle", (event) => {
+		const b = get();
+		if (b) b.runOutcome = event.outcome;
+	});
+	pi.on("agent_settled", (event) => {
+		const b = get();
+		if (!b) return;
+		appendActivity(b, { kind: "settled", status: event.aborted ? "aborted" : b.runOutcome || "error" });
+		b.run = "";
+		b.runOutcome = "";
+		b.requestUser = "";
+	});
 	pi.on("turn_start", () => {
 		const b = get();
 		if (!b) return;
@@ -625,8 +720,11 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		if (!b) return;
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user" && msg.role !== "assistant") return;
+		// The request's own user message carries its ref.
+		const id = msg.role === "user" ? b.requestUser : "";
+		if (msg.role === "user") b.requestUser = "";
 		const text = truncateUtf8(textOf(msg.content), MAX_ACTIVITY_TEXT);
-		if (text) appendActivity(b, { kind: msg.role, text });
+		if (text) appendActivity(b, { kind: msg.role, id, text });
 	});
 	pi.on("tool_execution_start", (event) => {
 		const b = get();

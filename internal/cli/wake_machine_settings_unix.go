@@ -17,8 +17,9 @@ import (
 // The machine wake settings: ~/.amq/wake.settings sets wake settings for
 // every wake of this user on this machine, under each agent's .wake.settings.
 // It has the agent file's format and trust rules. Its writers serialize on
-// wakeMachineSettingsLockFileName; a running wake reads it on each settings
-// tick and each inbox scan, resolving the path every time.
+// wakeMachineSettingsLockFileName; a running wake checks it on each settings
+// tick and each inbox scan, resolving the path every time, and reads it when
+// its version or that of ~/.amq changed.
 const (
 	wakeMachineSettingsFileName     = "wake.settings"
 	wakeMachineSettingsLockFileName = "wake.settings.lock"

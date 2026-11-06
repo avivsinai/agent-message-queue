@@ -1,7 +1,8 @@
-// Package mirror is the view of a session's finished turns in its Buzz
-// channel. Fold assigns transcript lines to turns by the ids their writer
-// put on them (message.id on an assistant line, promptId on a user line),
-// never by line order alone. Render makes the one post that shows a turn.
+// Package mirror is the view of a session's turns in its Buzz channel.
+// Fold assigns transcript lines to turns by the ids their writer put on them
+// (message.id on an assistant line, promptId on a user line), never by line
+// order alone. Render makes the one post that shows a turn, running or
+// ended.
 // Both are pure: no clock, file or network. The machine agent's tick reads
 // the transcript, claims each post and sends it.
 package mirror
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // End kinds of a turn.
@@ -31,19 +34,28 @@ const (
 	EndRefused        = "refused"
 	EndSessionEnded   = "session ended"
 	EndSessionCleared = "session cleared"
+	// EndMirrorOff ends the post of a running turn when the owner turns the
+	// mirror off.
+	EndMirrorOff = "mirror off"
 )
 
 // Event kinds. Ended is a turn's first end; Continued changes a turn that
-// already ended.
+// already ended. Opened is a Claude turn's first assistant line that does
+// not end it, Progress each later one: the turn still runs.
 const (
+	Opened    = "opened"
+	Progress  = "progress"
 	Ended     = "ended"
 	Continued = "continued"
 )
 
 // Event is one turn change Fold reports, with the turn's value at that line.
+// Tries counts the sends of the event whose outcome was unknown; Fold never
+// sets it.
 type Event struct {
-	Kind string `json:"kind"`
-	Turn Turn   `json:"turn"`
+	Kind  string `json:"kind"`
+	Turn  Turn   `json:"turn"`
+	Tries int    `json:"tries,omitempty"`
 }
 
 // ToolCount is how often a turn used one tool.
@@ -77,8 +89,11 @@ type Turn struct {
 	// Earlier counts the turns of a backlog that were dropped before it.
 	Earlier int `json:"earlier,omitempty"`
 
-	// Interrupted is set once the turn saw the interrupt text.
+	// Interrupted is set once the turn saw the interrupt text; Halted from
+	// that text until the turn's next assistant line, while the running
+	// turn shows as interrupted.
 	Interrupted bool `json:"interrupted,omitempty"`
+	Halted      bool `json:"halted,omitempty"`
 	// ClosingEnd is the end kind of the turn's closing message, "" until
 	// one arrived; Closing is that message's id. The turn ends at the
 	// message's text, or at the first line that is not part of it.
@@ -89,10 +104,23 @@ type Turn struct {
 	// next end is a Continued event, or, with nothing new, its old end.
 	Reopened string `json:"reopened,omitempty"`
 	Resumed  bool   `json:"resumed,omitempty"`
+
+	// Prompted is set once a Codex turn read its first user message, Final
+	// once its Text is a final answer, which commentary never replaces.
+	Prompted bool `json:"prompted,omitempty"`
+	Final    bool `json:"final,omitempty"`
 }
 
 func (t Turn) clone() Turn {
 	t.MessageIDs = append([]string(nil), t.MessageIDs...)
+	t.Tools = append([]ToolCount(nil), t.Tools...)
+	return t
+}
+
+// view is t as a running turn's event carries it: without its message ids,
+// which only the fold reads, so an event costs no more as the turn grows.
+func (t Turn) view() Turn {
+	t.MessageIDs = nil
 	t.Tools = append([]ToolCount(nil), t.Tools...)
 	return t
 }
@@ -132,6 +160,20 @@ func (st State) clone() State {
 	return st
 }
 
+// fork is st for the next line of a Claude transcript. Message ids are only
+// appended, so the new state shares them with st: folding one line costs
+// no more as a turn grows. A state must be folded once; fold its fork.
+func (st State) fork() State {
+	for _, t := range []**Turn{&st.Open, &st.Last} {
+		if *t != nil {
+			c := **t
+			c.Tools = append([]ToolCount(nil), c.Tools...)
+			*t = &c
+		}
+	}
+	return st
+}
+
 // Carried reports whether a frame msg_id is one the binding's carrier sent.
 type Carried func(msgID string) bool
 
@@ -141,11 +183,13 @@ func (c Carried) has(msgID string) bool { return c != nil && msgID != "" && c(ms
 // classified, so a line that ends a turn waiting for its closing text is
 // then classified with no turn open. A sidechain line and every type other
 // than user and assistant (an absorbed frame parses as user) is skipped.
+// The returned state shares storage with st, which must not be folded
+// again.
 func Fold(st State, l claude.TranscriptLine, carried Carried) (State, []Event) {
 	if l.Sidechain || l.Type != "user" && l.Type != "assistant" {
 		return st, nil
 	}
-	st = st.clone()
+	st = st.fork()
 	var out []Event
 	if o := st.Open; o != nil && o.ClosingEnd != "" && (l.Type == "user" || l.MessageID != o.Closing) {
 		out = st.end(o.ClosingEnd, out)
@@ -189,7 +233,8 @@ func (st *State) end(kind string, out []Event) []Event {
 
 // assistant adds the line to the turn that owns its message.id, else to
 // the open turn, which then owns the id. A line on the last ended turn
-// changes that turn.
+// changes that turn. A line on the open turn that does not end it reports
+// Opened when it is the turn's first assistant line, else Progress.
 func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	t := st.Open
 	switch {
@@ -214,14 +259,15 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 	if text != "" {
 		t.Text = bound(text)
 	}
-	if t.FirstAssistantTS == 0 {
+	first := t.FirstAssistantTS == 0
+	if first {
 		t.FirstAssistantTS = l.TS
 	}
 	t.touch(l.TS)
 	if t == st.Last {
 		return append(out, Event{Kind: Continued, Turn: t.clone()})
 	}
-	t.Resumed = t.Reopened != ""
+	t.Resumed, t.Halted = t.Reopened != "", false
 	if l.MessageID == "" && len(t.MessageIDs) == 0 {
 		// An assistant line with no id still makes the turn one with an
 		// answer.
@@ -233,9 +279,12 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 		}
 	}
 	if t.ClosingEnd != "" && l.MessageID == t.Closing && text != "" {
-		out = st.end(t.ClosingEnd, out)
+		return st.end(t.ClosingEnd, out)
 	}
-	return out
+	if first {
+		return append(out, Event{Kind: Opened, Turn: t.clone()})
+	}
+	return append(out, Event{Kind: Progress, Turn: t.view()})
 }
 
 func (t *Turn) count(name string) {
@@ -291,8 +340,10 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		}
 		return out
 	case o != nil && l.PromptID != "" && l.PromptID == o.PromptID:
-		o.Interrupted = o.Interrupted || strings.HasPrefix(text, claude.InterruptPrefix)
 		o.touch(l.TS)
+		if strings.HasPrefix(text, claude.InterruptPrefix) {
+			return o.halt(out)
+		}
 		return out
 	case o == nil && strings.HasPrefix(text, "<bash-input>"):
 		// A shell command typed with no turn open starts one, which posts
@@ -310,8 +361,8 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		// The interrupt text can carry the next prompt's promptId: it marks
 		// the running turn and never starts one.
 		if o != nil {
-			o.Interrupted = true
 			o.touch(l.TS)
+			return o.halt(out)
 		}
 		return out
 	case !hasText || result || l.CompactSummary || l.VisibleOnly || l.Meta && !metaOpener(l):
@@ -343,6 +394,18 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		t.Cause = promptCause(text)
 	}
 	return out
+}
+
+// halt marks the running turn interrupted. A turn the mirror shows (one
+// with an assistant line) reports Progress the first time, so its post
+// stops showing it running.
+func (t *Turn) halt(out []Event) []Event {
+	t.Interrupted = true
+	if t.Halted || t.FirstAssistantTS == 0 {
+		return out
+	}
+	t.Halted = true
+	return append(out, Event{Kind: Progress, Turn: t.view()})
 }
 
 // metaOpener reports whether a harness-injected (meta) line starts a turn:
@@ -446,11 +509,17 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<mark> <N tools (names)> · <duration>
 //	<final assistant text>
 //
-// A turn the carrier already answered shows the first two lines only.
+// A turn that still runs (no End) or that the carrier already answered
+// shows the first two lines only; a running turn the user interrupted
+// shows as interrupted.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
-	parts := []string{endMark(t.End)}
+	mark := endMark(t.End)
+	if t.End == "" && t.Halted {
+		mark = endMark(EndInterrupted)
+	}
+	parts := []string{mark}
 	if n := toolTotal(t.Tools); n > 0 {
 		names := make([]string, 0, len(t.Tools))
 		for _, c := range t.Tools {
@@ -477,23 +546,35 @@ func Render(t Turn) string {
 		}
 		b.WriteString(" · " + p)
 	}
-	if text := t.Text; text != "" && !t.Answered {
+	if text := t.Text; text != "" && t.End != "" && !t.Answered {
 		b.WriteString("\n" + cut(text))
 	}
 	if t.Earlier > 0 {
 		fmt.Fprintf(&b, "\n(+%d earlier turns not shown)", t.Earlier)
 	}
-	return unmention(b.String())
+	return Unmention(b.String())
+}
+
+// Fingerprint is what Render shows of t that can change while it runs:
+// its tools by name and count, whether it is interrupted, and its end. The
+// elapsed time is not part of it.
+func Fingerprint(t Turn) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%t", t.End, t.Halted)
+	for _, c := range t.Tools {
+		fmt.Fprintf(&b, "|%s×%d", c.Name, c.N)
+	}
+	return b.String()
 }
 
 // wordJoiner is invisible and is not a name character.
 const wordJoiner = "\u2060"
 
-// unmention puts a word joiner after each "@" that starts a word, so a post
+// Unmention puts a word joiner after each "@" that starts a word, so a post
 // never mentions anyone. Buzz reads "@name" after a space or at the start
 // as a mention: it refuses a post whose name matches no channel member, and
 // pings a member whose name matches.
-func unmention(s string) string {
+func Unmention(s string) string {
 	var b strings.Builder
 	for i, r := range s {
 		b.WriteRune(r)
@@ -506,9 +587,11 @@ func unmention(s string) string {
 
 func endMark(kind string) string {
 	switch kind {
+	case "":
+		return "… running"
 	case EndDone:
 		return "✓"
-	case EndSessionEnded, EndSessionCleared:
+	case EndSessionEnded, EndSessionCleared, EndMirrorOff:
 		return "■ ended (" + kind + ")"
 	}
 	return "✗ " + kind
@@ -614,14 +697,16 @@ func DirFor(name string) (string, error) {
 	return filepath.Join(root, name), nil
 }
 
-var msgIDRe = regexp.MustCompile(`^[0-9a-f-]{1,64}$`)
+// msgIDRe matches what a native carrier sends a request as: a frame msg_id,
+// or a request reference.
+var msgIDRe = regexp.MustCompile(`^(?:[0-9a-f-]{1,64}|` + protocol.RefPrefix + `[a-z2-7]{16,` + strconv.Itoa(protocol.MaxRefLen) + `})$`)
 
 // RecordCarried records, synced, that the native carrier of binding name
 // sends a frame with msgID. It is written before the frame is sent, so a
 // transcript line with that msg_id always finds it.
 func RecordCarried(name, msgID string) error {
 	if !msgIDRe.MatchString(msgID) {
-		return fmt.Errorf("msg_id %q is not a frame msg_id", msgID)
+		return fmt.Errorf("msg_id %q is not a frame msg_id or a request reference", msgID)
 	}
 	dir, err := DirFor(name)
 	if err != nil {

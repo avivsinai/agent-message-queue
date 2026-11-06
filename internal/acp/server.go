@@ -193,6 +193,9 @@ type Server struct {
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState
+	// view is the bindings and channel records the machine, dialog and
+	// mirror workers share.
+	view sessionView
 }
 
 // NewServer builds a server bound to one already authenticated routing context.

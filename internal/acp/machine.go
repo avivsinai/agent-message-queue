@@ -254,8 +254,9 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // machineTick runs every machineScanInterval in the worker that leads the
 // machine identity, until ctx ends. It writes the marker first, before any
 // relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions, and every lateReplyInterval
-// works through the retired store.
+// that are gone, provisions the live sessions, checks the hooks in their
+// Claude settings files, and every lateReplyInterval works through the
+// retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
@@ -273,7 +274,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	}
 	s.applyResets(now)
 	s.retireGone(now)
-	all, err := binding.List()
+	all, err := s.snapshot().list()
 	if err == nil {
 		for _, b := range all {
 			if s.stopped() {
@@ -284,16 +285,21 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 			}
 		}
 	}
+	if err == nil && !s.stopped() {
+		s.watchHooks(all)
+	}
 	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
 }
 
-// machineState is the machine worker's own state: its context and pacing.
+// machineState is the machine worker's own state: its context, pacing,
+// and the settings files it watches (machine_hooks.go).
 type machineState struct {
 	ctx           context.Context
 	marked, swept string
+	settings      map[string]settingsSeen
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
@@ -711,12 +717,19 @@ func left(r channelRecord) bool {
 // retireGone retires each record whose binding is proven gone or ended, and
 // finishes the move of a record a stopped worker left half retired.
 func (s *Server) retireGone(now time.Time) {
-	for _, r := range s.activeRecords() {
+	snap := s.snapshot()
+	for _, r := range snap.activeRecords() {
 		if s.stopped() {
 			return
 		}
 		if r.State == channelRetired {
 			s.finishRetire(r, now)
+			continue
+		}
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier record's relay call runs.
+		if b, ok := snap.binding(r.Name); ok && live(b) {
 			continue
 		}
 		b, err := binding.ReadNamed(r.Name)
@@ -733,16 +746,24 @@ func (s *Server) retireGone(now time.Time) {
 
 // activeRecords reads every good record in the name slots.
 func (s *Server) activeRecords() []channelRecord {
+	records, _ := s.readSlots()
+	return records
+}
+
+// readSlots reads every good record in the name slots, also by slot name.
+func (s *Server) readSlots() ([]channelRecord, map[string]channelRecord) {
 	entries, _ := os.ReadDir(s.channelDir())
 	var out []channelRecord
+	slots := map[string]channelRecord{}
 	for _, e := range entries {
-		if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".json") {
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok && e.Type().IsRegular() {
 			if r, ok := readChannelRecord(filepath.Join(s.channelDir(), e.Name())); ok {
 				out = append(out, r)
+				slots[name] = r
 			}
 		}
 	}
-	return out
+	return out, slots
 }
 
 // retiredRecords reads the retired store.

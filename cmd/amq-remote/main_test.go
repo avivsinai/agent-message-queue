@@ -17,7 +17,9 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -62,13 +64,17 @@ func init() {
 		return claude.Session{}, errors.New("tests read no Claude registry")
 	}
 	processCwd = func(int) (string, error) { return "", errors.New("tests read no process") }
-	codexThreadCwd = func(string, string) (string, error) { return "", errors.New("tests dial no app-server") }
+	codexThreadCwd = func(string, string) (string, string, error) { return "", "", errors.New("tests dial no app-server") }
+	codexRollout = func(string) string { return "" }
+	codexHolderRollout = func(launch.HolderIdentity) string { return "" }
 	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	codexDaemonPID = func(string) (int, error) { return 0, errors.New("tests dial no app-server") }
 	serviceRun = func(string, ...string) error { return errors.New("tests run no service manager") }
 	serviceRunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
 	claudeStopHookState = func() (string, error) { return "", errors.New("tests read no Claude settings") }
+	doctorWakeCheck = func(string, string) (wakeView, error) { return wakeView{}, errors.New("tests run no wake check") }
+	runHookProbe = func(string, string) (string, error) { return "", errors.New("tests run no hook") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
@@ -79,6 +85,30 @@ func init() {
 		lastRecordingFake.Store(rf)
 		return rf, nil
 	})
+}
+
+// TestMain runs the package in a home of its own: doctor reads the
+// bindings, Claude settings and Buzz Desktop files under the home, and no
+// test may read the developer's.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "amqr-home")
+	if err == nil {
+		home, err = filepath.EvalSymlinks(home)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	_ = os.Setenv("HOME", home)
+	// No claude on PATH: doctor asks the installed Claude Code for its
+	// version once per process, and the developer's must not decide a test.
+	_ = os.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", binding.EnvPath} {
+		_ = os.Unsetenv(name)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
 }
 
 // startServeWithArgs starts serve with explicit arguments and the same
@@ -743,7 +773,7 @@ func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
 	out, errBuf := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
 	go func() {
-		done <- run([]string{"serve", "--fake", "--root", root}, strings.NewReader(""), out, errBuf)
+		done <- run([]string{"serve", "--fake", "--root", root, "--poll", "10ms"}, strings.NewReader(""), out, errBuf)
 	}()
 	t.Cleanup(func() {
 		select {
@@ -763,8 +793,8 @@ func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
 	return "", nil, nil
 }
 
-// TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on every
-// serve tick, independent of Drain activity.
+// TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on its own
+// serve cadence, independent of Drain activity.
 func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	root, serveOut, serveErr := startServeCaptured(t)
 	stateDir := filepath.Join(root, "extensions", "remote")
@@ -834,7 +864,7 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	// stderr/stdout (tick/import/drain errors). No retries, no loop.
 	after, _ := os.ReadFile(envPath)
 	var report strings.Builder
-	report.WriteString("envelope was not reaped within 5s (B4: Reap not running on every tick)\n")
+	report.WriteString("envelope was not reaped within 5s (B4: Reap not running on its cadence)\n")
 	if len(after) > 0 {
 		var fin sender.Envelope
 		if err := json.Unmarshal(after, &fin); err == nil {

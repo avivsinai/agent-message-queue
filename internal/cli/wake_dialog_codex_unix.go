@@ -208,10 +208,30 @@ func installCodexDialogHook(bin string, dryRun bool) error {
 	if err != nil {
 		return err
 	}
-	if err := claude.InstallCommandHooksAt(path, hooks); err != nil {
+	if _, err := claude.InstallCommandHooksAt(path, hooks); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook installed in %s\n%s", path, codexHookTrustNote)
+}
+
+// InstallCodexDialogGuard installs or migrates the wake dialog guard, run
+// by the amq binary bin, in $CODEX_HOME/hooks.json when the Codex home
+// exists. It reports the file, whether it changed it, and the step Codex
+// needs before it runs a changed hook.
+func InstallCodexDialogGuard(bin string) (path string, changed bool, trust string, err error) {
+	if path, err = codexHooksPath(); err != nil {
+		return "", false, "", err
+	}
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() {
+		return path, false, "", nil
+	}
+	store, err := codexDialogStore()
+	if err != nil {
+		return path, false, "", err
+	}
+	bin = installedGuardBin(path, codexDialogHookEvents, codexDialogHookBinRe, bin)
+	changed, err = claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store))
+	return path, changed, strings.ReplaceAll(strings.TrimSpace(codexHookTrustNote), "\n", " "), err
 }
 
 func uninstallCodexDialogHook() error {

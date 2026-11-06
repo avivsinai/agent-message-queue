@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,18 +48,18 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	case "stop-hook":
 		return claude.RunStopHookReceiver(home, stdin, stdout)
 	case "install-stop-hook":
-		bin, err := os.Executable()
-		if err != nil {
-			bin = "amq-remote"
+		bin, err := hookExecutable()
+		if err == nil {
+			_, err = claude.OptInStopHook(home, claude.SettingsPath(home), bin)
 		}
-		if err := claude.InstallStopHook(home, bin); err != nil {
+		if err != nil {
 			say(os.Stderr, "install-stop-hook: %v\n", err)
 			return 1
 		}
 		say(stdout, "stop hook installed\n")
 		return 0
 	case "uninstall-stop-hook":
-		if err := claude.UninstallStopHook(home); err != nil {
+		if err := claude.OptOutHook(claude.SettingsPath(home), claude.HookStop); err != nil {
 			say(os.Stderr, "uninstall-stop-hook: %v\n", err)
 			return 1
 		}
@@ -69,12 +70,9 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	case "install-approval-hook":
 		// The absolute path of this binary: a session the desktop app or an
 		// IDE starts may not have its directory on PATH.
-		bin, err := os.Executable()
+		bin, err := hookExecutable()
 		if err == nil {
-			bin, err = filepath.Abs(bin)
-		}
-		if err == nil {
-			err = claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait)
+			_, err = claude.OptInPermissionHook(home, claude.SettingsPath(home), bin, claude.DefaultPermissionWait)
 		}
 		if err != nil {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
@@ -83,7 +81,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		say(stdout, "approval hook installed: the first tool dialog of each Claude Code session on this machine connects that session to its own Buzz channel (an AMQ session gets its own binding, the mailbox one /amq-remote writes; any other session a native binding, where chat needs /amq-remote --native), and every dialog appears there; the first answer, there or in the terminal, decides; /amq-remote off stops it for that session\n")
 		return 0
 	case "uninstall-approval-hook":
-		if err := claude.UninstallPermissionHook(home); err != nil {
+		if err := claude.OptOutHook(claude.SettingsPath(home), claude.HookApproval); err != nil {
 			say(os.Stderr, "uninstall-approval-hook: %v\n", err)
 			return 1
 		}
@@ -95,10 +93,41 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	}
 }
 
+// hookExecutable is the absolute amq-remote path a hook runs: the stable
+// path a login service would run, so an upgrade that removes the versioned
+// path keeps the hook working, else this binary's own absolute path.
+func hookExecutable() (string, error) {
+	if exe, _, err := stableExecutable(); err == nil {
+		return exe, nil
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(bin)
+}
+
+// hookProbeEnv set to 1, with an empty stdin, makes the PermissionRequest
+// receiver a probe: it prints its version and exits before it binds a
+// session or posts a dialog. Doctor runs the installed hook command this way
+// to prove that the command reaches this receiver. A real dialog always has
+// a payload on stdin, so the variable leaked into a session's environment
+// never silences one.
+const hookProbeEnv = "AMQ_HOOK_PROBE"
+
 // permissionHook runs the PermissionRequest receiver. It makes no decision
 // on any error: exit 0 with no output. TERM, INT and HUP end the wait, and
 // the terminal dialog decides.
 func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
+	if os.Getenv(hookProbeEnv) == "1" {
+		var first [1]byte
+		n, _ := io.ReadFull(stdin, first[:])
+		if n == 0 {
+			say(stdout, "amq-remote %s", version)
+			return 0
+		}
+		stdin = io.MultiReader(bytes.NewReader(first[:n]), stdin)
+	}
 	fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")

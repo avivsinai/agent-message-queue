@@ -315,6 +315,9 @@ func runDoctor(args []string) error {
 	if err := writeStdoutLine(summary); err != nil {
 		return err
 	}
+	if err := writeStdoutLine("Remote control from Buzz: run `amq-remote doctor` to check its hooks, machine agent, channels and wakes."); err != nil {
+		return err
+	}
 
 	// Pretty-print ops if present
 	if result.Ops != nil {
