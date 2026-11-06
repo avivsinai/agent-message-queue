@@ -60,6 +60,32 @@ type claudeTranscriptBlock struct {
 // a subagent's marker only that subagent's transcript. Any other marker is
 // never proven answered. An error means no proof: the hold stays.
 func claudeDialogAnswered(marker wakeDialogMarker, modTime time.Time) (bool, error) {
+	return claudeDialogAnsweredFrom(marker, modTime, readClaudeTranscriptTail)
+}
+
+// claudeTranscriptReader reads a transcript tail (readClaudeTranscriptTail).
+type claudeTranscriptReader func(path string) ([]byte, error)
+
+// newClaudeTranscriptReader reads each transcript tail once and returns the
+// same result to every later call.
+func newClaudeTranscriptReader() claudeTranscriptReader {
+	type result struct {
+		tail []byte
+		err  error
+	}
+	read := make(map[string]result)
+	return func(path string) ([]byte, error) {
+		if r, ok := read[path]; ok {
+			return r.tail, r.err
+		}
+		tail, err := readClaudeTranscriptTail(path)
+		read[path] = result{tail, err}
+		return tail, err
+	}
+}
+
+// claudeDialogAnsweredFrom is claudeDialogAnswered reading through read.
+func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read claudeTranscriptReader) (bool, error) {
 	permission := claudePermissionMarker(marker)
 	if marker.ToolUseID == "" && !permission {
 		return false, nil
@@ -71,13 +97,13 @@ func claudeDialogAnswered(marker wakeDialogMarker, modTime time.Time) (bool, err
 		if err != nil {
 			return false, err
 		}
-		tail, err := readClaudeTranscriptTail(path)
+		tail, err := read(path)
 		if err != nil {
 			return false, err
 		}
 		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), true), nil
 	}
-	tail, err := readClaudeTranscriptTail(marker.TranscriptPath)
+	tail, err := read(marker.TranscriptPath)
 	if err != nil {
 		return false, err
 	}
@@ -111,10 +137,12 @@ var claudeTranscriptNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // builds beside the session transcript <dir>/<session_id>.jsonl, read from
 // its strings `i(yee(),G(),"subagents")` and
 // `n=e?i(Zmt(),e):Zmt();return i(n,`agent-${t}.jsonl`)`:
-// <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one subdirectory
-// deeper. Invariant: the proof reads only a regular file, reached through
-// no symlink below <dir>, named for exactly this agent_id, and found
-// exactly once across both depths; anything else is an error and no proof.
+// <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one or two
+// subdirectories deeper (a workflow's subagents write to
+// subagents/workflows/<wf>/). Invariant: the proof reads only a regular
+// file, reached through no symlink below <dir>, named for exactly this
+// agent_id, and found exactly once across the three depths; anything else
+// is an error and no proof.
 func claudeSubagentTranscript(marker wakeDialogMarker) (string, error) {
 	if marker.AgentTranscriptPath != "" {
 		return marker.AgentTranscriptPath, nil
@@ -136,17 +164,30 @@ func claudeSubagentTranscript(marker wakeDialogMarker) (string, error) {
 		return err == nil && info.Mode().IsRegular()
 	}
 	var found []string
-	if path := filepath.Join(subagents, name); regular(path) {
-		found = append(found, path)
-	}
-	entries, err := os.ReadDir(subagents)
-	if err != nil {
-		return "", fmt.Errorf("read subagent transcripts: %w", err)
-	}
-	for _, entry := range entries {
-		if path := filepath.Join(subagents, entry.Name(), name); entry.IsDir() && regular(path) {
+	var search func(dir string, depth int) error
+	search = func(dir string, depth int) error {
+		if path := filepath.Join(dir, name); regular(path) {
 			found = append(found, path)
 		}
+		if depth == 2 {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("read subagent transcripts: %w", err)
+		}
+		for _, entry := range entries {
+			// A symlink is not a directory here, so the search follows none.
+			if entry.IsDir() {
+				if err := search(filepath.Join(dir, entry.Name()), depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := search(subagents, 0); err != nil {
+		return "", err
 	}
 	if len(found) != 1 {
 		return "", fmt.Errorf("%d subagent transcripts named %s", len(found), name)
@@ -256,7 +297,7 @@ type claudeDialogProof struct {
 // answered reports whether a Claude Code marker's dialog is proven gone
 // (claudeDialogAnswered). Other harnesses' markers, Startup markers, and
 // markers without a transcript never are.
-func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time) bool {
+func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time, read claudeTranscriptReader) bool {
 	if proof.raw == string(raw) && proof.modTime.Equal(modTime) {
 		return true
 	}
@@ -265,7 +306,7 @@ func (proof *claudeDialogProof) answered(raw []byte, modTime time.Time) bool {
 		marker.Event == wakeDialogStartupEvent || marker.TranscriptPath == "" {
 		return false
 	}
-	if ok, err := claudeDialogAnswered(marker, modTime); err != nil || !ok {
+	if ok, err := claudeDialogAnsweredFrom(marker, modTime, read); err != nil || !ok {
 		return false
 	}
 	proof.raw, proof.modTime = string(raw), modTime

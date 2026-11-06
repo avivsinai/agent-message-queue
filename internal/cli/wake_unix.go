@@ -2902,7 +2902,6 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		dialogSource:            withWakeStartupHold(wakeDialogSourceInDir(activeAgentDir, s.harness), s.startupHold),
 		dialogHoldReason:        wakeDialogHoldReasonInDir(activeAgentDir),
 		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir),
 		desktopNotify:           wakeDesktopNotifier(),
@@ -2954,6 +2953,12 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			return s.publishRepairFloor(persistedTarget, existing)
 		}
 	}
+	// The dialog source logs through this configuration's diagnostic
+	// destination, which is fixed once it is built.
+	diagnostics := cfg
+	cfg.dialogSource = withWakeStartupHold(wakeDialogSourceLoggingInDir(activeAgentDir, s.harness, func(format string, args ...any) {
+		_ = writeWakeDiagnostic(&diagnostics, format, args...)
+	}), s.startupHold)
 	return cfg
 }
 

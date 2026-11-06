@@ -25,6 +25,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -51,7 +52,7 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	// The transcript is missing, so it proves nothing and the hold stays.
 	hook("open", `{"hook_event_name":"PreToolUse","session_id":"s1","transcript_path":"/nonexistent/amq-test/session.jsonl","tool_name":"AskUserQuestion","tool_use_id":"toolu_1","tool_input":{"questions":[]}}`)
 	// The dialog opened at the harness clock's now.
-	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+	marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName, wakeDialogEntryName("s1", "", "toolu_1"))
 	if err := os.Chtimes(marker, h.now, h.now); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +137,17 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	}
 	// asked is the main-chain message whose tool call opened the dialog.
 	asked := func(opened time.Time) string { return assistant("msg_asked", false, opened.Add(-time.Second)) }
+	// HOST is replaced by the row's host process.
+	permissionWithHost := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","host":HOST,"session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadHost, reusedHost := self, self
+	deadHost.PID = 99999999
+	reusedHost.ProcessStart = "1.000000000"
+	mainPermission := wakeDialogHookInput{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1"}
+	subagentPermissionOpen := wakeDialogHookInput{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1", AgentID: "a1"}
 	subagentMovedOn := func(opened time.Time) string {
 		return assistant("msg_sub_asked", true, opened.Add(-time.Second)) + assistant("msg_sub_next", true, opened.Add(5*time.Minute))
 	}
@@ -152,8 +164,13 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// transcripts for a marker opened at opened; nil leaves a file
 		// missing.
 		transcript, agentTranscript func(opened time.Time) string
-		// hook runs through the hook receiver after the marker is written.
-		hook    wakeDialogHookInput
+		// hooks run through the hook receiver after the marker, if any, is
+		// written, and before the subagent transcript is.
+		hooks []wakeDialogHookInput
+		// agentPath is the subagent transcript below subagents/.
+		agentPath string
+		// host is the marker's host process.
+		host    launch.HolderIdentity
 		notices int
 		rings   int
 		log     string
@@ -191,27 +208,55 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// The main thread's Stop and permission dialogs left a background
 		// subagent's open dialog unguarded.
 		{name: "a main-thread Stop keeps a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, transcript: movedOn, hook: wakeDialogHookInput{Event: "Stop", SessionID: "s1"}, notices: 1},
+			claudeHook: true, transcript: movedOn, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "Stop", SessionID: "s1"}}, notices: 1},
 		{name: "a new process's SessionStart clears a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, transcript: asked, hook: wakeDialogHookInput{Event: "SessionStart", Source: "startup", SessionID: "s1"}, rings: 1},
+			claudeHook: true, transcript: asked, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "SessionStart", Source: "startup", SessionID: "s1"}}, rings: 1},
 		{name: "a compaction's SessionStart keeps a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, transcript: movedOn, hook: wakeDialogHookInput{Event: "SessionStart", Source: "compact", SessionID: "s1"}, notices: 1},
+			claudeHook: true, transcript: movedOn, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "SessionStart", Source: "compact", SessionID: "s1"}}, notices: 1},
 		{name: "a main-thread permission keeps an unproven subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: func(opened time.Time) string {
 				return asked(opened) + assistant("msg_next", false, opened.Add(wakeDialogQuietHold+2*time.Minute))
-			}, hook: wakeDialogHookInput{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1"}, notices: 1},
+			}, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1"}}, notices: 1},
 		// Pre-merge review of agent-message-queue-zu3: a synthetic API-error
 		// record landed about 0.5 s before a rejected tool call's result.
 		{name: "a synthetic assistant record proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, notices: 1, transcript: func(opened time.Time) string {
 				return asked(opened) + record("msg_error", "<synthetic>", false, opened.Add(5*time.Minute))
 			}},
+		// Pre-merge review of agent-message-queue-zu3 (probe2): one marker
+		// held either the main thread's or a subagent's dialog, so the
+		// subagent's proof left the main dialog open with no trace.
+		{name: "main then subagent dialog: the main dialog holds after the subagent's closes", claudeHook: true,
+			hooks: []wakeDialogHookInput{mainPermission, subagentPermissionOpen}, transcript: asked, agentTranscript: subagentMovedOn, notices: 1},
+		{name: "subagent then main dialog: the main dialog holds after the subagent's closes", claudeHook: true,
+			hooks: []wakeDialogHookInput{subagentPermissionOpen, mainPermission}, transcript: asked, agentTranscript: subagentMovedOn, notices: 1},
+		// Pre-merge review of agent-message-queue-zu3: a workflow's subagent
+		// writes two directories below subagents/.
+		{name: "a newer message in a workflow subagent's transcript rings", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, agentPath: "workflows/wf_x/agent-a1.jsonl", agentTranscript: subagentMovedOn, rings: 1},
+		// Pre-merge review of agent-message-queue-zu3: another terminal's
+		// session events on the same handle cleared this session's marker.
+		{name: "another session's SessionStart keeps this session's dialog", claudeHook: true, transcript: asked, notices: 1,
+			hooks: []wakeDialogHookInput{mainPermission, {Event: "SessionStart", Source: "startup", SessionID: "s2"}}},
+		{name: "a single-file marker holds after a dialog opens over it", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, hooks: []wakeDialogHookInput{subagentPermissionOpen}, notices: 1,
+			agentTranscript: func(opened time.Time) string {
+				return assistant("msg_sub_asked", true, opened) + assistant("msg_sub_next", true, opened.Add(wakeDialogQuietHold+2*time.Minute))
+			}},
+		// A Claude process that crashed left its dialog's entry with no
+		// event to close it; the dialog cannot outlive its process.
+		{name: "an entry whose host exited closes", marker: permissionWithHost, host: deadHost, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1, log: "dialog host 99999999 exited; entry closed"},
+		{name: "an entry whose host pid runs another process closes", marker: permissionWithHost, host: reusedHost, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1},
+		{name: "an entry with no host holds", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, notices: 1},
 		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
 		// that opened past a permission marker kept that marker, so the
 		// doorbell answered a dialog seconds old once that marker released.
 		{name: "AskUserQuestion after a closed permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
 			claudeHook: true, transcript: movedOn, notices: 1,
-			hook: wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"}},
+			hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"}}},
 		// Pre-merge review of agent-message-queue-zu3: a marker of no known
 		// writer read as stale and rang.
 		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
@@ -219,9 +264,11 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
-			if wakeDialogHookVerb(tt.hook.Event) == "open" {
-				// The hook writer ages markers by the real clock.
-				h.now = time.Now()
+			for _, in := range tt.hooks {
+				if wakeDialogHookVerb(in.Event) == "open" {
+					// The hook writer ages markers by the real clock.
+					h.now = time.Now()
+				}
 			}
 			if tt.claudeHook {
 				home := t.TempDir()
@@ -245,10 +292,15 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			paths := t.TempDir()
 			// The session s1 and its subagent a1, as Claude Code lays them out.
 			transcript := filepath.Join(paths, "s1.jsonl")
-			agentTranscript := filepath.Join(paths, "s1", "subagents", "agent-a1.jsonl")
-			for path, content := range map[string]func(time.Time) string{transcript: tt.transcript, agentTranscript: tt.agentTranscript} {
+			agentPath := tt.agentPath
+			if agentPath == "" {
+				agentPath = "agent-a1.jsonl"
+			}
+			agentTranscript := filepath.Join(paths, "s1", "subagents", agentPath)
+			writeTranscript := func(path string, content func(time.Time) string) {
+				t.Helper()
 				if content == nil {
-					continue
+					return
 				}
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
@@ -257,15 +309,22 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			raw := strings.NewReplacer("AGENT_TRANSCRIPT", agentTranscript, "TRANSCRIPT", transcript).Replace(tt.marker)
-			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-			if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
-				t.Fatal(err)
+			writeTranscript(transcript, tt.transcript)
+			if tt.marker != "" {
+				host, err := json.Marshal(tt.host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw := strings.NewReplacer("AGENT_TRANSCRIPT", agentTranscript, "TRANSCRIPT", transcript, "HOST", string(host)).Replace(tt.marker)
+				marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
+				if err := os.WriteFile(marker, []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(marker, opened, opened); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := os.Chtimes(marker, opened, opened); err != nil {
-				t.Fatal(err)
-			}
-			if in := tt.hook; in.Event != "" {
+			for _, in := range tt.hooks {
 				if err := agentDir.withFD(func(dirfd int) error {
 					if wakeDialogHookVerb(in.Event) == "open" {
 						in.TranscriptPath = transcript
@@ -276,6 +335,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			writeTranscript(agentTranscript, tt.agentTranscript)
 			var notices []string
 			attention := 0
 			h.cfg.dialogHoldReason = wakeDialogHoldReasonInDir(agentDir)

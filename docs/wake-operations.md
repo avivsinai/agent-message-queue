@@ -234,14 +234,32 @@ made Claude Code ignore the whole settings file. With no readable version it
 leaves that event out. Doctor counts an event as missing only when that
 version supports it.
 
-- **Marker.** The hooks run `amq wake dialog open|close`, which writes or
-  removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
-  AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
-  runs on `PostToolUse` and `PostToolUseFailure` for the same two tools (it
-  removes only the marker of that tool call), and on `UserPromptSubmit`,
-  `Stop`, `SessionStart`, and `SessionEnd`; a subagent's permission marker
-  closes only on `SessionEnd` or a `SessionStart` from `startup` or
-  `resume` (below). The receiver exits 0 once its
+- **Marker.** The hooks run `amq wake dialog open|close`. Claude Code can
+  show several dialogs at once, the main thread's and each subagent's, so
+  each open dialog is one entry: `<root>/agents/<me>/.wake.dialog/` is a
+  directory of `<key>.json` files, where `<key>` is the first 32 hex digits
+  of the SHA-256 of the dialog's session id, its `agent_id` (or `main`) and
+  its `tool_use_id`, each entry one marker. The doorbell is held while any
+  entry holds. `open` runs on `PreToolUse` for AskUserQuestion and
+  ExitPlanMode, and on every `PermissionRequest`, and writes that dialog's
+  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the
+  same two tools, which close only the entry of that tool call, and on
+  `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd`, which close
+  only entries of their own session: `Stop` and `UserPromptSubmit` its
+  main-thread entries, `SessionEnd` and a `SessionStart` from `startup` or
+  `resume` (a new process) all of them. An entry also records its host:
+  the nearest of the hook's first three ancestors, each parent edge proven
+  by its process start token, that runs Claude Code (an executable named
+  `claude`, or a native install's `claude/versions/<version>`). A dialog
+  cannot outlive its process, so while the doorbell is held an entry whose
+  host is proven gone (not running, or its pid now runs another process)
+  closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An
+  entry with no host, or a host the wake cannot prove gone, holds. Other writers (Codex, Cursor, agy,
+  pi, `amq coop exec`) keep the single file `.wake.dialog`. When a Claude
+  Code dialog opens over that file, the file becomes the entry
+  `legacy.json` in one atomic exchange, so the path is never absent, and
+  it keeps the single-file rules below. The directory goes with its last
+  entry. The receiver exits 0 once its
   arguments parse and prints nothing, so it never decides a tool call or a
   permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
@@ -310,13 +328,14 @@ version supports it.
   does, by the same rule without the sidechain filter. A permission hook
   gives no `agent_transcript_path`, so the wake reads the transcript where
   Claude Code writes it: `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl`
-  or one subdirectory deeper, beside the session transcript
+  or one or two subdirectories deeper (a workflow's subagents write to
+  `subagents/workflows/<wf>/`), beside the session transcript
   `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
-  no symbolic link, found exactly once at either depth; none, several, or
+  no symbolic link, found exactly once across those depths; none, several, or
   an unreadable file is no proof. A subagent can outlive the main thread's
   turn, so the main thread's `Stop`, `UserPromptSubmit` and a `SessionStart`
-  from `clear`, `compact` or `fork` do not clear its marker, and a later
-  permission open keeps it while it is not proven closed. It clears on its
+  from `clear`, `compact` or `fork` do not clear its entry, and a later
+  dialog's open writes its own entry beside it. It clears on its
   proof, on `SessionEnd`, or on a `SessionStart` from `startup` or `resume`,
   which is a new Claude Code process that cannot show the old one's
   dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
