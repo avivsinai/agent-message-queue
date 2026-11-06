@@ -34,6 +34,20 @@ it is active it creates
 `<AM_ROOT>/agents/<handle>/extensions/pi-bridge/` and keeps
 `bridge.liveness` fresh while the session runs.
 
+## Embed in a host application
+
+A host application that runs pi with its own identity or prompt queue loads
+this file unmodified and calls `registerAmqBridge(pi, options)` instead of
+the default export:
+
+- `identity(ctx)` returns `{root, handle}` instead of `AM_ROOT` and `AM_ME`.
+- `deliver` gives `busy(ctx)` and `send(ctx, request, report)` instead of
+  `sendUserMessage`. The host reports `started` and then exactly one terminal
+  outcome for each request it is handed.
+- `upgrade` is the remedy `amq-remote` shows when the bridge is too old.
+
+The contract is [the protocol's Embedding section](../../docs/pi-bridge-protocol.md#embedding).
+
 ## Doorbell guard
 
 While pi asks "Trust project folder?" at startup, and while an extension

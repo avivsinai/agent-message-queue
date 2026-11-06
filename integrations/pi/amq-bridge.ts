@@ -11,8 +11,9 @@ import * as path from "node:path";
 export const PROTOCOL = "amq:pi-bridge:v1";
 // BRIDGE_REVISION names the implementation rules the adapter relies on
 // (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
-// requests to a bridge that publishes a lower revision or none.
-export const BRIDGE_REVISION = 3;
+// requests to a bridge that publishes a lower revision or none. Revision 4
+// is revision 3 plus pi's session id in liveness.
+export const BRIDGE_REVISION = 4;
 // A request carries the bridge_revision its adapter requires. A request
 // without one comes from an adapter that predates the revision fence and is
 // refused, so an old adapter cannot send work through this bridge.
@@ -42,8 +43,54 @@ const TERMINAL = new Set(["completed", "failed", "cancelled", "refused", "uncert
 
 type EventFields = { event: string; text?: string; error?: string; reason?: string };
 
+// AmqIdentity is the AMQ participation identity: the queue root and the
+// handle pi runs as.
+export type AmqIdentity = { root: string; handle: string };
+
+// AmqRequest is a request the bridge admitted and hands to a host's
+// delivery. origin is present only when the request carries a valid one
+// (docs/pi-bridge-protocol.md, requests); it is display text, never
+// authority.
+export type AmqRequest = { ref: string; text: string; notAfter: string; origin?: { carrier: string; name: string } };
+
+// AmqOutcome is what a host's delivery reports for the request it was
+// handed: started at its real admission, then exactly one terminal outcome.
+export type AmqOutcome =
+	| { event: "started" }
+	| { event: "completed"; text: string }
+	| { event: "failed" | "uncertain"; error: string }
+	| { event: "cancelled" }
+	| { event: "refused"; reason: "expired"; error?: string };
+
+// AmqDelivery replaces the bridge's own hand-off to pi. busy reports that a
+// request would have to wait behind other work, so the bridge refuses it
+// busy. send runs right after the receipt is claimed; the host reports the
+// request's start and outcome through report, and the bridge then does no
+// correlation of its own for that request.
+export type AmqDelivery = {
+	busy(ctx: ExtensionContext): boolean;
+	send(ctx: ExtensionContext, request: AmqRequest, report: (outcome: AmqOutcome) => void): void;
+};
+
+// AmqBridgeOptions lets a host application embed the bridge. Every option
+// is optional, and the defaults are the behaviour of the plain extension.
+export type AmqBridgeOptions = {
+	// identity resolves root and handle; ctx is undefined before the session
+	// starts. Default: AM_ROOT and AM_ME.
+	identity?: (ctx: ExtensionContext | undefined) => AmqIdentity | undefined;
+	// deliver default: sendUserMessage as a follow-up, correlated by the
+	// bridge itself.
+	deliver?: AmqDelivery;
+	// upgrade is the host's own remedy for an owner whose bridge is too
+	// old, published in liveness. Default: none.
+	upgrade?: string;
+};
+
 type Bridge = {
 	dir: string;
+	identity: AmqIdentity;
+	deliver: AmqDelivery | null;
+	upgrade: string;
 	ctx: ExtensionContext;
 	generation: string;
 	surface: string;
@@ -101,7 +148,18 @@ type Inflight = {
 let inactiveNoticeShown = false;
 
 export default function amqPiBridge(pi: ExtensionAPI): void {
+	registerAmqBridge(pi);
+}
+
+// registerAmqBridge registers the bridge on pi. A host application passes
+// its own identity, delivery, or upgrade remedy; without options this is
+// the plain extension.
+export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): void {
 	let bridge: Bridge | null = null;
+	// who is the identity the wake marker and the Buzz dialog use: the
+	// session's once it started, else what the identity source gives
+	// without a session.
+	const who = (): AmqIdentity | undefined => bridge?.identity ?? resolveIdentity(options, undefined);
 
 	// The doorbell must never answer a pi prompt. pi counts nested
 	// extension prompts itself: ui_prompt_start fires when it starts waiting
@@ -120,44 +178,46 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	// carry only its kind and title), so the owner answers in the terminal and
 	// the dialog closes when the prompt ends.
 	pi.on("project_trust", () => {
-		openWakeDialog(WAKE_DIALOG_TRUST, "select");
-		openRemoteDialog("select", "Trust project folder?", "");
+		openWakeDialog(who(), WAKE_DIALOG_TRUST, "select");
+		openRemoteDialog(who(), "select", "Trust project folder?", "");
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
 		if (++openPrompts === 1) {
-			openWakeDialog(WAKE_DIALOG_PROMPT, event.kind);
-			openRemoteDialog(event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
+			openWakeDialog(who(), WAKE_DIALOG_PROMPT, event.kind);
+			openRemoteDialog(who(), event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
 		if (--openPrompts <= 0) {
-			closeWakeDialog();
+			closeWakeDialog(who());
 			closeRemoteDialog();
 		}
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		openPrompts = 0;
-		closeWakeDialog();
+		closeWakeDialog(who());
 		closeRemoteDialog();
 		stop(bridge, "restart");
-		bridge = start(pi, ctx);
+		bridge = start(pi, ctx, options);
 		if (bridge) scan(pi, bridge);
 	});
 
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
-		closeWakeDialog();
+		closeWakeDialog(who());
 		closeRemoteDialog();
 		stop(bridge, event.reason);
 		bridge = null;
 	});
 
-	// active is the in-flight request whose outcome is still open.
+	// active is the in-flight request whose outcome is still open and that
+	// the bridge correlates itself. A host's delivery reports its own
+	// request, so the handlers below never decide it.
 	const active = (): Inflight | null => {
 		const f = bridge?.inflight;
-		return f && !f.terminal ? f : null;
+		return f && !f.terminal && !bridge?.deliver ? f : null;
 	};
 
 	// Output and outcome belong to the request only after its own user
@@ -237,17 +297,39 @@ function settle(b: Bridge, fields: EventFields): void {
 	if (appendEvent(b.dir, f.ref, fields)) b.inflight = null;
 }
 
-function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
+// envIdentity is the AMQ participation contract: AM_ROOT and AM_ME, set by
+// `amq coop exec`.
+function envIdentity(): AmqIdentity | undefined {
 	const root = process.env.AM_ROOT ?? "";
 	const handle = process.env.AM_ME ?? "";
-	if (!root || !HANDLE.test(handle)) {
-		if (!inactiveNoticeShown) {
+	return root && HANDLE.test(handle) ? { root, handle } : undefined;
+}
+
+// resolveIdentity is the identity from the configured source, or undefined
+// when it gives none that is valid.
+function resolveIdentity(options: AmqBridgeOptions, ctx: ExtensionContext | undefined): AmqIdentity | undefined {
+	if (!options.identity) return envIdentity();
+	let id: AmqIdentity | undefined;
+	try {
+		id = options.identity(ctx);
+	} catch {
+		return undefined;
+	}
+	return id && typeof id.root === "string" && id.root && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
+}
+
+function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions): Bridge | null {
+	const identity = resolveIdentity(options, ctx);
+	if (!identity) {
+		// A host that gives no identity for this session keeps the bridge off
+		// on purpose; only the plain extension tells the owner how to fix it.
+		if (!options.identity && !inactiveNoticeShown) {
 			inactiveNoticeShown = true;
 			notify(ctx, "amq-bridge inactive: AM_ROOT and AM_ME are not set to a valid AMQ identity. Run pi under `amq coop exec` to make it reachable by amq-remote.");
 		}
 		return null;
 	}
-	const dir = path.join(root, "agents", handle, "extensions", "pi-bridge");
+	const dir = path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
 	try {
 		for (const sub of ["requests", "receipts", "events"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
@@ -264,6 +346,9 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 	}
 	const b: Bridge = {
 		dir,
+		identity,
+		deliver: options.deliver ?? null,
+		upgrade: options.upgrade ?? "",
 		ctx,
 		generation: randomUUID(),
 		surface: ctx.mode,
@@ -356,10 +441,11 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	const f = b.inflight;
 	if (f?.terminal) {
 		settle(b, f.terminal); // retry a terminal append that failed
-	} else if (f && !f.started && Date.now() - f.deliveredAt > START_GRACE_MS && b.ctx.isIdle() && !b.ctx.hasPendingMessages()) {
+	} else if (f && !b.deliver && !f.started && Date.now() - f.deliveredAt > START_GRACE_MS && b.ctx.isIdle() && !b.ctx.hasPendingMessages()) {
 		// pi reports a failed sendUserMessage out of band. An idle session
 		// with nothing queued that never started the follow-up most likely
-		// dropped it, but nothing proves that it did not run.
+		// dropped it, but nothing proves that it did not run. A host's
+		// delivery reports its own outcome instead.
 		settle(b, { event: "uncertain", error: "pi is idle and never started the follow-up; the outcome is unknown" });
 	}
 
@@ -376,7 +462,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		let { refuse, error } = verdict;
 		// v1 refuses a busy target (the remote-control ADR). The check sits
 		// at the admission boundary, before the receipt and the hand-off.
-		if (!refuse && (b.inflight || !b.ctx.isIdle() || b.ctx.hasPendingMessages())) {
+		if (!refuse && (b.inflight || (b.deliver ? b.deliver.busy(b.ctx) : !b.ctx.isIdle() || b.ctx.hasPendingMessages()))) {
 			refuse = "busy";
 			error = b.inflight ? "another remote request is in flight" : "pi is busy with other work";
 		}
@@ -409,6 +495,16 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 			outcome: "",
 			terminal: null,
 		};
+		if (b.deliver) {
+			const request: AmqRequest = { ref, text: verdict.text, notAfter: verdict.notAfter };
+			if (verdict.origin) request.origin = verdict.origin;
+			try {
+				b.deliver.send(b.ctx, request, reporter(b, ref));
+			} catch (err) {
+				settle(b, { event: "failed", error: `deliver: ${String(err)}` });
+			}
+			continue;
+		}
 		try {
 			pi.sendUserMessage(verdict.text, { deliverAs: "followUp" });
 		} catch (err) {
@@ -417,10 +513,42 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	}
 }
 
-type Verdict = { refuse: string; error: string; text: string };
+// reporter is the report callback for the request ref that a host's
+// delivery was handed. A report for a request that is no longer this
+// bridge's open request (decided, closed at shutdown, or from an earlier
+// session) is ignored.
+function reporter(b: Bridge, ref: string): (outcome: AmqOutcome) => void {
+	return (outcome) => {
+		const f = b.inflight;
+		if (!f || f.ref !== ref || f.terminal) return;
+		if (outcome.event !== "started") {
+			settle(b, outcome);
+			return;
+		}
+		if (f.started) return;
+		f.started = true;
+		// The request's own user message, next, carries its ref.
+		b.requestUser = ref;
+		appendEvent(b.dir, ref, { event: "started" });
+	};
+}
+
+type Verdict = { refuse: string; error: string; text: string; notAfter: string; origin?: { carrier: string; name: string } };
+
+// MAX_ORIGIN_NAME is the protocol's bound on a request origin's name.
+const MAX_ORIGIN_NAME = 64;
+
+// originOf is the request's origin when it is valid (both fields non-empty
+// strings, name at most 64 bytes), else undefined.
+function originOf(v: unknown): { carrier: string; name: string } | undefined {
+	if (v === null || typeof v !== "object") return undefined;
+	const { carrier, name } = v as { carrier?: unknown; name?: unknown };
+	if (typeof carrier !== "string" || !carrier || typeof name !== "string" || !name) return undefined;
+	return Buffer.byteLength(name, "utf8") <= MAX_ORIGIN_NAME ? { carrier, name } : undefined;
+}
 
 function examine(b: Bridge, ref: string): Verdict {
-	const refuse = (reason: string, error: string): Verdict => ({ refuse: reason, error, text: "" });
+	const refuse = (reason: string, error: string): Verdict => ({ refuse: reason, error, text: "", notAfter: "" });
 	let req: Record<string, unknown>;
 	try {
 		req = JSON.parse(fs.readFileSync(path.join(b.dir, "requests", `${ref}.json`), "utf8"));
@@ -447,7 +575,7 @@ function examine(b: Bridge, ref: string): Verdict {
 	// absent or empty hint addresses none, so a request retained across
 	// session_start never runs in a session it was not sent to.
 	if (hint !== b.generation) return refuse("generation", "epoch_hint does not match the live session generation");
-	return { refuse: "", error: "", text: req.text };
+	return { refuse: "", error: "", text: req.text, notAfter: req.not_after as string, origin: originOf(req.origin) };
 }
 
 // claimReceipt publishes receipts/<ref>.json create-new. The receipt is the
@@ -486,6 +614,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		bridge_revision: BRIDGE_REVISION,
 		session_id: sessionIdOf(b.ctx) || undefined,
 		activity: ACTIVITY_VERSION,
+		upgrade: b.upgrade || undefined,
 	});
 	try {
 		const tmp = writeTemp(b.dir, body);
@@ -813,13 +942,11 @@ const WAKE_DIALOG = ".wake.dialog";
 const WAKE_DIALOG_PROMPT = "ui_prompt";
 const WAKE_DIALOG_TRUST = "project_trust";
 
-// wakeAgentDir is this pi's AMQ agent directory, or "" without a valid
-// identity or an existing mailbox.
-function wakeAgentDir(): string {
-	const root = process.env.AM_ROOT ?? "";
-	const handle = process.env.AM_ME ?? "";
-	if (!root || !HANDLE.test(handle)) return "";
-	const dir = path.join(root, "agents", handle);
+// wakeAgentDir is this pi's AMQ agent directory, or "" without an identity
+// or an existing mailbox.
+function wakeAgentDir(id: AmqIdentity | undefined): string {
+	if (!id) return "";
+	const dir = path.join(id.root, "agents", id.handle);
 	try {
 		return fs.lstatSync(dir).isDirectory() ? dir : "";
 	} catch {
@@ -829,8 +956,8 @@ function wakeAgentDir(): string {
 
 // openWakeDialog installs the marker by an exclusive temp file and a rename,
 // without fsync: the marker is advisory, and the prompt is rendering.
-function openWakeDialog(event: string, kind: string): void {
-	const dir = wakeAgentDir();
+function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string): void {
+	const dir = wakeAgentDir(id);
 	if (!dir) return;
 	const marker = {
 		schema: 1,
@@ -854,8 +981,8 @@ function openWakeDialog(event: string, kind: string): void {
 
 // closeWakeDialog removes the marker only when this extension wrote it, so
 // a marker another writer installed keeps holding.
-function closeWakeDialog(): void {
-	const dir = wakeAgentDir();
+function closeWakeDialog(id: AmqIdentity | undefined): void {
+	const dir = wakeAgentDir(id);
 	if (!dir) return;
 	const file = path.join(dir, WAKE_DIALOG);
 	try {
@@ -868,7 +995,7 @@ function closeWakeDialog(): void {
 
 // The remote dialog store is <store>/dialogs/<binding>/{requests,resolved}
 // (internal/remote/dialog). A seam shows a dialog in Buzz only when a mailbox
-// binding names this AM_ROOT and AM_ME; without one it does nothing. The Go
+// binding names this pi's root and handle; without one it does nothing. The Go
 // liveness rule also compares the holder's pid and process start token, which
 // Node cannot read portably, so only a binding whose root is gone counts as
 // ended here.
@@ -888,10 +1015,9 @@ function realPath(p: string): string {
 }
 
 // remoteBinding is the name of the mailbox binding that serves this pi.
-function remoteBinding(store: string): string {
-	const root = process.env.AM_ROOT ?? "";
-	const handle = process.env.AM_ME ?? "";
-	if (!root || !handle) return "";
+function remoteBinding(store: string, id: AmqIdentity | undefined): string {
+	if (!id) return "";
+	const { root, handle } = id;
 	const want = realPath(root);
 	let names: string[] = [];
 	try {
@@ -914,10 +1040,10 @@ function remoteBinding(store: string): string {
 
 // openRemoteDialog writes a request with no options, so Buzz shows the prompt
 // and says to answer in the terminal.
-function openRemoteDialog(kind: string, title: string, session: string): void {
+function openRemoteDialog(identity: AmqIdentity | undefined, kind: string, title: string, session: string): void {
 	closeRemoteDialog();
 	const store = remoteStore();
-	const name = remoteBinding(store);
+	const name = remoteBinding(store, identity);
 	if (!name) return;
 	const dir = path.join(store, "dialogs", name);
 	const id = `d-${randomUUID().replace(/-/g, "")}`;

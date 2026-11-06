@@ -17,8 +17,9 @@ side from this document.
 The extension takes its identity from the AMQ participation contract: `AM_ROOT`
 (the queue root) and `AM_ME` (the handle, `[a-z0-9_-]+`, not starting with
 `-`). pi runs under `amq coop exec`, which sets both. Without them the
-extension stays inactive. The adapter takes the handle from its manifest entry
-and never from its own environment.
+extension stays inactive. A host application that embeds the extension may
+supply the root and handle itself (see [Embedding](#embedding)). The adapter
+takes the handle from its manifest entry and never from its own environment.
 
 ```text
 <AM_ROOT>/agents/<handle>/extensions/pi-bridge/
@@ -233,7 +234,8 @@ nothing: it never decides a request outcome.
   "pid": 4242,
   "surface": "tui",
   "session_generation": "3f0c...",
-  "bridge_revision": 3,
+  "bridge_revision": 4,
+  "session_id": "0199c0de-0000-7000-8000-000000000000",
   "activity": 2
 }
 ```
@@ -506,6 +508,31 @@ applies with these differences:
   other turn meanwhile. The `session/cancel` write runs on its own, so an
   agent that stopped reading its stdin does not hold the turn past those 30
   seconds; the host then records `failed` and exits.
+
+## Embedding
+
+A host application can load the reference extension unmodified and call
+`registerAmqBridge(pi, options)` instead of its default export. Every option
+is optional; without options the extension behaves as described above.
+
+| Option | Default | Host value |
+| --- | --- | --- |
+| `identity(ctx)` | `AM_ROOT` and `AM_ME` | `{root, handle}` for the session, or `undefined` to stay inactive. `ctx` is `undefined` before the session starts. The same identity places the bridge directory, the wake marker, and the Buzz dialog. |
+| `deliver.busy(ctx)` | `ctx.isIdle()` is false or `ctx.hasPendingMessages()` is true | `true` when a request would wait behind the host's own work. The extension then refuses it `busy`. |
+| `deliver.send(ctx, request, report)` | `sendUserMessage(text, { deliverAs: "followUp" })` with the correlation above | Hands `{ref, text, notAfter, origin}` to the host. `origin` is present only when the request carries a valid one. |
+| `upgrade` | none | The liveness `upgrade` remedy. |
+
+The extension claims the receipt immediately before it calls `send`, in the
+same synchronous step, so delivery stays at-most-once. The host then owns the
+request's correlation: it reports `{event: "started"}` when it admits the
+request into a run, and then exactly one terminal outcome: `completed` with
+`text`, `failed` or `uncertain` with `error`, `cancelled`, or `refused` with
+reason `expired`. The extension writes these as the request's events, applies
+no correlation and no start watchdog of its own to that request, and ignores
+a report for a request that is no longer in flight. The host must report a
+terminal outcome: until it does, the request stays in flight and the
+extension refuses every other request `busy`. `session_shutdown` closes it as
+described above.
 
 ## Capabilities
 
