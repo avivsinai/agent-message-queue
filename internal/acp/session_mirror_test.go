@@ -79,7 +79,10 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 // mirrorEditGap, and edited at once with its answer. A tick that changes
 // nothing sends nothing. The second turn's tick crashes after its post: the
 // post still gets its final edit (agent-message-queue-07h review). The third
-// turn changes 12 times and gets mirrorProgressMax progress edits.
+// turn changes 12 times and gets mirrorProgressMax progress edits, then
+// still shows the interrupt (review: the cap kept it "running"). The fourth
+// turn is continued by a Stop hook 20 times in 60 s and is edited once per
+// gap, ending with its last answer (review: 21 stored events).
 func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
@@ -163,8 +166,23 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		}
 		steps = append(steps, st)
 	}
-	steps = append(steps, step{lines: []string{say("k13", 574, "end_turn", "Done.")}, after: 574,
-		want: []string{"edit: ▶ loop\n✓ 13 tools (Bash ×13) · 6m14s\nDone."}})
+	interrupt := `{"type":"user","uuid":"i3","promptId":"po3","timestamp":"` + ts(574) + `","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`
+	steps = append(steps,
+		step{lines: []string{interrupt}, after: 574,
+			want: []string{"edit: ▶ loop\n✗ interrupted · 13 tools (Bash ×13) · 6m14s"}},
+		step{lines: []string{say("k13", 580, "end_turn", "Done.")}, after: 580,
+			want: []string{"edit: ▶ loop\n✓ 13 tools (Bash ×13) · 6m20s\nDone."}},
+		step{lines: []string{opener("o4", 700, "ship"), say("h0", 701, "end_turn", "done 0")}, after: 701,
+			want: []string{"post: ▶ ship\n✓ 1s\ndone 0"}})
+	for i := 1; i <= 20; i++ {
+		hook := `{"type":"user","uuid":"g` + strconv.Itoa(i) + `","promptId":"po4","isMeta":true,"timestamp":"` + ts(700+3*i) + `","message":{"content":[{"type":"text","text":"Stop hook feedback: keep going"}]}}`
+		st := step{lines: []string{hook, say("h"+strconv.Itoa(i), 701+3*i, "end_turn", "done "+strconv.Itoa(i))}, after: 702 + 3*i}
+		if i%10 == 0 {
+			st.want = []string{fmt.Sprintf("edit: ▶ ship\n✓ %s\ndone %d", time.Duration(1+3*i)*time.Second, i)}
+		}
+		steps = append(steps, st)
+	}
+	steps = append(steps, step{after: 800})
 	for i, step := range steps {
 		if step.lines != nil {
 			appendLines(step.lines...)

@@ -868,7 +868,8 @@ a peer session or a background task. One message shows one turn. It appears
 when the model first answers and shows `… running` with the tools used so
 far. While the turn runs it is updated at most every 30 s while it changes
 (new tools or an interrupt; elapsed time alone is no change), at most 10
-times, and it shows the answer as soon as the turn ends:
+times plus one to show an interrupt, and it shows the answer as soon as the
+turn ends:
 
 ```text
 ▶ run the tests and fix the failure
@@ -889,7 +890,8 @@ already got (a Buzz message, or a reply the session sent to Buzz during the
 turn) shows the first two lines only. A shell command typed with `!` shows only
 when the model answers it, and never with the command itself; local slash
 commands and a subagent's own steps are not shown. When a Stop hook
-makes the session go on after a turn, that turn's message is edited.
+makes the session go on after a turn, that turn's message is edited, at
+most every 30 s, ending with the last answer.
 
 The machine agent reads the session's transcript, which Claude Code names in
 its session registry and in each approval hook; attach, and the approval hook
