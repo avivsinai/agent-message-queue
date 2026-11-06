@@ -210,7 +210,7 @@ func waitCoopNamedInputFree(root, handle, harnessName string, limit, interval ti
 	source := wakeDialogSourceInDir(agentDir, harnessName)
 	deadline := time.Now().Add(limit)
 	for {
-		if state, err := source(time.Now()); err == nil && !state.holdsInput() {
+		if state, err := source(time.Now()); err == nil && state == wakeDialogClosed {
 			return true
 		}
 		if !time.Now().Before(deadline) {
