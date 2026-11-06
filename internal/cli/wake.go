@@ -122,6 +122,7 @@ type wakeConfig struct {
 	attentionIsTTY                func() bool
 	attentionIsForeground         func() bool // the wake leads the attention terminal's foreground group
 	attentionWrite                func([]byte) (int, error)
+	logNotices                    *wakeLogNoticeFold // folds repeated notices when attention output is a log
 	diagnosticIsTTY               func() bool
 	diagnosticIsForeground        func() bool // the wake leads the stderr terminal's foreground group
 }

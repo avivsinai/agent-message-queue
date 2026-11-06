@@ -12,13 +12,22 @@ import (
 
 // stageEvidence never holds the snapshot writer lock. Immutable leftovers are
 // safe and count toward capacity; the later commit revalidates every reference.
-func (s Store) stageEvidence(ctx context.Context, blobs [][]byte) error {
+// It does not write the evidence of messages below the history floor, which
+// the commit will not take.
+func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Message) error {
 	if len(blobs) == 0 {
 		return nil
 	}
 	// Validate initialized state before creating even an evidence lock file.
-	if _, err := s.ReadContext(ctx); err != nil {
+	state, err := s.ReadContext(ctx)
+	if err != nil {
 		return err
+	}
+	pruned := map[string]bool{}
+	for _, m := range messages {
+		if _, kept := state.Messages[m.Key]; !kept && state.belowFloor(m) {
+			pruned[m.EvidenceHash] = true
+		}
 	}
 	path := filepath.Join(s.Dir, "evidence.lock")
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
@@ -48,7 +57,7 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte) error {
 		if err = json.Unmarshal(data, &identity); err != nil {
 			return err
 		}
-		if (identity.Schema != SnapshotSchema && identity.Schema != legacySnapshotSchema) || identity.BaseRoot != s.BaseRoot || identity.BaseRootID != s.BaseRootID || identity.HostID != s.HostID || identity.ProjectID == "" || identity.Generation == 0 {
+		if (identity.Schema != SnapshotSchema && identity.Schema != v2SnapshotSchema && identity.Schema != legacySnapshotSchema) || identity.BaseRoot != s.BaseRoot || identity.BaseRootID != s.BaseRootID || identity.HostID != s.HostID || identity.ProjectID == "" || identity.Generation == 0 {
 			return errors.New("evidence staging identity invalid; recovery required")
 		}
 
@@ -56,6 +65,6 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte) error {
 			return ErrProjectChanged
 		}
 
-		return s.saveEvidence(ctx, blobs)
+		return s.saveEvidence(ctx, blobs, pruned)
 	})
 }

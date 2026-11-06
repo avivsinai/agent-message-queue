@@ -1,6 +1,7 @@
 package board
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,10 +21,20 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
-const SnapshotSchema = "amq/board-state/v2"
+// SnapshotSchema v3 is v2 published as a base snapshot plus a journal; a
+// binary that reads only the base refuses it instead of publishing over it.
+const SnapshotSchema = "amq/board-state/v3"
+const v2SnapshotSchema = "amq/board-state/v2"
 const legacySnapshotSchema = "amq/board-state/v1"
 const snapshotLimit = 64 << 20
 const snapshotReserve = 1 << 20
+
+// A publication past snapshotLimit-snapshotReserve first prunes the oldest
+// unreferenced history down to pruneTarget, so ingestion continues.
+const pruneTarget = (snapshotLimit - snapshotReserve) / 4 * 3
+
+// journalName holds one record per publication since the base snapshot.
+const journalName = "journal.jsonl"
 
 var ErrProjectChanged = errors.New("board project identity changed; restart required")
 
@@ -70,6 +81,13 @@ type Snapshot struct {
 	Withdrawals       map[string]string             `json:"withdrawal_adoptions"`
 	// RequestLabels are classifier opinions keyed by RequestLabelKey.
 	RequestLabels map[string]RequestLabel `json:"request_labels,omitempty"`
+	// HistoryFloor is the creation time at or before which pruned history is
+	// not ingested again. Messages that tasks or suggestions hold stay.
+	HistoryFloor time.Time `json:"history_floor,omitzero"`
+	// RetiredEvidence maps the evidence hash of each pruned message to the
+	// generation that pruned it. The file goes once neither the base snapshot
+	// nor its backup can name the message.
+	RetiredEvidence map[string]uint64 `json:"retired_evidence,omitempty"`
 }
 
 type Task struct {
@@ -184,7 +202,7 @@ func (s Store) Init(ctx context.Context) error {
 		}
 
 		state := Snapshot{Facts: map[string]AliasFact{}, Schema: SnapshotSchema, BaseRoot: s.BaseRoot, BaseRootID: s.BaseRootID, ProjectID: project, HostID: s.HostID, Tasks: map[string]Task{}, Anchors: map[string]string{}, Aliases: map[string]string{}, Messages: map[string]Message{}, Dismissed: map[string]bool{}, ActionCancelled: map[string]bool{}, Withdrawals: map[string]string{}}
-		return s.publish(&state)
+		return s.publish(&state, document{})
 	})
 }
 
@@ -255,87 +273,142 @@ func (s Store) ReadContext(ctx context.Context) (Snapshot, error) {
 		if err = s.validateIdentity(ctx); err != nil {
 			return err
 		}
-		state, err = s.readUnlocked(ctx)
+		state, _, err = s.readUnlocked(ctx)
 		return err
 	})
 	return state, err
 }
 
-func (s Store) readUnlocked(ctx context.Context) (Snapshot, error) {
+// document is the published state as readers reconstruct it: the base
+// snapshot with the journal replayed over it.
+type document struct {
+	data           []byte
+	baseSchema     string
+	baseGeneration uint64
+	baseBytes      int64
+	journalBytes   int64
+}
+
+func (s Store) readDocument() (document, error) {
+	base, err := readBounded(filepath.Join(s.Dir, "snapshot.json"), snapshotLimit)
+	if err != nil {
+		return document{}, err
+	}
+	var head struct {
+		Schema     string `json:"schema"`
+		Generation uint64 `json:"generation"`
+	}
+	if err = json.Unmarshal(base, &head); err != nil {
+		return document{}, err
+	}
+	doc := document{data: base, baseSchema: head.Schema, baseGeneration: head.Generation, baseBytes: int64(len(base))}
+	journal, err := readBounded(filepath.Join(s.Dir, journalName), snapshotLimit)
+	if os.IsNotExist(err) {
+		return doc, nil
+	} else if err != nil {
+		return document{}, err
+	}
+	doc.journalBytes = int64(len(journal))
+	var records []journalRecord
+	for rest := journal; len(rest) > 0; {
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			return document{}, errors.New("board journal ends in a partial record")
+		}
+		var r journalRecord
+		if err = json.Unmarshal(rest[:i], &r); err != nil {
+			return document{}, fmt.Errorf("board journal record unreadable: %w", err)
+		}
+		records = append(records, r)
+		rest = rest[i+1:]
+	}
+	if doc.data, err = replayJournal(base, head.Generation, records); err != nil {
+		return document{}, err
+	}
+	if len(doc.data) > snapshotLimit {
+		return document{}, errors.New("board snapshot bound exceeded")
+	}
+	return doc, nil
+}
+
+func (s Store) readUnlocked(ctx context.Context) (Snapshot, document, error) {
 	var state Snapshot
 	if err := s.safeDirectory(); err != nil {
-		return state, err
+		return state, document{}, err
 	}
 	if _, err := os.Lstat(filepath.Join(s.Dir, "write-pending")); !os.IsNotExist(err) {
-		return state, errors.New("board publication interrupted; recovery required")
+		return state, document{}, errors.New("board publication interrupted; recovery required")
 	}
-	data, err := readBounded(filepath.Join(s.Dir, "snapshot.json"), snapshotLimit)
+	doc, err := s.readDocument()
 	if err != nil {
-		return state, fmt.Errorf("board snapshot recovery required: %w", err)
+		return state, document{}, fmt.Errorf("board snapshot recovery required: %w", err)
 	}
-	if err = json.Unmarshal(data, &state); err != nil {
-		return state, fmt.Errorf("board snapshot recovery required: %w", err)
+	if err = json.Unmarshal(doc.data, &state); err != nil {
+		return state, document{}, fmt.Errorf("board snapshot recovery required: %w", err)
 	}
 	if state.Schema == legacySnapshotSchema {
-		if err := state.migrateLegacy(data); err != nil {
-			return Snapshot{}, err
+		if err := state.migrateLegacy(doc.data); err != nil {
+			return Snapshot{}, document{}, err
 		}
 	}
+	if state.Schema == v2SnapshotSchema {
+		state.Schema = SnapshotSchema
+	}
 	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || state.BaseRootID != s.BaseRootID || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil || state.Facts == nil {
-		return Snapshot{}, errors.New("board identity or state invalid; recovery required")
+		return Snapshot{}, document{}, errors.New("board identity or state invalid; recovery required")
 	}
 	if s.ProjectID != "" && state.ProjectID != s.ProjectID {
-		return Snapshot{}, ErrProjectChanged
+		return Snapshot{}, document{}, ErrProjectChanged
 	}
 	if state.ClaudeLists == nil {
 		state.ClaudeLists = map[string]ClaudeListBinding{}
 	}
 	for key, binding := range state.ClaudeLists {
 		if key != ClaudeListKey(binding.Home, binding.List) || binding.Revision == "" {
-			return Snapshot{}, errors.New("claude list binding invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("claude list binding invalid; recovery required")
 		}
 	}
 	for anchor, id := range state.Anchors {
 		if _, ok := state.Tasks[id]; !ok || anchor == "" {
-			return Snapshot{}, errors.New("board admission identity invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("board admission identity invalid; recovery required")
 		}
 	}
 	for alias, id := range state.Aliases {
 		if _, ok := state.Tasks[id]; !ok || alias == "" {
-			return Snapshot{}, errors.New("board alias identity invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("board alias identity invalid; recovery required")
 		}
 	}
 	for id, task := range state.Tasks {
 		if task.ID != id || task.Title == "" || task.Authority == "" {
-			return Snapshot{}, errors.New("board task identity invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("board task identity invalid; recovery required")
 		}
 		for _, key := range task.Attachments {
 			if _, ok := state.Messages[key]; !ok {
-				return Snapshot{}, errors.New("board attachment missing; recovery required")
+				return Snapshot{}, document{}, errors.New("board attachment missing; recovery required")
 			}
 		}
 	}
 	for key, msg := range state.Messages {
 		if key != msg.Key || msg.ID == "" || msg.Root == "" {
-			return Snapshot{}, errors.New("board message identity invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("board message identity invalid; recovery required")
 		}
 	}
 	for key, label := range state.RequestLabels {
 		if key != RequestLabelKey(label.MessageKey, label.EvidenceDigest, label.Classifier) {
-			return Snapshot{}, errors.New("board request label identity invalid; recovery required")
+			return Snapshot{}, document{}, errors.New("board request label identity invalid; recovery required")
 		}
 	}
 	if err := state.validateIdentityRecords(); err != nil {
-		return Snapshot{}, err
+		return Snapshot{}, document{}, err
 	}
 	state.hydrateAuthorities()
 	if err := s.verifyMessages(ctx, &state); err != nil {
-		return Snapshot{}, err
+		return Snapshot{}, document{}, err
 	}
 	if err := state.validateModelBindings(); err != nil {
-		return Snapshot{}, err
+		return Snapshot{}, document{}, err
 	}
-	return state, nil
+	return state, doc, nil
 }
 
 func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
@@ -352,7 +425,7 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err := s.validateIdentity(ctx); err != nil {
 			return err
 		}
-		state, err := s.readUnlocked(ctx)
+		state, doc, err := s.readUnlocked(ctx)
 		if err != nil {
 			return err
 		}
@@ -369,62 +442,167 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err = state.validateModelBindings(); err != nil {
 			return err
 		}
-		data, err := snapshotBytes(&state)
+		data, err := stamp(&state)
 		if err != nil {
 			return err
 		}
+		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget) {
+			// A prune that drops a message something still names must not
+			// publish: the store would need recovery on its next read.
+			if state.validatePruned() == nil {
+				if data, err = snapshotBytes(&state); err != nil {
+					return err
+				}
+			}
+		}
 		if len(data) > snapshotLimit-snapshotReserve {
-			prior, err := s.readUnlocked(ctx)
+			prior, doc, err := s.readUnlocked(ctx)
 			if err != nil {
 				return err
 			}
 			markCapacity(&prior, "board-capacity", errSnapshotBound.Error())
-			if err = s.publish(&prior); err != nil {
+			if err = s.publish(&prior, doc); err != nil {
 				return err
 			}
 			return errSnapshotBound
 		}
-		return s.publish(&state)
+		return s.write(&state, data, doc)
 	})
 }
 
-func (s Store) publish(state *Snapshot) error {
+// stamp gives state its next generation and publication time and returns
+// the bytes that publish it.
+func stamp(state *Snapshot) ([]byte, error) {
 	state.Generation++
 	state.PublishedAt = time.Now().UTC()
-	data, err := snapshotBytes(state)
+	return snapshotBytes(state)
+}
+
+// publish writes state as the generation after prev, the document it was
+// read from; an empty prev starts a new base.
+func (s Store) publish(state *Snapshot, prev document) error {
+	data, err := stamp(state)
 	if err != nil {
 		return err
 	}
+	return s.write(state, data, prev)
+}
+
+// write publishes data, the encoding of state, as the generation after prev.
+// It appends the leaf changes from prev to the journal, or writes a new base
+// when prev is none or an older schema, when the journal would pass a quarter
+// of the base, or while pruned evidence waits to be removed. A new base keeps the old one
+// as snapshot.backup.json by a hard link, so every crash point leaves the old
+// base, the old journal or both, under the write-pending marker.
+func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if len(data) > snapshotLimit {
 		return errors.New("board snapshot reached 64 MiB; ingestion stopped, existing state preserved")
 	}
-	// A durable marker makes an interrupted or uncertain rename fail closed on
-	// the next writer. Readers never fall back to source reads or a backup.
-	if _, err = fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("publication pending\n"), 0o600); err != nil {
-		return err
-	}
-	old, err := readBounded(filepath.Join(s.Dir, "snapshot.json"), snapshotLimit)
-	if err == nil {
-		if _, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600); err != nil {
+	compact := prev.data == nil || prev.baseSchema != SnapshotSchema || len(state.RetiredEvidence) > 0
+	var record []byte
+	if !compact {
+		ops, err := diffRaw(prev.data, data, nil, nil)
+		if err != nil {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
+		if record, err = json.Marshal(journalRecord{Generation: state.Generation, Ops: ops}); err != nil {
+			return err
+		}
+		record = append(record, '\n')
+		compact = prev.journalBytes+int64(len(record)) > prev.baseBytes/4
+	}
+	// Retired evidence the old base no longer names goes with this base: the
+	// old base becomes the backup, so no kept generation names it.
+	var unlink []string
+	if compact {
+		for hash, gen := range state.RetiredEvidence {
+			if prev.data != nil && gen <= prev.baseGeneration {
+				unlink = append(unlink, hash)
+				delete(state.RetiredEvidence, hash)
+			}
+		}
+		if len(unlink) > 0 {
+			var err error
+			if data, err = snapshotBytes(state); err != nil {
+				return err
+			}
+		}
+	}
+	// A durable marker makes an interrupted or uncertain rename fail closed on
+	// the next writer. Readers never fall back to source reads or a backup.
+	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("publication pending\n"), 0o600); err != nil {
 		return err
 	}
-	if _, err = fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
+	if compact {
+		if err := s.keepBackup(); err != nil {
+			return err
+		}
+		if _, err := fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
+			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
+		}
+		if err := os.Remove(filepath.Join(s.Dir, journalName)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if err := s.appendJournal(record); err != nil {
 		return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 	}
-	if err = os.Remove(filepath.Join(s.Dir, "write-pending")); err != nil {
+	if err := fsq.SyncDir(s.Dir); err != nil {
 		return err
 	}
-	if err = fsq.SyncDir(s.Dir); err != nil {
+	if err := os.Remove(filepath.Join(s.Dir, "write-pending")); err != nil {
+		return err
+	}
+	if err := fsq.SyncDir(s.Dir); err != nil {
 		_, _ = fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("durability uncertain\n"), 0o600)
 		return fmt.Errorf("board durability uncertain; stop writes: %w", err)
+	}
+	// Leftover evidence is immutable and safe, so a crash here only leaks it.
+	for _, hash := range unlink {
+		_ = os.Remove(filepath.Join(s.Dir, "evidence", hash+".json"))
 	}
 	return nil
 }
 
-func (s Store) saveEvidence(ctx context.Context, blobs [][]byte) error {
+// keepBackup makes the current base snapshot.backup.json without copying it.
+func (s Store) keepBackup() error {
+	current := filepath.Join(s.Dir, "snapshot.json")
+	if _, err := os.Lstat(current); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	staged := filepath.Join(s.Dir, "snapshot.backup.json.tmp")
+	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Link(current, staged); err != nil {
+		old, rerr := readBounded(current, snapshotLimit)
+		if rerr != nil {
+			return rerr
+		}
+		_, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600)
+		return err
+	}
+	return os.Rename(staged, filepath.Join(s.Dir, "snapshot.backup.json"))
+}
+
+func (s Store) appendJournal(record []byte) error {
+	f, err := os.OpenFile(filepath.Join(s.Dir, journalName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(record); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[string]bool) error {
 	dir := filepath.Join(s.Dir, "evidence")
 	if info, err := os.Lstat(dir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 		return errors.New("unsafe board evidence directory")
@@ -434,17 +612,23 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte) error {
 	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	var used int64
-	for _, e := range entries {
-		info, err := e.Info()
+	// The budget scan stats every evidence file, so it runs only when a blob
+	// is new.
+	used := int64(-1)
+	measure := func() error {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return err
 		}
-		used += info.Size()
+		used = 0
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				return err
+			}
+			used += info.Size()
+		}
+		return nil
 	}
 	for _, b := range blobs {
 		if ctx.Err() != nil {
@@ -454,7 +638,11 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte) error {
 			return err
 		}
 		sum := sha256.Sum256(b)
-		name := hex.EncodeToString(sum[:]) + ".json"
+		hash := hex.EncodeToString(sum[:])
+		if pruned[hash] {
+			continue
+		}
+		name := hash + ".json"
 		if previous, err := readBounded(filepath.Join(dir, name), snapshotLimit); err == nil {
 			if string(previous) != string(b) {
 				return errors.New("board evidence hash conflict")
@@ -463,10 +651,15 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte) error {
 		} else if !os.IsNotExist(err) {
 			return err
 		}
+		if used < 0 {
+			if err := measure(); err != nil {
+				return err
+			}
+		}
 		if len(b) > snapshotLimit || used+int64(len(b)) > evidenceLimit {
 			return errEvidenceBound
 		}
-		if _, err = fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
 			return err
 		}
 		used += int64(len(b))
@@ -482,7 +675,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		return ErrProjectChanged
 	}
 	s.ProjectID = a.ProjectID
-	stageErr := s.stageEvidence(ctx, a.Evidence)
+	stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
 	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
 		return stageErr
 	}
@@ -573,6 +766,9 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		state.Input = a.Input
 		state.Usage = a.Usage
 		for _, m := range a.Messages {
+			if _, kept := state.Messages[m.Key]; !kept && state.belowFloor(m) {
+				continue
+			}
 			if previous, ok := state.Messages[m.Key]; ok {
 				before, after := previous, m
 				before.EvidenceHash = ""
@@ -1206,7 +1402,7 @@ func snapshotBytes(state *Snapshot) ([]byte, error) {
 		message.Body = ""
 		published.Messages[key] = message
 	}
-	return json.MarshalIndent(published, "", "  ")
+	return json.Marshal(published)
 }
 
 func markCapacity(state *Snapshot, name, detail string) {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
@@ -17,7 +18,9 @@ import (
 // ReadHistory uses AMQ's metadata enumeration and existing full-body export.
 // A missing export is a coverage gap, including commands that warned but
 // returned success. Nothing here consumes mail or infers task identity.
-func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result, []board.Message, [][]byte) {
+// Messages whose id stamp is before floor are pruned history and are not
+// exported; a zero floor reads all history.
+func ReadHistory(ctx context.Context, env board.Env, base string, floor time.Time) (board.Result, []board.Message, [][]byte) {
 	ctx, cancel := context.WithTimeout(ctx, board.SourceTimeout)
 	defer cancel()
 	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Feeds: []board.Column{board.ColumnRequests}}
@@ -63,6 +66,27 @@ func ReadHistory(ctx context.Context, env board.Env, base string) (board.Result,
 	var blobs [][]byte
 	messagesByID := map[string]board.Message{}
 	copyFacts := map[string][]board.MessageCopy{}
+	if !floor.IsZero() {
+		threads := index.Threads[:0]
+		for _, record := range index.Threads {
+			roots := record.Roots[:0]
+			for _, root := range record.Roots {
+				ids := root.MessageIDs[:0]
+				for _, id := range root.MessageIDs {
+					if !prunedID(id, floor) {
+						ids = append(ids, id)
+					}
+				}
+				if root.MessageIDs = ids; len(ids) > 0 {
+					roots = append(roots, root)
+				}
+			}
+			if record.Roots = roots; len(roots) > 0 {
+				threads = append(threads, record)
+			}
+		}
+		index.Threads = threads
+	}
 	for _, record := range index.Threads {
 		for _, root := range record.Roots {
 			for _, id := range root.MessageIDs {
@@ -183,4 +207,16 @@ func historyBatches(ids []string) ([][]string, error) {
 		batches = append(batches, batch)
 	}
 	return batches, nil
+}
+
+// prunedID reports whether the id's creation stamp is before floor. The
+// stamp has millisecond precision, so a message created in floor's own
+// millisecond is still read and the commit decides by its creation time.
+func prunedID(id string, floor time.Time) bool {
+	stamp, _, ok := strings.Cut(id, "_")
+	if !ok {
+		return false
+	}
+	created, err := time.Parse("2006-01-02T15-04-05.000Z", stamp)
+	return err == nil && created.Add(time.Millisecond).Before(floor)
 }
