@@ -13,6 +13,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,47 +119,61 @@ func TestWakeDialogHoldsDoorbellUntilDialogCloses(t *testing.T) {
 	}
 }
 
-// How a marker holds the doorbell by its kind and age.
+// How a marker holds the doorbell by its kind, age and transcript proof.
 func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	agyBusy := `{"schema":1,"event":"OSC7501","harness":"agy","kind":"working","opened_at":"2026-10-26T00:00:00Z"}` + "\n"
-	permission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
-	staleLog := `amq wake: the dialog marker is older than 10m0s and closes only when the turn ends; ringing the doorbell (marker event="PermissionRequest" kind="" harness="claude" tool="Bash" age=11m0s transcript=none)`
+	// TRANSCRIPT is replaced by the row's transcript path.
+	permission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	assistant := func(id string, sidechain bool, at time.Time) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"timestamp":%q,"message":{"id":%q,"content":[]}}`,
+			sidechain, at.UTC().Format(time.RFC3339Nano), id) + "\n"
+	}
+	// asked is the main-chain message whose tool call opened the dialog.
+	asked := func(opened time.Time) string { return assistant("msg_asked", false, opened.Add(-time.Second)) }
+	movedOn := func(opened time.Time) string {
+		return asked(opened) + assistant("msg_next", false, opened.Add(5*time.Minute))
+	}
 	for _, tt := range []struct {
 		name   string
 		marker string
-		// age is the marker's age when the message arrives; later, if set,
-		// is how long the clock then runs with no new message.
-		age, later time.Duration
+		// age is the marker's age when the message arrives.
+		age        time.Duration
 		claudeHook bool
-		// rangBefore rings the doorbell for the message before the marker
-		// opens; ask then opens an AskUserQuestion through the hook writer.
-		rangBefore, ask bool
-		notices         int
-		rings           int
-		log             string
+		// transcript is the session transcript for a marker opened at
+		// opened; nil leaves the file missing.
+		transcript func(opened time.Time) string
+		// ask opens an AskUserQuestion through the hook writer.
+		ask     bool
+		notices int
+		rings   int
+		log     string
 	}{
 		// field: agy busy turns showed held notices (2026-10-26). A working
 		// marker younger than wakeDialogQuietHold holds without a desktop
 		// notice or terminal attention.
 		{name: "agy busy turn younger than the quiet hold", marker: agyBusy, age: wakeDialogQuietHold - time.Minute},
-		// field agent-message-queue-zu3 (2026-11-05): a permission marker,
-		// which only the turn's end closes, held a Claude Code doorbell for
-		// an hour-long turn, attention only. Past the quiet hold it rings,
-		// also for a doorbell held while the marker was fresh.
-		{name: "Claude permission marker older than the quiet hold", marker: permission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, rings: 1, log: staleLog},
-		{name: "Claude permission marker ages past the quiet hold while held", marker: permission, age: wakeDialogQuietHold - time.Minute,
-			later: 2 * time.Minute, claudeHook: true, notices: 1, rings: 1, log: staleLog},
-		// Pre-merge review of agent-message-queue-zu3: a doorbell shown
-		// before the marker opened made the ring past the stale marker a
-		// bare Enter, which approves an open permission dialog.
-		{name: "ring past a stale marker after a shown doorbell types the full doorbell", marker: permission,
-			later: wakeDialogQuietHold + time.Minute, claudeHook: true, rangBefore: true, notices: 1, rings: 1, log: staleLog},
+		// field agent-message-queue-zu3 (2026-11-06): a Bash permission
+		// dialog stayed open for 8 hours; a doorbell typed past its 10-minute
+		// marker would have approved the command. Without a new main-chain
+		// assistant message, nothing is typed.
+		{name: "Claude permission marker without transcript proof holds", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, notices: 1, log: "holding input, attention only"},
+		// field agent-message-queue-zu3 (2026-11-05): a permission marker
+		// held a Claude Code doorbell for an hour-long turn. A new
+		// main-chain assistant message proves the dialog closed.
+		{name: "Claude permission marker with a newer assistant message rings", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: movedOn, rings: 1},
+		{name: "a newer sidechain message proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, notices: 1, transcript: func(opened time.Time) string {
+				return asked(opened) + assistant("msg_side", true, opened.Add(5*time.Minute))
+			}},
+		{name: "an unreadable transcript proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, notices: 1, log: "transcript=unreadable, holding"},
 		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
-		// that opened past a stale permission marker kept that marker, so
-		// the doorbell answered a dialog seconds old.
-		{name: "AskUserQuestion after a stale permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
-			claudeHook: true, ask: true, notices: 1},
+		// that opened past a permission marker kept that marker, so the
+		// doorbell answered a dialog seconds old once that marker released.
+		{name: "AskUserQuestion after a closed permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
+			claudeHook: true, transcript: movedOn, ask: true, notices: 1},
 		// Pre-merge review of agent-message-queue-zu3: a marker of no known
 		// writer read as stale and rang.
 		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
@@ -188,20 +203,17 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = agentDir.Close() })
 			h.cfg.dialogSource = wakeDialogSourceInDir(agentDir, "")
-			if tt.rangBefore {
-				h.send("a", format.PriorityNormal)
-				h.scan(h.cfg)
-				if got := h.rings(); got != 1 {
-					t.Fatalf("doorbells before the marker = %d, want 1", got)
+			opened := h.now.Add(-tt.age)
+			transcript := filepath.Join(t.TempDir(), "session.jsonl")
+			if tt.transcript != nil {
+				if err := os.WriteFile(transcript, []byte(tt.transcript(opened)), 0o600); err != nil {
+					t.Fatal(err)
 				}
-				// The reminder is due as the marker opens, so it is held.
-				h.advance(wakeDoorbellRetryBase)
 			}
 			marker := filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)
-			if err := os.WriteFile(marker, []byte(tt.marker), 0o600); err != nil {
+			if err := os.WriteFile(marker, []byte(strings.ReplaceAll(tt.marker, "TRANSCRIPT", transcript)), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			opened := h.now.Add(-tt.age)
 			if err := os.Chtimes(marker, opened, opened); err != nil {
 				t.Fatal(err)
 			}
@@ -225,18 +237,9 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				attention++
 				return len(p), nil
 			}
-			if !tt.rangBefore {
-				h.send("a", format.PriorityNormal)
-			}
+			h.send("a", format.PriorityNormal)
 			_, stderr, _ := captureEnvOutput(t, func() error {
 				h.scan(h.cfg)
-				if tt.later > 0 {
-					if got := h.rings(); got != 0 {
-						t.Fatalf("doorbells while the marker is fresh = %d, want 0", got)
-					}
-					h.advance(tt.later)
-					h.scan(h.cfg)
-				}
 				return nil
 			})
 			if got := h.rings(); got != tt.rings {

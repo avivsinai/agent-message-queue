@@ -167,8 +167,9 @@ type wakeDialogMarker struct {
 // It reads only through the canonical agent directory. A Claude Code
 // Startup marker reads as closed once Claude Code has recorded its trust
 // decision (a Codex one never does), so the doorbell rings without a
-// SessionStart hook. A Claude Code marker whose session transcript shows a
-// result for its tool call (claudeDialogAnswered) is removed; a missing or
+// SessionStart hook. A Claude Code marker whose session transcript proves
+// its dialog gone (claudeDialogAnswered: a result for its tool call, or for
+// a permission marker a new main-chain assistant message) is removed; a missing or
 // unreadable transcript, a busy lock or a changed marker keeps the hold
 // until the next recheck.
 //
@@ -177,10 +178,7 @@ type wakeDialogMarker struct {
 // unknown, and so holds input, only while the dialog guard of the harness
 // that wrote it (else harnessName) is on (dialogGuardEnabled). Without the
 // guard it reads as closed: the default wake is a plain doorbell that never
-// stays held by a marker nothing will close. With the guard, a marker that
-// only a turn or session event closes (turnClosedMarker) reads as stale
-// once older than wakeDialogQuietHold and holds no input: its hold would
-// otherwise last the whole turn.
+// stays held by a marker nothing will close.
 func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time.Time) (wakeDialogState, error) {
 	var startup startupDialogCache
 	var proof claudeDialogProof
@@ -212,37 +210,11 @@ func wakeDialogSourceInDir(agentDir *wakeAgentDir, harnessName string) func(time
 			modTime = info.ModTime()
 		}
 		state, stateErr := classifyWakeDialogMarker(modTime, exists, readErr, now)
-		if state != wakeDialogUnknown {
-			return state, stateErr
-		}
-		state, stateErr = unknown(raw, stateErr)
-		if state == wakeDialogUnknown && readErr == nil && now.Sub(modTime) >= wakeDialogQuietHold && turnClosedMarker(raw) {
-			return wakeDialogStale, nil
+		if state == wakeDialogUnknown {
+			return unknown(raw, stateErr)
 		}
 		return state, stateErr
 	}
-}
-
-// turnClosedMarker reports a marker that only a turn or session event
-// closes, as its writer records it: a Claude Code permission marker (event
-// PermissionRequest, no harness or "claude", no tool_use_id), a Codex
-// approval marker (event PermissionRequest, harness "codex") or a Cursor
-// tool call marker (event preToolUse, harness "cursor"). Every other marker
-// has its own close or an unknown one and keeps the aged hold.
-func turnClosedMarker(raw []byte) bool {
-	var marker wakeDialogMarker
-	if json.Unmarshal(raw, &marker) != nil {
-		return false
-	}
-	switch marker.Harness {
-	case "", harness.Claude:
-		return marker.Event == "PermissionRequest" && marker.ToolUseID == ""
-	case harness.Codex:
-		return marker.Event == "PermissionRequest"
-	case harness.Cursor:
-		return marker.Event == "preToolUse"
-	}
-	return false
 }
 
 // wakeStartupTrustReleaseInDir reports whether the agent's Startup marker
@@ -304,9 +276,9 @@ func wakeDialogHoldDetailInDir(agentDir *wakeAgentDir) func(time.Time) string {
 			harness = "claude" // Claude Code dialog hooks write no harness
 		}
 		transcript := "none"
-		if marker.TranscriptPath != "" && marker.ToolUseID != "" && harness == "claude" {
+		if marker.TranscriptPath != "" && harness == "claude" && (marker.ToolUseID != "" || claudePermissionMarker(marker)) {
 			transcript = "no proof yet"
-			if _, err := claudeDialogAnswered(marker); err != nil {
+			if _, err := claudeDialogAnswered(marker, info.ModTime()); err != nil {
 				transcript = fmt.Sprintf("unreadable, holding: %q", err.Error())
 			}
 		}
@@ -468,7 +440,8 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 // writeWakeDialogMarker writes the marker for in. A present marker without
 // a tool_use_id (a permission dialog) stays as it is when a tool call opens,
 // so a PostToolUse of that call cannot clear the permission dialog's hold: a
-// permission marker closes only on a turn or session event. A PermissionRequest names
+// permission marker closes only on a turn or session event, or on its
+// transcript proof (claudeDialogAnswered). A PermissionRequest names
 // no tool call, so it never takes the tool_use_id of the marker it
 // replaces: that marker can belong to another call of the same tool.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
@@ -487,15 +460,17 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 	if in.ToolUseID == "" {
 		return replaceWakeDialogMarkerAt(dirfd, agentDir, append(raw, '\n'))
 	}
-	// A tool call's open keeps a present marker without a tool_use_id: that
-	// hold closes only on a turn or session event, and the decision shares
-	// the marker lock with the replacement. A stale turn marker holds no
-	// input, so the new dialog's marker replaces it and holds.
-	now := time.Now()
+	// A tool call's open keeps a present marker without a tool_use_id unless
+	// its transcript proves it closed: the wake would remove that marker and
+	// leave this dialog unheld. The decision shares the marker lock with the
+	// replacement.
 	return replaceWakeDialogMarkerUnlessAt(dirfd, agentDir, append(raw, '\n'), func(current []byte, modTime time.Time) bool {
 		var marker wakeDialogMarker
-		return json.Unmarshal(current, &marker) == nil && marker.ToolUseID == "" &&
-			(now.Sub(modTime) < wakeDialogQuietHold || !turnClosedMarker(current))
+		if json.Unmarshal(current, &marker) != nil || marker.ToolUseID != "" {
+			return false
+		}
+		closed, err := claudeDialogAnswered(marker, modTime)
+		return err != nil || !closed
 	})
 }
 
@@ -745,7 +720,7 @@ func runWakeInstallDialogHook(args []string) error {
 		"~/.claude/settings.json), with --harness codex in $CODEX_HOME/hooks.json",
 		"(Codex runs them once you trust them in /hooks),",
 		"or with --harness cursor in ~/.cursor/hooks.json (Cursor reads it when a session",
-		"starts; it holds the doorbell from a tool call to the end of that turn, at most 10m).",
+		"starts; it holds the doorbell from a tool call to the end of that turn).",
 		"",
 		"While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,",
 		"the hooks keep a marker in the agent's mailbox and every wake of that agent",
