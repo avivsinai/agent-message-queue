@@ -188,6 +188,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		return 0, fmt.Errorf("canonicalize root %s: %w", c.root, err)
 	}
 	c.root = canonical
+	stderr = logSink(filepath.Join(c.root, stateDirName), stderr)
 	entryID := registry.EntryID(c.root, *me, "remote", c.root)
 
 	// Process-lifetime ownership before anything is spawned or written.
@@ -224,7 +225,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		return 0, fmt.Errorf("reclaim phantom companion rows: %w", rerr)
 	}
 	for _, id := range reclaimed {
-		say(stderr, "amq-remote up: reclaimed stale companion row %s (lifetime lock not held)\n", id)
+		say(stderr, "amq-remote up: reclaimed stale companion row %s (lifetime lock not held)", id)
 	}
 	entry := registry.Entry{
 		ID:      entryID,
@@ -254,10 +255,10 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		// failure is never silent: a leftover row would present a
 		// dead endpoint as active to every registry consumer.
 		if _, ferr := store.Forget(entryID); ferr != nil {
-			say(stderr, "amq-remote up: WARNING: could not remove registration %s from %s: %v\n", entryID, regPath, ferr)
+			say(stderr, "amq-remote up: WARNING: could not remove registration %s from %s: %v", entryID, regPath, ferr)
 		}
 	}()
-	say(stderr, "amq-remote up: supervising serve for root %s (registry %s)\n", c.root, regPath)
+	say(stderr, "amq-remote up: supervising serve for root %s (registry %s)", c.root, regPath)
 
 	// Serve args: forward --root and --me plus every serve flag the user
 	// passed, preserving parsed values (--fake=false must not be forwarded
@@ -457,51 +458,51 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 		start := now()
 		proc, err := sp.Spawn(ctx, cfg.serveArgs)
 		if err != nil {
-			say(stderr, "amq-remote up: spawn failed: %v\n", err)
+			say(stderr, "amq-remote up: spawn failed: %v", err)
 		} else {
 			code, werr := proc.Wait()
 			if ctx.Err() != nil {
 				// Context cancelled (SIGINT/SIGTERM to up): exit.
-				say(stderr, "amq-remote up: shutting down\n")
+				say(stderr, "amq-remote up: shutting down")
 				return 0, nil
 			}
 			if werr != nil {
-				say(stderr, "amq-remote up: serve wait error: %v\n", werr)
+				say(stderr, "amq-remote up: serve wait error: %v", werr)
 			}
 			if code == 0 {
 				// Clean exit: up ends.
-				say(stderr, "amq-remote up: serve exited cleanly (0)\n")
+				say(stderr, "amq-remote up: serve exited cleanly (0)")
 				return 0, nil
 			}
 			if code == upUsageExitCode {
 				// serve refused its arguments. Respawning
 				// replays the same refusal forever - observed 'respawning in
 				// 1m0s' for a child exiting 2. Propagate the code; up ends.
-				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
+				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning", code)
 				return code, nil
 			}
 			uptime := now().Sub(start)
-			say(stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
+			say(stderr, "amq-remote up: serve exited %d (ran %s)", code, uptime.Round(time.Millisecond))
 			// A child that ran healthy-long did not fail immediately - the
 			// crash it just suffered starts a fresh failure
 			// series, so the counter resets and the next wait is the base
 			// step, not an escalated one.
 			if uptime >= upHealthyUptime(cfg.backoffBase) {
-				say(stderr, "amq-remote up: healthy uptime %s; resetting backoff series\n", uptime.Round(time.Second))
+				say(stderr, "amq-remote up: healthy uptime %s; resetting backoff series", uptime.Round(time.Second))
 				restart = 0
 			}
 		}
 		restart++
 		budget++
 		if cfg.maxRestarts > 0 && budget > cfg.maxRestarts {
-			say(stderr, "amq-remote up: max-restarts (%d) exceeded\n", cfg.maxRestarts)
+			say(stderr, "amq-remote up: max-restarts (%d) exceeded", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
 		// Backoff: reuse keepalive's failure-backoff constants (exponential,
 		// capped). Do not invent a second table. The index (restart), not
 		// the budget, drives escalation.
 		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
-		say(stderr, "amq-remote up: respawning in %s (attempt %d)\n", delay, restart)
+		say(stderr, "amq-remote up: respawning in %s (attempt %d)", delay, restart)
 		select {
 		case <-ctx.Done():
 			return 0, nil

@@ -119,10 +119,18 @@ func notifyWakeRestartPlatform(
 		return fmt.Errorf("send wake restart control request: %w", err)
 	}
 	line, err := bufio.NewReader(
-		io.LimitReader(conn, wakeControlInjectViaACKMaxBytes+1),
+		io.LimitReader(conn, wakeRestartControlReplyMaxBytes+1),
 	).ReadString('\n')
-	if err != nil || len(line) > wakeControlInjectViaACKMaxBytes || strings.TrimSpace(line) != "ACK" {
-		return fmt.Errorf("wake restart control request refused")
+	if err == nil && len(line) <= wakeRestartControlReplyMaxBytes {
+		reply := strings.TrimSpace(line)
+		if reply == "ACK" {
+			return nil
+		}
+		if reason, ok := strings.CutPrefix(reply, strings.TrimSpace(wakeRestartControlNACK)); ok {
+			return wakeRestartRefusedByWakeError{Reason: strings.TrimSpace(reason)}
+		}
 	}
-	return nil
+	// No reply line: the wake predates refusal reasons, or the exchange was
+	// cut short. Whether the wake queued the restart is unknown.
+	return fmt.Errorf("wake restart control request refused")
 }

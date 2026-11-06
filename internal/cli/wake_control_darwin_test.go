@@ -301,8 +301,10 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 		t.Fatalf("restart control changed owner claim: %#v", current)
 	}
 	observed, exists := readDarwinWakeRestartRecordForTest(t, root, agent)
-	if !exists || !sameWakeRestartRecord(record, observed) {
-		t.Fatalf("restart control changed pending record: exists=%v record=%#v", exists, observed)
+	taken := record
+	taken.Taken = true
+	if !exists || !sameWakeRestartRecord(taken, observed) {
+		t.Fatalf("accepted restart record = %#v (exists=%v), want the pending record marked taken", observed, exists)
 	}
 }
 
@@ -395,8 +397,13 @@ func TestDarwinWakeHealthProbeTimesOutWithoutLoopResponse(t *testing.T) {
 
 func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(
+		name string
+		// reason is part of the NACK the requester and the wake log get.
+		reason string
+		// finished means the wake marks the named request refused. These
+		// records name no requester, so no peer can finish them.
+		finished bool
+		mutate   func(
 			t *testing.T,
 			root string,
 			agent string,
@@ -408,32 +415,42 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 		)
 	}{
 		{
-			name: "request id",
+			name:     "request id",
+			reason:   "does not match the exact pending record",
+			finished: false,
 			mutate: func(_ *testing.T, _, _ string, _ wakeOwner, _ wakeLock, _ wakeRestartRecord, request *wakeControlOwnerRequest, _ *int) {
 				request.RequestID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 			},
 		},
 		{
-			name: "generation",
+			name:     "generation",
+			reason:   "authoritative wake generation changed",
+			finished: false,
 			mutate: func(_ *testing.T, _, _ string, _ wakeOwner, _ wakeLock, _ wakeRestartRecord, request *wakeControlOwnerRequest, _ *int) {
 				request.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 			},
 		},
 		{
-			name: "owner",
+			name:     "owner",
+			reason:   "owner token does not match the claim",
+			finished: false,
 			mutate: func(_ *testing.T, _, _ string, owner wakeOwner, _ wakeLock, _ wakeRestartRecord, request *wakeControlOwnerRequest, _ *int) {
 				owner.PID++
 				request.Owner = &owner
 			},
 		},
 		{
-			name: "session",
+			name:     "session",
+			reason:   "not owner session",
+			finished: false,
 			mutate: func(_ *testing.T, _, _ string, owner wakeOwner, _ wakeLock, _ wakeRestartRecord, _ *wakeControlOwnerRequest, peerSession *int) {
 				*peerSession = owner.SessionID + 1
 			},
 		},
 		{
-			name: "missing record",
+			name:     "missing record",
+			reason:   "does not match the exact pending record",
+			finished: false,
 			mutate: func(t *testing.T, root, agent string, _ wakeOwner, _ wakeLock, _ wakeRestartRecord, _ *wakeControlOwnerRequest, _ *int) {
 				agentDir, err := openWakeAgentDir(root, agent)
 				if err != nil {
@@ -479,8 +496,15 @@ func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 				Operation:  wakeControlRestartOperation,
 			}
 			test.mutate(t, root, agent, owner, lock, record, &request, peerSession)
-			if response := sendDarwinOwnerControlRequest(t, root, agent, lock, request); response != "" {
-				t.Fatalf("restart refusal response = %q, want closed connection", response)
+			// agent-message-queue-5bu: a refusal used to close the connection
+			// silently and leave the pending request in place.
+			if response := sendDarwinOwnerControlRequest(t, root, agent, lock, request); !strings.HasPrefix(response, wakeRestartControlNACK) ||
+				!strings.Contains(response, test.reason) {
+				t.Fatalf("restart refusal response = %q, want NACK naming %q", response, test.reason)
+			}
+			if stored, exists := readDarwinWakeRestartRecordForTest(t, root, agent); exists &&
+				(stored.Status == wakeRestartRefused) != test.finished {
+				t.Fatalf("refused request status = %q, finished=%v", stored.Status, test.finished)
 			}
 			select {
 			case signal := <-restartSignals:

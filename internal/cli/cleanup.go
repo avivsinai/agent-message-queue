@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,11 +34,28 @@ func runCleanup(args []string) error {
 		"",
 		"Remove one agent mailbox under --root when it holds no unread mail, dead letters, extension data, or live wake",
 	)
+	historyOlderFlag := fs.String(
+		"history-older-than",
+		"",
+		"Remove read messages, sent copies and receipts older than this duration (e.g. 720h)",
+	)
+	historyMaxFlag := fs.String(
+		"history-max-size",
+		"",
+		"Remove the oldest read messages, sent copies and receipts until each mailbox's history fits this size (e.g. 100MB)",
+	)
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
 	usage := usageWithFlags(
 		fs,
-		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
+		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
+		"--history-older-than and --history-max-size remove history from every agent",
+		"mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent)",
+		"and receipts, oldest first by the creation stamp in the message id. A size",
+		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
+		"dead letters, extension data, and every copy of a message that",
+		"'amq thread open --max-age 0' lists as open, with the replies that ref it,",
+		"are never removed, and nothing is removed unless you run this command.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
 		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
 		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
@@ -63,11 +81,12 @@ func runCleanup(args []string) error {
 		return nil
 	}
 	mailboxSelected := flagWasVisited(fs, "mailbox")
-	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !*launchJournalFlag && !mailboxSelected {
-		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, --launch-journal, or --mailbox is required")
+	historySelected := *historyOlderFlag != "" || *historyMaxFlag != ""
+	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !historySelected && !*launchJournalFlag && !mailboxSelected {
+		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, --history-older-than, --history-max-size, --launch-journal, or --mailbox is required")
 	}
 	if mailboxSelected {
-		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || *launchJournalFlag {
+		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || historySelected || *launchJournalFlag {
 			return UsageError("--mailbox cannot be combined with other cleanup selectors")
 		}
 		if !common.rootExplicit() {
@@ -86,7 +105,7 @@ func runCleanup(args []string) error {
 		return cleanupMailbox(common.Root, handle, common.JSON, *dryRunFlag, *yesFlag)
 	}
 	if *launchJournalFlag {
-		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" {
+		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || historySelected {
 			return UsageError("--launch-journal cannot be combined with other cleanup selectors")
 		}
 		if !common.rootExplicit() {
@@ -116,6 +135,24 @@ func runCleanup(args []string) error {
 			return UsageError("--wake-quarantine-older-than must be > 0")
 		}
 	}
+	var historyDuration time.Duration
+	if *historyOlderFlag != "" {
+		var err error
+		historyDuration, err = time.ParseDuration(*historyOlderFlag)
+		if err != nil {
+			return UsageError("--history-older-than: %v", err)
+		}
+		if historyDuration <= 0 {
+			return UsageError("--history-older-than must be > 0")
+		}
+	}
+	var historyMax int64
+	if *historyMaxFlag != "" {
+		var err error
+		if historyMax, err = parseByteSize(*historyMaxFlag); err != nil {
+			return UsageError("--history-max-size: %v", err)
+		}
+	}
 	root := resolveRoot(common.Root)
 	now := time.Now()
 
@@ -138,9 +175,32 @@ func runCleanup(args []string) error {
 			return err
 		}
 	}
+	var historyCandidates []fsq.HistoryFile
+	var historyBytes int64
+	if historySelected {
+		var cutoff time.Time
+		if historyDuration > 0 {
+			cutoff = now.Add(-historyDuration)
+		}
+		open, err := openObligationIDs(absPath(root))
+		if err != nil {
+			return err
+		}
+		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
+			return err
+		}
+	}
 	candidates := append([]string{}, tmpCandidates...)
 	for _, candidate := range wakeQuarantineCandidates {
 		candidates = append(candidates, candidate.Path)
+	}
+	for _, candidate := range historyCandidates {
+		candidates = append(candidates, candidate.Path)
+		historyBytes += candidate.Size
+	}
+	label := "cleanup artifact(s)"
+	if *wakeQuarantineOlderFlag == "" && !historySelected {
+		label = "tmp file(s)"
 	}
 	if len(candidates) == 0 {
 		if common.JSON {
@@ -150,7 +210,7 @@ func runCleanup(args []string) error {
 				"count":      0,
 			})
 		}
-		if *wakeQuarantineOlderFlag != "" {
+		if label != "tmp file(s)" {
 			return writeStdoutLine("No cleanup artifacts to remove.")
 		}
 		return writeStdoutLine("No tmp files to remove.")
@@ -159,15 +219,12 @@ func runCleanup(args []string) error {
 	if *dryRunFlag {
 		if common.JSON {
 			return writeJSON(os.Stdout, map[string]any{
-				"candidates": candidates,
-				"count":      len(candidates),
+				"candidates":    candidates,
+				"count":         len(candidates),
+				"history_bytes": historyBytes,
 			})
 		}
-		label := "cleanup artifact(s)"
-		if len(wakeQuarantineCandidates) == 0 {
-			label = "tmp file(s)"
-		}
-		if err := writeStdout("Would remove %d %s.\n", len(candidates), label); err != nil {
+		if err := writeStdout("Would remove %d %s%s.\n", len(candidates), label, historyNote(historyBytes)); err != nil {
 			return err
 		}
 		for _, path := range candidates {
@@ -204,17 +261,20 @@ func runCleanup(args []string) error {
 		}
 		removed++
 	}
+	for _, candidate := range historyCandidates {
+		if err := os.Remove(candidate.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		removed++
+	}
 
 	if common.JSON {
 		return writeJSON(os.Stdout, map[string]any{
-			"removed": removed,
+			"removed":       removed,
+			"history_bytes": historyBytes,
 		})
 	}
-	label := "cleanup artifact(s)"
-	if len(wakeQuarantineCandidates) == 0 {
-		label = "tmp file(s)"
-	}
-	if err := writeStdout("Removed %d %s.\n", removed, label); err != nil {
+	if err := writeStdout("Removed %d %s%s.\n", removed, label, historyNote(historyBytes)); err != nil {
 		return err
 	}
 	return nil
@@ -332,4 +392,31 @@ func writeLaunchJournalCleanupReport(action string, report launchJournalCleanupR
 		}
 	}
 	return nil
+}
+
+func historyNote(bytes int64) string {
+	if bytes == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d bytes of mailbox history", bytes)
+}
+
+// parseByteSize reads a positive size such as "100MB", "64KB" or "4096B".
+func parseByteSize(s string) (int64, error) {
+	t := strings.ToUpper(strings.TrimSpace(s))
+	shift := 0
+	for _, u := range []struct {
+		suffix string
+		shift  int
+	}{{"GB", 30}, {"MB", 20}, {"KB", 10}, {"B", 0}} {
+		if num, ok := strings.CutSuffix(t, u.suffix); ok {
+			t, shift = strings.TrimSpace(num), u.shift
+			break
+		}
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)>>shift {
+		return 0, fmt.Errorf("%q is not a positive size such as 100MB", s)
+	}
+	return n << shift, nil
 }
