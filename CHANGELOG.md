@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.131.0](https://github.com/avivsinai/agent-message-queue/compare/v0.130.0...v0.131.0) (2026-11-06)
+
+
+### Features
+
+* **remote:** amq-remote hands out the pi bridge it was built with ([#1356](https://github.com/avivsinai/agent-message-queue/issues/1356)) ([8edd54a](https://github.com/avivsinai/agent-message-queue/commit/8edd54a942c5ecd9140a48438c7c93621ce0bd4d))
+
 ## [0.130.0](https://github.com/avivsinai/agent-message-queue/compare/v0.129.0...v0.130.0) (2026-11-06)
 
 
