@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -19,6 +20,40 @@ const (
 
 	wakeAttentionTitle = "AMQ attention"
 )
+
+// wakeLogNoticeFold folds repeated notices in a log destination: a notice
+// identical to the last one written there is counted, not written again, and
+// the count is written before the next different notice.
+type wakeLogNoticeFold struct {
+	mu      sync.Mutex
+	last    string
+	repeats int
+}
+
+// fold reports whether text repeats the last notice in the log, and otherwise
+// returns the line that reports the folded repeats, if any. A new notice
+// becomes the last one only through wrote, after the log holds it.
+func (f *wakeLogNoticeFold) fold(text string) (repeat bool, folded string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if text == f.last {
+		f.repeats++
+		return true, ""
+	}
+	if f.repeats > 0 {
+		folded = fmt.Sprintf("%s amq wake: the notice above repeated %d more times\n",
+			time.Now().UTC().Format(time.RFC3339), f.repeats)
+	}
+	return false, folded
+}
+
+// wrote records text as the last notice the log holds, with its count
+// written.
+func (f *wakeLogNoticeFold) wrote(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last, f.repeats = text, 0
+}
 
 type wakeAttentionEmission struct {
 	Effects          []string
@@ -72,7 +107,9 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 
 // emitWakeAttention is the non-input destination for a wake notification.
 // Effects record only a complete write by AMQ; they do not assert that a
-// terminal rendered them or that a person observed them.
+// terminal rendered them or that a person observed them. In a log
+// destination a repeated notice is folded into a count, and its output effect
+// stands for the identical notice the log already holds.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	isTerminal := wakeAttentionIsTerminal(cfg)
 	writePlainOutput := !isTerminal || wakeMayPrintToTerminal(cfg, wakeAttentionIsForeground)
@@ -101,7 +138,13 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 			effects = append(effects, wakeAttentionEffectOSC777)
 		}
 	}
-	if writePlainOutput {
+	repeat := false
+	if writePlainOutput && !isTerminal && cfg != nil && cfg.logNotices != nil {
+		var folded string
+		repeat, folded = cfg.logNotices.fold(safeText)
+		output.WriteString(folded)
+	}
+	if writePlainOutput && !repeat {
 		output.WriteString(safeText)
 		if isTerminal {
 			// A terminal in raw mode does not map LF to CRLF.
@@ -117,7 +160,10 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		write = cfg.attentionWrite
 	}
 	data := []byte(output.String())
-	n, err := write(data)
+	n, err := 0, error(nil)
+	if len(data) > 0 {
+		n, err = write(data)
+	}
 	if err != nil || n != len(data) {
 		if err == nil {
 			err = io.ErrShortWrite
@@ -130,6 +176,9 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		}
 	}
 
+	if writePlainOutput && !isTerminal && cfg != nil && cfg.logNotices != nil && !repeat {
+		cfg.logNotices.wrote(safeText)
+	}
 	if cfg != nil && cfg.recordAttention != nil {
 		emission := wakeAttentionEmission{
 			Effects:          append([]string(nil), effects...),

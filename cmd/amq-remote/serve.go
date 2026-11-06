@@ -90,6 +90,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if *discover {
 		return discoverAndPrint(c.root, stateDir, manifestFile, *codexSocket, stdout, stderr)
 	}
+	stderr = logSink(stateDir, stderr)
 	// Register the endpoint's mailbox handle in config.json so other
 	// agents in the root can route to it. This preserves every other agent's
 	// config; amqio.New stays free of configuration side effects.

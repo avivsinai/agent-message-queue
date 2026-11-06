@@ -19,6 +19,17 @@ A non-TTY agent must preserve a live wake unless the check reports
 command revalidates the current process, target, generation, root, and owner
 state before it changes anything.
 
+`amq wake restart` asks the live wake, through its control endpoint, to
+restart itself. On macOS the wake accepts a requester that presents the owner
+token and either runs in the owner's OS session or descends from the exact
+owner process, so a harness tool that runs commands in a session of its own
+under the agent qualifies. When the wake refuses, the requester's error and the
+wake log name the reason, and the request is marked refused so it does not hold
+a later restart or self-upgrade. A pending request whose requester exited
+before the wake took it is marked refused at the wake's next self-upgrade
+check. A wake from an older release refuses without a reason; its request
+stays pending until the next `amq wake restart` adopts it.
+
 `wake check` and `doctor` JSON has two schemas. Schema 1 is the default and is
 byte-compatible for a missing lock; a live or stale lock adds
 `wake_generation`, `wake_target_digest`, `started_at` (the lock's start time),
@@ -78,7 +89,9 @@ the terminal supports one. It drops diagnostics that have no log. A wake under
 is not a terminal, such as a log file, is always plain text. A new wake
 truncates the log when it has reached 1 MiB, and
 the 30-second maintenance tick checks again, so a long-lived wake bounds its
-own log. The keepalive launcher's detached variant is in
+own log. In a log, a notice that repeats the previous notice is counted
+instead of written again; one timestamped line reports the count before the
+next different notice. The keepalive launcher's detached variant is in
 [the keepalive reference](amq-keepalive.md#detached-wake-diagnostics).
 
 ## Hold by priority
@@ -234,12 +247,34 @@ made Claude Code ignore the whole settings file. With no readable version it
 leaves that event out. Doctor counts an event as missing only when that
 version supports it.
 
-- **Marker.** The hooks run `amq wake dialog open|close`, which writes or
-  removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
-  AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
-  runs on `PostToolUse` and `PostToolUseFailure` for the same two tools (it
-  removes only the marker of that tool call), and on `UserPromptSubmit`,
-  `Stop`, `SessionStart`, and `SessionEnd`. The receiver exits 0 once its
+- **Marker.** The hooks run `amq wake dialog open|close`. Claude Code can
+  show several dialogs at once, the main thread's and each subagent's, so
+  each open dialog is one entry: `<root>/agents/<me>/.wake.dialog/` is a
+  directory of `<key>.json` files, where `<key>` is the first 32 hex digits
+  of the SHA-256 of the dialog's session id, its `agent_id` (or `main`) and
+  its `tool_use_id`, each entry one marker. The doorbell is held while any
+  entry holds. `open` runs on `PreToolUse` for AskUserQuestion and
+  ExitPlanMode, and on every `PermissionRequest`, and writes that dialog's
+  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the
+  same two tools, which close only the entry of that tool call, and on
+  `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd`, which close
+  only entries of their own session: `Stop` and `UserPromptSubmit` its
+  main-thread entries, `SessionEnd` and a `SessionStart` from `startup` or
+  `resume` (a new process) all of them; a `--resume` of the same session in
+  a second terminal therefore also closes the first terminal's entries of
+  that session. An entry also records its host:
+  the nearest of the hook's first three ancestors, each parent edge proven
+  by its process start token, that runs Claude Code (an executable named
+  `claude`, or a native install's `claude/versions/<version>`). A dialog
+  cannot outlive its process, so while the doorbell is held an entry whose
+  host is proven gone (not running, or its pid now runs another process)
+  closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An
+  entry with no host, or a host the wake cannot prove gone, holds. Other writers (Codex, Cursor, agy,
+  pi, `amq coop exec`) keep the single file `.wake.dialog`. When a Claude
+  Code dialog opens over that file, the file becomes the entry
+  `legacy.json` in one atomic exchange, so the path is never absent, and
+  it keeps the single-file rules below. The directory goes with its last
+  entry. The receiver exits 0 once its
   arguments parse and prints nothing, so it never decides a tool call or a
   permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
@@ -285,21 +320,50 @@ version supports it.
   (default `true`) turns the desktop notification off; the terminal floor
   stays. During the moment before `amq coop exec` writes or clears the
   `Startup` marker, the wake holds without a notice.
-- **Whole-turn hold after a permission dialog.** Permission hook input has no
-  tool call id, so only `UserPromptSubmit`, `Stop` or a session event clears
-  a permission marker. A tool call's `PostToolUse` does not: a call that
+- **Hold after a permission dialog.** Permission hook input has no tool
+  call id, so no hook of a tool call clears a permission marker: a call that
   Claude Code allows without asking, with the same tool and input, would
-  close a dialog that still shows. A doorbell that would land mid-turn after
-  a permission dialog lands when the turn ends or the person types.
-- **AskUserQuestion and ExitPlanMode.** A marker that the call's own
+  close a dialog that still shows. `UserPromptSubmit`, `Stop` and the
+  session events clear it, and so does the session transcript. While a
+  permission dialog blocks a tool call, the main chain writes no new
+  assistant message, because the model waits for the whole tool batch. At
+  each recheck (every 2 seconds while the doorbell is held, on the input
+  retry ladder once the marker is older than 10 minutes) the wake reads the
+  same bounded transcript tail as below and removes the marker when it
+  holds a record with `type` `assistant`, not `isSidechain`, dated after
+  the marker opened, whose message has no record dated at or before that.
+  The marker opened by the end of its `opened_at` second or at its mtime,
+  whichever is later. Subagent (sidechain) records run alongside a dialog,
+  a later record of the message that asked belongs to the same batch, and a
+  record whose `model` is `<synthetic>` (an API error Claude Code writes
+  itself) can land while a dialog shows, so none of them proves anything.
+  A dialog of a subagent (the hook input names its `agent_id`) blocks only
+  that subagent while the main chain runs on, so the main transcript never
+  proves it; only an assistant record in the subagent's own transcript
+  does, by the same rule without the sidechain filter. A permission hook
+  gives no `agent_transcript_path`, so the wake reads the transcript where
+  Claude Code writes it: `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl`
+  or one or two subdirectories deeper (a workflow's subagents write to
+  `subagents/workflows/<wf>/`), beside the session transcript
+  `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
+  no symbolic link, found exactly once across those depths; none, several, or
+  an unreadable file is no proof. A subagent can outlive the main thread's
+  turn, so the main thread's `Stop`, `UserPromptSubmit` and a `SessionStart`
+  from `clear`, `compact` or `fork` do not clear its entry, and a later
+  dialog's open writes its own entry beside it. It clears on its
+  proof, on `SessionEnd`, or on a `SessionStart` from `startup` or `resume`,
+  which is a new Claude Code process that cannot show the old one's
+  dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
+  permission dialog lands once the turn moves on, the turn ends, or the
+  person types.
+- **AskUserQuestion and ExitPlanMode.** An entry that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
-  so a marker it writes, also one right after such a `PreToolUse`, is a
-  permission marker (below): the `PreToolUse` marker it replaces can belong
-  to another call of the same tool. A tool call's open never replaces a
-  present marker without a tool call id; the check and the replacement
-  share the marker lock. Esc on such a dialog runs no hook, but
-  Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
+  so it writes its own permission entry beside the call's entry; no open
+  replaces another dialog's entry. Where the file system refuses the
+  exchange that turns a single file into entries, the single file stays:
+  the new dialog's marker replaces it, except that a tool call's marker
+  keeps a present marker without a tool call id. Esc on such a dialog runs no hook, but  Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
   the hook's `transcript_path`. At each recheck the wake reads, read-only, at
   most the last 256 KiB of that file (a regular file, no symlink followed),
@@ -309,15 +373,15 @@ version supports it.
   unreadable transcript proves nothing: the hold stays, and the hold line
   says so.
 - **Esc on a permission dialog, and stale markers.** Esc or a deny on a
-  permission dialog runs no hook, and no transcript record names the marker,
-  so the marker stays until the person's next prompt. While the hook stays
+  permission dialog runs no hook and interrupts the turn, so no new
+  assistant message follows, and the marker stays until the person's next
+  prompt. While the hook stays
   installed, a marker older than 10 minutes, dated in the future, or one the
   wake cannot read, still blocks input. The wake then stops the 2-second
   recheck and retries on the input retry ladder (5 seconds, doubling to 2
-  minutes), with the held-doorbell notice on the attention cadence. No timer
-  releases the hold, because Enter on an open permission dialog approves the
-  tool call. Each hold line in
-  `.wake.log` starts with the UTC time and names the marker's event, kind,
+  minutes), with the held-doorbell notice on the attention cadence. The
+  marker's age never releases the hold, because Enter on an open permission
+  dialog approves the tool call; only a hook or a transcript proof does. Each hold line in  `.wake.log` starts with the UTC time and names the marker's event, kind,
   harness, tool, age, and transcript state.
 
 - **Startup prompts.** Claude Code and Codex ask whether to trust a new
@@ -790,7 +854,12 @@ that path at a strictly newer release image, the wake waits for a quiescent
 delivery boundary and replaces its running image in place: the PID, terminal
 ownership, and unread work stay. On Darwin, a running wake whose mapped
 executable still has the recorded device and inode counts as the same image
-after the package manager removes the old path. On Homebrew or Scoop installs,
+after the package manager removes the old path. When that removal deletes the
+last name of the running file, macOS reports no executable path for the
+process; AMQ then selects the mapped executable by the recorded device and
+inode, and treats a process that does not map exactly that file as unproven.
+The wake's identity (lock, generation, process start, and owner) is proven
+separately and does not depend on its image path. On Homebrew or Scoop installs,
 `amq upgrade` delegates to the package manager.
 
 - **Candidates.** The wake reads the candidate's version from the recorded

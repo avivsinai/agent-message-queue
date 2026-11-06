@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const wakeStartedTimestampUncertainty = time.Second
@@ -58,6 +60,14 @@ func inspectWakeBinaryStalenessPlatform(
 	}
 
 	running, err := inspectDarwinWakeProcessImage(inspection.PID)
+	deletedImage := false
+	if errors.Is(err, unix.ENOENT) {
+		// The running image lost its last name (Homebrew removes the old
+		// Cellar version on upgrade). It is still the recorded image only when
+		// the process maps exactly the recorded device and inode.
+		running, err = inspectDarwinWakeUnlinkedImage(inspection.PID, recorded.Device, recorded.Inode)
+		deletedImage = err == nil
+	}
 	if err != nil {
 		return wakeBinaryStaleness{}, err
 	}
@@ -65,8 +75,7 @@ func inspectWakeBinaryStalenessPlatform(
 		return wakeBinaryStaleness{}, fmt.Errorf("live wake image identity disagrees with recorded image evidence")
 	}
 	restartStageAlias := sameDarwinWakeRestartStageAlias(recorded, running)
-	deletedImage := false
-	if !sameDarwinWakeImagePath(recorded.ExecutionPath, running.Path) && !restartStageAlias {
+	if !deletedImage && !sameDarwinWakeImagePath(recorded.ExecutionPath, running.Path) && !restartStageAlias {
 		if _, pathErr := os.Lstat(recorded.ExecutionPath); errors.Is(pathErr, fs.ErrNotExist) {
 			deletedImage = true
 		} else {
