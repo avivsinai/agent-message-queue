@@ -89,7 +89,9 @@ the terminal supports one. It drops diagnostics that have no log. A wake under
 is not a terminal, such as a log file, is always plain text. A new wake
 truncates the log when it has reached 1 MiB, and
 the 30-second maintenance tick checks again, so a long-lived wake bounds its
-own log. The keepalive launcher's detached variant is in
+own log. In a log, a notice that repeats the previous notice is counted
+instead of written again; one timestamped line reports the count before the
+next different notice. The keepalive launcher's detached variant is in
 [the keepalive reference](amq-keepalive.md#detached-wake-diagnostics).
 
 ## Hold by priority

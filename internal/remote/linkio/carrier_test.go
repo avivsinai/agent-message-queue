@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -480,5 +481,38 @@ func waitFor(t *testing.T, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatal("condition never held")
 		}
+	}
+}
+
+// A link whose server stays down logs one line, not one per redial (2,462
+// identical dial-failure lines in one up.log, bead agent-message-queue-9df).
+func TestDownLinkLogsOneLinePerState(t *testing.T) {
+	var dials atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		dials.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	var mu sync.Mutex
+	var lines []string
+	fs := &fakeServer{srv: srv}
+	_, _ = startCarrier(t, fs, newClock(), func(cfg *Config) {
+		cfg.Logf = func(f string, a ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, fmt.Sprintf(f, a...))
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for dials.Load() < 5 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if dials.Load() < 5 {
+		t.Fatalf("dials = %d, want at least 5", dials.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 1 || !strings.Contains(lines[0], "503") {
+		t.Fatalf("logged %q after %d dials, want one 503 line", lines, dials.Load())
 	}
 }

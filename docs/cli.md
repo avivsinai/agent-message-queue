@@ -448,8 +448,15 @@ Use "amq presence <subcommand> --help" for details.
 ```text
 $ amq cleanup --help
 Usage:
-  amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
+  amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
 
+--history-older-than and --history-max-size remove history from every agent
+mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent)
+and receipts, oldest first by the creation stamp in the message id. A size
+(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,
+dead letters, extension data, and every copy of a message that
+'amq thread open --max-age 0' lists as open, with the replies that ref it,
+are never removed, and nothing is removed unless you run this command.
 --mailbox uses --root as given and removes <root>/agents/<handle>, with its
 read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
 inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a
@@ -472,6 +479,10 @@ preserved = where a tree was kept; refusal = why the run exited 6.
 Options:
   -dry-run
         Show what would be removed without deleting
+  -history-max-size string
+        Remove the oldest read messages, sent copies and receipts until each mailbox's history fits this size (e.g. 100MB)
+  -history-older-than string
+        Remove read messages, sent copies and receipts older than this duration (e.g. 720h)
   -json
         Emit JSON output
   -launch-journal

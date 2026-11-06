@@ -2866,6 +2866,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 	currentWake := s.currentWake
 	startupSettings := s.startupSettings
 	cfg := wakeConfig{
+		logNotices:          &wakeLogNoticeFold{},
 		me:                  me,
 		root:                root,
 		session:             resolveSessionName(root),

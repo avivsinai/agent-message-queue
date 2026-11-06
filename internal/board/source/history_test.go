@@ -32,7 +32,7 @@ func TestHistoryVerifiesEachRootAndNormalizesEvidence(t *testing.T) {
 	body := `[{"id":"ask","thread":"work","from":"user","to":["worker"],"kind":"review_request","body":"Exact request","labels":["review"],"refs":["prior"],"reply_to":"user","reply_project":"peer","from_project":"origin","context":{"path":"file.go"}}]`
 	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user --message-ids ask --include-body --json --root /base": []byte(`[]`), "amq thread --id work --agents worker --message-ids ask --include-body --json --root /base/session": []byte(body)}
 	env := board.Env{Dir: "/project", Now: time.Now, Run: runner}
-	result, messages, evidence := ReadHistory(context.Background(), env, "/base")
+	result, messages, evidence := ReadHistory(context.Background(), env, "/base", nil)
 	if !result.Coverage.Partial() || !strings.Contains(result.Coverage.Detail, "/base: ask") || len(messages) != 1 {
 		t.Fatalf("missing root copy hidden: %+v", result.Coverage)
 	}
@@ -44,7 +44,7 @@ func TestHistoryVerifiesEachRootAndNormalizesEvidence(t *testing.T) {
 		t.Fatal("expected one immutable message evidence unit")
 	}
 	runner["amq thread list --all-sessions --json"] = []byte(strings.Replace(metadata, "first", "second", 1))
-	_, again, nextEvidence := ReadHistory(context.Background(), env, "/base")
+	_, again, nextEvidence := ReadHistory(context.Background(), env, "/base", nil)
 	if len(again) != 1 || again[0].EvidenceHash != message.EvidenceHash || len(nextEvidence) != 1 || string(nextEvidence[0]) != string(evidence[0]) {
 		t.Fatal("acquisition timestamp changed evidence identity")
 	}
@@ -65,5 +65,19 @@ func TestBeadsBindsReportedDatabaseAcrossWorktrees(t *testing.T) {
 		if result.Status != board.StatusOK || result.Namespace != backend || len(result.Items) != 1 {
 			t.Fatalf("backend binding failed in %s: %+v", dir, result)
 		}
+	}
+}
+
+// Pruned history is not exported again, so pruned evidence stays gone (board ingestion stopping at its cap, bead
+// agent-message-queue-9df).
+func TestHistorySkipsPrunedMessages(t *testing.T) {
+	old, recent := "2026-01-01T00-00-00.000Z_pid1_a", "2026-02-01T00-00-00.000Z_pid1_b"
+	metadata := `{"schema":"amq/thread-list/v1","base_root":"/base","threads":[{"thread_id":"work","message_ids":["` + old + `","` + recent + `"],"roots":[{"root":"/base","session":"","agents":["user"],"message_ids":["` + old + `","` + recent + `"]}]}],"coverage":{"complete":true}}`
+	body := `[{"id":"` + recent + `","thread":"work","from":"user","to":["worker"],"kind":"todo","created":"2026-02-01T00:00:00Z"}]`
+	runner := captureRunner{"amq thread list --all-sessions --json": []byte(metadata), "amq thread --id work --agents user --message-ids " + recent + " --include-body --json --root /base": []byte(body)}
+	env := board.Env{Dir: "/project", Now: time.Now, Run: runner}
+	result, messages, evidence := ReadHistory(context.Background(), env, "/base", func(id string) bool { return id == old })
+	if result.Coverage.Partial() || len(messages) != 1 || messages[0].ID != recent || len(evidence) != 1 {
+		t.Fatalf("coverage %+v, messages %+v", result.Coverage, messages)
 	}
 }
