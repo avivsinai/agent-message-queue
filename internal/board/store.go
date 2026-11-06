@@ -81,9 +81,12 @@ type Snapshot struct {
 	Withdrawals       map[string]string             `json:"withdrawal_adoptions"`
 	// RequestLabels are classifier opinions keyed by RequestLabelKey.
 	RequestLabels map[string]RequestLabel `json:"request_labels,omitempty"`
-	// HistoryFloor is the creation time at or before which pruned history is
-	// not ingested again. Messages that tasks or suggestions hold stay.
-	HistoryFloor time.Time `json:"history_floor,omitzero"`
+	// PrunedIDs maps the id of each pruned message created at or after
+	// PrunedBefore to its creation time; acquisition does not take these
+	// messages again. A message created before PrunedBefore is not taken even
+	// when it was never ingested (see prunedIDHorizon).
+	PrunedIDs    map[string]time.Time `json:"pruned_ids,omitempty"`
+	PrunedBefore time.Time            `json:"pruned_before,omitzero"`
 	// RetiredEvidence maps the evidence hash of each pruned message to the
 	// generation that pruned it. The file goes once neither the base snapshot
 	// nor its backup can name the message.
@@ -491,9 +494,10 @@ func (s Store) publish(state *Snapshot, prev document) error {
 // write publishes data, the encoding of state, as the generation after prev.
 // It appends the leaf changes from prev to the journal, or writes a new base
 // when prev is none or an older schema, when the journal would pass a quarter
-// of the base, or while pruned evidence waits to be removed. A new base keeps the old one
-// as snapshot.backup.json by a hard link, so every crash point leaves the old
-// base, the old journal or both, under the write-pending marker.
+// of the base, or while pruned evidence waits to be removed. A new base keeps
+// the old base and its journal as the recovery copy (keepBackup), so every
+// crash point leaves the previous generation recoverable under the
+// write-pending marker.
 func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if len(data) > snapshotLimit {
 		return errors.New("board snapshot reached 64 MiB; ingestion stopped, existing state preserved")
@@ -540,9 +544,6 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		if _, err := fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
 			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 		}
-		if err := os.Remove(filepath.Join(s.Dir, journalName)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
 	} else if err := s.appendJournal(record); err != nil {
 		return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 	}
@@ -563,7 +564,14 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	return nil
 }
 
-// keepBackup makes the current base snapshot.backup.json without copying it.
+// backupJournalName replays over snapshot.backup.json to the generation
+// before the current base.
+const backupJournalName = "snapshot.backup.journal.jsonl"
+
+// keepBackup makes the current base snapshot.backup.json without copying it,
+// then moves the current journal beside it, so the recovery copy replays to
+// the previous generation. Until the new base replaces snapshot.json, the
+// current base is unchanged.
 func (s Store) keepBackup() error {
 	current := filepath.Join(s.Dir, "snapshot.json")
 	if _, err := os.Lstat(current); os.IsNotExist(err) {
@@ -575,15 +583,27 @@ func (s Store) keepBackup() error {
 	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.Link(current, staged); err != nil {
-		old, rerr := readBounded(current, snapshotLimit)
-		if rerr != nil {
-			return rerr
+	if err := os.Link(current, staged); err == nil {
+		if err = os.Rename(staged, filepath.Join(s.Dir, "snapshot.backup.json")); err != nil {
+			return err
 		}
-		_, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600)
-		return err
+	} else {
+		old, err := readBounded(current, snapshotLimit)
+		if err != nil {
+			return err
+		}
+		if _, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600); err != nil {
+			return err
+		}
 	}
-	return os.Rename(staged, filepath.Join(s.Dir, "snapshot.backup.json"))
+	err := os.Rename(filepath.Join(s.Dir, journalName), filepath.Join(s.Dir, backupJournalName))
+	if os.IsNotExist(err) {
+		err = os.Remove(filepath.Join(s.Dir, backupJournalName))
+		if os.IsNotExist(err) {
+			return nil
+		}
+	}
+	return err
 }
 
 func (s Store) appendJournal(record []byte) error {
@@ -766,7 +786,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		state.Input = a.Input
 		state.Usage = a.Usage
 		for _, m := range a.Messages {
-			if _, kept := state.Messages[m.Key]; !kept && state.belowFloor(m) {
+			if state.Pruned(m.ID, m.Created) {
 				continue
 			}
 			if previous, ok := state.Messages[m.Key]; ok {

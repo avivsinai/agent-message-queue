@@ -22,8 +22,8 @@ type HistoryFile struct {
 // in maxBytes. A zero cutoff or maxBytes leaves that limit off. A file's age
 // is the creation stamp that starts its message id, or its modification time
 // when the name has none. Unread mail, dead letters and temporary files are
-// never history.
-func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64) ([]HistoryFile, error) {
+// never history, and a message whose id is in keep stays with its receipts.
+func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[string]bool) ([]HistoryFile, error) {
 	agents, err := ListAgents(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -50,6 +50,10 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64) ([]HistoryF
 				info, err := entry.Info()
 				if err != nil {
 					continue // removed while scanning
+				}
+				if keep[historyID(entry.Name())] {
+					total += info.Size()
+					continue
 				}
 				files = append(files, HistoryFile{Path: filepath.Join(dir, entry.Name()), Agent: agent, Size: info.Size(), Created: historyStamp(entry.Name(), info.ModTime())})
 				total += info.Size()
@@ -80,4 +84,13 @@ func historyStamp(name string, modified time.Time) time.Time {
 		return created
 	}
 	return modified
+}
+
+// historyID is the message id a history file holds: the name of a message
+// file without .md, or the id that starts a receipt name.
+func historyID(name string) string {
+	if id, _, ok := strings.Cut(name, "__"); ok {
+		return id
+	}
+	return strings.TrimSuffix(name, ".md")
 }

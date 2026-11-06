@@ -1,37 +1,84 @@
 package board
 
-import "testing"
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
+)
 
 // A full board prunes its oldest unheld history instead of stopping
-// ingestion, and does not take that history back (board snapshot at 92% of
-// its cap with ingestion about to stop, bead agent-message-queue-9df).
-func TestPruneDropsOldestUnheldHistory(t *testing.T) {
-	message := func(key, created string) Message {
-		return Message{Key: key, ID: key, Root: "/r", Created: created, EvidenceHash: "hash-" + key}
+// ingestion and does not take that history back, while a late message
+// created before the pruned ones still arrives, and pruned ids past the
+// horizon are forgotten (board ingestion stopping at its cap, bead
+// agent-message-queue-9df; late delivery dropped by a creation time floor
+// and an unbounded pruned id set, reviews of that bead).
+func TestPruneDropsOldestUnheldHistoryAndKeepsLateMail(t *testing.T) {
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	s := Snapshot{
-		Generation:   7,
-		Messages:     map[string]Message{"old-held": message("old-held", "2026-01-01T00:00:00Z"), "old": message("old", "2026-01-02T00:00:00Z"), "new": message("new", "2026-01-03T00:00:00Z")},
-		Observations: map[string]MessageObservation{"old": {}, "new": {}},
-		Dismissed:    map[string]bool{"old": true},
-		Tasks:        map[string]Task{"task-1": {ID: "task-1", Attachments: []string{"old-held"}}},
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !s.pruneHistory(1) {
-		t.Fatal("nothing pruned")
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := s.Messages["old"]; ok || s.Dismissed["old"] {
-		t.Fatal("oldest unheld message kept")
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := s.Messages["old-held"]; !ok {
-		t.Fatal("attached message pruned")
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := s.Messages["new"]; !ok {
-		t.Fatal("pruned past the requested bytes")
+	message := func(id, created string) (Message, []byte) {
+		raw, _ := json.Marshal(thread.Entry{ID: id, Thread: "work", Kind: "status", Created: created})
+		sum := sha256.Sum256(raw)
+		var entry thread.Entry
+		_ = json.Unmarshal(raw, &entry)
+		return MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:])), raw
 	}
-	if s.RetiredEvidence["hash-old"] != 7 || len(s.RetiredEvidence) != 1 {
-		t.Fatalf("retired evidence = %v", s.RetiredEvidence)
+	at := func(ago time.Duration) string { return time.Now().UTC().Add(-ago).Format(time.RFC3339Nano) }
+	old, oldRaw := message("old", at(3*time.Hour))
+	recent, recentRaw := message("recent", at(2*time.Hour))
+	late, lateRaw := message("late", at(4*time.Hour))
+	commit := func(msgs []Message, raws [][]byte) {
+		t.Helper()
+		if err := store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: Input{Dir: base}, Messages: msgs, Evidence: raws}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !s.belowFloor(message("old", "2026-01-02T00:00:00Z")) || s.belowFloor(message("newer", "2026-01-02T00:00:01Z")) {
-		t.Fatalf("floor %v does not separate pruned from new history", s.HistoryFloor)
+	commit([]Message{old, recent}, [][]byte{oldRaw, recentRaw})
+	if err = store.update(ctx, func(s *Snapshot) error {
+		s.PrunedIDs = map[string]time.Time{"ancient": time.Now().Add(-prunedIDHorizon - time.Hour)}
+		if !s.pruneHistory(1) {
+			t.Fatal("nothing pruned")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit([]Message{old, recent, late}, [][]byte{oldRaw, recentRaw, lateRaw})
+	got, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, hasOld := got.Messages[old.Key]
+	_, hasRecent := got.Messages[recent.Key]
+	_, hasLate := got.Messages[late.Key]
+	if hasOld || !hasRecent || !hasLate {
+		t.Fatalf("old=%v recent=%v late=%v, want only the pruned message gone", hasOld, hasRecent, hasLate)
+	}
+	if _, ok := got.PrunedIDs["ancient"]; ok || len(got.PrunedIDs) != 1 {
+		t.Fatalf("pruned ids = %v, want only the recent prune", got.PrunedIDs)
 	}
 }

@@ -12,8 +12,8 @@ import (
 
 // stageEvidence never holds the snapshot writer lock. Immutable leftovers are
 // safe and count toward capacity; the later commit revalidates every reference.
-// It does not write the evidence of messages below the history floor, which
-// the commit will not take.
+// It does not write the evidence of pruned messages, which the commit will
+// not take.
 func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Message) error {
 	if len(blobs) == 0 {
 		return nil
@@ -25,7 +25,7 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Mes
 	}
 	pruned := map[string]bool{}
 	for _, m := range messages {
-		if _, kept := state.Messages[m.Key]; !kept && state.belowFloor(m) {
+		if state.Pruned(m.ID, m.Created) {
 			pruned[m.EvidenceHash] = true
 		}
 	}

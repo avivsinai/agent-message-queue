@@ -31,7 +31,8 @@ type wakeLogNoticeFold struct {
 }
 
 // fold reports whether text repeats the last notice in the log, and otherwise
-// returns the line that reports the folded repeats, if any.
+// returns the line that reports the folded repeats, if any. A new notice
+// becomes the last one only through wrote, after the log holds it.
 func (f *wakeLogNoticeFold) fold(text string) (repeat bool, folded string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -43,8 +44,15 @@ func (f *wakeLogNoticeFold) fold(text string) (repeat bool, folded string) {
 		folded = fmt.Sprintf("%s amq wake: the notice above repeated %d more times\n",
 			time.Now().UTC().Format(time.RFC3339), f.repeats)
 	}
-	f.last, f.repeats = text, 0
 	return false, folded
+}
+
+// wrote records text as the last notice the log holds, with its count
+// written.
+func (f *wakeLogNoticeFold) wrote(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last, f.repeats = text, 0
 }
 
 type wakeAttentionEmission struct {
@@ -168,6 +176,9 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		}
 	}
 
+	if writePlainOutput && !isTerminal && cfg != nil && cfg.logNotices != nil && !repeat {
+		cfg.logNotices.wrote(safeText)
+	}
 	if cfg != nil && cfg.recordAttention != nil {
 		emission := wakeAttentionEmission{
 			Effects:          append([]string(nil), effects...),

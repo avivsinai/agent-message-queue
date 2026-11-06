@@ -243,11 +243,7 @@ func runThreadOpen(args []string) error {
 	}
 
 	baseRoot := absPath(baseRootOf(root))
-	session := ""
-	if root != baseRoot {
-		session = sessionName(root)
-	}
-	scanRoots := []thread.ScanRoot{{Session: session, Root: root}}
+	scanRoots := []thread.ScanRoot{threadOpenScanRoot(root)}
 	if *allSessions {
 		if baseRoot, err = sessionBaseRoot(root); err != nil {
 			return err
@@ -284,7 +280,7 @@ func runThreadOpen(args []string) error {
 		result.Sessions = append(result.Sessions, scanRoot.Session)
 	}
 
-	scan, err := thread.CollectAll(scanRoots, cutoff, func(path string, parseErr error) error {
+	scan, red, err := reduceObligations(scanRoots, cutoff, func(path string, parseErr error) error {
 		result.Coverage.Skipped = append(result.Coverage.Skipped, threadOpenSkipped{Path: path, Error: parseErr.Error()})
 		return nil
 	})
@@ -292,9 +288,6 @@ func runThreadOpen(args []string) error {
 		return err
 	}
 	result.Coverage.PrunedFiles = countsBySession(result.Sessions, scan.Pruned)
-
-	red := newObligationReducer(scanRoots, scan.Entries, cutoff)
-	red.run()
 	result.Coverage.Skipped = append(result.Coverage.Skipped, red.skipped...)
 	result.Coverage.UnresolvedLineage = red.unresolved
 	result.Coverage.Ambiguous = red.ambiguous
@@ -330,6 +323,42 @@ func runThreadOpen(args []string) error {
 		return writeJSON(os.Stdout, result)
 	}
 	return writeThreadOpenText(result)
+}
+
+// threadOpenScanRoot is the root thread open scans without --all-sessions.
+func threadOpenScanRoot(root string) thread.ScanRoot {
+	session := ""
+	if root != absPath(baseRootOf(root)) {
+		session = sessionName(root)
+	}
+	return thread.ScanRoot{Session: session, Root: root}
+}
+
+// reduceObligations reads the message headers under scanRoots, skipping
+// files stamped before a nonzero cutoff, and reduces them to obligations.
+func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError func(string, error) error) (thread.ScanResult, *obligationReducer, error) {
+	scan, err := thread.CollectAll(scanRoots, cutoff, onError)
+	if err != nil {
+		return thread.ScanResult{}, nil, err
+	}
+	red := newObligationReducer(scanRoots, scan.Entries, cutoff)
+	red.run()
+	return scan, red, nil
+}
+
+// openObligationIDs are the ids of the openers that `thread open --max-age 0`
+// lists as open under root.
+func openObligationIDs(root string) (map[string]bool, error) {
+	_, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(string, error) error { return nil })
+	if err != nil {
+		return nil, err
+	}
+	open, _ := red.report(threadOpenFilter{})
+	ids := make(map[string]bool, len(open))
+	for _, ob := range open {
+		ids[ob.opener.ID] = true
+	}
+	return ids, nil
 }
 
 // obligation is the open debt of one recipient (owner) to the sender

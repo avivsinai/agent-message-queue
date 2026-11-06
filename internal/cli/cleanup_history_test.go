@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -39,5 +41,30 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 		if kept != (err == nil) {
 			t.Fatalf("%s kept=%v, want %v", rel, err == nil, kept)
 		}
+	}
+}
+
+// History cleanup keeps a read review request nobody answered, so thread open
+// still lists it (a 3-day-old open review request removed by
+// --history-max-size 1B, review of bead agent-message-queue-9df).
+func TestCleanupHistoryKeepsOpenObligations(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	base := filepath.Join(t.TempDir(), defaultCoopRoot)
+	ids, _ := writeThreadOpenMessages(t, base, []threadOpenMessage{{name: "rr", from: "alpha@s1", to: "beta@s1", kind: format.KindReviewRequest}}, func(int, threadOpenMessage) time.Time {
+		return time.Now().UTC().Add(-3 * 24 * time.Hour)
+	})
+	s1 := filepath.Join(base, "s1")
+	if err := os.Rename(filepath.Join(fsq.AgentInboxNew(s1, "beta"), ids["rr"]+".md"), filepath.Join(fsq.AgentInboxCur(s1, "beta"), ids["rr"]+".md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--history-max-size", "1B", "--root", s1, "--yes"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 1 {
+		t.Fatalf("open obligations after cleanup = %d, want 1", len(after.Obligations))
 	}
 }

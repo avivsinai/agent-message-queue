@@ -53,8 +53,9 @@ func runCleanup(args []string) error {
 		"mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent)",
 		"and receipts, oldest first by the creation stamp in the message id. A size",
 		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
-		"dead letters and extension data are never removed, and nothing is removed",
-		"unless you run this command.",
+		"dead letters, extension data, and every copy of a message that",
+		"'amq thread open --max-age 0' lists as open are never removed, and nothing",
+		"is removed unless you run this command.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
 		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
 		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
@@ -181,8 +182,11 @@ func runCleanup(args []string) error {
 		if historyDuration > 0 {
 			cutoff = now.Add(-historyDuration)
 		}
-		var err error
-		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax); err != nil {
+		open, err := openObligationIDs(absPath(root))
+		if err != nil {
+			return err
+		}
+		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
 			return err
 		}
 	}
