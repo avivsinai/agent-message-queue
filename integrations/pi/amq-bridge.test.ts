@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import amqPiBridge from "./amq-bridge.ts";
+import amqPiBridge, { type AmqBridgeOptions, type AmqOutcome, type AmqRequest, registerAmqBridge } from "./amq-bridge.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -34,11 +34,16 @@ function normalize(text: string): string {
 }
 
 // harness runs the extension against a fake ExtensionAPI and a real bridge
-// directory under a temporary AM_ROOT.
-function harness() {
+// directory under a temporary AM_ROOT. host, when given, embeds the bridge
+// as a host application does, with no AM_ROOT or AM_ME set.
+function harness(host?: (root: string) => AmqBridgeOptions) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
 	process.env.AM_ROOT = root;
 	process.env.AM_ME = "pi-seat";
+	if (host) {
+		delete process.env.AM_ROOT;
+		delete process.env.AM_ME;
+	}
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
 	const state = { idle: true, pending: false, idleChecks: 0 };
@@ -68,7 +73,8 @@ function harness() {
 		sessionManager: { getSessionId: () => "pi-session-1" },
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
-	amqPiBridge(pi as never);
+	if (host) registerAmqBridge(pi as never, host(root));
+	else amqPiBridge(pi as never);
 	const emit = async (name: string, event: object = {}) => {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};
@@ -622,4 +628,70 @@ test("session activity is recorded to activity/<session_id>.jsonl", async () => 
 	assert.match(lines[0].run, /^[0-9a-f]{8}-r1$/);
 	assert.deepEqual(new Set(lines.map((l) => l.run)), new Set([lines[0].run]));
 	await h.done();
+});
+
+test("a host application's identity and delivery run a request without AM_ROOT or AM_ME", async () => {
+	const handed: { request: AmqRequest; report: (outcome: AmqOutcome) => void; receipt: boolean }[] = [];
+	let busy = false;
+	const h = harness((root) => ({
+		identity: () => ({ root, handle: "pi-seat" }),
+		deliver: {
+			busy: () => busy,
+			send(_ctx, request, report) {
+				const receipt = fs.existsSync(path.join(root, "agents", "pi-seat", "extensions", "pi-bridge", "receipts", `${request.ref}.json`));
+				handed.push({ request, report, receipt });
+			},
+		},
+		upgrade: "update the host application",
+	}));
+	await h.start();
+	try {
+		const live = JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"));
+		assert.equal(live.upgrade, "update the host application");
+		assert.equal(live.bridge_revision, 4);
+
+		h.publish(REF, "remote task", h.generation(), { bridge_revision: 3, origin: { carrier: "link", name: "example" } });
+		await h.waitFor(() => handed.length === 1);
+		assert.equal(handed.length, 1);
+		const { request, report, receipt } = handed[0];
+		assert.equal(receipt, true);
+		assert.equal(request.ref, REF);
+		assert.equal(request.text, "remote task");
+		assert.deepEqual(request.origin, { carrier: "link", name: "example" });
+		assert.deepEqual(h.sent, []);
+
+		// The host reports its own admission and outcome; pi's events do not
+		// decide the request.
+		report({ event: "started" });
+		await h.emit("message_end", userMessage("remote task"));
+		await h.emit("message_end", assistantMessage("pi's own text"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled", { aborted: false });
+		report({ event: "completed", text: "HOST RESULT" });
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.text]),
+			[
+				["started", undefined],
+				["completed", "HOST RESULT"],
+			],
+		);
+		const activity = fs
+			.readFileSync(path.join(h.dir, "activity", "pi-session-1.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((l) => JSON.parse(l));
+		assert.equal(activity.find((l) => l.kind === "user").id, REF);
+
+		busy = true;
+		h.publish(OTHER, "second task", h.generation());
+		await h.waitFor(() => h.events(OTHER).length > 0);
+		assert.deepEqual(
+			h.events(OTHER).map((e) => [e.event, e.reason]),
+			[["refused", "busy"]],
+		);
+		assert.equal(h.hasReceipt(OTHER), false);
+		assert.equal(handed.length, 1);
+	} finally {
+		await h.done();
+	}
 });
