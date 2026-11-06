@@ -8,6 +8,28 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.128.0](https://github.com/avivsinai/agent-message-queue/compare/v0.127.3...v0.128.0) (2026-11-06)
+
+
+### Features
+
+* AMQ disk use stays bounded without manual cleanup ([#1350](https://github.com/avivsinai/agent-message-queue/issues/1350)) ([84c1d37](https://github.com/avivsinai/agent-message-queue/commit/84c1d37dcfe42c80f83d7355705b0f9637aac768))
+* **remote:** amq-remote doctor checks every mode and settings file ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** doctor --fix repairs setup; a lost approval hook returns ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** show a Claude turn live in the session's Buzz channel ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** show finished Codex turns in the session's Buzz channel ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** show finished pi runs in the session's Buzz channel ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** turn the session mirror on or off from the CLI and skill ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+
+
+### Bug Fixes
+
+* **remote:** a mirror post never mentions anyone ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** name a doorbell turn "AMQ message", or "Buzz" ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **remote:** never post turns from before the mirror saw a session ([88763f1](https://github.com/avivsinai/agent-message-queue/commit/88763f187f0daff794b8a20732e5153a207bbb89))
+* **wake:** close each dialog hold only on its own proof ([#1349](https://github.com/avivsinai/agent-message-queue/issues/1349)) ([71a371b](https://github.com/avivsinai/agent-message-queue/commit/71a371bade8c537a9c55f184a03c98190354521f))
+* **wake:** self-upgrade and agent restart work after brew deletes the old image ([#1348](https://github.com/avivsinai/agent-message-queue/issues/1348)) ([184efac](https://github.com/avivsinai/agent-message-queue/commit/184efacbcba8b61f13a959dc1c80c7a34ac1d3b4))
+
 ## [0.127.3](https://github.com/avivsinai/agent-message-queue/compare/v0.127.2...v0.127.3) (2026-11-06)
 
 
