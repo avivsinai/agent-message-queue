@@ -247,7 +247,9 @@ version supports it.
   `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd`, which close
   only entries of their own session: `Stop` and `UserPromptSubmit` its
   main-thread entries, `SessionEnd` and a `SessionStart` from `startup` or
-  `resume` (a new process) all of them. An entry also records its host:
+  `resume` (a new process) all of them; a `--resume` of the same session in
+  a second terminal therefore also closes the first terminal's entries of
+  that session. An entry also records its host:
   the nearest of the hook's first three ancestors, each parent edge proven
   by its process start token, that runs Claude Code (an executable named
   `claude`, or a native install's `claude/versions/<version>`). A dialog
@@ -341,15 +343,14 @@ version supports it.
   dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
   permission dialog lands once the turn moves on, the turn ends, or the
   person types.
-- **AskUserQuestion and ExitPlanMode.** A marker that the call's own
+- **AskUserQuestion and ExitPlanMode.** An entry that the call's own
   `PreToolUse` wrote keeps its tool call id, so that call's `PostToolUse` or
   `PostToolUseFailure` closes it. A `PermissionRequest` names no tool call,
-  so a marker it writes, also one right after such a `PreToolUse`, is a
-  permission marker (below): the `PreToolUse` marker it replaces can belong
-  to another call of the same tool. A tool call's open never replaces a
-  present marker without a tool call id unless the transcript proves that
-  marker closed (above); the check and the replacement share the marker
-  lock. Esc on such a dialog runs no hook, but
+  so it writes its own permission entry beside the call's entry; no open
+  replaces another dialog's entry. Where the file system refuses the
+  exchange that turns a single file into entries, the single file stays:
+  the new dialog's marker replaces it, except that a tool call's marker
+  keeps a present marker without a tool call id. Esc on such a dialog runs no hook, but
   Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
   rejected tool use") to the session transcript at once. The marker keeps
   the hook's `transcript_path`. At each recheck the wake reads, read-only, at

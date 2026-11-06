@@ -229,22 +229,36 @@ func (n *claudeNativeNotifier) ready() error {
 		if ready.Schema != 1 || ready.SessionID != n.binding.SessionID || ready.Launch != n.binding.Launch {
 			return fmt.Errorf("native startup acknowledgement belongs to another launch")
 		}
-		raw, info, exists, err := readWakeRepairMetadataAt(fd, wakeDialogFileName, "wake dialog marker", filepath.Join(n.dir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
-		if err != nil || !exists {
-			return err
+		// Every marker, the single file or each open dialog's entry, must
+		// allow native delivery.
+		for _, entry := range readWakeDialogEntriesAt(fd, n.dir.path) {
+			if err := n.dialogAllowsDelivery(entry); err != nil {
+				return err
+			}
 		}
-		var marker wakeDialogMarker
-		if json.Unmarshal(raw, &marker) != nil || marker.Schema != 1 || marker.SessionID != n.binding.SessionID || info.ModTime().After(time.Now().Add(wakeDialogRecheck)) {
-			return fmt.Errorf("native delivery retains an uncertain dialog hold")
-		}
-		if marker.Event == wakeDialogStartupEvent || marker.Kind == claudeNativeStartupKind {
-			return fmt.Errorf("native delivery retains the startup hold")
-		}
-		if marker.Event == "PermissionRequest" || marker.Event == "PreToolUse" && (marker.Tool == "AskUserQuestion" || marker.Tool == "ExitPlanMode") {
-			return nil
-		}
-		return fmt.Errorf("native delivery retains an unknown-purpose hold")
+		return nil
 	})
+}
+
+// dialogAllowsDelivery reports whether one dialog marker lets a native
+// doorbell queue behind it: a known permission or question dialog of this
+// session does; a startup hold, another session's or an unknown marker
+// does not.
+func (n *claudeNativeNotifier) dialogAllowsDelivery(entry wakeDialogEntry) error {
+	if entry.readErr != nil {
+		return entry.readErr
+	}
+	var marker wakeDialogMarker
+	if json.Unmarshal(entry.raw, &marker) != nil || marker.Schema != 1 || marker.SessionID != n.binding.SessionID || entry.info.ModTime().After(time.Now().Add(wakeDialogRecheck)) {
+		return fmt.Errorf("native delivery retains an uncertain dialog hold")
+	}
+	if marker.Event == wakeDialogStartupEvent || marker.Kind == claudeNativeStartupKind {
+		return fmt.Errorf("native delivery retains the startup hold")
+	}
+	if marker.Event == "PermissionRequest" || marker.Event == "PreToolUse" && (marker.Tool == "AskUserQuestion" || marker.Tool == "ExitPlanMode") {
+		return nil
+	}
+	return fmt.Errorf("native delivery retains an unknown-purpose hold")
 }
 
 func nativeDoorbellFrame(id string) ([]byte, error) {

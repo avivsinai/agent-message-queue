@@ -27,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"golang.org/x/sys/unix"
 )
 
 // Regression: #1054, an injected doorbell answered an open
@@ -170,10 +171,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// agentPath is the subagent transcript below subagents/.
 		agentPath string
 		// host is the marker's host process.
-		host    launch.HolderIdentity
-		notices int
-		rings   int
-		log     string
+		host launch.HolderIdentity
+		// noExchange makes the file system refuse an exchange rename.
+		noExchange bool
+		notices    int
+		rings      int
+		log        string
 	}{
 		// field: agy busy turns showed held notices (2026-10-26). A working
 		// marker younger than wakeDialogQuietHold holds without a desktop
@@ -243,6 +246,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			agentTranscript: func(opened time.Time) string {
 				return assistant("msg_sub_asked", true, opened) + assistant("msg_sub_next", true, opened.Add(wakeDialogQuietHold+2*time.Minute))
 			}},
+		// Pre-merge review of agent-message-queue-zu3: where the file system
+		// refused the exchange, the new dialog got no marker and was
+		// unguarded once the single marker closed.
+		{name: "a refused exchange replaces the single marker with the new dialog's", claudeHook: true, noExchange: true,
+			marker:     `{"schema":1,"event":"PreToolUse","tool":"AskUserQuestion","tool_use_id":"toolu_q","transcript_path":"TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n",
+			transcript: asked, notices: 1, hooks: []wakeDialogHookInput{mainPermission, {Event: "PostToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_q", SessionID: "s1"}}},
 		// A Claude process that crashed left its dialog's entry with no
 		// event to close it; the dialog cannot outlive its process.
 		{name: "an entry whose host exited closes", marker: permissionWithHost, host: deadHost, age: wakeDialogQuietHold + time.Minute,
@@ -264,6 +273,11 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			if tt.noExchange {
+				exchange := wakeDialogExchangeAt
+				wakeDialogExchangeAt = func(int, string, int, string) error { return unix.EINVAL }
+				t.Cleanup(func() { wakeDialogExchangeAt = exchange })
+			}
 			for _, in := range tt.hooks {
 				if wakeDialogHookVerb(in.Event) == "open" {
 					// The hook writer ages markers by the real clock.

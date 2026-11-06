@@ -271,8 +271,9 @@ func writeWakeDialogEntryFileAt(dirfd int, name string, data []byte, modTime tim
 // writeWakeDialogEntryAt installs data as the entry name under the marker
 // lock. Over a single-file marker it builds the directory with that marker
 // as its legacy entry and exchanges it in, then removes the file it
-// replaced; where the file system cannot exchange, the single marker stays
-// and holds, and the entry is not written.
+// replaced. Where the file system refuses the exchange, the new dialog's
+// marker replaces the single file as a single-file marker
+// (writeWakeDialogSingleMarkerAt).
 func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data []byte) error {
 	return withWakeDialogMarkerLock(dirfd, func() error {
 		dir, ok, err := openWakeDialogEntriesAt(dirfd, agentDir.path)
@@ -319,8 +320,8 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 		if err := writeWakeDialogEntryFileAt(tempFD, wakeDialogLegacyEntry, legacy, info.ModTime()); err != nil {
 			return err
 		}
-		if err := wakeRenameExchangeAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
-			return fmt.Errorf("exchange wake dialog marker for entries: %w", err)
+		if err := wakeDialogExchangeAt(dirfd, temp, dirfd, wakeDialogFileName); err != nil {
+			return writeWakeDialogSingleMarkerAt(dirfd, legacy, data)
 		}
 		installed = true
 		// temp now names the single file the entries replaced.
@@ -329,6 +330,22 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 		}
 		return nil
 	})
+}
+
+// wakeDialogExchangeAt swaps two names in one step (wakeRenameExchangeAt).
+var wakeDialogExchangeAt = wakeRenameExchangeAt
+
+// writeWakeDialogSingleMarkerAt keeps the single-file form, under the
+// caller's marker lock, as it was before entries: the new marker replaces
+// the present one, except that a tool call's marker keeps a present marker
+// without a tool_use_id, whose hold closes only on a turn or session event.
+func writeWakeDialogSingleMarkerAt(dirfd int, current, data []byte) error {
+	var present, next wakeDialogMarker
+	if json.Unmarshal(data, &next) == nil && next.ToolUseID != "" &&
+		json.Unmarshal(current, &present) == nil && present.ToolUseID == "" {
+		return nil
+	}
+	return writeWakeDialogEntryFileAt(dirfd, wakeDialogFileName, data, time.Time{})
 }
 
 // removeWakeDialogTempDirAt removes a temp entries directory that was never
