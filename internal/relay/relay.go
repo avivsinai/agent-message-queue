@@ -41,7 +41,7 @@ var ErrUnknownDelivery = errors.New("relay publish result unknown")
 
 // ErrGrantExpired means the enrolled grant this connection authenticated
 // with has passed its signed not-after: the connection is unusable from that
-// instant (codex slice 1 review r2 #3).
+// instant.
 var ErrGrantExpired = errors.New("enrolled grant expired")
 
 // ErrRejected is an explicit negative OK for a published event.
@@ -176,7 +176,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
-	// No redirect is followed (codex slice 1 review #1): the library would
+	// No redirect is followed: the library would
 	// otherwise follow one with scheme conversion, taking AUTH to another
 	// origin or to cleartext.
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -198,7 +198,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if !cfg.NotAfter.IsZero() {
 		// At expiry access is revoked first, then the transport is aborted
 		// without a close handshake: a peer that withholds its close reply
-		// cannot keep the connection open (codex slice 1 review r3 #2).
+		// cannot keep the connection open.
 		c.expiry = time.AfterFunc(cfg.NotAfter.Sub(cfg.Now()), func() {
 			c.mu.Lock()
 			c.expired = true
@@ -326,8 +326,7 @@ func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ Ma
 	}
 	if _, dup := c.waiters[evt.ID]; dup {
 		// One immutable event id has one OK; a second concurrent send of
-		// it must not steal or delete the first waiter (codex slice 1
-		// review #5).
+		// it must not steal or delete the first waiter.
 		c.mu.Unlock()
 		return okResult{}, fmt.Errorf("relay: event %s is already awaiting its OK", evt.ID.Hex())
 	}

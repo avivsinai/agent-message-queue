@@ -98,7 +98,7 @@ func (c *Client) set(state State, err error, conn *Conn) {
 }
 
 // identityCheck is how often a live connection's enrolled identity is
-// re-validated for removal or renewal (codex slice 1 review #2). Expiry is
+// re-validated for removal or renewal. Expiry is
 // not polled: the connection itself closes at the grant's not-after.
 var identityCheck = time.Minute
 
@@ -157,7 +157,7 @@ func sameIdentity(a, b Config) bool {
 
 // Category maps an error to a fixed, AMQ-worded category for status files:
 // relay-controlled text (OK reasons, close reasons) never reaches them
-// (codex slice 1 review #9). Local configuration errors keep their text.
+// Local configuration errors keep their text.
 func Category(err error) string {
 	var remote *RemoteError
 	switch {
@@ -183,8 +183,7 @@ func Category(err error) string {
 }
 
 // StatusText is err's text for a status file: a wrapped relay refusal
-// shows only its category, so relay-controlled words never reach the file
-// (codex slice 1 review #9).
+// shows only its category, so relay-controlled words never reach the file.
 func StatusText(err error) string {
 	if err == nil {
 		return ""
