@@ -51,16 +51,21 @@ protocol.
 
 One extension instance serves a mailbox. Before it writes liveness or closes
 orphaned receipts, an instance creates `bridge.owner` create-new (temporary
-file, hard link) with its `pid` and `session_generation`. When the record
-exists and its owner is live, the instance stays inactive for that session and
-tells the owner once in pi; a second pi started with the same `AM_ROOT` and
-`AM_ME`, for example from a pi tool, never touches the first bridge's
-requests or liveness. An owner is live while its process exists and either its
-liveness record is live for its generation or its owner record is younger than
-the 5-second staleness bound. The record of an owner that is not live is
-renamed aside and replaced only when the renamed record is the one judged
-dead, so two starters never both own. An instance whose record another
-instance replaced stops at its next heartbeat. On shutdown the owner writes
+file, hard link) with its `pid`, `session_generation`, and, where the platform
+gives one, its process start token `start`. When the owner is live, the
+instance stays inactive for that session and tells the owner once in pi; a
+second pi started with the same `AM_ROOT` and `AM_ME`, for example from a pi
+tool, never touches the first bridge's requests or liveness. An owner is live
+while its pid exists and runs the process that wrote the record (same start
+token where one is recorded). A stalled owner stays the owner: stale liveness
+never transfers ownership. A fresh `live: true` liveness record from a live
+process whose generation has no owner record is an older extension, and it
+counts as a live owner too. The record of an owner that is not live is renamed
+aside and replaced only when the renamed record is the one judged dead, so two
+starters never both own; an instance that loses that race says so in its own
+notice. An owner whose record is missing links it again create-new. An
+instance whose record names another generation stops at once and tells its pi
+once that it no longer serves Buzz requests. On shutdown the owner writes
 `live: false` and then removes its own record; it never writes over or
 removes another owner's. The adapter does not read `bridge.owner`.
 

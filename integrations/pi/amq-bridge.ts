@@ -173,7 +173,13 @@ let inactiveNoticeShown = false;
 // releases it.
 const OWNER = "bridge.owner";
 
-type Owner = { pid: number; generation: string };
+// start is the owner process's start token ("" where the platform gives
+// none), so a pid that now runs another process reads as dead.
+type Owner = { pid: number; generation: string; start: string };
+
+// ownedGenerations holds the generations that bridges in this process own,
+// so a record that names this process but none of them reads as dead.
+const ownedGenerations = new Set<string>();
 
 export default function amqPiBridge(pi: ExtensionAPI): void {
 	registerAmqBridge(pi);
@@ -380,17 +386,17 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		// recorded, and requests run as before.
 	}
 	const generation = randomUUID();
-	let holder: number | null;
+	let refused: string | null;
 	try {
-		holder = acquireOwner(dir, generation);
+		refused = acquireOwner(dir, generation);
 	} catch (err) {
 		notify(ctx, `amq-bridge inactive: cannot own ${dir}: ${String(err)}`);
 		return null;
 	}
-	if (holder !== null) {
+	if (refused !== null) {
 		if (!ownerNotice.shown) {
 			ownerNotice.shown = true;
-			notify(ctx, `amq-bridge inactive: another live pi bridge${holder > 0 ? ` (pid ${holder})` : ""} serves ${identity.handle} in this AMQ root, so amq-remote reaches that pi, not this one.`);
+			notify(ctx, `amq-bridge inactive: ${refused}.`);
 		}
 		return null;
 	}
@@ -434,21 +440,36 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 
 function retire(b: Bridge): void {
 	for (const t of b.timers.splice(0)) clearInterval(t);
+	ownedGenerations.delete(b.generation);
 }
 
-// owns reports whether the owner record still names this bridge. A bridge
-// whose record names another bridge (it was judged dead and replaced)
-// retires at once, so it never writes over the new owner's liveness or
-// answers its requests. A record that cannot be read now (for example, one
-// a starter has moved aside for a moment) only skips this turn.
+// owns reports whether the owner record still names this bridge. A missing
+// record is linked again create-new, so a lost record never leaves the live
+// owner inert. A bridge whose record names another bridge retires at once,
+// telling its pi while it was still running, so it never writes over the
+// new owner's liveness or answers its requests. A record that cannot be read
+// now only skips this turn.
 function owns(b: Bridge): boolean {
+	const file = path.join(b.dir, OWNER);
 	let rec: { session_generation?: unknown };
 	try {
-		rec = JSON.parse(fs.readFileSync(path.join(b.dir, OWNER), "utf8"));
+		try {
+			rec = JSON.parse(fs.readFileSync(file, "utf8"));
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			try {
+				linkNew(b.dir, file, ownerBody({ pid: process.pid, generation: b.generation, start: processStart(process.pid) }));
+				return true;
+			} catch (linkErr) {
+				if ((linkErr as NodeJS.ErrnoException).code !== "EEXIST") throw linkErr;
+			}
+			rec = JSON.parse(fs.readFileSync(file, "utf8"));
+		}
 	} catch {
 		return false;
 	}
 	if (rec?.session_generation === b.generation) return true;
+	if (b.timers.length > 0) notify(b.ctx, "amq-bridge: this pi no longer serves Buzz requests: another pi bridge owns its AMQ mailbox now.");
 	retire(b);
 	return false;
 }
@@ -478,53 +499,85 @@ function stop(b: Bridge | null, reason: string): void {
 }
 
 // acquireOwner makes the bridge with this generation the directory's owner
-// and returns null, or returns the pid of the live owner that holds it (0
-// when unknown). A dead owner's record is moved aside, and replaced only
-// when the moved record is the one judged dead; a record another starter
-// created meanwhile is put back. So two starters never both own.
-function acquireOwner(dir: string, generation: string): number | null {
+// and returns null, or returns why it cannot. A record whose owner is dead is
+// moved aside, and replaced only when the moved record is the one judged
+// dead; a record another starter created meanwhile is put back. So two
+// starters never both own.
+function acquireOwner(dir: string, generation: string): string | null {
 	const file = path.join(dir, OWNER);
+	const older = olderBridge(dir, file);
+	if (older > 0) return `an older pi extension (pid ${older}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one`;
+	const busy = (pid: number) => `another live pi bridge (pid ${pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one`;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
-			linkNew(dir, file, ownerBody({ pid: process.pid, generation }));
+			linkNew(dir, file, ownerBody({ pid: process.pid, generation, start: processStart(process.pid) }));
+			ownedGenerations.add(generation);
 			return null;
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 		}
 		const held = ownerOf(file);
-		if (held && ownerLive(dir, file, held)) return held.pid;
+		if (held && ownerLive(held)) return busy(held.pid);
 		const moved = moveAside(file);
 		if (moved === undefined) continue; // released meanwhile
 		if (moved?.generation !== held?.generation) {
 			putBack(file, moved);
-			return moved?.pid ?? 0;
+			if (moved) return busy(moved.pid);
+			break;
 		}
 	}
-	return 0;
+	return "another pi bridge was starting on this AMQ mailbox at the same moment; start a new pi session to try again";
 }
 
-// ownerLive reports whether an owner record names a live bridge: its process
-// exists, and its liveness is live for its generation or its record is
-// younger than the liveness staleness bound (it is still starting).
-function ownerLive(dir: string, file: string, o: Owner): boolean {
+// ownerLive reports whether an owner's process still runs: its pid exists
+// and, where the platform gives a start token, runs the process that wrote
+// the record. A record that names this process is live only for a
+// generation a bridge here owns. A stalled owner stays the owner.
+function ownerLive(o: Owner): boolean {
+	if (!pidAlive(o.pid)) return false;
+	if (o.pid === process.pid) return ownedGenerations.has(o.generation);
+	const start = o.start ? processStart(o.pid) : "";
+	return !start || start === o.start;
+}
+
+// olderBridge is the pid of an extension that predates the owner record and
+// still runs here: a fresh live liveness record from a live process whose
+// generation has no owner record. It is 0 when there is none.
+function olderBridge(dir: string, file: string): number {
 	try {
-		process.kill(o.pid, 0);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EPERM") return false;
-	}
-	try {
-		if (Date.now() - fs.statSync(file).mtimeMs < STALE_MS) return true;
 		const liveness = path.join(dir, "bridge.liveness");
-		if (Date.now() - fs.statSync(liveness).mtimeMs >= STALE_MS) return false;
+		if (Date.now() - fs.statSync(liveness).mtimeMs >= STALE_MS) return 0;
 		const rec = JSON.parse(fs.readFileSync(liveness, "utf8"));
-		return rec.protocol === PROTOCOL && rec.live === true && rec.session_generation === o.generation;
+		if (rec.protocol !== PROTOCOL || rec.live !== true || !Number.isSafeInteger(rec.pid) || rec.pid <= 0) return 0;
+		if (ownerOf(file)?.generation === rec.session_generation || !pidAlive(rec.pid)) return 0;
+		return rec.pid === process.pid ? 0 : rec.pid;
 	} catch {
-		return false;
+		return 0;
+	}
+}
+
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+// processStart is the start time of process pid in clock ticks since boot,
+// where /proc gives it; "" elsewhere.
+function processStart(pid: number): string {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "";
+	} catch {
+		return "";
 	}
 }
 
 function ownerBody(o: Owner): string {
-	return JSON.stringify({ protocol: PROTOCOL, pid: o.pid, session_generation: o.generation });
+	return JSON.stringify({ protocol: PROTOCOL, pid: o.pid, session_generation: o.generation, start: o.start || undefined });
 }
 
 // ownerOf is the owner record in file, or null when it is absent or not a
@@ -533,7 +586,7 @@ function ownerOf(file: string): Owner | null {
 	try {
 		const rec = JSON.parse(fs.readFileSync(file, "utf8"));
 		if (rec.protocol !== PROTOCOL || !Number.isSafeInteger(rec.pid) || rec.pid <= 0 || typeof rec.session_generation !== "string") return null;
-		return { pid: rec.pid, generation: rec.session_generation };
+		return { pid: rec.pid, generation: rec.session_generation, start: typeof rec.start === "string" ? rec.start : "" };
 	} catch {
 		return null;
 	}
@@ -563,7 +616,7 @@ function putBack(file: string, moved: Owner | null): void {
 		linkNew(path.dirname(file), file, ownerBody(moved));
 	} catch {
 		// Another owner record stands; the displaced owner retires at its
-		// next heartbeat.
+		// next ownership check.
 	}
 }
 
@@ -573,7 +626,7 @@ function removeOwner(file: string, generation: string): void {
 		const moved = moveAside(file);
 		if (moved && moved.generation !== generation) putBack(file, moved);
 	} catch {
-		// A record left behind reads as dead once its liveness goes stale.
+		// A record left behind reads as dead once this process ends.
 	}
 }
 
@@ -955,20 +1008,14 @@ function appendEvent(dir: string, ref: string, fields: EventFields): boolean {
 
 // appendLine appends one fsynced line and reports whether it is durable. A
 // file already past maxSize (when set) is truncated first: the history is
-// not evidence. A line that creates its file is durable only once the
-// directory entry is synced too.
+// not evidence. A line written into an empty file is durable only once the
+// directory entry is synced too, because the file may be new.
 function appendLine(file: string, line: string, maxSize: number): boolean {
 	let fd: number | undefined;
-	let created = true;
 	try {
-		try {
-			fd = fs.openSync(file, "ax+", 0o600);
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-			created = false;
-			fd = fs.openSync(file, "a+", 0o600);
-		}
+		fd = fs.openSync(file, "a+", 0o600);
 		let size = fs.fstatSync(fd).size;
+		const empty = size === 0;
 		if (maxSize > 0 && size > maxSize) {
 			fs.ftruncateSync(fd, 0);
 			size = 0;
@@ -977,7 +1024,7 @@ function appendLine(file: string, line: string, maxSize: number): boolean {
 		if (size > 0 && fs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) writeAll(fd, "\n");
 		writeAll(fd, line);
 		fs.fsyncSync(fd);
-		return !created || syncDir(path.dirname(file));
+		return !empty || syncDir(path.dirname(file));
 	} catch {
 		return false;
 	} finally {

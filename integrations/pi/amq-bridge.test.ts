@@ -278,7 +278,7 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 });
 
 // Review of pi bridge ownership: a second pi on one mailbox masked the first request's real result.
-test("a second bridge on a live owner's mailbox stays inactive and the request keeps its real outcome", async () => {
+test("a second bridge on a live, even stalled, owner's mailbox stays inactive and the request keeps its real outcome", async () => {
 	const h1 = harness();
 	await h1.start();
 	const h2 = harness(undefined, h1.root);
@@ -287,6 +287,9 @@ test("a second bridge on a live owner's mailbox stays inactive and the request k
 		h1.publish(REF, "remote task", gen);
 		await h1.waitFor(() => h1.hasReceipt(REF));
 		await h1.emit("message_start", userMessage("remote task"));
+		// A stalled owner (no heartbeat for 10 s) is still the owner.
+		const past = new Date(Date.now() - 10_000);
+		for (const f of ["bridge.liveness", "bridge.owner"]) fs.utimesSync(path.join(h1.dir, f), past, past);
 		await h2.start();
 		assert.equal(h1.generation(), gen);
 		assert.equal(h2.notices.length, 1);
@@ -303,7 +306,7 @@ test("a second bridge on a live owner's mailbox stays inactive and the request k
 });
 
 // Review of pi admission evidence: a short receipt write was published and handed to pi.
-test("a short receipt write publishes nothing, and the retry publishes the whole receipt", async () => {
+test("a receipt cut short by a short write is never published; the retry publishes it whole", async () => {
 	const h = harness();
 	const realWrite = nodeFs.writeSync;
 	let cut = false;
@@ -325,6 +328,31 @@ test("a short receipt write publishes nothing, and the retry publishes the whole
 		assert.equal(h.sent.length, 1);
 	} finally {
 		nodeFs.writeSync = realWrite;
+		syncBuiltinESMExports();
+		await h.done();
+	}
+});
+
+// Review of pi admission evidence: a new events file's directory entry was never synced.
+test("a line that starts an events file syncs the events directory", async () => {
+	const h = harness();
+	const synced = new Set<number>();
+	const realFsync = nodeFs.fsyncSync;
+	nodeFs.fsyncSync = (fd: number) => {
+		const st = fs.fstatSync(fd);
+		if (st.isDirectory()) synced.add(st.ino);
+		realFsync(fd);
+	};
+	syncBuiltinESMExports();
+	try {
+		await h.start();
+		h.state.idle = false;
+		h.publish(REF, "remote task", h.generation()); // refused busy: the ref's first event line
+		await h.waitFor(() => h.events(REF).length === 1);
+		assert.equal(h.events(REF)[0].reason, "busy");
+		assert.ok(synced.has(fs.statSync(path.join(h.dir, "events")).ino));
+	} finally {
+		nodeFs.fsyncSync = realFsync;
 		syncBuiltinESMExports();
 		await h.done();
 	}
