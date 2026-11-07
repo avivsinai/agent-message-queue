@@ -314,8 +314,8 @@ func validateWakeSelfUpgradeLaunchLocator(path string, info os.FileInfo) error {
 	// as 0777 even though chmod does not control link traversal. Ownership of
 	// the unresolved locator is still required; the resolved executable keeps
 	// the existing strict mode and ownership validation in the per-tick probe.
-	ownerUID, ownerOK := wakelock.FileOwnerUID(info)
-	currentUID, currentOK := wakelock.CurrentUID()
+	ownerUID, ownerOK := selfUpgradeFileOwnerUID(info)
+	currentUID, currentOK := selfUpgradeCurrentUID()
 	if ownerOK && currentOK && ownerUID != currentUID {
 		return fmt.Errorf(
 			"wake self-upgrade launch locator %s is owned by uid %d, want current uid %d",
@@ -860,3 +860,10 @@ func removeWakeSelfUpgradeDiagnosticAt(dirfd int) error {
 	}
 	return nil
 }
+
+// selfUpgradeCurrentUID and selfUpgradeFileOwnerUID are the uid reads the
+// launch-locator check uses; a test replaces them.
+var (
+	selfUpgradeCurrentUID   = wakelock.CurrentUID
+	selfUpgradeFileOwnerUID = wakelock.FileOwnerUID
+)
