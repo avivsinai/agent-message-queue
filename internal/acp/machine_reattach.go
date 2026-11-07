@@ -2,10 +2,10 @@ package acp
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -13,32 +13,54 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
-// The live-session records each harness owns; tests replace them.
+// reattachWindow is how long after its retirement a channel record is still
+// a candidate for reattach.
+const reattachWindow = 7 * 24 * time.Hour
+
+// The records that prove who runs a session; tests replace them.
 var (
-	claudeLiveSessions = claude.LiveSessions
-	piLiveBridge       = pi.LiveBridge
-	reattachHolderOf   = launch.HolderOf
+	reattachWakeOwner = liveWakeOwner
+	piLiveBridge      = pi.LiveBridge
 )
 
-// reattach restores the share of a session that ended and came back: a
-// running process's own harness record (Claude's session registry, a pi
-// bridge's liveness) names the session id the ended binding recorded, the
-// identity is the same, and the owner never detached that identity. It
-// rebinds that process through binding.WriteSession; provision then
-// restores the channel. It restores an earlier share only, never a detach.
-// Codex publishes no such record, so a Codex session is never reattached.
+// liveWakeOwner is the process the wake lock of root and handle records as
+// its owner, when that process still runs with the recorded identity.
+func liveWakeOwner(root, handle string) (launch.HolderIdentity, bool) {
+	owner, ok := amqcli.WakeOwner(root, handle)
+	if !ok {
+		return launch.HolderIdentity{}, false
+	}
+	cur, err := launch.HolderOf(owner.PID)
+	if err != nil || cur.ProcessStart != owner.ProcessStart || cur.BootID != owner.BootID {
+		return launch.HolderIdentity{}, false
+	}
+	return cur, true
+}
+
+// reattach restores the share of a session that ended and came back in a
+// new process under the same session id: a mailbox session (Claude or pi)
+// whose new process is the live wake owner of its root and handle and whose
+// harness record names the recorded session, or a pi native session whose
+// bridge names it. The owner's detach is never undone (binding.DetachedFor).
+// The binding is written back only if it is still as it was read; provision
+// then restores the channel. A native Claude session is restored by the
+// approval hook on its first dialog instead, and Codex publishes no record
+// to prove a resume.
 //
-// The scan runs at most once per channelStepGap. Only a retired record of a
-// channel that was active and ended with its session is a candidate, and the
-// harness records are read only when one exists.
+// The scan runs at most once per channelStepGap. A candidate is a retired
+// record of a channel that was active and ended with its session, retired
+// within reattachWindow and before this tick.
 func (s *Server) reattach(now time.Time) {
 	if !due(s.machine.rebound, channelStepGap, now) {
 		return
 	}
-	s.machine.rebound = now.UTC().Format(time.RFC3339)
+	stamp := now.UTC().Format(time.RFC3339)
+	s.machine.rebound = stamp
 	var cands []channelRecord
 	for _, r := range s.retiredRecords() {
-		if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && r.ChannelID != "" {
+		at, err := time.Parse(time.RFC3339, r.Updated)
+		if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && r.ChannelID != "" &&
+			err == nil && r.Updated != stamp && now.Sub(at) < reattachWindow {
 			cands = append(cands, r)
 		}
 	}
@@ -49,128 +71,108 @@ func (s *Server) reattach(now time.Time) {
 	if err != nil {
 		return
 	}
-	detached := map[string]bool{}
-	for _, t := range tombs {
-		if t.Removed == binding.RemovedDetached {
-			detached[t.SessionIdentity()] = true
-		}
-	}
-	claudes := map[string][]claude.LiveSession{}
 	tried := map[string]bool{}
 	for _, r := range cands {
 		if s.stopped() {
 			return
 		}
-		if tried[r.Name] || detached[r.Identity] {
+		if tried[r.Name] {
 			continue
 		}
 		tried[r.Name] = true
-		b, ok := endedBinding(r, tombs)
+		b, pruned, ok := endedBinding(r, tombs)
 		if !ok {
 			continue
 		}
-		nb, shared, ok := s.liveAgain(b, claudes, now)
-		if shared && !r.SaidShared && s.unchanged(r) {
-			r.SaidShared = true
-			if s.save(&r, now) == nil {
-				_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content",
-					"Not connected again: two running sessions continue "+r.Label+". Run /amq-remote in the one to connect."))
-			}
+		nb, ok := liveAgain(b, now)
+		if !ok {
+			continue
 		}
-		if ok {
-			_, _, _ = binding.WriteSession(nb, b.Name, binding.Binding.Liveness)
+		if _, off := binding.DetachedFor(nb, tombs); off {
+			continue
+		}
+		if pruned {
+			_, _ = binding.ReviveEnded(b, nb)
+		} else {
+			_, _ = binding.Replace(b, nb)
 		}
 	}
 }
 
-// endedBinding is the binding r served, when it is proven ended: a binding
-// of r's name and identity that is ended, else that name's tombstone for the
-// identity that records an end.
-func endedBinding(r channelRecord, tombs []binding.Binding) (binding.Binding, bool) {
+// endedBinding is the binding r served, as read, when it is proven ended: a
+// binding of r's name and identity that is ended, else that name's tombstone
+// of the identity that records an end (pruned).
+func endedBinding(r channelRecord, tombs []binding.Binding) (b binding.Binding, pruned, ok bool) {
 	b, err := binding.ReadNamed(r.Name)
 	if err == nil {
 		state, _ := b.Liveness()
-		return b, b.SessionIdentity() == r.Identity && state == binding.Ended
+		return b, false, b.SessionIdentity() == r.Identity && state == binding.Ended
 	}
 	if !errors.Is(err, binding.ErrNone) {
-		return binding.Binding{}, false
+		return binding.Binding{}, false, false
 	}
 	for _, t := range tombs {
-		if t.Name == r.Name && t.SessionIdentity() == r.Identity && tombReason(t) == retiredEnded {
-			t.Removed = ""
-			return t, true
+		if t.Name == r.Name && t.SessionIdentity() == r.Identity && t.Removed == binding.RemovedEnded {
+			return t, true, true
 		}
 	}
-	return binding.Binding{}, false
+	return binding.Binding{}, false, false
 }
 
-// liveAgain returns b held by the one running process whose harness record
-// names b's recorded session, with the same identity. shared is true when
-// two running processes name it: neither is bound. claudes caches the
-// Claude registry of each config dir for this scan.
-func (s *Server) liveAgain(b binding.Binding, claudes map[string][]claude.LiveSession, now time.Time) (nb binding.Binding, shared, ok bool) {
+// liveAgain returns b held by the running process that proves it runs b's
+// recorded session, as b's identity.
+func liveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
 	id := b.RecordedSession()
 	if id == "" {
-		return b, false, false
+		return b, false
 	}
-	pid := 0
-	nb = b
+	var holder launch.HolderIdentity
+	switch {
+	case b.Mailbox():
+		owner, ok := reattachWakeOwner(b.Root, b.Handle)
+		if !ok || !runsSession(b, owner, id, now) {
+			return b, false
+		}
+		holder = owner
+	case b.Harness == harness.Pi:
+		pid, session, _, live := piLiveBridge(b.Root, strings.TrimPrefix(b.Target, "pi:"), now)
+		if !live || session != id {
+			return b, false
+		}
+		h, err := launch.HolderOf(pid)
+		if err != nil {
+			return b, false
+		}
+		holder = h
+	default:
+		return b, false
+	}
+	nb := b
+	nb.Removed, nb.Holder, nb.BoundAt = "", holder, ""
+	return nb, true
+}
+
+// runsSession reports whether the wake owner of a mailbox binding runs b's
+// recorded session id: the Claude process whose own registry entry names
+// it with b's transcript, or the pi process whose bridge publishes it.
+func runsSession(b binding.Binding, owner launch.HolderIdentity, id string, now time.Time) bool {
 	switch b.Harness {
 	case harness.Claude:
+		started, err := launch.ProcessStartUnix(owner)
+		if err != nil {
+			return false
+		}
 		dir := b.ConfigDir
 		if dir == "" {
-			var err error
 			if dir, err = harness.UserClaudeConfigDir(); err != nil {
-				return b, false, false
+				return false
 			}
 		}
-		live, read := claudes[dir]
-		if !read {
-			live, _ = claudeLiveSessions(dir)
-			claudes[dir] = live
-		}
-		var match *claude.LiveSession
-		for i := range live {
-			if live[i].ID != id {
-				continue
-			}
-			if match != nil {
-				return b, true, false
-			}
-			match = &live[i]
-		}
-		if match == nil {
-			return b, false, false
-		}
-		pid = match.PID
-		if !b.Mailbox() {
-			// A native identity is the harness, root and working directory;
-			// a session resumed elsewhere is another identity.
-			if binding.NativeIdentity(harness.Claude, b.Root, match.Cwd) != b.SessionIdentity() {
-				return b, false, false
-			}
-			nb.Target = "claude:" + strconv.Itoa(pid)
-		}
-		if match.Transcript != "" {
-			nb.Transcript = match.Transcript
-		}
+		s, err := claude.SessionOfProcess(dir, owner.PID, time.Unix(started, 0))
+		return err == nil && s.ID == id && s.Transcript == b.Transcript
 	case harness.Pi:
-		handle := b.Handle
-		if !b.Mailbox() {
-			handle = strings.TrimPrefix(b.Target, "pi:")
-		}
-		bridgePID, session, _, live := piLiveBridge(b.Root, handle, now)
-		if !live || session != id {
-			return b, false, false
-		}
-		pid = bridgePID
-	default:
-		return b, false, false
+		pid, session, _, live := piLiveBridge(b.Root, b.Handle, now)
+		return live && pid == owner.PID && session == id
 	}
-	holder, err := reattachHolderOf(pid)
-	if err != nil {
-		return b, false, false
-	}
-	nb.Holder, nb.BoundAt = holder, ""
-	return nb, false, true
+	return false
 }

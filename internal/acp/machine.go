@@ -138,12 +138,9 @@ type channelRecord struct {
 	RetiredBy   string   `json:"retired_by,omitempty"`
 	RetiredFrom string   `json:"retired_from,omitempty"`
 	SaidEnded   bool     `json:"said_ended,omitempty"`
-	// SaidShared records that two live processes named this session, so
-	// it was restored to neither; it is said once.
-	SaidShared bool   `json:"said_shared,omitempty"`
-	LastError  string `json:"last_error,omitempty"`
-	LastTry    string `json:"last_try,omitempty"`
-	Updated    string `json:"updated"`
+	LastError   string   `json:"last_error,omitempty"`
+	LastTry     string   `json:"last_try,omitempty"`
+	Updated     string   `json:"updated"`
 }
 
 // inDoubt reports whether a create of r may have made a channel that is not
@@ -694,25 +691,20 @@ func (s *Server) removeDurably(path string) error {
 func goneReason(r channelRecord) string {
 	tombs, _ := binding.Tombstones()
 	for _, t := range tombs {
-		if t.Name == r.Name && t.SessionIdentity() == r.Identity {
-			return tombReason(t)
+		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
+			continue
 		}
-	}
-	return retiredDetached
-}
-
-// tombReason is the retirement reason a tombstone records.
-func tombReason(t binding.Binding) string {
-	switch t.Removed {
-	case binding.RemovedEnded:
-		return retiredEnded
-	case binding.RemovedMoved:
-		return retiredMoved
-	case binding.RemovedDetached:
-		return retiredDetached
-	}
-	if state, _ := t.Liveness(); state == binding.Ended {
-		return retiredEnded
+		switch t.Removed {
+		case binding.RemovedEnded:
+			return retiredEnded
+		case binding.RemovedMoved:
+			return retiredMoved
+		case binding.RemovedDetached:
+			return retiredDetached
+		}
+		if state, _ := t.Liveness(); state == binding.Ended {
+			return retiredEnded
+		}
 	}
 	return retiredDetached
 }

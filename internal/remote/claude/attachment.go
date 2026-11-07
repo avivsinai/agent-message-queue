@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -630,48 +629,34 @@ func SessionForPID(pid int) (Session, error) {
 	return s, nil
 }
 
-// maxLiveSessions bounds the registry entries LiveSessions examines.
-const maxLiveSessions = 512
-
-// LiveSession is the registry entry of a running Claude process.
-type LiveSession struct {
-	PID int
-	Session
-}
-
-// LiveSessions reads the session registry under the Claude config dir
-// configDir and returns the entries whose process still runs, from at most
-// maxLiveSessions entries. A missing registry is no session; an entry that
-// does not read is skipped.
-func LiveSessions(configDir string) ([]LiveSession, error) {
-	entries, err := os.ReadDir(registryDir(configDir))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// SessionOfProcess reads the registry entry of the Claude process pid under
+// the Claude config dir configDir, for a process that started at started. An
+// entry last written before that start is a pid reuse's leftover, never this
+// process's, and is refused; so is a missing entry.
+func SessionOfProcess(configDir string, pid int, started time.Time) (Session, error) {
+	reg, err := readSessionRegistry(configDir, pid)
 	if err != nil {
-		return nil, err
+		return Session{}, err
 	}
-	var out []LiveSession
-	for _, e := range entries[:min(len(entries), maxLiveSessions)] {
-		stem, ok := strings.CutSuffix(e.Name(), ".json")
-		pid, err := strconv.Atoi(stem)
-		if !ok || err != nil || pid <= 0 {
-			continue
-		}
-		reg, err := readSessionRegistry(configDir, pid)
-		if err != nil || reg == nil {
-			continue
-		}
-		if alive, err := pidAlive(pid); err != nil || !alive {
-			continue
-		}
-		s := LiveSession{PID: pid, Session: Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}}
-		if path := transcriptPath(configDir, reg.Cwd, reg.SessionID); regularFile(path) {
-			s.Transcript = path
-		}
-		out = append(out, s)
+	if reg == nil {
+		return Session{}, fmt.Errorf("no Claude session registry entry for pid %d", pid)
 	}
-	return out, nil
+	written := time.UnixMilli(reg.UpdatedAt)
+	if reg.UpdatedAt <= 0 {
+		fi, err := os.Lstat(filepath.Join(registryDir(configDir), strconv.Itoa(pid)+".json"))
+		if err != nil {
+			return Session{}, err
+		}
+		written = fi.ModTime()
+	}
+	if written.Before(started) {
+		return Session{}, fmt.Errorf("the Claude session registry entry for pid %d predates its process", pid)
+	}
+	s := Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}
+	if path := transcriptPath(configDir, reg.Cwd, reg.SessionID); regularFile(path) {
+		s.Transcript = path
+	}
+	return s, nil
 }
 
 func regularFile(path string) bool {

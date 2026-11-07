@@ -920,6 +920,74 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 	return removed, err
 }
 
+// DetachedFor reports whether the owner turned b's session off, and the
+// name of the tombstone that says so: a tombstone that detach left which
+// records the same session as b (a resumed session is the same session),
+// or whose holder is b's (another session in that process is still off).
+func DetachedFor(b Binding, tombs []Binding) (string, bool) {
+	for _, t := range tombs {
+		if t.Removed != RemovedDetached {
+			continue
+		}
+		if t.RecordedSession() != "" && t.RecordedSession() == b.RecordedSession() ||
+			t.Holder.PID > 0 && t.Holder == b.Holder {
+			return t.Name, true
+		}
+	}
+	return "", false
+}
+
+// ReviveEnded writes b under the name of the tombstone tomb, as read, and
+// removes that tombstone, when under the binding lock the tombstone is still
+// exactly tomb, it records an end, and no binding holds the name. It
+// reports whether it wrote. A tombstone of any other reason is never
+// removed.
+func ReviveEnded(tomb, b Binding) (bool, error) {
+	if err := ValidName(tomb.Name); err != nil {
+		return false, err
+	}
+	if tomb.Removed != RemovedEnded {
+		return false, nil
+	}
+	if err := b.Valid(); err != nil {
+		return false, err
+	}
+	b.Removed, b.Identity = "", b.SessionIdentity()
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	wrote := false
+	err = transact(func(string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		cur, err := read(filepath.Join(dir, tomb.Name+tombstoneSuffix))
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if cur.Name = tomb.Name; cur != tomb {
+			return nil
+		}
+		if _, err := os.Lstat(filepath.Join(dir, tomb.Name+".json")); !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if _, err := fsq.WriteFileAtomic(dir, tomb.Name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		wrote = true
+		return os.Remove(filepath.Join(dir, tomb.Name+tombstoneSuffix))
+	})
+	return wrote, err
+}
+
 // Tombstones returns the binding each tombstone recorded, named by its
 // binding name and sorted by it.
 func Tombstones() ([]Binding, error) {

@@ -194,28 +194,15 @@ func usableRoot(root string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// ownerDetached refuses a session the owner turned off: a tombstone that
-// detach left for b's identity and b's recorded session, in whatever process
-// that session runs now (a resumed session is the same session). A tombstone
-// that recorded no session turns off only its own process. Another session
-// in the same place is not off. The binding stays gone until the owner
-// attaches the session again.
+// ownerDetached refuses a session the owner turned off (binding.DetachedFor).
+// The binding stays gone until the owner attaches the session again.
 func ownerDetached(b binding.Binding) error {
 	tombs, err := binding.Tombstones()
 	if err != nil {
 		return err
 	}
-	for _, t := range tombs {
-		if t.Removed != binding.RemovedDetached || t.SessionIdentity() != b.SessionIdentity() {
-			continue
-		}
-		same := t.RecordedSession() != "" && t.RecordedSession() == b.RecordedSession()
-		if t.RecordedSession() == "" {
-			same = t.Holder.PID > 0 && t.Holder == b.Holder
-		}
-		if same {
-			return fmt.Errorf("the owner turned this session off (binding %s); /amq-remote connects it again", t.Name)
-		}
+	if name, off := binding.DetachedFor(b, tombs); off {
+		return fmt.Errorf("the owner turned this session off (binding %s); /amq-remote connects it again", name)
 	}
 	return nil
 }
