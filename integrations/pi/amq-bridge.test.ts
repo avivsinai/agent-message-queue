@@ -33,6 +33,19 @@ function normalize(text: string): string {
 		.join("");
 }
 
+// aged makes ref's receipt and events older than the bridge's owner
+// staleness bound, as an earlier generation's are.
+function aged(dir: string, ref: string): void {
+	const past = new Date(Date.now() - 120_000);
+	for (const rel of [`receipts/${ref}.json`, `events/${ref}.jsonl`]) {
+		try {
+			fs.utimesSync(path.join(dir, rel), past, past);
+		} catch {
+			// No such file yet.
+		}
+	}
+}
+
 // harness runs the extension against a fake ExtensionAPI and a real bridge
 // directory under a temporary AM_ROOT. host, when given, embeds the bridge
 // as a host application does, with no AM_ROOT or AM_ME set. shared, when
@@ -248,6 +261,7 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 	// A receipt an earlier generation left without a terminal event.
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 
 	await h.start();
 	try {
@@ -289,7 +303,7 @@ test("a second bridge on a live, even stalled, owner's mailbox stays inactive an
 		await h1.emit("message_start", userMessage("remote task"));
 		// A stalled owner (no heartbeat for 10 s) is still the owner.
 		const past = new Date(Date.now() - 10_000);
-		for (const f of ["bridge.liveness", "bridge.owner"]) fs.utimesSync(path.join(h1.dir, f), past, past);
+		fs.utimesSync(path.join(h1.dir, "bridge.liveness"), past, past);
 		await h2.start();
 		assert.equal(h1.generation(), gen);
 		assert.equal(h2.notices.length, 1);
@@ -302,6 +316,22 @@ test("a second bridge on a live, even stalled, owner's mailbox stays inactive an
 		assert.deepEqual([live.live, live.session_generation], [true, gen]);
 	} finally {
 		await h1.done();
+	}
+});
+
+// Review of pi bridge ownership: a bridge started over another generation's live liveness.
+test("a bridge stays inactive while another generation's liveness is live", async () => {
+	const h = harness();
+	const foreign = JSON.stringify({ protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 });
+	fs.mkdirSync(h.dir, { recursive: true });
+	fs.writeFileSync(path.join(h.dir, "bridge.liveness"), foreign);
+	await h.start();
+	try {
+		assert.equal(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"), foreign);
+		assert.equal(h.notices.length, 1);
+		assert.match(h.notices[0], /pid 4242/);
+	} finally {
+		await h.done();
 	}
 });
 
@@ -334,7 +364,7 @@ test("a receipt cut short by a short write is never published; the retry publish
 });
 
 // Review of pi admission evidence: a new events file's directory entry was never synced.
-test("a line that starts an events file syncs the events directory", async () => {
+test("a line written into an empty events file syncs the events directory", async () => {
 	const h = harness();
 	const synced = new Set<number>();
 	const realFsync = nodeFs.fsyncSync;
@@ -345,9 +375,11 @@ test("a line that starts an events file syncs the events directory", async () =>
 	};
 	syncBuiltinESMExports();
 	try {
+		fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
+		fs.writeFileSync(path.join(h.dir, "events", `${REF}.jsonl`), ""); // its entry may not be durable yet
 		await h.start();
 		h.state.idle = false;
-		h.publish(REF, "remote task", h.generation()); // refused busy: the ref's first event line
+		h.publish(REF, "remote task", h.generation()); // refused busy: the first line in the empty file
 		await h.waitFor(() => h.events(REF).length === 1);
 		assert.equal(h.events(REF)[0].reason, "busy");
 		assert.ok(synced.has(fs.statSync(path.join(h.dir, "events")).ino));
@@ -423,7 +455,9 @@ test("a terminal append is retried until durable, and recovery repairs a partial
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 	fs.writeFileSync(path.join(h.dir, "events", `${ORPHAN}.jsonl`), fragment);
+	aged(h.dir, ORPHAN);
 
 	await h.start();
 	try {
@@ -538,6 +572,7 @@ test("an orphan receipt whose read failed is recovered on a later poll", async (
 	try {
 		fs.rmdirSync(receipt);
 		fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), receipt); // the filesystem recovers
+		aged(h.dir, ORPHAN);
 		await h.waitFor(() => h.events(ORPHAN).length > 0);
 		assert.deepEqual(
 			h.events(ORPHAN).map((e) => e.event),
@@ -581,6 +616,7 @@ test("a refusal and an orphan closure whose fsync failed are appended again", as
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 	const failOnce = new Set([`${ORPHAN}.jsonl`, `${REF}.jsonl`].map((n) => path.join(h.dir, "events", n)));
 	const realFsync = nodeFs.fsyncSync;
 	nodeFs.fsyncSync = (fd: number) => {

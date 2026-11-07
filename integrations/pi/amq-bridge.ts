@@ -20,7 +20,13 @@ export const BRIDGE_REVISION = 4;
 const MIN_ADAPTER_REVISION = 3;
 
 const HEARTBEAT_MS = 2000;
-const STALE_MS = 5000; // the adapter treats a liveness file older than 5 s as stale
+// OWNER_STALE_MS is how long a live liveness record keeps the mailbox for
+// its generation. One bridge serves a mailbox: another bridge starts only on
+// a record that is older, not live, or absent, and a request is closed
+// uncertain as an orphan only when its last event is older. It is far longer
+// than the adapter's 5-second staleness, so a stalled owner keeps its
+// mailbox and its running request.
+const OWNER_STALE_MS = 60_000;
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
 // A poll lists requests/ only when the directory changed, and in any case
 // every RECONCILE_MS. A listing within COARSE_MTIME_MS of the directory's
@@ -117,13 +123,16 @@ type Bridge = {
 	// ref is never examined again; only this same refusal is retried.
 	refusals: Map<string, EventFields>;
 	inflight: Inflight | null;
-	orphansPending: boolean;
+	// orphans holds the receipts of other generations that may still need
+	// closing; null until receipts/ is listed.
+	orphans: Set<string> | null;
 	// orphanRetry holds orphan refs whose closing append failed. Their
 	// bytes may be on disk without being durable, so they are appended
 	// again until an append succeeds.
 	orphanRetry: Set<string>;
 	// revisionNoticeShown limits the old-adapter notice to once per runtime.
 	revisionNoticeShown: boolean;
+	ownerNotice: { shown: boolean };
 	// sessionId is pi's own session id; "" disables activity records.
 	sessionId: string;
 	// turn is the id of the open turn, "" outside one. turns counts turns.
@@ -167,20 +176,6 @@ type Inflight = {
 
 let inactiveNoticeShown = false;
 
-// OWNER is the bridge directory's owner record. One bridge serves a
-// mailbox: start creates the record create-new before it writes liveness or
-// closes orphaned receipts, and only the bridge it names writes liveness or
-// releases it.
-const OWNER = "bridge.owner";
-
-// start is the owner process's start token ("" where the platform gives
-// none), so a pid that now runs another process reads as dead.
-type Owner = { pid: number; generation: string; start: string };
-
-// ownedGenerations holds the generations that bridges in this process own,
-// so a record that names this process but none of them reads as dead.
-const ownedGenerations = new Set<string>();
-
 export default function amqPiBridge(pi: ExtensionAPI): void {
 	registerAmqBridge(pi);
 }
@@ -190,7 +185,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // the plain extension.
 export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): void {
 	let bridge: Bridge | null = null;
-	// ownerNotice limits the notice about another live owner to once.
+	// ownerNotice limits the notices about another bridge to once.
 	const ownerNotice = { shown: false };
 	// session holds the identity resolved for the open session, none
 	// included; it is null outside a session.
@@ -386,17 +381,11 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		// recorded, and requests run as before.
 	}
 	const generation = randomUUID();
-	let refused: string | null;
-	try {
-		refused = acquireOwner(dir, generation);
-	} catch (err) {
-		notify(ctx, `amq-bridge inactive: cannot own ${dir}: ${String(err)}`);
-		return null;
-	}
-	if (refused !== null) {
+	const holder = liveHolder(dir);
+	if (holder) {
 		if (!ownerNotice.shown) {
 			ownerNotice.shown = true;
-			notify(ctx, `amq-bridge inactive: ${refused}.`);
+			notify(ctx, `amq-bridge inactive: another live pi bridge (pid ${holder.pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
 		}
 		return null;
 	}
@@ -415,7 +404,8 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		listedAt: 0,
 		refusals: new Map(),
 		inflight: null,
-		orphansPending: false,
+		orphans: null,
+		ownerNotice,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
 		sessionId: sessionIdOf(ctx),
@@ -429,7 +419,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		requestUser: "",
 	};
 	writeLiveness(b, true);
-	b.orphansPending = !closeOrphanedReceipts(b);
+	closeOrphanedReceipts(b);
 	const beat = setInterval(() => owns(b) && writeLiveness(b, true), HEARTBEAT_MS);
 	const poll = setInterval(() => scanSafely(pi, b), POLL_MS);
 	beat.unref();
@@ -440,37 +430,40 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 
 function retire(b: Bridge): void {
 	for (const t of b.timers.splice(0)) clearInterval(t);
-	ownedGenerations.delete(b.generation);
 }
 
-// owns reports whether the owner record still names this bridge. A missing
-// record is linked again create-new, so a lost record never leaves the live
-// owner inert. A bridge whose record names another bridge retires at once,
-// telling its pi while it was still running, so it never writes over the
-// new owner's liveness or answers its requests. A record that cannot be read
-// now only skips this turn.
-function owns(b: Bridge): boolean {
-	const file = path.join(b.dir, OWNER);
-	let rec: { session_generation?: unknown };
+// liveHolder is the bridge that holds the mailbox: a liveness record younger
+// than OWNER_STALE_MS that is live. It is null when the record is older, not
+// live, absent, or unreadable.
+function liveHolder(dir: string): { pid: number; generation: string } | null {
 	try {
-		try {
-			rec = JSON.parse(fs.readFileSync(file, "utf8"));
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-			try {
-				linkNew(b.dir, file, ownerBody({ pid: process.pid, generation: b.generation, start: processStart(process.pid) }));
-				return true;
-			} catch (linkErr) {
-				if ((linkErr as NodeJS.ErrnoException).code !== "EEXIST") throw linkErr;
-			}
-			rec = JSON.parse(fs.readFileSync(file, "utf8"));
-		}
+		const file = path.join(dir, "bridge.liveness");
+		if (Date.now() - fs.statSync(file).mtimeMs >= OWNER_STALE_MS) return null;
+		const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+		return rec.protocol === PROTOCOL && rec.live === true && typeof rec.session_generation === "string" ? { pid: rec.pid, generation: rec.session_generation } : null;
 	} catch {
-		return false;
+		return null;
+	}
+}
+
+// owns reports whether the liveness record still names this bridge's
+// generation. When two bridges start at once the last liveness write wins;
+// a bridge that reads another generation retires at once and tells its pi
+// once, so it never writes over the owner's liveness or answers its
+// requests. An absent or unreadable record leaves this bridge the owner.
+function owns(b: Bridge): boolean {
+	let rec: { session_generation?: unknown; pid?: unknown };
+	try {
+		rec = JSON.parse(fs.readFileSync(path.join(b.dir, "bridge.liveness"), "utf8"));
+	} catch {
+		return true;
 	}
 	if (rec?.session_generation === b.generation) return true;
-	if (b.timers.length > 0) notify(b.ctx, "amq-bridge: this pi no longer serves Buzz requests: another pi bridge owns its AMQ mailbox now.");
 	retire(b);
+	if (!b.ownerNotice.shown) {
+		b.ownerNotice.shown = true;
+		notify(b.ctx, `amq-bridge: this pi no longer serves Buzz requests: another pi bridge (pid ${String(rec?.pid)}) took over its AMQ mailbox.`);
+	}
 	return false;
 }
 
@@ -491,143 +484,8 @@ function stop(b: Bridge | null, reason: string): void {
 		appendEvent(b.dir, f.ref, fields);
 		b.inflight = null;
 	}
-	// Liveness goes offline before the record is released, so a successor
-	// that owns the directory next is never marked offline by this bridge.
-	if (!owns(b)) return;
-	writeLiveness(b, false);
-	removeOwner(path.join(b.dir, OWNER), b.generation);
-}
-
-// acquireOwner makes the bridge with this generation the directory's owner
-// and returns null, or returns why it cannot. A record whose owner is dead is
-// moved aside, and replaced only when the moved record is the one judged
-// dead; a record another starter created meanwhile is put back. So two
-// starters never both own.
-function acquireOwner(dir: string, generation: string): string | null {
-	const file = path.join(dir, OWNER);
-	const older = olderBridge(dir, file);
-	if (older > 0) return `an older pi extension (pid ${older}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one`;
-	const busy = (pid: number) => `another live pi bridge (pid ${pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one`;
-	for (let attempt = 0; attempt < 3; attempt++) {
-		try {
-			linkNew(dir, file, ownerBody({ pid: process.pid, generation, start: processStart(process.pid) }));
-			ownedGenerations.add(generation);
-			return null;
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-		}
-		const held = ownerOf(file);
-		if (held && ownerLive(held)) return busy(held.pid);
-		const moved = moveAside(file);
-		if (moved === undefined) continue; // released meanwhile
-		if (moved?.generation !== held?.generation) {
-			putBack(file, moved);
-			if (moved) return busy(moved.pid);
-			break;
-		}
-	}
-	return "another pi bridge was starting on this AMQ mailbox at the same moment; start a new pi session to try again";
-}
-
-// ownerLive reports whether an owner's process still runs: its pid exists
-// and, where the platform gives a start token, runs the process that wrote
-// the record. A record that names this process is live only for a
-// generation a bridge here owns. A stalled owner stays the owner.
-function ownerLive(o: Owner): boolean {
-	if (!pidAlive(o.pid)) return false;
-	if (o.pid === process.pid) return ownedGenerations.has(o.generation);
-	const start = o.start ? processStart(o.pid) : "";
-	return !start || start === o.start;
-}
-
-// olderBridge is the pid of an extension that predates the owner record and
-// still runs here: a fresh live liveness record from a live process whose
-// generation has no owner record. It is 0 when there is none.
-function olderBridge(dir: string, file: string): number {
-	try {
-		const liveness = path.join(dir, "bridge.liveness");
-		if (Date.now() - fs.statSync(liveness).mtimeMs >= STALE_MS) return 0;
-		const rec = JSON.parse(fs.readFileSync(liveness, "utf8"));
-		if (rec.protocol !== PROTOCOL || rec.live !== true || !Number.isSafeInteger(rec.pid) || rec.pid <= 0) return 0;
-		if (ownerOf(file)?.generation === rec.session_generation || !pidAlive(rec.pid)) return 0;
-		return rec.pid === process.pid ? 0 : rec.pid;
-	} catch {
-		return 0;
-	}
-}
-
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err) {
-		return (err as NodeJS.ErrnoException).code === "EPERM";
-	}
-}
-
-// processStart is the start time of process pid in clock ticks since boot,
-// where /proc gives it; "" elsewhere.
-function processStart(pid: number): string {
-	try {
-		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "";
-	} catch {
-		return "";
-	}
-}
-
-function ownerBody(o: Owner): string {
-	return JSON.stringify({ protocol: PROTOCOL, pid: o.pid, session_generation: o.generation, start: o.start || undefined });
-}
-
-// ownerOf is the owner record in file, or null when it is absent or not a
-// valid record (a record that is not valid has no live owner).
-function ownerOf(file: string): Owner | null {
-	try {
-		const rec = JSON.parse(fs.readFileSync(file, "utf8"));
-		if (rec.protocol !== PROTOCOL || !Number.isSafeInteger(rec.pid) || rec.pid <= 0 || typeof rec.session_generation !== "string") return null;
-		return { pid: rec.pid, generation: rec.session_generation, start: typeof rec.start === "string" ? rec.start : "" };
-	} catch {
-		return null;
-	}
-}
-
-// moveAside takes the owner record away by a rename to a unique name, so
-// exactly one caller takes any one record, and returns the record it took
-// (null when that is not valid), or undefined when there was none.
-function moveAside(file: string): Owner | null | undefined {
-	const aside = `${file}.aside-${randomUUID()}`;
-	try {
-		fs.renameSync(file, aside);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw err;
-	}
-	const rec = ownerOf(aside);
-	fs.rmSync(aside, { force: true });
-	return rec;
-}
-
-// putBack restores a record moveAside took by mistake, create-new: a record
-// created since then stands.
-function putBack(file: string, moved: Owner | null): void {
-	if (!moved) return;
-	try {
-		linkNew(path.dirname(file), file, ownerBody(moved));
-	} catch {
-		// Another owner record stands; the displaced owner retires at its
-		// next ownership check.
-	}
-}
-
-// removeOwner releases the record only while it names generation.
-function removeOwner(file: string, generation: string): void {
-	try {
-		const moved = moveAside(file);
-		if (moved && moved.generation !== generation) putBack(file, moved);
-	} catch {
-		// A record left behind reads as dead once this process ends.
-	}
+	// Only the owner marks the mailbox offline.
+	if (owns(b)) writeLiveness(b, false);
 }
 
 // scanSafely is scan whose failure waits for the next poll: a transient
@@ -693,7 +551,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	discover(b);
 	const pending = [...b.pending].sort(([ra, ma], [rb, mb]) => ma - mb || (ra < rb ? -1 : ra > rb ? 1 : 0));
 
-	if (b.orphansPending) b.orphansPending = !closeOrphanedReceipts(b);
+	if (!b.orphans || b.orphans.size > 0) closeOrphanedReceipts(b);
 
 	const f = b.inflight;
 	if (f?.terminal) {
@@ -938,40 +796,51 @@ function writeLiveness(b: Bridge, live: boolean): void {
 // closeOrphanedReceipts closes receipts that an earlier bridge process or
 // generation left without a terminal event, so the adapter does not report
 // them running forever. The outcome of such a request is unknown, so the
-// event is `uncertain`. It returns false when an append failed; scan then
-// runs it again (it is idempotent).
-function closeOrphanedReceipts(b: Bridge): boolean {
-	let names: string[];
-	try {
-		names = fs.readdirSync(path.join(b.dir, "receipts"));
-	} catch {
-		return false;
-	}
-	let done = true;
-	for (const name of names) {
-		const m = REQUEST_FILE.exec(name);
-		if (!m) continue;
-		const ref = m[1];
+// event is `uncertain`. A request whose last event (or receipt) is younger
+// than OWNER_STALE_MS may still run in a stalled owner and is left open
+// until it is older. receipts/ is listed once; later polls look only at the
+// receipts still open.
+function closeOrphanedReceipts(b: Bridge): void {
+	if (!b.orphans) {
 		try {
-			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", name), "utf8"));
+			b.orphans = new Set(fs.readdirSync(path.join(b.dir, "receipts")).flatMap((name) => REQUEST_FILE.exec(name)?.[1] ?? []));
+		} catch {
+			return;
+		}
+	}
+	for (const ref of [...b.orphans]) {
+		try {
+			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", `${ref}.json`), "utf8"));
 			const retry = b.orphanRetry.has(ref);
-			if (rc.session_generation === b.generation || (!retry && hasTerminal(b.dir, ref))) continue;
+			if (rc.session_generation === b.generation || (!retry && hasTerminal(b.dir, ref))) {
+				b.orphans.delete(ref);
+				continue;
+			}
+			if (!retry && Date.now() - lastEventAt(b.dir, ref) < OWNER_STALE_MS) continue;
 			const ok = appendEvent(b.dir, ref, {
 				event: "uncertain",
 				error: "the pi bridge restarted before the request settled; the outcome is unknown",
 			});
 			if (ok) {
 				b.orphanRetry.delete(ref);
+				b.orphans.delete(ref);
 			} else {
 				b.orphanRetry.add(ref);
-				done = false;
 			}
 		} catch {
 			// An unreadable receipt is not recovered yet; scan reads it again.
-			done = false;
 		}
 	}
-	return done;
+}
+
+// lastEventAt is when ref's last event was written, or its receipt when it
+// has no event.
+function lastEventAt(dir: string, ref: string): number {
+	try {
+		return fs.statSync(path.join(dir, "events", `${ref}.jsonl`)).mtimeMs;
+	} catch {
+		return fs.statSync(path.join(dir, "receipts", `${ref}.json`)).mtimeMs;
+	}
 }
 
 function hasTerminal(dir: string, ref: string): boolean {

@@ -29,7 +29,6 @@ takes the handle from its manifest entry and never from its own environment.
   cancels/<ref>.json     adapter -> extension: cancel of one request (revision 5)
   activity/<session_id>.jsonl  extension -> adapter: whole-session activity
   bridge.liveness        extension -> adapter: heartbeat
-  bridge.owner           extension only: the one bridge that serves the mailbox
 ```
 
 Directories are mode 0700 and files are mode 0600.
@@ -43,31 +42,25 @@ adapter's temporary files.
 ## Ownership
 
 The adapter writes only `requests/` and `cancels/`. The extension writes only
-`receipts/`, `events/`, `activity/`, `bridge.liveness`, and `bridge.owner`.
+`receipts/`, `events/`, `activity/`, and `bridge.liveness`.
 Neither side deletes or rewrites a file the other side owns. The extension
 never deletes or rewrites a request; the adapter never deletes a request it
 published. Cleanup of old files is an explicit operator action outside this
 protocol.
 
-One extension instance serves a mailbox. Before it writes liveness or closes
-orphaned receipts, an instance creates `bridge.owner` create-new (temporary
-file, hard link) with its `pid`, `session_generation`, and, where the platform
-gives one, its process start token `start`. When the owner is live, the
-instance stays inactive for that session and tells the owner once in pi; a
+One extension instance serves a mailbox, and `bridge.liveness` is the only
+record of which one. Its owner is the generation it names while it is
+younger than `OWNER_STALE_MS` (60 seconds, 30 heartbeats) and has
+`live: true`. A starting instance that finds such a record for another
+generation stays inactive for that session and tells the owner once in pi; a
 second pi started with the same `AM_ROOT` and `AM_ME`, for example from a pi
-tool, never touches the first bridge's requests or liveness. An owner is live
-while its pid exists and runs the process that wrote the record (same start
-token where one is recorded). A stalled owner stays the owner: stale liveness
-never transfers ownership. A fresh `live: true` liveness record from a live
-process whose generation has no owner record is an older extension, and it
-counts as a live owner too. The record of an owner that is not live is renamed
-aside and replaced only when the renamed record is the one judged dead, so two
-starters never both own; an instance that loses that race says so in its own
-notice. An owner whose record is missing links it again create-new. An
-instance whose record names another generation stops at once and tells its pi
-once that it no longer serves Buzz requests. On shutdown the owner writes
-`live: false` and then removes its own record; it never writes over or
-removes another owner's. The adapter does not read `bridge.owner`.
+tool, never touches the first bridge's requests or liveness. A stalled owner
+keeps the mailbox until its record is older than `OWNER_STALE_MS`. A record
+that is older, not live, or absent is taken over by writing liveness. When
+two instances start at once, the last liveness write wins: an instance that
+reads another generation in liveness stops at once and tells its pi once
+that it no longer serves Buzz requests. Only the owner writes liveness,
+including `live: false` on shutdown.
 
 ## Protocol string
 
@@ -267,7 +260,8 @@ seconds. Freshness is the file's modification time: a record older than 5
 seconds is stale. The record is live only when it is fresh, parses, carries
 this protocol, and has `live: true` and `pid > 0`. `session_generation` is the
 current generation; the adapter addresses first-contact requests to it. Only the
-owner (see [Ownership](#ownership)) writes the record. On shutdown it writes
+owner (see [Ownership](#ownership)) writes the record; the adapter's 5-second
+staleness says whether the bridge is reachable now, not who owns the mailbox. On shutdown it writes
 `live: false`, so the adapter sees the bridge offline at once.
 `surface` is the pi run mode (`tui`, `rpc`, `json`, or `print`).
 `bridge_revision` is the extension's implementation revision. An extension
@@ -464,11 +458,13 @@ On `session_shutdown` with a request in flight, the extension appends the
 outcome it already decided; otherwise `failed` naming the shutdown reason when
 the request started, or `uncertain` when it did not. On `session_start`, once
 it owns the mailbox, it appends `uncertain` to every receipt from another
-generation that has no terminal event; ownership proves that generation's
-bridge is gone, so a crash never leaves a ref running forever and never
-records an outcome nobody observed. A receipt it cannot read or close is
-retried on later polls, and a closing line whose append failed is appended
-again even when it is readable.
+generation that has no terminal event and whose last event (or, without one,
+the receipt) is older than `OWNER_STALE_MS`; a younger one is closed when it
+reaches that age, so a stalled owner's running request is never closed under
+it. A crash never leaves a ref running forever and never records an outcome
+nobody observed. A receipt it cannot read or close is retried on later polls,
+and a closing line whose append failed is appended again even when it is
+readable.
 
 ## Adapter recovery and evidence
 
