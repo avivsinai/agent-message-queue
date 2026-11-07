@@ -763,8 +763,8 @@ test("a host report outside the outcome shapes settles the request uncertain", a
 	}
 });
 
-// Review of the pi and images code, finding 4: that throws after it reported
-// the start leaves the outcome unknown, never failed.
+// Review of the pi and images code, finding 4: a host send that throws after it
+// reported the start leaves the outcome unknown, never failed.
 test("a host send that throws after the start settles the request uncertain", async () => {
 	const h = hostHarness({
 		busy: () => false,
@@ -789,8 +789,8 @@ test("a host send that throws after the start settles the request uncertain", as
 	}
 });
 
-// Review of the pi and images code, finding 5: check that throws refuses the
-// request busy instead of stopping every scan.
+// Review of the pi and images code, finding 5: a host busy check that throws
+// refuses the request busy instead of stopping every scan.
 test("a host busy check that throws refuses the request busy", async () => {
 	const h = hostHarness({
 		busy: () => {
@@ -814,8 +814,8 @@ test("a host busy check that throws refuses the request busy", async () => {
 	}
 });
 
-// Review of the pi and images code, finding 6: the host keeps inactive shows
-// no wake marker for the identity the host gives without a session.
+// Review of the pi and images code, finding 6: a session the host keeps
+// inactive shows no wake marker for the identity the host gives without a session.
 test("a session the host keeps inactive holds no wake doorbell", async () => {
 	let agentDir = "";
 	const h = harness((root) => {
@@ -832,8 +832,8 @@ test("a session the host keeps inactive holds no wake doorbell", async () => {
 	}
 });
 
-// Review of the pi and images code, finding 7: root is no identity, so the
-// bridge never writes under the working directory.
+// Review of the pi and images code, finding 7: a relative root is no identity,
+// so the bridge never writes under the working directory.
 test("a host identity with a relative root keeps the bridge inactive", async () => {
 	const rel = `amq-pi-relative-${process.pid}`;
 	const h = harness(() => ({ identity: () => ({ root: rel, handle: "pi-seat" }) }));

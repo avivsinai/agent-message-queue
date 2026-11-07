@@ -36,8 +36,8 @@ func TestPiBridgePathWritesTheBuiltInExtension(t *testing.T) {
 	}
 }
 
-// Review of the pi and images code, the bridge-path symlink note: a symlink at the extension's path is replaced by a
-// plain file, even when its target holds the built-in extension, so pi never
+// Review of the pi and images code, the bridge-path symlink note: a symlink
+// at the extension's path is replaced by a plain file, even when its target holds the built-in extension, so pi never
 // runs a file the link can later redirect.
 func TestPiBridgePathReplacesASymlink(t *testing.T) {
 	home := t.TempDir()

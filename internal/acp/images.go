@@ -42,10 +42,11 @@ const (
 
 var (
 	sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	// httpsURLRe finds the https URLs of an event's text, ending at
-	// whitespace, a quote, or a bracket (a Markdown link or image wraps its
-	// URL in parentheses); blobSHA decides which of them name a blob.
-	httpsURLRe = regexp.MustCompile(`https://[^\s"'<>()\[\]]+`)
+	// blobLinkRe finds a blob link in an event's text, in the two forms a
+	// Blossom server serves: https://<host>/<sha256>[.ext] and
+	// https://<host>/media/<sha256>[.ext]. The match ends at the extension,
+	// so Markdown or other text around the link is never part of it.
+	blobLinkRe = regexp.MustCompile(`https://[^\s"'<>()\[\]/]+/(?:media/)?([0-9a-fA-F]{64})(\.[A-Za-z0-9]+)?`)
 	// imageExts are the stored extensions, in the order a stored file is
 	// looked up by its sha256.
 	imageExts = []string{"png", "jpg", "gif", "webp", "heic"}
@@ -134,9 +135,10 @@ func promptMedia(prompt string) []eventMedia {
 	if len(media) > 0 {
 		return media
 	}
-	for _, raw := range httpsURLRe.FindAllString(evt, -1) {
-		raw = strings.TrimRight(raw, ".,;:!?")
-		if onRelay(raw) && blobSHA(raw) != "" && !seen[raw] {
+	for _, m := range blobLinkRe.FindAllStringSubmatchIndex(evt, -1) {
+		// The fetch names the sha256 in lower case, as Blossom stores it.
+		raw := evt[m[0]:m[2]] + strings.ToLower(evt[m[2]:m[3]]) + evt[m[3]:m[1]]
+		if onRelay(raw) && !seen[raw] {
 			seen[raw] = true
 			media = append(media, eventMedia{url: raw})
 		}

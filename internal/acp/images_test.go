@@ -68,8 +68,8 @@ func TestAttachImagesStoresTheImageAndNamesIt(t *testing.T) {
 }
 
 // Review round 1 of the pi and images code: Buzz writes an image into the
-// text as a Markdown image, so the URL found without imeta ends at its
-// closing parenthesis and before trailing punctuation.
+// text as a Markdown image, so the link found without imeta ends at its
+// extension, before any parenthesis, punctuation or emphasis around it.
 func TestAttachImagesDownloadsAMarkdownImageLink(t *testing.T) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
@@ -87,7 +87,7 @@ func TestAttachImagesDownloadsAMarkdownImageLink(t *testing.T) {
 		return buf.Bytes(), nil
 	}
 	root := canonicalTempDir(t)
-	prompt := "<buzz-event type=\"@mention\">\nContent: see ![image](" + url + ").\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
+	prompt := "<buzz-event type=\"@mention\">\nContent: see ![image](" + url + "). Again: **`" + url + "`**\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
 
 	got := attachImages(root, prompt)
 	path := filepath.Join(root, "agents", mailboxSender, "remote-files", sha+".png")
