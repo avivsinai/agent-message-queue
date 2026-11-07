@@ -809,7 +809,11 @@ func takeDarwinWakeRestartAt(
 	if err := queue(); err != nil {
 		return err
 	}
-	return markWakeRestartTakenAt(scope, record)
+	// The restart is queued, so the requester gets an ACK: a NACK now would
+	// make it refuse a restart that happens anyway. A failed Taken write
+	// leaves the record pending and untaken, as before this request.
+	_ = markWakeRestartTakenAt(scope, record)
+	return nil
 }
 
 func startWakeControlListenerInDirWithRestart(
