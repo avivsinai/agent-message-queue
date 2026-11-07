@@ -105,7 +105,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `CancelRequest` only while the live bridge advertises `bridge_revision` 5 or higher. Submit evidence is `submitted`. |
 | `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `CancelRequest`: `amq-remote cancel` or `/cancel` stops the request's ACP turn, or keeps a request that has not run from running. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
 | `mailbox` | `handle`: an AMQ handle in serve's own root whose `agents/<handle>/inbox` already exists; the adapter never creates it. Optional `reply_timeout` (default `10m`, at most `24h`). The handle must not be `buzz`, `amq-remote` or serve's `--me`, and `--me` must not be `buzz` or `amq-remote`. Unknown config fields are refused. | `Inspect`, `Submit` and `CancelRequest`. Each request is one AMQ message to the handle: from `buzz` on thread `cockpit/<channel>` with the label `nostr:<event>` for a Buzz DM, else from `amq-remote` on thread `remote/<creator host>`. The handle answers with `amq reply --id <id>`; when the endpoint next looks, the newest of its replies that is not `--kind status` and has a body is the request's result; later replies stay unread in the carrier inbox. With no such reply within `reply_timeout` the request fails, and the message stays in the inbox. A cancel after delivery ends the request as delivered and no longer waited for. Several requests can be open at once; each is its own message, answered by its own id, so a second message never waits for the first or comes back busy. The handle cannot ask the owner a question through the share: a mailbox has no interaction seam. Submit evidence is `submitted`. See [Strict share in one owner step](#strict-share-in-one-owner-step). |
-| `fake` | none | Test double. `epoch` is accepted only for this kind. |
+| `fake` | none | Test double, linked into test builds only; a release binary refuses it as an unknown kind. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
 exit 2. An unknown kind is refused at startup; `serve` continues with the
@@ -141,7 +141,7 @@ adapters that attached, writes `refusals.json`, and prints the refusal.
 ```
 
 Two serve flags append to this file's adapter list instead of editing it.
-`--fake` adds kind `fake`, target `fake`. `--codex-socket PATH` attaches the
+`--fake` adds kind `fake`, target `fake` (test builds only). `--codex-socket PATH` attaches the
 daemon's loaded threads, or only `--codex-thread ID` when that flag is set.
 Those sugar targets look like `codex:` plus the thread id with hyphens
 removed. A target id that appears both in the file and in the flags is
@@ -500,7 +500,7 @@ flag list; the `share` flags are in the table below.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--me HANDLE` | `remote` | Endpoint mailbox handle registered in the root. |
-| `--fake` | false | Append the fake runtime as target `fake`. |
+| `--fake` | false | Append the fake runtime as target `fake` (test builds only; a release binary refuses it). |
 | `--codex-socket PATH` | empty | Unix socket of a running Codex app-server. |
 | `--codex-thread ID` | empty | With `--codex-socket`, attach only this thread. |
 | `--manifest PATH` | `<root>/extensions/remote/manifest.json` | Adapter manifest path. |

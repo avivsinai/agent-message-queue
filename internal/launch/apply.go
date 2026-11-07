@@ -551,10 +551,9 @@ func writeApplySessionConfig(root *fsq.DeliveryRoot, lease *Lease, createdUTC st
 	if createdUTC == "" {
 		createdUTC = time.Now().UTC().Format(time.RFC3339)
 	}
-	// Preserve unmodelled keys from the existing config.json (611.22.57,
-	// the setup/apply half of review-821-r1 P1-b): the apply roster write
-	// used to re-marshal a bare struct and wipe default_agent/project/
-	// routing etc. from a live root. Overlay the modelled keys onto the raw
+	// Preserve unmodelled keys from the existing config.json: re-marshaling
+	// a bare struct would wipe default_agent/project/routing etc. from a
+	// live root. Overlay the modelled keys onto the raw
 	// existing document instead (config.MarshalPreservingUnknowns); a
 	// missing file yields an empty raw map, so the output is the modelled
 	// struct alone in the same sorted-map form.

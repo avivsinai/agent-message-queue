@@ -1,5 +1,4 @@
-// Package relay is AMQ's Nostr relay transport (bead 611.15, relay design
-// slice 1): one bounded WebSocket per relay and body identity, NIP-42 AUTH
+// Package relay is AMQ's Nostr relay transport: one bounded WebSocket per relay and body identity, NIP-42 AUTH
 // that presents exactly one enrolled NIP-OA tag, and publish that succeeds
 // only on the relay's matching OK. It executes no requests, mints no
 // credentials and knows nothing about bridge envelopes; callers own policy
@@ -50,9 +49,8 @@ var ErrRejected = errors.New("relay rejected event")
 
 // RemoteError carries a relay's refusal. Kind is the stable category;
 // Reason is relay-controlled text. Error() adds the reason as quoted relay
-// words, so a log or doctor names why the relay refused
-// (agent-message-queue-611.58); status files take Category or StatusText,
-// which never carry it (codex slice 1 review #9).
+// words, so a log or doctor names why the relay refused;
+// status files take Category or StatusText, which never carry it.
 type RemoteError struct {
 	Kind   error
 	Reason string
