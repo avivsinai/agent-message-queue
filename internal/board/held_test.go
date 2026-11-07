@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// Review of the disk bounds: pruning held requests by a second rule forever; it follows the open obligations up to the pruned-id horizon.
+// Review of the disk bounds, round 1, finding 2: pruning held requests by a
+// second rule forever; it follows the open obligations up to the horizon.
 func TestPruneHoldsOpenObligationsWithinTheHorizon(t *testing.T) {
 	now := time.Now().UTC()
 	msg := func(name, kind, from, to string, ago time.Duration, refs ...string) Message {
