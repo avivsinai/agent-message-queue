@@ -267,8 +267,11 @@ harness is installed.
 
 The wake reads the marker before each delivery attempt and each terminal
 write and never infers it from other wake state. The doorbell is held while
-any entry holds; each entry closes only by its own dialog's facts, and a
-session's events close only that session's entries. An entry whose recorded
+any entry holds; each entry closes only on proof that its dialog closed:
+its tool call's result, its subagent's `SubagentStop`, a later typed prompt
+or a main-thread `Stop`, `SessionStart` or `SessionEnd` of its own session, or a `clear`
+from its own host process that replaced its session. A Claude Code dialog
+hook's marker closes by these rules as an entry or as a single file. An entry whose recorded
 Claude Code host process is proven gone closes; one whose host is unknown
 holds. The directory replaces
 a single file only by an atomic exchange and is removed only when empty, so

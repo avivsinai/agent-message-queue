@@ -243,8 +243,9 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
 The installer reads `claude --version` from the `claude` on `PATH`, with
 bounded output and a time limit, and adds `PostToolUseFailure` only for
 Claude Code 2.1.119 or later, because before 2.1.101 an unknown hook event
-made Claude Code ignore the whole settings file. With no readable version it
-leaves that event out. Doctor counts an event as missing only when that
+made Claude Code ignore the whole settings file, and `SubagentStop` only for
+2.0.42 or later, the first whose `SubagentStop` input names its `agent_id`.
+With no readable version it leaves those events out. Doctor counts an event as missing only when that
 version supports it.
 
 - **Marker.** The hooks run `amq wake dialog open|close`. Claude Code can
@@ -257,12 +258,17 @@ version supports it.
   ExitPlanMode, and on every `PermissionRequest`, and writes that dialog's
   entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the
   same two tools, which close only the entry of that tool call, and on
-  `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd`, which close
-  only entries of their own session: `Stop` and `UserPromptSubmit` its
-  main-thread entries, `SessionEnd` and a `SessionStart` from `startup` or
+  `UserPromptSubmit`, `Stop`, `SubagentStop`, `SessionStart`, and
+  `SessionEnd`. `SubagentStop` closes every entry of its `agent_id`. A
+  `SessionStart` from `clear` closes the entries its own host process
+  recorded under another session id, the session `/clear` replaced; with no
+  host on either side it closes nothing. The other events close only
+  entries of their own session: `Stop` its main-thread entries,
+  `UserPromptSubmit` every entry opened before it (a typed prompt proves no
+  dialog had focus), `SessionEnd` and a `SessionStart` from `startup` or
   `resume` (a new process) all of them; a `--resume` of the same session in
   a second terminal therefore also closes the first terminal's entries of
-  that session. An entry also records its host:
+  that session. `compact` and `fork` close nothing. An entry also records its host:
   the nearest of the hook's first three ancestors, each parent edge proven
   by its process start token, that runs Claude Code (an executable named
   `claude`, or a native install's `claude/versions/<version>`). A dialog
@@ -273,7 +279,8 @@ version supports it.
   pi, `amq coop exec`) keep the single file `.wake.dialog`. When a Claude
   Code dialog opens over that file, the file becomes the entry
   `legacy.json` in one atomic exchange, so the path is never absent, and
-  it keeps the single-file rules below. The directory goes with its last
+  it keeps the single-file rules below. A marker the Claude Code dialog hook
+  wrote closes by the rules above whether it is an entry or a single file. The directory goes with its last
   entry. The receiver exits 0 once its
   arguments parse and prints nothing, so it never decides a tool call or a
   permission. The marker is
@@ -323,8 +330,8 @@ version supports it.
 - **Hold after a permission dialog.** Permission hook input has no tool
   call id, so no hook of a tool call clears a permission marker: a call that
   Claude Code allows without asking, with the same tool and input, would
-  close a dialog that still shows. `UserPromptSubmit`, `Stop` and the
-  session events clear it, and so does the session transcript. While a
+  close a dialog that still shows. The events above clear it, and so does
+  the session transcript. While a
   permission dialog blocks a tool call, the main chain writes no new
   assistant message, because the model waits for the whole tool batch. At
   each recheck (every 2 seconds while the doorbell is held, on the input
@@ -348,12 +355,12 @@ version supports it.
   `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
   no symbolic link, found exactly once across those depths; none, several, or
   an unreadable file is no proof. A subagent can outlive the main thread's
-  turn, so the main thread's `Stop`, `UserPromptSubmit` and a `SessionStart`
-  from `clear`, `compact` or `fork` do not clear its entry, and a later
-  dialog's open writes its own entry beside it. It clears on its
-  proof, on `SessionEnd`, or on a `SessionStart` from `startup` or `resume`,
-  which is a new Claude Code process that cannot show the old one's
-  dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
+  turn, so the main thread's `Stop` and a `SessionStart` from `compact` or
+  `fork` do not clear its entry, and a later dialog's open writes its own
+  entry beside it. It clears on its proof, on its own `SubagentStop`, on a
+  typed prompt, on `SessionEnd`, on a `SessionStart` from `startup` or
+  `resume`, which is a new Claude Code process that cannot show the old
+  one's dialog, or on the `clear` that replaced its session. A doorbell that would land mid-turn after a
   permission dialog lands once the turn moves on, the turn ends, or the
   person types.
 - **AskUserQuestion and ExitPlanMode.** An entry that the call's own
@@ -364,8 +371,9 @@ version supports it.
   exchange that turns a single file into entries, the single file stays:
   the new dialog's marker replaces it, except that a tool call's marker
   keeps a present marker without a tool call id. Esc on such a dialog runs no hook, but  Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
-  rejected tool use") to the session transcript at once. The marker keeps
-  the hook's `transcript_path`. At each recheck the wake reads, read-only, at
+  rejected tool use") to the session transcript at once, or for a
+  subagent's call to its `agent_transcript_path` when the hook gave one.
+  The marker keeps both paths. At each recheck the wake reads, read-only, at
   most the last 256 KiB of that file (a regular file, no symlink followed),
   and removes the marker when the tail holds a `tool_result` for the
   marker's tool call id. It removes it under the marker lock, without

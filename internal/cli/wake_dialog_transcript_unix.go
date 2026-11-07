@@ -54,7 +54,8 @@ type claudeTranscriptBlock struct {
 }
 
 // claudeDialogAnswered reports whether the transcript the marker names
-// proves its dialog gone: a tool_result for the marker's tool_use_id, or for
+// proves its dialog gone: a tool_result for the marker's tool_use_id (in a
+// subagent's own transcript when the marker names one), or for
 // a permission marker (claudePermissionMarker) a new assistant message of
 // its own chain after it opened (claudeTurnMovedOn): the main chain, or for
 // a subagent's marker only that subagent's transcript. Any other marker is
@@ -103,7 +104,11 @@ func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read c
 		}
 		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), true), nil
 	}
-	tail, err := read(marker.TranscriptPath)
+	path := marker.TranscriptPath
+	if marker.AgentID != "" && marker.AgentTranscriptPath != "" {
+		path = marker.AgentTranscriptPath
+	}
+	tail, err := read(path)
 	if err != nil {
 		return false, err
 	}
@@ -134,9 +139,7 @@ var claudeTranscriptNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // claudeSubagentTranscript is the transcript of the marker's subagent: its
 // agent_transcript_path when the hook gave one, else the path Claude Code
-// builds beside the session transcript <dir>/<session_id>.jsonl, read from
-// its strings `i(yee(),G(),"subagents")` and
-// `n=e?i(Zmt(),e):Zmt();return i(n,`agent-${t}.jsonl`)`:
+// lays out beside the session transcript <dir>/<session_id>.jsonl:
 // <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one or two
 // subdirectories deeper (a workflow's subagents write to
 // subagents/workflows/<wf>/). Invariant: the proof reads only a regular

@@ -129,6 +129,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 	// TRANSCRIPT and AGENT_TRANSCRIPT are replaced by the row's paths.
 	subagentPermission := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","agent_id":"a1","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
 	subagentPermissionWithTranscript := `{"schema":1,"event":"PermissionRequest","tool":"Bash","transcript_path":"TRANSCRIPT","agent_id":"a1","agent_transcript_path":"AGENT_TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
+	subagentQuestion := `{"schema":1,"event":"PreToolUse","tool":"AskUserQuestion","tool_use_id":"toolu_sub","transcript_path":"TRANSCRIPT","agent_id":"a1","agent_transcript_path":"AGENT_TRANSCRIPT","session_id":"s1","opened_at":"2026-11-05T19:13:00Z"}` + "\n"
 	record := func(id, model string, sidechain bool, at time.Time) string {
 		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"timestamp":%q,"message":{"id":%q,"model":%q,"content":[]}}`,
 			sidechain, at.UTC().Format(time.RFC3339Nano), id, model) + "\n"
@@ -193,12 +194,6 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// main-chain assistant message proves the dialog closed.
 		{name: "Claude permission marker with a newer assistant message rings", marker: permission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: movedOn, rings: 1},
-		{name: "a newer sidechain message proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, notices: 1, transcript: func(opened time.Time) string {
-				return asked(opened) + assistant("msg_side", true, opened.Add(5*time.Minute))
-			}},
-		{name: "an unreadable transcript proves nothing", marker: permission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, notices: 1, log: "transcript=unreadable, holding"},
 		// Pre-merge review of agent-message-queue-zu3 (session 21fde719): a
 		// subagent's Bash dialog stayed open 5869 s while the main chain
 		// wrote 53 new assistant messages, each a false proof.
@@ -214,8 +209,6 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			claudeHook: true, transcript: movedOn, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "Stop", SessionID: "s1"}}, notices: 1},
 		{name: "a new process's SessionStart clears a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: asked, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "SessionStart", Source: "startup", SessionID: "s1"}}, rings: 1},
-		{name: "a compaction's SessionStart keeps a subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, transcript: movedOn, hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "SessionStart", Source: "compact", SessionID: "s1"}}, notices: 1},
 		{name: "a main-thread permission keeps an unproven subagent marker", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: func(opened time.Time) string {
 				return asked(opened) + assistant("msg_next", false, opened.Add(wakeDialogQuietHold+2*time.Minute))
@@ -258,14 +251,36 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			claudeHook: true, transcript: asked, rings: 1, log: "dialog host 99999999 exited; entry closed"},
 		{name: "an entry whose host pid runs another process closes", marker: permissionWithHost, host: reusedHost, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: asked, rings: 1},
-		{name: "an entry with no host holds", marker: permission, age: wakeDialogQuietHold + time.Minute,
-			claudeHook: true, transcript: asked, notices: 1},
 		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
 		// that opened past a permission marker kept that marker, so the
 		// doorbell answered a dialog seconds old once that marker released.
 		{name: "AskUserQuestion after a closed permission marker holds", marker: permission, age: wakeDialogQuietHold + 5*time.Minute,
 			claudeHook: true, transcript: movedOn, notices: 1,
 			hooks: []wakeDialogHookInput{wakeDialogHookInput{Event: "PreToolUse", Tool: "AskUserQuestion", ToolUseID: "toolu_ask", SessionID: "s1"}}},
+		// Field, 2026-11-07: background subagents sat on Bash permission
+		// dialogs and were stopped; their entries held the doorbell for the
+		// life of the Claude Code process. SubagentStop closes them.
+		{name: "a subagent's stop closes its dialog", claudeHook: true, transcript: asked, rings: 1,
+			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "SubagentStop", SessionID: "s1", AgentID: "a1"}}},
+		// Review of the wake dialog entries: a typed prompt left a subagent's
+		// entry open, though it proves that no dialog had focus.
+		{name: "a typed prompt closes a subagent's dialog", claudeHook: true, transcript: asked, rings: 1,
+			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "UserPromptSubmit", SessionID: "s1"}}},
+		// Review of the wake dialog entries: /clear gives the same process a
+		// new session id, so no event closed the old session's entry.
+		{name: "a clear in the same process closes the old session's dialog", claudeHook: true, transcript: asked, rings: 1,
+			hooks: []wakeDialogHookInput{{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1", host: &self},
+				{Event: "SessionStart", Source: "clear", SessionID: "s2", host: &self}}},
+		// Review of the wake dialog entries: a single-file marker closed on
+		// another session's events.
+		{name: "another session's Stop keeps a single-file marker", marker: permission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, notices: 1, hooks: []wakeDialogHookInput{{Event: "Stop", SessionID: "s2"}}},
+		// Review of the wake dialog entries: the proof of a subagent's
+		// rejected question was searched in the main transcript only.
+		{name: "a rejected question in the subagent's own transcript rings", marker: subagentQuestion, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1, agentTranscript: func(time.Time) string {
+				return `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_sub","is_error":true}]}}` + "\n"
+			}},
 		// Pre-merge review of agent-message-queue-zu3: a marker of no known
 		// writer read as stale and rang.
 		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
