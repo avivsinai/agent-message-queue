@@ -703,7 +703,7 @@ func (s *Server) mirrorFacts(c *mirrorClaim, name string, b binding.Binding, tur
 	if c.Buzz {
 		turn.AnsweredBuzz()
 	}
-	c.Buzz = turn.Cause == mirror.CauseBuzz
+	c.Buzz = c.Buzz || turn.Cause == mirror.CauseBuzz
 }
 
 // mirrorRepliedToBuzz reports whether the buzz inbox of a mailbox binding's
