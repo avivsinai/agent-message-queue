@@ -197,7 +197,14 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	};
 	const begin = (ctx: ExtensionContext, identity: AmqIdentity) => {
 		bridge = start(pi, ctx, options, identity, ownerNotice, displaced);
-		if (bridge) scanSafely(pi, bridge);
+		if (!bridge) return;
+		// A pi that takes over while its own prompt is open holds the
+		// doorbell for that prompt from now on.
+		if (openPrompts > 0 && !written && outerPrompt) {
+			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
+			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge.sessionId);
+		}
+		scanSafely(pi, bridge);
 	};
 	// serve starts the bridge for identity, or waits while another live
 	// bridge holds the mailbox.
@@ -208,7 +215,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		if (!held) return begin(ctx, identity);
 		if (!held.stale && !ownerNotice.shown) {
 			ownerNotice.shown = true;
-			notify(ctx, `amq-bridge inactive: another live pi bridge (pid ${held.pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
+			notify(ctx, `amq-bridge inactive: another live pi bridge${typeof held.pid === "number" ? ` (pid ${held.pid})` : ""} serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
 		}
 		let seen: { key: string; at: number } | null = null;
 		waiting = setInterval(() => {
@@ -269,6 +276,8 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// marker follows one count of open prompts, which does not depend on
 	// order: it exists exactly while the count is above zero.
 	let openPrompts = 0;
+	// outerPrompt is the kind and title of the outermost open prompt.
+	let outerPrompt: { kind: string; title: string } | null = null;
 	// Opening a marker is gated on serving(); closing one is not. written
 	// holds the bytes of the marker this process last wrote, "" when none
 	// may stand. That marker is closed at prompt end and at every session
@@ -297,13 +306,16 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
-		if (++openPrompts === 1 && serving()) {
-			openMarker(WAKE_DIALOG_PROMPT, event.kind);
-			openRemoteDialog(who(), event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
+		if (++openPrompts !== 1) return;
+		outerPrompt = { kind: event.kind, title: (event as { title?: string }).title ?? "" };
+		if (serving()) {
+			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
+			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
 		if (--openPrompts <= 0) {
+			outerPrompt = null;
 			closeMarker();
 			closeRemoteDialog();
 		}
@@ -311,6 +323,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("session_start", (_event, ctx) => {
 		openPrompts = 0;
+		outerPrompt = null;
 		closeRemoteDialog();
 		stopWaiting();
 		stop(bridge, "restart");
@@ -332,6 +345,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
+		outerPrompt = null;
 		closeMarker();
 		closeRemoteDialog();
 		stopWaiting();
@@ -520,16 +534,29 @@ function retire(b: Bridge): void {
 // on every write. It is null when the record is absent, unreadable, or not
 // live; such a mailbox is free.
 function holderOf(dir: string): { pid: unknown; stale: boolean; key: string } | null {
+	const file = path.join(dir, "bridge.liveness");
+	let mtime: number;
+	let text: string;
 	try {
-		const file = path.join(dir, "bridge.liveness");
-		const mtime = fs.statSync(file).mtimeMs;
-		const text = fs.readFileSync(file, "utf8");
-		const rec = JSON.parse(text);
-		if (rec?.protocol !== PROTOCOL || rec.live !== true) return null;
-		return { pid: rec.pid, stale: Date.now() - mtime >= OWNER_STALE_MS, key: `${mtime}:${text}` };
-	} catch {
-		return null;
+		mtime = fs.statSync(file).mtimeMs;
+		text = fs.readFileSync(file, "utf8");
+	} catch (err) {
+		// Only a missing record frees the mailbox; a record that cannot be
+		// read now may be a live holder's.
+		return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : { pid: undefined, stale: false, key: "" };
 	}
+	// A clock step can put the mtime ahead of now; one more than
+	// OWNER_STALE_MS ahead is stale too.
+	const age = Date.now() - mtime;
+	const stale = age >= OWNER_STALE_MS || -age > OWNER_STALE_MS;
+	let rec: { protocol?: unknown; live?: unknown; pid?: unknown };
+	try {
+		rec = JSON.parse(text);
+	} catch {
+		return { pid: undefined, stale, key: `${mtime}:${text}` };
+	}
+	if (rec?.protocol !== PROTOCOL || rec.live !== true) return null;
+	return { pid: rec.pid, stale, key: `${mtime}:${text}` };
 }
 
 // livenessOf is the generation and pid the liveness record names, or null

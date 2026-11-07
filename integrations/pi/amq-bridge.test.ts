@@ -405,6 +405,27 @@ test("a displaced pi's prompt end leaves the serving pi's marker that replaced i
 	}
 });
 
+// Review of dialog ownership: a pi that took over during its own open prompt served with no marker, so the doorbell could type into the prompt.
+test("a pi that takes over during its own open prompt holds the doorbell for it", async () => {
+	const h = harness();
+	const live = path.join(h.dir, "bridge.liveness");
+	const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+	fs.mkdirSync(h.dir, { recursive: true });
+	fs.writeFileSync(live, JSON.stringify(other));
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		assert.equal(fs.existsSync(marker), false); // held off: not this pi's doorbell yet
+		fs.writeFileSync(live, JSON.stringify({ ...other, live: false })); // the holder exits
+		for (let i = 0; i < 150 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).kind, "confirm");
+	} finally {
+		await h.done();
+	}
+});
+
 // Review of pi admission evidence: a short receipt write was published and handed to pi.
 test("a receipt cut short by a short write is never published; the retry publishes it whole", async () => {
 	const h = harness();
