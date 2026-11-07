@@ -168,14 +168,9 @@ func TestMaintainWakeSelfUpgradeProceedsAfterUnfinishableRestartRequest(t *testi
 				t.Fatal(err)
 			}
 			defer cleanup()
-			response := sendDarwinOwnerControlRequest(t, fixture.root, fixture.agent, fixture.lock.Lock, wakeControlOwnerRequest{
-				Generation: fixture.record.Generation,
-				RequestID:  fixture.record.RequestID,
-				Owner:      &fixture.record.Owner,
-				Operation:  wakeControlRestartOperation,
-			})
-			if !strings.Contains(response, "test owner unknown") {
-				t.Fatalf("restart response = %q, want the refusal reason", response)
+			err = notifyWakeRestartRequest(fixture.agentDir, inspectWakeLock(fixture.root, fixture.agent), record)
+			if err == nil || !strings.Contains(err.Error(), "test owner unknown") {
+				t.Fatalf("restart notify error = %v, want the refusal reason", err)
 			}
 		},
 		"requester exited": func(t *testing.T, fixture wakeRestartFixture) {

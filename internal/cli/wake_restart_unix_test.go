@@ -325,6 +325,42 @@ func TestWakeRestartRejectsRegisteredOwnerlessInjectViaBeforeSignal(t *testing.T
 	assertWakeCheckTreeUnchanged(t, fixture.root, before)
 }
 
+// Review of the restart release: adoption kept the publisher as requester, so
+// once the publisher exited, self-upgrade retired a request the adopting
+// `amq wake restart` was still waiting on.
+func TestWakeRestartAdoptionRecordsTheNewRequester(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	publisher := fixture.owner
+	publisher.PID++
+	record := fixture.record
+	record.Requester = &publisher
+	if err := withWakeMutationScopeInDir(fixture.agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldNotify := wakeRestartNotify
+	var stored wakeRestartRecord
+	wakeRestartNotify = func(agentDir *wakeAgentDir, _ wakeLockInspection, _ wakeRestartRecord) error {
+		if err := agentDir.withFD(func(dirfd int) error {
+			var err error
+			stored, _, err = readWakeRestartRecordAt(dirfd, agentDir)
+			return err
+		}); err != nil {
+			return err
+		}
+		return os.ErrDeadlineExceeded
+	}
+	t.Cleanup(func() { wakeRestartNotify = oldNotify })
+
+	if _, err := requestWakeRestart(fixture.root, fixture.agent); err == nil {
+		t.Fatal("restart client succeeded without a wake")
+	}
+	if orphaned, reason := wakeRestartRequestOrphaned(stored); stored.RequestID != record.RequestID || orphaned {
+		t.Fatalf("adopted request = %#v, orphaned=%v (%s)", stored, orphaned, reason)
+	}
+}
+
 func TestWakeRestartClientWaitsForPreparedRequestConsumption(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)

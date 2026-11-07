@@ -368,6 +368,13 @@ func HolderOf(pid int) (HolderIdentity, error) {
 	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID, PIDNamespace: pidNamespace()}, nil
 }
 
+// LocalHolder is a recorded process identity that was read in this process's
+// pid namespace, for a caller whose record carries no namespace and checks it
+// with InspectHolder or ProcessRunsUnder.
+func LocalHolder(pid int, processStart, bootID string) HolderIdentity {
+	return HolderIdentity{PID: pid, ProcessStart: processStart, BootID: bootID, PIDNamespace: pidNamespace()}
+}
+
 // ProcessStartUnix is the wall-clock second the holder's process started.
 func ProcessStartUnix(h HolderIdentity) (int64, error) {
 	return processStartUnix(h.ProcessStart)
