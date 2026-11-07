@@ -41,8 +41,10 @@ const (
 )
 
 var (
-	sha256HexRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	blossomURLRe = regexp.MustCompile(`https://[^\s/"'<>]+/[0-9a-f]{64}(?:\.[A-Za-z0-9]+)?`)
+	sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// httpsURLRe finds the https URLs of an event's text; blobSHA decides
+	// which of them name a blob.
+	httpsURLRe = regexp.MustCompile(`https://[^\s"'<>]+`)
 	// imageExts are the stored extensions, in the order a stored file is
 	// looked up by its sha256.
 	imageExts = []string{"png", "jpg", "gif", "webp", "heic"}
@@ -86,7 +88,7 @@ func attachImages(root, prompt string) string {
 }
 
 // promptMedia lists the files of the prompt's Buzz event: its imeta tags, or,
-// when it has none, the Blossom URLs on the relay's host in the event.
+// when it has none, the Blossom URLs on the agent's relay in the event.
 func promptMedia(prompt string) []eventMedia {
 	evt := buzzEvent(prompt)
 	if evt == "" {
@@ -131,8 +133,8 @@ func promptMedia(prompt string) []eventMedia {
 	if len(media) > 0 {
 		return media
 	}
-	for _, raw := range blossomURLRe.FindAllString(evt, -1) {
-		if onRelay(raw) && !seen[raw] {
+	for _, raw := range httpsURLRe.FindAllString(evt, -1) {
+		if onRelay(raw) && blobSHA(raw) != "" && !seen[raw] {
 			seen[raw] = true
 			media = append(media, eventMedia{url: raw})
 		}
@@ -165,13 +167,15 @@ func urlPort(u *url.URL) string {
 	return ""
 }
 
-// blobSHA is the sha256 a Blossom URL names its blob by, or "".
+// blobSHA is the sha256, in lower case, that a Blossom URL names its blob
+// by in its last path segment, `<sha256>[.<ext>]`, or "".
 func blobSHA(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
 	}
 	sha, _, _ := strings.Cut(path.Base(u.Path), ".")
+	sha = strings.ToLower(sha)
 	if !sha256HexRe.MatchString(sha) {
 		return ""
 	}

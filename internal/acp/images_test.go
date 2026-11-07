@@ -85,9 +85,12 @@ func TestAttachImagesRefusesAnImageOverTheCap(t *testing.T) {
 	}
 }
 
-// Review of the image refusals: each refusal is one valid UTF-8 line, a
-// cached file is found only by the sha256 its Blossom URL names, and only
-// the relay's own port is the relay.
+// Review of the pi and images code, findings 8 and 9 and the relay port
+// note: each refusal is one valid UTF-8 line, a cached file is found only by
+// the sha256 its Blossom URL names, and only the relay's own port is the
+// relay. Review round 1, findings 3 and 4: a link in the real Buzz media
+// form, without imeta and with upper-case hex, is found too. A row without
+// a type has no imeta tag.
 func TestAttachImagesRefusesOnOneLine(t *testing.T) {
 	saved := buzzRelayURL
 	t.Cleanup(func() { buzzRelayURL = saved })
@@ -103,6 +106,8 @@ func TestAttachImagesRefusesOnOneLine(t *testing.T) {
 			"[image not attached: " + named + ".png: its sha256 does not match its URL]"},
 		{"another port of the relay host is not the relay", "https://relay.example:8443/" + named + ".png", "image/png", "",
 			"[image not attached: " + named + ".png: it is not on this agent's relay]"},
+		{"a media link without imeta is attached", "https://relay.example/media/" + strings.ToUpper(declared) + ".png", "", "",
+			"[image: {dir}/" + declared + ".png]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := canonicalTempDir(t)
@@ -116,16 +121,20 @@ func TestAttachImagesRefusesOnOneLine(t *testing.T) {
 				t.Fatal(err)
 			}
 			prompt := mediaPrompt(tc.url, tc.mime, tc.sha, 100)
+			if tc.mime == "" {
+				prompt = "<buzz-event type=\"@mention\">\nContent: what is this? " + tc.url + "\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
+			}
+			want := strings.ReplaceAll(tc.want, "{dir}", dir)
 			got, ok := strings.CutPrefix(attachImages(root, prompt), strings.TrimRight(prompt, "\n")+"\n\n")
-			if !ok || strings.Contains(got, "\n") || !utf8.ValidString(got) || (tc.want != "" && got != tc.want) {
-				t.Fatalf("lines = %q, want one valid line %q", got, tc.want)
+			if !ok || strings.Contains(got, "\n") || !utf8.ValidString(got) || (want != "" && got != want) {
+				t.Fatalf("lines = %q, want one valid line %q", got, want)
 			}
 		})
 	}
 }
 
-// Review of the download cap: a media get is stopped once its output passes
-// the file cap, instead of buffering until the CLI exits.
+// Review of the pi and images code, finding 1: a media get is stopped once
+// its output passes the file cap, instead of buffering until the CLI exits.
 func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("needs a POSIX shell")
@@ -144,7 +153,15 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 	root, prompt := canonicalTempDir(t), imagePrompt("https://relay.example/"+sha+".png", sha, 100)
 	done := make(chan string, 1)
 	go func() { done <- attachImages(root, prompt) }()
+	// Only a CLI the test gave up on is still running; a returned run was
+	// reaped, and its pid may belong to another process by now.
+	timedOut := false
 	t.Cleanup(func() {
+		if !timedOut {
+			<-done
+			buzzIdentity, buzzRelayURL = savedID, savedRelay
+			return
+		}
 		if raw, err := os.ReadFile(pidFile); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
 				if p, err := os.FindProcess(pid); err == nil {
@@ -162,6 +179,7 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 			t.Fatalf("prompt ends %q, want the cap refusal", got[max(0, len(got)-120):])
 		}
 	case <-time.After(5 * time.Second):
+		timedOut = true
 		t.Fatal("the download ran on past the cap")
 	}
 }
