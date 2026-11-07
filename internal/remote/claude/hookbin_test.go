@@ -33,3 +33,34 @@ func TestHookBinaryKeepsTheSymlinkBesideTheProgram(t *testing.T) {
 		t.Fatalf("HookBinary = %q, %v; want %s", got, err, filepath.Join(bin, "amq-remote"))
 	}
 }
+
+// Review of the hook binary resolver: a sibling beside the started path
+// that points at an older version won over the one beside the running
+// binary.
+func TestSiblingBinaryIgnoresAStartedSiblingOfAnotherVersion(t *testing.T) {
+	base := t.TempDir()
+	bin, oldDir, newDir := filepath.Join(base, "bin"), filepath.Join(base, "Cellar", "1"), filepath.Join(base, "Cellar", "2")
+	for _, dir := range []string{bin, oldDir, newDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{filepath.Join(newDir, "amq-acp"), filepath.Join(newDir, "amq-remote"), filepath.Join(oldDir, "amq-remote")} {
+		if err := os.WriteFile(path, nil, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(newDir, "amq-acp"), filepath.Join(bin, "amq-acp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(oldDir, "amq-remote"), filepath.Join(bin, "amq-remote")); err != nil {
+		t.Fatal(err)
+	}
+	saved := executable
+	t.Cleanup(func() { executable = saved })
+	executable = func() (string, error) { return filepath.Join(bin, "amq-acp"), nil }
+	want, _ := filepath.EvalSymlinks(filepath.Join(newDir, "amq-remote"))
+	if got, err := SiblingBinary("amq-remote"); err != nil || got != want {
+		t.Fatalf("SiblingBinary = %q, %v; want %s", got, err, want)
+	}
+}

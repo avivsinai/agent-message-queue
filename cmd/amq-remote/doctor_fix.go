@@ -49,11 +49,6 @@ func doctorFix(root, stateDir string, all []binding.Binding, fail reportFunc) []
 	return fixed
 }
 
-// formFlagged reports whether doctor flags an installed hook's form.
-func formFlagged(form string) bool {
-	return form == claude.HookFormStale || form == claude.HookFormUngated
-}
-
 // fixHooks installs or migrates the AMQ hooks doctor flags in each Claude
 // settings file it checks.
 func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, subject, what string), fail reportFunc) {
@@ -75,12 +70,12 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 	}
 	for _, path := range claudeSettingsFiles(stateDir, all) {
 		if state, err := claude.PermissionHookState(path); err == nil {
-			if form, _ := claude.PermissionHookForm(home, path); state == claude.HookMissing || formFlagged(form) {
+			if form, _ := claude.PermissionHookForm(home, path); state == claude.HookMissing || claude.FormFlagged(form) {
 				ensure(path, "approval hook (PermissionRequest)", func() (bool, error) { return claude.EnsurePermissionHook(home, path, bin) })
 			}
 		}
 		if state, err := claude.StopHookStateAt(path); err == nil {
-			if form, _ := claude.StopHookForm(home, path); native && state == claude.HookMissing || state != claude.HookMissing && formFlagged(form) {
+			if form, _ := claude.StopHookForm(home, path); native && state == claude.HookMissing || state != claude.HookMissing && claude.FormFlagged(form) {
 				ensure(path, "Stop hook", func() (bool, error) { return claude.EnsureStopHook(home, path, bin) })
 			}
 		}

@@ -839,15 +839,14 @@ read them.
 one `FIXED <link> <subject>: <what>` line per change (`fixed` in JSON). Each
 step is idempotent: a second run changes nothing.
 
-- In the settings file the environment names (created when missing) and in
-  every settings file the hook check reads, it installs or migrates the
-  approval hook, the Stop hook (where native mode needs it, or to migrate an
-  installed one) and the wake dialog guard. A hook in the current form keeps
-  its binary and wait. The hooks run the `amq-remote` and `amq` on PATH when
-  those are the installed binaries, so an upgrade keeps them working.
-- With a Codex home, it installs or migrates the Codex wake dialog guard in
-  `$CODEX_HOME/hooks.json` and prints the trust step: Codex runs a new or
-  changed hook only after you trust it in `/hooks`.
+- In every settings file the hook check reads (the one the environment names
+  only when its directory exists), it installs or migrates what the check
+  flags: the approval hook, the Stop hook (where native mode needs it, or to
+  migrate an installed one) and the wake dialog guard. It never installs a
+  hook the owner removed with its uninstall command. A repair keeps the
+  installed binary unless it is the versioned target of the stable path it
+  would write. The hooks run the `amq-remote` and `amq` on PATH when those
+  are the installed binaries, so an upgrade keeps them working.
 - While this machine has no machine agent, it writes the import file
   `~/Downloads/AMQ Remote machine.agent.json` with `amq-acp setup --machine`
   (which also writes the AMQ Remote harness that file names). Then in Buzz
@@ -976,10 +975,11 @@ this session stay in the terminal: the AMQ approval hook left <path> at
 removed any other way while the opt-in exists, Claude Code's `/hooks` menu
 included, comes back; the uninstall command is the way to stop it.
 A hook that is present in an older form (for example the approval hook with
-the 10-minute timeout) the agent upgrades as `doctor --fix` does, with or
-without an opt-in, unless the owner removed it with the uninstall command,
-and posts once: "The AMQ approval hook in <path> was an older form (changed
-<mtime>); upgraded."
+the 10-minute timeout) the agent upgrades as `doctor --fix` does while the
+opt-in for that file exists, and posts: "The AMQ approval hook in <path> was
+an older form (changed <mtime>); upgraded." With no opt-in it changes
+nothing and posts once per version of the file: "The AMQ approval hook in
+<path> is an older form (changed <mtime>). Run `amq-remote doctor --fix`."
 
 ### Turns in the session's channel
 

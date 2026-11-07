@@ -553,6 +553,12 @@ func PermissionHookForm(home, settings string) (string, error) {
 	})
 }
 
+// FormFlagged reports whether doctor flags an installed hook's form, so
+// doctor --fix and the machine agent upgrade it.
+func FormFlagged(form string) bool {
+	return form == HookFormStale || form == HookFormUngated
+}
+
 // hookForm compares the one marked group of spec's chain with the group
 // render builds from its command, nil when the command does not parse.
 func hookForm(path string, spec hookSpec, render func(cmd string) []byte) (string, error) {

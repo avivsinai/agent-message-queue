@@ -24,7 +24,8 @@ import (
 // native session, the Stop hook), the agent puts the hook back through the
 // locked settings writer while the owner's opt-in for that file exists, and
 // says so once in the session's channel. A hook of an older form it
-// upgrades as doctor --fix does, unless the owner removed it, and says so; with no opt-in it only says, once
+// upgrades as doctor --fix does while the opt-in exists, and says so, else
+// says once that doctor --fix upgrades it; with no opt-in it only says, once
 // per change, that the session's approvals (or native turns) now stay in
 // the terminal. A removal the owner made with the uninstall commands clears
 // the opt-in, so it stays removed.
@@ -105,11 +106,14 @@ func statSettings(path string) os.FileInfo {
 
 // Lines the machine agent posts about a hook that left a settings file.
 const (
-	hookRestoredLine  = "The AMQ %s hook was missing from %s (changed %s); restored."
-	hookUpgradedLine  = "The AMQ %s hook in %s was an older form (changed %s); upgraded."
-	approvalLostLine  = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
-	restoreFailedLine = " The restore failed: %v"
-	stopLostLine      = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
+	hookRestoredLine   = "The AMQ %s hook was missing from %s (changed %s); restored."
+	hookUpgradedLine   = "The AMQ %s hook in %s was an older form (changed %s); upgraded."
+	hookOldFormLine    = "The AMQ %s hook in %s is an older form (changed %s). Run `amq-remote doctor --fix`."
+	upgradeFailedLine  = " The upgrade failed: %v"
+	hookUnreadableLine = "Cannot read %s to check the AMQ %s hook: %v. Run `amq-remote doctor`."
+	approvalLostLine   = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
+	restoreFailedLine  = " The restore failed: %v"
+	stopLostLine       = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
 )
 
 // checkHooks handles one settings file that changed: the approval hook for
@@ -150,26 +154,35 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		}
 		state, err := h.state(path)
 		if err != nil {
+			if s.warnOnce(path, h.kind, info) {
+				post(fmt.Sprintf(hookUnreadableLine, path, h.name, err))
+			}
 			continue
 		}
 		if state != claude.HookMissing {
 			// A hook of an older form is upgraded as doctor --fix does it,
-			// unless the owner removed it.
-			if form, _ := h.form(home, path); form != claude.HookFormStale && form != claude.HookFormUngated {
+			// while the owner's opt-in exists; else it is reported once.
+			if form, _ := h.form(home, path); !claude.FormFlagged(form) {
 				continue
 			}
+			upgraded := false
 			bin, err := remoteExecutable()
-			if err != nil {
-				continue
+			if err == nil {
+				upgraded, err = claude.UpgradeHook(home, path, h.kind, bin)
+				if errors.Is(err, claude.ErrSettingsBusy) {
+					delete(s.machine.settings, path)
+					return
+				}
 			}
-			upgraded, err := claude.UpgradeHook(home, path, h.kind, bin)
-			if errors.Is(err, claude.ErrSettingsBusy) {
-				delete(s.machine.settings, path)
-				return
-			}
-			if err == nil && upgraded {
+			switch {
+			case err == nil && upgraded:
 				restoredAny = true
 				post(fmt.Sprintf(hookUpgradedLine, h.name, path, changed))
+			case err == nil || !s.warnOnce(path, h.kind, info):
+			case errors.Is(err, claude.ErrNoOptIn):
+				post(fmt.Sprintf(hookOldFormLine, h.name, path, changed))
+			default:
+				post(fmt.Sprintf(hookOldFormLine, h.name, path, changed) + fmt.Sprintf(upgradeFailedLine, err))
 			}
 			continue
 		}

@@ -22,18 +22,20 @@ func HookBinary(name string) (string, error) {
 // executable is os.Executable; tests replace it.
 var executable = os.Executable
 
-// SiblingBinary is the program name beside the running program as it was
-// started (a PATH directory such as a Homebrew bin keeps that path across
-// upgrades), else beside its resolved path, else the one on PATH.
+// SiblingBinary is the program name beside the running program's resolved
+// path, else on PATH. The one beside the program as it was started (a
+// Homebrew bin symlink, which keeps its path across upgrades) stands in for
+// it when that one resolves into the same directory.
 func SiblingBinary(name string) (string, error) {
 	if self, err := executable(); err == nil {
-		dirs := []string{filepath.Dir(self)}
 		if real, err := filepath.EvalSymlinks(self); err == nil {
-			dirs = append(dirs, filepath.Dir(real))
-		}
-		for _, dir := range dirs {
-			if path := filepath.Join(dir, name); installedFile(path) {
-				return path, nil
+			resolved := filepath.Join(filepath.Dir(real), name)
+			if installedFile(resolved) {
+				started := filepath.Join(filepath.Dir(self), name)
+				if target, err := filepath.EvalSymlinks(started); err == nil && filepath.Dir(target) == filepath.Dir(real) {
+					return started, nil
+				}
+				return resolved, nil
 			}
 		}
 	}

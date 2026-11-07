@@ -103,9 +103,13 @@ func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, 
 // parentWatch reports, on each call, whether the process that started the
 // hook is gone: the hook was reparented, or that pid no longer runs. A
 // Claude process killed without a signal (SIGKILL, a crash) sends the hook
-// no TERM.
+// no TERM. A hook started already orphaned (ppid 1 or less) has no parent
+// to watch: nil.
 func parentWatch() func() bool {
 	ppid := os.Getppid()
+	if ppid <= 1 {
+		return nil
+	}
 	return func() bool {
 		if os.Getppid() != ppid {
 			return true

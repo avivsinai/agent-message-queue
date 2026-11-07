@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -272,12 +271,33 @@ func OptInPermissionHook(home, settings, bin string) (bool, error) {
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), false, settingsLockWait)
+	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), optInInstall, settingsLockWait)
 }
 
 // OptInStopHook is OptInPermissionHook for the Stop hook.
 func OptInStopHook(home, settings, bin string) (bool, error) {
-	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), false, settingsLockWait)
+	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), optInInstall, settingsLockWait)
+}
+
+// optInMode is what optIn requires of the owner's opt-in before it writes.
+type optInMode int
+
+const (
+	optInInstall optInMode = iota // the owner installs: nothing
+	optInEnsure                   // a repair: the owner did not remove the hook
+	optInUpgrade                  // the machine agent: an opt-in of that kind exists
+)
+
+// ErrNoOptIn refuses the machine agent's upgrade of a hook the owner has
+// no opt-in for in that settings file.
+var ErrNoOptIn = errors.New("the owner has no opt-in for this hook in this settings file")
+
+// has reports whether the opt-in of kind exists.
+func (in HookOptIn) has(kind string) bool {
+	if kind == HookApproval {
+		return in.Approval != nil
+	}
+	return in.Stop != nil
 }
 
 // ErrHookRemoved refuses to install a hook that the owner removed from that
@@ -288,16 +308,19 @@ var ErrHookRemoved = errors.New("the owner removed this hook with its uninstall 
 // and records the opt-in of kind for bin, under one lock. With ensure set it
 // refuses with ErrHookRemoved when the owner removed that hook. It waits
 // for the lock at most wait (ErrSettingsBusy).
-func optIn(settings, kind, bin string, spec hookSpec, entry []byte, ensure bool, wait time.Duration) (bool, error) {
+func optIn(settings, kind, bin string, spec hookSpec, entry []byte, mode optInMode, wait time.Duration) (bool, error) {
 	changed := false
 	err := withSettingsLockWait(settings, wait, func() error {
-		if ensure {
+		if mode != optInInstall {
 			in, err := ReadHookOptIn(settings)
 			if err != nil {
 				return err
 			}
 			if in.Removed(kind) {
 				return ErrHookRemoved
+			}
+			if mode == optInUpgrade && !in.has(kind) {
+				return ErrNoOptIn
 			}
 		}
 		same, err := installedAs(settings, spec, entry)
@@ -375,29 +398,29 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 // with ErrHookRemoved a hook the owner removed. It reports whether it
 // changed the settings file.
 func EnsurePermissionHook(home, settings, bin string) (bool, error) {
-	return ensureHook(home, settings, HookApproval, bin, settingsLockWait)
+	return ensureHook(home, settings, HookApproval, bin, optInEnsure, settingsLockWait)
 }
 
 // EnsureStopHook is EnsurePermissionHook for the Stop hook.
 func EnsureStopHook(home, settings, bin string) (bool, error) {
-	return ensureHook(home, settings, HookStop, bin, settingsLockWait)
+	return ensureHook(home, settings, HookStop, bin, optInEnsure, settingsLockWait)
 }
 
 // UpgradeHook is EnsurePermissionHook (kind HookApproval) or EnsureStopHook
-// that waits for the file's lock at most settingsLockTry (ErrSettingsBusy),
-// for the machine agent's tick.
+// for the machine agent's tick: it acts only while the owner's opt-in of
+// that kind exists (ErrNoOptIn), never creates one, and waits for the
+// file's lock at most settingsLockTry (ErrSettingsBusy).
 func UpgradeHook(home, settings, kind, bin string) (bool, error) {
-	return ensureHook(home, settings, kind, bin, settingsLockTry)
+	return ensureHook(home, settings, kind, bin, optInUpgrade, settingsLockTry)
 }
 
-func ensureHook(home, settings, kind, bin string, wait time.Duration) (bool, error) {
-	spec, binRe, form := permissionSpec, permissionHookBinRe, PermissionHookForm
+func ensureHook(home, settings, kind, bin string, mode optInMode, wait time.Duration) (bool, error) {
+	spec, binRe := permissionSpec, permissionHookBinRe
 	if kind == HookStop {
-		spec, binRe, form = stopHook, stopHookBinRe, StopHookForm
+		spec, binRe = stopHook, stopHookBinRe
 	}
 	cmds, _ := installedCommands(settings, spec)
-	f, _ := form(home, settings)
-	bin = KeptHookBin(cmds, binRe, bin, f == HookFormCurrent)
+	bin = KeptHookBin(cmds, binRe, bin)
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
@@ -405,16 +428,15 @@ func ensureHook(home, settings, kind, bin string, wait time.Duration) (bool, err
 	if kind == HookStop {
 		entry = stopHookEntry(home, bin)
 	}
-	return optIn(settings, kind, bin, spec, entry, true, wait)
+	return optIn(settings, kind, bin, spec, entry, mode, wait)
 }
 
 // KeptHookBin is the binary that the installed hook commands all run, as
-// the first group of binRe names it, when they name one installed file and
-// either their form is current or that file is the one PATH finds for its
-// name; else bin. A repair keeps the binary an install chose, so two
-// installers never rewrite a file back and forth, and replaces an older
-// form's versioned path that an upgrade removes.
-func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string, current bool) string {
+// the first group of binRe names it, when they name one installed file;
+// else bin. A repair keeps the binary an install chose, so two installers
+// never rewrite a file back and forth, except the versioned target of bin
+// (bin is a stable symlink to it), which an upgrade removes: then bin.
+func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string) string {
 	found := ""
 	for _, command := range commands {
 		m := binRe.FindStringSubmatch(command)
@@ -427,19 +449,13 @@ func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string, current bo
 		}
 		found = got
 	}
-	if found == "" || !installedFile(found) || !current && !onPath(found) {
+	if found == "" || !installedFile(found) {
+		return bin
+	}
+	if target, err := filepath.EvalSymlinks(bin); err == nil && target == found && found != bin {
 		return bin
 	}
 	return found
-}
-
-// onPath reports whether path is the program PATH finds for its name.
-func onPath(path string) bool {
-	looked, err := exec.LookPath(filepath.Base(path))
-	if err == nil {
-		looked, err = filepath.Abs(looked)
-	}
-	return err == nil && looked == path
 }
 
 // installedFile reports whether path is an existing regular file.

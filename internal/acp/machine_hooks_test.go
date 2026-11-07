@@ -218,3 +218,30 @@ func TestMachineAgentUpgradesAnOldFormApprovalHook(t *testing.T) {
 		t.Fatalf("posts = %q; want one upgraded line", got)
 	}
 }
+
+// Review of the machine agent's upgrade: it rewrote an older-form hook and
+// recorded an opt-in the owner never gave. With no opt-in it only says,
+// once, that doctor --fix upgrades the hook.
+func TestMachineAgentOnlyReportsAnOldFormHookWithoutTheOptIn(t *testing.T) {
+	s, settings, _, posts := hookWatchSession(t, false)
+	tick(s, time.Now())
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Replace(raw, []byte(`claude permission-hook"`), []byte(`claude permission-hook --wait 600"`), 1)
+	if err := os.WriteFile(settings, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, time.Now())
+	tick(s, time.Now())
+	if got, _ := os.ReadFile(settings); !bytes.Equal(got, old) {
+		t.Fatalf("settings changed without an opt-in:\n%s", got)
+	}
+	if in, _ := claude.ReadHookOptIn(settings); in.Approval != nil {
+		t.Fatalf("opt-in created: %+v", in)
+	}
+	if got := posts(); len(got) != 1 || !strings.Contains(got[0], " is an older form ") || !strings.Contains(got[0], "amq-remote doctor --fix") {
+		t.Fatalf("posts = %q; want one older-form report", got)
+	}
+}

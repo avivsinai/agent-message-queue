@@ -1,8 +1,10 @@
 package claude
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +120,36 @@ func TestHookInstallKeepsTheSettingsFileMode(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
 		t.Fatalf("mode after install = %v, %v; want 0644", info.Mode().Perm(), err)
+	}
+}
+
+// Review of the kept hook binary: whether a repair kept the installed
+// binary depended on the process PATH, so a machine agent started without
+// it replaced a working stable install.
+func TestEnsureKeepsAnInstalledBinaryOffPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", filepath.Join(home, "empty"))
+	path := SettingsPath(home)
+	installed, other := filepath.Join(home, "opt", "amq-remote"), filepath.Join(home, "bin", "amq-remote")
+	for _, bin := range []string{installed, other} {
+		if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bin, nil, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := InstallPermissionHookAt(home, path, installed); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, bytes.Replace(raw, []byte(`claude permission-hook"`), []byte(`claude permission-hook --wait 600"`), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsurePermissionHook(home, path, other); err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _ := PermissionHookCommand(path); !strings.HasSuffix(cmd, "'"+installed+"' claude permission-hook") {
+		t.Fatalf("repaired hook %q; want it to keep %s", cmd, installed)
 	}
 }

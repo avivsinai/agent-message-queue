@@ -200,6 +200,7 @@ func TestInstallRefusesTrailingJSON(t *testing.T) {
 	}
 }
 
+// Review of the hookinstall preflight: an inner "hooks" of the wrong type must be refused, not edited around.
 func TestInstallCodexRefusesWrongTypeInnerHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "hooks.json")
