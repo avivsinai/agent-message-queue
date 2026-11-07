@@ -67,19 +67,6 @@ func owesCancel(rec *requests.Record) bool {
 	return rec.OwesCancel()
 }
 
-// owesAck reports whether the runtime is holding a result for us that we have
-// not released. This is the SECOND obligation — it is about a RESULT we have
-// not acknowledged, nothing else. Result != nil is what makes the digest
-// non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
-// owes nothing and is never re-driven — that closes the revision-churn bug
-// BY CONSTRUCTION.
-//
-// Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
-// Result is bound, compute the digest from Result).
-func owesAck(rec *requests.Record) bool {
-	return rec.OwesAck()
-}
-
 // shouldCompact rate-limits compaction to once per minute. Survives restarts
 // (time-interval, not tick-count). Returns false if compaction is disabled
 // (compactHorizon == 0).
@@ -293,16 +280,11 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if rec.AckDigest != "" && rec.Acknowledged {
 		return nil
 	}
-	// owesAck (Result != nil, AckDigest == "") describes the crash-gap case
-	// where the ack was never sent. But we also replay when AckDigest IS set
-	// but the ack didn't land (PointBeforeAck crash). So we cannot gate on
-	// owesAck alone — the Lookup below is the real gate (EvidenceNone means
-	// the ack already landed). owesAck is referenced here to document why
-	// computing the digest from Result is safe.
-	_ = owesAck(rec)
-	// The digest to acknowledge: if AckDigest was memo'd, use it. If not
-	// (crash between terminal commit and ack memo, owesAck is true), compute
-	// it from rec.Result — owesAck guarantees Result != nil.
+	// The digest to acknowledge is the memoed AckDigest, or, after a crash
+	// between the terminal commit and the memo, the digest of the bound
+	// Result. An empty digest means no result was retained, so nothing is
+	// owed. Whether the ack already landed is decided by the Lookup below
+	// (EvidenceNone), not here.
 	digest := rec.AckDigest
 	if digest == "" {
 		digest = protocol.EvidenceDigest(rec.Result)

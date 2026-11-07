@@ -233,7 +233,8 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	}
 	// Same reservation as a fresh admission: the room
 	// for the result is taken before dispatch, and released on every
-	// exit that does not reach the dispatching write. Storage full
+	// exit before the dispatching write. A failed write is the store's to
+	// settle: it may already be on disk, holding the room. Storage full
 	// leaves the busy tombstone as it was, still re-admittable.
 	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
 		e.mu.Unlock()
@@ -255,7 +256,6 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	// Cannot use commitLocked: crash-point ordering requires Update between
 	// PointBeforeDispatching and PointAfterDispatching.
 	if err := e.store.Update(rec); err != nil {
-		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
@@ -309,7 +309,6 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 		return protocol.Reply{}, err
 	}
 	if err := e.store.Create(rec); err != nil {
-		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		var r *protocol.Refusal
 		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {

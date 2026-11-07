@@ -7,6 +7,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 type drainResult struct {
@@ -91,7 +92,11 @@ func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutpu
 		}
 	}
 
-	if drainErr != nil {
+	// A failed receipt repair with nothing claimed still answers the drain:
+	// the empty result is printed and the repair error decides the exit code.
+	var repairErr *receipt.RepairError
+	repairOnly := len(items) == 0 && errors.As(drainErr, &repairErr) && drainErr == error(repairErr)
+	if drainErr != nil && !repairOnly {
 		var committed *fsq.CommittedDurabilityError
 		if errors.As(drainErr, &committed) {
 			return drainErr
@@ -105,10 +110,10 @@ func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutpu
 	if len(items) == 0 {
 		emitSiblingBacklogHintsIfInboxEmpty(root, me)
 		if jsonOutput {
-			return writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0})
+			return joinOutcomeErr(drainErr, writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0}))
 		}
 		// Silent for text mode when empty (hook-friendly)
-		return nil
+		return drainErr
 	}
 	return nil
 }

@@ -41,7 +41,35 @@ func drainInboxItemsWithClaimHook(
 	return items, err
 }
 
+// drainInboxItemsPinned first writes receipts that earlier claims still owe,
+// then claims new messages. Repair never returns items, so an already claimed
+// message is not delivered twice.
 func drainInboxItemsPinned(
+	deliveryRoot *fsq.DeliveryRoot,
+	root, me string,
+	includeBody bool,
+	limit int,
+	validator *headerValidator,
+	afterClaim func(string) error,
+) ([]inboxItem, error) {
+	repairErr := receipt.RepairPending(deliveryRoot, me)
+	items, err := claimInboxItemsPinned(deliveryRoot, root, me, includeBody, limit, validator, afterClaim)
+	return items, joinOutcomeErr(err, repairErr)
+}
+
+// joinOutcomeErr adds a later failure without wrapping a lone primary error,
+// so callers that classify the primary error still see it unchanged.
+func joinOutcomeErr(primary, later error) error {
+	if later == nil {
+		return primary
+	}
+	if primary == nil {
+		return later
+	}
+	return errors.Join(primary, later)
+}
+
+func claimInboxItemsPinned(
 	deliveryRoot *fsq.DeliveryRoot,
 	root, me string,
 	includeBody bool,
@@ -58,7 +86,14 @@ func drainInboxItemsPinned(
 		validator = &headerValidator{}
 	}
 
+	// A receipt that fails to write is parked and owed; it never stops the
+	// batch, so a receipts fault cannot ration mail. Every return reports the
+	// owed receipts so the command still fails.
 	items := make([]inboxItem, 0, len(filenames))
+	var receiptErrs []error
+	finish := func(err error) ([]inboxItem, error) {
+		return finishInboxBatch(items, joinOutcomeErr(err, errors.Join(receiptErrs...)))
+	}
 	for _, filename := range filenames {
 		if limit > 0 && len(items) >= limit {
 			break
@@ -70,22 +105,22 @@ func drainInboxItemsPinned(
 			if os.IsNotExist(claimErr) {
 				exists, checkErr := claimMailboxDirsExist(deliveryRoot, me)
 				if checkErr != nil {
-					return finishInboxBatch(items, checkErr)
+					return finish(checkErr)
 				}
 				if exists {
 					continue
 				}
-				return finishInboxBatch(items, NotFoundError("mailbox for %q disappeared while claiming %s at root %s", me, filename, root))
+				return finish(NotFoundError("mailbox for %q disappeared while claiming %s at root %s", me, filename, root))
 			}
-			return finishInboxBatch(items, claimErr)
+			return finish(claimErr)
 		}
 		if afterClaim != nil {
 			if err := afterClaim(filename); err != nil {
 				items = append(items, failedClaimedInboxItem(filename, "processing_error", err))
 				if claimCommitted {
-					return finishInboxBatch(items, errors.Join(claimErr, err))
+					return finish(errors.Join(claimErr, err))
 				}
-				return finishInboxBatch(items, err)
+				return finish(err)
 			}
 		}
 
@@ -136,7 +171,9 @@ func drainInboxItemsPinned(
 			}
 			if dlqErr == nil {
 				item.MovedToDLQ = true
-				emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError)
+				if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError); err != nil {
+					receiptErrs = append(receiptErrs, err)
+				}
 				items = append(items, item)
 				continue
 			} else {
@@ -148,34 +185,38 @@ func drainInboxItemsPinned(
 					// in cur. Surface the item before returning a typed error so
 					// callers cannot mistake the duplicate state for completion.
 					items = append(items, item)
-					return finishInboxBatch(items, dlqErr)
+					return finish(dlqErr)
 				case dlqPath != "" && errors.As(dlqErr, &committed):
 					// The source transition completed, but its durability is
 					// indeterminate. Report the completed logical outcome and
 					// still fail the command so operators do not retry blindly.
 					item.MovedToDLQ = true
-					emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError)
+					if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError); err != nil {
+						receiptErrs = append(receiptErrs, err)
+					}
 					items = append(items, item)
-					return finishInboxBatch(items, dlqErr)
+					return finish(dlqErr)
 				default:
 					// No DLQ envelope is visible and the claimed source remains
 					// in cur. Preserve the item, but fail the batch instead of
 					// reducing a transport failure to a warning-only success.
 					items = append(items, item)
-					return finishInboxBatch(items, dlqErr)
+					return finish(dlqErr)
 				}
 			}
 		}
 
 		item.MovedToCur = true
-		emitReceipt(deliveryRoot, me, &item, receipt.StageDrained, "")
+		if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDrained, ""); err != nil {
+			receiptErrs = append(receiptErrs, err)
+		}
 		items = append(items, item)
 		if claimCommitted {
-			return finishInboxBatch(items, claimErr)
+			return finish(claimErr)
 		}
 	}
 
-	return finishInboxBatch(items, nil)
+	return finish(nil)
 }
 
 func finishInboxBatch(items []inboxItem, err error) ([]inboxItem, error) {
@@ -208,7 +249,9 @@ func claimMailboxDirsExist(root *fsq.DeliveryRoot, me string) (bool, error) {
 	return true, nil
 }
 
-func emitReceipt(root *fsq.DeliveryRoot, consumer string, item *inboxItem, stage, detail string) {
+// emitReceipt records the receipt for an outcome that already committed. A
+// non-nil error means the outcome stands but its receipt is still owed.
+func emitReceipt(root *fsq.DeliveryRoot, consumer string, item *inboxItem, stage, detail string) error {
 	sender := ""
 	if strings.TrimSpace(item.From) != "" {
 		var err error
@@ -226,9 +269,10 @@ func emitReceipt(root *fsq.DeliveryRoot, consumer string, item *inboxItem, stage
 	}
 
 	r := receipt.New(item.ID, item.Thread, sender, consumer, stage, detail)
-	if err := receipt.EmitDeliveryRoot(root, r); err != nil {
-		_ = writeStderr("warning: failed to emit %s receipt for %s: %v\n", stage, item.ID, err)
+	if err := receipt.EmitOwed(root, r); err != nil {
+		return fmt.Errorf("%s receipt for %s: %w", stage, item.ID, err)
 	}
+	return nil
 }
 
 func collectInboxItems(

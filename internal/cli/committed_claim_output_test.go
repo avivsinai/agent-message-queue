@@ -153,3 +153,36 @@ func unmarshalJSONOutput(output string, target any) error {
 	}
 	return json.Unmarshal([]byte(output), target)
 }
+
+// Regression: bead agent-message-queue-fbp (B6) review. An invalid parked
+// receipt failed every later drain, and drain --json printed nothing when the
+// repair was the only failure.
+func TestRunDrainQuarantinesInvalidParkedReceiptOnce(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	pending := filepath.Join(root, "agents", "alice", "receipts-pending")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pending, "x__alice__drained.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	drain := func() (drainResult, error) {
+		stdout, _, err := captureEnvOutput(t, func() error {
+			return runDrain([]string{"--root", root, "--me", "alice", "--json"})
+		})
+		var result drainResult
+		if jsonErr := unmarshalJSONOutput(stdout, &result); jsonErr != nil {
+			t.Fatalf("drain --json output %q: %v (drain error: %v)", stdout, jsonErr, err)
+		}
+		return result, err
+	}
+
+	result, err := drain()
+	var repairErr *receipt.RepairError
+	if !errors.As(err, &repairErr) || result.Count != 0 {
+		t.Fatalf("first drain = %+v, %v; want an empty result and a repair error", result, err)
+	}
+	if result, err := drain(); err != nil || result.Count != 0 {
+		t.Fatalf("second drain = %+v, %v; want the quarantined entry skipped", result, err)
+	}
+}

@@ -8,6 +8,24 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.133.0](https://github.com/avivsinai/agent-message-queue/compare/v0.132.0...v0.133.0) (2026-11-07)
+
+
+### Features
+
+* **remote:** a resumed Claude seat gets its Buzz channel back ([#1374](https://github.com/avivsinai/agent-message-queue/issues/1374)) ([e0dc4b7](https://github.com/avivsinai/agent-message-queue/commit/e0dc4b7c4d8cd701b9efab89f191c05064ea7f17))
+* **remote:** a resumed session gets its Buzz channel back ([#1369](https://github.com/avivsinai/agent-message-queue/issues/1369)) ([db1df0e](https://github.com/avivsinai/agent-message-queue/commit/db1df0efb307001e52f9f5fd72040f89e5fb3725))
+
+
+### Bug Fixes
+
+* **receipt:** a failed drained receipt is written by the next drain ([#1376](https://github.com/avivsinai/agent-message-queue/issues/1376)) ([be456ae](https://github.com/avivsinai/agent-message-queue/commit/be456ae5c7138596dfc46f97163dd012e6843803))
+* **remote:** a mailbox seat's channel is named by its handle ([#1371](https://github.com/avivsinai/agent-message-queue/issues/1371)) ([743252e](https://github.com/avivsinai/agent-message-queue/commit/743252e73a42ca629339864daa191673fe666639))
+* **remote:** Claude hooks start nothing when no session is live ([#1367](https://github.com/avivsinai/agent-message-queue/issues/1367)) ([8e70a4d](https://github.com/avivsinai/agent-message-queue/commit/8e70a4db7fb25c5b1dd9535a2ff69968fc504066))
+* **remote:** the request store recovers from faults and stale cancels ([#1375](https://github.com/avivsinai/agent-message-queue/issues/1375)) ([387d8a1](https://github.com/avivsinai/agent-message-queue/commit/387d8a15a9d516fcf50b47da93ae2b03cedf2372))
+* **wake:** a dialog hold closes when its Claude process exits ([#1365](https://github.com/avivsinai/agent-message-queue/issues/1365)) ([1ad89c7](https://github.com/avivsinai/agent-message-queue/commit/1ad89c71f700949b6e721da3694d3b0c22d39d56))
+* **wake:** an upgrade never silences an older running wake ([#1373](https://github.com/avivsinai/agent-message-queue/issues/1373)) ([2a6d739](https://github.com/avivsinai/agent-message-queue/commit/2a6d7394617993ce70f41cbf3a386fc8b99e60b8))
+
 ## [0.132.0](https://github.com/avivsinai/agent-message-queue/compare/v0.131.0...v0.132.0) (2026-11-07)
 
 
