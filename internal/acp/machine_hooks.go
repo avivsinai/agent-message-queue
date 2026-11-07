@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -91,30 +90,9 @@ func (s *Server) watchHooks(all []binding.Binding) {
 	}
 }
 
-// remoteExecutable is the amq-remote a restored hook runs: the one on PATH
-// when it is the same file as the one beside this amq-acp, so an upgrade
-// that removes the versioned path keeps the hook working, else the one
-// beside this amq-acp, else the one on PATH. Tests replace it.
-var remoteExecutable = func() (string, error) {
-	var sibling, looked string
-	if self, err := os.Executable(); err == nil {
-		sibling = filepath.Join(filepath.Dir(self), "amq-remote")
-	}
-	if path, err := exec.LookPath("amq-remote"); err == nil {
-		looked, _ = filepath.Abs(path)
-	}
-	a, errA := os.Stat(sibling)
-	b, errB := os.Stat(looked)
-	switch {
-	case errA == nil && errB == nil && os.SameFile(a, b):
-		return looked, nil
-	case errA == nil && a.Mode().IsRegular():
-		return sibling, nil
-	case errB == nil && b.Mode().IsRegular():
-		return looked, nil
-	}
-	return "", errors.New("no amq-remote beside amq-acp or on PATH")
-}
+// remoteExecutable is the amq-remote a restored hook runs
+// (claude.HookBinary). Tests replace it.
+var remoteExecutable = func() (string, error) { return claude.HookBinary("amq-remote") }
 
 func statSettings(path string) os.FileInfo {
 	info, err := os.Stat(path)
@@ -126,9 +104,10 @@ func statSettings(path string) os.FileInfo {
 
 // Lines the machine agent posts about a hook that left a settings file.
 const (
-	hookRestoredLine = "The AMQ %s hook was missing from %s (changed %s); restored."
-	approvalLostLine = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
-	stopLostLine     = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
+	hookRestoredLine  = "The AMQ %s hook was missing from %s (changed %s); restored."
+	approvalLostLine  = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
+	restoreFailedLine = " The restore failed: %v"
+	stopLostLine      = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
 )
 
 // checkHooks handles one settings file that changed: the approval hook for
@@ -161,29 +140,32 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		if len(channels) == 0 {
 			continue
 		}
-		if state, err := h.state(path); err != nil || state != claude.StopHookMissing {
+		if state, err := h.state(path); err != nil || state != claude.HookMissing {
 			continue
 		}
 		restored := false
 		// With no installed amq-remote the hook is not written: a hook that
-		// runs a missing binary does nothing, and the warning says what to do.
-		if bin, err := remoteExecutable(); err == nil {
-			var err error
+		// runs a missing binary does nothing, and the warning says why.
+		bin, err := remoteExecutable()
+		if err == nil {
 			restored, err = claude.RestoreHook(home, path, h.kind, bin)
 			if errors.Is(err, claude.ErrSettingsBusy) {
 				// Another writer holds the file: check it again next tick.
 				delete(s.machine.settings, path)
 				return
 			}
-			restored = err == nil && restored
 		}
 		text := fmt.Sprintf(hookRestoredLine, h.name, path, changed)
-		if restored {
+		switch {
+		case restored && err == nil:
 			restoredAny = true
-		} else if !s.warnOnce(path, h.kind, info) {
+		case !s.warnOnce(path, h.kind, info):
 			continue
-		} else {
+		default:
 			text = fmt.Sprintf(h.lost, path, changed)
+			if err != nil {
+				text += fmt.Sprintf(restoreFailedLine, err)
+			}
 		}
 		for _, channel := range channels {
 			_, _ = postAnswer(channel, mirror.Unmention(text), s.cfg.PostTimeout)

@@ -425,7 +425,7 @@ func runApprovalHook(t *testing.T, count int, session, name string) []dialog.Req
 	for range count {
 		go func() {
 			ended <- claude.RunPermissionHook(strings.NewReader(`{"session_id":"`+session+`","tool_name":"Bash","tool_input":{"command":"make"}}`),
-				io.Discard, done, time.Minute, hookBinding)
+				io.Discard, done, hookBinding)
 		}()
 	}
 	ddir, err := dialog.DirFor(name)
@@ -830,7 +830,7 @@ func TestAttachRefusesAClaudeSessionWithoutTheStopHook(t *testing.T) {
 	findSelf = func(string, string) (registry.Candidate, error) {
 		return registry.Candidate{Kind: "claude", Target: "claude:7", Config: json.RawMessage(`{"pid":7}`)}, nil
 	}
-	claudeStopHookState = func() (string, error) { return claude.StopHookMissing, nil }
+	claudeStopHookState = func() (string, error) { return claude.HookMissing, nil }
 	code, err := attach([]string{"--self", "--link", "srv"}, io.Discard, io.Discard)
 	if code != protocol.ExitActionRequired || err == nil || !strings.Contains(err.Error(), "amq-remote claude install-stop-hook") {
 		t.Fatalf("attach --link without the Stop hook: code=%d err=%v; want exit 6 naming amq-remote claude install-stop-hook", code, err)

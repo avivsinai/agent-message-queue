@@ -34,7 +34,7 @@ func TestStopHookStateIsBoundedAndHonorsDisable(t *testing.T) {
 	if err := os.WriteFile(SettingsPath(home), disabled, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if state, err := StopHookState(home); err != nil || state != StopHookDisabled {
+	if state, err := StopHookState(home); err != nil || state != HookDisabled {
 		t.Fatalf("state = %q err = %v, want disabled", state, err)
 	}
 }

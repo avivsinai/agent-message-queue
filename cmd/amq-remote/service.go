@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -446,41 +447,26 @@ func servicePATH(exe string) string {
 // is a variable because a test binary is never the binary a service runs.
 var serviceExecutable = os.Executable
 
-// stableExecutable is this binary's path as the service should run it: the
-// PATH entry when it names this binary, so a Homebrew upgrade (which removes
-// the versioned Cellar path) does not break the service; else the resolved
-// path, with a warning that the service does not run the amq-remote on PATH.
-// A binary under the temporary directory (go run) is refused: it disappears.
+// stableExecutable is this binary's path as the service should run it
+// (claude.StableBinary): the PATH entry when it names this binary, so a
+// Homebrew upgrade does not break the service, else the resolved path with
+// a warning. A temporary build is refused.
 func stableExecutable() (exe, warning string, err error) {
 	self, err := serviceExecutable()
 	if err != nil {
 		return "", "", err
 	}
-	resolved, err := filepath.EvalSymlinks(self)
+	exe, warning, err = claude.StableBinary(self, "amq-remote")
 	if err != nil {
 		return "", "", err
 	}
-	if hasControl(resolved) {
-		return "", "", fmt.Errorf("executable path %q contains a control character; a login service cannot run it", resolved)
+	if hasControl(exe) {
+		return "", "", fmt.Errorf("executable path %q contains a control character; a login service cannot run it", exe)
 	}
-	if tmp, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
-		if rel, err := filepath.Rel(tmp, resolved); err == nil && !strings.HasPrefix(rel, "..") {
-			return "", "", fmt.Errorf("%s is a temporary build that disappears; install amq-remote, then run service install with it", resolved)
-		}
+	if warning != "" {
+		warning = "the service " + warning
 	}
-	looked, err := exec.LookPath("amq-remote")
-	if err == nil {
-		looked, err = filepath.Abs(looked)
-	}
-	if err != nil {
-		return resolved, fmt.Sprintf("the service runs %s, and no amq-remote is on PATH", resolved), nil
-	}
-	lookedInfo, lookedErr := os.Stat(looked)
-	selfInfo, selfErr := os.Stat(self)
-	if lookedErr == nil && selfErr == nil && os.SameFile(lookedInfo, selfInfo) {
-		return looked, "", nil
-	}
-	return resolved, fmt.Sprintf("the service runs %s, not the amq-remote on PATH (%s)", resolved, looked), nil
+	return exe, warning, nil
 }
 
 // noteNoService advises the login service when the root has a link and no

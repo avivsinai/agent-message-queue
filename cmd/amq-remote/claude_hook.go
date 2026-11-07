@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -72,7 +71,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		// IDE starts may not have its directory on PATH.
 		bin, err := hookExecutable()
 		if err == nil {
-			_, err = claude.OptInPermissionHook(home, claude.SettingsPath(home), bin, claude.DefaultPermissionWait)
+			_, err = claude.OptInPermissionHook(home, claude.SettingsPath(home), bin)
 		}
 		if err != nil {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
@@ -130,7 +129,9 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 	}
 	fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+	// An installed hook of an older form passes --wait; the hook has no
+	// deadline, so the value is ignored.
+	_ = fs.Int("wait", 0, "ignored")
 	if fs.Parse(args) != nil {
 		return 0
 	}
@@ -142,7 +143,7 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 		<-sigs
 		close(done)
 	}()
-	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second, hookBinding)
+	return claude.RunPermissionHook(stdin, stdout, done, hookBinding)
 }
 
 // hookBinding writes the binding of a Claude session that no binding serves,

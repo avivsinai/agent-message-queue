@@ -79,7 +79,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		fail("bindings", "", "cannot list the bindings: "+err.Error(), "check the permissions of the AMQ home's remote directory")
 	}
 	if *fix {
-		report["fixed"] = doctorFix(stateDir, all, fail)
+		report["fixed"] = doctorFix(c.root, stateDir, all, fail)
 	}
 	doctorMachine(stateDir, all, report, fail, note)
 	// A Buzz agent can keep running an amq-acp that an upgrade replaced, so
@@ -230,12 +230,12 @@ func doctorNativeCapability(stateDir string, sessions []protocol.Session, report
 			switch {
 			case err != nil:
 				fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+err.Error(), "repair "+settings)
-			case state == claude.StopHookMissing:
+			case state == claude.HookMissing:
 				fail("native_capability", s.TargetID, row.missing(s), "run `amq-remote claude "+row.installer+"`")
-			case state == claude.StopHookDisabled:
+			case state == claude.HookDisabled:
 				report[row.key] = settings + " holds the hook and sets disableAllHooks; project or managed settings decide whether it runs"
 			}
-			if err == nil && state != claude.StopHookMissing {
+			if err == nil && state != claude.HookMissing {
 				if form, _ := row.form(home, settings); form == claude.HookFormStale {
 					fail("native_capability", s.TargetID, "the hook's gate is stale: it names other paths than this machine resolves now, or an older timeout, so it can skip the state it guards", "run `amq-remote claude "+row.installer+"`")
 				}

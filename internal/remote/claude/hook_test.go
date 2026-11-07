@@ -377,13 +377,16 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := InstallStopHook(home, "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait); err != nil {
+	if err := InstallPermissionHook(home, "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 || !strings.HasPrefix(cmds[0], `AMQ_APPROVAL_HOOK=1 set -- "${AMQ_REMOTE_BINDING-}" '`+home+`/.amq/remote/binding.json' '`+home+`/.amq/remote/acp/agents/_machine/'*.json`) ||
-		!strings.HasSuffix(cmds[0], `; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec '/opt/amq-remote' claude permission-hook --wait 600`) {
+		!strings.HasSuffix(cmds[0], `; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec '/opt/amq-remote' claude permission-hook`) {
 		t.Fatalf("approval hook commands = %q, %v", cmds, err)
+	}
+	if groups, _ := markedGroups(SettingsPath(home), permissionSpec); len(groups) != 1 || !strings.Contains(string(groups[0]), `"timeout":86400`) {
+		t.Fatalf("approval hook group = %q; want the one-day timeout", groups)
 	}
 	if form, err := PermissionHookForm(home, SettingsPath(home)); err != nil || form != HookFormCurrent {
 		t.Fatalf("form = %q, %v; want current", form, err)
@@ -391,10 +394,10 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := UninstallPermissionHook(home); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := PermissionHookState(SettingsPath(home)); state != StopHookMissing {
+	if state, _ := PermissionHookState(SettingsPath(home)); state != HookMissing {
 		t.Fatalf("after uninstall the approval hook state = %q, want missing", state)
 	}
-	if state, _ := StopHookState(home); state != StopHookPresent {
+	if state, _ := StopHookState(home); state != HookPresent {
 		t.Fatalf("after uninstall the Stop hook state = %q, want it kept", state)
 	}
 }

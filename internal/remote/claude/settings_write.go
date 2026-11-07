@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
@@ -19,9 +19,11 @@ import (
 
 // Every AMQ write to a hooks file goes through editSettings. It holds one
 // advisory lock per file under ~/.amq/locks, so two AMQ writers never lose
-// each other's entry, and it reads the file again before the rename: a
-// writer that takes no lock (an older AMQ, or another program) and wrote in
-// between makes the edit apply again to what that writer left.
+// each other's entry. It also reads the file again just before the rename
+// and applies the edit again when the bytes changed. That narrows, and does
+// not close, the window of a writer that takes no lock (an older AMQ, or
+// another program): its write between that re-read and the rename is lost.
+// A rewrite keeps the file's permission bits; a new file is 0600.
 
 // settingsEditTries bounds how often one edit is applied again because the
 // file changed under it.
@@ -73,13 +75,16 @@ func editSettingsLocked(path string, seed []byte, edit func([]byte) ([]byte, err
 		if stillExists != exists || exists && !bytes.Equal(again, raw) {
 			continue // another writer changed it: apply the edit to its bytes
 		}
-		if !exists {
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				return false, err
+		perm := os.FileMode(0o600)
+		if exists {
+			if info, err := os.Lstat(path); err == nil {
+				perm = info.Mode().Perm()
 			}
+		} else if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return false, fmt.Errorf("settings %s: %w", path, err)
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), out, 0o600); err != nil {
-			return false, err
+		if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), out, perm); err != nil {
+			return false, fmt.Errorf("settings %s: %w", path, err)
 		}
 		return true, nil
 	}
@@ -159,7 +164,7 @@ func settingsKey(path string) string {
 
 // The owner's opt-in: install-approval-hook and install-stop-hook record,
 // per settings file, that the owner wants that hook there, with the binary
-// and wait it was installed with; the uninstall commands clear it. The
+// it was installed with; the uninstall commands clear it. The
 // machine agent restores a hook that left a file only while its opt-in
 // exists, so a removal the owner made stays removed.
 
@@ -190,10 +195,9 @@ func (in HookOptIn) Removed(kind string) bool {
 	return in.StopRemoved
 }
 
-// HookShape is the binary a hook runs and, for the approval hook, its wait.
+// HookShape is the binary a hook runs.
 type HookShape struct {
-	Bin         string `json:"bin"`
-	WaitSeconds int    `json:"wait_seconds,omitempty"`
+	Bin string `json:"bin"`
 }
 
 func optInPath(path string) (string, error) {
@@ -261,26 +265,51 @@ func sameShape(a, b *HookShape) bool {
 }
 
 // OptInPermissionHook installs the approval hook in the settings file
-// settings as InstallPermissionHookAt does, and records the owner's opt-in.
-func OptInPermissionHook(home, settings, bin string, wait time.Duration) (bool, error) {
-	changed, err := InstallPermissionHookAt(home, settings, bin, wait)
-	if err != nil {
-		return changed, err
+// settings as InstallPermissionHookAt does, and records the owner's opt-in,
+// both under the file's lock, so an uninstall never runs between them.
+func OptInPermissionHook(home, settings, bin string) (bool, error) {
+	if !filepath.IsAbs(bin) {
+		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return changed, withSettingsLock(settings, func() error {
-		return setHookOptIn(settings, HookApproval, &HookShape{Bin: bin, WaitSeconds: int(wait / time.Second)})
-	})
+	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), false)
 }
 
 // OptInStopHook is OptInPermissionHook for the Stop hook.
 func OptInStopHook(home, settings, bin string) (bool, error) {
-	changed, err := InstallStopHookAt(home, settings, bin)
-	if err != nil {
-		return changed, err
-	}
-	return changed, withSettingsLock(settings, func() error {
-		return setHookOptIn(settings, HookStop, &HookShape{Bin: bin})
+	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), false)
+}
+
+// ErrHookRemoved refuses to install a hook that the owner removed from that
+// settings file with its uninstall command.
+var ErrHookRemoved = errors.New("the owner removed this hook with its uninstall command")
+
+// optIn makes entry spec's one marked entry in the settings file settings
+// and records the opt-in of kind for bin, under one lock. With ensure set it
+// refuses with ErrHookRemoved when the owner removed that hook.
+func optIn(settings, kind, bin string, spec hookSpec, entry []byte, ensure bool) (bool, error) {
+	changed := false
+	err := withSettingsLock(settings, func() error {
+		if ensure {
+			in, err := ReadHookOptIn(settings)
+			if err != nil {
+				return err
+			}
+			if in.Removed(kind) {
+				return ErrHookRemoved
+			}
+		}
+		same, err := installedAs(settings, spec, entry)
+		if err != nil {
+			return err
+		}
+		if !same {
+			if changed, err = editSettingsLocked(settings, spec.seed(), replaceEdit(spec, entry)); err != nil {
+				return err
+			}
+		}
+		return setHookOptIn(settings, kind, &HookShape{Bin: bin})
 	})
+	return changed, err
 }
 
 // OptOutHook removes the hook of kind from the settings file settings and
@@ -299,15 +328,16 @@ func OptOutHook(settings, kind string) error {
 }
 
 // RestoreHook puts the hook of kind back into the settings file settings
-// when it holds none and the owner's opt-in for that file exists. The hook
-// runs bin, the amq-remote installed now, which must exist: a recorded path
-// that an upgrade removed is never written back. It reads the opt-in under
-// the file's lock, so an uninstall that ran first wins, and waits for that
-// lock at most settingsLockTry (ErrSettingsBusy). It reports whether it
-// wrote the hook; false with no error means no opt-in or a hook already
+// when it holds none and the owner's opt-in for that file exists. It never
+// creates the file: one the owner deleted stays deleted. The hook runs bin,
+// the amq-remote installed now, which must exist: a recorded path that an
+// upgrade removed is never written back. It reads the opt-in under the
+// file's lock, so an uninstall that ran first wins, and waits for that lock
+// at most settingsLockTry (ErrSettingsBusy). It reports whether it wrote the
+// hook; false with no error means no opt-in, no file or a hook already
 // there.
 func RestoreHook(home, settings, kind, bin string) (bool, error) {
-	if info, err := os.Stat(bin); !filepath.IsAbs(bin) || err != nil || !info.Mode().IsRegular() {
+	if !filepath.IsAbs(bin) || !installedFile(bin) {
 		return false, fmt.Errorf("the hook binary %q is not an installed file", bin)
 	}
 	restored := false
@@ -320,18 +350,13 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 		var entry []byte
 		switch {
 		case kind == HookApproval && in.Approval != nil:
-			spec = permissionSpec
-			wait := time.Duration(in.Approval.WaitSeconds) * time.Second
-			if wait <= 0 {
-				wait = DefaultPermissionWait
-			}
-			entry = permissionHookEntry(home, bin, wait)
+			spec, entry = permissionSpec, permissionHookEntry(home, bin)
 		case kind == HookStop && in.Stop != nil:
 			spec, entry = stopHook, stopHookEntry(home, bin)
 		default:
 			return nil
 		}
-		restored, err = editSettingsLocked(settings, spec.seed(), func(raw []byte) ([]byte, error) {
+		restored, err = editSettingsLocked(settings, nil, func(raw []byte) ([]byte, error) {
 			if groups, err := markedGroupsIn(raw, spec); err != nil || len(groups) > 0 {
 				return nil, err
 			}
@@ -342,33 +367,48 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 	return restored, err
 }
 
-// EnsurePermissionHook is OptInPermissionHook that keeps an installed
-// approval hook in its current form, with its binary and wait, and installs
-// bin with wait only in place of a missing, stale or doubled one. It
-// reports whether it changed the settings file.
-func EnsurePermissionHook(home, settings, bin string, wait time.Duration) (bool, error) {
-	if cmd, err := PermissionHookCommand(settings); err == nil && cmd != "" {
-		if form, _ := PermissionHookForm(home, settings); form == HookFormCurrent {
-			if m := permissionHookBinRe.FindStringSubmatch(cmd); m != nil {
-				if secs, err := strconv.Atoi(m[2]); err == nil && installedFile(shellUnquote(m[1])) {
-					bin, wait = shellUnquote(m[1]), time.Duration(secs)*time.Second
-				}
-			}
-		}
+// EnsurePermissionHook is OptInPermissionHook that keeps the binary of the
+// installed approval hook (KeptHookBin) and writes the entry in its current
+// form, so an older form (another timeout or gate) is upgraded. It refuses
+// with ErrHookRemoved a hook the owner removed. It reports whether it
+// changed the settings file.
+func EnsurePermissionHook(home, settings, bin string) (bool, error) {
+	cmds, _ := installedCommands(settings, permissionSpec)
+	bin = KeptHookBin(cmds, permissionHookBinRe, bin)
+	if !filepath.IsAbs(bin) {
+		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return OptInPermissionHook(home, settings, bin, wait)
+	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), true)
 }
 
 // EnsureStopHook is EnsurePermissionHook for the Stop hook.
 func EnsureStopHook(home, settings, bin string) (bool, error) {
-	if cmds, err := installedCommands(settings, stopHook); err == nil && len(cmds) == 1 {
-		if form, _ := StopHookForm(home, settings); form == HookFormCurrent {
-			if m := stopHookBinRe.FindStringSubmatch(cmds[0]); m != nil && installedFile(shellUnquote(m[1])) {
-				bin = shellUnquote(m[1])
-			}
+	cmds, _ := installedCommands(settings, stopHook)
+	bin = KeptHookBin(cmds, stopHookBinRe, bin)
+	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), true)
+}
+
+// KeptHookBin is the binary that the installed hook commands all run, as
+// the first group of binRe names it, when they name one binary and it is an
+// installed file; else bin. A repair keeps the binary an install chose, so
+// two installers never rewrite a file back and forth.
+func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string) string {
+	found := ""
+	for _, command := range commands {
+		m := binRe.FindStringSubmatch(command)
+		if m == nil {
+			return bin
 		}
+		got := shellUnquote(m[1])
+		if found != "" && got != found {
+			return bin
+		}
+		found = got
 	}
-	return OptInStopHook(home, settings, bin)
+	if found == "" || !installedFile(found) {
+		return bin
+	}
+	return found
 }
 
 // installedFile reports whether path is an existing regular file.

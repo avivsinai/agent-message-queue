@@ -46,9 +46,9 @@ func hookWatchSession(t *testing.T, optIn bool) (s *Server, settings, stable str
 	remoteExecutable = func() (string, error) { return stable, nil }
 	var err error
 	if optIn {
-		_, err = claude.OptInPermissionHook(home, settings, bin, claude.DefaultPermissionWait)
+		_, err = claude.OptInPermissionHook(home, settings, bin)
 	} else {
-		_, err = claude.InstallPermissionHookAt(home, settings, bin, claude.DefaultPermissionWait)
+		_, err = claude.InstallPermissionHookAt(home, settings, bin)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestMachineAgentOnlyWarnsWithoutTheOptIn(t *testing.T) {
 	dropHook(t, settings)
 	tick(s, time.Now())
 	tick(s, time.Now())
-	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookMissing {
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookMissing {
 		t.Fatalf("approval hook %q; want it left out", state)
 	}
 	got := posts()
@@ -139,7 +139,7 @@ func TestMachineAgentNeverWarnsAfterTheOwnerRemovedTheHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	tick(s, time.Now())
-	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookMissing || len(posts()) != 0 {
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookMissing || len(posts()) != 0 {
 		t.Fatalf("after uninstall: hook %q, posts %q; want neither", state, posts())
 	}
 }
@@ -169,12 +169,26 @@ func TestMachineAgentSkipsASettingsFileWhoseLockIsHeld(t *testing.T) {
 		<-done
 		t.Fatal("the tick waited on a held settings lock")
 	}
-	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookMissing || len(posts()) != 0 {
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookMissing || len(posts()) != 0 {
 		t.Fatalf("with the lock held: hook %q, posts %q; want nothing", state, posts())
 	}
 	release()
 	tick(s, time.Now())
-	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookPresent || len(posts()) != 1 {
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookPresent || len(posts()) != 1 {
 		t.Fatalf("after the lock: hook %q, posts %q; want restored once", state, posts())
+	}
+}
+
+// Review of the machine agent: a failed restore posted the plain warning
+// and dropped why the restore failed.
+func TestMachineAgentPostsWhyARestoreFailed(t *testing.T) {
+	s, settings, _, posts := hookWatchSession(t, true)
+	remoteExecutable = func() (string, error) { return "amq-remote", nil }
+	tick(s, time.Now())
+	dropHook(t, settings)
+	tick(s, time.Now())
+	got := posts()
+	if len(got) != 1 || !strings.Contains(got[0], "the AMQ approval hook left "+settings) || !strings.Contains(got[0], `The restore failed: the hook binary "amq-remote" is not an installed file`) {
+		t.Fatalf("posts = %q; want the warning with the restore's error", got)
 	}
 }

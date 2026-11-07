@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // Regression: on 2026-11-05 the approval hook left a settings.json because
@@ -22,7 +21,7 @@ func TestConcurrentInstallsKeepBothEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(home, "bin", "amq-remote")
-	approval := replaceEdit(permissionSpec, permissionHookEntry(home, bin, DefaultPermissionWait))
+	approval := replaceEdit(permissionSpec, permissionHookEntry(home, bin))
 	other := true
 	_, err := editSettings(path, permissionSpec.seed(), func(raw []byte) ([]byte, error) {
 		if other {
@@ -43,7 +42,7 @@ func TestConcurrentInstallsKeepBothEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, state := range map[string]func(string) (string, error){"approval": PermissionHookState, "stop": StopHookStateAt} {
-		if got, err := state(path); err != nil || got != StopHookPresent {
+		if got, err := state(path); err != nil || got != HookPresent {
 			t.Errorf("%s hook = %q, %v; want both installs kept", name, got, err)
 		}
 	}
@@ -58,7 +57,7 @@ func TestRestoreHookFollowsTheOptIn(t *testing.T) {
 	if err := os.WriteFile(bin, nil, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OptInPermissionHook(home, path, bin, 30*time.Second); err != nil {
+	if _, err := OptInPermissionHook(home, path, bin); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(`{"model":"x"}`), 0o600); err != nil {
@@ -75,5 +74,49 @@ func TestRestoreHookFollowsTheOptIn(t *testing.T) {
 	}
 	if restored, err := RestoreHook(home, path, HookApproval, bin); err != nil || restored {
 		t.Fatalf("restore after uninstall = %v, %v; want nothing", restored, err)
+	}
+}
+
+// Review of the hook installers: RestoreHook recreated a settings file the
+// owner had deleted.
+func TestRestoreHookLeavesADeletedSettingsFileDeleted(t *testing.T) {
+	home := t.TempDir()
+	path := SettingsPath(home)
+	bin := filepath.Join(home, "amq-remote")
+	if err := os.WriteFile(bin, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OptInPermissionHook(home, path, bin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreHook(home, path, HookApproval, bin); err != nil || restored {
+		t.Fatalf("restore = %v, %v; want nothing", restored, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the deleted settings file is back: %v", err)
+	}
+}
+
+// Review of the hook installers: an edit made a 0644 settings file 0600.
+func TestHookInstallKeepsTheSettingsFileMode(t *testing.T) {
+	home := t.TempDir()
+	path := SettingsPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallPermissionHookAt(home, path, "/opt/amq-remote"); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("mode after install = %v, %v; want 0644", info.Mode().Perm(), err)
 	}
 }

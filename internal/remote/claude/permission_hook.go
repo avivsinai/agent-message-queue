@@ -37,13 +37,6 @@ const permissionHookMarker = "AMQ_APPROVAL_HOOK=1 "
 // permissionHookType is the hook event name in settings.json.
 const permissionHookType = "PermissionRequest"
 
-// DefaultPermissionWait is the hook's own deadline. The installed timeout is
-// this plus PermissionHookGrace, so the hook normally ends first.
-const (
-	DefaultPermissionWait = 600 * time.Second
-	PermissionHookGrace   = 30 * time.Second
-)
-
 // harnessClaude names the harness in the request.
 const harnessClaude = "claude"
 
@@ -88,10 +81,10 @@ type Seat struct {
 type Binder func(Seat) (string, error)
 
 // permissionHook holds the hook's clock and pacing, so tests can drive it,
-// and the writer of a new binding.
+// and the writer of a new binding. It has no deadline: it ends when Buzz or
+// the terminal answers, or when done closes.
 type permissionHook struct {
 	now  func() time.Time
-	wait time.Duration
 	poll time.Duration
 	bind Binder // nil: a session no binding serves answers in the terminal
 }
@@ -100,11 +93,8 @@ type permissionHook struct {
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
 // configured timeout. bind writes the binding of a session no binding
 // serves. It always returns 0.
-func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration, bind Binder) int {
-	if wait <= 0 {
-		wait = DefaultPermissionWait
-	}
-	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond, bind: bind}
+func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, bind Binder) int {
+	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, bind: bind}
 	return h.run(stdin, stdout, done)
 }
 
@@ -143,7 +133,6 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
-	deadline := opened.Add(h.wait)
 	ticker := time.NewTicker(h.poll)
 	defer ticker.Stop()
 	resolve := func(outcome, label, by string) bool {
@@ -169,10 +158,6 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		}
 		if watch != nil && watch.answered() {
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
-			return 0
-		}
-		if !h.now().Before(deadline) {
-			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
 			return 0
 		}
 		select {

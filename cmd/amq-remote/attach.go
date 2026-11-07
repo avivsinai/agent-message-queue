@@ -1092,9 +1092,9 @@ func requireStopHook() (warning string, err error) {
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("cannot read the Claude user settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
-	case state == claude.StopHookMissing:
+	case state == claude.HookMissing:
 		return "", protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
-	case state == claude.StopHookDisabled:
+	case state == claude.HookDisabled:
 		return "the Claude user settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
 	}
 	return "", nil
@@ -1120,9 +1120,9 @@ func approvalHookState() string {
 	switch {
 	case err != nil:
 		return approvalHookUnreadable
-	case state == claude.StopHookMissing:
+	case state == claude.HookMissing:
 		return approvalHookMissing
-	case state == claude.StopHookDisabled:
+	case state == claude.HookDisabled:
 		return approvalHookDisabled
 	}
 	switch form, _ := claude.PermissionHookForm(home, settings); form {
