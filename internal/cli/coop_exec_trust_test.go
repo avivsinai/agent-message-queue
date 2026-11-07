@@ -619,6 +619,28 @@ func TestWakeCheckReportsAnOpenTrustHold(t *testing.T) {
 	if hold := inspectWakeStartupHold(root, "codex", time.Now()); hold == nil {
 		t.Fatal("no startup hold reported after the shared trust record changed")
 	}
+	// Review of the wake dialog entries (D8): a Claude Code dialog that
+	// opened over the Startup marker made it the legacy entry of the
+	// directory, and wake check no longer reported the hold.
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(marker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(marker, wakeDialogLegacyEntry)
+	if err := os.WriteFile(legacy, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(legacy, opened, opened); err != nil {
+		t.Fatal(err)
+	}
+	if hold := inspectWakeStartupHold(root, "codex", time.Now()); hold == nil || hold.Harness != "codex" || hold.AgeSeconds < 600 {
+		t.Fatalf("startup hold in the legacy entry = %#v", hold)
+	}
+	if _, ok := codexStartupHoldHint(root, "codex"); !ok {
+		t.Fatal("no Codex trust hold hint for the legacy entry")
+	}
 }
 
 // #1180 review: a wake restart or self-upgrade during the trust dialog

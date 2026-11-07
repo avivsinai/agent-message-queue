@@ -95,7 +95,15 @@ func notifyWakeRestartPlatform(
 				return fmt.Errorf("wake restart request changed before signal")
 			}
 
-			return scope.sendPidfdSignal(pidfd, unix.SIGUSR1)
+			if err := scope.sendPidfdSignal(pidfd, unix.SIGUSR1); err != nil {
+				return err
+			}
+			// The wake has the request, so the restart is reported as
+			// sent: an error now would make the requester give up on a
+			// restart that happens anyway. A failed Taken write leaves the
+			// record pending and untaken, as before the signal.
+			_ = markWakeRestartTakenAt(scope, observed)
+			return nil
 		},
 	)
 }

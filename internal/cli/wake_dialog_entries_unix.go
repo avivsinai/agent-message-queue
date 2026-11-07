@@ -367,21 +367,30 @@ func removeWakeDialogTempDirAt(dirfd int, temp string) error {
 	return wakeUnlinkAt(dirfd, temp, unix.AT_REMOVEDIR)
 }
 
-// wakeDialogEntriesClosedBy reports whether a Claude Code hook event closes
-// a keyed entry: an explicit close with no input closes all; a tool call's
-// close only its own tool_use_id; otherwise only events of the entry's own
-// session: SessionEnd closes all its entries, a SessionStart of a new
-// process (startup or resume) too, and a main-thread Stop or prompt its
-// main-thread entries.
+// wakeDialogEntriesClosedBy reports whether a Claude Code hook event proves
+// closed the dialog of a Claude Code dialog hook's marker, keyed entry or
+// single file:
+//   - an explicit close with no input closes all;
+//   - a subagent's SubagentStop closes every entry of that agent_id;
+//   - otherwise only events of the entry's own session: a tool call's close
+//     closes only its own tool_use_id, SessionEnd (a clear included) all,
+//     a SessionStart of a new process (startup or resume) all, and a
+//     main-thread Stop or prompt only the main-thread entries. A subagent
+//     can show a dialog while the main thread takes a prompt, so a prompt
+//     proves nothing about it. Other SessionStart sources close nothing.
 func wakeDialogEntriesClosedBy(raw []byte, in wakeDialogHookInput) bool {
 	if in.emptyInput {
 		return true
 	}
 	var marker wakeDialogMarker
-	if json.Unmarshal(raw, &marker) != nil || marker.SessionID != in.SessionID {
+	if json.Unmarshal(raw, &marker) != nil {
 		return false
 	}
 	switch {
+	case in.Event == "SubagentStop":
+		return in.AgentID != "" && marker.AgentID == in.AgentID
+	case marker.SessionID != in.SessionID:
+		return false
 	case in.ToolUseID != "":
 		return marker.ToolUseID == in.ToolUseID
 	case in.Event == "SessionEnd":
@@ -389,9 +398,18 @@ func wakeDialogEntriesClosedBy(raw []byte, in wakeDialogHookInput) bool {
 	case in.Event == "SessionStart":
 		return in.Source == "startup" || in.Source == "resume"
 	case in.Event == "Stop", in.Event == "UserPromptSubmit":
+		// A prompt's hook runs before its turn, while no main-thread
+		// dialog can be on screen, so it closes every main-thread entry.
 		return in.AgentID == "" && marker.AgentID == ""
 	}
 	return false
+}
+
+// claudeDialogHookMarker reports a marker the Claude Code dialog hook's open
+// wrote: no harness, and a PreToolUse or PermissionRequest event.
+func claudeDialogHookMarker(raw []byte) bool {
+	var marker wakeDialogMarker
+	return json.Unmarshal(raw, &marker) == nil && marker.Harness == "" && wakeDialogHookVerb(marker.Event) == "open"
 }
 
 // maxWakeDialogHostHops bounds the walk from the hook receiver to its

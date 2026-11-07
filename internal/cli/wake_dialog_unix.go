@@ -48,6 +48,7 @@ var wakeDialogHookEvents = []string{
 	"PostToolUseFailure",
 	"UserPromptSubmit",
 	"Stop",
+	"SubagentStop",
 	"SessionStart",
 	"SessionEnd",
 	"PreToolUse",
@@ -55,12 +56,14 @@ var wakeDialogHookEvents = []string{
 }
 
 // wakeDialogHookEventFloor is the first Claude Code version known to have
-// each gated event: the changelog first names PostToolUseFailure in
-// 2.1.119. Before 2.1.101 an unknown event made Claude Code ignore the
-// whole settings file, so the installer adds a gated event only for a
-// version at or past its floor.
+// each gated event, per the Claude Code changelog: PostToolUseFailure in
+// 2.1.119, and agent_id in SubagentStop input in 2.0.42 (SubagentStop
+// closes nothing without it). Before 2.1.101 an unknown event made Claude
+// Code ignore the whole settings file, so the installer adds a gated event
+// only for a version at or past its floor.
 var wakeDialogHookEventFloor = map[string]claudeVersion{
 	"PostToolUseFailure": {2, 1, 119},
+	"SubagentStop":       {2, 0, 42},
 }
 
 // claudeVersion is a Claude Code major.minor.patch.
@@ -648,17 +651,15 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 	})
 }
 
-// clearWakeDialogMarker checks the current marker under its lock. Cursor
-// can queue a prompt during an approval and sends abort/error stop hooks
-// without waiting; neither may release a later turn's hold. A tool call's
-// PostToolUse or PostToolUseFailure closes only the marker of the same
-// tool_use_id. A keyed entry closes only by its own dialog's events
-// (wakeDialogEntriesClosedBy); the single-file marker and the legacy entry
-// keep the rules below.
+// clearWakeDialogMarker checks the current marker under its lock. A marker
+// the Claude Code dialog hook opened, keyed entry, legacy entry or single
+// file, closes only by a proof that its own dialog closed
+// (wakeDialogEntriesClosedBy). Any other single-file marker keeps the rules
+// of wakeDialogMarkerClosedBy.
 func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
 	return withWakeDialogMarkerLock(dirfd, func() error {
 		return removeWakeDialogEntriesAt(dirfd, agentDir, func(name string, raw []byte, _ os.FileInfo) bool {
-			if wakeDialogKeyedEntry(name) {
+			if wakeDialogKeyedEntry(name) || claudeDialogHookMarker(raw) {
 				return wakeDialogEntriesClosedBy(raw, in)
 			}
 			return wakeDialogMarkerClosedBy(dirfd, agentDir, raw, in)
@@ -667,7 +668,9 @@ func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 }
 
 // wakeDialogMarkerClosedBy reports whether a hook event closes a
-// single-file marker.
+// single-file marker no Claude Code dialog hook wrote. Cursor can queue a
+// prompt during an approval and sends abort/error stop hooks without
+// waiting; neither may release a later turn's hold.
 func wakeDialogMarkerClosedBy(dirfd int, agentDir *wakeAgentDir, raw []byte, in wakeDialogHookInput) bool {
 	var marker wakeDialogMarker
 	decoded := json.Unmarshal(raw, &marker) == nil
@@ -676,14 +679,6 @@ func wakeDialogMarkerClosedBy(dirfd int, agentDir *wakeAgentDir, raw []byte, in 
 	}
 	if decoded && marker.Harness == "cursor" {
 		return cursorDialogCloseMatches(marker, in)
-	}
-	if decoded && marker.AgentID != "" && !in.emptyInput {
-		// A subagent's dialog can outlive the main thread's turn, so
-		// only the end of its process closes it here: SessionEnd, or a
-		// SessionStart of a new process (startup or resume). Its
-		// transcript proof closes it in the wake.
-		return in.Event == "SessionEnd" ||
-			in.Event == "SessionStart" && (in.Source == "startup" || in.Source == "resume")
 	}
 	return in.ToolUseID == "" || marker.ToolUseID == in.ToolUseID
 }

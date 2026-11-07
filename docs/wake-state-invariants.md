@@ -267,23 +267,31 @@ harness is installed.
 
 The wake reads the marker before each delivery attempt and each terminal
 write and never infers it from other wake state. The doorbell is held while
-any entry holds; each entry closes only by its own dialog's facts, and a
-session's events close only that session's entries. An entry whose recorded
-Claude Code host process is proven gone closes; one whose host is unknown
-holds. The directory replaces
-a single file only by an atomic exchange and is removed only when empty, so
-the path is never absent while a dialog is open. It writes no marker; it
-removes only a Claude Code marker whose session transcript proves its
-dialog gone (a tool call marker by that call's result, a permission marker
-by a newer non-synthetic assistant message of its own chain: the main chain,
-or for a subagent's marker only that subagent's transcript, found once
-at the layout Claude Code writes), and only the exact version it
-read, under the marker lock. A marker's age never releases input. No wake cleanup removes it. A marker that is unreadable, dated in the
+any entry holds; each entry closes only on proof that its dialog closed. A
+close with empty input closes every entry. `SubagentStop` closes every entry
+of its `agent_id`. Every other event closes only entries of its own session:
+a tool call's close only the entry of that tool call, a main-thread `Stop`
+or `UserPromptSubmit` only the main-thread entries, `SessionEnd` all of
+them, and `SessionStart` all of them only from `startup` or `resume`. A
+Claude Code dialog hook's marker closes by these rules as an entry or as a
+single file. An entry whose recorded Claude Code host process is proven gone
+closes; one whose host is unknown holds. The directory replaces a single
+file only by an atomic exchange and is removed only when empty, so the path
+is never absent while a dialog is open. It writes no marker; it removes only
+a Claude Code marker whose transcript proves its dialog gone (a tool call
+marker by that call's result, a permission marker by a newer non-synthetic
+assistant message of its own chain; a subagent's marker only by that
+subagent's own transcript, its `agent_transcript_path` or else the one file
+found at the layout Claude Code writes, where a later interrupt record also
+proves a permission dialog gone), and only the exact
+version it read, under the marker lock. A marker's age never releases input.
+No wake cleanup removes it. A marker that is unreadable, dated in the
 future, behind a non-canonical agent directory, or older than the quiet hold
 blocks input only while the AMQ dialog hook of the harness that wrote it
 (Claude Code, Codex trusted, or Cursor) is installed with its amq binary
-present; an agy or pi marker never does. Otherwise it reads as closed. Source anchors: `wake_dialog.go`,
-`wake_dialog_unix.go` and `coop_exec_trust.go`.
+present; an agy or pi marker never does. Otherwise it reads as closed.
+Source anchors: `wake_dialog.go`, `wake_dialog_unix.go` and
+`coop_exec_trust.go`.
 
 ## `.wake.lifecycle.lock`: mutation serialization
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -51,14 +52,18 @@ type claudeTranscriptRecord struct {
 type claudeTranscriptBlock struct {
 	Type      string `json:"type"`
 	ToolUseID string `json:"tool_use_id"`
+	Text      string `json:"text"`
 }
 
 // claudeDialogAnswered reports whether the transcript the marker names
-// proves its dialog gone: a tool_result for the marker's tool_use_id, or for
+// proves its dialog gone (a subagent's marker only by that subagent's own
+// transcript, claudeSubagentTranscript): a tool_result for the marker's
+// tool_use_id, or for
 // a permission marker (claudePermissionMarker) a new assistant message of
 // its own chain after it opened (claudeTurnMovedOn): the main chain, or for
-// a subagent's marker only that subagent's transcript. Any other marker is
-// never proven answered. An error means no proof: the hold stays.
+// a subagent's marker only that subagent's transcript, which also proves it
+// by a later interrupt record (claudeSubagentWaitEnded). Any other
+// marker is never proven answered. An error means no proof: the hold stays.
 func claudeDialogAnswered(marker wakeDialogMarker, modTime time.Time) (bool, error) {
 	return claudeDialogAnsweredFrom(marker, modTime, readClaudeTranscriptTail)
 }
@@ -90,25 +95,25 @@ func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read c
 	if marker.ToolUseID == "" && !permission {
 		return false, nil
 	}
-	if permission && marker.AgentID != "" {
+	path := marker.TranscriptPath
+	if marker.AgentID != "" {
 		// A subagent's dialog: only its own transcript, every record of
 		// which is the subagent's, proves it closed.
-		path, err := claudeSubagentTranscript(marker)
-		if err != nil {
+		var err error
+		if path, err = claudeSubagentTranscript(marker); err != nil {
 			return false, err
 		}
-		tail, err := read(path)
-		if err != nil {
-			return false, err
-		}
-		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), true), nil
 	}
-	tail, err := read(marker.TranscriptPath)
+	tail, err := read(path)
 	if err != nil {
 		return false, err
 	}
 	if permission {
-		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), false), nil
+		opened := wakeDialogMarkerOpened(marker, modTime)
+		if marker.AgentID != "" && claudeSubagentWaitEnded(tail, opened) {
+			return true, nil
+		}
+		return claudeTurnMovedOn(tail, opened, marker.AgentID != ""), nil
 	}
 	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
 		var record claudeTranscriptRecord
@@ -134,9 +139,7 @@ var claudeTranscriptNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // claudeSubagentTranscript is the transcript of the marker's subagent: its
 // agent_transcript_path when the hook gave one, else the path Claude Code
-// builds beside the session transcript <dir>/<session_id>.jsonl, read from
-// its strings `i(yee(),G(),"subagents")` and
-// `n=e?i(Zmt(),e):Zmt();return i(n,`agent-${t}.jsonl`)`:
+// lays out beside the session transcript <dir>/<session_id>.jsonl:
 // <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one or two
 // subdirectories deeper (a workflow's subagents write to
 // subagents/workflows/<wf>/). Invariant: the proof reads only a regular
@@ -212,6 +215,45 @@ func wakeDialogMarkerOpened(marker wakeDialogMarker, modTime time.Time) time.Tim
 		}
 	}
 	return opened
+}
+
+// claudeInterruptPrefix starts the text of the user record Claude Code
+// writes when the person interrupts a turn or a tool call.
+const claudeInterruptPrefix = "[Request interrupted by user"
+
+// claudeSubagentWaitEnded reports whether a subagent's own transcript tail
+// holds a user record dated after opened that carries an interrupt. A
+// reject writes one after the rejected tool_result and an Esc writes one,
+// so it proves the dialog gone even when no SubagentStop follows. A
+// tool_result alone proves nothing: another call of the same batch can
+// finish while the dialog still shows.
+func claudeSubagentWaitEnded(tail []byte, opened time.Time) bool {
+	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
+		var record claudeTranscriptRecord
+		if json.Unmarshal(line, &record) != nil || record.Type != "user" {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, record.Timestamp); err != nil || !at.After(opened) {
+			continue
+		}
+		var text string
+		if json.Unmarshal(record.Message.Content, &text) == nil {
+			if strings.HasPrefix(text, claudeInterruptPrefix) {
+				return true
+			}
+			continue
+		}
+		var blocks []claudeTranscriptBlock
+		if json.Unmarshal(record.Message.Content, &blocks) != nil {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "text" && strings.HasPrefix(block.Text, claudeInterruptPrefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // claudeTranscriptSyntheticModel marks an assistant record Claude Code

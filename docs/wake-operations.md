@@ -243,9 +243,11 @@ the hook is missing, runs an amq binary that is gone, or has an older form.
 The installer reads `claude --version` from the `claude` on `PATH`, with
 bounded output and a time limit, and adds `PostToolUseFailure` only for
 Claude Code 2.1.119 or later, because before 2.1.101 an unknown hook event
-made Claude Code ignore the whole settings file. With no readable version it
-leaves that event out. Doctor counts an event as missing only when that
-version supports it.
+made Claude Code ignore the whole settings file, and `SubagentStop` only for
+2.0.42 or later, the first version whose `SubagentStop` input names its
+`agent_id` per the Claude Code changelog. With no readable version it leaves
+those events out. Doctor counts an event as missing only when that version
+supports it.
 
 - **Marker.** The hooks run `amq wake dialog open|close`. Claude Code can
   show several dialogs at once, the main thread's and each subagent's, so
@@ -255,26 +257,30 @@ version supports it.
   its `tool_use_id`, each entry one marker. The doorbell is held while any
   entry holds. `open` runs on `PreToolUse` for AskUserQuestion and
   ExitPlanMode, and on every `PermissionRequest`, and writes that dialog's
-  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the
-  same two tools, which close only the entry of that tool call, and on
-  `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd`, which close
-  only entries of their own session: `Stop` and `UserPromptSubmit` its
-  main-thread entries, `SessionEnd` and a `SessionStart` from `startup` or
-  `resume` (a new process) all of them; a `--resume` of the same session in
-  a second terminal therefore also closes the first terminal's entries of
-  that session. An entry also records its host:
-  the nearest of the hook's first three ancestors, each parent edge proven
-  by its process start token, that runs Claude Code (an executable named
-  `claude`, or a native install's `claude/versions/<version>`). A dialog
-  cannot outlive its process, so while the doorbell is held an entry whose
-  host is proven gone (not running, or its pid now runs another process)
+  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the same
+  two tools, and on `UserPromptSubmit`, `Stop`, `SubagentStop`,
+  `SessionStart`, and `SessionEnd`. A `close` with empty input closes every
+  entry. `SubagentStop` closes every entry of its `agent_id`. The other
+  events close only entries of their own session: a tool call's close only
+  the entry of that tool call, `Stop` and `UserPromptSubmit` its main-thread
+  entries, `SessionEnd` (whatever its reason, `clear` included) and a
+  `SessionStart` from `startup` or `resume` (a new process) all of them; a
+  `--resume` of the same session in a second terminal therefore also closes
+  the first terminal's entries of that session. A `SessionStart` from
+  `clear`, `compact` or `fork` closes nothing. An entry also records its
+  host: the nearest of the hook's first three ancestors, each parent edge
+  proven by its process start token, that runs Claude Code (an executable
+  named `claude`, or a native install's `claude/versions/<version>`). A
+  dialog cannot outlive its process, so while the doorbell is held an entry
+  whose host is proven gone (not running, or its pid now runs another process)
   closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An
   entry with no host, or a host the wake cannot prove gone, holds. Other writers (Codex, Cursor, agy,
   pi, `amq coop exec`) keep the single file `.wake.dialog`. When a Claude
   Code dialog opens over that file, the file becomes the entry
   `legacy.json` in one atomic exchange, so the path is never absent, and
-  it keeps the single-file rules below. The directory goes with its last
-  entry. The receiver exits 0 once its
+  it keeps the single-file rules below. A marker the Claude Code dialog hook
+  wrote closes by the rules above whether it is an entry or a single file.
+  The directory goes with its last entry. The receiver exits 0 once its
   arguments parse and prints nothing, so it never decides a tool call or a
   permission. The marker is
   advisory and is written without fsync; a marker lost in a crash leaves the
@@ -323,8 +329,8 @@ version supports it.
 - **Hold after a permission dialog.** Permission hook input has no tool
   call id, so no hook of a tool call clears a permission marker: a call that
   Claude Code allows without asking, with the same tool and input, would
-  close a dialog that still shows. `UserPromptSubmit`, `Stop` and the
-  session events clear it, and so does the session transcript. While a
+  close a dialog that still shows. The events above clear it, and so does
+  the session transcript. While a
   permission dialog blocks a tool call, the main chain writes no new
   assistant message, because the model waits for the whole tool batch. At
   each recheck (every 2 seconds while the doorbell is held, on the input
@@ -339,21 +345,27 @@ version supports it.
   itself) can land while a dialog shows, so none of them proves anything.
   A dialog of a subagent (the hook input names its `agent_id`) blocks only
   that subagent while the main chain runs on, so the main transcript never
-  proves it; only an assistant record in the subagent's own transcript
-  does, by the same rule without the sidechain filter. A permission hook
-  gives no `agent_transcript_path`, so the wake reads the transcript where
-  Claude Code writes it: `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl`
-  or one or two subdirectories deeper (a workflow's subagents write to
+  proves it; only the subagent's own transcript does: an assistant record
+  by the same rule without the sidechain filter, or a `user` record dated
+  after the marker opened that carries an interrupt (`[Request interrupted
+  by user`), which a reject writes after the rejected `tool_result` and an
+  Esc writes at once, so the hold ends even when no `SubagentStop` follows.
+  A `tool_result` alone proves nothing, because another call of the same
+  batch can finish while the dialog still shows. A permission
+  hook gives no `agent_transcript_path`, so the wake reads the transcript
+  where Claude Code writes it:
+  `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl` or one or two
+  subdirectories deeper (a workflow's subagents write to
   `subagents/workflows/<wf>/`), beside the session transcript
   `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
   no symbolic link, found exactly once across those depths; none, several, or
   an unreadable file is no proof. A subagent can outlive the main thread's
-  turn, so the main thread's `Stop`, `UserPromptSubmit` and a `SessionStart`
-  from `clear`, `compact` or `fork` do not clear its entry, and a later
-  dialog's open writes its own entry beside it. It clears on its
-  proof, on `SessionEnd`, or on a `SessionStart` from `startup` or `resume`,
-  which is a new Claude Code process that cannot show the old one's
-  dialog; the dialog hooks do not receive `SubagentStop`. A doorbell that would land mid-turn after a
+  turn, so the main thread's `Stop` and `UserPromptSubmit` and a
+  `SessionStart` from `clear`, `compact` or `fork` do not clear its entry,
+  and a later dialog's open writes its own entry beside it. It clears on its
+  proof, on its own `SubagentStop`, on `SessionEnd`, or on a `SessionStart`
+  from `startup` or `resume`, which is a new Claude Code process that cannot
+  show the old one's dialog. A doorbell that would land mid-turn after a
   permission dialog lands once the turn moves on, the turn ends, or the
   person types.
 - **AskUserQuestion and ExitPlanMode.** An entry that the call's own
@@ -364,14 +376,16 @@ version supports it.
   exchange that turns a single file into entries, the single file stays:
   the new dialog's marker replaces it, except that a tool call's marker
   keeps a present marker without a tool call id. Esc on such a dialog runs no hook, but  Claude Code writes a `tool_result` for that tool call id (`is_error`, "User
-  rejected tool use") to the session transcript at once. The marker keeps
-  the hook's `transcript_path`. At each recheck the wake reads, read-only, at
-  most the last 256 KiB of that file (a regular file, no symlink followed),
-  and removes the marker when the tail holds a `tool_result` for the
-  marker's tool call id. It removes it under the marker lock, without
-  waiting, and only if the marker is still the version it read. A missing or
-  unreadable transcript proves nothing: the hold stays, and the hold line
-  says so.
+  rejected tool use") to the session transcript at once, or for a subagent's
+  call to the subagent's own transcript, which the wake finds as for a
+  subagent's permission dialog above. The marker keeps the hook's
+  `transcript_path` and `agent_transcript_path`. At each recheck the wake
+  reads, read-only, at most the last 256 KiB of that file (a regular file,
+  no symlink followed), and removes the marker when the tail holds a
+  `tool_result` for the marker's tool call id. It removes it under the
+  marker lock, without waiting, and only if the marker is still the version
+  it read. A missing or unreadable transcript proves nothing: the hold
+  stays, and the hold line says so.
 - **Esc on a permission dialog, and stale markers.** Esc or a deny on a
   permission dialog runs no hook and interrupts the turn, so no new
   assistant message follows, and the marker stays until the person's next
