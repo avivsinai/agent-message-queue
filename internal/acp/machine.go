@@ -137,10 +137,13 @@ type channelRecord struct {
 	Orphans     []string `json:"orphans,omitempty"`
 	RetiredBy   string   `json:"retired_by,omitempty"`
 	RetiredFrom string   `json:"retired_from,omitempty"`
-	SaidEnded   bool     `json:"said_ended,omitempty"`
-	LastError   string   `json:"last_error,omitempty"`
-	LastTry     string   `json:"last_try,omitempty"`
-	Updated     string   `json:"updated"`
+	// RetiredAt is when the record left its active slot, set once then;
+	// empty in a record retired before it was recorded.
+	RetiredAt string `json:"retired_at,omitempty"`
+	SaidEnded bool   `json:"said_ended,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+	LastTry   string `json:"last_try,omitempty"`
+	Updated   string `json:"updated"`
 }
 
 // inDoubt reports whether a create of r may have made a channel that is not
@@ -274,6 +277,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	}
 	s.applyResets(now)
 	s.retireGone(now)
+	s.reattach(now)
 	all, err := s.snapshot().list()
 	if err == nil {
 		for _, b := range all {
@@ -297,9 +301,9 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 // machineState is the machine worker's own state: its context, pacing,
 // and the settings files it watches (machine_hooks.go).
 type machineState struct {
-	ctx           context.Context
-	marked, swept string
-	settings      map[string]settingsSeen
+	ctx                    context.Context
+	marked, swept, rebound string
+	settings               map[string]settingsSeen
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
@@ -607,7 +611,7 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
 	fromSlot := r.State != channelRetired
 	if fromSlot {
-		r.RetiredFrom = r.State
+		r.RetiredFrom, r.RetiredAt = r.State, now.UTC().Format(time.RFC3339)
 	}
 	r.State, r.RetiredBy = channelRetired, by
 	raw, err := json.MarshalIndent(r, "", "  ")
