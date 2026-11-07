@@ -2,6 +2,7 @@ package receipt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,6 +83,78 @@ func EmitDeliveryRoot(root *fsq.DeliveryRoot, r Receipt) error {
 		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
 	}
 	return nil
+}
+
+// pendingDir holds receipts a consumer owes but could not write. It is a
+// sibling of receipts/ so a failing receipts directory cannot also lose the
+// obligation. Each entry is the full receipt under its final filename.
+func pendingDir(consumer string) string {
+	return filepath.Join("agents", consumer, "receipts-pending")
+}
+
+// EmitOwed writes a receipt for an outcome that already happened. When the
+// write fails, the receipt is parked in the consumer's pending directory so
+// RepairPending can write it later, and the write error is returned either
+// way: the caller's outcome is committed but its receipt is not yet visible.
+func EmitOwed(root *fsq.DeliveryRoot, r Receipt) error {
+	writeErr := EmitDeliveryRoot(root, r)
+	if writeErr == nil {
+		return nil
+	}
+	data, err := r.Marshal()
+	if err == nil {
+		_, err = root.WriteFileAtomic(pendingDir(r.Consumer), r.filename(), data, 0o600)
+	}
+	if err != nil {
+		return errors.Join(writeErr, fmt.Errorf("park %s receipt for %s: %w", r.Stage, r.MsgID, err))
+	}
+	return fmt.Errorf("%w (parked; the next drain or read writes it)", writeErr)
+}
+
+// RepairPending writes every receipt parked for consumer and then removes its
+// pending entry. It only reads the pending directory, so its cost follows
+// owed receipts, not mailbox history. A repeated or concurrent repair writes
+// identical bytes and is harmless.
+func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
+	dir := pendingDir(consumer)
+	entries, err := root.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read pending receipts: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		data, err := root.ReadRegularNoFollow(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("read pending receipt %s: %w", name, err))
+			}
+			continue
+		}
+		r, err := parseReceipt(data)
+		if err == nil && (r.Consumer != consumer || r.filename() != name) {
+			err = fmt.Errorf("receipt names %s", r.filename())
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pending receipt %s: %w", name, err))
+			continue
+		}
+		if err := EmitDeliveryRoot(root, r); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := root.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove pending receipt %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // WaitFor polls for a specific consumer-local receipt by deterministic filename.

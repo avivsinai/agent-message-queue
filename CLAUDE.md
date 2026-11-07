@@ -125,6 +125,7 @@ Mailbox layout:
 <root>/agents/<agent>/inbox/{tmp,new,cur}/
 <root>/agents/<agent>/outbox/sent/
 <root>/agents/<agent>/receipts/
+<root>/agents/<agent>/receipts-pending/
 <root>/agents/<agent>/dlq/{tmp,new,cur}/
 <root>/bridge/{host-id,identity,trusted/<host>,outbox,drop,receipts}/
 ```
@@ -142,6 +143,9 @@ P2P thread names use `p2p/<lower_handle>__<higher_handle>`.
 **Receipts**: Consumers write `drained` or `dlq` receipts under their own
 mailbox. Use `receipts list`, `receipts wait`, or `send --wait-for` to inspect
 delivery without treating a wake notification as consumption proof.
+A receipt that fails to write after a committed claim is parked in
+`receipts-pending/`; the command still prints the payload, fails, and the next
+`drain` or `read` writes the receipt without delivering the message again.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity

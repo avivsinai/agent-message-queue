@@ -3,10 +3,12 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -202,6 +204,77 @@ func TestDrainInboxItemsReportsEarlierClaimWhenLaterClaimCannotBeRead(t *testing
 	}
 	assertInboxCollectFixtureState(t, root, firstFilename, "cur")
 	assertInboxCollectFixtureState(t, root, secondFilename, "cur")
+}
+
+// Review of receipt recovery: a drained receipt that failed to write was only
+// a warning, and no later drain could write it, so `send --wait-for drained`
+// timed out although the message was consumed.
+func TestSendWaitForDrainedCompletesAfterReceiptWriteFailsOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := filepath.Join(t.TempDir(), "queue")
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+	configureSendTestRoot(t, root, "alice", "bob")
+	for _, key := range []string{envRoot, envBaseRoot, envSession} {
+		setOptionalEnv(t, key, "", false)
+	}
+	deliveryRoot := openDeliveryRootForCLITest(t, root)
+	receiptsDir := fsq.AgentReceipts(root, "alice")
+	t.Cleanup(func() { _ = os.Chmod(receiptsDir, 0o700) })
+
+	consumer := make(chan []string, 1)
+	_, _, err := captureEnvOutput(t, func() error {
+		go func() {
+			var failures []string
+			defer func() { consumer <- failures }()
+			newDir := fsq.AgentInboxNew(root, "alice")
+			for deadline := time.Now().Add(4 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if entries, _ := os.ReadDir(newDir); len(entries) > 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					failures = append(failures, "message never arrived")
+					return
+				}
+			}
+			if err := os.Chmod(receiptsDir, 0o500); err != nil {
+				failures = append(failures, err.Error())
+				return
+			}
+			items, err := drainInboxItems(deliveryRoot, root, "alice", true, 0, &headerValidator{})
+			if err == nil || len(items) != 1 || strings.TrimSpace(items[0].Body) != "consume me" {
+				failures = append(failures, fmt.Sprintf("drain with unwritable receipts = %d items, %v; want the payload and an error", len(items), err))
+			}
+			if err := os.Chmod(receiptsDir, 0o700); err != nil {
+				failures = append(failures, err.Error())
+				return
+			}
+			items, err = drainInboxItems(deliveryRoot, root, "alice", true, 0, &headerValidator{})
+			if err != nil || len(items) != 0 {
+				failures = append(failures, fmt.Sprintf("repairing drain = %d items, %v; want no redelivery and no error", len(items), err))
+			}
+		}()
+		return runSend([]string{
+			"--root", root,
+			"--me", "bob",
+			"--to", "alice",
+			"--body", "consume me",
+			"--wait-for", "drained",
+			"--wait-timeout", "4s",
+		})
+	})
+	failures := <-consumer
+	if err != nil {
+		failures = append(failures, fmt.Sprintf("send --wait-for drained: %v", err))
+	}
+	if len(failures) > 0 {
+		t.Fatal(strings.Join(failures, "\n"))
+	}
 }
 
 func ensureInboxCollectFixtureRoot(t *testing.T, root string) {
