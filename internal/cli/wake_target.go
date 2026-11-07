@@ -8,29 +8,32 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 const (
 	wakeTargetSchema    = 1
 	wakeTargetFileName  = ".wake.target"
-	wakeTargetInjectVia = "inject-via"
+	wakeTargetInjectVia = wakelock.InjectViaMode
 	envWakeOwner        = "AMQ_WAKE_OWNER"
-
-	maxWakeOwnerIdentityTokenBytes = 256
 )
 
-type wakeOwner struct {
-	PID          int    `json:"pid"`
-	ProcessStart string `json:"process_start,omitempty"`
-	BootID       string `json:"boot_id,omitempty"`
-	SessionID    int    `json:"session_id,omitempty"`
+type wakeOwner = wakelock.Owner
+
+func validateWakeOwner(owner wakeOwner) error {
+	return wakelock.ValidateOwner(owner)
+}
+
+func validateAuthoritativeWakeOwner(owner wakeOwner) error {
+	return wakelock.ValidateAuthoritativeOwner(owner)
+}
+
+func validateWakeTargetPathOwnership(label, path string, info os.FileInfo) error {
+	return wakelock.ValidatePathOwnership(label, path, info)
 }
 
 type wakeTarget struct {
@@ -251,121 +254,6 @@ func wakeOwnerFromEnv() (*wakeOwner, error) {
 	return &owner, nil
 }
 
-func validateWakeOwner(owner wakeOwner) error {
-	if owner.PID <= 0 {
-		return fmt.Errorf("wake owner pid must be > 0")
-	}
-	if strings.ContainsRune(owner.ProcessStart, 0) {
-		return fmt.Errorf("wake owner process start contains NUL")
-	}
-	if strings.ContainsRune(owner.BootID, 0) {
-		return fmt.Errorf("wake owner boot id contains NUL")
-	}
-	if owner.SessionID < 0 {
-		return fmt.Errorf("wake owner session id must be >= 0")
-	}
-	return nil
-}
-
-func validateAuthoritativeWakeOwner(owner wakeOwner) error {
-	if err := validateWakeOwner(owner); err != nil {
-		return err
-	}
-	if err := validateAuthoritativeWakeOwnerToken("process start", owner.ProcessStart); err != nil {
-		return err
-	}
-	if err := validateAuthoritativeWakeOwnerToken("boot id", owner.BootID); err != nil {
-		return err
-	}
-	if owner.SessionID <= 0 {
-		return fmt.Errorf("wake owner session id must be > 0")
-	}
-	if !validWakeOwnerProcessStart(owner.ProcessStart) {
-		return fmt.Errorf("wake owner process start has malformed platform value")
-	}
-	if !validWakeOwnerBootID(owner.BootID) {
-		return fmt.Errorf("wake owner boot id has malformed platform value")
-	}
-	return nil
-}
-
-func validateAuthoritativeWakeOwnerToken(label, value string) error {
-	if value == "" {
-		return fmt.Errorf("wake owner %s is required", label)
-	}
-	if len(value) > maxWakeOwnerIdentityTokenBytes {
-		return fmt.Errorf("wake owner %s is too long", label)
-	}
-	if !utf8.ValidString(value) {
-		return fmt.Errorf("wake owner %s is not valid UTF-8", label)
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("wake owner %s contains a control character", label)
-		}
-	}
-	if strings.TrimSpace(value) != value {
-		return fmt.Errorf("wake owner %s is not canonical", label)
-	}
-	return nil
-}
-
-func validWakeOwnerProcessStart(value string) bool {
-	if validPositiveDecimal(value) {
-		return true
-	}
-	return validWakeOwnerTimestamp(value)
-}
-
-func validWakeOwnerBootID(value string) bool {
-	if validWakeOwnerTimestamp(value) {
-		return true
-	}
-	if len(value) != 36 {
-		return false
-	}
-	for index, r := range value {
-		switch index {
-		case 8, 13, 18, 23:
-			if r != '-' {
-				return false
-			}
-		default:
-			if (r < '0' || r > '9') &&
-				(r < 'a' || r > 'f') &&
-				(r < 'A' || r > 'F') {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func validWakeOwnerTimestamp(value string) bool {
-	seconds, nanos, found := strings.Cut(value, ".")
-	if !found || !validPositiveDecimal(seconds) || len(nanos) != 9 {
-		return false
-	}
-	parsedNanos, err := strconv.ParseUint(nanos, 10, 32)
-	return err == nil && parsedNanos < 1_000_000_000
-}
-
-func validPositiveDecimal(value string) bool {
-	if value == "" {
-		return false
-	}
-	if len(value) > 1 && value[0] == '0' {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	return err == nil && parsed > 0
-}
-
 func validateWakeInjectViaPath(path string) (string, error) {
 	resolvedPath, err := resolveWakeInjectViaPath(path)
 	if err != nil {
@@ -425,18 +313,6 @@ func validateResolvedWakeInjectViaPath(path string) error {
 	}
 	if err := validateResolvedWakeInjectViaTarget(resolvedPath); err != nil {
 		return err
-	}
-	return nil
-}
-
-func validateWakeTargetPathOwnership(label, path string, info os.FileInfo) error {
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s %s is group/world-writable", label, path)
-	}
-	ownerUID, ownerOK := wakeTargetFileOwnerUID(info)
-	currentUID, currentOK := wakeTargetCurrentUID()
-	if ownerOK && currentOK && ownerUID != currentUID {
-		return fmt.Errorf("%s %s is owned by uid %d, want current uid %d", label, path, ownerUID, currentUID)
 	}
 	return nil
 }
