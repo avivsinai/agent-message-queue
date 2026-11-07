@@ -85,10 +85,10 @@ func Publish(r Record) error {
 				return fmt.Errorf("sync %s: %w", d, err)
 			}
 		}
-		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "records"), processKey(r)+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "records", processKey(r)+".json"), append(raw, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the exec identity: %w", err)
 		}
-		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "current", currentKey(r)+".json"), append(current, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the current exec identity: %w", err)
 		}
 		return nil
@@ -164,6 +164,8 @@ func currentKey(r Record) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+const storeName = "exec-records"
+
 // storeDir is $HOME/.amq/exec-records with its records/ and current/
 // directories, each a plain directory. With create, missing directories are
 // made with mode 0700; without, a missing store returns "".
@@ -175,7 +177,7 @@ func storeDir(create bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	store := filepath.Join(amqDir, "exec-records")
+	store := filepath.Join(amqDir, storeName)
 	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "records"), filepath.Join(store, "current")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {

@@ -21,6 +21,8 @@ import (
 const TrustVersion = 1
 
 type TrustStore struct {
+	// stateDir is the trust anchor; dir is the store below it.
+	stateDir        string
 	dir             string
 	projectIdentity string
 }
@@ -77,6 +79,7 @@ func OpenTrustStoreForBase(userStateDir, projectRoot, baseRoot string) (*TrustSt
 		dir = filepath.Join(dir, "bases", hex.EncodeToString(baseSum[:]))
 	}
 	return &TrustStore{
+		stateDir:        stateAbs,
 		dir:             dir,
 		projectIdentity: identity,
 	}, nil
@@ -142,13 +145,17 @@ func (store *TrustStore) Replace(record TrustRecord) error {
 	if err := ensureAMQHomeFor(store.dir); err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(store.dir, "trust.json", data, 0o600)
+	rel, err := filepath.Rel(store.stateDir, store.Path())
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteStateFile(store.stateDir, rel, data, 0o600)
 	return err
 }
 
 // ensureAMQHomeFor creates ~/.amq through amqhome, with its symlink check,
-// when dir is below it. Without this, the MkdirAll in the atomic write could
-// create ~/.amq unchecked.
+// when dir is below it. Without this, the state writer could create ~/.amq
+// unchecked.
 func ensureAMQHomeFor(dir string) error {
 	home, err := amqhome.Dir()
 	if err != nil {

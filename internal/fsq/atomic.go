@@ -11,13 +11,17 @@ import (
 	"time"
 )
 
-// WriteStateFile atomically replaces root/rel with data. root is trusted: it
-// must already exist, and links in its own path are the caller's choice. Every
-// directory below root is checked without following a symlink and created 0700
-// when missing, so a planted link cannot redirect the write. rel must be local.
+// WriteStateFile atomically replaces root/rel with data. root is the trust
+// anchor: it is created 0700 when missing, and links in its own path are the
+// caller's choice. Every directory below root is checked without following a
+// symlink and created 0700 when missing, so a planted link cannot redirect the
+// write. rel must be local.
 func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, error) {
 	if !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("state file %q is not a local path below %s", rel, root)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
 	}
 	identity, err := SnapshotDeliveryRoot(root)
 	if err != nil {
