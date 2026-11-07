@@ -279,8 +279,7 @@ func ValidateStateBinding(lock Lock) error {
 
 // Wake-lock input trust is enforced jointly by the reader's syntax gate, the
 // occurrence-preserving scanner below, json.Unmarshal's known-field type
-// checks, and the envelope validators. Keep that complete family synchronized
-// with TestWakeLockJSONTrustMatrix: (1) raw parse failure; (2) non-object top
+// checks, and the envelope validators. They together refuse: (1) raw parse failure; (2) non-object top
 // levels; (3) known-field wrong types at early and late byte positions;
 // (4) direct and folded known-field nulls; (5) top-level duplicate known keys
 // in both orders and through folded aliases; (6) nested colliding keys, which
