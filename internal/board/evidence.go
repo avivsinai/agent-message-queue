@@ -14,14 +14,14 @@ import (
 // safe and count toward capacity; the later commit revalidates every reference.
 // It does not write the evidence of pruned messages, which the commit will
 // not take.
-func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Message) error {
+func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Message) (map[string]bool, error) {
 	if len(blobs) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Validate initialized state before creating even an evidence lock file.
 	state, err := s.ReadContext(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pruned := map[string]bool{}
 	for _, m := range messages {
@@ -31,11 +31,12 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Mes
 	}
 	path := filepath.Join(s.Dir, "evidence.lock")
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return errors.New("unsafe evidence budget lock")
+		return nil, errors.New("unsafe evidence budget lock")
 	} else if err != nil && !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
-	return lock.WithExclusiveFileLockUntil(path, func() bool { return ctx.Err() != nil }, func() error {
+	var written map[string]bool
+	err = lock.WithExclusiveFileLockUntil(path, func() bool { return ctx.Err() != nil }, func() error {
 		if err := s.validateIdentity(ctx); err != nil {
 			return err
 		}
@@ -64,7 +65,8 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Mes
 		if identity.ProjectID != s.ProjectID {
 			return ErrProjectChanged
 		}
-
-		return s.saveEvidence(ctx, blobs, pruned)
+		written, err = s.saveEvidence(ctx, blobs, pruned)
+		return err
 	})
+	return written, err
 }

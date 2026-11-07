@@ -587,20 +587,51 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	return nil
 }
 
-// holdsUnnamedEvidence reports whether the evidence directory holds bytes
-// that neither a published message nor a pending retirement names: the
-// bytes a new base would sweep.
-func (s Store) holdsUnnamedEvidence(ctx context.Context) (bool, error) {
-	state, err := s.ReadContext(ctx)
-	if err != nil {
-		return false, err
-	}
+// namedEvidence is the evidence file names a new base keeps: those state
+// and the recovery copy (prev, the document the new base replaces) name, and
+// the pending retirements.
+func namedEvidence(state *Snapshot, prev document) (map[string]bool, error) {
 	named := map[string]bool{}
 	for _, m := range state.Messages {
 		named[m.EvidenceHash+".json"] = true
 	}
 	for hash := range state.RetiredEvidence {
 		named[hash+".json"] = true
+	}
+	if prev.data != nil {
+		var backup struct {
+			Messages map[string]struct {
+				EvidenceHash string `json:"evidence_hash"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(prev.data, &backup); err != nil {
+			return nil, err
+		}
+		for _, m := range backup.Messages {
+			named[m.EvidenceHash+".json"] = true
+		}
+	}
+	return named, nil
+}
+
+// holdsUnnamedEvidence reports whether the evidence directory holds bytes a
+// new base would sweep: named by neither namedEvidence of the published
+// state nor staged, the files this acquisition just wrote.
+func (s Store) holdsUnnamedEvidence(ctx context.Context, staged map[string]bool) (bool, error) {
+	var named map[string]bool
+	err := lock.WithExclusiveFileLockUntil(filepath.Join(s.Dir, "writer.lock"), func() bool { return ctx.Err() != nil }, func() error {
+		if err := s.validateIdentity(ctx); err != nil {
+			return err
+		}
+		state, doc, err := s.readUnlocked(ctx)
+		if err != nil {
+			return err
+		}
+		named, err = namedEvidence(&state, doc)
+		return err
+	})
+	if err != nil {
+		return false, err
 	}
 	entries, err := os.ReadDir(filepath.Join(s.Dir, "evidence"))
 	if os.IsNotExist(err) {
@@ -609,7 +640,7 @@ func (s Store) holdsUnnamedEvidence(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	for _, e := range entries {
-		if named[e.Name()] || !e.Type().IsRegular() {
+		if named[e.Name()] || staged[e.Name()] || !e.Type().IsRegular() {
 			continue
 		}
 		if info, err := e.Info(); err == nil && info.Size() > 0 {
@@ -625,25 +656,9 @@ func (s Store) holdsUnnamedEvidence(ctx context.Context) (bool, error) {
 // staged for a publication that has not happened yet goes too, and that
 // publication's evidence check refuses it until it is staged again.
 func (s Store) sweepEvidence(state *Snapshot, prev document) error {
-	named := map[string]bool{}
-	for _, m := range state.Messages {
-		named[m.EvidenceHash+".json"] = true
-	}
-	for hash := range state.RetiredEvidence {
-		named[hash+".json"] = true
-	}
-	if prev.data != nil {
-		var backup struct {
-			Messages map[string]struct {
-				EvidenceHash string `json:"evidence_hash"`
-			} `json:"messages"`
-		}
-		if err := json.Unmarshal(prev.data, &backup); err != nil {
-			return err
-		}
-		for _, m := range backup.Messages {
-			named[m.EvidenceHash+".json"] = true
-		}
+	named, err := namedEvidence(state, prev)
+	if err != nil {
+		return err
 	}
 	dir := filepath.Join(s.Dir, "evidence")
 	return lock.WithExclusiveFileLockUntil(filepath.Join(s.Dir, "evidence.lock"), func() bool { return false }, func() error {
@@ -735,15 +750,18 @@ func (s Store) appendJournal(record []byte) error {
 	return f.Close()
 }
 
-func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[string]bool) error {
+// saveEvidence writes the blobs that are new and returns the evidence file
+// names it wrote.
+func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[string]bool) (map[string]bool, error) {
+	written := map[string]bool{}
 	dir := filepath.Join(s.Dir, "evidence")
 	if info, err := os.Lstat(dir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
-		return errors.New("unsafe board evidence directory")
+		return written, errors.New("unsafe board evidence directory")
 	} else if err != nil && !os.IsNotExist(err) {
-		return err
+		return written, err
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
-		return err
+		return written, err
 	}
 	// The budget scan stats every evidence file, so it runs only when a blob
 	// is new.
@@ -765,10 +783,10 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 	}
 	for i, b := range blobs {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return written, ctx.Err()
 		}
 		if err := s.safeDirectory(); err != nil {
-			return err
+			return written, err
 		}
 		sum := sha256.Sum256(b)
 		hash := hex.EncodeToString(sum[:])
@@ -778,15 +796,15 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 		name := hash + ".json"
 		if previous, err := readBounded(filepath.Join(dir, name), snapshotLimit); err == nil {
 			if string(previous) != string(b) {
-				return errors.New("board evidence hash conflict")
+				return written, errors.New("board evidence hash conflict")
 			}
 			continue
 		} else if !os.IsNotExist(err) {
-			return err
+			return written, err
 		}
 		if used < 0 {
 			if err := measure(); err != nil {
-				return err
+				return written, err
 			}
 		}
 		if len(b) > snapshotLimit || used+int64(len(b)) > evidenceLimit {
@@ -806,14 +824,15 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 				}
 				excess += int64(len(rest))
 			}
-			return evidenceBoundError{excess: excess}
+			return written, evidenceBoundError{excess: excess}
 		}
 		if _, err := fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
-			return err
+			return written, err
 		}
+		written[name] = true
 		used += int64(len(b))
 	}
-	return fsq.SyncDir(s.Dir)
+	return written, fsq.SyncDir(s.Dir)
 }
 
 func (s Store) Commit(ctx context.Context, a Acquisition) error {
@@ -834,11 +853,11 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 }
 
 func (s Store) commit(ctx context.Context, a Acquisition) error {
-	stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
+	staged, stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
 	if errors.Is(stageErr, errEvidenceBound) {
 		// A new base removes the evidence nothing names; only what is
 		// still past the bound after it is pressure.
-		unnamed, err := s.holdsUnnamedEvidence(ctx)
+		unnamed, err := s.holdsUnnamedEvidence(ctx, staged)
 		if err != nil {
 			return err
 		}
@@ -849,7 +868,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}); err != nil {
 				return err
 			}
-			stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
+			_, stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
 		}
 	}
 	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
