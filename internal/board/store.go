@@ -516,14 +516,12 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	// A retired hash is stamped with the generation that first publishes it.
 	// Retired evidence the old base no longer names goes with this base: the
 	// old base becomes the backup, so no kept generation names it.
-	var unlink []string
 	changed := false
 	for hash, gen := range state.RetiredEvidence {
 		if gen == 0 {
 			state.RetiredEvidence[hash] = state.Generation
 			changed = true
 		} else if prev.data != nil && gen <= prev.baseGeneration {
-			unlink = append(unlink, hash)
 			delete(state.RetiredEvidence, hash)
 			changed = true
 		}
@@ -566,11 +564,57 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		_, _ = fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("durability uncertain\n"), 0o600)
 		return fmt.Errorf("board durability uncertain; stop writes: %w", err)
 	}
-	// Leftover evidence is immutable and safe, so a crash here only leaks it.
-	for _, hash := range unlink {
-		_ = os.Remove(filepath.Join(s.Dir, "evidence", hash+".json"))
+	if compact {
+		// Leftover evidence is immutable and safe, so a crash or a failed
+		// sweep only leaks it until the next new base.
+		_ = s.sweepEvidence(state, prev)
 	}
 	return nil
+}
+
+// sweepEvidence removes every evidence file that the published state, the
+// recovery copy (prev) and RetiredEvidence leave unnamed. It holds the
+// evidence lock, so no staging measures the bound while it runs; evidence
+// staged for a publication that has not happened yet goes too, and that
+// publication's evidence check refuses it until it is staged again.
+func (s Store) sweepEvidence(state *Snapshot, prev document) error {
+	named := map[string]bool{}
+	for _, m := range state.Messages {
+		named[m.EvidenceHash+".json"] = true
+	}
+	for hash := range state.RetiredEvidence {
+		named[hash+".json"] = true
+	}
+	if prev.data != nil {
+		var backup struct {
+			Messages map[string]struct {
+				EvidenceHash string `json:"evidence_hash"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(prev.data, &backup); err != nil {
+			return err
+		}
+		for _, m := range backup.Messages {
+			named[m.EvidenceHash+".json"] = true
+		}
+	}
+	dir := filepath.Join(s.Dir, "evidence")
+	return lock.WithExclusiveFileLockUntil(filepath.Join(s.Dir, "evidence.lock"), func() bool { return false }, func() error {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if !named[e.Name()] && e.Type().IsRegular() {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // backupJournalName replays over snapshot.backup.json to the generation

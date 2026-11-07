@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,72 @@ func TestEvidencePressurePrunesAndSkippedEvidenceIsRetired(t *testing.T) {
 	got := read()
 	if _, kept := got.Messages[old.Key]; kept || got.RetiredEvidence[old.EvidenceHash] == 0 {
 		t.Fatalf("evidence pressure kept %v, retired %v; want the oldest history pruned", kept, got.RetiredEvidence)
+	}
+}
+
+// Review of the disk bounds: evidence that nothing names stayed on disk and
+// counted against the evidence bound, so ingestion stopped for good.
+func TestNewBaseSweepsUnnamedEvidence(t *testing.T) {
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := func(name string, ago time.Duration) (Message, []byte) {
+		created := time.Now().UTC().Add(-ago)
+		id := created.Format("2006-01-02T15-04-05.000Z") + "_pid1_" + name
+		raw, _ := json.Marshal(thread.Entry{ID: id, Thread: "work", Kind: "status", Created: created.Format(time.RFC3339Nano)})
+		sum := sha256.Sum256(raw)
+		var entry thread.Entry
+		_ = json.Unmarshal(raw, &entry)
+		return MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:])), raw
+	}
+	commit := func(m Message, raw []byte) {
+		t.Helper()
+		err := store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: Input{Dir: base}, Messages: []Message{m}, Evidence: [][]byte{raw}})
+		if err != nil && !errors.Is(err, errEvidenceBound) {
+			t.Fatal(err)
+		}
+	}
+	kept, keptRaw := message("kept", 2*time.Hour)
+	commit(kept, keptRaw)
+	orphan := filepath.Join(store.Dir, "evidence", strings.Repeat("0", 64)+".json")
+	if err = os.WriteFile(orphan, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Truncate(orphan, evidenceLimit); err != nil {
+		t.Fatal(err)
+	}
+	next, nextRaw := message("next", time.Hour)
+	for range 3 {
+		commit(next, nextRaw)
+	}
+	got, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("unnamed evidence is still on disk: %v", err)
+	}
+	if _, ok := got.Messages[next.Key]; !ok {
+		t.Fatal("ingestion did not resume after the unnamed evidence went")
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir, "evidence", next.EvidenceHash+".json")); err != nil {
+		t.Fatalf("named evidence was removed: %v", err)
 	}
 }
