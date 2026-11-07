@@ -127,6 +127,10 @@ func runRead(args []string) error {
 		return readErr
 	}
 
+	// Receipts that earlier claims still owe are written before this read
+	// claims anything; a repair failure leaves them owed and fails the read.
+	repairErr := receipt.RepairPending(deliveryRoot, common.Me)
+
 	// Move to cur only after successful parse
 	var claimErr error
 	if box == fsq.BoxNew {
@@ -137,21 +141,21 @@ func runRead(args []string) error {
 				return claimErr
 			}
 		}
-		emitReceipt(deliveryRoot, common.Me, &inboxItem{
+		claimErr = joinOutcomeErr(claimErr, emitReceipt(deliveryRoot, common.Me, &inboxItem{
 			ID:     msg.Header.ID,
 			From:   msg.Header.From,
 			Thread: msg.Header.Thread,
-		}, receipt.StageDrained, "")
+		}, receipt.StageDrained, ""))
 	}
 
 	if common.JSON {
-		return errors.Join(claimErr, writeJSON(os.Stdout, map[string]any{
+		return errors.Join(claimErr, repairErr, writeJSON(os.Stdout, map[string]any{
 			"header": msg.Header,
 			"body":   msg.Body,
 		}))
 	}
 
-	return errors.Join(claimErr, writeStdout("%s", msg.Body))
+	return errors.Join(claimErr, repairErr, writeStdout("%s", msg.Body))
 }
 
 func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reason, detail string, header *format.Header) (*inboxItem, error) {
@@ -196,8 +200,7 @@ func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reas
 	}
 
 	item.MovedToDLQ = true
-	emitReceipt(root, me, item, receipt.StageDLQ, detail)
-	return item, transitionErr
+	return item, joinOutcomeErr(transitionErr, emitReceipt(root, me, item, receipt.StageDLQ, detail))
 }
 
 func outputReadFailure(jsonOutput bool, item *inboxItem) error {
