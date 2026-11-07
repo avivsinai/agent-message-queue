@@ -67,6 +67,35 @@ func TestAttachImagesStoresTheImageAndNamesIt(t *testing.T) {
 	}
 }
 
+// Review round 1 of the pi and images code: Buzz writes an image into the
+// text as a Markdown image, so the URL found without imeta ends at its
+// closing parenthesis and before trailing punctuation.
+func TestAttachImagesDownloadsAMarkdownImageLink(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	sha := hex.EncodeToString(sum[:])
+	url := "https://relay.example/media/" + sha + ".png"
+	saved, savedRelay := mediaGet, buzzRelayURL
+	t.Cleanup(func() { mediaGet, buzzRelayURL = saved, savedRelay })
+	buzzRelayURL = "wss://relay.example"
+	var calls []string
+	mediaGet = func(_ time.Duration, _ int, got string) ([]byte, error) {
+		calls = append(calls, got)
+		return buf.Bytes(), nil
+	}
+	root := canonicalTempDir(t)
+	prompt := "<buzz-event type=\"@mention\">\nContent: see ![image](" + url + ").\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
+
+	got := attachImages(root, prompt)
+	path := filepath.Join(root, "agents", mailboxSender, "remote-files", sha+".png")
+	if want := prompt + "\n\n[image: " + path + "]"; got != want || len(calls) != 1 || calls[0] != url {
+		t.Fatalf("prompt =\n%s\ndownloads = %q; want one download of %s", got, calls, url)
+	}
+}
+
 // An image over the cap is refused with a line, without a download, and the
 // owner's text still arrives (bead agent-message-queue-ho2).
 func TestAttachImagesRefusesAnImageOverTheCap(t *testing.T) {

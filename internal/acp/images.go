@@ -42,9 +42,10 @@ const (
 
 var (
 	sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	// httpsURLRe finds the https URLs of an event's text; blobSHA decides
-	// which of them name a blob.
-	httpsURLRe = regexp.MustCompile(`https://[^\s"'<>]+`)
+	// httpsURLRe finds the https URLs of an event's text, ending at
+	// whitespace, a quote, or a bracket (a Markdown link or image wraps its
+	// URL in parentheses); blobSHA decides which of them name a blob.
+	httpsURLRe = regexp.MustCompile(`https://[^\s"'<>()\[\]]+`)
 	// imageExts are the stored extensions, in the order a stored file is
 	// looked up by its sha256.
 	imageExts = []string{"png", "jpg", "gif", "webp", "heic"}
@@ -134,6 +135,7 @@ func promptMedia(prompt string) []eventMedia {
 		return media
 	}
 	for _, raw := range httpsURLRe.FindAllString(evt, -1) {
+		raw = strings.TrimRight(raw, ".,;:!?")
 		if onRelay(raw) && blobSHA(raw) != "" && !seen[raw] {
 			seen[raw] = true
 			media = append(media, eventMedia{url: raw})
