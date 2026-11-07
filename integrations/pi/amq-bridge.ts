@@ -187,6 +187,30 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	let bridge: Bridge | null = null;
 	// ownerNotice limits the notices about another bridge to once.
 	const ownerNotice = { shown: false };
+	// waiting is the beat of a bridge another live bridge holds off. When
+	// the holder's liveness is stale, not live, or absent (it crashed or
+	// exited), the bridge starts as at session_start and tells its pi.
+	let waiting: ReturnType<typeof setInterval> | null = null;
+	const stopWaiting = () => {
+		if (waiting) clearInterval(waiting);
+		waiting = null;
+	};
+	const open = (ctx: ExtensionContext, identity: AmqIdentity): Bridge | null => {
+		const b = start(pi, ctx, options, identity, ownerNotice);
+		if (b !== "held") return b;
+		waiting = setInterval(() => {
+			const next = start(pi, ctx, options, identity, ownerNotice);
+			if (next === "held") return;
+			stopWaiting();
+			bridge = next;
+			if (!next) return;
+			ownerNotice.shown = false;
+			notify(ctx, "amq-bridge now serves Buzz requests.");
+			scanSafely(pi, next);
+		}, HEARTBEAT_MS);
+		waiting.unref();
+		return null;
+	};
 	// session holds the identity resolved for the open session, none
 	// included; it is null outside a session.
 	let session: { identity: AmqIdentity | undefined } | null = null;
@@ -233,9 +257,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		openPrompts = 0;
 		closeWakeDialog(who());
 		closeRemoteDialog();
+		stopWaiting();
 		stop(bridge, "restart");
 		session = { identity: resolveIdentity(options, ctx) };
-		bridge = session.identity ? start(pi, ctx, options, session.identity, ownerNotice) : null;
+		bridge = session.identity ? open(ctx, session.identity) : null;
 		if (bridge) scanSafely(pi, bridge);
 		else if (!session.identity && !options.identity && !inactiveNoticeShown) {
 			// A host that gives no identity for this session keeps the bridge
@@ -252,6 +277,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		openPrompts = 0;
 		closeWakeDialog(who());
 		closeRemoteDialog();
+		stopWaiting();
 		stop(bridge, event.reason);
 		bridge = null;
 		session = null;
@@ -364,7 +390,9 @@ function resolveIdentity(options: AmqBridgeOptions, ctx: ExtensionContext | unde
 	return id && typeof id.root === "string" && path.isAbsolute(id.root) && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
 }
 
-function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }): Bridge | null {
+// start starts the bridge, or returns "held" while another live bridge
+// holds the mailbox, or null when the bridge cannot run.
+function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }): Bridge | "held" | null {
 	const dir = path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
 	try {
 		for (const sub of ["requests", "receipts", "events"]) {
@@ -387,7 +415,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 			ownerNotice.shown = true;
 			notify(ctx, `amq-bridge inactive: another live pi bridge (pid ${holder.pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
 		}
-		return null;
+		return "held";
 	}
 	const b: Bridge = {
 		dir,

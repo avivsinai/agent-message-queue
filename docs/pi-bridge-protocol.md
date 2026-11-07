@@ -52,9 +52,13 @@ One extension instance serves a mailbox, and `bridge.liveness` is the only
 record of which one. Its owner is the generation it names while it is
 younger than `OWNER_STALE_MS` (60 seconds, 30 heartbeats) and has
 `live: true`. A starting instance that finds such a record for another
-generation stays inactive for that session and tells the owner once in pi; a
-second pi started with the same `AM_ROOT` and `AM_ME`, for example from a pi
-tool, never touches the first bridge's requests or liveness. A stalled owner
+generation stays inactive and tells the owner once in pi; a second pi started
+with the same `AM_ROOT` and `AM_ME`, for example from a pi tool, never touches
+the first bridge's requests or liveness. The inactive instance checks every
+heartbeat and, once the record is older, not live, or absent, takes over as at
+start and tells its pi that it now serves Buzz requests. A clean exit writes
+`live: false`, so the takeover then follows at the next heartbeat; after a
+crash it follows within `OWNER_STALE_MS`. A stalled owner
 keeps the mailbox until its record is older than `OWNER_STALE_MS`. A record
 that is older, not live, or absent is taken over by writing liveness. When
 two instances start at once, the last liveness write wins: an instance that

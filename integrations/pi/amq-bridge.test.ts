@@ -320,7 +320,7 @@ test("a second bridge on a live, even stalled, owner's mailbox stays inactive an
 });
 
 // Review of pi bridge ownership: a bridge started over another generation's live liveness.
-test("a bridge stays inactive while another generation's liveness is live", async () => {
+test("a bridge stays inactive while another generation's liveness is live, and takes over once it ages", async () => {
 	const h = harness();
 	const foreign = JSON.stringify({ protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 });
 	fs.mkdirSync(h.dir, { recursive: true });
@@ -330,6 +330,14 @@ test("a bridge stays inactive while another generation's liveness is live", asyn
 		assert.equal(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"), foreign);
 		assert.equal(h.notices.length, 1);
 		assert.match(h.notices[0], /pid 4242/);
+		// Review of the liveness ruling: a pi restarted within 60 s of a crash stayed inactive all session.
+		const past = new Date(Date.now() - 120_000);
+		fs.utimesSync(path.join(h.dir, "bridge.liveness"), past, past);
+		for (let i = 0; i < 150 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.equal(h.sent.length, 1);
 	} finally {
 		await h.done();
 	}
