@@ -165,16 +165,15 @@ func replaceTestEnv(env []string, key, value string) []string {
 	return append(out, key+"="+value)
 }
 
-// waitForTestPID polls until the grandchild has published its pid. A missing or
-// empty file means the grandchild is not up yet (observed on Windows CI).
+// waitForTestPID polls until the grandchild has published its pid. Until
+// then a read can find no file, an empty file, or (Windows CI, #1365) a
+// sharing violation while the helper's rename holds the file open; each
+// means "not yet", so only the deadline fails the wait.
 func waitForTestPID(t *testing.T, path string) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		raw, err := os.ReadFile(path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
 		if err == nil && strings.TrimSpace(string(raw)) != "" {
 			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
 			if parseErr != nil || pid <= 0 {
@@ -183,7 +182,7 @@ func waitForTestPID(t *testing.T, path string) int {
 			return pid
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for grandchild pid file %q", path)
+			t.Fatalf("timed out waiting for grandchild pid file %q (last read: %v)", path, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
