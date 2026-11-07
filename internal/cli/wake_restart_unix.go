@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
@@ -262,15 +263,7 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	result.PreviousGeneration = record.Generation
 
 	if needsNotify {
-		if err := wakeRestartNotify(agentDir, expected, record); err != nil {
-			var refused wakeRestartRefusedByWakeError
-			if errors.As(err, &refused) {
-				// The wake did not queue this request. Finish it so it does
-				// not hold a later restart or self-upgrade.
-				if finishErr := refuseWakeRestartRecord(agentDir, record, refused.Reason); finishErr != nil {
-					err = errors.Join(err, fmt.Errorf("finish refused wake restart request: %w", finishErr))
-				}
-			}
+		if err := notifyWakeRestartRequest(agentDir, expected, record); err != nil {
 			result.Reason = err.Error()
 			return result, err
 		}
@@ -461,6 +454,15 @@ func reconcileWakeRestartPublicationAt(
 			return false, err
 		}
 	}
+	write := !adopted
+	if adopted && needsNotify && !record.Taken && state.record.Requester != nil &&
+		!sameWakeOwner(record.Requester, state.record.Requester) {
+		// The adopting process now waits on the untaken request, so its
+		// exit, not the publisher's, makes the request orphaned. An adopter
+		// without an identity keeps the publisher's.
+		record.Requester = state.record.Requester
+		write = true
+	}
 	if !adopted {
 		record.Generation = state.expected.Lock.Generation
 		record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(state.expected.Lock)
@@ -472,6 +474,8 @@ func reconcileWakeRestartPublicationAt(
 			state.needsNotify = needsNotify
 			return true, nil
 		}
+	}
+	if write {
 		if err := writeWakeRestartRecordAt(scope, record); err != nil {
 			return false, err
 		}
@@ -1068,16 +1072,53 @@ func wakeRestartRequestOrphaned(record wakeRestartRecord) (bool, string) {
 		record.Taken || record.Requester == nil {
 		return false, ""
 	}
-	observation, err := observeAuthoritativeWakeOwner(*record.Requester)
-	closeErr := observation.Close()
-	if err != nil || closeErr != nil || observation.State != wakeOwnerDead {
+	state, evidence := launch.InspectHolder(wakeOwnerHolder(*record.Requester))
+	if state != launch.LeaseStale {
 		return false, ""
 	}
 	return true, fmt.Sprintf(
 		"the restart requester (pid %d) exited before the wake took the request: %s",
 		record.Requester.PID,
-		observation.Reason,
+		evidence,
 	)
+}
+
+// wakeOwnerHolder is a recorded wake process identity as a launch holder, so
+// every "is this the recorded process" question has one comparator.
+func wakeOwnerHolder(owner wakeOwner) launch.HolderIdentity {
+	return launch.LocalHolder(owner.PID, owner.ProcessStart, owner.BootID)
+}
+
+// notifyWakeRestartRequest notifies the wake of the request this process
+// published or adopted. When the wake refuses it, this process is the one
+// writer that finishes the request refused, so it does not hold a later
+// restart or self-upgrade.
+func notifyWakeRestartRequest(agentDir *wakeAgentDir, expected wakeLockInspection, record wakeRestartRecord) error {
+	err := wakeRestartNotify(agentDir, expected, record)
+	var refused wakeRestartRefusedByWakeError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	finishErr := withWakeMutationScopeInDir(agentDir, wakeGuardWait, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		current, exists, err := readWakeRestartRecordAt(dirfd, scopedAgentDir)
+		if err != nil || !exists {
+			return err
+		}
+		// A request the wake took, or one another process adopted since,
+		// is no longer this process's to finish.
+		if current.Taken || !sameWakeOwner(current.Requester, record.Requester) {
+			return nil
+		}
+		return refuseWakeRestartRecordAt(scope, record, refused.Reason)
+	})
+	if finishErr != nil {
+		return errors.Join(err, fmt.Errorf("finish refused wake restart request: %w", finishErr))
+	}
+	return err
 }
 
 func sameWakeRestartAttemptIdentity(expected, current wakeRestartRecord) bool {

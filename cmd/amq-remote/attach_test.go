@@ -737,7 +737,9 @@ func endedHolder(t *testing.T) launch.HolderIdentity {
 	if self.BootID == "" {
 		t.Skip("boot id unavailable")
 	}
-	self.BootID = "another-boot"
+	// Another boot in the form the platform reports (a UUID): a different
+	// boot proves the holder ended only when both ids are UUIDs.
+	self.BootID = "00000000-0000-4000-8000-000000000001"
 	return self
 }
 

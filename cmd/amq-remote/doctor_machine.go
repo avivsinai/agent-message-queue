@@ -209,6 +209,8 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 		switch row.Guard {
 		case amqcli.DialogGuardMissing:
 			gateReport("hooks", path, "the wake dialog guard is not installed, so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
+		case amqcli.DialogGuardStale:
+			gateReport("hooks", path, "the wake dialog guard has an older hook form, so the dialog hold does not close when Claude Code exits until the hook is reinstalled", fix("amq wake install-dialog-hook"))
 		case amqcli.DialogGuardIncomplete, amqcli.DialogGuardUnreadable:
 			detail, _, _ = strings.Cut(detail, "; remedy:")
 			gateReport("hooks", path, "the wake dialog guard is "+row.Guard+" ("+detail+"), so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))

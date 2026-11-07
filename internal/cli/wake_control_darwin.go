@@ -683,7 +683,6 @@ func handleDarwinWakeRestartControl(
 				peerPID,
 				peerUID,
 			); err != nil {
-				finishRefusedDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, root, me, lock, request, peerPID, err)
 				return err
 			}
 			return takeDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, request, func() error {
@@ -701,11 +700,7 @@ func handleDarwinWakeRestartControl(
 // wakeProcessRunsUnderOwner reports whether pid is the owner process or
 // descends from it through parent edges with stable identities.
 func wakeProcessRunsUnderOwner(pid int, owner wakeOwner) bool {
-	return launch.ProcessRunsUnder(pid, launch.HolderIdentity{
-		PID:          owner.PID,
-		ProcessStart: owner.ProcessStart,
-		BootID:       owner.BootID,
-	})
+	return launch.ProcessRunsUnder(pid, wakeOwnerHolder(owner))
 }
 
 // wakeRestartControlNACK prefixes a refusal line; the rest of the line is
@@ -734,54 +729,6 @@ func wakeRestartControlReason(reason error) string {
 		text = strings.ToValidUTF8(text[:limit], "")
 	}
 	return text
-}
-
-// finishRefusedDarwinWakeRestartAt marks the exact pending request refused
-// so it does not hold later restarts or self-upgrades. Only the requester
-// that published the record can have it finished: the record's id, owner
-// token, and generation are readable by any same-user process, so they do
-// not prove authorship. Any other peer gets its refusal and changes nothing.
-func finishRefusedDarwinWakeRestartAt(
-	scope *wakeMutationScope,
-	dirfd int,
-	agentDir *wakeAgentDir,
-	root, me string,
-	lock wakeLock,
-	request wakeControlOwnerRequest,
-	peerPID int,
-	reason error,
-) {
-	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
-	if err != nil || !exists {
-		return
-	}
-	current := inspectWakeLockAt(dirfd, agentDir, root, me)
-	if !current.Exists || !current.IdentityConfirmed ||
-		current.Lock.Generation != lock.Generation ||
-		request.Generation != lock.Generation ||
-		record.Status != wakeRestartPending ||
-		record.Schema != wakeRestartSchemaV1 ||
-		record.SuccessorGeneration != "" ||
-		record.RequestID == "" || record.RequestID != request.RequestID ||
-		request.Owner == nil || !sameWakeOwner(request.Owner, &record.Owner) ||
-		record.Generation != lock.Generation ||
-		record.Root != canonicalWakeRoot(root) || record.Agent != me ||
-		!wakeRestartPeerIsRequester(peerPID, record.Requester) {
-		return
-	}
-	_ = refuseWakeRestartRecordAt(scope, record, wakeRestartControlReason(reason))
-}
-
-// wakeRestartPeerIsRequester reports whether the connected peer is the exact
-// process recorded as the request's requester.
-func wakeRestartPeerIsRequester(peerPID int, requester *wakeOwner) bool {
-	if requester == nil || peerPID <= 0 || requester.PID != peerPID {
-		return false
-	}
-	peer := inspectWakeProcess(peerPID)
-	return peer.Running && peer.StartToken != "" &&
-		peer.StartToken == requester.ProcessStart &&
-		compareWakeBootID(requester.BootID, peer) == bootIDMatch
 }
 
 // takeDarwinWakeRestartAt queues the restart of the exact pending request

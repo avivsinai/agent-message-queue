@@ -78,8 +78,9 @@ const maxSettingsBytes = 4 << 20
 // the attachment unsubscribes. User off removes only the Buzz binding.
 //
 // The command starts amq-remote only when a state the receiver reads
-// exists: AMQ_REMOTE_BINDING, a binding file, the bindings directory, or
-// the attachment sentinels. Everywhere else the hook costs one sh.
+// exists: AMQ_REMOTE_BINDING, a binding file, a binding in the bindings
+// directory (its tombstones are none), or the attachment sentinels.
+// Everywhere else the hook costs one sh.
 func InstallStopHook(home, bin string) error {
 	_, err := InstallStopHookAt(home, SettingsPath(home), bin)
 	return err
@@ -682,15 +683,29 @@ func removeEdit(spec hookSpec) func([]byte) ([]byte, error) {
 // assignment, then a gate of shell tests, then the single-quoted binary,
 // exec'd so Claude's signals reach it. The gate repeats what the receiver
 // reads before it writes (stopSessionAllowed): the binding env path, the
-// binding file and bindings directory under the AMQ home that home
-// resolves now, and the attachment sentinels under $HOME, the home the
-// receiver resolves. With none of them present the receiver writes
-// nothing, so the hook starts nothing.
+// binding file and every binding in the bindings directory under the AMQ
+// home that home resolves now, and the attachment sentinels under $HOME,
+// the home the receiver resolves. With none of them present the receiver
+// writes nothing, so the hook starts nothing.
 func stopHookCommand(home, bin string) string {
 	remote := filepath.Join(amqhome.Under(home), "remote")
 	return stopHookMarker + `[ -z "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
-		` ] && [ ! -e ` + shellQuote(filepath.Join(remote, "bindings")) +
-		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] || exec ` + shellQuote(bin) + " claude stop-hook"
+		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] && ` + noLiveBindingTest(filepath.Join(remote, "bindings")) +
+		` || exec ` + shellQuote(bin) + " claude stop-hook"
+}
+
+// noLiveBindingTest is a shell test that succeeds when the bindings
+// directory dir holds no binding. A tombstone is no binding, so a directory
+// of tombstones alone passes. A path the shell cannot list as a plain
+// directory, or an entry it cannot classify, fails the test, so the
+// receiver decides. Under zsh an unmatched glob is an error, so the test
+// turns on nullglob there; sh and bash keep the pattern itself, which
+// names no file.
+func noLiveBindingTest(dir string) string {
+	d := shellQuote(dir)
+	return `{ [ -z "${ZSH_VERSION-}" ] || setopt nullglob; } && [ ! -L ` + d + ` ] && { [ ! -e ` + d +
+		` ] || { [ -d ` + d + ` ] && [ -r ` + d + ` ] && [ -x ` + d + ` ] && f= && for f in ` + d +
+		`/*.json; do case $f in *` + binding.TombstoneSuffix + `) f= ;; esac; { [ -z "$f" ] || [ ! -e "$f" ]; } && [ ! -L "$f" ] || break; f=; done && [ -z "$f" ]; }; }`
 }
 
 // shellQuote single-quotes s for POSIX sh (Claude Code runs hook commands
@@ -702,15 +717,15 @@ func shellQuote(s string) string {
 // permissionHookCommand runs the PermissionRequest receiver by its
 // absolute path, exec'd so Claude's TERM reaches it, and only
 // when something can post a dialog: a machine agent's marker, or a binding
-// (the binding env path, the binding file, a named binding) under the AMQ
-// home that home resolves now. With none, no dialog can reach Buzz, so the
-// hook starts nothing and the terminal dialog decides. The globs run inside
-// sh; an unmatched one stays the pattern itself, which does not exist.
+// (the binding env path, the binding file, a named binding that is not a
+// tombstone) under the AMQ home that home resolves now. With none, no
+// dialog can reach Buzz, so the hook starts nothing and the terminal dialog
+// decides.
 func permissionHookCommand(home, bin string) string {
 	remote := filepath.Join(amqhome.Under(home), "remote")
-	return permissionHookMarker + `set -- "${` + binding.EnvPath + `-}" ` + shellQuote(filepath.Join(remote, "binding.json")) + " " +
-		shellQuote(filepath.Join(remote, "acp", "agents", "_machine")+"/") + "*.json " +
-		shellQuote(filepath.Join(remote, "bindings")+"/") + `*.json; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec ` +
+	return permissionHookMarker + `[ ! -e "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
+		` ] && ` + noLiveBindingTest(filepath.Join(remote, "bindings")) + ` && f= && for f in ` +
+		shellQuote(filepath.Join(remote, "acp", "agents", "_machine")) + `/*.json; do [ -e "$f" ] && break; f=; done && [ -z "$f" ] || exec ` +
 		shellQuote(bin) + " claude permission-hook"
 }
 

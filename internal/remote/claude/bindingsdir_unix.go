@@ -34,7 +34,8 @@ func bindingsDirState(dir, sessionID string) (allow, present bool) {
 		present = true
 	}
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") || binding.IsTombstone(e.Name()) {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || binding.IsTombstone(e.Name()) || binding.ValidName(name) != nil {
 			continue
 		}
 		present = true

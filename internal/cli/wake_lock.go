@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // wakeLock represents the lock file content for wake process deduplication.
@@ -920,75 +920,19 @@ const (
 	bootIDUnknown
 )
 
+// compareWakeBootID applies launch.CompareBootID to the current boot id and
+// to the legacy boottime form a wake recorded before it used UUIDs.
 func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
 	if recorded == "" {
 		return bootIDMatch
 	}
 	for _, current := range []string{proc.BootID, proc.LegacyBootID} {
-		if current == "" {
-			continue
-		}
-		if strings.EqualFold(recorded, current) {
-			return bootIDMatch
-		}
-		if legacyDarwinBootIDsMatch(recorded, current) {
+		if current != "" && launch.CompareBootID(recorded, current) == launch.BootIDMatch {
 			return bootIDMatch
 		}
 	}
-	// Only unlike boots of the same identity representation are conclusive.
-	// A UUID cannot be disproved by a readable boottime, and vice versa.
-	if isDarwinBootUUID(recorded) && isDarwinBootUUID(proc.BootID) {
+	if launch.CompareBootID(recorded, proc.BootID) == launch.BootIDMismatch {
 		return bootIDMismatch
 	}
 	return bootIDUnknown
-}
-
-func isDarwinBootUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, r := range value {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if r != '-' {
-				return false
-			}
-			continue
-		}
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
-			return false
-		}
-	}
-	return true
-}
-
-// Legacy Darwin boot IDs came from kern.boottime, which can move slightly as
-// macOS corrects wall-clock time. A one-second migration tolerance preserves
-// old live wake locks without making two realistically distinct boots equal.
-func legacyDarwinBootIDsMatch(first, second string) bool {
-	firstTime, firstOK := parseLegacyDarwinBootID(first)
-	secondTime, secondOK := parseLegacyDarwinBootID(second)
-	if !firstOK || !secondOK {
-		return false
-	}
-	secDelta := firstTime.Unix() - secondTime.Unix()
-	if secDelta < -1 || secDelta > 1 {
-		return false
-	}
-	return firstTime.Sub(secondTime) <= time.Second && secondTime.Sub(firstTime) <= time.Second
-}
-
-func parseLegacyDarwinBootID(value string) (time.Time, bool) {
-	seconds, nanos, ok := strings.Cut(value, ".")
-	if !ok || seconds == "" || len(nanos) != 9 || strings.Contains(nanos, ".") {
-		return time.Time{}, false
-	}
-	sec, err := strconv.ParseInt(seconds, 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
-	nsec, err := strconv.ParseInt(nanos, 10, 64)
-	if err != nil || nsec < 0 || nsec >= int64(time.Second) {
-		return time.Time{}, false
-	}
-	return time.Unix(sec, nsec), true
 }

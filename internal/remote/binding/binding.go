@@ -736,7 +736,7 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 				return statErr
 			}
-			_, tombErr := os.Lstat(filepath.Join(dir, candidate+tombstoneSuffix))
+			_, tombErr := os.Lstat(filepath.Join(dir, candidate+TombstoneSuffix))
 			if tombErr != nil && !errors.Is(tombErr, os.ErrNotExist) {
 				return tombErr
 			}
@@ -752,7 +752,7 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 		if _, err := fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
 			return err
 		}
-		if err := os.Remove(filepath.Join(dir, name+tombstoneSuffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(filepath.Join(dir, name+TombstoneSuffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
@@ -861,14 +861,14 @@ func List() ([]Binding, error) {
 	return out, nil
 }
 
-// tombstoneSuffix names the tombstone a removed binding leaves:
+// TombstoneSuffix names the tombstone a removed binding leaves:
 // <name>.ended.json, the binding as it was when it was removed.
-const tombstoneSuffix = ".ended.json"
+const TombstoneSuffix = ".ended.json"
 
 // IsTombstone reports whether a file name in the bindings directory is a
 // tombstone. A tombstone is never a binding, so it is no evidence that a
 // session is bound: every reader of the directory skips it.
-func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tombstoneSuffix) }
+func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, TombstoneSuffix) }
 
 // PruneEnded removes every binding whose session inspect proves ended and
 // returns the names removed. Each binding is checked as read under the
@@ -927,7 +927,7 @@ func retire(why string, match, ended func(Binding) bool) (removed, keptOff []str
 			if err != nil {
 				return err
 			}
-			if _, err := fsq.WriteFileAtomic(dir, b.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+			if _, err := fsq.WriteFileAtomic(dir, b.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
 				return err
 			}
 			if err := os.Remove(filepath.Join(dir, b.Name+".json")); err != nil {
@@ -1055,7 +1055,7 @@ func scanTombstones(dir string) ([]Binding, error) {
 	}
 	var out []Binding
 	for _, e := range entries {
-		name := strings.TrimSuffix(e.Name(), tombstoneSuffix)
+		name := strings.TrimSuffix(e.Name(), TombstoneSuffix)
 		if !IsTombstone(e.Name()) || e.IsDir() || ValidName(name) != nil {
 			continue
 		}

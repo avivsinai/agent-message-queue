@@ -268,10 +268,17 @@ supports it.
   `--resume` of the same session in a second terminal therefore also closes
   the first terminal's entries of that session. A `SessionStart` from
   `clear`, `compact` or `fork` closes nothing. An entry also records its
-  host: the nearest of the hook's first three ancestors, each parent edge
-  proven by its process start token, that runs Claude Code (an executable
-  named `claude`, or a native install's `claude/versions/<version>`). A
-  dialog cannot outlive its process, so while the doorbell is held an entry
+  host, the Claude Code process: the `open` hook passes the pid of the
+  process that ran it (`--host-pid "$PPID"`, the parent of its `sh -c`),
+  and the receiver records it only when it is one of its own first two
+  ancestors, each parent edge proven by its process start token. No
+  executable name is matched, so an npm install that runs as `node` has a
+  host too. An `open` hook of the older form passes no pid and records no
+  host; `amq doctor` reports that form as stale, and
+  `amq wake install-dialog-hook` replaces it. After an upgrade of amq, run
+  `amq wake install-dialog-hook` or `amq-remote doctor --fix` once. A
+  dialog cannot outlive its
+  process, so while the doorbell is held an entry
   whose host is proven gone (not running, or its pid now runs another process)
   closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An
   entry with no host, or a host the wake cannot prove gone, holds. Other writers (Codex, Cursor, agy,
