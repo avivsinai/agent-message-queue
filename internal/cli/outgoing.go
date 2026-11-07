@@ -172,7 +172,9 @@ func deliverOutgoing(m outgoingMessage) error {
 	// Best-effort presence touch.
 	_ = presence.TouchDeliveryRoot(m.sourceFS, m.me)
 
-	// The sender's outbox copy is an audit record in the source root.
+	// The sender's outbox copy is written after delivery: the opposite order
+	// would record a send that never happened.
+	// It is an audit record in the source root.
 	outboxDir := filepath.Join("agents", m.me, "outbox", "sent")
 	outboxErr := error(nil)
 	if _, err := m.sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {

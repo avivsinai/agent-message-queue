@@ -7,10 +7,10 @@
 // the wake injects anyway and the failure is recorded for trace to surface.
 // An audit log that blocks the thing it audits is worse than no audit log.
 //
-// Design (lead review 2026-08-30, three hard requirements):
+// Design (three hard requirements):
 //
-//  1. TRUE append-only (O_APPEND), not read-modify-write. The prototype read
-//     the whole journal, concatenated, and called WriteFileAtomic — O(n) per
+//  1. TRUE append-only (O_APPEND), not read-modify-write. Reading the whole
+//     journal, concatenating, and calling WriteFileAtomic is O(n) per
 //     notification on the wake hot path, and a lost-update race under
 //     concurrency (two notifications both read current, both append, one
 //     record vanishes silently). O_APPEND gives kernel-level atomic appends
@@ -18,8 +18,8 @@
 //     neither loses data. A stable sidecar lock gates rotation and readers;
 //     shared append locks do not serialize ordinary writers.
 //
-//  2. ONE log, not two. The prototype used separate prepared/result files
-//     rotated independently; whichever crossed the size cap first dropped its
+//  2. ONE log, not two. Separate prepared/result files rotated independently
+//     would let whichever crossed the size cap first drop its
 //     old records while the other kept its partners, orphaning results that
 //     trace would render as "attempted, never completed" — a false failure
 //     report for the exact scenario this ledger exists to diagnose. In a
