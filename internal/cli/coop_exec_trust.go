@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
@@ -759,15 +758,8 @@ func startupTrustFileStamp(harness string) string {
 // dialog hook at the session's first turn; while it holds, the wake shows
 // the held-doorbell notice.
 func codexStartupHoldHint(root, handle string) (opsHint, bool) {
-	path := filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName)
-	info, err := os.Lstat(path)
-	if err != nil {
-		return opsHint{}, false
-	}
-	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
-	var marker wakeDialogMarker
-	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent || marker.Harness != launch.CodexProvider ||
-		!wakeStartupMarkerHolds(raw, info.ModTime(), time.Now()) {
+	marker, raw, modTime, ok := readWakeStartupMarker(root, handle)
+	if !ok || marker.Harness != launch.CodexProvider || !wakeStartupMarkerHolds(raw, modTime, time.Now()) {
 		return opsHint{}, false
 	}
 	return opsHint{
@@ -895,15 +887,8 @@ func withWakeStartupHold(source func(time.Time) (wakeDialogState, error), releas
 // inspectWakeStartupHold reports the agent's Startup marker while it holds
 // input, or nil.
 func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHoldStatus {
-	path := filepath.Join(fsq.AgentBase(root, handle), wakeDialogFileName)
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil
-	}
-	raw, err := fsq.ReadRegularNoFollowBounded(path, maxWakeMetadataFileBytes)
-	var marker wakeDialogMarker
-	if err != nil || json.Unmarshal(raw, &marker) != nil || marker.Event != wakeDialogStartupEvent ||
-		!wakeStartupMarkerHolds(raw, info.ModTime(), now) {
+	marker, raw, modTime, ok := readWakeStartupMarker(root, handle)
+	if !ok || !wakeStartupMarkerHolds(raw, modTime, now) {
 		return nil
 	}
 	const held = "input stays held, and the wake shows the held-doorbell notice at once"
@@ -914,8 +899,31 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 	}
 	return &wakeStartupHoldStatus{
 		Harness: marker.Harness, Dir: marker.Cwd,
-		AgeSeconds: int64(now.Sub(info.ModTime()).Seconds()), Release: release,
+		AgeSeconds: int64(now.Sub(modTime).Seconds()), Release: release,
 	}
+}
+
+// readWakeStartupMarker reads the agent's Startup marker through the dialog
+// entries reader, as the wake does: the single file, or the legacy entry a
+// Claude Code dialog moved it to. ok is false without a readable one.
+func readWakeStartupMarker(root, handle string) (marker wakeDialogMarker, raw []byte, modTime time.Time, ok bool) {
+	agentDir, err := openExistingWakeAgentDir(root, handle)
+	if err != nil {
+		return wakeDialogMarker{}, nil, time.Time{}, false
+	}
+	defer func() { _ = agentDir.Close() }()
+	entries, err := readWakeDialogEntriesInDir(agentDir)
+	if err != nil {
+		return wakeDialogMarker{}, nil, time.Time{}, false
+	}
+	for _, entry := range entries {
+		var candidate wakeDialogMarker
+		if entry.readErr == nil && entry.info != nil && json.Unmarshal(entry.raw, &candidate) == nil &&
+			candidate.Event == wakeDialogStartupEvent {
+			return candidate, entry.raw, entry.info.ModTime(), true
+		}
+	}
+	return wakeDialogMarker{}, nil, time.Time{}, false
 }
 
 // wakeStartupMarkerHolds reports whether a Startup marker read as raw with
