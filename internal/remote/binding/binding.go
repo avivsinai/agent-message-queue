@@ -365,7 +365,7 @@ func Write(b Binding) error {
 		return err
 	}
 	return transact(func(path string) error {
-		_, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
+		_, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
 		return err
 	})
 }
@@ -749,7 +749,7 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 		_, wasBound := held[name]
 		_, wasTomb := tombOf[name]
 		reused = wasBound || wasTomb
-		if _, err := fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
 			return err
 		}
 		if err := os.Remove(filepath.Join(dir, name+TombstoneSuffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -798,7 +798,7 @@ func Replace(was, now Binding) (Binding, bool, error) {
 		if old.Name = was.Name; old != was {
 			return nil
 		}
-		if _, err := fsq.WriteFileAtomic(dir, was.Name+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(dir, was.Name+".json", append(raw, '\n'), 0o600); err != nil {
 			return err
 		}
 		replaced = true
@@ -839,7 +839,7 @@ func writeNamed(b Binding, allow func(old Binding) bool) error {
 				return &NameTakenError{Name: b.Name}
 			}
 		}
-		_, err = fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600)
+		_, err = fsq.WriteFileAtomicFollowLinks(dir, b.Name+".json", append(raw, '\n'), 0o600)
 		return err
 	})
 }
@@ -927,7 +927,7 @@ func retire(why string, match, ended func(Binding) bool) (removed, keptOff []str
 			if err != nil {
 				return err
 			}
-			if _, err := fsq.WriteFileAtomic(dir, b.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+			if _, err := fsq.WriteFileAtomicFollowLinks(dir, b.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
 				return err
 			}
 			if err := os.Remove(filepath.Join(dir, b.Name+".json")); err != nil {
@@ -949,7 +949,7 @@ func retire(why string, match, ended func(Binding) bool) (removed, keptOff []str
 				if err != nil {
 					return err
 				}
-				if _, err := fsq.WriteFileAtomic(dir, t.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+				if _, err := fsq.WriteFileAtomicFollowLinks(dir, t.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
 					return err
 				}
 				keptOff = append(keptOff, t.Name)
@@ -1027,7 +1027,7 @@ func ReviveEnded(tomb, b Binding) (bool, error) {
 		if _, err := os.Lstat(filepath.Join(dir, tomb.Name+".json")); !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if _, err := fsq.WriteFileAtomic(dir, tomb.Name+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(dir, tomb.Name+".json", append(raw, '\n'), 0o600); err != nil {
 			return err
 		}
 		wrote = true

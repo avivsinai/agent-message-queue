@@ -6,15 +6,15 @@ import (
 	"testing"
 )
 
-func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
+func TestWriteStateFileReplacesExistingFile(t *testing.T) {
 	dir := t.TempDir()
 
-	finalPath, err := WriteFileAtomic(dir, "state.json", []byte("old"), 0o600)
+	finalPath, err := WriteStateFile(dir, "state.json", []byte("old"), 0o600)
 	if err != nil {
-		t.Fatalf("initial WriteFileAtomic: %v", err)
+		t.Fatalf("initial WriteStateFile: %v", err)
 	}
-	if _, err := WriteFileAtomic(dir, "state.json", []byte("new"), 0o600); err != nil {
-		t.Fatalf("replacement WriteFileAtomic: %v", err)
+	if _, err := WriteStateFile(dir, "state.json", []byte("new"), 0o600); err != nil {
+		t.Fatalf("replacement WriteStateFile: %v", err)
 	}
 
 	data, err := os.ReadFile(finalPath)

@@ -418,7 +418,7 @@ func (rs *relaySet) writeStatus(ctx context.Context) {
 		sort.Slice(doc.Shares, func(i, j int) bool { return doc.Shares[i].Session < doc.Shares[j].Session })
 		raw, _ := json.MarshalIndent(doc, "", "  ")
 		if doc.URL != "" && string(raw) != last {
-			if _, err := fsq.WriteFileAtomic(rs.stateDir, relayStatusFile, raw, 0o600); err != nil {
+			if _, err := fsq.WriteFileAtomicFollowLinks(rs.stateDir, relayStatusFile, raw, 0o600); err != nil {
 				say(rs.stderr, "relay status: %v", err)
 			} else {
 				last = string(raw)

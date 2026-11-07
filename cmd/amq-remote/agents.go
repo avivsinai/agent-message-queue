@@ -307,7 +307,7 @@ func legacyAgents(record bool) []string {
 	if err != nil {
 		return nil
 	}
-	if _, err := fsq.WriteFileAtomic(dir, legacyNoticeFile, append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(dir, legacyNoticeFile, append(raw, '\n'), 0o600); err != nil {
 		return nil
 	}
 	return agents

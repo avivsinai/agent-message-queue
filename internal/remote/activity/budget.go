@@ -126,7 +126,7 @@ func readSeqHi(dir, key string) (uint64, error) {
 }
 
 func writeSeqHi(dir, key string, hi uint64) error {
-	_, err := fsq.WriteFileAtomic(dir, seqFile(key), []byte(strconv.FormatUint(hi, 10)), 0o600)
+	_, err := fsq.WriteFileAtomicFollowLinks(dir, seqFile(key), []byte(strconv.FormatUint(hi, 10)), 0o600)
 	return err
 }
 

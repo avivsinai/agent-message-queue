@@ -1148,6 +1148,6 @@ func setupWriteAtomicIfChanged(path string, data []byte, mode os.FileMode) (bool
 	if exists && bytes.Equal(current, data) {
 		return false, nil
 	}
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, mode)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), data, mode)
 	return err == nil, err
 }

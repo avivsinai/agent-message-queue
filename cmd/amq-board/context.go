@@ -123,7 +123,7 @@ func boardHostID(ctx context.Context) (string, error) {
 		if err != nil {
 			return err
 		}
-		_, err = fsq.WriteFileAtomic(home, "board-host-id", []byte(identity+"\n"), 0o600)
+		_, err = fsq.WriteFileAtomicFollowLinks(home, "board-host-id", []byte(identity+"\n"), 0o600)
 		return err
 	})
 	if err != nil {

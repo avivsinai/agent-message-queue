@@ -17,7 +17,7 @@ func TestNewSyncsParentAgainAfterAFailedSync(t *testing.T) {
 	dir := filepath.Join(parent, "usage")
 	fail := true
 	synced := 0
-	restore := fsq.SyncDirAmbientSwapForTest(func(d string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(d string) error {
 		if d != parent {
 			return nil
 		}
@@ -59,7 +59,7 @@ func TestSetAsideJournalReportsCleanupFailureAfterRecovery(t *testing.T) {
 	}
 	cleanupErr := errors.New("cleanup directory sync failed")
 	syncs := 0
-	restore := fsq.SyncDirAmbientSwapForTest(func(d string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(d string) error {
 		if d == dir {
 			syncs++
 			if syncs == 2 {

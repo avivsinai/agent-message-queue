@@ -142,7 +142,7 @@ func (store *TrustStore) Replace(record TrustRecord) error {
 	if err := ensureAMQHomeFor(store.dir); err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(store.dir, "trust.json", data, 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(store.dir, "trust.json", data, 0o600)
 	return err
 }
 

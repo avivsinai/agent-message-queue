@@ -1237,7 +1237,7 @@ func TestAtomicStateWritesFaulted(t *testing.T) {
 	// Wire the fsq ambient SyncDir fault hook (the same mechanism #827
 	// uses) so the FIRST directory sync fails; the pending write must
 	// refuse, and the key dir must keep no temp residue.
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		return errors.New("fault: dir sync failed")
 	})
 	defer restore()
@@ -1267,9 +1267,9 @@ func TestAtomicStateWritesFaulted(t *testing.T) {
 // directory sync is removed.)
 func TestSyncDirSwappedIsTheRealOne(t *testing.T) {
 	dir := t.TempDir()
-	restore := fsq.SyncDirAmbientSwapForTest(func(string) error { return errors.New("fault: dir sync failed") })
+	restore := fsq.SetPackageSyncDirFaultForTest(func(string) error { return errors.New("fault: dir sync failed") })
 	defer restore()
-	if _, err := fsq.WriteFileAtomic(dir, "probe.txt", []byte("x"), 0o600); err == nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(dir, "probe.txt", []byte("x"), 0o600); err == nil {
 		t.Fatal("WriteFileAtomic succeeded with a faulted dir sync: SyncDir is not on the write path")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "probe.txt")); !os.IsNotExist(err) {

@@ -702,7 +702,7 @@ func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	reqDir := filepath.Join(state, layoutVersion, requestsDir)
 	var synced []string
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		synced = append(synced, filepath.Clean(dir))
 		return nil
 	})
@@ -764,7 +764,7 @@ func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 	// WriteFileAtomic syncs the host directory before and after the rename;
 	// fail the second, so the terminal record is on disk and the write errs.
 	calls := 0
-	restore := fsq.SyncDirAmbientSwapForTest(func(string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(string) error {
 		calls++
 		if calls == 2 {
 			return fmt.Errorf("injected post-rename sync failure")

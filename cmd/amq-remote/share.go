@@ -1466,7 +1466,7 @@ func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
 // durably named.
 func writeStateFile(path string, raw []byte) error {
 	dir, name := filepath.Dir(path), filepath.Base(path)
-	if _, err := fsq.WriteFileAtomic(dir, name, raw, 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(dir, name, raw, 0o600); err != nil {
 		return fmt.Errorf("atomic write %s: %w", path, err)
 	}
 	return nil

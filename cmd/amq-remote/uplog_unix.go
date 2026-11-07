@@ -108,7 +108,7 @@ func (l *upLog) rotate(n int64) {
 	if err != nil {
 		return
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(l.path), filepath.Base(l.path)+".1", data, 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(l.path), filepath.Base(l.path)+".1", data, 0o600); err != nil {
 		return
 	}
 	_ = l.f.Truncate(0)

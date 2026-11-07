@@ -570,7 +570,7 @@ func checkLegacyIdentityMigration(t *testing.T, store Store, ctx context.Context
 	}
 	document["tasks"], _ = json.Marshal(tasks)
 	legacy, _ := json.Marshal(document)
-	if _, err = fsq.WriteFileAtomic(store.Dir, "snapshot.json", legacy, 0o600); err != nil {
+	if _, err = fsq.WriteFileAtomicFollowLinks(store.Dir, "snapshot.json", legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A v1 store is one snapshot file with no journal.

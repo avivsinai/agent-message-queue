@@ -85,10 +85,10 @@ func Publish(r Record) error {
 				return fmt.Errorf("sync %s: %w", d, err)
 			}
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "records"), processKey(r)+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "records"), processKey(r)+".json", append(raw, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the exec identity: %w", err)
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the current exec identity: %w", err)
 		}
 		return nil

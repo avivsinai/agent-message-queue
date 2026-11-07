@@ -112,7 +112,7 @@ func setHookOptIn(path, kind string, shape *HookShape) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(filepath.Dir(file), filepath.Base(file), append(raw, '\n'), 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(file), filepath.Base(file), append(raw, '\n'), 0o600)
 	return err
 }
 

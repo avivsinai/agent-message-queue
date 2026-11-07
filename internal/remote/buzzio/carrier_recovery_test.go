@@ -374,7 +374,7 @@ func TestShownRefusalIsNotResubmitted(t *testing.T) {
 						t.Fatalf("expected unsupported reply, got %+v %v", out, err)
 					}
 					syncs := 0
-					restore = fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+					restore = fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 						// Production PutReceipt writes row map then ref receipt, each
 						// with a directory sync before and after rename.
 						if dir == filepath.Join(r.l.dir, "receipts") {

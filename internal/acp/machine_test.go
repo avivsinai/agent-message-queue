@@ -365,7 +365,7 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	// bring the stale copy back as the newer one. The absence must be
 	// synced before the slot says retired.
 	var synced []string
-	defer fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	defer fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if strings.HasPrefix(dir, s.channelDir()) {
 			synced = append(synced, dir)
 		}

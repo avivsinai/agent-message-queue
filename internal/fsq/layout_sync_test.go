@@ -132,7 +132,7 @@ func TestEnsureAgentDirsAmbientSyncTerminatesAndCoversOwningDirectories(t *testi
 
 	calls := atomic.Int64{}
 	synced := map[string]bool{}
-	restore := syncDirAmbientSwapForTest(func(dir string) error {
+	restore := SetPackageSyncDirFaultForTest(func(dir string) error {
 		if calls.Add(1) > 64 {
 			return errors.New("sync loop guard")
 		}
@@ -255,7 +255,7 @@ func TestEnsureAgentDirsStopsAtAnUncleanedRoot(t *testing.T) {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
 	var synced []string
-	restore := syncDirAmbientSwapForTest(func(dir string) error {
+	restore := SetPackageSyncDirFaultForTest(func(dir string) error {
 		synced = append(synced, dir)
 		return nil
 	})
@@ -355,7 +355,7 @@ func TestEnsureRootDirsSyncsTheParentThatOwnsANewRoot(t *testing.T) {
 	root := filepath.Join(parent, "fresh-queue")
 
 	var synced []string
-	restore := syncDirAmbientSwapForTest(func(dir string) error {
+	restore := SetPackageSyncDirFaultForTest(func(dir string) error {
 		synced = append(synced, dir)
 		return nil
 	})
@@ -397,7 +397,7 @@ func TestEnsureRootDirsSyncsEveryLevelItCreated(t *testing.T) {
 	root := filepath.Join(outer, "proj", "nested", ".amq")
 
 	var synced []string
-	restore := syncDirAmbientSwapForTest(func(dir string) error {
+	restore := SetPackageSyncDirFaultForTest(func(dir string) error {
 		synced = append(synced, dir)
 		return nil
 	})

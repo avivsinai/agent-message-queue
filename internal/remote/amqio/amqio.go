@@ -1429,7 +1429,7 @@ func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomic(c.ledgerDir(), msgID+".json", data, 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(c.ledgerDir(), msgID+".json", data, 0o600); err != nil {
 		return fmt.Errorf("reply ledger %s: %w", msgID, err)
 	}
 	return nil

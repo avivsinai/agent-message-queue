@@ -622,7 +622,7 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 		t.Fatalf("seed claim: %v %v", won, err)
 	}
 	synced := false
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if dir == claimDir {
 			synced = true
 		}

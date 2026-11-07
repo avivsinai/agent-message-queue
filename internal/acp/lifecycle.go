@@ -446,7 +446,7 @@ func (s *Server) recordDM(channel string) {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return
 	}
-	_, _ = fsq.WriteFileAtomic(dir, buzzSelf+".dm", []byte(channel+"\n"), 0o600)
+	_, _ = fsq.WriteFileAtomicFollowLinks(dir, buzzSelf+".dm", []byte(channel+"\n"), 0o600)
 }
 
 // writeAgentMarker stamps m as this process's and writes it under dir. Only
@@ -470,7 +470,7 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return
 	}
-	_, _ = fsq.WriteFileAtomic(dir, buzzSelf+".json", append(raw, '\n'), 0o600)
+	_, _ = fsq.WriteFileAtomicFollowLinks(dir, buzzSelf+".json", append(raw, '\n'), 0o600)
 }
 
 // The per-machine helper ("AMQ Remote helper" in its system prompt) creates
@@ -719,7 +719,7 @@ func (s *Server) requestSessionAgent(channel string, b binding.Binding, req help
 	}
 	// The attempt is recorded first, so a failing Desktop or relay never
 	// gets more than helperRequestTries requests.
-	if _, err := fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
 		return false, nil
 	}
 	return true, buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)

@@ -84,11 +84,14 @@ func (r *DeliveryRoot) SetReadRegularNoFollowFaultForTest(fn func(name string) (
 }
 
 // SetPackageSyncDirFaultForTest installs a process-wide directory-sync fault
-// that applies to EVERY DeliveryRoot in this process, including handles the
-// test does not own (a courier opens its own root per cycle). Restore with a
-// nil fn in t.Cleanup.
-func SetPackageSyncDirFaultForTest(fn func(dir string) error) {
+// that applies to every directory sync in this process: ambient SyncDir
+// (dir is the path as given) and every DeliveryRoot, including handles the
+// test does not own (dir is root-relative). An instance fault set with
+// SetSyncDirFaultForTest takes precedence. It returns the restore func.
+func SetPackageSyncDirFaultForTest(fn func(dir string) error) (restore func()) {
+	prev := packageSyncDirFaultForTest
 	packageSyncDirFaultForTest = fn
+	return func() { packageSyncDirFaultForTest = prev }
 }
 
 // packageFileSyncFaultForTest, when set, makes every file Sync through a

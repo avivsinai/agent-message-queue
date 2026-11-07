@@ -41,7 +41,7 @@ func Write(root string, p Presence) error {
 		return err
 	}
 	data = append(data, '\n')
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), data, 0o600)
 	return err
 }
 

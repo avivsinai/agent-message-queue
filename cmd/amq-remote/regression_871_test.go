@@ -156,7 +156,7 @@ func TestActivityCallbackNeverBlocksTheReadPump(t *testing.T) {
 	var enteredOnce, releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	defer unblock()
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if strings.HasPrefix(dir, as.stateDir) {
 			enteredOnce.Do(func() { close(entered); <-release })
 		}

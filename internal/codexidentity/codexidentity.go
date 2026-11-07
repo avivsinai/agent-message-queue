@@ -109,10 +109,10 @@ func Publish(r Record) error {
 		if err := captureLegacyBinding(dir, r.Thread); err != nil {
 			return err
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the Codex thread identity: %w", err)
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the current Codex thread: %w", err)
 		}
 		now := time.Now().UTC()
@@ -120,7 +120,7 @@ func Publish(r Record) error {
 		if err != nil {
 			return err
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", now.UnixNano(), r.Thread), append(event, '\n'), 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", now.UnixNano(), r.Thread), append(event, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the Codex thread binding: %w", err)
 		}
 		return nil
@@ -314,7 +314,7 @@ func captureLegacyBinding(dir, thread string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", bound.UnixNano(), thread), append(event, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "bindings"), fmt.Sprintf("%020d-%s.json", bound.UnixNano(), thread), append(event, '\n'), 0o600); err != nil {
 		return fmt.Errorf("record the earlier Codex thread binding: %w", err)
 	}
 	return nil

@@ -86,7 +86,7 @@ func EditLocked(path string, seed []byte, edit func([]byte) ([]byte, error)) (bo
 		} else if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return false, fmt.Errorf("settings %s: %w", path, err)
 		}
-		if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), out, perm); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), out, perm); err != nil {
 			return false, fmt.Errorf("settings %s: %w", path, err)
 		}
 		return true, nil

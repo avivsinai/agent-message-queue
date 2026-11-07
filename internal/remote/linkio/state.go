@@ -356,7 +356,7 @@ func Retire(stateDir, name string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	if _, err := fsq.WriteFileAtomic(dir, host, []byte(name+"\n"), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(dir, host, []byte(name+"\n"), 0o600); err != nil {
 		return "", err
 	}
 	if err := os.RemoveAll(LinkDir(stateDir, name)); err != nil {
@@ -404,7 +404,7 @@ func writeJSON(dir, file string, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(dir, file, append(data, '\n'), 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(dir, file, append(data, '\n'), 0o600)
 	return err
 }
 

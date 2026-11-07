@@ -335,7 +335,7 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	// Atomic: a truncated refusals.json would make doctor silently drop
 	// the refusal and exit 0. Same durability as every other
 	// generated-state file.
-	_, err = fsq.WriteFileAtomic(stateDir, "refusals.json", data, 0600)
+	_, err = fsq.WriteFileAtomicFollowLinks(stateDir, "refusals.json", data, 0600)
 	return err
 }
 
@@ -376,7 +376,7 @@ func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.A
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(stateDir, "adapters.json", data, 0600)
+	_, err = fsq.WriteFileAtomicFollowLinks(stateDir, "adapters.json", data, 0600)
 	return err
 }
 

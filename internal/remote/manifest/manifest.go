@@ -598,7 +598,7 @@ func Write(path string, f File) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("manifest %s: %w", path, err)
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(data, '\n'), 0644); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), append(data, '\n'), 0644); err != nil {
 		return fmt.Errorf("write manifest %s: %w", path, err)
 	}
 	return nil
