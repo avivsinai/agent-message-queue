@@ -452,10 +452,11 @@ Usage:
 
 --history-older-than and --history-max-size remove history from every agent
 mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),
-receipts, and fetched remote files such as Buzz images (remote-files), oldest
+and receipts, oldest
 first by the creation stamp in the message id, else the modification time. A size
 (B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,
-dead letters, extension data, and every copy of a message that
+dead letters and their receipts, fetched remote files, a message whose header
+does not parse, extension data, and every copy of a message that
 'amq thread open --max-age 0' lists as open, with the replies that ref it,
 are never removed, and nothing is removed unless you run this command.
 --mailbox uses --root as given and removes <root>/agents/<handle>, with its
@@ -481,9 +482,9 @@ Options:
   -dry-run
         Show what would be removed without deleting
   -history-max-size string
-        Remove the oldest read messages, sent copies, receipts and remote files until each mailbox's history fits this size (e.g. 100MB)
+        Remove the oldest read messages, sent copies, receipts until each mailbox's history fits this size (e.g. 100MB)
   -history-older-than string
-        Remove read messages, sent copies, receipts and remote files older than this duration (e.g. 720h)
+        Remove read messages, sent copies, receipts older than this duration (e.g. 720h)
   -json
         Emit JSON output
   -launch-journal
