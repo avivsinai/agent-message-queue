@@ -35,9 +35,10 @@ function normalize(text: string): string {
 
 // harness runs the extension against a fake ExtensionAPI and a real bridge
 // directory under a temporary AM_ROOT. host, when given, embeds the bridge
-// as a host application does, with no AM_ROOT or AM_ME set.
-function harness(host?: (root: string) => AmqBridgeOptions) {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
+// as a host application does, with no AM_ROOT or AM_ME set. shared, when
+// given, is another harness's root, which that harness removes.
+function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
+	const root = shared ?? fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
 	process.env.AM_ROOT = root;
 	process.env.AM_ME = "pi-seat";
 	if (host) {
@@ -79,6 +80,7 @@ function harness(host?: (root: string) => AmqBridgeOptions) {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};
 	return {
+		root,
 		dir,
 		sent,
 		state,
@@ -121,7 +123,7 @@ function harness(host?: (root: string) => AmqBridgeOptions) {
 		},
 		async done() {
 			await emit("session_shutdown", { reason: "quit" });
-			fs.rmSync(root, { recursive: true, force: true });
+			if (!shared) fs.rmSync(root, { recursive: true, force: true });
 		},
 	};
 }
@@ -271,6 +273,62 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 			assert.equal(produced(rel), golden(rel), rel);
 		}
 	} finally {
+		await h.done();
+	}
+});
+
+// Review of pi bridge ownership: a second pi on the same AM_ROOT and AM_ME
+// closed the first bridge's running request uncertain, and the adapter keeps
+// the first terminal event, so the real outcome was lost.
+test("a second bridge on a live owner's mailbox stays inactive and the request keeps its real outcome", async () => {
+	const h1 = harness();
+	await h1.start();
+	const h2 = harness(undefined, h1.root);
+	try {
+		const gen = h1.generation();
+		h1.publish(REF, "remote task", gen);
+		await h1.waitFor(() => h1.hasReceipt(REF));
+		await h1.emit("message_start", userMessage("remote task"));
+		await h2.start();
+		assert.equal(h1.generation(), gen);
+		assert.equal(h2.notices.length, 1);
+		await h1.emit("message_end", assistantMessage("done"));
+		await h1.emit("agent_before_settle", { outcome: "completed" });
+		await h1.emit("agent_settled");
+		assert.deepEqual(h1.events(REF).map((e) => e.event), ["started", "completed"]);
+		await h2.done();
+		const live = JSON.parse(fs.readFileSync(path.join(h1.dir, "bridge.liveness"), "utf8"));
+		assert.deepEqual([live.live, live.session_generation], [true, gen]);
+	} finally {
+		await h1.done();
+	}
+});
+
+// Review of pi admission evidence: a short write of the receipt was synced,
+// linked, and handed to pi, so the adapter could not parse the admission proof.
+test("a short receipt write publishes nothing, and the retry publishes the whole receipt", async () => {
+	const h = harness();
+	const realWrite = nodeFs.writeSync;
+	let cut = false;
+	nodeFs.writeSync = ((fd: number, data: string | Uint8Array, ...rest: unknown[]) => {
+		const bytes = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+		if (!cut && bytes.includes("delivered_at")) {
+			cut = true;
+			return realWrite(fd, bytes.subarray(0, 8));
+		}
+		return (realWrite as (...a: unknown[]) => number)(fd, data, ...rest);
+	}) as typeof nodeFs.writeSync;
+	syncBuiltinESMExports();
+	try {
+		await h.start();
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.ok(cut);
+		assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, "receipts", `${REF}.json`), "utf8")).ref, REF);
+		assert.equal(h.sent.length, 1);
+	} finally {
+		nodeFs.writeSync = realWrite;
+		syncBuiltinESMExports();
 		await h.done();
 	}
 });
