@@ -415,7 +415,7 @@ func claudeDialogHookMarker(raw []byte) bool {
 // process that ran the hook: its sh -c starts amq, or execs into it.
 const maxWakeDialogHostHops = 2
 
-// wakeDialogAncestors is launch.Ancestors; tests replace it.
+// wakeDialogAncestors reads this process's proven ancestors (launch.Ancestors).
 var wakeDialogAncestors = launch.Ancestors
 
 // wakeDialogHookHost is the process that ran the hook, named by pid (the
