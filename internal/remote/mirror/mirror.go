@@ -339,10 +339,9 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	}
 	o := st.Open
 	switch {
-	case l.Absorbed, o != nil && metaOpener(l):
-		// Input folded into the running turn only touches it.
+	case l.Absorbed:
 		if o != nil {
-			if l.Absorbed && carried.has(l.MsgID) {
+			if carried.has(l.MsgID) {
 				o.AnsweredBuzz()
 			}
 			o.touch(l.TS)

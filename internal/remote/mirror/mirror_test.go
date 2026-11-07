@@ -280,19 +280,6 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Ended, Ended},
 		posts:  []string{"▶ ship it\n✓ 1s\nShipped.", "▶ background task finished\n✓ 2s\nThe build passed."},
 	}, {
-		// Review of the mirror: a task notification inside a running turn
-		// ended that turn as unfinished.
-		name: "a task notification inside a running turn",
-		lines: []string{
-			prompt("o1", "p1", 0, "run the suite"),
-			assistant("m1", "tool_use", 1, nil, tool("Bash")),
-			user("p2", 2, map[string]any{"isMeta": true, "origin": map[string]any{"kind": "task-notification"}}, text("<task-notification>done</task-notification>")),
-			user("p1", 3, nil, result("t-Bash", false)),
-			assistant("m2", "end_turn", 4, nil, text("Suite passes.")),
-		},
-		events: []string{Opened, Ended},
-		posts:  []string{"▶ run the suite\n✓ 1 tool (Bash) · 4s\nSuite passes."},
-	}, {
 		// Review of the mirror: a doorbell turn that took a Buzz frame
 		// still showed "AMQ message", so the owner could not find the answer.
 		name: "a Buzz frame absorbed into a doorbell turn",

@@ -43,17 +43,30 @@ import (
 const mirrorInterval = 2 * time.Second
 
 // A post is edited only when what it shows changed (mirror.Fingerprint;
-// elapsed time alone is no change). A running turn's post, and an ended
-// one's Continued edit, waits until mirrorEditGap after the binding's last
-// post or edit, and is edited at most mirrorProgressMax times, except to
-// show it interrupted. Each edit is a stored relay event that clients
-// fetch, so the bound is on stored events, not on freshness. The edit that
-// ends a post showing the turn running is sent at once, not counted, and
-// starts the count again for the changes after the end.
+// elapsed time alone is no change), and only mirrorEditGap after the
+// binding's last post or edit. Only the edit that ends a post showing the
+// turn running skips the gap. A post gets mirrorProgressMax counted edits;
+// an Ended event's edit is not counted and starts the count again. Past the
+// count, a running turn's edit is dropped, except to show it interrupted,
+// and an ended turn's edit waits a gap that doubles with each edit up to
+// mirrorEditGapMax, so its last answer still lands. Each edit is a stored
+// relay event that clients fetch, so the bound is on stored events, not on
+// freshness.
 const (
 	mirrorEditGap     = 30 * time.Second
+	mirrorEditGapMax  = 10 * time.Minute
 	mirrorProgressMax = 10
 )
+
+// mirrorGap is the gap before the next edit of a post that had edits
+// counted edits.
+func mirrorGap(edits int) time.Duration {
+	gap := mirrorEditGap
+	for n := edits; n > mirrorProgressMax && gap < mirrorEditGapMax; n-- {
+		gap *= 2
+	}
+	return min(gap, mirrorEditGapMax)
+}
 
 // mirrorReadMax bounds the transcript bytes one binding reads in one tick.
 const mirrorReadMax = 64 << 20
@@ -478,8 +491,8 @@ var errMirrorWait = errors.New("the mirror edit waits for the edit gap")
 // out. An Opened or an Ended with no claim posts the turn; a Progress of the
 // live turn, and an Ended or Continued whose claim holds an event id, edit
 // its post. A Progress of a posted turn that a Stop hook continued makes it
-// the live turn again. An edit that waits for the gap stays queued and the events after
-// it are sent. A send proved not sent keeps the event queued and backs the
+// the live turn again. An edit that waits for its gap stays queued and the
+// events after it are sent. A send proved not sent keeps the event queued and backs the
 // binding off. Any other failure leaves the outcome unknown: a post's claim
 // stays with no event id and the turn is never sent again, a progress edit
 // is dropped, and the final edit of a turn is tried once more after the
@@ -493,8 +506,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 		id := ev.Turn.ID
 		claim := filepath.Join(dir, "posted", id+".json")
 		final := ev.Kind == mirror.Ended || ev.Kind == mirror.Continued
-		since := now.UnixMilli() - st.Edited
-		ready := since < 0 || since >= mirrorEditGap.Milliseconds()
+		since := time.Duration(now.UnixMilli()-st.Edited) * time.Millisecond
 		var err error
 		sent, edit := false, false
 		if ev.Kind == mirror.Progress && ev.Turn.Reopened != "" && id != st.Live && turnIDRe.MatchString(id) && mirrorPosted(claim) {
@@ -510,10 +522,10 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 				st.Live, sent = id, true
 			}
 		case id == st.Live && ev.Kind == mirror.Progress:
-			sent, err = s.mirrorProgress(claim, t, b, ev.Turn, ready)
+			sent, err = s.mirrorProgress(claim, t, b, ev.Turn, since)
 		case final && mirrorPosted(claim):
 			edit = true
-			sent, err = s.mirrorEdit(claim, t, b, ev.Turn, ev.Kind == mirror.Ended || id == st.Live, ready)
+			sent, err = s.mirrorEdit(claim, t, b, ev, since)
 		case ev.Kind == mirror.Ended && ev.Turn.LastTS > st.Watermark:
 			var event string
 			event, err = s.mirrorPost(claim, t, b, ev.Turn)
@@ -557,18 +569,23 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 }
 
 // mirrorClaim is one turn's posted/<turn>.json: the post, the fingerprint
-// of what it shows, whether it shows the turn interrupted, and the number of
-// counted edits it had. Buzz and Earlier are facts the post keeps once it
-// showed them: the turn answered Buzz, and the backlog turns dropped before
-// it.
+// of what it shows, whether it shows the turn running or interrupted, and
+// the number of counted edits it had. Buzz and Earlier are facts the post
+// keeps once it showed them: the turn answered Buzz, and the backlog turns
+// dropped before it. Checked is set once the turn's end decided Buzz.
 type mirrorClaim struct {
 	dialogPost
 	Shown   string `json:"shown,omitempty"`
+	Running bool   `json:"running,omitempty"`
 	Halted  bool   `json:"halted,omitempty"`
 	Edits   int    `json:"edits,omitempty"`
 	Buzz    bool   `json:"buzz,omitempty"`
+	Checked bool   `json:"checked,omitempty"`
 	Earlier int    `json:"earlier,omitempty"`
 }
+
+// buzzPrefix starts a post that shows Buzz as its cause.
+const buzzPrefix = "▶ " + mirror.CauseBuzz + "\n"
 
 func readMirrorClaim(path string) (mirrorClaim, bool) {
 	raw, err := readSmallRegular(path)
@@ -579,6 +596,8 @@ func readMirrorClaim(path string) (mirrorClaim, bool) {
 	if json.Unmarshal(raw, &c) != nil {
 		return mirrorClaim{}, false
 	}
+	// A claim written before Buzz was recorded has it only in its post.
+	c.Buzz = c.Buzz || strings.HasPrefix(c.Text, buzzPrefix)
 	return c, true
 }
 
@@ -601,8 +620,8 @@ func mirrorPosted(claim string) bool {
 // already claimed is not posted. It returns the event id the claim holds.
 func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn) (string, error) {
 	p := mirrorClaim{dialogPost: dialogPost{Channel: t.channel}}
-	s.mirrorFacts(&p, t.name, b, &turn)
-	p.Text, p.Shown, p.Halted = mirror.Render(turn), mirror.Fingerprint(turn), turn.Halted
+	_ = s.mirrorFacts("", &p, t.name, b, &turn)
+	p.Text, p.Shown, p.Running, p.Halted = mirror.Render(turn), mirror.Fingerprint(turn), turn.End == "", turn.Halted
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return "", err
@@ -632,55 +651,60 @@ func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, tur
 
 // mirrorProgress edits the post of the running turn when what it shows
 // changed and the turn had fewer than mirrorProgressMax counted edits, or
-// when it was interrupted or runs again, and reports whether it edited it.
-// An edit that is not ready waits.
-func (s *Server) mirrorProgress(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, ready bool) (bool, error) {
+// when it was interrupted, and reports whether it edited it. An edit within
+// the gap (since is the time from the binding's last post or edit) waits.
+func (s *Server) mirrorProgress(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, since time.Duration) (bool, error) {
 	c, found := readMirrorClaim(claim)
 	if !found || c.Event == "" {
 		return false, nil
 	}
-	s.mirrorFacts(&c, t.name, b, &turn)
+	if err := s.mirrorFacts(claim, &c, t.name, b, &turn); err != nil {
+		return false, err
+	}
 	shown := mirror.Fingerprint(turn)
 	capped := c.Edits >= mirrorProgressMax && turn.Halted == c.Halted
 	if capped || shown == c.Shown {
 		return false, nil
 	}
-	if !ready {
+	if since >= 0 && since < mirrorEditGap {
 		return false, errMirrorWait
 	}
 	text := mirror.Render(turn)
 	if err := editMessage(c.Event, text, s.cfg.PostTimeout); err != nil {
 		return false, err
 	}
-	c.Text, c.Shown, c.Halted, c.Edits = text, shown, turn.Halted, c.Edits+1
+	c.Text, c.Shown, c.Running, c.Halted, c.Edits = text, shown, true, turn.Halted, c.Edits+1
 	return true, writeMirrorClaim(claim, c)
 }
 
-// mirrorEdit makes the edit of an ended turn's post and reports whether it
-// edited it. A turn with no post, or one whose outcome is unknown, is not
-// edited. The edit that ends a post showing the turn running (ended) is
-// sent at once and starts the count again; any other edit that is not
-// ready waits, and one past the cap is dropped. The edit that shows the
-// mirror turned off is the post's last.
-func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, ended, ready bool) (bool, error) {
+// mirrorEdit makes the edit of an ended turn's post for ev, an Ended or
+// Continued event, and reports whether it edited it. A turn with no post,
+// or one whose outcome is unknown, is not edited. The edit that ends a post
+// showing the turn running is sent at once; any other waits for its gap
+// (mirrorGap; since is the time from the binding's last post or edit). The
+// edit that shows the mirror turned off is the post's last.
+func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, ev mirror.Event, since time.Duration) (bool, error) {
 	p, found := readMirrorClaim(claim)
 	if !found || p.Event == "" {
 		return false, nil
 	}
-	s.mirrorFacts(&p, t.name, b, &turn)
+	turn := ev.Turn
+	if err := s.mirrorFacts(claim, &p, t.name, b, &turn); err != nil {
+		return false, err
+	}
 	shown := mirror.Fingerprint(turn)
-	if shown == p.Shown || !ended && p.Edits >= mirrorProgressMax {
+	if shown == p.Shown {
 		return false, nil
 	}
-	if !ready && !ended {
+	if !p.Running && since >= 0 && since < mirrorGap(p.Edits) {
 		return false, errMirrorWait
 	}
 	text := mirror.Render(turn)
 	if err := editMessage(p.Event, text, s.cfg.PostTimeout); err != nil {
 		return false, err
 	}
-	p.Text, p.Shown, p.Halted = text, shown, turn.Halted
-	if p.Edits++; ended {
+	p.Text, p.Shown, p.Running, p.Halted = text, shown, false, turn.Halted
+	if p.Edits++; ev.Kind == mirror.Ended {
 		p.Edits = 0
 	}
 	if turn.End == mirror.EndMirrorOff {
@@ -692,24 +716,34 @@ func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, tur
 // mirrorFacts applies to turn the facts its post keeps (claim c) and keeps
 // the new ones in c: the dropped backlog turns, and whether the turn
 // answered Buzz. Once a post shows Buzz it keeps it, whatever a later edit's
-// turn or the inbox then hold. An ended turn of a mailbox binding (named
-// name) not yet known to answer Buzz is looked up in the buzz inbox.
-func (s *Server) mirrorFacts(c *mirrorClaim, name string, b binding.Binding, turn *mirror.Turn) {
+// turn or the inbox then hold. Buzz is decided once, at the turn's first
+// end: a turn the fold names Buzz, or a mailbox binding's (named name)
+// doorbell or task turn that replied to a Buzz message. A claim on disk
+// (path claim) is written as soon as that decision is made, so it is never
+// looked up again.
+func (s *Server) mirrorFacts(claim string, c *mirrorClaim, name string, b binding.Binding, turn *mirror.Turn) error {
 	c.Earlier = max(c.Earlier, turn.Earlier)
 	turn.Earlier = c.Earlier
-	if !c.Buzz && turn.End != "" && mirror.BuzzReplaces(turn.Cause) && s.mirrorRepliedToBuzz(name, b, *turn) {
-		c.Buzz = true
+	c.Buzz = c.Buzz || turn.Cause == mirror.CauseBuzz
+	if !c.Checked && turn.End != "" {
+		c.Checked = true
+		c.Buzz = c.Buzz || mirror.BuzzReplaces(turn.Cause) && s.mirrorRepliedToBuzz(name, b, *turn)
+		if claim != "" {
+			if err := writeMirrorClaim(claim, *c); err != nil {
+				return err
+			}
+		}
 	}
 	if c.Buzz {
-		turn.AnsweredBuzz()
+		turn.Cause = mirror.CauseBuzz
 	}
-	c.Buzz = c.Buzz || turn.Cause == mirror.CauseBuzz
+	return nil
 }
 
 // mirrorRepliedToBuzz reports whether the buzz inbox of a mailbox binding's
 // root holds a reply from its handle, created between the turn's first
-// assistant line and its last line, to a Buzz message: one of its refs
-// names a message from buzz in the handle's inbox. The reply is a tool call
+// assistant line and its last line, to a Buzz message: the message it
+// directly answers, its last ref, is from buzz. The reply is a tool call
 // inside the turn, so it is delivered before the closing message is
 // written.
 func (s *Server) mirrorRepliedToBuzz(name string, b binding.Binding, turn mirror.Turn) bool {
@@ -733,7 +767,7 @@ func (s *Server) mirrorRepliedToBuzz(name string, b binding.Binding, turn mirror
 			if h == nil || h.From != b.Handle {
 				continue
 			}
-			if created, err := time.Parse(time.RFC3339Nano, h.Created); err == nil && !created.Before(from) && !created.After(to) && refsBuzz(b, h.Refs) {
+			if created, err := time.Parse(time.RFC3339Nano, h.Created); err == nil && !created.Before(from) && !created.After(to) && len(h.Refs) > 0 && fromBuzz(b, h.Refs[len(h.Refs)-1]) {
 				return true
 			}
 		}
@@ -741,17 +775,15 @@ func (s *Server) mirrorRepliedToBuzz(name string, b binding.Binding, turn mirror
 	return false
 }
 
-// refsBuzz reports whether one of refs names a message from buzz in the
-// inbox of the binding's handle.
-func refsBuzz(b binding.Binding, refs []string) bool {
-	for _, ref := range refs {
-		if fsq.ValidateMessageFilename(ref+".md") != nil {
-			continue
-		}
-		for _, dir := range []string{fsq.AgentInboxNew(b.Root, b.Handle), fsq.AgentInboxCur(b.Root, b.Handle)} {
-			if h, err := format.ReadHeaderFile(filepath.Join(dir, ref+".md")); err == nil && h.From == mailboxSender {
-				return true
-			}
+// fromBuzz reports whether message id in the inbox of the binding's handle
+// is from buzz.
+func fromBuzz(b binding.Binding, id string) bool {
+	if fsq.ValidateMessageFilename(id+".md") != nil {
+		return false
+	}
+	for _, dir := range []string{fsq.AgentInboxNew(b.Root, b.Handle), fsq.AgentInboxCur(b.Root, b.Handle)} {
+		if h, err := format.ReadHeaderFile(filepath.Join(dir, id+".md")); err == nil && h.From == mailboxSender {
+			return true
 		}
 	}
 	return false
