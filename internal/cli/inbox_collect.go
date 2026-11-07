@@ -86,7 +86,14 @@ func claimInboxItemsPinned(
 		validator = &headerValidator{}
 	}
 
+	// A receipt that fails to write is parked and owed; it never stops the
+	// batch, so a receipts fault cannot ration mail. Every return reports the
+	// owed receipts so the command still fails.
 	items := make([]inboxItem, 0, len(filenames))
+	var receiptErrs []error
+	finish := func(err error) ([]inboxItem, error) {
+		return finishInboxBatch(items, joinOutcomeErr(err, errors.Join(receiptErrs...)))
+	}
 	for _, filename := range filenames {
 		if limit > 0 && len(items) >= limit {
 			break
@@ -98,22 +105,22 @@ func claimInboxItemsPinned(
 			if os.IsNotExist(claimErr) {
 				exists, checkErr := claimMailboxDirsExist(deliveryRoot, me)
 				if checkErr != nil {
-					return finishInboxBatch(items, checkErr)
+					return finish(checkErr)
 				}
 				if exists {
 					continue
 				}
-				return finishInboxBatch(items, NotFoundError("mailbox for %q disappeared while claiming %s at root %s", me, filename, root))
+				return finish(NotFoundError("mailbox for %q disappeared while claiming %s at root %s", me, filename, root))
 			}
-			return finishInboxBatch(items, claimErr)
+			return finish(claimErr)
 		}
 		if afterClaim != nil {
 			if err := afterClaim(filename); err != nil {
 				items = append(items, failedClaimedInboxItem(filename, "processing_error", err))
 				if claimCommitted {
-					return finishInboxBatch(items, errors.Join(claimErr, err))
+					return finish(errors.Join(claimErr, err))
 				}
-				return finishInboxBatch(items, err)
+				return finish(err)
 			}
 		}
 
@@ -164,11 +171,10 @@ func claimInboxItemsPinned(
 			}
 			if dlqErr == nil {
 				item.MovedToDLQ = true
-				receiptErr := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError)
-				items = append(items, item)
-				if receiptErr != nil {
-					return finishInboxBatch(items, receiptErr)
+				if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError); err != nil {
+					receiptErrs = append(receiptErrs, err)
 				}
+				items = append(items, item)
 				continue
 			} else {
 				var partial *fsq.DLQTransitionError
@@ -179,36 +185,38 @@ func claimInboxItemsPinned(
 					// in cur. Surface the item before returning a typed error so
 					// callers cannot mistake the duplicate state for completion.
 					items = append(items, item)
-					return finishInboxBatch(items, dlqErr)
+					return finish(dlqErr)
 				case dlqPath != "" && errors.As(dlqErr, &committed):
 					// The source transition completed, but its durability is
 					// indeterminate. Report the completed logical outcome and
 					// still fail the command so operators do not retry blindly.
 					item.MovedToDLQ = true
-					receiptErr := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError)
+					if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError); err != nil {
+						receiptErrs = append(receiptErrs, err)
+					}
 					items = append(items, item)
-					return finishInboxBatch(items, joinOutcomeErr(dlqErr, receiptErr))
+					return finish(dlqErr)
 				default:
 					// No DLQ envelope is visible and the claimed source remains
 					// in cur. Preserve the item, but fail the batch instead of
 					// reducing a transport failure to a warning-only success.
 					items = append(items, item)
-					return finishInboxBatch(items, dlqErr)
+					return finish(dlqErr)
 				}
 			}
 		}
 
 		item.MovedToCur = true
-		receiptErr := emitReceipt(deliveryRoot, me, &item, receipt.StageDrained, "")
+		if err := emitReceipt(deliveryRoot, me, &item, receipt.StageDrained, ""); err != nil {
+			receiptErrs = append(receiptErrs, err)
+		}
 		items = append(items, item)
-		if claimCommitted || receiptErr != nil {
-			// The claimed payload is in items; the error tells the caller the
-			// batch is incomplete and stops further claims.
-			return finishInboxBatch(items, joinOutcomeErr(claimErr, receiptErr))
+		if claimCommitted {
+			return finish(claimErr)
 		}
 	}
 
-	return finishInboxBatch(items, nil)
+	return finish(nil)
 }
 
 func finishInboxBatch(items []inboxItem, err error) ([]inboxItem, error) {

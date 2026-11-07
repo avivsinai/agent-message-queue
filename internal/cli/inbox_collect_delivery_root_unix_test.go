@@ -208,7 +208,8 @@ func TestDrainInboxItemsReportsEarlierClaimWhenLaterClaimCannotBeRead(t *testing
 
 // Review of receipt recovery: a drained receipt that failed to write was only
 // a warning, and no later drain could write it, so `send --wait-for drained`
-// timed out although the message was consumed.
+// timed out although the message was consumed. A receipt fault must not stop
+// the batch either: every waiting message is delivered.
 func TestSendWaitForDrainedCompletesAfterReceiptWriteFailsOnce(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -224,6 +225,7 @@ func TestSendWaitForDrainedCompletesAfterReceiptWriteFailsOnce(t *testing.T) {
 		setOptionalEnv(t, key, "", false)
 	}
 	deliveryRoot := openDeliveryRootForCLITest(t, root)
+	deliverInboxCollectFixture(t, root, "0-earlier.md", "earlier", "earlier mail")
 	receiptsDir := fsq.AgentReceipts(root, "alice")
 	t.Cleanup(func() { _ = os.Chmod(receiptsDir, 0o700) })
 
@@ -234,7 +236,7 @@ func TestSendWaitForDrainedCompletesAfterReceiptWriteFailsOnce(t *testing.T) {
 			defer func() { consumer <- failures }()
 			newDir := fsq.AgentInboxNew(root, "alice")
 			for deadline := time.Now().Add(4 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-				if entries, _ := os.ReadDir(newDir); len(entries) > 0 {
+				if entries, _ := os.ReadDir(newDir); len(entries) >= 2 {
 					break
 				}
 				if time.Now().After(deadline) {
@@ -247,8 +249,8 @@ func TestSendWaitForDrainedCompletesAfterReceiptWriteFailsOnce(t *testing.T) {
 				return
 			}
 			items, err := drainInboxItems(deliveryRoot, root, "alice", true, 0, &headerValidator{})
-			if err == nil || len(items) != 1 || strings.TrimSpace(items[0].Body) != "consume me" {
-				failures = append(failures, fmt.Sprintf("drain with unwritable receipts = %d items, %v; want the payload and an error", len(items), err))
+			if err == nil || len(items) != 2 {
+				failures = append(failures, fmt.Sprintf("drain with unwritable receipts = %d items, %v; want both payloads and an error", len(items), err))
 			}
 			if err := os.Chmod(receiptsDir, 0o700); err != nil {
 				failures = append(failures, err.Error())
