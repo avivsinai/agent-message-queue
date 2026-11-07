@@ -368,11 +368,11 @@ func currentKey(r Record) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// CurrentDir is the current/ directory of the store below home's AMQ home.
-// It exists once any coop exec published a thread; a hook gate tests it
-// before it starts amq.
-func CurrentDir(home string) string {
-	return filepath.Join(amqhome.Under(home), storeName, "current")
+// ThreadsDir is the threads/ directory of the store below home's AMQ home,
+// one <thread>.json record per thread coop exec published. A hook gate
+// tests a thread's record there before it starts amq.
+func ThreadsDir(home string) string {
+	return filepath.Join(amqhome.Under(home), storeName, "threads")
 }
 
 const storeName = "codex-threads"

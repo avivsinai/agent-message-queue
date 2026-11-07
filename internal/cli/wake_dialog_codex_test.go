@@ -37,15 +37,26 @@ func TestCodexDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 	if zsh, err := exec.LookPath("zsh"); err == nil {
 		shells = append(shells, zsh)
 	}
-	store := filepath.Join(dir, "codex-threads", "current")
+	store := filepath.Join(dir, "codex-threads", "threads")
+	recorded := "01a165af-5f6d-7270-bb60-671490b46ea1"
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, recorded+".json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, shell := range shells {
 		for _, tc := range []struct {
-			name  string
-			env   []string
-			start bool
+			name   string
+			env    []string
+			thread string
+			start  bool
 		}{
-			{"participant", []string{"AM_ME=codex", "AM_ROOT=" + root}, true},
-			{"no AM_ME and no store", nil, false},
+			{"participant", []string{"AM_ME=codex", "AM_ROOT=" + root}, "", true},
+			// Perf audit 2026-11-05: a store from older coop exec runs
+			// started amq on every event of every Codex session.
+			{"no AM_ME, thread with no record", nil, "0b5e2c1d-0000-4000-8000-000000000001", false},
+			{"no AM_ME, recorded thread", nil, recorded, true},
 		} {
 			for _, hook := range codexDialogHooks(fake, store) {
 				if hook.Event != "PermissionRequest" {
@@ -55,7 +66,7 @@ func TestCodexDialogHookHoldsUntilTheTurnEnds(t *testing.T) {
 				cmd := exec.Command(shell, "-c", hook.Command)
 				cmd.Dir = dir
 				cmd.Env = append([]string{"PATH=/usr/bin:/bin", "RAN=" + ran}, tc.env...)
-				cmd.Stdin = strings.NewReader(`{"hook_event_name":"PermissionRequest"}`)
+				cmd.Stdin = strings.NewReader(`{"session_id":"` + tc.thread + `","hook_event_name":"PermissionRequest"}`)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("%s %s: %v: %s", shell, tc.name, err, out)
 				}
@@ -163,8 +174,18 @@ func TestCodexDialogHookKeepsTheHoldWhenAnAllowedParallelCallCompletes(t *testin
 // Codex runs a hook only when the stored hash equals its hash of the current
 // definition and the hook is enabled, and an async open lets the prompt
 // show before the marker. The hash vectors are what Codex 0.163.0 stored
-// after "Trust all" for these exact entries.
+// after "Trust all" for these exact entries, so the fixture keeps the
+// commands Codex hashed then (the gate before the thread-record test).
 func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
+	hashed := codexDialogHooks("/opt/amq/bin/amq", "/home/user/.amq/codex-threads/threads")
+	for i, hook := range hashed {
+		verb, gate := "close", `[ -n "${AM_ME-}" ] && `+wakeDialogNoMarkerTest+` && exit 0; `
+		if hook.Event == "PermissionRequest" {
+			verb, gate = "open", ""
+		}
+		hashed[i].Command = wakeDialogHookMarker + gate + `[ -n "${AM_ME-}" ] || [ -d '/home/user/.amq/codex-threads/current' ] || exit 0; ` +
+			`'/opt/amq/bin/amq' --no-update-check wake dialog --harness codex ` + verb + " || true"
+	}
 	vectors := map[string]string{
 		"PermissionRequest": "sha256:c0774a72a65ea5d80ac2ae8fc216954bba006d065793e3eb4a929d08a59b50ac",
 		"SessionStart":      "sha256:220511253a2c437a12911143d52ac52aa94c645253dec93d27b35d5569bb9678",
@@ -174,7 +195,7 @@ func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
 		"Interrupt":         "sha256:2f4bc142493a7c72b8392f4537f5e8ee40b0d0df3f0e6eae3eb2fc726bca1c90",
 	}
 	vecPath := filepath.Join(t.TempDir(), "hooks.json")
-	if _, err := claude.InstallCommandHooksAt(vecPath, codexDialogHooks("/opt/amq/bin/amq", "/home/user/.amq/codex-threads/current")); err != nil {
+	if _, err := claude.InstallCommandHooksAt(vecPath, hashed); err != nil {
 		t.Fatal(err)
 	}
 	vecEntries, err := readCodexHookEntries(vecPath)

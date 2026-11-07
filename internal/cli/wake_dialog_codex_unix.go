@@ -45,19 +45,23 @@ var codexDialogHookEvents = []string{
 
 // codexDialogHookCommand is the command one Codex hook runs under the user's
 // $SHELL -c. Without AM_ME, the receiver can find the seat only through the
-// codexidentity store, so with neither the gate starts nothing. A close
-// with AM_ME also skips when the agent directory holds no marker. Exit 2
-// means something to Codex on several events, and an older amq at this path
-// would exit 2 on the unknown flag, so the shell stays as the parent and
-// ends in || true; there is no exec.
-func codexDialogHookCommand(bin, store, verb string) string {
+// codexidentity record of the input's session_id, the thread id, so the
+// gate reads the input with shell builtins and starts nothing when it names
+// a thread with no record in threads. Input it cannot read that way goes to
+// the receiver, which decides. A close with AM_ME also skips when the agent
+// directory holds no marker. Exit 2 means something to Codex on several
+// events, and an older amq at this path would exit 2 on the unknown flag,
+// so the shell stays as the parent and ends in || true; there is no exec.
+func codexDialogHookCommand(bin, threads, verb string) string {
+	run := singleQuote(bin) + " --no-update-check wake dialog --harness codex " + verb + " || true"
 	gate := ""
 	if verb == "close" {
 		gate = `[ -n "${AM_ME-}" ] && ` + wakeDialogNoMarkerTest + ` && exit 0; `
 	}
-	gate += `[ -n "${AM_ME-}" ] || [ -d ` + singleQuote(store) + ` ] || exit 0; `
-	return wakeDialogHookMarker + gate + singleQuote(bin) +
-		" --no-update-check wake dialog --harness codex " + verb + " || true"
+	gate += `[ -n "${AM_ME-}" ] || { in=; while IFS= read -r l || [ -n "$l" ]; do in="$in$l"; done; ` +
+		`t=${in#*'"session_id":"'}; t=${t%%'"'*}; case $t in ''|*[!0-9a-f-]*) ;; *) [ -e ` + singleQuote(threads) +
+		`/"$t".json ] || exit 0 ;; esac; printf '%s' "$in" | ` + run + `; exit 0; }; `
+	return wakeDialogHookMarker + gate + run
 }
 
 // codexDialogHookBinRe reads the binary back from codexDialogHookCommand.
@@ -86,13 +90,13 @@ func codexDialogHooks(bin, store string) []claude.CommandHook {
 	return hooks
 }
 
-// codexDialogStore is the codexidentity directory the gate tests.
+// codexDialogStore is the codexidentity threads directory the gate tests.
 func codexDialogStore() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return codexidentity.CurrentDir(home), nil
+	return codexidentity.ThreadsDir(home), nil
 }
 
 // adoptCodexHookIdentity gives a Codex hook with no AM_* the identity amq
