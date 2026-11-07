@@ -325,16 +325,27 @@ func classifyHolder(recorded HolderIdentity, live processInfo) (LeaseState, stri
 		if live.StartToken == "" {
 			return LeaseUnverified, evidenceOr("process start time unavailable", live.InspectError)
 		}
+		unknownBoot := false
 		if recorded.BootID != "" && live.BootID != "" {
 			switch CompareBootID(recorded.BootID, live.BootID) {
 			case BootIDMismatch:
 				return LeaseStale, "boot id mismatch"
 			case BootIDUnknown:
-				return LeaseUnverified, "boot ids use different representations"
+				unknownBoot = true
 			}
 		}
 		if recorded.BootID != "" && live.BootID == "" {
 			return LeaseUnverified, evidenceOr("boot id unavailable", live.InspectError)
+		}
+		if unknownBoot {
+			// Boot ids in two representations prove nothing either way.
+			// Only a mixed pair from darwin reaches here, whose start
+			// token is an absolute time: a different start still proves
+			// the pid belongs to another process.
+			if recorded.ProcessStart != live.StartToken {
+				return LeaseStale, "process start time mismatch"
+			}
+			return LeaseUnverified, "boot ids use different representations"
 		}
 		if recorded.ProcessStart != live.StartToken {
 			if recorded.BootID == "" {

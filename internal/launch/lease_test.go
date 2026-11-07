@@ -198,4 +198,12 @@ func TestHolderWithBoottimeBootIDIsNotStaleUnderUUIDReader(t *testing.T) {
 	if state, evidence := classifyHolder(recorded, live); state != LeaseUnverified {
 		t.Fatalf("classifyHolder = %v (%s), want unverified", state, evidence)
 	}
+	// Review of the one-writer change: with mixed boot-id forms after a
+	// reboot, a pid now owned by another process (another start) must still
+	// read stale, or a dead holder blocks a launch for as long as that pid
+	// lives.
+	live.StartToken = "1794100000.000000002"
+	if state, evidence := classifyHolder(recorded, live); state != LeaseStale {
+		t.Fatalf("classifyHolder with another start = %v (%s), want stale", state, evidence)
+	}
 }
