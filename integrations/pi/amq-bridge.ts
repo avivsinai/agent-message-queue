@@ -34,9 +34,6 @@ const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a
 // in the same tick.
 const RECONCILE_MS = 5 * 60 * 1000;
 const COARSE_MTIME_MS = 2000;
-// MAX_HANDLED bounds the refs remembered as handled. A forgotten ref is
-// handled again from its receipt or terminal event on disk.
-const MAX_HANDLED = 4096;
 const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by then dropped it
 const MAX_EVENT_TEXT = 256 * 1024;
 // Activity records are a bounded, best-effort view of the whole session for
@@ -133,6 +130,7 @@ type Bridge = {
 	// revisionNoticeShown limits the old-adapter notice to once per runtime.
 	revisionNoticeShown: boolean;
 	ownerNotice: { shown: boolean };
+	displaced: (b: Bridge) => void;
 	// sessionId is pi's own session id; "" disables activity records.
 	sessionId: string;
 	// turn is the id of the open turn, "" outside one. turns counts turns.
@@ -187,29 +185,58 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	let bridge: Bridge | null = null;
 	// ownerNotice limits the notices about another bridge to once.
 	const ownerNotice = { shown: false };
-	// waiting is the beat of a bridge another live bridge holds off. When
-	// the holder's liveness is stale, not live, or absent (it crashed or
-	// exited), the bridge starts as at session_start and tells its pi.
+	// waiting is the beat of a pi that does not serve its mailbox: another
+	// live bridge held it off at session_start, or displaced it. A record
+	// that is absent or not live is taken at the next beat. A live record is
+	// taken only after two of these beats at least a beat apart saw it stale
+	// and unchanged, so an owner that resumes from sleep refreshes it first.
 	let waiting: ReturnType<typeof setInterval> | null = null;
 	const stopWaiting = () => {
 		if (waiting) clearInterval(waiting);
 		waiting = null;
 	};
-	const open = (ctx: ExtensionContext, identity: AmqIdentity): Bridge | null => {
-		const b = start(pi, ctx, options, identity, ownerNotice);
-		if (b !== "held") return b;
+	const begin = (ctx: ExtensionContext, identity: AmqIdentity) => {
+		bridge = start(pi, ctx, options, identity, ownerNotice, displaced);
+		if (bridge) scanSafely(pi, bridge);
+	};
+	// serve starts the bridge for identity, or waits while another live
+	// bridge holds the mailbox.
+	const serve = (ctx: ExtensionContext, identity: AmqIdentity): void => {
+		stopWaiting();
+		const dir = bridgeDir(identity);
+		const held = holderOf(dir);
+		if (!held) return begin(ctx, identity);
+		if (!held.stale && !ownerNotice.shown) {
+			ownerNotice.shown = true;
+			notify(ctx, `amq-bridge inactive: another live pi bridge (pid ${held.pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
+		}
+		let seen: { key: string; at: number } | null = null;
 		waiting = setInterval(() => {
-			const next = start(pi, ctx, options, identity, ownerNotice);
-			if (next === "held") return;
+			const now = Date.now();
+			const h = holderOf(dir);
+			if (h && !h.stale) {
+				seen = null;
+				return;
+			}
+			if (h) {
+				// Less a poll for timer jitter: the two beats are a beat apart.
+				if (!seen || seen.key !== h.key) seen = { key: h.key, at: now };
+				if (now - seen.at < HEARTBEAT_MS - POLL_MS) return;
+			}
 			stopWaiting();
-			bridge = next;
-			if (!next) return;
+			const told = ownerNotice.shown;
 			ownerNotice.shown = false;
-			notify(ctx, "amq-bridge now serves Buzz requests.");
-			scanSafely(pi, next);
+			begin(ctx, identity);
+			if (bridge && told) notify(ctx, "amq-bridge now serves Buzz requests.");
 		}, HEARTBEAT_MS);
 		waiting.unref();
-		return null;
+	};
+	// displaced is called by a bridge that found another generation in
+	// liveness; this pi then waits as a held-off pi does.
+	const displaced = (b: Bridge) => {
+		if (bridge !== b) return;
+		bridge = null;
+		serve(b.ctx, b.identity);
 	};
 	// session holds the identity resolved for the open session, none
 	// included; it is null outside a session.
@@ -218,6 +245,17 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// session's once it started, else what the identity source gives
 	// without a session.
 	const who = (): AmqIdentity | undefined => (session ? session.identity : resolveIdentity(options, undefined));
+	// serving reports whether this pi may hold the wake doorbell and show Buzz
+	// dialogs for its mailbox: only the owning bridge may, never a pi that
+	// another live bridge holds off. Before the session starts, a pi serves
+	// unless a fresh live record names another bridge.
+	const serving = (): boolean => {
+		if (bridge) return true;
+		if (waiting) return false;
+		const id = who();
+		const h = id ? holderOf(bridgeDir(id)) : null;
+		return !h || h.stale;
+	};
 
 	// The doorbell must never answer a pi prompt. pi counts nested
 	// extension prompts itself: ui_prompt_start fires when it starts waiting
@@ -236,33 +274,36 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// carry only its kind and title), so the owner answers in the terminal and
 	// the dialog closes when the prompt ends.
 	pi.on("project_trust", () => {
-		openWakeDialog(who(), WAKE_DIALOG_TRUST, "select");
-		openRemoteDialog(who(), "select", "Trust project folder?", "");
+		if (serving()) {
+			openWakeDialog(who(), WAKE_DIALOG_TRUST, "select");
+			openRemoteDialog(who(), "select", "Trust project folder?", "");
+		}
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
-		if (++openPrompts === 1) {
+		if (++openPrompts === 1 && serving()) {
 			openWakeDialog(who(), WAKE_DIALOG_PROMPT, event.kind);
 			openRemoteDialog(who(), event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
 		if (--openPrompts <= 0) {
-			closeWakeDialog(who());
+			if (serving()) closeWakeDialog(who());
 			closeRemoteDialog();
 		}
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		openPrompts = 0;
-		closeWakeDialog(who());
 		closeRemoteDialog();
 		stopWaiting();
 		stop(bridge, "restart");
+		bridge = null;
+		ownerNotice.shown = false;
 		session = { identity: resolveIdentity(options, ctx) };
-		bridge = session.identity ? open(ctx, session.identity) : null;
-		if (bridge) scanSafely(pi, bridge);
-		else if (!session.identity && !options.identity && !inactiveNoticeShown) {
+		if (session.identity) serve(ctx, session.identity);
+		if (serving()) closeWakeDialog(who());
+		if (!session.identity && !options.identity && !inactiveNoticeShown) {
 			// A host that gives no identity for this session keeps the bridge
 			// off on purpose; only the plain extension tells the owner how to
 			// fix it.
@@ -275,7 +316,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
-		closeWakeDialog(who());
+		if (serving()) closeWakeDialog(who());
 		closeRemoteDialog();
 		stopWaiting();
 		stop(bridge, event.reason);
@@ -390,10 +431,15 @@ function resolveIdentity(options: AmqBridgeOptions, ctx: ExtensionContext | unde
 	return id && typeof id.root === "string" && path.isAbsolute(id.root) && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
 }
 
-// start starts the bridge, or returns "held" while another live bridge
-// holds the mailbox, or null when the bridge cannot run.
-function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }): Bridge | "held" | null {
-	const dir = path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
+function bridgeDir(identity: AmqIdentity): string {
+	return path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
+}
+
+// start starts the bridge and takes the mailbox by writing liveness, or
+// returns null when the bridge cannot run. displaced is called when another
+// generation's liveness later replaces this bridge's.
+function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }, displaced: (b: Bridge) => void): Bridge | null {
+	const dir = bridgeDir(identity);
 	try {
 		for (const sub of ["requests", "receipts", "events"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
@@ -409,14 +455,6 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		// recorded, and requests run as before.
 	}
 	const generation = randomUUID();
-	const holder = liveHolder(dir);
-	if (holder) {
-		if (!ownerNotice.shown) {
-			ownerNotice.shown = true;
-			notify(ctx, `amq-bridge inactive: another live pi bridge (pid ${holder.pid}) serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
-		}
-		return "held";
-	}
 	const b: Bridge = {
 		dir,
 		identity,
@@ -434,6 +472,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		inflight: null,
 		orphans: null,
 		ownerNotice,
+		displaced,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
 		sessionId: sessionIdOf(ctx),
@@ -460,15 +499,29 @@ function retire(b: Bridge): void {
 	for (const t of b.timers.splice(0)) clearInterval(t);
 }
 
-// liveHolder is the bridge that holds the mailbox: a liveness record younger
-// than OWNER_STALE_MS that is live. It is null when the record is older, not
-// live, absent, or unreadable.
-function liveHolder(dir: string): { pid: number; generation: string } | null {
+// holderOf reads the liveness record of the bridge that holds the mailbox:
+// its pid, whether it is older than OWNER_STALE_MS, and a key that changes
+// on every write. It is null when the record is absent, unreadable, or not
+// live; such a mailbox is free.
+function holderOf(dir: string): { pid: unknown; stale: boolean; key: string } | null {
 	try {
 		const file = path.join(dir, "bridge.liveness");
-		if (Date.now() - fs.statSync(file).mtimeMs >= OWNER_STALE_MS) return null;
-		const rec = JSON.parse(fs.readFileSync(file, "utf8"));
-		return rec.protocol === PROTOCOL && rec.live === true && typeof rec.session_generation === "string" ? { pid: rec.pid, generation: rec.session_generation } : null;
+		const mtime = fs.statSync(file).mtimeMs;
+		const text = fs.readFileSync(file, "utf8");
+		const rec = JSON.parse(text);
+		if (rec?.protocol !== PROTOCOL || rec.live !== true) return null;
+		return { pid: rec.pid, stale: Date.now() - mtime >= OWNER_STALE_MS, key: `${mtime}:${text}` };
+	} catch {
+		return null;
+	}
+}
+
+// livenessOf is the generation and pid the liveness record names, or null
+// when it cannot be read.
+function livenessOf(dir: string): { generation: unknown; pid: unknown } | null {
+	try {
+		const rec = JSON.parse(fs.readFileSync(path.join(dir, "bridge.liveness"), "utf8"));
+		return { generation: rec?.session_generation, pid: rec?.pid };
 	} catch {
 		return null;
 	}
@@ -476,22 +529,19 @@ function liveHolder(dir: string): { pid: number; generation: string } | null {
 
 // owns reports whether the liveness record still names this bridge's
 // generation. When two bridges start at once the last liveness write wins;
-// a bridge that reads another generation retires at once and tells its pi
-// once, so it never writes over the owner's liveness or answers its
-// requests. An absent or unreadable record leaves this bridge the owner.
+// a bridge that reads another generation retires at once, tells its pi
+// once, and hands its pi back to waiting, so it never writes over the
+// owner's liveness or answers its requests. A record that cannot be read
+// leaves this bridge the owner.
 function owns(b: Bridge): boolean {
-	let rec: { session_generation?: unknown; pid?: unknown };
-	try {
-		rec = JSON.parse(fs.readFileSync(path.join(b.dir, "bridge.liveness"), "utf8"));
-	} catch {
-		return true;
-	}
-	if (rec?.session_generation === b.generation) return true;
+	const rec = livenessOf(b.dir);
+	if (!rec || rec.generation === b.generation) return true;
 	retire(b);
 	if (!b.ownerNotice.shown) {
 		b.ownerNotice.shown = true;
-		notify(b.ctx, `amq-bridge: this pi no longer serves Buzz requests: another pi bridge (pid ${String(rec?.pid)}) took over its AMQ mailbox.`);
+		notify(b.ctx, `amq-bridge: this pi no longer serves Buzz requests: another pi bridge (pid ${String(rec.pid)}) took over its AMQ mailbox.`);
 	}
+	b.displaced(b);
 	return false;
 }
 
@@ -513,7 +563,8 @@ function stop(b: Bridge | null, reason: string): void {
 		b.inflight = null;
 	}
 	// Only the owner marks the mailbox offline.
-	if (owns(b)) writeLiveness(b, false);
+	const rec = livenessOf(b.dir);
+	if (!rec || rec.generation === b.generation) writeLiveness(b, false);
 }
 
 // scanSafely is scan whose failure waits for the next poll: a transient
@@ -542,13 +593,21 @@ function discover(b: Bridge): void {
 	} catch {
 		return;
 	}
+	// The first listing finds only receipts that orphan recovery listed at
+	// start; a later one can find a receipt another generation wrote since.
+	const later = b.listedMtime !== -1;
 	b.listedMtime = mtime;
 	b.listedAt = now;
+	const listed = new Set<string>();
 	for (const name of names) {
 		const m = REQUEST_FILE.exec(name);
-		if (!m || b.handled.has(m[1]) || b.pending.has(m[1])) continue;
+		if (!m) continue;
 		const ref = m[1];
-		if (exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref)) {
+		listed.add(ref);
+		if (b.handled.has(ref) || b.pending.has(ref)) continue;
+		const receipt = exists(path.join(b.dir, "receipts", `${ref}.json`));
+		if (receipt || hasTerminal(b.dir, ref)) {
+			if (receipt && later) b.orphans?.add(ref);
 			markHandled(b, ref);
 			continue;
 		}
@@ -558,14 +617,14 @@ function discover(b: Bridge): void {
 			// Vanished between readdir and stat: nothing to answer.
 		}
 	}
+	// handled holds only refs in the latest listing.
+	for (const ref of b.handled) if (!listed.has(ref)) b.handled.delete(ref);
 }
 
-// markHandled records that ref needs no more work; the oldest handled refs are
-// forgotten past MAX_HANDLED.
+// markHandled records that ref needs no more work.
 function markHandled(b: Bridge, ref: string): void {
 	b.pending.delete(ref);
 	b.handled.add(ref);
-	if (b.handled.size > MAX_HANDLED) b.handled.delete(b.handled.values().next().value as string);
 }
 
 // scan examines every pending request in arrival order. Refusals are

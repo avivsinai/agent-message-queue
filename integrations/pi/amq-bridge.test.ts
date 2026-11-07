@@ -320,7 +320,7 @@ test("a second bridge on a live, even stalled, owner's mailbox stays inactive an
 });
 
 // Review of pi bridge ownership: a bridge started over another generation's live liveness.
-test("a bridge stays inactive while another generation's liveness is live, and takes over once it ages", async () => {
+test("a bridge stays inactive while another generation's liveness is live, and takes over a beat after it sees it aged", async () => {
 	const h = harness();
 	const foreign = JSON.stringify({ protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 });
 	fs.mkdirSync(h.dir, { recursive: true });
@@ -333,6 +333,30 @@ test("a bridge stays inactive while another generation's liveness is live, and t
 		// Review of the liveness ruling: a pi restarted within 60 s of a crash stayed inactive all session.
 		const past = new Date(Date.now() - 120_000);
 		fs.utimesSync(path.join(h.dir, "bridge.liveness"), past, past);
+		// Review of sleep safety: a stale live record is not taken on the first beat that sees it.
+		await new Promise((r) => setTimeout(r, 2300));
+		assert.equal(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"), foreign);
+		for (let i = 0; i < 125 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.equal(h.sent.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of the liveness ownership: a displaced bridge stayed inactive after the bridge that displaced it left.
+test("a displaced bridge waits and serves again once the other bridge leaves", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const live = path.join(h.dir, "bridge.liveness");
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(live, JSON.stringify(other)); // a bridge that started at the same moment wrote last
+		await h.waitFor(() => h.notices.length === 1);
+		assert.match(h.notices[0], /no longer serves Buzz requests/);
+		fs.writeFileSync(live, JSON.stringify({ ...other, live: false })); // it exits
 		for (let i = 0; i < 150 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
 		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
 		h.publish(REF, "remote task", h.generation());
