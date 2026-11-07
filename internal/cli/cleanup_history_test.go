@@ -27,6 +27,7 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 		"receipts/2026-01-03T00-00-00.000Z_pid1_c__claude__drained.json": "receipt1",
 		"inbox/cur/2026-02-01T00-00-00.000Z_pid1_d.md":                   validHistoryMessage,
 		"inbox/new/2025-01-01T00-00-00.000Z_pid1_e.md":                   "unread!!",
+		"remote-files/" + strings.Repeat("f", 64) + ".png":               "an image",
 	}
 	for rel, body := range files {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(base, rel)), 0o700); err != nil {
@@ -35,6 +36,10 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(base, rel), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	old := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(base, "remote-files", strings.Repeat("f", 64)+".png"), old, old); err != nil {
+		t.Fatal(err)
 	}
 	if _, _, err := captureEnvOutput(t, func() error {
 		return runCleanup([]string{"--history-max-size", "30B", "--root", rootPath, "--yes"})
@@ -110,11 +115,13 @@ func TestCleanupHistoryKeepsRepliesToOpenObligations(t *testing.T) {
 }
 
 // Review of the disk bounds: history cleanup deleted a corrupt message, a
-// dead-letter receipt and a fetched remote file instead of keeping them.
-func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndRemoteFiles(t *testing.T) {
+// dead-letter receipt and a fetched remote file that unread mail names.
+func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndReferencedRemoteFile(t *testing.T) {
 	rootPath := newCleanupMailboxRoot(t, "claude")
 	base := fsq.AgentBase(rootPath, "claude")
+	image := filepath.Join(base, "remote-files", strings.Repeat("f", 64)+".png")
 	files := map[string]string{
+		"inbox/new/2026-01-04T00-00-00.000Z_pid1_d.md":                   "---json\n{\"schema\":1}\n---\nsee\n\n[image: " + image + "]\n",
 		"inbox/cur/2026-01-01T00-00-00.000Z_pid1_a.md":                   "not a message",
 		"receipts/2026-01-02T00-00-00.000Z_pid1_b__claude__dlq.json":     "dlq receipt",
 		"receipts/2026-01-03T00-00-00.000Z_pid1_c__claude__drained.json": "drained",
@@ -138,5 +145,47 @@ func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndRemoteFiles(t *testing.T)
 		if kept := !strings.Contains(rel, "drained"); kept != (err == nil) {
 			t.Fatalf("%s kept=%v, want %v", rel, err == nil, kept)
 		}
+	}
+}
+
+// Review of the disk bounds: size cleanup deleted the answer of a question
+// while a copy of the question stayed, so the question looked open again.
+func TestCleanupHistoryKeepsAReplyWhileItsParentStays(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	base := filepath.Join(t.TempDir(), defaultCoopRoot)
+	start := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	ids, _ := writeThreadOpenMessages(t, base, []threadOpenMessage{
+		{name: "q", from: "alpha@s1", to: "beta@s1,gamma@s1", kind: format.KindQuestion, thread: "work"},
+		{name: "long", from: "beta@s1", to: "alpha@s1", kind: format.KindAnswer, thread: "work", refs: []string{"q"}},
+		{name: "short", from: "gamma@s1", to: "alpha@s1", kind: format.KindAnswer, thread: "work", refs: []string{"q"}},
+	}, func(i int, _ threadOpenMessage) time.Time { return start.Add(time.Duration(i) * time.Hour) })
+	s1 := filepath.Join(base, "s1")
+	for _, move := range [][2]string{{"beta", "q"}, {"gamma", "q"}, {"alpha", "long"}, {"alpha", "short"}} {
+		if err := os.Rename(filepath.Join(fsq.AgentInboxNew(s1, move[0]), ids[move[1]]+".md"), filepath.Join(fsq.AgentInboxCur(s1, move[0]), ids[move[1]]+".md")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// beta's long answer pushes alpha's and beta's mailboxes past the bound;
+	// gamma's mailbox, which keeps a copy of the question, stays under it.
+	for _, path := range []string{filepath.Join(fsq.AgentOutboxSent(s1, "beta"), ids["long"]+".md"), filepath.Join(fsq.AgentInboxCur(s1, "alpha"), ids["long"]+".md")} {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString(strings.Repeat("x", 8192))
+		_ = f.Close()
+	}
+	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 0 {
+		t.Fatalf("obligations before cleanup = %+v, want none", after.Obligations)
+	}
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--history-max-size", "4KB", "--root", s1, "--yes"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 0 {
+		t.Fatalf("obligations after cleanup = %+v, want none", after.Obligations)
 	}
 }

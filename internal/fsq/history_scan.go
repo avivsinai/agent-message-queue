@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent) or
-// receipt in an agent mailbox.
+// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent),
+// receipt or fetched remote file (remote-files) in an agent mailbox.
 type HistoryFile struct {
 	Path    string
 	Agent   string
@@ -23,9 +23,8 @@ type HistoryFile struct {
 // is the creation stamp that starts its message id, or its modification time
 // when the name has none. Unread mail, dead letters and temporary files are
 // never history, dead-letter receipts are the only record of a corrupt
-// message and stay, remote files (which an unread message may still
-// reference) are not scanned, and a message whose id is in keep stays with
-// its receipts.
+// message and stay, a message whose id is in keep stays with its receipts,
+// and a remote file whose name is in keep stays.
 func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[string]bool) ([]HistoryFile, error) {
 	agents, err := ListAgents(root)
 	if err != nil {
@@ -38,7 +37,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 	for _, agent := range agents {
 		var files []HistoryFile
 		var total int64
-		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent)} {
+		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent), AgentRemoteFiles(root, agent)} {
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -54,7 +53,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 				if err != nil {
 					continue // removed while scanning
 				}
-				if keep[historyID(entry.Name())] {
+				if keep[HistoryID(entry.Name())] {
 					total += info.Size()
 					continue
 				}
@@ -88,9 +87,10 @@ func historyStamp(name string, modified time.Time) time.Time {
 	return modified
 }
 
-// historyID is the message id a history file holds: the name of a message
-// file without .md, or the id that starts a receipt name.
-func historyID(name string) string {
+// HistoryID is the message id a history file holds: the name of a message
+// file without .md, or the id that starts a receipt name. A remote file's id
+// is its name.
+func HistoryID(name string) string {
 	if id, _, ok := strings.Cut(name, "__"); ok {
 		return id
 	}

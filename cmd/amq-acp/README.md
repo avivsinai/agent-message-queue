@@ -304,7 +304,8 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   sha256 reuses the file), and the prompt gains a line `[image: <path>]`.
   Any other file, or a failed fetch, gives `[image not attached: <reason>]`,
   and the turn still runs. `amq cleanup --history-older-than` and
-  `--history-max-size` remove these files with the read history.
+  `--history-max-size` remove these files with the read history, except a
+  file that an unread message or an open obligation still names.
   `promptCapabilities.image` stays false: buzz-acp sends the event as text.
 - When Buzz names the event, the prompt and each follow-up carry the label
   `nostr:<eventID>`: the id of the owner's Buzz DM event that caused the
