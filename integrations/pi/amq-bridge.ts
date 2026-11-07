@@ -269,26 +269,40 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// marker follows one count of open prompts, which does not depend on
 	// order: it exists exactly while the count is above zero.
 	let openPrompts = 0;
+	// Opening a marker is gated on serving(); closing one is not. markerOpen
+	// is true while a marker this process wrote may stand, and that marker is
+	// closed at prompt end and at every session boundary even after this pi
+	// stopped serving, so it never holds the serving pi's doorbell. A marker
+	// this process did not write is closed only by the serving pi.
+	let markerOpen = false;
+	const openMarker = (event: string, kind: string) => {
+		openWakeDialog(who(), event, kind);
+		markerOpen = true;
+	};
+	const closeMarker = () => {
+		if (markerOpen || serving()) closeWakeDialog(who());
+		markerOpen = false;
+	};
 	// The same prompt is shown in Buzz as a dialog with no options: pi
 	// exposes no way to answer a prompt from an extension (the prompt events
 	// carry only its kind and title), so the owner answers in the terminal and
 	// the dialog closes when the prompt ends.
 	pi.on("project_trust", () => {
 		if (serving()) {
-			openWakeDialog(who(), WAKE_DIALOG_TRUST, "select");
+			openMarker(WAKE_DIALOG_TRUST, "select");
 			openRemoteDialog(who(), "select", "Trust project folder?", "");
 		}
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
 		if (++openPrompts === 1 && serving()) {
-			openWakeDialog(who(), WAKE_DIALOG_PROMPT, event.kind);
+			openMarker(WAKE_DIALOG_PROMPT, event.kind);
 			openRemoteDialog(who(), event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
 		if (--openPrompts <= 0) {
-			if (serving()) closeWakeDialog(who());
+			closeMarker();
 			closeRemoteDialog();
 		}
 	});
@@ -302,7 +316,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		ownerNotice.shown = false;
 		session = { identity: resolveIdentity(options, ctx) };
 		if (session.identity) serve(ctx, session.identity);
-		if (serving()) closeWakeDialog(who());
+		closeMarker();
 		if (!session.identity && !options.identity && !inactiveNoticeShown) {
 			// A host that gives no identity for this session keeps the bridge
 			// off on purpose; only the plain extension tells the owner how to
@@ -316,7 +330,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
-		if (serving()) closeWakeDialog(who());
+		closeMarker();
 		closeRemoteDialog();
 		stopWaiting();
 		stop(bridge, event.reason);

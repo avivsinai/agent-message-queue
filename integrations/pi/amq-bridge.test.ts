@@ -367,6 +367,25 @@ test("a displaced bridge waits and serves again once the other bridge leaves", a
 	}
 });
 
+// Review of dialog ownership: a pi displaced while its prompt was open left its marker, holding the serving pi's doorbell.
+test("a prompt opened while serving closes its marker after the pi is displaced", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		assert.ok(fs.existsSync(marker));
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(path.join(h.dir, "bridge.liveness"), JSON.stringify(other));
+		await h.waitFor(() => h.notices.length === 1);
+		assert.match(h.notices[0], /no longer serves Buzz requests/);
+		await h.emit("ui_prompt_end", { reason: "ui_prompt" });
+		assert.equal(fs.existsSync(marker), false);
+	} finally {
+		await h.done();
+	}
+});
+
 // Review of pi admission evidence: a short receipt write was published and handed to pi.
 test("a receipt cut short by a short write is never published; the retry publishes it whole", async () => {
 	const h = harness();

@@ -67,8 +67,11 @@ exit writes `live: false`. A `live: true` record is taken only after two of
 these heartbeats, at least a heartbeat apart, saw it older than
 `OWNER_STALE_MS` and unchanged, so an owner that resumes from sleep refreshes
 it first. A stalled owner keeps the mailbox until then. Only the owner writes
-liveness, including `live: false` on shutdown, and only the owner writes or
-removes the wake dialog marker and opens Buzz dialogs for the mailbox.
+liveness, including `live: false` on shutdown. Only the owner opens the wake
+dialog marker or a Buzz dialog for the mailbox. A pi always closes a marker
+or dialog it opened itself, at prompt end and at every session boundary,
+even after it stopped serving, so it never holds the owner's doorbell; only
+the owner closes a marker it did not open.
 
 ## Protocol string
 
