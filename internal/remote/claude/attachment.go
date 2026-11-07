@@ -622,11 +622,43 @@ func SessionForPID(pid int) (Session, error) {
 	if reg == nil {
 		return Session{}, fmt.Errorf("no Claude session registry entry for pid %d", pid)
 	}
+	return sessionOf(dir, reg), nil
+}
+
+// SessionOfProcess reads the registry entry of the Claude process pid under
+// the Claude config dir configDir, for a process that started at started.
+// An entry last written (its updatedAt, else its mtime) before that start
+// is a reused pid's leftover, never this process's, and is refused; so is a
+// missing entry.
+func SessionOfProcess(configDir string, pid int, started time.Time) (Session, error) {
+	reg, err := readSessionRegistry(configDir, pid)
+	if err != nil {
+		return Session{}, err
+	}
+	if reg == nil {
+		return Session{}, fmt.Errorf("no Claude session registry entry for pid %d", pid)
+	}
+	written := time.UnixMilli(reg.UpdatedAt)
+	if reg.UpdatedAt <= 0 {
+		fi, err := os.Lstat(filepath.Join(registryDir(configDir), strconv.Itoa(pid)+".json"))
+		if err != nil {
+			return Session{}, err
+		}
+		written = fi.ModTime()
+	}
+	if written.Before(started) {
+		return Session{}, fmt.Errorf("the Claude session registry entry for pid %d predates its process", pid)
+	}
+	return sessionOf(configDir, reg), nil
+}
+
+// sessionOf is the session reg names under the Claude config dir dir.
+func sessionOf(dir string, reg *sessionRegistry) Session {
 	s := Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}
 	if path := transcriptPath(dir, reg.Cwd, reg.SessionID); regularFile(path) {
 		s.Transcript = path
 	}
-	return s, nil
+	return s
 }
 
 func regularFile(path string) bool {
