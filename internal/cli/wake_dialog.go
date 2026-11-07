@@ -17,16 +17,16 @@ import (
 // and its CR would answer the dialog, so no input byte is written while the
 // marker is present.
 
-// wakeDialogEntriesSince is the first AMQ release whose wake reads
+// WakeDialogEntriesSince is the first AMQ release whose wake reads
 // .wake.dialog as a directory of entries. An older wake reads it only as a
 // regular file and holds input while it is a directory.
-const wakeDialogEntriesSince = "0.128.0"
+const WakeDialogEntriesSince = "0.128.0"
 
 // WakeVersionReadsDialogEntries reports whether a wake of AMQ version reads
 // the directory of dialog entries; known is false when version is not a
 // release version (empty, "unknown", or a local build name).
 func WakeVersionReadsDialogEntries(version string) (reads, known bool) {
-	cmp, ok := update.CompareVersions(version, wakeDialogEntriesSince)
+	cmp, ok := update.CompareVersions(version, WakeDialogEntriesSince)
 	return ok && cmp >= 0, ok
 }
 
@@ -45,7 +45,7 @@ func outdatedDialogWakeHint(inspection wakeLockInspection) (opsHint, bool) {
 		Code:   "outdated_dialog_wake",
 		Status: "warn",
 		Message: fmt.Sprintf("Wake for agent %q (pid %d) runs amq %s, which cannot read the dialog marker form of amq %s or later; restart that session (exit and resume it).",
-			inspection.Agent, inspection.PID, inspection.Lock.ImageVersion, wakeDialogEntriesSince),
+			inspection.Agent, inspection.PID, inspection.Lock.ImageVersion, WakeDialogEntriesSince),
 	}, true
 }
 

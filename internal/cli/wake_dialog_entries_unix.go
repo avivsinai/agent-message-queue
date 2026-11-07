@@ -340,17 +340,18 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 }
 
 // wakeReadsDialogEntries reports whether the agent's wake reads the
-// directory of entries. With no wake lock, or a stale one, no wake reads
-// the marker. Otherwise the lock's version decides, and a version that is
-// not a release version reads as the single file: every wake reads that
-// form and closes its hold, so an unknown wake never holds without limit.
+// directory of entries: false only for a wake lock that is not stale and
+// records a release before WakeDialogEntriesSince. Every such release
+// records its version, so a lock without a release version (a local build,
+// or a lock being created) is a wake that reads entries, and keeps the
+// guard of each dialog.
 func wakeReadsDialogEntries(agentDir *wakeAgentDir) bool {
 	inspection := inspectWakeLock(filepath.Dir(filepath.Dir(agentDir.path)), filepath.Base(agentDir.path))
 	if !inspection.Exists || inspection.Status == wakeLockStale {
 		return true
 	}
-	reads, _ := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion)
-	return reads
+	reads, known := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion)
+	return reads || !known
 }
 
 // wakeDialogExchangeAt swaps two names in one step (wakeRenameExchangeAt).

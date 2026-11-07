@@ -483,7 +483,7 @@ func doctorMailboxes(all []binding.Binding, fail, note reportFunc) []mailboxRow 
 			fail("mailbox", subject, fmt.Sprintf("handle %q has no live wake (%s), so a Buzz message waits in its inbox until the session drains", b.Handle, nonEmpty(wake.WakeStatus, "no wake")),
 				remedy("start the session with `amq launch`, which starts its wake"))
 		case wakeCannotReadDialogEntries(wake.RunningVersion):
-			fail("mailbox", subject, fmt.Sprintf("the wake of handle %q runs AMQ %s, which cannot read the current dialog marker form, so a Claude dialog can hold its doorbell until the session restarts", b.Handle, wake.RunningVersion),
+			note("mailbox", subject, fmt.Sprintf("the wake of handle %q runs amq %s, which cannot read the dialog marker form of %s or later", b.Handle, wake.RunningVersion, amqcli.WakeDialogEntriesSince),
 				"restart that session (exit and resume it)")
 		case wake.ImageStatus == "different" || wake.ImageStatus == "outdated":
 			fail("mailbox", subject, fmt.Sprintf("the wake of handle %q runs another AMQ image than the installed one (image %s)", b.Handle, wake.ImageStatus),
