@@ -82,8 +82,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 }
 
 func historyStamp(name string, modified time.Time) time.Time {
-	stamp, _, _ := strings.Cut(name, "_")
-	if created, err := time.Parse("2006-01-02T15-04-05.000Z", stamp); err == nil {
+	if created, ok := IDTime(name); ok {
 		return created
 	}
 	return modified
