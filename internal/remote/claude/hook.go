@@ -78,8 +78,9 @@ const maxSettingsBytes = 4 << 20
 // the attachment unsubscribes. User off removes only the Buzz binding.
 //
 // The command starts amq-remote only when a state the receiver reads
-// exists: AMQ_REMOTE_BINDING, a binding file, the bindings directory, or
-// the attachment sentinels. Everywhere else the hook costs one sh.
+// exists: AMQ_REMOTE_BINDING, a binding file, a binding in the bindings
+// directory (its tombstones are none), or the attachment sentinels.
+// Everywhere else the hook costs one sh.
 func InstallStopHook(home, bin string) error {
 	_, err := InstallStopHookAt(home, SettingsPath(home), bin)
 	return err
@@ -682,15 +683,21 @@ func removeEdit(spec hookSpec) func([]byte) ([]byte, error) {
 // assignment, then a gate of shell tests, then the single-quoted binary,
 // exec'd so Claude's signals reach it. The gate repeats what the receiver
 // reads before it writes (stopSessionAllowed): the binding env path, the
-// binding file and bindings directory under the AMQ home that home
-// resolves now, and the attachment sentinels under $HOME, the home the
-// receiver resolves. With none of them present the receiver writes
-// nothing, so the hook starts nothing.
+// binding file and every binding in the bindings directory under the AMQ
+// home that home resolves now, and the attachment sentinels under $HOME,
+// the home the receiver resolves. A tombstone is no binding, so a
+// directory of tombstones alone keeps the gate closed. A bindings path the
+// shell cannot list as a plain directory, or an entry it cannot classify,
+// opens the gate and the receiver decides. With none of them present the
+// receiver writes nothing, so the hook starts nothing.
 func stopHookCommand(home, bin string) string {
 	remote := filepath.Join(amqhome.Under(home), "remote")
+	dir := shellQuote(filepath.Join(remote, "bindings"))
 	return stopHookMarker + `[ -z "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
-		` ] && [ ! -e ` + shellQuote(filepath.Join(remote, "bindings")) +
-		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] || exec ` + shellQuote(bin) + " claude stop-hook"
+		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] && [ ! -L ` + dir + ` ] && { [ ! -e ` + dir +
+		` ] || { [ -d ` + dir + ` ] && [ -r ` + dir + ` ] && [ -x ` + dir + ` ] && for f in ` + dir +
+		`/*.json; do case $f in *` + binding.TombstoneSuffix + `) f= ;; esac; { [ -z "$f" ] || [ ! -e "$f" ]; } && [ ! -L "$f" ] || break; f=; done && [ -z "$f" ]; }; }` +
+		` || exec ` + shellQuote(bin) + " claude stop-hook"
 }
 
 // shellQuote single-quotes s for POSIX sh (Claude Code runs hook commands
