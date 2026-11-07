@@ -1,6 +1,11 @@
 package cli
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/update"
+)
 
 // Dialog guard, opt-in per harness (dialogGuardEnabled); without it the
 // wake rings a plain doorbell. A Claude Code hook (amq wake dialog open|close)
@@ -11,6 +16,38 @@ import "time"
 // Codex Startup marker: only a prompt hook of its launch does. Doorbell text
 // and its CR would answer the dialog, so no input byte is written while the
 // marker is present.
+
+// WakeDialogEntriesSince is the first AMQ release whose wake reads
+// .wake.dialog as a directory of entries. An older wake reads it only as a
+// regular file and holds input while it is a directory.
+const WakeDialogEntriesSince = "0.128.0"
+
+// WakeVersionReadsDialogEntries reports whether a wake of AMQ version reads
+// the directory of dialog entries; known is false when version is not a
+// release version (empty, "unknown", or a local build name).
+func WakeVersionReadsDialogEntries(version string) (reads, known bool) {
+	cmp, ok := update.CompareVersions(version, WakeDialogEntriesSince)
+	return ok && cmp >= 0, ok
+}
+
+// outdatedDialogWakeHint names a live wake whose release predates dialog
+// entries. The dialog hook keeps the single-file marker for it, which
+// guards one dialog at a time, and an entries directory a newer wake left
+// holds its doorbell until the directory's last entry closes.
+func outdatedDialogWakeHint(inspection wakeLockInspection) (opsHint, bool) {
+	if !inspection.Exists || inspection.Status != wakeLockValid {
+		return opsHint{}, false
+	}
+	if reads, known := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion); reads || !known {
+		return opsHint{}, false
+	}
+	return opsHint{
+		Code:   "outdated_dialog_wake",
+		Status: "warn",
+		Message: fmt.Sprintf("Wake for agent %q (pid %d) runs amq %s, which cannot read the dialog marker form of amq %s or later; restart that session (exit and resume it).",
+			inspection.Agent, inspection.PID, inspection.Lock.ImageVersion, WakeDialogEntriesSince),
+	}, true
+}
 
 // Claude dialog guard states in one settings file (ClaudeDialogGuardAt).
 const (

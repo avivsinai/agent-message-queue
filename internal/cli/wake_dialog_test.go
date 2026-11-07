@@ -178,9 +178,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		ancestors []launch.HolderIdentity
 		// noExchange makes the file system refuse an exchange rename.
 		noExchange bool
-		notices    int
-		rings      int
-		log        string
+		// wakeVersion is the version a live wake lock records; each open
+		// must leave a marker that wake reads (no directory before 0.128.0).
+		wakeVersion string
+		notices     int
+		rings       int
+		log         string
 	}{
 		// field: agy busy turns showed held notices (2026-10-26). A working
 		// marker younger than wakeDialogQuietHold holds without a desktop
@@ -312,6 +315,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// writer read as stale and rang.
 		{name: "unknown marker older than the quiet hold holds", marker: "{}\n", age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, notices: 1},
+		// Field 2026-11-07: a wake from before dialog entries read the
+		// entries directory as an unreadable marker and held every doorbell
+		// with no limit.
+		{name: "a wake from before dialog entries gets the single-file marker and rings after the close", claudeHook: true,
+			wakeVersion: "0.126.1", transcript: asked, rings: 1,
+			hooks: []wakeDialogHookInput{mainPermission, {Event: "Stop", SessionID: "s1"}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
@@ -385,6 +394,15 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tt.wakeVersion != "" {
+				writeWakeLockForTest(t, h.root, "codex", wakeLock{PID: 4242, TTY: "/dev/ttys005", Started: "2026-11-07T00:00:00Z",
+					ProcessStart: "12345", BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq",
+					WakeMode: wakeInjectModeRaw, Generation: "live-raw-generation", ImageVersion: tt.wakeVersion})
+				stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+					return wakeProcessInfo{PID: pid, Running: true, StartToken: "12345",
+						BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq"}
+				})
+			}
 			for _, in := range tt.hooks {
 				if err := agentDir.withFD(func(dirfd int) error {
 					if wakeDialogHookVerb(in.Event) == "open" {
@@ -394,6 +412,9 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 					return clearWakeDialogMarker(dirfd, agentDir, in)
 				}); err != nil {
 					t.Fatal(err)
+				}
+				if info, err := os.Lstat(filepath.Join(fsq.AgentBase(h.root, "codex"), wakeDialogFileName)); tt.wakeVersion != "" && err == nil && !info.Mode().IsRegular() {
+					t.Fatalf("after %s the marker is %v, which a %s wake cannot read", in.Event, info.Mode(), tt.wakeVersion)
 				}
 			}
 			writeTranscript(agentTranscript, tt.agentTranscript)
