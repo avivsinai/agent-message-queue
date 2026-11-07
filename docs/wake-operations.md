@@ -610,12 +610,9 @@ and enabled, the guard is off and the seat gets the plain doorbell.
   user's `$SHELL`. With `AM_ME` set (an embedded Codex started by
   `amq coop exec` or `amq launch`) the receiver uses it. Without it, the
   receiver takes the seat that `amq coop exec` recorded for the hook's
-  `session_id`, the thread id, in `~/.amq/codex-threads`. Without `AM_ME`
-  the shell reads the hook input and starts nothing when its `session_id`
-  has no record in `~/.amq/codex-threads/threads`, so a Codex session that
-  AMQ did not start costs one shell per event. Input the shell cannot parse
-  goes to amq, which decides. A change of these commands needs a new trust
-  in Codex `/hooks`.
+  `session_id`, the thread id, in `~/.amq/codex-threads`. With neither
+  `AM_ME` nor that store the hook starts nothing; on a machine that has the
+  store, a Codex session without `AM_ME` starts amq once per event.
 - **Exit status.** The entries keep the shell as the parent and end in
   `|| true`, so an older amq that exits 2 never blocks a Codex prompt or
   continues a turn.
