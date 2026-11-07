@@ -33,7 +33,7 @@ func codexPrompt(n int, text string, extra map[string]any) string {
 
 // A finished Codex turn makes one post: its prompt, its tool count and its
 // last answer, never a command, its output or a file change. A turn the
-// Buzz carrier sent (its client_id carried) shows the first two lines only.
+// Buzz carrier sent (its client_id carried) names Buzz as its cause.
 func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 	const clientID = "amqr1_local_codex-1_00000000-0000-4000-8000-000000000001"
 	carried := func(id string) bool { return id == CodexCarriedID(clientID) }
@@ -67,7 +67,7 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 		name:   "Buzz prompt",
 		lines:  turn(codexPrompt(0, "run the tests", map[string]any{"client_id": clientID})),
 		events: []string{Ended},
-		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
+		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
 	}, {
 		// agent-message-queue-7fz review: reasoning and subagent items after
 		// the end edited the post with no new work.

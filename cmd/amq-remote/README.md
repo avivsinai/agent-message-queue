@@ -1001,9 +1001,9 @@ command`, or `continued`. The second line is how
 the turn ended (`✓`; `✗ interrupted`, `unfinished`, `error` or `refused`;
 `■ ended` when the session ended or was cleared), the tools it used by name
 and count, and how long it ran. Tool input never leaves the machine. An
-answer longer than 3,500 bytes is cut and says so. A turn whose answer Buzz
-already got (a Buzz message, or a reply the session sent to Buzz during the
-turn) shows the first two lines only. A shell command typed with `!` shows only
+answer longer than 3,500 bytes is cut and says so. A turn that answered Buzz
+keeps its answer too, although the reply is also a thread reply under the Buzz
+message. A shell command typed with `!` shows only
 when the model answers it, and never with the command itself; local slash
 commands and a subagent's own steps are not shown. When a Stop hook
 makes the session go on after a turn, that turn's message is edited, at

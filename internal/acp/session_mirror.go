@@ -588,7 +588,7 @@ func mirrorPosted(claim string) bool {
 // already claimed is not posted. It returns the event id the claim holds.
 func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn) (string, error) {
 	if turn.End != "" {
-		s.mirrorAnswered(t.name, b, &turn)
+		s.mirrorBuzzCause(t.name, b, &turn)
 	}
 	p := mirrorClaim{dialogPost: dialogPost{Channel: t.channel, Text: mirror.Render(turn)}, Shown: mirror.Fingerprint(turn), Halted: turn.Halted}
 	raw, err := json.Marshal(p)
@@ -650,7 +650,7 @@ func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, tur
 		return false, nil
 	}
 	if turn.End != "" {
-		s.mirrorAnswered(t.name, b, &turn)
+		s.mirrorBuzzCause(t.name, b, &turn)
 	}
 	text := mirror.Render(turn)
 	if text == p.Text {
@@ -669,12 +669,13 @@ func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, tur
 	return true, writeMirrorClaim(claim, p)
 }
 
-// mirrorAnswered marks a mailbox binding's turn answered when the buzz inbox
-// of its root holds a message from its handle created between the turn's
-// first assistant line and its last line. The reply is a tool call inside
-// the turn, so it is delivered before the closing message is written.
-func (s *Server) mirrorAnswered(name string, b binding.Binding, turn *mirror.Turn) {
-	if turn.Answered || !b.Mailbox() || turn.FirstAssistantTS == 0 {
+// mirrorBuzzCause names a doorbell turn of a mailbox binding a Buzz turn
+// when the buzz inbox of its root holds a message from its handle created
+// between the turn's first assistant line and its last line. The reply is a
+// tool call inside the turn, so it is delivered before the closing message
+// is written.
+func (s *Server) mirrorBuzzCause(name string, b binding.Binding, turn *mirror.Turn) {
+	if turn.Cause != mirror.CauseMail || !b.Mailbox() || turn.FirstAssistantTS == 0 {
 		return
 	}
 	from, to := time.UnixMilli(turn.FirstAssistantTS), time.UnixMilli(turn.LastTS)
@@ -695,10 +696,7 @@ func (s *Server) mirrorAnswered(name string, b binding.Binding, turn *mirror.Tur
 				continue
 			}
 			if created, err := time.Parse(time.RFC3339Nano, h.Created); err == nil && !created.Before(from) && !created.After(to) {
-				turn.Answered = true
-				if turn.Cause == mirror.CauseMail {
-					turn.Cause = mirror.CauseBuzz
-				}
+				turn.Cause = mirror.CauseBuzz
 				return
 			}
 		}

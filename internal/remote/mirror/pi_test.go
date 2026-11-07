@@ -7,7 +7,7 @@ import (
 
 // A pi run is one turn from its run_start to its settled record: a prompt
 // typed in the terminal posts its cause, tools, time and last answer; a run
-// the Buzz carrier sent posts only its first two lines.
+// the Buzz carrier sent posts the same, with Buzz as its cause.
 func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	const ref = "amqr1_nbxxg5brabygsljraaydambqgaydambngaydambngqydambnhaydambngaydambqgaydambqgayq"
 	rec := func(run string, ts int, kind, fields string) string {
@@ -48,7 +48,7 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	}
 	want := []string{
 		"▶ run the tests\n✓ 1 tool (bash) · 3s\nAll pass.",
-		"▶ Buzz\n✓ 2s",
+		"▶ Buzz\n✓ 2s\nTwo files.",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("posts = %q, want %q", got, want)

@@ -84,8 +84,6 @@ type Turn struct {
 	FirstAssistantTS int64  `json:"first_assistant_ts,omitempty"`
 	LastTS           int64  `json:"last_ts,omitempty"`
 	End              string `json:"end,omitempty"`
-	// Answered is set when the carrier already posted the turn's answer.
-	Answered bool `json:"answered,omitempty"`
 	// Earlier counts the turns of a backlog that were dropped before it.
 	Earlier int `json:"earlier,omitempty"`
 
@@ -335,7 +333,6 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	switch {
 	case l.Absorbed:
 		if o != nil {
-			o.Answered = o.Answered || carried.has(l.MsgID)
 			o.touch(l.TS)
 		}
 		return out
@@ -378,7 +375,7 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	t := st.open(l, "")
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
-		t.Cause, t.Answered = CauseBuzz, true
+		t.Cause = CauseBuzz
 	case promptCause(text) == harness.Doorbell:
 		// Typed into the terminal, or sent as a peer frame by a native wake.
 		t.Cause = CauseMail
@@ -509,9 +506,10 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<mark> <N tools (names)> · <duration>
 //	<final assistant text>
 //
-// A turn that still runs (no End) or that the carrier already answered
-// shows the first two lines only; a running turn the user interrupted
-// shows as interrupted.
+// A turn that still runs (no End) shows the first two lines only; a running
+// turn the user interrupted shows as interrupted. A turn the carrier also
+// answered keeps its text: the carrier's reply is a thread reply under the
+// prompt, and the channel shows the turn post.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
@@ -546,7 +544,7 @@ func Render(t Turn) string {
 		}
 		b.WriteString(" · " + p)
 	}
-	if text := t.Text; text != "" && t.End != "" && !t.Answered {
+	if text := t.Text; text != "" && t.End != "" {
 		b.WriteString("\n" + cut(text))
 	}
 	if t.Earlier > 0 {

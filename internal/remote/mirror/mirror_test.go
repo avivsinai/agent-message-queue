@@ -241,6 +241,9 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Opened, Ended},
 		posts:  []string{"▶ find the bug\n✓ 1 tool (Task) · 5s\nThe bug is in cache.go."},
 	}, {
+		// Field, 2026-11-06: the owner asked from Buzz, the turn's answer
+		// went to a thread reply, and the channel post hid the text, so the
+		// answer looked lost. A turn the carrier answered keeps its text.
 		name: "a Buzz frame absorbed into the running turn",
 		lines: []string{
 			prompt("o1", "p1", 0, "deploy"),
@@ -251,7 +254,7 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			assistant("m2", "end_turn", 4, nil, text("Deployed.")),
 		},
 		events: []string{Opened, Ended},
-		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s"},
+		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s\nDeployed."},
 	}, {
 		name: "an API error end",
 		lines: []string{
