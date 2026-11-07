@@ -220,7 +220,7 @@ func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) 
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(dialogPost{Channel: "c", Event: "ev", Text: "t"})
-	if _, err := fsq.WriteFileAtomic(s.dialogPostDir("aaa"), aReq.ID+".json", raw, 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(s.dialogPostDir("aaa"), aReq.ID+".json", raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// bbb: open dialog.

@@ -21,7 +21,7 @@ func TestPublishSyncsTheDirectoriesItCreates(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	var synced []string
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		synced = append(synced, dir)
 		if dir == home {
 			return errors.New("injected sync failure")

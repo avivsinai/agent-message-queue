@@ -1,15 +1,80 @@
 package fsq
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// WriteFileAtomic writes data to a temporary file in dir and renames it into place.
-func WriteFileAtomic(dir, filename string, data []byte, perm os.FileMode) (string, error) {
+// WriteStateFile atomically replaces root/rel with data. root is the trust
+// anchor: it is created 0700 when missing, and links in its own path are the
+// caller's choice. Every directory below root is checked without following a
+// symlink and created 0700 when missing, so a planted link cannot redirect the
+// write. rel must be local.
+func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, error) {
+	if !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("state file %q is not a local path below %s", rel, root)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	identity, err := SnapshotDeliveryRoot(root)
+	if err != nil {
+		return "", err
+	}
+	r, err := OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = r.Close() }()
+	dir, name := filepath.Split(rel)
+	dir = filepath.Clean(dir)
+	// The no-follow walk is the guard: WriteFileAtomic's own MkdirAll
+	// follows links that stay inside the root.
+	if err := r.mkdirAllNoFollow(dir); err != nil {
+		return "", err
+	}
+	return r.WriteFileAtomic(dir, name, data, perm)
+}
+
+// mkdirAllNoFollow creates each missing component of the root-relative dir at
+// 0700 and refuses any component that is a symlink or not a directory.
+func (r *DeliveryRoot) mkdirAllNoFollow(dir string) error {
+	if dir == "." {
+		return nil
+	}
+	current := ""
+	for _, part := range strings.Split(dir, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := r.root.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := r.root.Mkdir(current, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			info, err = r.root.Lstat(current)
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return &PathSymlinkError{Path: r.displayPath(current)}
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("state path %s exists and is not a directory", r.displayPath(current))
+		}
+	}
+	return nil
+}
+
+// WriteFileAtomicFollowLinks writes data to a temporary file in dir and
+// renames it into place. It resolves dir through the ambient namespace and
+// follows every symlink in it; state below a known root uses WriteStateFile.
+func WriteFileAtomicFollowLinks(dir, filename string, data []byte, perm os.FileMode) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

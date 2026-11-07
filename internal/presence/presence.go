@@ -35,13 +35,12 @@ func New(handle, status, note string, now time.Time) Presence {
 }
 
 func Write(root string, p Presence) error {
-	path := filepath.Join(root, "agents", p.Handle, "presence.json")
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
+	_, err = fsq.WriteStateFile(root, filepath.Join("agents", p.Handle, "presence.json"), data, 0o600)
 	return err
 }
 

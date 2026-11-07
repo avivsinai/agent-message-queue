@@ -646,7 +646,7 @@ func writeMirrorClaim(path string, c mirrorClaim) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), raw, 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), raw, 0o600)
 	return err
 }
 
@@ -867,7 +867,7 @@ func writeMirrorFile(dir string, st mirrorFile) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(dir, "state.json", raw, 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(dir, "state.json", raw, 0o600)
 	return err
 }
 

@@ -181,6 +181,6 @@ func commitBytes(dir, name string, body []byte) error {
 	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 		return ErrName
 	}
-	_, err := fsq.WriteFileAtomic(dir, name, body, 0o600)
+	_, err := fsq.WriteFileAtomicFollowLinks(dir, name, body, 0o600)
 	return err
 }

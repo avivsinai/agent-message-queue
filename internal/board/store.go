@@ -553,14 +553,14 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if compact {
 		marker = fmt.Sprintf("new base pending: generation %d\n", state.Generation)
 	}
-	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte(marker), 0o600); err != nil {
+	if _, err := s.writeFile("write-pending", []byte(marker), 0o600); err != nil {
 		return err
 	}
 	if compact {
 		if err := s.keepBackup(); err != nil {
 			return err
 		}
-		if _, err := fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
+		if _, err := s.writeFile("snapshot.json", append(data, '\n'), 0o600); err != nil {
 			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 		}
 		if err := os.Remove(filepath.Join(s.Dir, journalName)); err != nil && !os.IsNotExist(err) {
@@ -576,7 +576,7 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		return err
 	}
 	if err := fsq.SyncDir(s.Dir); err != nil {
-		_, _ = fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("durability uncertain\n"), 0o600)
+		_, _ = s.writeFile("write-pending", []byte("durability uncertain\n"), 0o600)
 		return fmt.Errorf("board durability uncertain; stop writes: %w", err)
 	}
 	if compact {
@@ -730,7 +730,7 @@ func (s Store) linkBackup(name, backup string) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(s.Dir, backup, data, 0o600)
+	_, err = s.writeFile(backup, data, 0o600)
 	return err
 }
 
@@ -826,7 +826,7 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 			}
 			return written, evidenceBoundError{excess: excess}
 		}
-		if _, err := fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
+		if _, err := s.writeFile(filepath.Join("evidence", name), b, 0o600); err != nil {
 			return written, err
 		}
 		written[name] = true
@@ -1636,4 +1636,11 @@ func markCapacity(state *Snapshot, name, detail string) {
 		}
 	}
 	state.Input.Results = append(state.Input.Results, NamedResult{Name: name, Result: Result{Status: StatusDegraded, Detail: detail, ObservedAt: time.Now().UTC(), Coverage: Coverage{Unresolved: 1, Detail: detail}}})
+}
+
+// writeFile atomically replaces rel below the store directory. The parent of
+// the store directory is the trust anchor, so a symlink at the store
+// directory or below it is refused.
+func (s Store) writeFile(rel string, data []byte, perm os.FileMode) (string, error) {
+	return fsq.WriteStateFile(filepath.Dir(s.Dir), filepath.Join(filepath.Base(s.Dir), rel), data, perm)
 }

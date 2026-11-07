@@ -193,7 +193,7 @@ func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	// Fail the sync after the rename of B's dispatching write.
 	hostDir := filepath.Join(store.Dir(), "requests", "local")
 	calls := 0
-	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if filepath.Clean(dir) == hostDir {
 			if calls++; calls == 2 {
 				return errors.New("injected post-rename sync failure")

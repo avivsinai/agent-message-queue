@@ -125,7 +125,7 @@ func (ps *pageServer) ensure(ctx context.Context) error {
 			_ = l.Close()
 			return err
 		}
-		if _, err := fsq.WriteFileAtomic(linkio.Dir(ps.stateDir), pagesFile, data, 0o600); err != nil {
+		if _, err := fsq.WriteFileAtomicFollowLinks(linkio.Dir(ps.stateDir), pagesFile, data, 0o600); err != nil {
 			_ = l.Close()
 			return err
 		}

@@ -138,7 +138,7 @@ func Open(dir string, r Request) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(filepath.Join(dir, "requests"), r.ID+".json", raw, 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Join(dir, "requests"), r.ID+".json", raw, 0o600)
 	return err
 }
 

@@ -139,7 +139,7 @@ func (s *sessionStore) save() error {
 		return err
 	}
 	data = append(data, '\n')
-	if _, err := fsq.WriteFileAtomic(s.dir, sessionStateFilename, data, 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(filepath.Dir(s.dir), filepath.Join(filepath.Base(s.dir), sessionStateFilename), data, 0o600); err != nil {
 		return fmt.Errorf("write ACP session state: %w", err)
 	}
 	return nil

@@ -240,6 +240,6 @@ func (s Store) save(name string, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(s.dir, name, append(data, '\n'), 0o600)
+	_, err = fsq.WriteStateFile(filepath.Dir(s.dir), filepath.Join(filepath.Base(s.dir), name), append(data, '\n'), 0o600)
 	return err
 }

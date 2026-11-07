@@ -208,7 +208,7 @@ func (s *Server) save(r *channelRecord, now time.Time) error {
 		return err
 	}
 	path := s.recordPath(*r)
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
+	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
 	return err
 }
 
@@ -631,7 +631,7 @@ func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
 	// The active slot says retired first, so routing stops before anything
 	// else happens.
 	slot := s.slotPath(r.Name)
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(slot), filepath.Base(slot), append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(slot), filepath.Base(slot), append(raw, '\n'), 0o600); err != nil {
 		return false
 	}
 	moved, ok := s.finishRetire(r, now)
@@ -1193,7 +1193,7 @@ func RequestChannelReset(name string) (MachineChannel, error) {
 	if err != nil {
 		return MachineChannel{}, err
 	}
-	if _, err := fsq.WriteFileAtomic(c.dir, name+".reset", append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(c.dir, name+".reset", append(raw, '\n'), 0o600); err != nil {
 		return MachineChannel{}, err
 	}
 	return c, nil
