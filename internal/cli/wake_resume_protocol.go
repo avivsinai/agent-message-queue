@@ -8,10 +8,11 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 const (
-	wakeResumeSchemaV2   = 2
+	wakeResumeSchemaV2   = wakelock.ResumeSchemaV2
 	wakeResumeSignalUSR1 = "SIGUSR1"
 )
 

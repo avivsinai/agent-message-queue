@@ -88,18 +88,18 @@ func TestProbeWakeSelfUpgradeLocatorRevalidatesUnresolvedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previousCurrentUID := wakeTargetCurrentUID
-	previousOwnerUID := wakeTargetFileOwnerUID
+	previousCurrentUID := selfUpgradeCurrentUID
+	previousOwnerUID := selfUpgradeFileOwnerUID
 	previousEval := wakeSelfUpgradeEvalSymlinks
-	wakeTargetCurrentUID = func() (int, bool) { return 1000, true }
-	wakeTargetFileOwnerUID = func(os.FileInfo) (int, bool) { return 2000, true }
+	selfUpgradeCurrentUID = func() (int, bool) { return 1000, true }
+	selfUpgradeFileOwnerUID = func(os.FileInfo) (int, bool) { return 2000, true }
 	wakeSelfUpgradeEvalSymlinks = func(string) (string, error) {
 		t.Fatal("unsafe unresolved locator was followed")
 		return "", nil
 	}
 	t.Cleanup(func() {
-		wakeTargetCurrentUID = previousCurrentUID
-		wakeTargetFileOwnerUID = previousOwnerUID
+		selfUpgradeCurrentUID = previousCurrentUID
+		selfUpgradeFileOwnerUID = previousOwnerUID
 		wakeSelfUpgradeEvalSymlinks = previousEval
 	})
 
