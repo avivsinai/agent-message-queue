@@ -1024,6 +1024,7 @@ func runWake(args []string) error {
 			return runWakeUninstallDialogHook(args[1:])
 		}
 	}
+	runWakeFromVersionStore()
 	return runWakeWithLoop(args, runWakeLoop)
 }
 

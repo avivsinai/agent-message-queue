@@ -170,8 +170,9 @@ in `~/.amq/keepalive`.
 
 ## Darwin wake restart stages
 
-On macOS, a wake restart or self-upgrade stages the new binary under
-`~/.amq/state/wake-stages`. `~/.amq` and `~/.amq/state` must not be symlinks,
+On macOS, a wake restart or self-upgrade stages a private copy of the new
+binary under `~/.amq/state/wake-stages`, never a hardlink of the installed
+file. `~/.amq` and `~/.amq/state` must not be symlinks,
 another user's directories, or group-writable or world-writable; each level
 below them is mode 0700.
 
@@ -180,3 +181,18 @@ below them is mode 0700.
   or self-upgrade that an older release started finishes, and its stage is
   removed
   ([issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).
+
+## Darwin version store
+
+On macOS, `amq wake`, `amq-keepalive supervise`, and the `amq-bridge up`
+courier first re-execute themselves, with the same arguments and environment,
+from a private copy in `~/.amq/state/versions/<sha256>/<binary>`. A package
+manager can then delete the installed file, as Homebrew deletes an old Cellar
+version on upgrade, while the process keeps a named image; macOS cannot
+attribute a process whose image has no name and then denies protected volumes
+to every process of the same terminal. Keepalive self-upgrade publishes its
+new image into the same store. An entry is a verified, code-signature-checked
+copy that AMQ never replaces; it is removed only when no process of this user
+runs it. If the store cannot be used, the process reports it once and runs
+from the installed image. `amq doctor --ops` and `amq wake check` count a wake
+that runs a store copy of the current binary as current.

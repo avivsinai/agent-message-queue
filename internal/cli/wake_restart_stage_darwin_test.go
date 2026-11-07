@@ -186,8 +186,10 @@ func TestDarwinRestartStageIsWrittenUnderAMQHomeAndSurvivesCandidateRemoval(t *t
 		t.Fatal(err)
 	}
 	defer func() { _ = bound.close() }()
-	if bound.evidence.Device != record.Candidate.Device || bound.evidence.Inode != record.Candidate.Inode {
-		t.Fatalf("same-filesystem stage was not a hardlink: candidate=%#v stage=%#v", record.Candidate, bound.evidence)
+	// A hardlinked stage loses its path when the candidate's name is
+	// deleted, so the stage must be its own copy.
+	if bound.evidence.Device == record.Candidate.Device && bound.evidence.Inode == record.Candidate.Inode {
+		t.Fatalf("stage is a hardlink of the candidate: candidate=%#v stage=%#v", record.Candidate, bound.evidence)
 	}
 	if err := os.RemoveAll(filepath.Dir(record.Candidate.ExecutionPath)); err != nil {
 		t.Fatal(err)

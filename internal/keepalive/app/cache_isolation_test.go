@@ -27,6 +27,8 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "set AMQ_KEEPALIVE_CACHE_DIR for tests: %v\n", err)
 		os.Exit(1)
 	}
+	// In-process supervise must never replace the test binary.
+	superviseRunFromStore = func(string) error { return nil }
 	exitCode := m.Run()
 	_ = os.RemoveAll(cacheDir)
 	os.Exit(exitCode)

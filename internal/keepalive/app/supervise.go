@@ -27,6 +27,12 @@ type adapterLogState struct {
 }
 
 func (a App) supervise(ctx context.Context, args []string) error {
+	// Run from the version store before any lock or state, so a package
+	// manager that deletes the installed image leaves this process a named
+	// image. A failure keeps the installed image.
+	if err := superviseRunFromStore(a.SelfVersion); err != nil {
+		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive: keeps running from the installed image: %v\n", err)
+	}
 	fs := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")

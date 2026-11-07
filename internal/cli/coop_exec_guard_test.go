@@ -15,6 +15,7 @@ func guardTestProcessReplacement() {
 	coopExecProcess = guardedTestProcessReplacement("coopExecProcess")
 	launchExecProcess = guardedTestProcessReplacement("launchExecProcess")
 	wakeRestartExec = guardedTestProcessReplacement("wakeRestartExec")
+	runFromVersionStore = func(string) error { return nil }
 }
 
 func guardedTestProcessReplacement(seam string) func(string, []string, []string) error {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"golang.org/x/sys/unix"
 )
 
@@ -94,6 +95,17 @@ func inspectWakeBinaryStalenessPlatform(
 	}
 
 	if running.Identity.Device != currentIdentity.Device || running.Identity.Inode != currentIdentity.Inode {
+		// A wake runs from AMQ's own copy of the image (the version store or
+		// a restart stage), so a different file can hold the current content.
+		if !deletedImage && (restartStageAlias || selfupgrade.InStore(recorded.ExecutionPath)) {
+			same, err := darwinWakeImageHoldsCurrentContent(recorded, current, currentIdentity)
+			if err != nil {
+				return wakeBinaryStaleness{}, err
+			}
+			if same {
+				return wakeBinaryStaleness{Method: method, Evidence: comparisonEvidence}, nil
+			}
+		}
 		return wakeBinaryStaleness{
 			Stale:    true,
 			Method:   method,
@@ -127,6 +139,26 @@ func inspectWakeBinaryStalenessPlatform(
 		Evidence: comparisonEvidence,
 		Reason:   reason,
 	}, nil
+}
+
+// darwinWakeImageHoldsCurrentContent hashes the current executable and
+// compares its content with the recorded running image.
+func darwinWakeImageHoldsCurrentContent(
+	recorded wakeImageEvidenceV1,
+	current resolvedWakeBinary,
+	currentIdentity wakeFileIdentity,
+) (bool, error) {
+	if current.Info.Size() != recorded.Size {
+		return false, nil
+	}
+	evidence, err := captureWakeImageEvidence(current.Path, recorded.EmbeddedVersion)
+	if err != nil {
+		return false, fmt.Errorf("hash current amq executable: %w", err)
+	}
+	if err := confirmResolvedDarwinWakeBinary(current, currentIdentity); err != nil {
+		return false, err
+	}
+	return evidence.SHA256 == recorded.SHA256, nil
 }
 
 func sameDarwinWakeImagePath(recorded, running string) bool {
