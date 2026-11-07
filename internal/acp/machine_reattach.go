@@ -163,7 +163,8 @@ func liveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
 
 // claudeRunsSession reports whether the Claude process owner runs session id
 // with b's transcript: its registry entry, under b's Claude config dir, was
-// written after owner started and names both.
+// not written before owner started and names both. An empty transcript proves
+// nothing, so it is never a match.
 func claudeRunsSession(b binding.Binding, owner launch.HolderIdentity, id string) bool {
 	started, err := launch.ProcessStartUnix(owner)
 	if err != nil {
@@ -176,5 +177,5 @@ func claudeRunsSession(b binding.Binding, owner launch.HolderIdentity, id string
 		}
 	}
 	s, err := claude.SessionOfProcess(dir, owner.PID, time.Unix(started, 0))
-	return err == nil && s.ID == id && s.Transcript == b.Transcript
+	return err == nil && s.ID == id && b.Transcript != "" && s.Transcript == b.Transcript
 }
