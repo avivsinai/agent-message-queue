@@ -367,32 +367,78 @@ func TestMirrorLastAnswerLandsPastTheCap(t *testing.T) {
 
 // Review of the mirror: a looping Stop hook past the cap left its turn
 // live while its post showed an answer, and turning the mirror off then
-// erased that answer.
+// erased that answer. Off ends a running post without an answer and leaves
+// an ended post's answer.
 func TestMirrorOffKeepsTheShownAnswer(t *testing.T) {
-	f := newMirrorFixture(t)
-	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
-	f.tick(0)
-	var sec int
-	for i := 1; i <= 13; i++ {
-		sec = 40 * i
-		f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
-			f.assistantLine("t"+strconv.Itoa(i), float64(sec), "tool_use", toolBlock("Bash")))
-		f.tick(sec)
-		f.add(f.assistantLine("m"+strconv.Itoa(i), float64(sec+2), "end_turn", textBlock("done "+strconv.Itoa(i))))
-		f.tick(sec + 2)
-	}
-	dir, _ := mirror.DirFor("alpha")
-	if st, _, _ := readMirrorFile(dir); !slices.ContainsFunc(st.Queue, func(ev mirror.Event) bool { return ev.Kind == mirror.Continued }) {
-		t.Fatalf("queue %+v; want a Continued waiting", st.Queue)
-	}
-	if err := mirror.SetOff("alpha", true); err != nil {
-		t.Fatal(err)
-	}
-	for after := sec + 4; after <= sec+int(mirrorEditGapMax/time.Second); after += 30 {
-		for _, sent := range f.tick(after) {
-			if !strings.Contains(sent, "\ndone ") {
+	t.Run("ended post", func(t *testing.T) {
+		f := newMirrorFixture(t)
+		f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
+		f.tick(0)
+		var sec int
+		for i := 1; i <= 13; i++ {
+			sec = 40 * i
+			f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
+				f.assistantLine("t"+strconv.Itoa(i), float64(sec), "tool_use", toolBlock("Bash")))
+			f.tick(sec)
+			f.add(f.assistantLine("m"+strconv.Itoa(i), float64(sec+2), "end_turn", textBlock("done "+strconv.Itoa(i))))
+			f.tick(sec + 2)
+		}
+		dir, _ := mirror.DirFor("alpha")
+		if st, _, _ := readMirrorFile(dir); !slices.ContainsFunc(st.Queue, func(ev mirror.Event) bool { return ev.Kind == mirror.Continued }) {
+			t.Fatalf("queue %+v; want a Continued waiting", st.Queue)
+		}
+		if err := mirror.SetOff("alpha", true); err != nil {
+			t.Fatal(err)
+		}
+		for after := sec + 4; after <= sec+int(mirrorEditGapMax/time.Second); after += 30 {
+			if sent := f.tick(after); len(sent) > 0 {
 				t.Fatalf("at +%ds sent %q; want the post to keep its answer", after, sent)
 			}
+		}
+	})
+	t.Run("running post", func(t *testing.T) {
+		f := newMirrorFixture(t)
+		f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
+		f.tick(1)
+		if err := mirror.SetOff("alpha", true); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := f.tick(2), []string{"edit: ▶ ship\n■ ended (mirror off) · 1 tool (Bash) · 1s"}; !slices.Equal(got, want) {
+			t.Fatalf("sent %q; want %q", got, want)
+		}
+		f.add(f.assistantLine("m2", 3, "end_turn", textBlock("Shipped.")))
+		if got := f.tick(60); len(got) > 0 {
+			t.Fatalf("sent %q after the off edit; want nothing", got)
+		}
+	})
+}
+
+// Review of the mirror: the queue kept every waiting Continued, so turns
+// continued faster than their gap grew it without bound. It stays within
+// mirrorQueueMax, and each post ends with its newest answer or an earlier
+// one, never without one.
+func TestMirrorQueueBoundsWaitingContinued(t *testing.T) {
+	f := newMirrorFixture(t)
+	dir, _ := mirror.DirFor("alpha")
+	const turns = 12
+	for i := 1; i <= turns; i++ {
+		n, sec := strconv.Itoa(i), 5*i
+		f.add(f.userLine("o"+n, "p"+n, float64(sec), "task "+n, nil), f.assistantLine("m"+n, float64(sec+1), "end_turn", textBlock("a "+n)))
+		f.tick(sec + 1)
+		f.add(f.assistantLine("m"+n, float64(sec+2), "end_turn", textBlock("b "+n)))
+		f.tick(sec + 2)
+		if st, _, _ := readMirrorFile(dir); len(st.Queue) > mirrorQueueMax {
+			t.Fatalf("after turn %d the queue holds %d events; want at most %d", i, len(st.Queue), mirrorQueueMax)
+		}
+	}
+	for sec := 5*turns + 30; sec <= 5*turns+120; sec += 30 {
+		f.tick(sec)
+	}
+	for i := 1; i <= turns; i++ {
+		n := strconv.Itoa(i)
+		c, _ := readMirrorClaim(filepath.Join(dir, "posted", "o"+n+".json"))
+		if !strings.HasSuffix(c.Text, "\na "+n) && !strings.HasSuffix(c.Text, "\na "+n+"\nb "+n) {
+			t.Fatalf("post of turn %d shows %q; want its answer", i, c.Text)
 		}
 	}
 }
@@ -432,7 +478,7 @@ func TestMirrorEditKeepsEarlierNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn.Earlier, turn.Text = 0, "Shipped and tagged."
-	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, f.now.Add(mirrorEditGap), 0); err != nil {
+	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, f.now.Add(mirrorEditGap)); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}; !slices.Equal(f.sent, want) {
