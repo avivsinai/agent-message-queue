@@ -174,16 +174,21 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 					return
 				}
 			}
-			switch {
-			case err == nil && upgraded:
-				restoredAny = true
-				post(fmt.Sprintf(hookUpgradedLine, h.name, path, changed))
-			case err == nil || !s.warnOnce(path, h.kind, info):
-			case errors.Is(err, claude.ErrNoOptIn):
-				post(fmt.Sprintf(hookOldFormLine, h.name, path, changed))
-			default:
-				post(fmt.Sprintf(hookOldFormLine, h.name, path, changed) + fmt.Sprintf(upgradeFailedLine, err))
+			if err == nil {
+				if upgraded {
+					restoredAny = true
+					post(fmt.Sprintf(hookUpgradedLine, h.name, path, changed))
+				}
+				continue
 			}
+			if !s.warnOnce(path, h.kind, info) {
+				continue
+			}
+			line := fmt.Sprintf(hookOldFormLine, h.name, path, changed)
+			if !errors.Is(err, claude.ErrNoOptIn) {
+				line += fmt.Sprintf(upgradeFailedLine, err)
+			}
+			post(line)
 			continue
 		}
 		restored := false

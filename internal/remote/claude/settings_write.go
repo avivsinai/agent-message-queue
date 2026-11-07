@@ -328,7 +328,13 @@ func optIn(settings, kind, bin string, spec hookSpec, entry []byte, mode optInMo
 			return err
 		}
 		if !same {
-			if changed, err = editSettingsLocked(settings, spec.seed(), replaceEdit(spec, entry)); err != nil {
+			// An upgrade writes only into a file that exists, as a restore
+			// does: a file the owner deleted stays deleted.
+			seed := spec.seed()
+			if mode == optInUpgrade {
+				seed = nil
+			}
+			if changed, err = editSettingsLocked(settings, seed, replaceEdit(spec, entry)); err != nil {
 				return err
 			}
 		}

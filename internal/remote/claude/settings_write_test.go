@@ -97,6 +97,11 @@ func TestRestoreHookLeavesADeletedSettingsFileDeleted(t *testing.T) {
 	if restored, err := RestoreHook(home, path, HookApproval, bin); err != nil || restored {
 		t.Fatalf("restore = %v, %v; want nothing", restored, err)
 	}
+	// Review of the hook upgrade: an upgrade raced with the owner's delete
+	// and wrote the file back from a seed.
+	if upgraded, err := UpgradeHook(home, path, HookApproval, bin); err != nil || upgraded {
+		t.Fatalf("upgrade = %v, %v; want nothing", upgraded, err)
+	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("the deleted settings file is back: %v", err)
 	}
