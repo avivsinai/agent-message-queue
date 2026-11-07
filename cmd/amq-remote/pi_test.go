@@ -35,3 +35,28 @@ func TestPiBridgePathWritesTheBuiltInExtension(t *testing.T) {
 		t.Fatalf("file holds %d bytes, want the %d-byte built-in extension", len(got), len(pibridge.Source))
 	}
 }
+
+// Review of bridge-path: a symlink at the extension's path is replaced by a
+// plain file, even when its target holds the built-in extension, so pi never
+// runs a file the link can later redirect.
+func TestPiBridgePathReplacesASymlink(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "elsewhere.ts")
+	if err := os.WriteFile(target, pibridge.Source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(home, "pi"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, "pi", "amq-bridge.ts")); err != nil {
+		t.Fatal(err)
+	}
+	path, err := writePiBridge(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("%s is %v, %v; want a regular file", path, info.Mode(), err)
+	}
+}
