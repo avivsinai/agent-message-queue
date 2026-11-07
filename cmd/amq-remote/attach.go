@@ -356,7 +356,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
-		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
+		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(handle, strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
 		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind)}
 	if fromHook {
 		if err := ownerDetached(b.Holder); err != nil {

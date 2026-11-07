@@ -443,6 +443,47 @@ func runApprovalHook(t *testing.T, count int, session, name string) []dialog.Req
 	return open
 }
 
+// Two Claude seats in one AMQ session get labels, and so Buzz channels, that
+// name their handles.
+//
+// Observed 2026-11-07: seats claude and claude2 in one session both got a
+// channel labelled "claude · <project>/<session> @ <machine>".
+func TestMailboxSeatsInOneSessionAreLabelledByHandle(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session1")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved := detectHarness
+	t.Cleanup(func() { detectHarness = saved })
+	detectHarness = func(*codexView, string, string) harnessSession { return harnessSession{Kind: "claude"} }
+	pinMailboxSession(t, root)
+	labels := map[string]string{}
+	for _, handle := range []string{"claude", "claude2"} {
+		t.Setenv("AM_ME", handle)
+		var out bytes.Buffer
+		if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+			t.Fatalf("attach as %s: code=%d err=%v", handle, code, err)
+		}
+		var got struct{ Name string }
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("attach output %q: %v", out.String(), err)
+		}
+		b, err := binding.ReadNamed(got.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		labels[handle] = b.Label
+	}
+	if labels["claude"] != binding.SessionLabel("claude", "p/session1", binding.Machine()) ||
+		labels["claude2"] != binding.SessionLabel("claude2", "p/session1", binding.Machine()) {
+		t.Fatalf("labels = %q; want each seat named by its handle", labels)
+	}
+}
+
 // An AMQ session that never ran /amq-remote gets its mailbox binding from
 // its first approval dialog, as attach --self writes it, and the dialog
 // opens there; a later attach --self keeps that one binding.
