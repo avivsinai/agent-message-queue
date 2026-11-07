@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.132.0](https://github.com/avivsinai/agent-message-queue/compare/v0.131.0...v0.132.0) (2026-11-07)
+
+
+### Bug Fixes
+
+* **board:** compaction crash safety and one rule for open requests ([35694c4](https://github.com/avivsinai/agent-message-queue/commit/35694c4f36a8ed75cc34f2b94af18622a3382582))
+* **cleanup:** history cleanup keeps what open obligations still need ([35694c4](https://github.com/avivsinai/agent-message-queue/commit/35694c4f36a8ed75cc34f2b94af18622a3382582))
+* **pi:** host outcomes follow the contract; Buzz images fetch safely ([#1361](https://github.com/avivsinai/agent-message-queue/issues/1361)) ([cb6a017](https://github.com/avivsinai/agent-message-queue/commit/cb6a0176c6675aabac7a3997e93d4f01f4f4871f))
+* **remote:** a mirrored turn keeps its whole answer and its own work ([#1362](https://github.com/avivsinai/agent-message-queue/issues/1362)) ([3711fc2](https://github.com/avivsinai/agent-message-queue/commit/3711fc2d62d2af12275f95a7fc38fb5b05b961a3))
+* **remote:** approvals wait until answered; doctor keeps owner choices ([#1359](https://github.com/avivsinai/agent-message-queue/issues/1359)) ([6a363c7](https://github.com/avivsinai/agent-message-queue/commit/6a363c72e4ce278e72c4788c1ada10021eb51696))
+* **remote:** up.log lines are locked and timestamped; link log per cause ([35694c4](https://github.com/avivsinai/agent-message-queue/commit/35694c4f36a8ed75cc34f2b94af18622a3382582))
+* **wake:** a held doorbell comes back after every Claude dialog closes ([#1358](https://github.com/avivsinai/agent-message-queue/issues/1358)) ([bc909c6](https://github.com/avivsinai/agent-message-queue/commit/bc909c6947c24d6f57dcdd82b391d84bb40759e4))
+
 ## [0.131.0](https://github.com/avivsinai/agent-message-queue/compare/v0.130.0...v0.131.0) (2026-11-06)
 
 
