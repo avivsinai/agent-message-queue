@@ -179,7 +179,10 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 			continue
 		}
 		row.Approval = approval
-		optIn, _ := claude.ReadHookOptIn(path)
+		optIn, err := claude.ReadHookOptIn(path)
+		if err != nil {
+			fail("hooks", path, "cannot read the owner's hook opt-in: "+err.Error(), "move that opt-in file away, then run the hook's install command")
+		}
 		switch {
 		case approval == claude.HookMissing && optIn.Removed(claude.HookApproval):
 			note("hooks", path, "the owner removed the AMQ approval hook with uninstall-approval-hook, so tool approvals of a Claude session that reads this file stay in the terminal", fix("amq-remote claude install-approval-hook"))

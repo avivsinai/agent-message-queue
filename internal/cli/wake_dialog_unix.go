@@ -946,7 +946,8 @@ func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
 }
 
 // installedGuardBin is claude.KeptHookBin of the installed guard entries in
-// the hooks file path (Codex never asks for trust again for nothing).
+// the hooks file path (Codex never asks for trust again for nothing). It
+// keeps only a binary PATH finds: the guard's form is not compared here.
 func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
 	var all []string
 	for _, event := range events {
@@ -956,7 +957,7 @@ func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin s
 		}
 		all = append(all, commands...)
 	}
-	return claude.KeptHookBin(all, binRe, bin)
+	return claude.KeptHookBin(all, binRe, bin, false)
 }
 
 // installedClaudeVersionOnce is installedClaudeVersion, run once per

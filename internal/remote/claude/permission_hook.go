@@ -81,12 +81,14 @@ type Seat struct {
 type Binder func(Seat) (string, error)
 
 // permissionHook holds the hook's clock and pacing, so tests can drive it,
-// and the writer of a new binding. It has no deadline: it ends when Buzz or
-// the terminal answers, or when done closes.
+// and the writer of a new binding. It ends when Buzz or the terminal
+// answers, when done closes, when the process that started it is gone
+// (parentGone), or at the installed timeout, which Claude enforces too.
 type permissionHook struct {
-	now  func() time.Time
-	poll time.Duration
-	bind Binder // nil: a session no binding serves answers in the terminal
+	now        func() time.Time
+	poll       time.Duration
+	parentGone func() bool // nil: no parent check
+	bind       Binder      // nil: a session no binding serves answers in the terminal
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
@@ -94,8 +96,23 @@ type permissionHook struct {
 // configured timeout. bind writes the binding of a session no binding
 // serves. It always returns 0.
 func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, bind Binder) int {
-	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, bind: bind}
+	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, parentGone: parentWatch(), bind: bind}
 	return h.run(stdin, stdout, done)
+}
+
+// parentWatch reports, on each call, whether the process that started the
+// hook is gone: the hook was reparented, or that pid no longer runs. A
+// Claude process killed without a signal (SIGKILL, a crash) sends the hook
+// no TERM.
+func parentWatch() func() bool {
+	ppid := os.Getppid()
+	return func() bool {
+		if os.Getppid() != ppid {
+			return true
+		}
+		alive, err := pidAlive(ppid)
+		return err == nil && !alive
+	}
 }
 
 func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struct{}) int {
@@ -133,6 +150,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
+	deadline := opened.Add(permissionHookTimeout * time.Second)
 	ticker := time.NewTicker(h.poll)
 	defer ticker.Stop()
 	resolve := func(outcome, label, by string) bool {
@@ -158,6 +176,10 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		}
 		if watch != nil && watch.answered() {
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
+			return 0
+		}
+		if h.parentGone != nil && h.parentGone() || !h.now().Before(deadline) {
+			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
 			return 0
 		}
 		select {

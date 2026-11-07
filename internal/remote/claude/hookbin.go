@@ -19,12 +19,20 @@ func HookBinary(name string) (string, error) {
 	return path, err
 }
 
-// SiblingBinary is the program name beside the running program, its
-// symlinks resolved, else the one on PATH.
+// executable is os.Executable; tests replace it.
+var executable = os.Executable
+
+// SiblingBinary is the program name beside the running program as it was
+// started (a PATH directory such as a Homebrew bin keeps that path across
+// upgrades), else beside its resolved path, else the one on PATH.
 func SiblingBinary(name string) (string, error) {
-	if self, err := os.Executable(); err == nil {
+	if self, err := executable(); err == nil {
+		dirs := []string{filepath.Dir(self)}
 		if real, err := filepath.EvalSymlinks(self); err == nil {
-			if path := filepath.Join(filepath.Dir(real), name); installedFile(path) {
+			dirs = append(dirs, filepath.Dir(real))
+		}
+		for _, dir := range dirs {
+			if path := filepath.Join(dir, name); installedFile(path) {
 				return path, nil
 			}
 		}
@@ -38,9 +46,10 @@ func SiblingBinary(name string) (string, error) {
 
 // StableBinary is the path a hook or a login service should run for the
 // program at path, named name: the PATH entry when it is the same file, so
-// an upgrade that removes the versioned path keeps it working; else path
-// with its symlinks resolved, and a warning that says why. A binary under
-// the temporary directory (go run) is refused: it disappears.
+// an upgrade that removes the versioned path keeps it working; else path as
+// given (a symlink there survives an upgrade that its target does not), and
+// a warning that says why. A binary under the temporary directory (go run)
+// is refused: it disappears.
 func StableBinary(path, name string) (stable, warning string, err error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -55,13 +64,14 @@ func StableBinary(path, name string) (stable, warning string, err error) {
 	if err == nil {
 		looked, err = filepath.Abs(looked)
 	}
+	path = filepath.Clean(path)
 	if err != nil {
-		return resolved, fmt.Sprintf("runs %s, and no %s is on PATH", resolved, name), nil
+		return path, fmt.Sprintf("runs %s, and no %s is on PATH", path, name), nil
 	}
 	a, errA := os.Stat(looked)
 	b, errB := os.Stat(resolved)
 	if errA == nil && errB == nil && os.SameFile(a, b) {
 		return looked, "", nil
 	}
-	return resolved, fmt.Sprintf("runs %s, not the %s on PATH (%s)", resolved, name, looked), nil
+	return path, fmt.Sprintf("runs %s, not the %s on PATH (%s)", path, name, looked), nil
 }

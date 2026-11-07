@@ -173,3 +173,37 @@ func TestApprovalProbeNeedsAnEmptyStdin(t *testing.T) {
 		t.Fatalf("probe = %q", out.String())
 	}
 }
+
+// An approval hook of the older form (--wait 600, timeout 630) becomes the
+// current form, with the one-day timeout, after doctor --fix.
+func TestDoctorFixUpgradesTheTenMinuteApprovalHook(t *testing.T) {
+	home := fixSandbox(t)
+	settings := claude.SettingsPath(home)
+	bin, _, err := stableExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.OptInPermissionHook(home, settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Replace(bytes.Replace(raw, []byte(`claude permission-hook"`), []byte(`claude permission-hook --wait 600"`), 1), []byte(`"timeout":86400`), []byte(`"timeout":630`), 1)
+	if err := os.WriteFile(settings, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if form, _ := claude.PermissionHookForm(home, settings); form != claude.HookFormStale {
+		t.Fatalf("old form reads as %q; want stale", form)
+	}
+	if _, _, err := doctor([]string{"--fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if form, _ := claude.PermissionHookForm(home, settings); form != claude.HookFormCurrent {
+		t.Fatalf("form after --fix = %q; want current", form)
+	}
+	if raw, _ := os.ReadFile(settings); !bytes.Contains(raw, []byte(`"timeout":86400`)) {
+		t.Fatalf("settings after --fix = %s; want the one-day timeout", raw)
+	}
+}

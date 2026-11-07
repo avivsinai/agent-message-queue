@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -220,7 +221,7 @@ func ReadHookOptIn(path string) (HookOptIn, error) {
 		return HookOptIn{}, nil
 	}
 	if err != nil {
-		return HookOptIn{}, err
+		return HookOptIn{}, fmt.Errorf("opt-in %s: %w", file, err)
 	}
 	var in HookOptIn
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -374,7 +375,8 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 // changed the settings file.
 func EnsurePermissionHook(home, settings, bin string) (bool, error) {
 	cmds, _ := installedCommands(settings, permissionSpec)
-	bin = KeptHookBin(cmds, permissionHookBinRe, bin)
+	form, _ := PermissionHookForm(home, settings)
+	bin = KeptHookBin(cmds, permissionHookBinRe, bin, form == HookFormCurrent)
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
@@ -384,15 +386,18 @@ func EnsurePermissionHook(home, settings, bin string) (bool, error) {
 // EnsureStopHook is EnsurePermissionHook for the Stop hook.
 func EnsureStopHook(home, settings, bin string) (bool, error) {
 	cmds, _ := installedCommands(settings, stopHook)
-	bin = KeptHookBin(cmds, stopHookBinRe, bin)
+	form, _ := StopHookForm(home, settings)
+	bin = KeptHookBin(cmds, stopHookBinRe, bin, form == HookFormCurrent)
 	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), true)
 }
 
 // KeptHookBin is the binary that the installed hook commands all run, as
-// the first group of binRe names it, when they name one binary and it is an
-// installed file; else bin. A repair keeps the binary an install chose, so
-// two installers never rewrite a file back and forth.
-func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string) string {
+// the first group of binRe names it, when they name one installed file and
+// either their form is current or that file is the one PATH finds for its
+// name; else bin. A repair keeps the binary an install chose, so two
+// installers never rewrite a file back and forth, and replaces an older
+// form's versioned path that an upgrade removes.
+func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string, current bool) string {
 	found := ""
 	for _, command := range commands {
 		m := binRe.FindStringSubmatch(command)
@@ -405,10 +410,19 @@ func KeptHookBin(commands []string, binRe *regexp.Regexp, bin string) string {
 		}
 		found = got
 	}
-	if found == "" || !installedFile(found) {
+	if found == "" || !installedFile(found) || !current && !onPath(found) {
 		return bin
 	}
 	return found
+}
+
+// onPath reports whether path is the program PATH finds for its name.
+func onPath(path string) bool {
+	looked, err := exec.LookPath(filepath.Base(path))
+	if err == nil {
+		looked, err = filepath.Abs(looked)
+	}
+	return err == nil && looked == path
 }
 
 // installedFile reports whether path is an existing regular file.

@@ -20,8 +20,7 @@ import (
 // doctor --fix repairs what the check pass flags and doctor can repair
 // without the owner, each step idempotent, and returns one line per change:
 // the approval hook, the Stop hook (where native mode needs it) and the
-// wake dialog guard in each Claude settings file doctor checks, the Codex
-// dialog guard, the machine agent's import file while no machine agent
+// wake dialog guard in each Claude settings file doctor checks, the machine agent's import file while no machine agent
 // exists, and, for the machine root only, the login service for `up` while
 // doctor advises one and none is installed. It never creates a settings file
 // in a Claude config dir that does not exist, never installs a hook the
@@ -56,7 +55,7 @@ func formFlagged(form string) bool {
 }
 
 // fixHooks installs or migrates the AMQ hooks doctor flags in each Claude
-// settings file it checks, and the Codex dialog guard.
+// settings file it checks.
 func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, subject, what string), fail reportFunc) {
 	bin, _, err := stableExecutable()
 	if err != nil {
@@ -98,14 +97,6 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 				changed("hooks", path, "installed the wake dialog guard")
 			}
 		}
-	}
-	if amqErr != nil {
-		return
-	}
-	if path, wrote, trust, err := amqcli.InstallCodexDialogGuard(amq); err != nil {
-		fail("hooks", path, "cannot install the Codex wake dialog guard: "+err.Error(), "repair "+path)
-	} else if wrote {
-		changed("hooks", path, "installed the Codex wake dialog guard; "+trust)
 	}
 }
 

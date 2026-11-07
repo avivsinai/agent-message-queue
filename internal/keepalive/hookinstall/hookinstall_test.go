@@ -200,26 +200,28 @@ func TestInstallRefusesTrailingJSON(t *testing.T) {
 	}
 }
 
-// The installer edits with the settings writer, which keeps a group it
-// cannot read as it is: an inner "hooks" of the wrong type survives.
-func TestInstallCodexKeepsWrongTypeInnerHooks(t *testing.T) {
+func TestInstallCodexRefusesWrongTypeInnerHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "hooks.json")
-	foreign := `{"hooks":{"type":"command","command":"existing"}}`
-	mustWrite(t, configPath, []byte(`{"hooks":{"SessionStart":[`+foreign+`]}}`))
+	original := []byte(`{"hooks":{"SessionStart":[{"hooks":{"type":"command","command":"existing"}}]}}`)
+	mustWrite(t, configPath, original)
 
-	if _, err := Install(Options{
+	_, err := Install(Options{
 		Agent:       AgentCodex,
 		ScriptPath:  filepath.Join(dir, "hook.sh"),
 		BinaryPath:  writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
 		CodexConfig: configPath,
 		Timeout:     time.Second,
-	}); err != nil {
-		t.Fatalf("Install() error = %v", err)
+	})
+	if err == nil {
+		t.Fatal("Install() error = nil, want wrong-type inner hooks refusal")
 	}
-	got, err := os.ReadFile(configPath)
-	if err != nil || !bytes.Contains(got, []byte(foreign)) {
-		t.Fatalf("wrong-type inner hooks were not kept: err=%v bytes=%q", err, got)
+	if !strings.Contains(err.Error(), `"hooks" must be a JSON array`) || !strings.Contains(err.Error(), configPath) {
+		t.Fatalf("Install() error = %v, want typed inner hooks naming the file", err)
+	}
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("wrong-type inner hooks were wiped: err=%v bytes=%q", readErr, got)
 	}
 }
 

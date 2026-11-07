@@ -295,11 +295,32 @@ func markedGroupsIn(raw []byte, spec hookSpec) ([][]byte, error) {
 	}
 	var out [][]byte
 	for i, g := range groups {
+		if err := checkGroup(raw[g[0]:g[1]], spec); err != nil {
+			return nil, err
+		}
 		if spec.owns(raw[g[0]:g[1]]) || spec.duplicate(raw, groups, i) {
 			out = append(out, raw[g[0]:g[1]])
 		}
 	}
 	return out, nil
+}
+
+// checkGroup refuses a matcher group whose "hooks" member is not an array:
+// the writer cannot tell whether it holds an owned hook.
+func checkGroup(el []byte, spec hookSpec) error {
+	if spec.flat {
+		return nil
+	}
+	var g map[string]json.RawMessage
+	if json.Unmarshal(el, &g) != nil {
+		return nil
+	}
+	if h, ok := g["hooks"]; ok {
+		if v := bytes.TrimSpace(h); len(v) == 0 || v[0] != '[' && !bytes.Equal(v, []byte("null")) {
+			return fmt.Errorf("%s: %q must be a JSON array", spec.event, "hooks")
+		}
+	}
+	return nil
 }
 
 // installedCommands lists the commands of spec's marked hooks in the
@@ -688,7 +709,7 @@ func permissionHookCommand(home, bin string) string {
 }
 
 // permissionHookTimeout is the installed timeout of the PermissionRequest
-// hook, in seconds. The hook has no deadline of its own: it waits until Buzz
+// hook, in seconds, and the hook's own deadline. The hook waits until Buzz
 // or the terminal answers, so the timeout only bounds a dialog nobody
 // answers for a day. Claude Code documents no maximum.
 const permissionHookTimeout = 86400

@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -267,5 +268,26 @@ func TestPermissionHookWaitsPastTenMinutes(t *testing.T) {
 	}
 	if d := decisionOf(t, out.String()); d["behavior"] != "allow" {
 		t.Fatalf("decision = %v; want the Buzz answer", d)
+	}
+}
+
+// Review of the hook without a deadline: a Claude process killed without a
+// signal left the hook waiting for ever, and its dialog open in Buzz.
+func TestPermissionHookEndsWhenItsClaudeProcessIsGone(t *testing.T) {
+	dir := boundHookEnv(t)
+	h := permissionHook{now: time.Now, poll: time.Millisecond, parentGone: func() bool { return true }}
+	ended := make(chan struct{})
+	go func() {
+		h.run(strings.NewReader(`{"session_id":"s-1","tool_name":"Bash","tool_input":{"command":"make"}}`), io.Discard, make(chan struct{}))
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook outlived its Claude process")
+	}
+	reqs, _ := dialog.Requests(dir)
+	if len(reqs) != 0 {
+		t.Fatalf("open dialogs = %+v; want the dialog closed", reqs)
 	}
 }

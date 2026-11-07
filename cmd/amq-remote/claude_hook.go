@@ -94,16 +94,10 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 
 // hookExecutable is the absolute amq-remote path a hook runs: the stable
 // path a login service would run, so an upgrade that removes the versioned
-// path keeps the hook working, else this binary's own absolute path.
+// path keeps the hook working. A temporary build is refused.
 func hookExecutable() (string, error) {
-	if exe, _, err := stableExecutable(); err == nil {
-		return exe, nil
-	}
-	bin, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Abs(bin)
+	exe, _, err := stableExecutable()
+	return exe, err
 }
 
 // hookProbeEnv set to 1, with an empty stdin, makes the PermissionRequest

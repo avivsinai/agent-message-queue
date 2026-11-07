@@ -88,9 +88,10 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
   this session: Bash(rm -rf ~/other/node_modules)", "Allow edits in ~/proj
   this session", "Stop allowing edits in ~/proj this session", or "Accept
   edits this session". After `/clear` the hook finds the binding its Claude
-  process holds, so the session keeps its binding and channel. It has no
-  deadline: it waits until Buzz or the terminal answers (the installed
-  hook timeout is one day). A terminal answer closes the Buzz message.
+  process holds, so the session keeps its binding and channel. It waits until
+  Buzz or the terminal answers, at most the installed hook timeout of one
+  day. A terminal answer, or the end of its Claude process, closes the Buzz
+  message.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
   `availableDecisions`; a user-input or elicitation request takes the
