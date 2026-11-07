@@ -282,8 +282,8 @@ a Claude Code marker whose transcript proves its dialog gone (a tool call
 marker by that call's result, a permission marker by a newer non-synthetic
 assistant message of its own chain; a subagent's marker only by that
 subagent's own transcript, its `agent_transcript_path` or else the one file
-found at the layout Claude Code writes, where a later `tool_result` or
-interrupt record also proves a permission dialog gone), and only the exact
+found at the layout Claude Code writes, where a later interrupt record also
+proves a permission dialog gone), and only the exact
 version it read, under the marker lock. A marker's age never releases input.
 No wake cleanup removes it. A marker that is unreadable, dated in the
 future, behind a non-canonical agent directory, or older than the quiet hold

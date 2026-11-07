@@ -347,9 +347,11 @@ supports it.
   that subagent while the main chain runs on, so the main transcript never
   proves it; only the subagent's own transcript does: an assistant record
   by the same rule without the sidechain filter, or a `user` record dated
-  after the marker opened that carries a `tool_result` or an interrupt
-  (`[Request interrupted by user`), which a reject or an Esc writes at
-  once, so the hold ends even when no `SubagentStop` follows. A permission
+  after the marker opened that carries an interrupt (`[Request interrupted
+  by user`), which a reject writes after the rejected `tool_result` and an
+  Esc writes at once, so the hold ends even when no `SubagentStop` follows.
+  A `tool_result` alone proves nothing, because another call of the same
+  batch can finish while the dialog still shows. A permission
   hook gives no `agent_transcript_path`, so the wake reads the transcript
   where Claude Code writes it:
   `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl` or one or two

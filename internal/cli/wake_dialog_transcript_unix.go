@@ -62,7 +62,7 @@ type claudeTranscriptBlock struct {
 // a permission marker (claudePermissionMarker) a new assistant message of
 // its own chain after it opened (claudeTurnMovedOn): the main chain, or for
 // a subagent's marker only that subagent's transcript, which also proves it
-// by a later tool_result or interrupt (claudeSubagentWaitEnded). Any other
+// by a later interrupt record (claudeSubagentWaitEnded). Any other
 // marker is never proven answered. An error means no proof: the hold stays.
 func claudeDialogAnswered(marker wakeDialogMarker, modTime time.Time) (bool, error) {
 	return claudeDialogAnsweredFrom(marker, modTime, readClaudeTranscriptTail)
@@ -222,10 +222,11 @@ func wakeDialogMarkerOpened(marker wakeDialogMarker, modTime time.Time) time.Tim
 const claudeInterruptPrefix = "[Request interrupted by user"
 
 // claudeSubagentWaitEnded reports whether a subagent's own transcript tail
-// holds a user record dated after opened that carries a tool_result or an
-// interrupt. While its permission dialog shows, the subagent waits on the
-// blocked call; a reject or an Esc writes such a record at once, so it
-// proves the dialog gone even when no SubagentStop follows.
+// holds a user record dated after opened that carries an interrupt. A
+// reject writes one after the rejected tool_result and an Esc writes one,
+// so it proves the dialog gone even when no SubagentStop follows. A
+// tool_result alone proves nothing: another call of the same batch can
+// finish while the dialog still shows.
 func claudeSubagentWaitEnded(tail []byte, opened time.Time) bool {
 	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
 		var record claudeTranscriptRecord
@@ -247,7 +248,7 @@ func claudeSubagentWaitEnded(tail []byte, opened time.Time) bool {
 			continue
 		}
 		for _, block := range blocks {
-			if block.Type == "tool_result" || (block.Type == "text" && strings.HasPrefix(block.Text, claudeInterruptPrefix)) {
+			if block.Type == "text" && strings.HasPrefix(block.Text, claudeInterruptPrefix) {
 				return true
 			}
 		}

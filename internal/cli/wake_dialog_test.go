@@ -268,13 +268,21 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		{name: "a typed prompt keeps a subagent's dialog", claudeHook: true, transcript: asked, notices: 1,
 			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "UserPromptSubmit", SessionID: "s1"}}},
 		// Review of the wake dialog close rules: a rejected or Escaped
-		// subagent permission dialog writes a tool_result, not a new
+		// subagent permission dialog writes an interrupt record, not a new
 		// assistant message, so its entry held until a SubagentStop that an
 		// interrupt may never send.
 		{name: "a rejected subagent permission rings", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: asked, rings: 1, agentTranscript: func(opened time.Time) string {
 				return assistant("msg_sub_asked", true, opened.Add(-time.Second)) +
-					fmt.Sprintf(`{"type":"user","isSidechain":true,"timestamp":%q,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bash","is_error":true}]}}`,
+					fmt.Sprintf(`{"type":"user","isSidechain":true,"timestamp":%q,"message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}`,
+						opened.Add(time.Minute).UTC().Format(time.RFC3339Nano)) + "\n"
+			}},
+		// Review of the wake dialog close rules: another call of the same
+		// batch can finish while the subagent's dialog still shows.
+		{name: "a subagent's other tool result keeps its dialog", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, notices: 1, agentTranscript: func(opened time.Time) string {
+				return assistant("msg_sub_asked", true, opened.Add(-time.Second)) +
+					fmt.Sprintf(`{"type":"user","isSidechain":true,"timestamp":%q,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"ok"}]}}`,
 						opened.Add(time.Minute).UTC().Format(time.RFC3339Nano)) + "\n"
 			}},
 		// Review of the wake dialog close rules: with no clear rule, the
