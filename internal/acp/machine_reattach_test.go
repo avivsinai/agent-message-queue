@@ -14,17 +14,17 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// A pi session whose process ended and that came back in a new process
-// under the same session id gets its binding and its channel back by
-// itself: the pi bridge of its root and handle names the session id the
-// ended binding recorded. One pi row starts from a pruned binding (a
-// tombstone), as the field saw it; the other from an ended binding not yet
-// pruned.
+// A session whose process ended and that came back in a new process under
+// the same session id gets its binding and its channel back by itself: for
+// pi, the pi bridge of its root and handle names the session id the ended
+// binding recorded; for a Claude mailbox seat, the live wake owner of its
+// root and handle has a registry entry that names it. One pi row starts
+// from a pruned binding (a tombstone), as the field saw it; the other from
+// an ended binding not yet pruned.
 //
 // Regression (review of the reattach branch): a Claude process whose
 // registry entry named the session id took a mailbox binding without proof
-// that it ran as that handle at that root. The machine agent leaves Claude
-// to the approval hook.
+// that it ran as that handle at that root. Only the wake owner is rebound.
 // Regression (round-2 review of the reattach branch): /amq-remote off after
 // the binding was pruned matched nothing, so a pi resume came back.
 func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
@@ -34,23 +34,34 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 	}
 	ended := self
 	ended.ProcessStart = laterStart(t, self.ProcessStart)
-	savedPi := piLiveBridge
-	t.Cleanup(func() { piLiveBridge = savedPi })
+	other, err := launch.HolderOf(os.Getppid())
+	if err != nil {
+		t.Skip("no parent process identity")
+	}
+	savedPi, savedOwner := piLiveBridge, reattachWakeOwner
+	t.Cleanup(func() { piLiveBridge, reattachWakeOwner = savedPi, savedOwner })
 	piLiveBridge = func(string, string, time.Time) (int, string, int, bool) { return self.PID, "pi-s-1", 0, true }
 
 	for _, tc := range []struct {
-		name    string
-		harness string
-		prune   bool
-		off     bool // the owner turns the session off after the prune
-		want    bool
+		name     string
+		harness  string
+		prune    bool
+		off      bool // the owner turns the session off after the prune
+		notOwner bool // another process is the handle's wake owner
+		want     bool
 	}{
-		{"pi", "pi", false, false, true},
-		{"pi, pruned", "pi", true, false, true},
-		{"pi, pruned, then off", "pi", true, true, false},
-		{"claude", "claude", true, false, false},
+		{"pi", "pi", false, false, false, true},
+		{"pi, pruned", "pi", true, false, false, true},
+		{"pi, pruned, then off", "pi", true, true, false, false},
+		{"claude", "claude", true, false, false, true},
+		{"claude, not the wake owner", "claude", true, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			owner := self
+			if tc.notOwner {
+				owner = other
+			}
+			reattachWakeOwner = func(string, string) (launch.HolderIdentity, bool) { return owner, true }
 			s, rec := machineServer(t)
 			root := canonicalTempDir(t)
 			if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {

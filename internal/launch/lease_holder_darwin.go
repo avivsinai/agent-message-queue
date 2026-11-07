@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -67,13 +68,14 @@ func darwinBootID() string {
 // pidNamespace is empty: this platform has no pid namespaces.
 func pidNamespace() string { return "" }
 
-// processStartUnix is the wall-clock start second of a start token, which
-// on Darwin is the kernel's p_starttime as "sec.nsec".
-func processStartUnix(token string) (int64, error) {
-	sec, _, ok := strings.Cut(token, ".")
+// processStartTime is the wall-clock start of a start token, which on
+// Darwin is the kernel's p_starttime as "sec.nsec", at full precision.
+func processStartTime(token string) (time.Time, error) {
+	sec, frac, ok := strings.Cut(token, ".")
 	value, err := strconv.ParseInt(sec, 10, 64)
-	if !ok || err != nil || value <= 0 {
-		return 0, fmt.Errorf("process start token %q is malformed", token)
+	nsec, nerr := strconv.ParseInt(frac, 10, 64)
+	if !ok || err != nil || value <= 0 || nerr != nil || nsec < 0 || nsec >= int64(time.Second) {
+		return time.Time{}, fmt.Errorf("process start token %q is malformed", token)
 	}
-	return value, nil
+	return time.Unix(value, nsec), nil
 }
