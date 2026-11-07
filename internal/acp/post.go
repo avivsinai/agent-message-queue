@@ -217,6 +217,37 @@ func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, 
 // runBuzzCLIContext is runBuzzCLI that also stops when parent ends. A run
 // that never started is a notSentError: it cannot have reached the relay.
 func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
+	return runBuzzCLIBounded(parent, budget, stdin, 0, args...)
+}
+
+// errBuzzOutputLimit is a buzz CLI run stopped because its stdout passed the
+// caller's limit.
+var errBuzzOutputLimit = errors.New("buzz CLI output is over the limit")
+
+// boundedBuffer holds at most limit bytes. The write that would pass limit
+// fails and calls stop, which kills the CLI, so the output never grows past
+// limit however much the CLI writes. It is not an io.ReaderFrom, so every
+// copy goes through Write.
+type boundedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	over  bool
+	stop  func()
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len()+len(p) > b.limit {
+		b.over = true
+		b.stop()
+		return 0, errBuzzOutputLimit
+	}
+	return b.buf.Write(p)
+}
+
+// runBuzzCLIBounded is runBuzzCLIContext whose stdout is limited to
+// stdoutMax bytes when stdoutMax > 0: a run that writes more is killed and
+// fails with errBuzzOutputLimit.
+func runBuzzCLIBounded(parent context.Context, budget time.Duration, stdin io.Reader, stdoutMax int, args ...string) ([]byte, error) {
 	if len(buzzIdentity) == 0 {
 		return nil, errNoBuzzIdentity
 	}
@@ -239,13 +270,21 @@ func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Re
 	cmd.WaitDelay = waitDelay
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, buzzIdentity...)
 	cmd.Stdin = stdin
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	stdout := &boundedBuffer{limit: stdoutMax, stop: cancel}
+	if stdoutMax > 0 {
+		cmd.Stdout = stdout
+	} else {
+		cmd.Stdout = &stdout.buf
+	}
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return nil, &notSentError{fmt.Errorf("buzz %s: %w", strings.Join(args[:2], " "), err)}
 	}
 	if err := cmd.Wait(); err != nil {
+		if stdout.over {
+			return nil, fmt.Errorf("buzz %s: %w", strings.Join(args[:2], " "), errBuzzOutputLimit)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[:300]
@@ -257,7 +296,7 @@ func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Re
 		}
 		return nil, &buzzExitError{code: code, err: fmt.Errorf("buzz %s: %v: %s", strings.Join(args[:2], " "), err, msg)}
 	}
-	return stdout.Bytes(), nil
+	return stdout.buf.Bytes(), nil
 }
 
 // buzzExitError is a buzz CLI run that started and failed. code is the

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -32,8 +34,9 @@ const (
 	remoteFileMax = 20 << 20
 	// remoteFileLimit caps the files fetched for one message.
 	remoteFileLimit = 8
-	// remoteFileBudget bounds all downloads of one prompt; it counts against
-	// the turn.
+	// remoteFileBudget bounds all downloads of one prompt. They run before
+	// the turn's own budget starts, so a prompt with files can wait this
+	// long on top of its turn.
 	remoteFileBudget = 60 * time.Second
 )
 
@@ -74,7 +77,7 @@ func attachImages(root, prompt string) string {
 		}
 		stored, err := storeImage(root, dir, m, deadline)
 		if err != nil {
-			lines = append(lines, "[image not attached: "+mediaName(m.url)+": "+oneLine(err.Error())+"]")
+			lines = append(lines, "[image not attached: "+oneLine(mediaName(m.url))+": "+oneLine(err.Error())+"]")
 			continue
 		}
 		lines = append(lines, "[image: "+stored+"]")
@@ -129,24 +132,57 @@ func promptMedia(prompt string) []eventMedia {
 		return media
 	}
 	for _, raw := range blossomURLRe.FindAllString(evt, -1) {
-		if u, err := url.Parse(raw); err == nil && onRelay(raw) && !seen[raw] {
+		if onRelay(raw) && !seen[raw] {
 			seen[raw] = true
-			// A Blossom URL names the blob by its sha256.
-			sha, _, _ := strings.Cut(path.Base(u.Path), ".")
-			media = append(media, eventMedia{url: raw, sha: sha})
+			media = append(media, eventMedia{url: raw})
 		}
 	}
 	return media
 }
 
-// onRelay reports that raw is an https URL on the host of the agent's relay.
+// onRelay reports that raw is an https URL on the host and port of the
+// agent's relay.
 func onRelay(raw string) bool {
 	relay, err := url.Parse(buzzRelayURL)
 	if err != nil || relay.Hostname() == "" {
 		return false
 	}
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), relay.Hostname())
+	return err == nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), relay.Hostname()) && urlPort(u) == urlPort(relay)
+}
+
+// urlPort is the port u connects to: its explicit port, else its scheme's.
+func urlPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		return "443"
+	case "http", "ws":
+		return "80"
+	}
+	return ""
+}
+
+// blobSHA is the sha256 a Blossom URL names its blob by, or "".
+func blobSHA(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	sha, _, _ := strings.Cut(path.Base(u.Path), ".")
+	if !sha256HexRe.MatchString(sha) {
+		return ""
+	}
+	return sha
+}
+
+// mediaGet downloads one relay file as the agent and fails with
+// errBuzzOutputLimit past limit bytes. A variable so tests can serve files
+// without a relay.
+var mediaGet = func(budget time.Duration, limit int, rawURL string) ([]byte, error) {
+	return runBuzzCLIBounded(context.Background(), budget, nil, limit, "media", "get", rawURL)
 }
 
 // storeImage returns the stored file of m: the file already stored under its
@@ -164,8 +200,15 @@ func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, err
 	if !onRelay(m.url) {
 		return "", errors.New("it is not on this agent's relay")
 	}
-	if sha256HexRe.MatchString(m.sha) {
-		if stored, ok := storedImage(dir, m.sha); ok {
+	// The relay serves a Blossom URL's blob by the sha256 the URL names, so
+	// that name is the only key of a stored file, and a declared sha256 must
+	// be it.
+	key := blobSHA(m.url)
+	if m.sha != "" && m.sha != key {
+		return "", errors.New("its sha256 does not match its URL")
+	}
+	if key != "" {
+		if stored, ok := storedImage(dir, key); ok {
 			return stored, nil
 		}
 	}
@@ -173,16 +216,16 @@ func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, err
 	if budget <= 0 {
 		return "", errors.New("no time left to download it")
 	}
-	data, err := buzzCall(budget, "media", "get", m.url)
+	data, err := mediaGet(budget, remoteFileMax, m.url)
+	if errors.Is(err, errBuzzOutputLimit) {
+		return "", errors.New("it is over the 20 MiB limit")
+	}
 	if err != nil {
 		return "", err
 	}
-	if len(data) > remoteFileMax {
-		return "", fmt.Errorf("%d bytes is over the 20 MiB limit", len(data))
-	}
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
-	if m.sha != "" && m.sha != sha {
+	if key != "" && key != sha {
 		return "", errors.New("the downloaded bytes do not match its sha256")
 	}
 	ext := imageExt(data)
@@ -239,11 +282,15 @@ func mediaName(raw string) string {
 	return raw
 }
 
-// oneLine keeps a refusal reason on one short line.
+// oneLine keeps refusal text on one short line, cut on a rune boundary.
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > 200 {
-		s = s[:200]
+		cut := 200
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return s
 }
