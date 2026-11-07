@@ -223,11 +223,11 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		// "@name" that matches no channel member, so the turn was lost.
 		name: "a name after @ in the prompt and the answer",
 		lines: []string{
-			prompt("o1", "p1", 0, "@amit check user@host"),
-			assistant("m1", "end_turn", 1, nil, text("Asked @amit.")),
+			prompt("o1", "p1", 0, "@sam check user@host"),
+			assistant("m1", "end_turn", 1, nil, text("Asked @sam.")),
 		},
 		events: []string{Ended},
-		posts:  []string{"▶ @\u2060amit check user@host\n✓ 1s\nAsked @\u2060amit."},
+		posts:  []string{"▶ @\u2060sam check user@host\n✓ 1s\nAsked @\u2060sam."},
 	}, {
 		name: "sidechain lines of a subagent",
 		lines: []string{
@@ -241,6 +241,9 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Opened, Ended},
 		posts:  []string{"▶ find the bug\n✓ 1 tool (Task) · 5s\nThe bug is in cache.go."},
 	}, {
+		// Field, 2026-11-06: the owner asked from Buzz, the turn's answer
+		// went to a thread reply, and the channel post hid the text, so the
+		// answer looked lost. A turn the carrier answered keeps its text.
 		name: "a Buzz frame absorbed into the running turn",
 		lines: []string{
 			prompt("o1", "p1", 0, "deploy"),
@@ -251,7 +254,45 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 			assistant("m2", "end_turn", 4, nil, text("Deployed.")),
 		},
 		events: []string{Opened, Ended},
-		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s"},
+		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s\nDeployed."},
+	}, {
+		// Review of the mirror: the closing message's later text block
+		// replaced its first, so the post lost the answer's start.
+		name: "a closing message with two text blocks",
+		lines: []string{
+			prompt("o1", "p1", 0, "explain"),
+			assistant("m1", "end_turn", 1, nil, text("First part.")),
+			assistant("m1", "end_turn", 2, nil, thinking()),
+			assistant("m1", "end_turn", 3, nil, text("Second part.")),
+		},
+		events: []string{Ended, Continued, Continued},
+		posts:  []string{"▶ explain\n✓ 3s\nFirst part.\nSecond part."},
+	}, {
+		// Review of the mirror: a task notification with the ended turn's
+		// promptId reopened that turn and folded the new turn into its post.
+		name: "a task notification after an ended turn",
+		lines: []string{
+			prompt("o1", "p1", 0, "ship it"),
+			assistant("m1", "end_turn", 1, nil, text("Shipped.")),
+			user("p1", 5, map[string]any{"isMeta": true, "origin": map[string]any{"kind": "task-notification"}}, text("<task-notification>build finished</task-notification>")),
+			assistant("m2", "end_turn", 7, nil, text("The build passed.")),
+		},
+		events: []string{Ended, Ended},
+		posts:  []string{"▶ ship it\n✓ 1s\nShipped.", "▶ background task finished\n✓ 2s\nThe build passed."},
+	}, {
+		// Review of the mirror: a doorbell turn that took a Buzz frame
+		// still showed "AMQ message", so the owner could not find the answer.
+		name: "a Buzz frame absorbed into a doorbell turn",
+		lines: []string{
+			prompt("o1", "p1", 0, harness.Doorbell),
+			assistant("m1", "tool_use", 1, nil, tool("Bash")),
+			line(map[string]any{"type": "attachment", "uuid": "q1", "timestamp": at(2),
+				"attachment": map[string]any{"type": "queued_command", "prompt": envelope, "origin": map[string]any{"kind": "peer", "msg_id": carried}}}),
+			user("p1", 3, nil, result("t-Bash", false)),
+			assistant("m2", "end_turn", 4, nil, text("Answered.")),
+		},
+		events: []string{Opened, Ended},
+		posts:  []string{"▶ Buzz\n✓ 1 tool (Bash) · 4s\nAnswered."},
 	}, {
 		name: "an API error end",
 		lines: []string{

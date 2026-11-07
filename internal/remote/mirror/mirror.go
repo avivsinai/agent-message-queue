@@ -8,6 +8,8 @@
 package mirror
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -74,8 +76,11 @@ type Turn struct {
 	Cause      string      `json:"cause"`
 	MessageIDs []string    `json:"message_ids,omitempty"`
 	Tools      []ToolCount `json:"tools,omitempty"`
-	// Text is the last assistant text, trimmed, bounded by bound.
-	Text string `json:"text,omitempty"`
+	// Text is the answer, trimmed, bounded by bound. For Claude it joins the
+	// text blocks of TextID, the latest assistant message with text: a
+	// message's later block extends it, another message's text replaces it.
+	Text   string `json:"text,omitempty"`
+	TextID string `json:"text_id,omitempty"`
 	// StartTS is when the turn started: its opener's time, but not before
 	// the previous turn's last line (an opener typed while that turn ran is
 	// written with the time it was typed). FirstAssistantTS is the time of
@@ -84,8 +89,6 @@ type Turn struct {
 	FirstAssistantTS int64  `json:"first_assistant_ts,omitempty"`
 	LastTS           int64  `json:"last_ts,omitempty"`
 	End              string `json:"end,omitempty"`
-	// Answered is set when the carrier already posted the turn's answer.
-	Answered bool `json:"answered,omitempty"`
 	// Earlier counts the turns of a backlog that were dropped before it.
 	Earlier int `json:"earlier,omitempty"`
 
@@ -257,7 +260,10 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 		}
 	}
 	if text != "" {
-		t.Text = bound(text)
+		if l.MessageID != "" && l.MessageID == t.TextID {
+			text = t.Text + "\n" + text
+		}
+		t.Text, t.TextID = bound(text), l.MessageID
 	}
 	first := t.FirstAssistantTS == 0
 	if first {
@@ -335,7 +341,9 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	switch {
 	case l.Absorbed:
 		if o != nil {
-			o.Answered = o.Answered || carried.has(l.MsgID)
+			if carried.has(l.MsgID) {
+				o.AnsweredBuzz()
+			}
 			o.touch(l.TS)
 		}
 		return out
@@ -352,7 +360,8 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		return out
 	case hasPrefix(text, localPrefixes...):
 		return out
-	case o == nil && l.Meta && st.Last != nil && l.PromptID != "" && l.PromptID == st.Last.PromptID:
+	case o == nil && l.Meta && !metaOpener(l) && st.Last != nil && l.PromptID != "" && l.PromptID == st.Last.PromptID:
+		// Stop hook feedback: the ended turn goes on.
 		st.Open, st.Last = st.Last, nil
 		st.Open.Reopened, st.Open.End = st.Open.End, ""
 		st.Open.touch(l.TS)
@@ -378,14 +387,14 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	t := st.open(l, "")
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
-		t.Cause, t.Answered = CauseBuzz, true
+		t.Cause = CauseBuzz
 	case promptCause(text) == harness.Doorbell:
 		// Typed into the terminal, or sent as a peer frame by a native wake.
 		t.Cause = CauseMail
 	case l.OriginKind == "peer", l.OriginKind == "" && l.CrossSession:
 		t.Cause = "message from another session"
 	case l.OriginKind == "task-notification":
-		t.Cause = "background task finished"
+		t.Cause = CauseTask
 	case l.OriginKind == "auto-continuation":
 		t.Cause = "continued"
 	case l.TurnOrigin == "scheduled":
@@ -436,13 +445,26 @@ func hasPrefix(s string, prefixes ...string) bool {
 }
 
 // CauseBuzz names a turn that answered a Buzz message. CauseMail names a
-// turn the AMQ doorbell started: the doorbell text cannot tell whose mail
-// it was, so the machine agent turns CauseMail into CauseBuzz once it sees
-// the turn's reply in the buzz inbox.
+// turn the AMQ doorbell started, CauseTask one a background task's
+// notification started: neither tells whose message the turn answered.
 const (
 	CauseBuzz = "Buzz"
 	CauseMail = "AMQ message"
+	CauseTask = "background task finished"
 )
+
+// BuzzReplaces reports whether a turn with cause shows Buzz once it answered
+// a Buzz message: its cause does not name the message it answered.
+func BuzzReplaces(cause string) bool { return cause == CauseMail || cause == CauseTask }
+
+// AnsweredBuzz records that t answered a Buzz message: a frame the carrier
+// sent reached it, or it replied to a Buzz message. Its cause becomes Buzz
+// where BuzzReplaces it, so the owner finds the answer by that label.
+func (t *Turn) AnsweredBuzz() {
+	if BuzzReplaces(t.Cause) {
+		t.Cause = CauseBuzz
+	}
+}
 
 // causeMax bounds the prompt text a post shows, in characters.
 const causeMax = 200
@@ -509,9 +531,10 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<mark> <N tools (names)> · <duration>
 //	<final assistant text>
 //
-// A turn that still runs (no End) or that the carrier already answered
-// shows the first two lines only; a running turn the user interrupted
-// shows as interrupted.
+// A turn that still runs (no End) shows the first two lines only; a running
+// turn the user interrupted shows as interrupted. A turn the carrier also
+// answered keeps its text: the carrier's reply is a thread reply under the
+// prompt, and the channel shows the turn post.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
@@ -546,7 +569,7 @@ func Render(t Turn) string {
 		}
 		b.WriteString(" · " + p)
 	}
-	if text := t.Text; text != "" && t.End != "" && !t.Answered {
+	if text := t.Text; text != "" && t.End != "" {
 		b.WriteString("\n" + cut(text))
 	}
 	if t.Earlier > 0 {
@@ -555,16 +578,12 @@ func Render(t Turn) string {
 	return Unmention(b.String())
 }
 
-// Fingerprint is what Render shows of t that can change while it runs:
-// its tools by name and count, whether it is interrupted, and its end. The
-// elapsed time is not part of it.
+// Fingerprint identifies everything Render shows of t except the elapsed
+// time: a post changed exactly when its fingerprint did.
 func Fingerprint(t Turn) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%t", t.End, t.Halted)
-	for _, c := range t.Tools {
-		fmt.Fprintf(&b, "|%s×%d", c.Name, c.N)
-	}
-	return b.String()
+	t.StartTS, t.LastTS = 0, 0
+	sum := sha256.Sum256([]byte(Render(t)))
+	return hex.EncodeToString(sum[:])
 }
 
 // wordJoiner is invisible and is not a name character.

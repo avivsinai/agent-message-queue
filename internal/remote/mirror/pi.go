@@ -94,11 +94,15 @@ func foldPi(st State, n pi.ActivityNote, carried Carried) (State, []Event) {
 	switch n.Kind {
 	case "user":
 		if t.Cause != "" {
-			break // a steer or follow-up inside the run
+			// A steer or follow-up inside the run.
+			if carried.has(n.ID) {
+				t.AnsweredBuzz()
+			}
+			break
 		}
 		switch {
 		case carried.has(n.ID):
-			t.Cause, t.Answered = CauseBuzz, true
+			t.Cause = CauseBuzz
 		case strings.HasPrefix(strings.TrimSpace(n.Text), harness.Doorbell):
 			t.Cause = CauseMail
 		default:
