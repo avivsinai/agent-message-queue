@@ -76,7 +76,8 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 				}
 			}
 			if tc.off {
-				if _, err := binding.Retire(binding.RemovedDetached, func(o binding.Binding) bool { return o.Name == b.Name }); err != nil {
+				same := func(o binding.Binding) bool { return o.Name == b.Name }
+				if _, _, err := binding.Detach(same, same); err != nil {
 					t.Fatal(err)
 				}
 			}

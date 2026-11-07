@@ -764,22 +764,23 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 }
 
 // Replace writes now in place of the binding called was.Name when that
-// binding is still exactly was, and reports whether it wrote. A binding that
+// binding is still exactly was, and reports whether it wrote, with the
+// binding as written (bound_at stamped when now has none). A binding that
 // changed or was removed meanwhile is left as it is. The check and the write
 // share one transaction.
-func Replace(was, now Binding) (bool, error) {
+func Replace(was, now Binding) (Binding, bool, error) {
 	if err := ValidName(was.Name); err != nil {
-		return false, err
+		return Binding{}, false, err
 	}
 	if err := now.Valid(); err != nil {
-		return false, err
+		return Binding{}, false, err
 	}
 	if now.BoundAt == "" {
 		now.BoundAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	raw, err := json.MarshalIndent(now, "", "  ")
 	if err != nil {
-		return false, err
+		return Binding{}, false, err
 	}
 	replaced := false
 	err = transact(func(string) error {
@@ -803,7 +804,11 @@ func Replace(was, now Binding) (bool, error) {
 		replaced = true
 		return nil
 	})
-	return replaced, err
+	if !replaced {
+		return Binding{}, false, err
+	}
+	now.Name = was.Name
+	return now, true, err
 }
 
 func writeNamed(b Binding, allow func(old Binding) bool) error {
@@ -883,18 +888,28 @@ func PruneEnded(inspect Inspector) ([]string, error) {
 // inherits the removed session's Buzz agent through a freed name. The
 // tombstone, which records why (one of the Removed values), is written
 // before the binding is removed, so a reader that finds the binding gone
-// finds the reason too; a stop between the two leaves the binding bound. A
-// detach also turns each tombstone match accepts that records an end into a
-// detached one and returns its name, so a session whose binding was already
-// pruned is turned off too and is never bound again by itself.
+// finds the reason too; a stop between the two leaves the binding bound.
 // Tombstones are never removed. Their number is bounded by the
 // distinct session identities, and an identity derived from a target (a link
 // share, or a native session whose working directory is unknown) names a
 // process, so each such session leaves one. The legacy single binding has no
 // name to hold and is deleted.
 func Retire(why string, match func(Binding) bool) ([]string, error) {
-	var removed []string
-	err := transact(func(path string) error {
+	removed, _, err := retire(why, match, nil)
+	return removed, err
+}
+
+// Detach retires every binding match accepts as detached, and in the same
+// transaction turns each tombstone ended accepts that records an end into a
+// detached one, so a session whose binding was already pruned is turned off
+// too and is never bound again by itself. It returns the names of the
+// bindings removed and of the tombstones turned off.
+func Detach(match, ended func(Binding) bool) (removed, keptOff []string, err error) {
+	return retire(RemovedDetached, match, ended)
+}
+
+func retire(why string, match, ended func(Binding) bool) (removed, keptOff []string, err error) {
+	err = transact(func(path string) error {
 		dir, err := namedDir(false)
 		if err != nil {
 			return err
@@ -920,13 +935,13 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 			}
 			removed = append(removed, b.Name)
 		}
-		if why == RemovedDetached {
+		if ended != nil {
 			tombs, err := scanTombstones(dir)
 			if err != nil {
 				return err
 			}
 			for _, t := range tombs {
-				if t.Removed != RemovedEnded || !match(t) {
+				if t.Removed != RemovedEnded || !ended(t) {
 					continue
 				}
 				t.Removed = RemovedDetached
@@ -937,7 +952,7 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 				if _, err := fsq.WriteFileAtomic(dir, t.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
 					return err
 				}
-				removed = append(removed, t.Name)
+				keptOff = append(keptOff, t.Name)
 			}
 		}
 		if b, err := read(path); err == nil {
@@ -950,7 +965,7 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 		}
 		return nil
 	})
-	return removed, err
+	return removed, keptOff, err
 }
 
 // DetachedFor reports whether the owner turned b's session off, and the

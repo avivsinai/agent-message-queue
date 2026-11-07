@@ -76,7 +76,7 @@ func (s *Server) reattach(now time.Time) {
 		if pruned {
 			_, _ = binding.ReviveEnded(b, nb)
 		} else {
-			_, _ = binding.Replace(b, nb)
+			_, _, _ = binding.Replace(b, nb)
 		}
 	}
 }

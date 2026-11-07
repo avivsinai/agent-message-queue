@@ -538,6 +538,39 @@ func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 	}
 }
 
+// /amq-remote off in one session turns off only that session: an earlier
+// session on the same handle that ended and was pruned keeps its ended
+// tombstone, so a resume of that session still comes back.
+//
+// Regression (review of the off-after-prune fix): a mailbox --self detach
+// turned every ended tombstone of the handle into a detached one.
+func TestDetachSelfLeavesAnotherSessionsEndedTombstone(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session1")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved := detectHarness
+	t.Cleanup(func() { detectHarness = saved })
+	session := "s-1"
+	detectHarness = func(*codexView, string, string) harnessSession { return harnessSession{Kind: "pi", Session: session} }
+	name := attachMailboxAs(t, root)
+	if _, err := binding.Retire(binding.RemovedEnded, func(b binding.Binding) bool { return b.Name == name }); err != nil {
+		t.Fatal(err)
+	}
+	session = "s-2"
+	var out bytes.Buffer
+	if code, err := detach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach: code=%d err=%v", code, err)
+	}
+	tombs, err := binding.Tombstones()
+	if err != nil || len(tombs) != 1 || tombs[0].Removed != binding.RemovedEnded || strings.TrimSpace(out.String()) != "Not connected." {
+		t.Fatalf("tombstones = %+v, %v; output %q; want s-1 still ended", tombs, err, out.String())
+	}
+}
+
 // A Claude session outside AMQ that no binding serves (the desktop app, a
 // plain terminal) gets the native binding attach --self --native writes,
 // once for two dialogs at a time, and its dialogs open there.

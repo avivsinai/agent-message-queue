@@ -743,10 +743,11 @@ func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
 	}
 	now := b
 	now.AppServer.Daemon = daemon
-	if replaced, err := binding.Replace(b, now); err != nil || !replaced {
+	written, replaced, err := binding.Replace(b, now)
+	if err != nil || !replaced {
 		return b
 	}
-	return now
+	return written
 }
 
 // linkShared reports whether a link share of the root at stateDir names a
@@ -988,31 +989,35 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if scopes != 1 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach needs exactly one of --self, --name <name> or --all")
 	}
-	var match func(binding.Binding) bool
+	var match, ended func(binding.Binding) bool
 	if *self {
 		var code int
 		var err error
 		if match, code, err = selfMatch(c); err != nil {
 			return code, err
 		}
+		ended = selfEnded(c, match)
 	}
 	if *name != "" {
 		match = func(b binding.Binding) bool { return b.Name == *name }
 	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
+	if ended == nil {
+		ended = match
+	}
 	// A session the machine agent serves stops taking messages in its
 	// channel as soon as the binding is gone; the machine agent archives the
 	// channel after that.
 	channel := false
-	removed, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool {
+	removed, keptOff, err := binding.Detach(func(b binding.Binding) bool {
 		if !match(b) {
 			return false
 		}
 		_, has := acp.MachineChannelOf(b)
 		channel = channel || has
 		return true
-	})
+	}, ended)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -1020,7 +1025,15 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if removed == nil {
 			removed = []string{}
 		}
-		emitJSON(stdout, map[string]any{"removed": removed})
+		out := map[string]any{"removed": removed}
+		if len(keptOff) > 0 {
+			out["kept_off"] = keptOff
+		}
+		emitJSON(stdout, out)
+		return 0, nil
+	}
+	if len(removed) == 0 && len(keptOff) > 0 {
+		say(stdout, "Kept off: %d (already ended).", len(keptOff))
 		return 0, nil
 	}
 	if len(removed) == 0 {
@@ -1033,6 +1046,23 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
 	return 0, nil
+}
+
+// selfEnded reports whether an ended session's tombstone that match accepts
+// is the invoking session's: a native tombstone names its native session
+// already; a mailbox tombstone must record the session id this session's
+// harness proves on its handle. A session it cannot prove matches no mailbox
+// tombstone, so one session's off never turns an earlier session on the same
+// handle off.
+func selfEnded(c *common, match func(binding.Binding) bool) func(binding.Binding) bool {
+	session := ""
+	if handle := strings.TrimSpace(os.Getenv("AM_ME")); handle != "" && c.root != "" {
+		h := detectHarness(newCodexView(), c.root, handle)
+		session = binding.Binding{Transcript: h.Transcript, HarnessSession: h.Session}.RecordedSession()
+	}
+	return func(t binding.Binding) bool {
+		return match(t) && (!t.Mailbox() || session != "" && t.RecordedSession() == session)
+	}
 }
 
 // selfMatch reports whether a binding is the invoking session's: its
