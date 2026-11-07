@@ -1,9 +1,6 @@
 package claude
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,153 +11,12 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 )
 
-// Every AMQ write to a hooks file goes through editSettings. It holds one
-// advisory lock per file under ~/.amq/locks, so two AMQ writers never lose
-// each other's entry. It also reads the file again just before the rename
-// and applies the edit again when the bytes changed. That narrows, and does
-// not close, the window of a writer that takes no lock (an older AMQ, or
-// another program): its write between that re-read and the rename is lost.
-// A rewrite keeps the file's permission bits; a new file is 0600.
-
-// settingsEditTries bounds how often one edit is applied again because the
-// file changed under it.
-const settingsEditTries = 5
-
-// editSettings applies edit to the bytes of the settings file at path and
-// writes the result atomically, and reports whether it wrote; a nil result
-// writes nothing. A missing file is started as seed, and is left alone when
-// seed is nil.
-func editSettings(path string, seed []byte, edit func([]byte) ([]byte, error)) (bool, error) {
-	var wrote bool
-	err := withSettingsLock(path, func() error {
-		var err error
-		wrote, err = editSettingsLocked(path, seed, edit)
-		return err
-	})
-	return wrote, err
-}
-
-// editSettingsLocked is editSettings for a caller that holds the file's
-// lock.
-func editSettingsLocked(path string, seed []byte, edit func([]byte) ([]byte, error)) (bool, error) {
-	for range settingsEditTries {
-		raw, exists, err := readSettings(path)
-		if err != nil {
-			return false, err
-		}
-		if !exists {
-			if seed == nil {
-				return false, nil
-			}
-			raw = seed
-		}
-		out, err := edit(raw)
-		if err != nil {
-			return false, fmt.Errorf("settings %s: %w", path, err)
-		}
-		if out == nil {
-			return false, nil // nothing changed
-		}
-		if !json.Valid(out) {
-			// Defense in depth: never write a file Claude Code cannot parse.
-			return false, fmt.Errorf("settings %s: edit would produce invalid JSON; refusing", path)
-		}
-		again, stillExists, err := readSettings(path)
-		if err != nil {
-			return false, err
-		}
-		if stillExists != exists || exists && !bytes.Equal(again, raw) {
-			continue // another writer changed it: apply the edit to its bytes
-		}
-		perm := os.FileMode(0o600)
-		if exists {
-			if info, err := os.Lstat(path); err == nil {
-				perm = info.Mode().Perm()
-			}
-		} else if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return false, fmt.Errorf("settings %s: %w", path, err)
-		}
-		if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), out, perm); err != nil {
-			return false, fmt.Errorf("settings %s: %w", path, err)
-		}
-		return true, nil
-	}
-	return false, fmt.Errorf("settings %s: it changed during each of %d edits; run again", path, settingsEditTries)
-}
-
-// readSettings reads the settings file at path; exists is false when there
-// is no file.
-func readSettings(path string) (raw []byte, exists bool, err error) {
-	raw, err = readRegularBounded(path, maxSettingsBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("settings %s: %w", path, err)
-	}
-	return raw, true, nil
-}
-
-// withSettingsLock runs fn while it holds the lock of the settings file at
-// path: ~/.amq/locks/settings-<key>.lock, where key names the file with its
-// directory's symlinks resolved, so one file reached two ways has one lock.
-// A platform with no advisory lock runs fn without one.
-func withSettingsLock(path string, fn func() error) error {
-	return withSettingsLockWait(path, settingsLockWait, fn)
-}
-
-// ErrSettingsBusy is the refusal of a writer that did not get a settings
-// file's lock within its wait.
-var ErrSettingsBusy = errors.New("another AMQ writer holds the settings file's lock")
-
-const (
-	// settingsLockWait bounds how long a command waits for a lock.
-	settingsLockWait = 10 * time.Second
-	// settingsLockTry bounds how long the machine agent's tick waits: a
-	// busy file is checked again on the next tick.
-	settingsLockTry = 50 * time.Millisecond
-)
-
-// withSettingsLockWait is withSettingsLock that gives up after wait with
-// ErrSettingsBusy, without running fn.
-func withSettingsLockWait(path string, wait time.Duration, fn func() error) error {
-	if !lock.AdvisoryLockAvailable() {
-		return fn()
-	}
-	home, err := amqhome.Dir()
-	if err != nil {
-		return fmt.Errorf("settings lock: %w", err)
-	}
-	dir := filepath.Join(home, "locks")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("settings lock: %w", err)
-	}
-	lockPath := filepath.Join(dir, "settings-"+settingsKey(path)+".lock")
-	deadline := time.Now().Add(wait)
-	err = lock.WithExclusiveFileLockUntil(lockPath, func() bool { return time.Now().After(deadline) }, fn)
-	if errors.Is(err, lock.ErrStopped) {
-		return fmt.Errorf("settings %s: %w (%s, waited %s); run again once it is done", path, ErrSettingsBusy, lockPath, wait)
-	}
-	return err
-}
-
-// canonicalSettings is path with its directory's symlinks resolved, or
-// clean when the directory does not resolve.
-func canonicalSettings(path string) string {
-	path = filepath.Clean(path)
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		return filepath.Join(dir, filepath.Base(path))
-	}
-	return path
-}
-
-func settingsKey(path string) string {
-	sum := sha256.Sum256([]byte(canonicalSettings(path)))
-	return hex.EncodeToString(sum[:12])
-}
+// ErrSettingsBusy is the refusal of a hook writer that did not get the
+// settings file's lock within its wait.
+var ErrSettingsBusy = hookfile.ErrBusy
 
 // The owner's opt-in: install-approval-hook and install-stop-hook record,
 // per settings file, that the owner wants that hook there, with the binary
@@ -205,7 +61,7 @@ func optInPath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "remote", "hooks", settingsKey(path)+".json"), nil
+	return filepath.Join(home, "remote", "hooks", hookfile.Key(path)+".json"), nil
 }
 
 // ReadHookOptIn reads the opt-in of the settings file at path; a file with
@@ -242,7 +98,7 @@ func setHookOptIn(path, kind string, shape *HookShape) error {
 		return err
 	}
 	before := in
-	in.Settings = canonicalSettings(path)
+	in.Settings = hookfile.Canonical(path)
 	if kind == HookApproval {
 		in.Approval, in.ApprovalRemoved = shape, shape == nil
 	} else {
@@ -271,12 +127,12 @@ func OptInPermissionHook(home, settings, bin string) (bool, error) {
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), optInInstall, settingsLockWait)
+	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), optInInstall, hookfile.LockWait)
 }
 
 // OptInStopHook is OptInPermissionHook for the Stop hook.
 func OptInStopHook(home, settings, bin string) (bool, error) {
-	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), optInInstall, settingsLockWait)
+	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), optInInstall, hookfile.LockWait)
 }
 
 // optInMode is what optIn requires of the owner's opt-in before it writes.
@@ -308,9 +164,9 @@ var ErrHookRemoved = errors.New("the owner removed this hook with its uninstall 
 // and records the opt-in of kind for bin, under one lock. With ensure set it
 // refuses with ErrHookRemoved when the owner removed that hook. It waits
 // for the lock at most wait (ErrSettingsBusy).
-func optIn(settings, kind, bin string, spec hookSpec, entry []byte, mode optInMode, wait time.Duration) (bool, error) {
+func optIn(settings, kind, bin string, spec hookfile.Spec, entry []byte, mode optInMode, wait time.Duration) (bool, error) {
 	changed := false
-	err := withSettingsLockWait(settings, wait, func() error {
+	err := hookfile.WithLockWait(settings, wait, func() error {
 		if mode != optInInstall {
 			in, err := ReadHookOptIn(settings)
 			if err != nil {
@@ -323,18 +179,18 @@ func optIn(settings, kind, bin string, spec hookSpec, entry []byte, mode optInMo
 				return ErrNoOptIn
 			}
 		}
-		same, err := installedAs(settings, spec, entry)
+		same, err := hookfile.InstalledAs(settings, spec, entry)
 		if err != nil {
 			return err
 		}
 		if !same {
 			// An upgrade writes only into a file that exists, as a restore
 			// does: a file the owner deleted stays deleted.
-			seed := spec.seed()
+			seed := spec.Seed()
 			if mode == optInUpgrade {
 				seed = nil
 			}
-			if changed, err = editSettingsLocked(settings, seed, replaceEdit(spec, entry)); err != nil {
+			if changed, err = hookfile.EditLocked(settings, seed, hookfile.ReplaceEdit(spec, entry)); err != nil {
 				return err
 			}
 		}
@@ -350,8 +206,8 @@ func OptOutHook(settings, kind string) error {
 	if kind == HookStop {
 		spec = stopHook
 	}
-	return withSettingsLock(settings, func() error {
-		if _, err := editSettingsLocked(settings, nil, removeEdit(spec)); err != nil {
+	return hookfile.WithLock(settings, func() error {
+		if _, err := hookfile.EditLocked(settings, nil, hookfile.RemoveEdit(spec)); err != nil {
 			return err
 		}
 		return setHookOptIn(settings, kind, nil)
@@ -364,7 +220,7 @@ func OptOutHook(settings, kind string) error {
 // the amq-remote installed now, which must exist: a recorded path that an
 // upgrade removed is never written back. It reads the opt-in under the
 // file's lock, so an uninstall that ran first wins, and waits for that lock
-// at most settingsLockTry (ErrSettingsBusy). It reports whether it wrote the
+// at most hookfile.LockTry (ErrSettingsBusy). It reports whether it wrote the
 // hook; false with no error means no opt-in, no file or a hook already
 // there.
 func RestoreHook(home, settings, kind, bin string) (bool, error) {
@@ -372,12 +228,12 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 		return false, fmt.Errorf("the hook binary %q is not an installed file", bin)
 	}
 	restored := false
-	err := withSettingsLockWait(settings, settingsLockTry, func() error {
+	err := hookfile.WithLockWait(settings, hookfile.LockTry, func() error {
 		in, err := ReadHookOptIn(settings)
 		if err != nil {
 			return err
 		}
-		var spec hookSpec
+		var spec hookfile.Spec
 		var entry []byte
 		switch {
 		case kind == HookApproval && in.Approval != nil:
@@ -387,11 +243,11 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 		default:
 			return nil
 		}
-		restored, err = editSettingsLocked(settings, nil, func(raw []byte) ([]byte, error) {
-			if groups, err := markedGroupsIn(raw, spec); err != nil || len(groups) > 0 {
+		restored, err = hookfile.EditLocked(settings, nil, func(raw []byte) ([]byte, error) {
+			if groups, err := hookfile.MarkedGroupsIn(raw, spec); err != nil || len(groups) > 0 {
 				return nil, err
 			}
-			return rawInsertEntry(raw, spec, entry)
+			return hookfile.InsertEntry(raw, spec, entry)
 		})
 		return err
 	})
@@ -404,20 +260,20 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 // with ErrHookRemoved a hook the owner removed. It reports whether it
 // changed the settings file.
 func EnsurePermissionHook(home, settings, bin string) (bool, error) {
-	return ensureHook(home, settings, HookApproval, bin, optInEnsure, settingsLockWait)
+	return ensureHook(home, settings, HookApproval, bin, optInEnsure, hookfile.LockWait)
 }
 
 // EnsureStopHook is EnsurePermissionHook for the Stop hook.
 func EnsureStopHook(home, settings, bin string) (bool, error) {
-	return ensureHook(home, settings, HookStop, bin, optInEnsure, settingsLockWait)
+	return ensureHook(home, settings, HookStop, bin, optInEnsure, hookfile.LockWait)
 }
 
 // UpgradeHook is EnsurePermissionHook (kind HookApproval) or EnsureStopHook
 // for the machine agent's tick: it acts only while the owner's opt-in of
 // that kind exists (ErrNoOptIn), never creates one, and waits for the
-// file's lock at most settingsLockTry (ErrSettingsBusy).
+// file's lock at most hookfile.LockTry (ErrSettingsBusy).
 func UpgradeHook(home, settings, kind, bin string) (bool, error) {
-	return ensureHook(home, settings, kind, bin, optInUpgrade, settingsLockTry)
+	return ensureHook(home, settings, kind, bin, optInUpgrade, hookfile.LockTry)
 }
 
 func ensureHook(home, settings, kind, bin string, mode optInMode, wait time.Duration) (bool, error) {
@@ -425,7 +281,7 @@ func ensureHook(home, settings, kind, bin string, mode optInMode, wait time.Dura
 	if kind == HookStop {
 		spec, binRe = stopHook, stopHookBinRe
 	}
-	cmds, _ := installedCommands(settings, spec)
+	cmds, _ := hookfile.InstalledCommands(settings, spec)
 	bin = KeptHookBin(cmds, binRe, bin)
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)

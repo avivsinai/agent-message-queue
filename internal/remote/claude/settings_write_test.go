@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 )
 
 // Regression: on 2026-11-05 the approval hook left a settings.json because
@@ -23,14 +25,14 @@ func TestConcurrentInstallsKeepBothEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(home, "bin", "amq-remote")
-	approval := replaceEdit(permissionSpec, permissionHookEntry(home, bin))
+	approval := hookfile.ReplaceEdit(permissionSpec, permissionHookEntry(home, bin))
 	other := true
-	_, err := editSettings(path, permissionSpec.seed(), func(raw []byte) ([]byte, error) {
+	_, err := hookfile.Edit(path, permissionSpec.Seed(), func(raw []byte) ([]byte, error) {
 		if other {
 			// The other install renames its file between this read and
 			// this rename.
 			other = false
-			theirs, err := replaceEdit(stopHook, stopHookEntry(home, bin))(raw)
+			theirs, err := hookfile.ReplaceEdit(stopHook, stopHookEntry(home, bin))(raw)
 			if err != nil {
 				t.Fatal(err)
 			}

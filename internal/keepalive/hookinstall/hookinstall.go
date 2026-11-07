@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 const (
@@ -352,12 +352,12 @@ func Install(opts Options) (Result, error) {
 // writer would refuse, with the writer's own check.
 func preflightHookConfigs(opts Options) error {
 	if opts.Agent == AgentClaude || opts.Agent == AgentBoth {
-		if err := claude.CheckSettings(opts.ClaudeConfig, "SessionStart"); err != nil {
+		if err := hookfile.Check(opts.ClaudeConfig, "SessionStart"); err != nil {
 			return err
 		}
 	}
 	if opts.Agent == AgentCodex || opts.Agent == AgentBoth {
-		if err := claude.CheckSettings(opts.CodexConfig, "SessionStart"); err != nil {
+		if err := hookfile.Check(opts.CodexConfig, "SessionStart"); err != nil {
 			return err
 		}
 	}
@@ -434,7 +434,7 @@ func NormalizeOptions(opts Options) (Options, error) {
 // cannot read, or one for another script that exists, stays, except a
 // byte-identical second copy of an owned group, which is removed.
 func installHook(path, scriptPath, agent, command string, hookTimeoutSeconds int) (FileResult, error) {
-	changed, err := claude.InstallCommandHooksAt(path, []claude.CommandHook{{
+	changed, err := hookfile.InstallCommandHooksAt(path, []hookfile.CommandHook{{
 		Event:   "SessionStart",
 		Matcher: sessionStartMatcher,
 		Marker:  amqOwnedCommandPrefix,

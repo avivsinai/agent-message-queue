@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 )
 
 // The Cursor approval guard. Cursor runs no hook when its approval prompt
@@ -87,10 +87,10 @@ func cursorDialogHookCommand(bin, verb string) string {
 // agent's environment, so the shell gate and the receiver read AM_ME and
 // AM_ROOT as for Claude Code; exit 2 from an older amq would deny a tool
 // call, so the amq call ends in || true before the printf.
-func cursorDialogHooks(bin string) []claude.CommandHook {
-	hooks := make([]claude.CommandHook, 0, len(cursorDialogHookEvents))
+func cursorDialogHooks(bin string) []hookfile.CommandHook {
+	hooks := make([]hookfile.CommandHook, 0, len(cursorDialogHookEvents))
 	for _, event := range cursorDialogHookEvents {
-		hooks = append(hooks, claude.CommandHook{
+		hooks = append(hooks, hookfile.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
 			Command: cursorDialogHookCommand(bin, cursorDialogHookVerb(event)),
@@ -118,7 +118,7 @@ func installCursorDialogHook(bin string, dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("resolve home for the Cursor dialog hook: %w", err)
 	}
-	if err := claude.InstallCursorCommandHooksAt(path, hooks); err != nil {
+	if err := hookfile.InstallCursorCommandHooksAt(path, hooks); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook installed in %s\n"+
@@ -132,7 +132,7 @@ func uninstallCursorDialogHook() error {
 	if err != nil {
 		return fmt.Errorf("resolve home for the Cursor dialog hook: %w", err)
 	}
-	if err := claude.UninstallCursorCommandHooksAt(path, wakeDialogHookMarker, cursorDialogHookEvents); err != nil {
+	if err := hookfile.UninstallCursorCommandHooksAt(path, wakeDialogHookMarker, cursorDialogHookEvents); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook removed from %s\n", path)
@@ -156,7 +156,7 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 	var commands []installed
 	var missing []string
 	for _, event := range cursorDialogHookEvents {
-		found, err := claude.MarkedCursorHookCommandsAt(path, event, wakeDialogHookMarker)
+		found, err := hookfile.MarkedCursorHookCommandsAt(path, event, wakeDialogHookMarker)
 		if err != nil {
 			check.Message = fmt.Sprintf("read %s: %v", path, err)
 			return check, true
@@ -179,7 +179,7 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 	if raw, err := os.ReadFile(path); err != nil {
 		check.Message = fmt.Sprintf("read %s: %v", path, err)
 		return check, true
-	} else if err := claude.ValidateCursorHooks(raw); err != nil {
+	} else if err := hookfile.ValidateCursorHooks(raw); err != nil {
 		check.Message = fmt.Sprintf("Cursor ignores %s: %v; %s", path, err, remedy)
 		return check, true
 	}
