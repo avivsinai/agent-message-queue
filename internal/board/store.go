@@ -47,6 +47,18 @@ const evidenceLimit = 256 << 20
 
 var errEvidenceBound = errors.New("board evidence bound reached; ingestion stopped")
 
+// evidenceBoundError is errEvidenceBound with the bytes by which staging
+// would pass the bound.
+type evidenceBoundError struct{ excess int64 }
+
+func (e evidenceBoundError) Error() string        { return errEvidenceBound.Error() }
+func (e evidenceBoundError) Is(target error) bool { return target == errEvidenceBound }
+
+// errEvidenceSwept reports that evidence staged for an acquisition was
+// removed by a new base before the acquisition was published. Staging again
+// recovers it.
+var errEvidenceSwept = errors.New("board evidence staged for this refresh was removed before publication; refresh again")
+
 // Store is bound to the authenticated canonical base root for its lifetime.
 // It never repairs an existing store or restores a backup implicitly.
 type Store struct {
@@ -91,6 +103,9 @@ type Snapshot struct {
 	// generation that pruned it. The file goes once neither the base snapshot
 	// nor its backup can name the message.
 	RetiredEvidence map[string]uint64 `json:"retired_evidence,omitempty"`
+	// newBase asks the next publication for a new base, which sweeps
+	// evidence that nothing names. It is never stored.
+	newBase bool
 }
 
 type Task struct {
@@ -449,13 +464,9 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err != nil {
 			return err
 		}
-		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget) {
-			// A prune that drops a message something still names must not
-			// publish: the store would need recovery on its next read.
-			if state.validatePruned() == nil {
-				if data, err = snapshotBytes(&state); err != nil {
-					return err
-				}
+		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget, nil) {
+			if data, err = snapshotBytes(&state); err != nil {
+				return err
 			}
 		}
 		if len(data) > snapshotLimit-snapshotReserve {
@@ -495,14 +506,16 @@ func (s Store) publish(state *Snapshot, prev document) error {
 // It appends the leaf changes from prev to the journal, or writes a new base
 // when prev is none or an older schema, when the journal would pass a quarter
 // of the base, or while pruned evidence waits to be removed. A new base keeps
-// the old base and its journal as the recovery copy (keepBackup), so every
-// crash point leaves the previous generation recoverable under the
-// write-pending marker.
+// the old base and its journal as the recovery copy (keepBackup) without
+// moving them, and journal.jsonl goes only after the new base is durable, so
+// at every crash point snapshot.json with journal.jsonl, or the new base
+// alone, is the last published generation. The write-pending marker names
+// which publication was interrupted.
 func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if len(data) > snapshotLimit {
 		return errors.New("board snapshot reached 64 MiB; ingestion stopped, existing state preserved")
 	}
-	compact := prev.data == nil || prev.baseSchema != SnapshotSchema || len(state.RetiredEvidence) > 0
+	compact := prev.data == nil || prev.baseSchema != SnapshotSchema || len(state.RetiredEvidence) > 0 || state.newBase
 	var record []byte
 	if !compact {
 		ops, err := diffRaw(prev.data, data, nil, nil)
@@ -515,26 +528,32 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		record = append(record, '\n')
 		compact = prev.journalBytes+int64(len(record)) > prev.baseBytes/4
 	}
+	// A retired hash is stamped with the generation that first publishes it.
 	// Retired evidence the old base no longer names goes with this base: the
 	// old base becomes the backup, so no kept generation names it.
-	var unlink []string
-	if compact {
-		for hash, gen := range state.RetiredEvidence {
-			if prev.data != nil && gen <= prev.baseGeneration {
-				unlink = append(unlink, hash)
-				delete(state.RetiredEvidence, hash)
-			}
+	changed := false
+	for hash, gen := range state.RetiredEvidence {
+		if gen == 0 {
+			state.RetiredEvidence[hash] = state.Generation
+			changed = true
+		} else if prev.data != nil && gen <= prev.baseGeneration {
+			delete(state.RetiredEvidence, hash)
+			changed = true
 		}
-		if len(unlink) > 0 {
-			var err error
-			if data, err = snapshotBytes(state); err != nil {
-				return err
-			}
+	}
+	if changed {
+		var err error
+		if data, err = snapshotBytes(state); err != nil {
+			return err
 		}
 	}
 	// A durable marker makes an interrupted or uncertain rename fail closed on
 	// the next writer. Readers never fall back to source reads or a backup.
-	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("publication pending\n"), 0o600); err != nil {
+	marker := "journal append pending\n"
+	if compact {
+		marker = fmt.Sprintf("new base pending: generation %d\n", state.Generation)
+	}
+	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte(marker), 0o600); err != nil {
 		return err
 	}
 	if compact {
@@ -542,6 +561,9 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 			return err
 		}
 		if _, err := fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
+			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
+		}
+		if err := os.Remove(filepath.Join(s.Dir, journalName)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 		}
 	} else if err := s.appendJournal(record); err != nil {
@@ -557,52 +579,158 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		_, _ = fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("durability uncertain\n"), 0o600)
 		return fmt.Errorf("board durability uncertain; stop writes: %w", err)
 	}
-	// Leftover evidence is immutable and safe, so a crash here only leaks it.
-	for _, hash := range unlink {
-		_ = os.Remove(filepath.Join(s.Dir, "evidence", hash+".json"))
+	if compact {
+		// Leftover evidence is immutable and safe, so a crash or a failed
+		// sweep only leaks it until the next new base.
+		_ = s.sweepEvidence(state, prev)
 	}
 	return nil
+}
+
+// namedEvidence is the evidence file names a new base keeps: those state
+// and the recovery copy (prev, the document the new base replaces) name, and
+// the pending retirements.
+func namedEvidence(state *Snapshot, prev document) (map[string]bool, error) {
+	named := map[string]bool{}
+	for _, m := range state.Messages {
+		named[m.EvidenceHash+".json"] = true
+	}
+	for hash := range state.RetiredEvidence {
+		named[hash+".json"] = true
+	}
+	if prev.data != nil {
+		var backup struct {
+			Messages map[string]struct {
+				EvidenceHash string `json:"evidence_hash"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(prev.data, &backup); err != nil {
+			return nil, err
+		}
+		for _, m := range backup.Messages {
+			named[m.EvidenceHash+".json"] = true
+		}
+	}
+	return named, nil
+}
+
+// holdsUnnamedEvidence reports whether the evidence directory holds bytes a
+// new base would sweep: named by neither namedEvidence of the published
+// state nor staged, the files this acquisition just wrote.
+func (s Store) holdsUnnamedEvidence(ctx context.Context, staged map[string]bool) (bool, error) {
+	var named map[string]bool
+	err := lock.WithExclusiveFileLockUntil(filepath.Join(s.Dir, "writer.lock"), func() bool { return ctx.Err() != nil }, func() error {
+		if err := s.validateIdentity(ctx); err != nil {
+			return err
+		}
+		state, doc, err := s.readUnlocked(ctx)
+		if err != nil {
+			return err
+		}
+		named, err = namedEvidence(&state, doc)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir(filepath.Join(s.Dir, "evidence"))
+	if os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if named[e.Name()] || staged[e.Name()] || !e.Type().IsRegular() {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.Size() > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// sweepEvidence removes every evidence file that the published state, the
+// recovery copy (prev) and RetiredEvidence leave unnamed. It holds the
+// evidence lock, so no staging measures the bound while it runs; evidence
+// staged for a publication that has not happened yet goes too, and that
+// publication's evidence check refuses it until it is staged again.
+func (s Store) sweepEvidence(state *Snapshot, prev document) error {
+	named, err := namedEvidence(state, prev)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(s.Dir, "evidence")
+	return lock.WithExclusiveFileLockUntil(filepath.Join(s.Dir, "evidence.lock"), func() bool { return false }, func() error {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if !named[e.Name()] && e.Type().IsRegular() {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // backupJournalName replays over snapshot.backup.json to the generation
 // before the current base.
 const backupJournalName = "snapshot.backup.journal.jsonl"
 
-// keepBackup makes the current base snapshot.backup.json without copying it,
-// then moves the current journal beside it, so the recovery copy replays to
-// the previous generation. Until the new base replaces snapshot.json, the
-// current base is unchanged.
+// keepBackup makes the current base and its journal snapshot.backup.json and
+// snapshot.backup.journal.jsonl, which replay to the current generation. It
+// never moves or changes snapshot.json or journal.jsonl.
 func (s Store) keepBackup() error {
-	current := filepath.Join(s.Dir, "snapshot.json")
-	if _, err := os.Lstat(current); os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(s.Dir, "snapshot.json")); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	staged := filepath.Join(s.Dir, "snapshot.backup.json.tmp")
-	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+	if err := s.linkBackup("snapshot.json", "snapshot.backup.json"); err != nil {
 		return err
 	}
-	if err := os.Link(current, staged); err == nil {
-		if err = os.Rename(staged, filepath.Join(s.Dir, "snapshot.backup.json")); err != nil {
-			return err
-		}
-	} else {
-		old, err := readBounded(current, snapshotLimit)
-		if err != nil {
-			return err
-		}
-		if _, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600); err != nil {
-			return err
-		}
-	}
-	err := os.Rename(filepath.Join(s.Dir, journalName), filepath.Join(s.Dir, backupJournalName))
+	err := s.linkBackup(journalName, backupJournalName)
 	if os.IsNotExist(err) {
 		err = os.Remove(filepath.Join(s.Dir, backupJournalName))
 		if os.IsNotExist(err) {
 			return nil
 		}
 	}
+	return err
+}
+
+// linkBackup makes backup hold the bytes of name, a hard link where the file
+// system allows one and a durable copy otherwise. name is not changed.
+func (s Store) linkBackup(name, backup string) error {
+	source := filepath.Join(s.Dir, name)
+	staged := filepath.Join(s.Dir, backup+".tmp")
+	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	err := os.Link(source, staged)
+	if err == nil {
+		// Renaming a link onto a link of the same file leaves staged behind.
+		if err = os.Rename(staged, filepath.Join(s.Dir, backup)); err != nil {
+			return err
+		}
+		if err = os.Remove(staged); os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	} else if os.IsNotExist(err) {
+		return err
+	}
+	data, err := readBounded(source, snapshotLimit)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteFileAtomic(s.Dir, backup, data, 0o600)
 	return err
 }
 
@@ -622,15 +750,18 @@ func (s Store) appendJournal(record []byte) error {
 	return f.Close()
 }
 
-func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[string]bool) error {
+// saveEvidence writes the blobs that are new and returns the evidence file
+// names it wrote.
+func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[string]bool) (map[string]bool, error) {
+	written := map[string]bool{}
 	dir := filepath.Join(s.Dir, "evidence")
 	if info, err := os.Lstat(dir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
-		return errors.New("unsafe board evidence directory")
+		return written, errors.New("unsafe board evidence directory")
 	} else if err != nil && !os.IsNotExist(err) {
-		return err
+		return written, err
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
-		return err
+		return written, err
 	}
 	// The budget scan stats every evidence file, so it runs only when a blob
 	// is new.
@@ -650,12 +781,12 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 		}
 		return nil
 	}
-	for _, b := range blobs {
+	for i, b := range blobs {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return written, ctx.Err()
 		}
 		if err := s.safeDirectory(); err != nil {
-			return err
+			return written, err
 		}
 		sum := sha256.Sum256(b)
 		hash := hex.EncodeToString(sum[:])
@@ -665,26 +796,43 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 		name := hash + ".json"
 		if previous, err := readBounded(filepath.Join(dir, name), snapshotLimit); err == nil {
 			if string(previous) != string(b) {
-				return errors.New("board evidence hash conflict")
+				return written, errors.New("board evidence hash conflict")
 			}
 			continue
 		} else if !os.IsNotExist(err) {
-			return err
+			return written, err
 		}
 		if used < 0 {
 			if err := measure(); err != nil {
-				return err
+				return written, err
 			}
 		}
 		if len(b) > snapshotLimit || used+int64(len(b)) > evidenceLimit {
-			return errEvidenceBound
+			// The excess counts only blobs this batch would add: not on
+			// disk, not pruned, not repeated.
+			excess := used - evidenceLimit
+			counted := map[string]bool{}
+			for _, rest := range blobs[i:] {
+				sum := sha256.Sum256(rest)
+				h := hex.EncodeToString(sum[:])
+				if pruned[h] || counted[h] {
+					continue
+				}
+				counted[h] = true
+				if _, err := os.Lstat(filepath.Join(dir, h+".json")); err == nil {
+					continue
+				}
+				excess += int64(len(rest))
+			}
+			return written, evidenceBoundError{excess: excess}
 		}
 		if _, err := fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
-			return err
+			return written, err
 		}
+		written[name] = true
 		used += int64(len(b))
 	}
-	return fsq.SyncDir(s.Dir)
+	return written, fsq.SyncDir(s.Dir)
 }
 
 func (s Store) Commit(ctx context.Context, a Acquisition) error {
@@ -695,7 +843,34 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		return ErrProjectChanged
 	}
 	s.ProjectID = a.ProjectID
-	stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
+	// A new base between staging and publication can remove the staged
+	// evidence; staging once more recovers it.
+	err := s.commit(ctx, a)
+	if errors.Is(err, errEvidenceSwept) {
+		err = s.commit(ctx, a)
+	}
+	return err
+}
+
+func (s Store) commit(ctx context.Context, a Acquisition) error {
+	staged, stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
+	if errors.Is(stageErr, errEvidenceBound) {
+		// A new base removes the evidence nothing names; only what is
+		// still past the bound after it is pressure.
+		unnamed, err := s.holdsUnnamedEvidence(ctx, staged)
+		if err != nil {
+			return err
+		}
+		if unnamed {
+			if err := s.update(ctx, func(state *Snapshot) error {
+				state.newBase = true
+				return nil
+			}); err != nil {
+				return err
+			}
+			_, stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
+		}
+	}
 	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
 		return stageErr
 	}
@@ -713,6 +888,20 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 				return err
 			}
 			stopped = true
+			// Named evidence past the bound prunes the oldest unheld history
+			// by the bytes still over it, so a later publication removes
+			// those files and ingestion resumes. While a retirement is
+			// pending, its removal comes first and nothing more is pruned.
+			var over evidenceBoundError
+			if len(state.RetiredEvidence) == 0 && errors.As(err, &over) {
+				state.pruneHistory(int(over.excess), func(m Message) int {
+					info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
+					if err != nil {
+						return 0
+					}
+					return int(info.Size())
+				})
+			}
 			// Do not publish references to any partially ingested evidence. Keep prior
 			// facts and identities, and publish the failed acquisition coverage itself.
 			found := false
@@ -785,9 +974,19 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		a.Input.Known = known
 		state.Input = a.Input
 		state.Usage = a.Usage
+		// Evidence staged before a concurrent prune can belong to a message
+		// that is now pruned; it is retired like the prune's own evidence.
+		var skipped []string
+		defer func() { state.retireEvidence(skipped) }()
 		for _, m := range a.Messages {
-			if state.Pruned(m.ID, m.Created) {
+			if state.Pruned(m.ID) {
+				skipped = append(skipped, m.EvidenceHash)
 				continue
+			}
+			if _, published := state.Messages[m.Key]; !published {
+				if _, err := os.Lstat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json")); os.IsNotExist(err) {
+					return errEvidenceSwept
+				}
 			}
 			if previous, ok := state.Messages[m.Key]; ok {
 				before, after := previous, m

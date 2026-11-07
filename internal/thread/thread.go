@@ -173,10 +173,6 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 	return entries, nil
 }
 
-// idStampLayout is the UTC creation stamp that starts every AMQ message id,
-// and so every message file name (<id>.md).
-const idStampLayout = "2006-01-02T15-04-05.000Z"
-
 // CollectAll reads the header of every message under roots, in every thread
 // and every agent mailbox, and returns one record per message id with every
 // copy it saw. A file whose name starts with an id stamp older than cutoff is
@@ -210,11 +206,9 @@ func CollectAll(roots []ScanRoot, cutoff time.Time, onError func(path string, er
 					if file.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 						continue
 					}
-					if !cutoff.IsZero() && len(name) >= len(idStampLayout) {
-						if stamp, err := time.Parse(idStampLayout, name[:len(idStampLayout)]); err == nil && stamp.Before(cutoff) {
-							result.Pruned[scanRoot.Session]++
-							continue
-						}
+					if stamp, ok := format.IDTime(name); ok && !cutoff.IsZero() && stamp.Before(cutoff) {
+						result.Pruned[scanRoot.Session]++
+						continue
 					}
 					path := filepath.Join(dir, name)
 					occurrence := Occurrence{Session: scanRoot.Session, Agent: agent, Dir: leaf, Path: path}

@@ -265,8 +265,8 @@ func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 }
 
 // NEW needs positive current intent in addition to structural outcome text,
-// and a request that some scoped recipient has not directly replied to.
-func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
+// and a request that the thread reduction holds open.
+func newEligible(s Snapshot, u EvidenceUnit, now time.Time, open map[string]bool) bool {
 	m := s.Messages[u.MessageKey]
 	episode, episodeErr := buildEpisode(s, []EvidenceUnit{u})
 	if episodeErr != nil || episode.Partial {
@@ -274,7 +274,7 @@ func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
 	}
 	o, ok := s.Observations[m.Key]
 	created, err := time.Parse(time.RFC3339Nano, m.Created)
-	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] || !newRequestIndex(s).request(m.Key, now).NoDirectReply {
+	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] || !open[m.Key] {
 		return false
 	}
 	for _, prior := range s.Messages {
@@ -443,10 +443,11 @@ func buildDecision(s Snapshot, units []EvidenceUnit, expanded bool, now time.Tim
 	for _, it := range req.Interpretations[2:] {
 		attachmentIDs = append(attachmentIDs, it.ID)
 	}
+	open := s.openRequests()
 	for ui, u := range units {
 		allowed := []string{"non_actionable", "unresolved"}
 		allowed = append(allowed, attachmentIDs...)
-		if newEligible(s, u, now) {
+		if newEligible(s, u, now, open) {
 			id := fmt.Sprintf("new_%d", ui)
 			copy := u
 			choices[id] = SuggestionChoice{ID: id, Kind: "new", Outcome: &copy, CurrentAsk: &copy}
@@ -677,7 +678,7 @@ func (s Store) AdoptSuggestion(ctx context.Context, a SuggestionAdoption) ([]str
 				state.Tasks[id] = task
 				ids = appendUnique(ids, id)
 			case "new":
-				if !a.ConfirmIndependent || c.Outcome == nil || c.CurrentAsk == nil || !unitValid(*state, *c.Outcome) || !unitValid(*state, *c.CurrentAsk) || !newEligible(*state, *c.CurrentAsk, time.Now()) {
+				if !a.ConfirmIndependent || c.Outcome == nil || c.CurrentAsk == nil || !unitValid(*state, *c.Outcome) || !unitValid(*state, *c.CurrentAsk) || !newEligible(*state, *c.CurrentAsk, time.Now(), state.openRequests()) {
 					return errors.New("NEW requires exact eligible outcome/current ask and owner confirmation of independence")
 				}
 				anchor := "inferred:" + c.Outcome.ID

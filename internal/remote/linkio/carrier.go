@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	mrand "math/rand/v2"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -146,7 +148,7 @@ type Carrier struct {
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
 	maxCalls   int                             // tool calls in flight, from welcome
 	// logged is the link state Run last logged: "online" or an offline
-	// error's text. Only Run's goroutine reads or writes it, so a link that
+	// error's class (offlineKey). Only Run's goroutine reads or writes it, so a link that
 	// stays down logs one line, not one per redial.
 	logged string
 }
@@ -497,9 +499,9 @@ func (c *Carrier) Run(ctx context.Context) error {
 			return ErrRevoked
 		}
 		c.setState("offline", err)
-		if msg := err.Error(); msg != c.logged {
-			c.logged = msg
-			c.cfg.Logf("link %s: %s", c.cfg.Name, msg)
+		if key := offlineKey(err); key != c.logged {
+			c.logged = key
+			c.cfg.Logf("link %s: %s", c.cfg.Name, err.Error())
 		}
 		if c.cfg.Now().Sub(start) > c.cfg.MaxBackoff {
 			backoff = c.cfg.MinBackoff
@@ -521,6 +523,32 @@ func (c *Carrier) Run(ctx context.Context) error {
 			backoff = c.cfg.MaxBackoff
 		}
 	}
+}
+
+// offlineKey names the class of an offline error: the same cause on another
+// ephemeral port or address is the same key, so a link that stays down logs
+// one line. An error of no known class keys on its text.
+func offlineKey(err error) string {
+	if code := websocket.CloseStatus(err); code != -1 {
+		return fmt.Sprintf("close %d", code)
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return "dns " + dns.Err
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return "net " + op.Op + " " + offlineKey(op.Err)
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return fmt.Sprintf("errno %d", errno)
+	}
+	var ne net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+		return "timeout"
+	}
+	return err.Error()
 }
 
 func (c *Carrier) setState(state string, err error) {

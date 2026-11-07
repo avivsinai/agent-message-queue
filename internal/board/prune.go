@@ -2,10 +2,14 @@ package board
 
 import (
 	"encoding/json"
-	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // prunedIDHorizon bounds how long a pruned id is remembered. ReadHistory has
@@ -15,38 +19,31 @@ import (
 const prunedIDHorizon = 30 * 24 * time.Hour
 
 // Pruned reports whether acquisition must not take the message with this id
-// and creation time again. An unparsable time is pruned only by its id.
-func (s *Snapshot) Pruned(id, created string) bool {
+// again: the id was pruned, or the creation stamp that starts it is below
+// the pruned floor.
+func (s *Snapshot) Pruned(id string) bool {
 	if _, ok := s.PrunedIDs[id]; ok {
 		return true
 	}
-	at, err := time.Parse(time.RFC3339Nano, created)
-	return err == nil && at.Before(s.PrunedBefore)
+	at, ok := format.IDTime(id)
+	return ok && s.belowPrunedFloor(at)
 }
 
-// PrunedStamp reports whether a message id is pruned, judged by its id and
-// the creation stamp that starts it, before its body is read. The stamp has
-// millisecond precision, so only a stamp a whole millisecond before
-// PrunedBefore counts; the commit decides the rest by creation time.
-func (s *Snapshot) PrunedStamp(id string) bool {
-	if _, ok := s.PrunedIDs[id]; ok {
-		return true
-	}
-	stamp, _, ok := strings.Cut(id, "_")
-	if !ok || s.PrunedBefore.IsZero() {
-		return false
-	}
-	at, err := time.Parse("2006-01-02T15-04-05.000Z", stamp)
-	return err == nil && at.Add(time.Millisecond).Before(s.PrunedBefore)
+// belowPrunedFloor reports whether an id stamp lies a whole millisecond
+// before PrunedBefore. Stamps have millisecond precision, so a stamp within
+// the floor's millisecond is not below it.
+func (s *Snapshot) belowPrunedFloor(at time.Time) bool {
+	return !s.PrunedBefore.IsZero() && at.Add(time.Millisecond).Before(s.PrunedBefore)
 }
 
-// pruneHistory removes the oldest messages that no task, suggestion or
-// withdrawal holds until about excess encoded bytes are gone, with their
+// pruneHistory removes the oldest messages that heldMessages does not hold,
+// by the stamp that starts their ids, until about excess bytes are gone, with their
 // observations, dismissals, cancellations and request labels. It records
 // their ids in PrunedIDs, so acquisition does not bring them back, and
 // retires their evidence under the current generation. It reports whether it
-// removed anything.
-func (s *Snapshot) pruneHistory(excess int) bool {
+// removed anything. cost is the bytes a message frees; nil counts its
+// encoding in the snapshot.
+func (s *Snapshot) pruneHistory(excess int, cost func(Message) int) bool {
 	if excess <= 0 {
 		return false
 	}
@@ -57,8 +54,8 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 	}
 	var candidates []candidate
 	for key, m := range s.Messages {
-		created, err := time.Parse(time.RFC3339Nano, m.Created)
-		if err != nil || held[key] {
+		created, ok := format.IDTime(m.ID)
+		if !ok || held[key] {
 			continue
 		}
 		candidates = append(candidates, candidate{key, created})
@@ -83,13 +80,19 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 			break
 		}
 		m := s.Messages[c.key]
-		m.Body = ""
-		b, _ := json.Marshal(m)
-		o, _ := json.Marshal(s.Observations[c.key])
-		freed += len(b) + len(o) + 2*len(c.key) - len(m.ID)
+		if cost != nil {
+			freed += cost(m)
+		} else {
+			m.Body = ""
+			b, _ := json.Marshal(m)
+			o, _ := json.Marshal(s.Observations[c.key])
+			freed += len(b) + len(o) + 2*len(c.key) - len(m.ID)
+		}
 		for _, label := range labels[c.key] {
-			l, _ := json.Marshal(s.RequestLabels[label])
-			freed += len(l) + len(label)
+			if cost == nil {
+				l, _ := json.Marshal(s.RequestLabels[label])
+				freed += len(l) + len(label)
+			}
 			delete(s.RequestLabels, label)
 		}
 		delete(s.Messages, c.key)
@@ -108,9 +111,19 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 		s.PrunedBefore = horizon
 	}
 	for id, created := range s.PrunedIDs {
-		if created.Before(s.PrunedBefore) {
+		if s.belowPrunedFloor(created) {
 			delete(s.PrunedIDs, id)
 		}
+	}
+	s.retireEvidence(retired)
+	return true
+}
+
+// retireEvidence marks each hash that no kept message names for removal.
+// The publication that carries the mark stamps it with its generation.
+func (s *Snapshot) retireEvidence(hashes []string) {
+	if len(hashes) == 0 {
+		return
 	}
 	kept := map[string]bool{}
 	for _, m := range s.Messages {
@@ -119,31 +132,18 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 	if s.RetiredEvidence == nil {
 		s.RetiredEvidence = map[string]uint64{}
 	}
-	for _, hash := range retired {
-		if !kept[hash] {
-			s.RetiredEvidence[hash] = s.Generation
+	for _, hash := range hashes {
+		if !kept[hash] && hash != "" {
+			s.RetiredEvidence[hash] = 0
 		}
 	}
-	return true
 }
 
-// validatePruned repeats the read-time reference checks that removing
-// messages can break.
-func (s *Snapshot) validatePruned() error {
-	for _, task := range s.Tasks {
-		for _, key := range task.Attachments {
-			if _, ok := s.Messages[key]; !ok {
-				return errors.New("pruned an attached message")
-			}
-		}
-	}
-	if err := s.validateIdentityRecords(); err != nil {
-		return err
-	}
-	return s.validateModelBindings()
-}
-
-// heldMessages are the message keys a task, suggestion or withdrawal names.
+// heldMessages are the message keys pruning keeps: those a task,
+// suggestion or withdrawal names, and the opener of every open obligation
+// with every message whose refs name it. An opener whose id stamp lies
+// before the pruned-id horizon is not held, nor are its referrers, so the
+// held set does not only grow.
 func (s *Snapshot) heldMessages() map[string]bool {
 	held := map[string]bool{}
 	for _, task := range s.Tasks {
@@ -164,5 +164,93 @@ func (s *Snapshot) heldMessages() map[string]bool {
 		held[key] = true
 		held[withdrawal] = true
 	}
+	horizon := s.PublishedAt.Add(-prunedIDHorizon)
+	open := map[string]bool{}
+	for key := range s.openRequests() {
+		m := s.Messages[key]
+		if at, ok := format.IDTime(m.ID); !ok || !at.Before(horizon) {
+			held[key] = true
+			open[m.Namespace+"#"+m.ID] = true
+		}
+	}
+	for key, m := range s.Messages {
+		if slices.ContainsFunc(m.Refs, func(ref string) bool { return open[m.Namespace+"#"+ref] }) {
+			held[key] = true
+		}
+	}
 	return held
+}
+
+// openRequests are the keys of the messages that open an obligation the
+// thread reduction, the one that amq thread open uses, holds open. A ref to
+// a pruned message counts as a settled root, as thread open reads that
+// message from its mailbox.
+func (s Snapshot) openRequests() map[string]bool {
+	project := ""
+	for _, nr := range s.Input.Results {
+		if nr.Name == "amq" && nr.Result.AMQ != nil {
+			project = nr.Result.AMQ.Project
+		}
+	}
+	type namespace struct {
+		entries []thread.Entry
+		keys    map[string]string
+	}
+	namespaces := map[string]*namespace{}
+	for key, m := range s.Messages {
+		ns := namespaces[m.Namespace]
+		if ns == nil {
+			ns = &namespace{keys: map[string]string{}}
+			namespaces[m.Namespace] = ns
+		}
+		ns.entries = append(ns.entries, obligationEntry(m, project))
+		ns.keys[m.ID] = key
+	}
+	open := map[string]bool{}
+	for _, ns := range namespaces {
+		// No roots: the reduction judges the snapshot and reads no mailbox.
+		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}, s.Pruned).Obligations {
+			if ob.Open() {
+				open[ns.keys[ob.Opener.ID]] = true
+			}
+		}
+	}
+	return open
+}
+
+// obligationEntry is the obligation reduction's view of m on a board of
+// project. A copy names the agents of its root that hold the thread, not the
+// mailbox that holds m, so a sender in project reads as an outbox copy in its
+// reply_to session or else the one session whose agents name it, and each
+// recipient outside project's outbound routes reads as an inbox copy in the
+// one session, outside the sender's routed session, whose agents name it.
+// Anything else is left to the routing fields and the local fallback.
+func obligationEntry(m Message, project string) thread.Entry {
+	e := thread.Entry{ID: m.ID, From: m.From, To: m.To, Thread: m.Thread, Created: m.Created, Kind: m.Kind, Labels: m.Labels, Refs: m.Refs, ReplyTo: m.ReplyTo, ReplyProject: m.ReplyProject, FromProject: m.FromProject}
+	if at, ok := messageTime(m); ok {
+		e.RawTime = at
+	}
+	_, routedSession, routed := strings.Cut(m.ReplyTo, "@")
+	if m.ReplyProject == "" || project != "" && m.ReplyProject == project {
+		if routed {
+			e.Occurrences = append(e.Occurrences, thread.Occurrence{Session: routedSession, Agent: m.From, Dir: fsq.MailboxOutboxSent})
+		} else if session, ok := rootOf(m, m.From, nil); ok {
+			e.Occurrences = append(e.Occurrences, thread.Occurrence{Session: session, Agent: m.From, Dir: fsq.MailboxOutboxSent})
+		}
+	}
+	if m.ReplyProject == "" || project != "" && m.ReplyProject != project {
+		var skip *string
+		if routed && m.ReplyProject == "" {
+			skip = &routedSession
+		}
+		for _, handle := range m.To {
+			if session, ok := rootOf(m, handle, skip); ok {
+				e.Occurrences = append(e.Occurrences, thread.Occurrence{Session: session, Agent: handle, Dir: fsq.MailboxInboxCur})
+			}
+		}
+	}
+	if len(e.Occurrences) == 0 {
+		e.Occurrences = []thread.Occurrence{{Session: m.Session}}
+	}
+	return e
 }

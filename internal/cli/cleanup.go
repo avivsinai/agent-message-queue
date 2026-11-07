@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -51,12 +55,17 @@ func runCleanup(args []string) error {
 		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
 		"--history-older-than and --history-max-size remove history from every agent",
 		"mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),",
-		"receipts, and fetched remote files such as Buzz images (remote-files), oldest",
+		"receipts, and fetched remote files such as images (remote-files), oldest",
 		"first by the creation stamp in the message id, else the modification time. A size",
 		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
-		"dead letters, extension data, and every copy of a message that",
-		"'amq thread open --max-age 0' lists as open, with the replies that ref it,",
-		"are never removed, and nothing is removed unless you run this command.",
+		"dead letters and their receipts, a message whose header does not parse,",
+		"extension data, every copy of a message that 'amq thread open --max-age 0'",
+		"lists as open, with the replies that ref it, the messages that closed an",
+		"obligation whose opener keeps a copy, and a remote file that",
+		"unread mail or such a message names as",
+		"[image: <path>] are never removed, and nothing is removed unless you run",
+		"this command. A size bound can remove an image an agent has not opened",
+		"yet when no unread or open message names it.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
 		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
 		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
@@ -183,11 +192,18 @@ func runCleanup(args []string) error {
 		if historyDuration > 0 {
 			cutoff = now.Add(-historyDuration)
 		}
-		open, err := openObligationIDs(absPath(root))
+		open, closers, err := openObligationIDs(absPath(root))
 		if err != nil {
 			return err
 		}
-		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
+		images, err := referencedRemoteFiles(root, open)
+		if err != nil {
+			return err
+		}
+		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open, images); err != nil {
+			return err
+		}
+		if historyCandidates, err = keepClosersOfKeptOpeners(root, historyCandidates, closers); err != nil {
 			return err
 		}
 	}
@@ -420,4 +436,97 @@ func parseByteSize(s string) (int64, error) {
 		return 0, fmt.Errorf("%q is not a positive size such as 100MB", s)
 	}
 	return n << shift, nil
+}
+
+// imageReference is the prompt line that hands a fetched remote file to an
+// agent.
+var imageReference = regexp.MustCompile(`\[image: ([^\]\n]+)\]`)
+
+// historyMessageDirs are the mailbox directories that hold message files:
+// unread mail first, then read mail and sent copies.
+func historyMessageDirs(root, agent string) []string {
+	return []string{fsq.AgentInboxNew(root, agent), fsq.AgentInboxCur(root, agent), fsq.AgentOutboxSent(root, agent)}
+}
+
+// referencedRemoteFiles are the names of the remote files that an unread
+// message, or a message whose id open holds (an open obligation and its
+// replies), names as [image: <path>].
+func referencedRemoteFiles(root string, open map[string]bool) (map[string]bool, error) {
+	names := map[string]bool{}
+	agents, err := fsq.ListAgents(root)
+	if os.IsNotExist(err) {
+		return names, nil
+	} else if err != nil {
+		return nil, err
+	}
+	for _, agent := range agents {
+		for i, dir := range historyMessageDirs(root, agent) {
+			entries, err := os.ReadDir(dir)
+			if os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			for _, e := range entries {
+				name := e.Name()
+				if !e.Type().IsRegular() || !strings.HasSuffix(name, ".md") || i > 0 && !open[fsq.HistoryID(name)] {
+					continue
+				}
+				msg, err := format.ReadMessageFile(filepath.Join(dir, name))
+				if err != nil {
+					continue // kept as unparsable; it names nothing readable
+				}
+				for _, m := range imageReference.FindAllStringSubmatch(msg.Body, -1) {
+					names[filepath.Base(m[1])] = true
+				}
+			}
+		}
+	}
+	return names, nil
+}
+
+// keepClosersOfKeptOpeners removes from candidates every message, with its
+// receipts, on the path that closed an obligation (closers maps it to the
+// openers of those obligations) when one of those openers keeps a copy
+// outside candidates, so an answered opener never stays without the path to
+// its answer. It keeps one path per closed obligation and nothing below it.
+func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers map[string][]string) ([]fsq.HistoryFile, error) {
+	removing := map[string]bool{}
+	for _, c := range candidates {
+		removing[c.Path] = true
+	}
+	openers := map[string]bool{}
+	for _, ids := range closers {
+		for _, opener := range ids {
+			openers[opener] = true
+		}
+	}
+	keptCopy := map[string]bool{}
+	agents, err := fsq.ListAgents(root)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, agent := range agents {
+		for _, dir := range historyMessageDirs(root, agent) {
+			entries, err := os.ReadDir(dir)
+			if os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			for _, e := range entries {
+				id := fsq.HistoryID(e.Name())
+				if openers[id] && e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".md") && !removing[filepath.Join(dir, e.Name())] {
+					keptCopy[id] = true
+				}
+			}
+		}
+	}
+	out := candidates[:0]
+	for _, c := range candidates {
+		if !slices.ContainsFunc(closers[fsq.HistoryID(filepath.Base(c.Path))], func(opener string) bool { return keptCopy[opener] }) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }

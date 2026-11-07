@@ -7,10 +7,12 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func NewMessageID(now time.Time) (string, error) {
-	stamp := now.UTC().Format("2006-01-02T15-04-05.000Z")
+	stamp := now.UTC().Format(fsq.IDStampLayout)
 	pid := os.Getpid()
 	suffix, err := randSuffix(4)
 	if err != nil {
@@ -26,3 +28,7 @@ func randSuffix(n int) (string, error) {
 	}
 	return strings.ToLower(hex.EncodeToString(buf)), nil
 }
+
+// IDTime is the creation time stamped at the start of a message id; see
+// fsq.IDTime.
+func IDTime(id string) (time.Time, bool) { return fsq.IDTime(id) }

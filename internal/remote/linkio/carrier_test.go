@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -514,5 +516,21 @@ func TestDownLinkLogsOneLinePerState(t *testing.T) {
 	defer mu.Unlock()
 	if len(lines) != 1 || !strings.Contains(lines[0], "503") {
 		t.Fatalf("logged %q after %d dials, want one 503 line", lines, dials.Load())
+	}
+}
+
+// Review of the disk bounds: a redial to another ephemeral port is the same
+// offline cause and must not log again.
+func TestOfflineKeyIgnoresEphemeralAddress(t *testing.T) {
+	refused := func(port int) error {
+		return &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port},
+			Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
+	if a, b := offlineKey(refused(40001)), offlineKey(refused(40002)); a != b {
+		t.Fatalf("offlineKey differs across ports: %q vs %q", a, b)
+	}
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	if offlineKey(timeout) == offlineKey(refused(40001)) {
+		t.Fatal("refused and timeout share a key")
 	}
 }

@@ -48,3 +48,28 @@ func TestUpLogTimestampsAndRotates(t *testing.T) {
 		t.Fatalf("up.log does not end with the last line:\n%s", cur)
 	}
 }
+
+// Review of the disk bounds: a service manager may open up.log without
+// O_APPEND; the sink must still lock, timestamp and append at the end.
+func TestUpLogSinkWithoutAppendFlag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "up.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	w := logSink(dir, f)
+	if _, ok := w.(*upLog); !ok {
+		t.Fatalf("logSink(non-append up.log) = %T, want *upLog", w)
+	}
+	say(w, "one")
+	say(w, "two")
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ one\n\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ two\n$`).Match(cur) {
+		t.Fatalf("up.log = %q, want two timestamped lines", cur)
+	}
+}

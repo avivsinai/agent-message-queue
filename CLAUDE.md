@@ -66,7 +66,8 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 
 - Handles are lowercase, match `[a-z0-9_-]+`, and do not start with `-`.
 - Use the CLI for mailbox operations. Never edit queue files directly.
-- Cleanup is explicit through `amq cleanup`; do not add automatic deletion.
+- Mailbox data (messages, receipts, DLQ) is removed only by `amq cleanup`; logs
+  and derived extension caches carry their own documented bounds.
 - AMQ remains daemon-free. Supervisors can run `wake` or `monitor`, but AMQ
   does not own their lifecycle.
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -108,8 +109,8 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // emitWakeAttention is the non-input destination for a wake notification.
 // Effects record only a complete write by AMQ; they do not assert that a
 // terminal rendered them or that a person observed them. In a log
-// destination a repeated notice is folded into a count, and its output effect
-// stands for the identical notice the log already holds.
+// destination a repeated notice is folded into a count and writes nothing, so
+// it records no output effect.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	isTerminal := wakeAttentionIsTerminal(cfg)
 	writePlainOutput := !isTerminal || wakeMayPrintToTerminal(cfg, wakeAttentionIsForeground)
@@ -143,6 +144,9 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 		var folded string
 		repeat, folded = cfg.logNotices.fold(safeText)
 		output.WriteString(folded)
+		if repeat {
+			effects = slices.DeleteFunc(effects, func(e string) bool { return e == wakeAttentionEffectOutput })
+		}
 	}
 	if writePlainOutput && !repeat {
 		output.WriteString(safeText)

@@ -226,18 +226,29 @@ renamed, and its directory synchronized. Readers wait cancellably on the writer 
 after lock acquisition requires recovery. An uncertain publication stops writes.
 Each publication appends its changes to `journal.jsonl` beside the snapshot, so
 a refresh writes what changed, not the whole history. When the journal reaches
-a quarter of the snapshot, the next publication writes a new snapshot; the old
-snapshot becomes `snapshot.backup.json` and its journal
-`snapshot.backup.journal.jsonl`, which together are the previous generation.
-Readers replay the journal over the snapshot; a journal that does not continue
-the snapshot's generation one by one requires recovery.
+a quarter of the snapshot, the next publication writes a new snapshot: the
+old snapshot and its journal are kept as `snapshot.backup.json` and
+`snapshot.backup.journal.jsonl`, which together are the last generation before
+the new snapshot, and `journal.jsonl` is removed once the new snapshot is
+durable. Readers replay the journal over the snapshot; a journal that does not
+continue the snapshot's generation one by one requires recovery.
 
-A publication interrupted while appending leaves `write-pending` and can leave
-a last journal line without a newline. Its generation was never published:
-remove that partial line, then `write-pending`. To restore the recovery copy,
-copy `snapshot.backup.json` to `snapshot.json` and
-`snapshot.backup.journal.jsonl` to `journal.jsonl` (or remove `journal.jsonl`
-when there is no backup journal).
+An interrupted publication leaves `write-pending`, and its text says which
+step was interrupted:
+
+- `journal append pending`: the last journal line can lack a newline. Its
+  generation was never published: remove that partial line, then
+  `write-pending`.
+- `new base pending: generation N`: if `snapshot.json` has generation N, the
+  new snapshot is published: remove `journal.jsonl` if it is still there, then
+  `write-pending`. Otherwise the old snapshot and `journal.jsonl` are still the
+  published state: remove only `write-pending`.
+- `durability uncertain`: the publication is written, but its directory sync
+  failed. Once the disk is healthy, remove `write-pending`.
+
+To restore the recovery copy, copy `snapshot.backup.json` to `snapshot.json`
+and `snapshot.backup.journal.jsonl` to `journal.jsonl` (or remove
+`journal.jsonl` when there is no backup journal).
 
 The snapshot bound is 64 MiB, including 1 MiB reserved for coverage-only
 publication; the evidence bound is 256 MiB. A publication past the snapshot
@@ -247,10 +258,17 @@ messages again. Pruned ids are kept for 30 days after their messages'
 creation; a message older than that which appears for the first time after a
 prune is not acquired. A pruned message's dismissal, action cancellation, and request
 labels go with it; tasks, their attachments, and task-level corrections stay.
-Pruned evidence files go once neither the snapshot nor the recovery copy names
-them. If the snapshot is still at its bound, or evidence reaches its bound,
-ingestion stops and publishes incomplete source coverage; identities and
-corrections are not evicted.
+Each new snapshot removes every evidence file that neither it, the recovery
+copy, nor a pending retirement names, so pruned and abandoned evidence does not
+count against the evidence bound. A refresh that would pass the evidence bound first publishes a new snapshot,
+which removes the evidence nothing names, and measures again. Only named
+evidence still past the bound prunes the oldest unheld history, by the bytes
+over it, and publishes incomplete source coverage; the pruned evidence goes
+at a later publication, and ingestion resumes. Evidence staged by a refresh
+and removed by a new snapshot before that refresh publishes is staged once
+more. If the snapshot is still at its bound, or nothing is left
+to prune, ingestion stops and publishes incomplete source coverage;
+identities and corrections are not evicted.
 
 ## Sources and configuration
 
