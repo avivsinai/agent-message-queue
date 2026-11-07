@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 // In this file, "state document" means the .wake.state artifact. Existing
@@ -419,24 +420,11 @@ func wakeLegacyDigest(raw []byte) string {
 }
 
 func validWakeStateDigest(value string) bool {
-	const prefix = "sha256:"
-	if len(value) != len(prefix)+sha256.Size*2 || !strings.HasPrefix(value, prefix) {
-		return false
-	}
-	encoded := value[len(prefix):]
-	if encoded != strings.ToLower(encoded) {
-		return false
-	}
-	decoded, err := hex.DecodeString(encoded)
-	return err == nil && len(decoded) == sha256.Size
+	return wakelock.ValidStateDigest(value)
 }
 
 func validWakeStateGeneration(value string) bool {
-	if len(value) != 32 || value != strings.ToLower(value) {
-		return false
-	}
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == 16
+	return wakelock.ValidStateGeneration(value)
 }
 
 func (target wakeStateTarget) wakeTarget() wakeTarget {

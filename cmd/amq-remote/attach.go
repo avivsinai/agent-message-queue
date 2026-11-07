@@ -44,6 +44,8 @@ const attachReadyTimeout = 20 * time.Second
 // in. Typing the command is the sharing choice, so the invoking session is
 // found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
+// The machine agent may later restore that share for the same identity and
+// the same recorded session id in a new process; it never undoes a detach.
 func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -357,9 +359,9 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind)}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind), HarnessSession: h.Session}
 	if fromHook {
-		if err := ownerDetached(b.Holder); err != nil {
+		if err := ownerDetached(b); err != nil {
 			return b, "", false, err
 		}
 	}
@@ -486,7 +488,7 @@ func heldBySession(b binding.Binding) bool {
 }
 
 // movedTarget reports whether old pins the same root and native target as b
-// under another native session. A mailbox binding pins no native session.
+// under another native session. movedTarget compares native bindings only.
 func movedTarget(old, b binding.Binding) bool {
 	return !old.Mailbox() && !b.Mailbox() && filepath.Clean(old.Root) == filepath.Clean(b.Root) &&
 		old.Target == b.Target && old.NativeSession != b.NativeSession
@@ -522,6 +524,9 @@ type harnessSession struct {
 	// Transcript is a Claude session's transcript or a Codex thread's
 	// rollout file; empty when not known.
 	Transcript string
+	// Session is a pi chat's session id as its bridge publishes it; empty
+	// for other harnesses and when not known.
+	Session string
 	// Holder is the exact identity captured while proving a Codex ancestor.
 	Holder launch.HolderIdentity
 	// AppServer is a Codex session's thread, which proves its liveness in
@@ -738,10 +743,11 @@ func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
 	}
 	now := b
 	now.AppServer.Daemon = daemon
-	if replaced, err := binding.Replace(b, now); err != nil || !replaced {
+	written, replaced, err := binding.Replace(b, now)
+	if err != nil || !replaced {
 		return b
 	}
-	return now
+	return written
 }
 
 // linkShared reports whether a link share of the root at stateDir names a
@@ -835,7 +841,8 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // When the harness execs directly (pi does), the holder is the harness; a
 // wrapper that forks is the holder itself, and the binding follows the
 // wrapper's lifetime. Without a recorded owner the holder stays unknown.
-// The holder is pi when the handle's live pi bridge runs in it.
+// The holder is pi when the handle's live pi bridge runs in it, and the
+// session is the pi session id that bridge publishes.
 func wakeOwnerSession(root, handle string) harnessSession {
 	owner, ok := amqcli.WakeOwner(root, handle)
 	if !ok {
@@ -849,8 +856,8 @@ func wakeOwnerSession(root, handle string) harnessSession {
 		return harnessSession{}
 	}
 	h := harnessSession{PID: cur.PID, Holder: cur}
-	if pid, _, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
-		h.Kind = "pi"
+	if pid, session, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
+		h.Kind, h.Session = "pi", session
 	}
 	return h
 }
@@ -982,31 +989,35 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if scopes != 1 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach needs exactly one of --self, --name <name> or --all")
 	}
-	var match func(binding.Binding) bool
+	var match, ended func(binding.Binding) bool
 	if *self {
 		var code int
 		var err error
 		if match, code, err = selfMatch(c); err != nil {
 			return code, err
 		}
+		ended = selfEnded(c, match)
 	}
 	if *name != "" {
 		match = func(b binding.Binding) bool { return b.Name == *name }
 	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
+	if ended == nil {
+		ended = match
+	}
 	// A session the machine agent serves stops taking messages in its
 	// channel as soon as the binding is gone; the machine agent archives the
 	// channel after that.
 	channel := false
-	removed, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool {
+	removed, keptOff, err := binding.Detach(func(b binding.Binding) bool {
 		if !match(b) {
 			return false
 		}
 		_, has := acp.MachineChannelOf(b)
 		channel = channel || has
 		return true
-	})
+	}, ended)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -1014,7 +1025,15 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if removed == nil {
 			removed = []string{}
 		}
-		emitJSON(stdout, map[string]any{"removed": removed})
+		out := map[string]any{"removed": removed}
+		if len(keptOff) > 0 {
+			out["kept_off"] = keptOff
+		}
+		emitJSON(stdout, out)
+		return 0, nil
+	}
+	if len(removed) == 0 && len(keptOff) > 0 {
+		say(stdout, "Kept off: %d (already ended).", len(keptOff))
 		return 0, nil
 	}
 	if len(removed) == 0 {
@@ -1027,6 +1046,23 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
 	return 0, nil
+}
+
+// selfEnded reports whether an ended session's tombstone that match accepts
+// is the invoking session's: a native tombstone names its native session
+// already; a mailbox tombstone must record the session id this session's
+// harness proves on its handle. A session it cannot prove matches no mailbox
+// tombstone, so one session's off never turns an earlier session on the same
+// handle off.
+func selfEnded(c *common, match func(binding.Binding) bool) func(binding.Binding) bool {
+	session := ""
+	if handle := strings.TrimSpace(os.Getenv("AM_ME")); handle != "" && c.root != "" {
+		h := detectHarness(newCodexView(), c.root, handle)
+		session = binding.Binding{Transcript: h.Transcript, HarnessSession: h.Session}.RecordedSession()
+	}
+	return func(t binding.Binding) bool {
+		return match(t) && (!t.Mailbox() || session != "" && t.RecordedSession() == session)
+	}
 }
 
 // selfMatch reports whether a binding is the invoking session's: its

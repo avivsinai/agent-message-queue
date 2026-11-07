@@ -472,11 +472,17 @@ func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
 }
 
 // After /amq-remote off the approval hook writes no binding for the
-// session's process again: its dialogs stay in the terminal until the owner
-// connects it. A session in another process is not off.
+// session again: its dialogs stay in the terminal until the owner connects
+// it, also when the same session resumes in another process, and for any
+// session in the process that was turned off. Another session in another
+// process is not off.
 //
 // Regression: code review of the hook-written binding found that the first
 // dialog after /amq-remote off connected the session again.
+// Regressions (review of the resumed-session reattach): the hook keyed a
+// detach on the process only, so a resumed session connected again; then
+// on the session only, so /clear, or a hook binding that names no session,
+// in the process that was turned off connected again.
 func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 	this, err := launch.HolderOf(os.Getpid())
 	if err != nil {
@@ -490,35 +496,78 @@ func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 	saved := detectHarness
 	t.Cleanup(func() { detectHarness = saved })
 	var holder launch.HolderIdentity
+	transcript := ""
 	detectHarness = func(*codexView, string, string) harnessSession {
-		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder}
+		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder, Transcript: transcript}
 	}
 	for _, tc := range []struct {
 		name     string
 		detached launch.HolderIdentity
+		off, now string // the transcript when turned off, and at the dialog
 		want     int
-	}{{"this process", this, 0}, {"another process", other, 1}} {
-		dir := canonicalTempDir(t)
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-		t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-		root := filepath.Join(dir, "p", ".agent-mail", "session1")
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		holder = tc.detached
-		attachMailboxAs(t, root)
-		if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
-			t.Fatalf("detach: code=%d err=%v", code, err)
-		}
-		holder = this
-		open := runApprovalHook(t, 1, "s-1", "claude-p-session1")
-		if len(open) != tc.want {
-			t.Fatalf("%s detached: open dialogs = %d; want %d", tc.name, len(open), tc.want)
-		}
-		if all, _ := binding.List(); len(all) != tc.want {
-			t.Fatalf("%s detached: bindings = %+v; want %d", tc.name, all, tc.want)
-		}
+	}{
+		{"this process", this, "", "", 0},
+		{"another process", other, "", "", 1},
+		{"this session resumed in another process", other, "/projects/p/s-1.jsonl", "/projects/p/s-1.jsonl", 0},
+		{"this process after /clear", this, "/projects/p/s-1.jsonl", "/projects/p/s-2.jsonl", 0},
+		{"this process, no session at the dialog", this, "/projects/p/s-1.jsonl", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := canonicalTempDir(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+			root := filepath.Join(dir, "p", ".agent-mail", "session1")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			holder, transcript = tc.detached, tc.off
+			attachMailboxAs(t, root)
+			if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
+				t.Fatalf("detach: code=%d err=%v", code, err)
+			}
+			holder, transcript = this, tc.now
+			open := runApprovalHook(t, 1, "s-1", "claude-p-session1")
+			if len(open) != tc.want {
+				t.Fatalf("open dialogs = %d; want %d", len(open), tc.want)
+			}
+			if all, _ := binding.List(); len(all) != tc.want {
+				t.Fatalf("bindings = %+v; want %d", all, tc.want)
+			}
+		})
+	}
+}
+
+// /amq-remote off in one session turns off only that session: an earlier
+// session on the same handle that ended and was pruned keeps its ended
+// tombstone, so a resume of that session still comes back.
+//
+// Regression (review of the off-after-prune fix): a mailbox --self detach
+// turned every ended tombstone of the handle into a detached one.
+func TestDetachSelfLeavesAnotherSessionsEndedTombstone(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session1")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved := detectHarness
+	t.Cleanup(func() { detectHarness = saved })
+	session := "s-1"
+	detectHarness = func(*codexView, string, string) harnessSession { return harnessSession{Kind: "pi", Session: session} }
+	name := attachMailboxAs(t, root)
+	if _, err := binding.Retire(binding.RemovedEnded, func(b binding.Binding) bool { return b.Name == name }); err != nil {
+		t.Fatal(err)
+	}
+	session = "s-2"
+	var out bytes.Buffer
+	if code, err := detach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach: code=%d err=%v", code, err)
+	}
+	tombs, err := binding.Tombstones()
+	if err != nil || len(tombs) != 1 || tombs[0].Removed != binding.RemovedEnded || strings.TrimSpace(out.String()) != "Not connected." {
+		t.Fatalf("tombstones = %+v, %v; output %q; want s-1 still ended", tombs, err, out.String())
 	}
 }
 
