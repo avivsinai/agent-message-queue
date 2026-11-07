@@ -701,8 +701,9 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 // delivery.
 const hostHarness = (deliver: AmqBridgeOptions["deliver"]) => harness((root) => ({ identity: () => ({ root, handle: "pi-seat" }), deliver }));
 
-// Review of host-mode activity: the request's ref tags its own user message,
-// matched by its text, not whichever user message ends after the report.
+// Review of the pi and images code, finding 2: the request's ref tags its own
+// user message, matched by its text, not whichever user message ends after the
+// report.
 test("a host request's ref tags only its own user message", async () => {
 	let report: ((outcome: AmqOutcome) => void) | undefined;
 	const h = hostHarness({
@@ -736,8 +737,9 @@ test("a host request's ref tags only its own user message", async () => {
 	}
 });
 
-// Review of host reports: a report outside the AmqOutcome shapes, such as a
-// busy refusal after the receipt, settles the request uncertain.
+// Review of the pi and images code, finding 3: a report outside the AmqOutcome
+// shapes, such as a busy refusal after the receipt, settles the request
+// uncertain.
 test("a host report outside the outcome shapes settles the request uncertain", async () => {
 	const h = hostHarness({
 		busy: () => false,
@@ -761,8 +763,8 @@ test("a host report outside the outcome shapes settles the request uncertain", a
 	}
 });
 
-// Review of host delivery: a send that throws after it reported the start
-// leaves the outcome unknown, never failed.
+// Review of the pi and images code, finding 4: that throws after it reported
+// the start leaves the outcome unknown, never failed.
 test("a host send that throws after the start settles the request uncertain", async () => {
 	const h = hostHarness({
 		busy: () => false,
@@ -787,8 +789,8 @@ test("a host send that throws after the start settles the request uncertain", as
 	}
 });
 
-// Review of host delivery: a busy check that throws refuses the request
-// busy instead of stopping every scan.
+// Review of the pi and images code, finding 5: check that throws refuses the
+// request busy instead of stopping every scan.
 test("a host busy check that throws refuses the request busy", async () => {
 	const h = hostHarness({
 		busy: () => {
@@ -812,8 +814,8 @@ test("a host busy check that throws refuses the request busy", async () => {
 	}
 });
 
-// Review of host identity: a session the host keeps inactive shows no wake
-// marker for the identity the host gives without a session.
+// Review of the pi and images code, finding 6: the host keeps inactive shows
+// no wake marker for the identity the host gives without a session.
 test("a session the host keeps inactive holds no wake doorbell", async () => {
 	let agentDir = "";
 	const h = harness((root) => {
@@ -830,13 +832,30 @@ test("a session the host keeps inactive holds no wake doorbell", async () => {
 	}
 });
 
-// Review of host identity: a relative root is no identity, so the bridge
-// never writes under the working directory.
+// Review of the pi and images code, finding 7: root is no identity, so the
+// bridge never writes under the working directory.
 test("a host identity with a relative root keeps the bridge inactive", async () => {
 	const rel = `amq-pi-relative-${process.pid}`;
 	const h = harness(() => ({ identity: () => ({ root: rel, handle: "pi-seat" }) }));
 	await h.start();
 	try {
+		assert.equal(fs.existsSync(path.resolve(rel)), false);
+	} finally {
+		fs.rmSync(path.resolve(rel), { recursive: true, force: true });
+		await h.done();
+	}
+});
+
+// Review round 1 of the pi and images code, finding 5: the plain
+// extension's inactive notice names a relative AM_ROOT as the cause.
+test("a relative AM_ROOT is named in the inactive notice", async () => {
+	const h = harness();
+	const rel = `amq-pi-relative-env-${process.pid}`;
+	process.env.AM_ROOT = rel;
+	await h.start();
+	try {
+		assert.equal(h.notices.length, 1);
+		assert.match(h.notices[0], /AM_ROOT .* is not an absolute path/);
 		assert.equal(fs.existsSync(path.resolve(rel)), false);
 	} finally {
 		fs.rmSync(path.resolve(rel), { recursive: true, force: true });

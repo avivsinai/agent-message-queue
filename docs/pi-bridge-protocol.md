@@ -535,7 +535,9 @@ other shape settles the request `uncertain`, with an error that names what the
 host sent. A throw from `send` after a terminal report changes nothing; after
 `started` it settles the request `uncertain`, and before it `failed`. In
 activity, the request's ref tags the first user message whose text is the
-request's text, as without a host. The host must report a
+request's text, as without a host. So the host hands `request.text` to pi
+verbatim: a changed text matches no user message, and the request's run is
+mirrored as local work. The host must report a
 terminal outcome: until it does, the request stays in flight and the
 extension refuses every other request `busy`. `session_shutdown` closes it as
 described above.

@@ -214,7 +214,9 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 			// off on purpose; only the plain extension tells the owner how to
 			// fix it.
 			inactiveNoticeShown = true;
-			notify(ctx, "amq-bridge inactive: AM_ROOT and AM_ME are not set to a valid AMQ identity. Run pi under `amq coop exec` to make it reachable by amq-remote.");
+			const root = process.env.AM_ROOT ?? "";
+			const cause = root && !path.isAbsolute(root) ? `AM_ROOT (${root}) is not an absolute path` : "AM_ROOT and AM_ME are not set to a valid AMQ identity";
+			notify(ctx, `amq-bridge inactive: ${cause}. Run pi under \`amq coop exec\` to make it reachable by amq-remote.`);
 		}
 	});
 
