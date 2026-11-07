@@ -163,23 +163,25 @@ func replaceTestEnv(env []string, key, value string) []string {
 	return append(out, key+"="+value)
 }
 
+// waitForTestPID polls until the grandchild has published its pid. A missing or
+// empty file means the grandchild is not up yet (observed on Windows CI).
 func waitForTestPID(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		raw, err := os.ReadFile(path)
-		if err == nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if err == nil && strings.TrimSpace(string(raw)) != "" {
 			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
 			if parseErr != nil || pid <= 0 {
 				t.Fatalf("grandchild pid file = %q, %v", raw, parseErr)
 			}
 			return pid
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
 		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for grandchild pid")
+			t.Fatalf("timed out waiting for grandchild pid file %q", path)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
