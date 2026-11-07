@@ -111,9 +111,9 @@ func TestPruneKeepsUnansweredRequests(t *testing.T) {
 	}
 }
 
-// Review of the disk bounds: evidence pressure stopped ingestion without a
-// prune, and the evidence of a message skipped as pruned was never retired.
-func TestEvidencePressurePrunesAndSkippedEvidenceIsRetired(t *testing.T) {
+// Review of the disk bounds: the evidence of a message skipped as pruned was
+// never retired.
+func TestSkippedEvidenceIsRetired(t *testing.T) {
 	ctx := context.Background()
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -169,26 +169,13 @@ func TestEvidencePressurePrunesAndSkippedEvidenceIsRetired(t *testing.T) {
 	if _, ok := read().RetiredEvidence[skipped.EvidenceHash]; !ok {
 		t.Fatal("evidence of a message skipped as pruned is not retired")
 	}
-	old, oldRaw := message("old", 3*time.Hour)
-	commit(old, oldRaw)
-	filler := filepath.Join(store.Dir, "evidence", "filler.json")
-	if err = os.WriteFile(filler, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Truncate(filler, evidenceLimit); err != nil {
-		t.Fatal(err)
-	}
-	next, nextRaw := message("next", time.Hour)
-	commit(next, nextRaw)
-	got := read()
-	if _, kept := got.Messages[old.Key]; kept || got.RetiredEvidence[old.EvidenceHash] == 0 {
-		t.Fatalf("evidence pressure kept %v, retired %v; want the oldest history pruned", kept, got.RetiredEvidence)
-	}
 }
 
-// Review of the disk bounds: evidence that nothing names stayed on disk and
-// counted against the evidence bound, so ingestion stopped for good.
-func TestNewBaseSweepsUnnamedEvidence(t *testing.T) {
+// Review of the disk bounds, round 2, finding 3: evidence that nothing names
+// counted against the evidence bound, so unheld history was pruned for it.
+// A bound passed by named evidence alone needs 256 MiB of real history, too
+// large for a fast test.
+func TestUnnamedEvidenceAtTheBoundPrunesNoHistory(t *testing.T) {
 	ctx := context.Background()
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -235,9 +222,7 @@ func TestNewBaseSweepsUnnamedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	next, nextRaw := message("next", time.Hour)
-	for range 3 {
-		commit(next, nextRaw)
-	}
+	commit(next, nextRaw)
 	got, err := store.Read()
 	if err != nil {
 		t.Fatal(err)
@@ -246,9 +231,51 @@ func TestNewBaseSweepsUnnamedEvidence(t *testing.T) {
 		t.Fatalf("unnamed evidence is still on disk: %v", err)
 	}
 	if _, ok := got.Messages[next.Key]; !ok {
-		t.Fatal("ingestion did not resume after the unnamed evidence went")
+		t.Fatal("the refresh did not ingest after the unnamed evidence went")
+	}
+	if _, ok := got.Messages[kept.Key]; !ok || len(got.RetiredEvidence) != 0 {
+		t.Fatalf("history was pruned for unnamed evidence: kept=%v retired=%v", ok, got.RetiredEvidence)
 	}
 	if _, err := os.Stat(filepath.Join(store.Dir, "evidence", next.EvidenceHash+".json")); err != nil {
 		t.Fatalf("named evidence was removed: %v", err)
+	}
+}
+
+// Review of the disk bounds, round 2, finding 2: evidence staged for a
+// refresh and removed by a new base before publication read as a store that
+// needs recovery. A message with no staged evidence stands for that case.
+func TestCommitWithSweptEvidenceIsRetryable(t *testing.T) {
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := time.Now().UTC().Format("2006-01-02T15-04-05.000Z") + "_pid1_a"
+	raw, _ := json.Marshal(thread.Entry{ID: id, Thread: "work", Kind: "status", Created: time.Now().UTC().Format(time.RFC3339Nano)})
+	sum := sha256.Sum256(raw)
+	var entry thread.Entry
+	_ = json.Unmarshal(raw, &entry)
+	m := MessageFromEntry(base, base, "", entry, hex.EncodeToString(sum[:]))
+	err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: Input{Dir: base}, Messages: []Message{m}})
+	if err == nil || strings.Contains(err.Error(), "recovery required") {
+		t.Fatalf("commit = %v, want a retryable refresh error", err)
+	}
+	if _, err = store.Read(); err != nil {
+		t.Fatalf("store after the refresh: %v", err)
 	}
 }

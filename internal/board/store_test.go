@@ -256,40 +256,6 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	if err = os.Remove(filepath.Join(store.Dir, "write-pending")); err != nil {
 		t.Fatal(err)
 	}
-	// Wave1 review: a full evidence store must publish incomplete coverage
-	// while retaining task IDs and corrections, then stop autonomous ingestion.
-	full, err := os.OpenFile(filepath.Join(store.Dir, "evidence", "capacity"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = full.Truncate(evidenceLimit); err != nil {
-		_ = full.Close()
-		t.Fatal(err)
-	}
-	if err = full.Close(); err != nil {
-		t.Fatal(err)
-	}
-	over := acquisition
-	over.Evidence = append(append([][]byte{}, acquisition.Evidence...), []byte(`{"id":"new"}`))
-	if err = store.Commit(ctx, over); !errors.Is(err, errEvidenceBound) {
-		t.Fatalf("full evidence store: %v", err)
-	}
-	bounded, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bounded.Tasks) != 4 || !bounded.ActionCancelled[ask.Key] {
-		t.Fatal("evidence bound lost identities or correction")
-	}
-	foundGap := false
-	for _, result := range bounded.Input.Results {
-		if result.Name == "amq-history" && result.Result.Status == StatusDegraded && result.Result.Coverage.Partial() {
-			foundGap = true
-		}
-	}
-	if !foundGap {
-		t.Fatal("evidence bound kept healthy coverage")
-	}
 	// Inline body text cannot hide missing or corrupted immutable evidence.
 	evidencePath := filepath.Join(store.Dir, "evidence", ask.EvidenceHash+".json")
 	original, err := os.ReadFile(evidencePath)

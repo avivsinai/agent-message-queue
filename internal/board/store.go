@@ -47,6 +47,18 @@ const evidenceLimit = 256 << 20
 
 var errEvidenceBound = errors.New("board evidence bound reached; ingestion stopped")
 
+// evidenceBoundError is errEvidenceBound with the bytes by which staging
+// would pass the bound.
+type evidenceBoundError struct{ excess int64 }
+
+func (e evidenceBoundError) Error() string        { return errEvidenceBound.Error() }
+func (e evidenceBoundError) Is(target error) bool { return target == errEvidenceBound }
+
+// errEvidenceSwept reports that evidence staged for an acquisition was
+// removed by a new base before the acquisition was published. Staging again
+// recovers it.
+var errEvidenceSwept = errors.New("board evidence staged for this refresh was removed before publication; refresh again")
+
 // Store is bound to the authenticated canonical base root for its lifetime.
 // It never repairs an existing store or restores a backup implicitly.
 type Store struct {
@@ -91,6 +103,9 @@ type Snapshot struct {
 	// generation that pruned it. The file goes once neither the base snapshot
 	// nor its backup can name the message.
 	RetiredEvidence map[string]uint64 `json:"retired_evidence,omitempty"`
+	// newBase asks the next publication for a new base, which sweeps
+	// evidence that nothing names. It is never stored.
+	newBase bool
 }
 
 type Task struct {
@@ -500,7 +515,7 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if len(data) > snapshotLimit {
 		return errors.New("board snapshot reached 64 MiB; ingestion stopped, existing state preserved")
 	}
-	compact := prev.data == nil || prev.baseSchema != SnapshotSchema || len(state.RetiredEvidence) > 0
+	compact := prev.data == nil || prev.baseSchema != SnapshotSchema || len(state.RetiredEvidence) > 0 || state.newBase
 	var record []byte
 	if !compact {
 		ops, err := diffRaw(prev.data, data, nil, nil)
@@ -716,7 +731,7 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 		}
 		return nil
 	}
-	for _, b := range blobs {
+	for i, b := range blobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -743,7 +758,11 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 			}
 		}
 		if len(b) > snapshotLimit || used+int64(len(b)) > evidenceLimit {
-			return errEvidenceBound
+			excess := used - evidenceLimit
+			for _, rest := range blobs[i:] {
+				excess += int64(len(rest))
+			}
+			return evidenceBoundError{excess: excess}
 		}
 		if _, err := fsq.WriteFileAtomic(dir, name, b, 0o600); err != nil {
 			return err
@@ -761,7 +780,28 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		return ErrProjectChanged
 	}
 	s.ProjectID = a.ProjectID
+	// A new base between staging and publication can remove the staged
+	// evidence; staging once more recovers it.
+	err := s.commit(ctx, a)
+	if errors.Is(err, errEvidenceSwept) {
+		err = s.commit(ctx, a)
+	}
+	return err
+}
+
+func (s Store) commit(ctx context.Context, a Acquisition) error {
 	stageErr := s.stageEvidence(ctx, a.Evidence, a.Messages)
+	if errors.Is(stageErr, errEvidenceBound) {
+		// A new base removes the evidence nothing names; only what is
+		// still past the bound after it is pressure.
+		if err := s.update(ctx, func(state *Snapshot) error {
+			state.newBase = true
+			return nil
+		}); err != nil {
+			return err
+		}
+		stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
+	}
 	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
 		return stageErr
 	}
@@ -779,12 +819,13 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 				return err
 			}
 			stopped = true
-			// Evidence pressure prunes the oldest unheld history by its
-			// evidence bytes, so a later publication removes those files
-			// and ingestion resumes. While a retirement is pending, its
-			// removal comes first and nothing more is pruned.
-			if len(state.RetiredEvidence) == 0 {
-				state.pruneHistory(evidenceLimit/4, func(m Message) int {
+			// Named evidence past the bound prunes the oldest unheld history
+			// by the bytes still over it, so a later publication removes
+			// those files and ingestion resumes. While a retirement is
+			// pending, its removal comes first and nothing more is pruned.
+			var over evidenceBoundError
+			if len(state.RetiredEvidence) == 0 && errors.As(err, &over) {
+				state.pruneHistory(int(over.excess), func(m Message) int {
 					info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
 					if err != nil {
 						return 0
@@ -872,6 +913,11 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			if state.Pruned(m.ID) {
 				skipped = append(skipped, m.EvidenceHash)
 				continue
+			}
+			if _, published := state.Messages[m.Key]; !published {
+				if _, err := os.Lstat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json")); os.IsNotExist(err) {
+					return errEvidenceSwept
+				}
 			}
 			if previous, ok := state.Messages[m.Key]; ok {
 				before, after := previous, m

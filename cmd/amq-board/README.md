@@ -260,10 +260,13 @@ prune is not acquired. A pruned message's dismissal, action cancellation, and re
 labels go with it; tasks, their attachments, and task-level corrections stay.
 Each new snapshot removes every evidence file that neither it, the recovery
 copy, nor a pending retirement names, so pruned and abandoned evidence does not
-count against the evidence bound. A publication that would pass the evidence bound prunes the same way, a
-quarter of the evidence bound by evidence bytes, and publishes incomplete
-source coverage; the pruned evidence goes at a later publication, and
-ingestion resumes. If the snapshot is still at its bound, or nothing is left
+count against the evidence bound. A refresh that would pass the evidence bound first publishes a new snapshot,
+which removes the evidence nothing names, and measures again. Only named
+evidence still past the bound prunes the oldest unheld history, by the bytes
+over it, and publishes incomplete source coverage; the pruned evidence goes
+at a later publication, and ingestion resumes. Evidence staged by a refresh
+and removed by a new snapshot before that refresh publishes is staged once
+more. If the snapshot is still at its bound, or nothing is left
 to prune, ingestion stops and publishes incomplete source coverage;
 identities and corrections are not evicted.
 
