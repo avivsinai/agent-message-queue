@@ -188,6 +188,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 		return 0, fmt.Errorf("canonicalize root %s: %w", c.root, err)
 	}
 	c.root = canonical
+	stdout = logSink(filepath.Join(c.root, stateDirName), stdout)
 	stderr = logSink(filepath.Join(c.root, stateDirName), stderr)
 	entryID := registry.EntryID(c.root, *me, "remote", c.root)
 

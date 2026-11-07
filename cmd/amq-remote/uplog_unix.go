@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -21,13 +19,15 @@ import (
 const upLogMaxBytes int64 = 1 << 20
 
 // upLog is the log of `up` and the serve it supervises when their output is
-// up.log in the state directory: the file the endpoint spawn and the login
-// service open for append. Every line starts with the UTC time. Before a
-// write would take the file past max, its content moves to up.log.1 and the
-// file is truncated in place, so every process that holds it open (up, serve,
-// the service manager) keeps writing to the same, bounded file. One flock on
-// up.log.lock serializes writes and rotation across those processes, so a
-// rotation loses no line.
+// up.log in the state directory. Every line it writes starts with the UTC
+// time. Before a write would take the file past max, its content moves to
+// up.log.1 and the file is truncated in place, so every writer that holds the
+// file open keeps writing to the same, bounded file. Lines go out through a
+// handle upLog opens itself with O_APPEND, so correctness does not depend on
+// how the inherited descriptor was opened. One flock on up.log.lock
+// serializes the writes and rotations of every process that logs through
+// upLog; a writer that bypasses upLog is not serialized and may lose a line
+// to a rotation.
 type upLog struct {
 	mu   sync.Mutex
 	f    *os.File
@@ -39,8 +39,7 @@ type upLog struct {
 }
 
 // logSink returns the writer up and serve log through. It is w itself unless
-// w is the append-mode up.log in stateDir; a terminal or a journal gets the
-// output unchanged.
+// w is up.log in stateDir; a terminal or a journal gets the output unchanged.
 func logSink(stateDir string, w io.Writer) io.Writer {
 	f, ok := w.(*os.File)
 	if !ok {
@@ -55,15 +54,16 @@ func logSink(stateDir string, w io.Writer) io.Writer {
 	if err != nil || !os.SameFile(got, want) {
 		return w
 	}
-	flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
-	if err != nil || flags&unix.O_APPEND == 0 {
+	af, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
 		return w
 	}
 	lk, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		_ = af.Close()
 		return w
 	}
-	return &upLog{f: f, lk: lk, path: path, max: upLogMaxBytes, now: time.Now, bol: true}
+	return &upLog{f: af, lk: lk, path: path, max: upLogMaxBytes, now: time.Now, bol: true}
 }
 
 func (l *upLog) Write(p []byte) (int, error) {
