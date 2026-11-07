@@ -482,9 +482,9 @@ Options:
   -dry-run
         Show what would be removed without deleting
   -history-max-size string
-        Remove the oldest read messages, sent copies, receipts until each mailbox's history fits this size (e.g. 100MB)
+        Remove the oldest read messages, sent copies and receipts until each mailbox's history fits this size (e.g. 100MB)
   -history-older-than string
-        Remove read messages, sent copies, receipts older than this duration (e.g. 720h)
+        Remove read messages, sent copies and receipts older than this duration (e.g. 720h)
   -json
         Emit JSON output
   -launch-journal

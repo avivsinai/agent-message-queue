@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -38,12 +37,12 @@ func runCleanup(args []string) error {
 	historyOlderFlag := fs.String(
 		"history-older-than",
 		"",
-		"Remove read messages, sent copies, receipts older than this duration (e.g. 720h)",
+		"Remove read messages, sent copies and receipts older than this duration (e.g. 720h)",
 	)
 	historyMaxFlag := fs.String(
 		"history-max-size",
 		"",
-		"Remove the oldest read messages, sent copies, receipts until each mailbox's history fits this size (e.g. 100MB)",
+		"Remove the oldest read messages, sent copies and receipts until each mailbox's history fits this size (e.g. 100MB)",
 	)
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
@@ -189,11 +188,9 @@ func runCleanup(args []string) error {
 		if err != nil {
 			return err
 		}
-		found, err := fsq.FindHistoryFiles(root, cutoff, historyMax, open)
-		if err != nil {
+		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
 			return err
 		}
-		historyCandidates = dropUnparsableMessages(found)
 	}
 	candidates := append([]string{}, tmpCandidates...)
 	for _, candidate := range wakeQuarantineCandidates {
@@ -397,21 +394,6 @@ func writeLaunchJournalCleanupReport(action string, report launchJournalCleanupR
 		}
 	}
 	return nil
-}
-
-// dropUnparsableMessages keeps every message file whose header does not
-// parse: such a file belongs to dead-letter handling, not to history.
-func dropUnparsableMessages(files []fsq.HistoryFile) []fsq.HistoryFile {
-	kept := files[:0]
-	for _, f := range files {
-		if strings.HasSuffix(f.Path, ".md") {
-			if _, err := format.ReadHeaderFile(f.Path); err != nil {
-				continue
-			}
-		}
-		kept = append(kept, f)
-	}
-	return kept
 }
 
 func historyNote(bytes int64) string {

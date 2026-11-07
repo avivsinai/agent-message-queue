@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -348,14 +349,19 @@ func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError fu
 
 // openObligationIDs are the ids of the openers that `thread open --max-age 0`
 // lists as open under root, and of every message whose refs name one: a
-// reply that acknowledges an opener decides its state.
+// reply that acknowledges an opener decides its state. A message whose header
+// does not parse is included too: its obligation is unknown and it belongs to
+// dead-letter handling.
 func openObligationIDs(root string) (map[string]bool, error) {
-	scan, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(string, error) error { return nil })
+	ids := map[string]bool{}
+	scan, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(path string, _ error) error {
+		ids[strings.TrimSuffix(filepath.Base(path), ".md")] = true
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	open, _ := red.report(threadOpenFilter{})
-	ids := make(map[string]bool, len(open))
 	for _, ob := range open {
 		ids[ob.opener.ID] = true
 	}
