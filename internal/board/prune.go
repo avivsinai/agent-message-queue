@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
 )
 
 // prunedIDHorizon bounds how long a pruned id is remembered. ReadHistory has
@@ -15,33 +16,25 @@ import (
 const prunedIDHorizon = 30 * 24 * time.Hour
 
 // Pruned reports whether acquisition must not take the message with this id
-// and creation time again. An unparsable time is pruned only by its id.
-func (s *Snapshot) Pruned(id, created string) bool {
+// again: the id was pruned, or the creation stamp that starts it is below
+// the pruned floor.
+func (s *Snapshot) Pruned(id string) bool {
 	if _, ok := s.PrunedIDs[id]; ok {
 		return true
 	}
-	at, err := time.Parse(time.RFC3339Nano, created)
-	return err == nil && at.Before(s.PrunedBefore)
+	at, ok := format.IDTime(id)
+	return ok && s.belowPrunedFloor(at)
 }
 
-// PrunedStamp reports whether a message id is pruned, judged by its id and
-// the creation stamp that starts it, before its body is read. The stamp has
-// millisecond precision, so only a stamp a whole millisecond before
-// PrunedBefore counts; the commit decides the rest by creation time.
-func (s *Snapshot) PrunedStamp(id string) bool {
-	if _, ok := s.PrunedIDs[id]; ok {
-		return true
-	}
-	stamp, _, ok := strings.Cut(id, "_")
-	if !ok || s.PrunedBefore.IsZero() {
-		return false
-	}
-	at, err := time.Parse("2006-01-02T15-04-05.000Z", stamp)
-	return err == nil && at.Add(time.Millisecond).Before(s.PrunedBefore)
+// belowPrunedFloor reports whether an id stamp lies a whole millisecond
+// before PrunedBefore. Stamps have millisecond precision, so a stamp within
+// the floor's millisecond is not below it.
+func (s *Snapshot) belowPrunedFloor(at time.Time) bool {
+	return !s.PrunedBefore.IsZero() && at.Add(time.Millisecond).Before(s.PrunedBefore)
 }
 
-// pruneHistory removes the oldest messages that no task, suggestion or
-// withdrawal holds until about excess encoded bytes are gone, with their
+// pruneHistory removes the oldest messages that heldMessages does not hold,
+// by the stamp that starts their ids, until about excess encoded bytes are gone, with their
 // observations, dismissals, cancellations and request labels. It records
 // their ids in PrunedIDs, so acquisition does not bring them back, and
 // retires their evidence under the current generation. It reports whether it
@@ -57,8 +50,8 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 	}
 	var candidates []candidate
 	for key, m := range s.Messages {
-		created, err := time.Parse(time.RFC3339Nano, m.Created)
-		if err != nil || held[key] {
+		created, ok := format.IDTime(m.ID)
+		if !ok || held[key] {
 			continue
 		}
 		candidates = append(candidates, candidate{key, created})
@@ -108,7 +101,7 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 		s.PrunedBefore = horizon
 	}
 	for id, created := range s.PrunedIDs {
-		if created.Before(s.PrunedBefore) {
+		if s.belowPrunedFloor(created) {
 			delete(s.PrunedIDs, id)
 		}
 	}
@@ -127,23 +120,20 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 	return true
 }
 
-// validatePruned repeats the read-time reference checks that removing
-// messages can break.
+// validatePruned confirms that every message heldMessages names is still
+// present, so a prune never publishes a store that needs recovery.
 func (s *Snapshot) validatePruned() error {
-	for _, task := range s.Tasks {
-		for _, key := range task.Attachments {
-			if _, ok := s.Messages[key]; !ok {
-				return errors.New("pruned an attached message")
-			}
+	for key := range s.heldMessages() {
+		if _, ok := s.Messages[key]; !ok {
+			return errors.New("pruned a held message")
 		}
 	}
-	if err := s.validateIdentityRecords(); err != nil {
-		return err
-	}
-	return s.validateModelBindings()
+	return nil
 }
 
-// heldMessages are the message keys a task, suggestion or withdrawal names.
+// heldMessages are the message keys pruning keeps: those a task,
+// suggestion or withdrawal names, every request with a recipient that has no
+// observed direct reply, and every message that refers to such a request.
 func (s *Snapshot) heldMessages() map[string]bool {
 	held := map[string]bool{}
 	for _, task := range s.Tasks {
@@ -163,6 +153,21 @@ func (s *Snapshot) heldMessages() map[string]bool {
 	for key, withdrawal := range s.Withdrawals {
 		held[key] = true
 		held[withdrawal] = true
+	}
+	x := newRequestIndex(*s)
+	for key, m := range s.Messages {
+		if !isRequestKind(m.Kind) {
+			continue
+		}
+		for _, r := range x.request(key, s.PublishedAt).Recipients {
+			if len(r.DirectReplies) == 0 {
+				held[key] = true
+				for _, reply := range x.referrer[m.Namespace+"#"+m.ID] {
+					held[reply] = true
+				}
+				break
+			}
+		}
 	}
 	return held
 }

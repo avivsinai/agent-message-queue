@@ -25,7 +25,7 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Mes
 	}
 	pruned := map[string]bool{}
 	for _, m := range messages {
-		if state.Pruned(m.ID, m.Created) {
+		if state.Pruned(m.ID) {
 			pruned[m.EvidenceHash] = true
 		}
 	}

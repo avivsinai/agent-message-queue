@@ -801,7 +801,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		state.Input = a.Input
 		state.Usage = a.Usage
 		for _, m := range a.Messages {
-			if state.Pruned(m.ID, m.Created) {
+			if state.Pruned(m.ID) {
 				continue
 			}
 			if previous, ok := state.Messages[m.Key]; ok {
