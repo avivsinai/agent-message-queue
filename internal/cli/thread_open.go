@@ -303,10 +303,11 @@ func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError fu
 // lists as open under root, and of every message whose refs name one: a
 // reply that acknowledges an opener decides its state. A message whose header
 // does not parse is included too: its obligation is unknown and it belongs to
-// dead-letter handling. closers maps the id of each message that closed an
-// obligation under root to its opener's id.
-func openObligationIDs(root string) (ids map[string]bool, closers map[string]string, err error) {
-	ids, closers = map[string]bool{}, map[string]string{}
+// dead-letter handling. closers maps the id of each message on the path that
+// closed an obligation under root (the closing message and its direct
+// parents up to the opener) to the ids of those openers.
+func openObligationIDs(root string) (ids map[string]bool, closers map[string][]string, err error) {
+	ids, closers = map[string]bool{}, map[string][]string{}
 	scan, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(path string, _ error) error {
 		ids[strings.TrimSuffix(filepath.Base(path), ".md")] = true
 		return nil
@@ -314,11 +315,24 @@ func openObligationIDs(root string) (ids map[string]bool, closers map[string]str
 	if err != nil {
 		return nil, nil, err
 	}
+	parent := map[string]string{}
+	for _, entry := range scan.Entries {
+		if n := len(entry.Refs); n > 0 {
+			parent[entry.ID] = entry.Refs[n-1]
+		}
+	}
 	for _, ob := range red.Obligations {
 		if ob.Open() {
 			ids[ob.Opener.ID] = true
-		} else if ob.Closed && ob.ClosedBy != nil {
-			closers[ob.ClosedBy.ID] = ob.Opener.ID
+			continue
+		}
+		if !ob.Closed || ob.ClosedBy == nil {
+			continue
+		}
+		seen := map[string]bool{}
+		for id := ob.ClosedBy.ID; id != "" && id != ob.Opener.ID && !seen[id]; id = parent[id] {
+			seen[id] = true
+			closers[id] = append(closers[id], ob.Opener.ID)
 		}
 	}
 	var replies []string

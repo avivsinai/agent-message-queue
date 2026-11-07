@@ -241,3 +241,55 @@ func TestCleanupHistoryCutsAPlainReplyChainToTheBound(t *testing.T) {
 		t.Fatalf("alpha keeps %d bytes of a plain reply chain, want at most %d", total, bound)
 	}
 }
+
+// Review of the disk bounds, round 3, finding 1: size cleanup kept the
+// closing answer but removed the status between it and the question, so the
+// answer's lineage broke and the question looked open again.
+func TestCleanupHistoryKeepsThePathToAClosingAnswer(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	base := filepath.Join(t.TempDir(), defaultCoopRoot)
+	start := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	ids, _ := writeThreadOpenMessages(t, base, []threadOpenMessage{
+		{name: "q", from: "alpha@s1", to: "beta@s1,delta@s1", kind: format.KindQuestion, thread: "work"},
+		{name: "d", from: "delta@s1", to: "alpha@s1", kind: format.KindAnswer, thread: "work", refs: []string{"q"}},
+		{name: "s", from: "beta@s1", to: "alpha@s1", kind: format.KindStatus, thread: "work", refs: []string{"q"}},
+		{name: "r", from: "beta@s1", to: "alpha@s1", kind: format.KindAnswer, thread: "work", refs: []string{"s"}},
+	}, func(i int, _ threadOpenMessage) time.Time { return start.Add(time.Duration(i) * time.Hour) })
+	s1 := filepath.Join(base, "s1")
+	for _, move := range [][2]string{{"beta", "q"}, {"delta", "q"}, {"alpha", "d"}, {"alpha", "s"}, {"alpha", "r"}} {
+		if err := os.Rename(filepath.Join(fsq.AgentInboxNew(s1, move[0]), ids[move[1]]+".md"), filepath.Join(fsq.AgentInboxCur(s1, move[0]), ids[move[1]]+".md")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The long answer pushes alpha's and beta's mailboxes past a bound that
+	// delta's mailbox, which keeps the question, fits.
+	for _, path := range []string{filepath.Join(fsq.AgentOutboxSent(s1, "beta"), ids["r"]+".md"), filepath.Join(fsq.AgentInboxCur(s1, "alpha"), ids["r"]+".md")} {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString(strings.Repeat("x", 8192))
+		_ = f.Close()
+	}
+	var bound int64
+	for _, path := range []string{filepath.Join(fsq.AgentInboxCur(s1, "delta"), ids["q"]+".md"), filepath.Join(fsq.AgentOutboxSent(s1, "delta"), ids["d"]+".md")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound += info.Size()
+	}
+	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 0 {
+		t.Fatalf("obligations before cleanup = %+v, want none", after.Obligations)
+	}
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--history-max-size", fmt.Sprintf("%dB", bound), "--root", s1, "--yes"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 0 {
+		t.Fatalf("obligations after cleanup = %+v, want none", after.Obligations)
+	}
+}

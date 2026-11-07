@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,8 +60,8 @@ func runCleanup(args []string) error {
 		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
 		"dead letters and their receipts, a message whose header does not parse,",
 		"extension data, every copy of a message that 'amq thread open --max-age 0'",
-		"lists as open, with the replies that ref it, a reply that closed an",
-		"obligation whose opener keeps a read or sent copy, and a remote file that",
+		"lists as open, with the replies that ref it, the messages that closed an",
+		"obligation whose opener keeps a copy, and a remote file that",
 		"unread mail or such a message names as",
 		"[image: <path>] are never removed, and nothing is removed unless you run",
 		"this command. A size bound can remove an image an agent has not opened",
@@ -485,18 +486,20 @@ func referencedRemoteFiles(root string, open map[string]bool) (map[string]bool, 
 }
 
 // keepClosersOfKeptOpeners removes from candidates every message, with its
-// receipts, that closed an obligation (closers maps it to its opener) whose
-// opener keeps a read or sent copy outside candidates, so an answered
-// opener never stays without its answer. It looks one step: a kept closer
-// keeps nothing else.
-func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers map[string]string) ([]fsq.HistoryFile, error) {
+// receipts, on the path that closed an obligation (closers maps it to the
+// openers of those obligations) when one of those openers keeps a copy
+// outside candidates, so an answered opener never stays without the path to
+// its answer. It keeps one path per closed obligation and nothing below it.
+func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers map[string][]string) ([]fsq.HistoryFile, error) {
 	removing := map[string]bool{}
 	for _, c := range candidates {
 		removing[c.Path] = true
 	}
 	openers := map[string]bool{}
-	for _, opener := range closers {
-		openers[opener] = true
+	for _, ids := range closers {
+		for _, opener := range ids {
+			openers[opener] = true
+		}
 	}
 	keptCopy := map[string]bool{}
 	agents, err := fsq.ListAgents(root)
@@ -504,7 +507,7 @@ func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers
 		return nil, err
 	}
 	for _, agent := range agents {
-		for _, dir := range []string{fsq.AgentInboxCur(root, agent), fsq.AgentOutboxSent(root, agent)} {
+		for _, dir := range historyMessageDirs(root, agent) {
 			entries, err := os.ReadDir(dir)
 			if os.IsNotExist(err) {
 				continue
@@ -521,7 +524,7 @@ func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers
 	}
 	out := candidates[:0]
 	for _, c := range candidates {
-		if opener, ok := closers[fsq.HistoryID(filepath.Base(c.Path))]; !ok || !keptCopy[opener] {
+		if !slices.ContainsFunc(closers[fsq.HistoryID(filepath.Base(c.Path))], func(opener string) bool { return keptCopy[opener] }) {
 			out = append(out, c)
 		}
 	}
