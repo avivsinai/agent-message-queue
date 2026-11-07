@@ -25,6 +25,8 @@ import (
 // registry entry named the session id took a mailbox binding without proof
 // that it ran as that handle at that root. The machine agent leaves Claude
 // to the approval hook.
+// Regression (round-2 review of the reattach branch): /amq-remote off after
+// the binding was pruned matched nothing, so a pi resume came back.
 func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 	self, err := launch.HolderOf(os.Getpid())
 	if err != nil {
@@ -40,11 +42,13 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 		name    string
 		harness string
 		prune   bool
+		off     bool // the owner turns the session off after the prune
 		want    bool
 	}{
-		{"pi", "pi", false, true},
-		{"pi, pruned", "pi", true, true},
-		{"claude", "claude", true, false},
+		{"pi", "pi", false, false, true},
+		{"pi, pruned", "pi", true, false, true},
+		{"pi, pruned, then off", "pi", true, true, false},
+		{"claude", "claude", true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, rec := machineServer(t)
@@ -55,7 +59,7 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 			b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Harness: tc.harness,
 				Holder: ended, Label: tc.harness + " · proj @ box", Name: "agent-proj"}
 			if tc.harness == "pi" {
-				b.NativeSession = "pi-s-1"
+				b.HarnessSession = "pi-s-1"
 			} else {
 				b.ConfigDir = canonicalTempDir(t)
 				b.Transcript = claudeSessionFiles(t, b.ConfigDir, self.PID, "s-1")
@@ -71,6 +75,11 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.off {
+				if _, err := binding.Retire(binding.RemovedDetached, func(o binding.Binding) bool { return o.Name == b.Name }); err != nil {
+					t.Fatal(err)
+				}
+			}
 			now := time.Now()
 			tick(s, now)
 			tick(s, now.Add(time.Minute))
@@ -79,7 +88,7 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 			got, err := binding.ReadNamed(b.Name)
 			if !tc.want {
 				if err == nil {
-					t.Fatalf("binding = %+v; want none: the approval hook restores a Claude session", got)
+					t.Fatalf("binding = %+v; want none", got)
 				}
 				return
 			}

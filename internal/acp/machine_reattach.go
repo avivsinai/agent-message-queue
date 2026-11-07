@@ -11,8 +11,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
-// reattachWindow is how long after its retirement a channel record is still
-// a candidate for reattach.
+// reattachWindow is how long after its RetiredAt a channel record is still a
+// candidate for reattach.
 const reattachWindow = 7 * 24 * time.Hour
 
 // piLiveBridge reads a pi bridge's liveness; tests replace it.
@@ -30,8 +30,8 @@ var piLiveBridge = pi.LiveBridge
 // process above it; Codex publishes no record that proves a resume.
 //
 // The scan runs at most once per channelStepGap. A candidate is a retired
-// record of a channel that was active and ended with its session, retired
-// within reattachWindow and before this tick.
+// record of a channel that was active and ended with its session, whose
+// RetiredAt is within reattachWindow and before this tick.
 func (s *Server) reattach(now time.Time) {
 	if !due(s.machine.rebound, channelStepGap, now) {
 		return
@@ -40,9 +40,9 @@ func (s *Server) reattach(now time.Time) {
 	s.machine.rebound = stamp
 	var cands []channelRecord
 	for _, r := range s.retiredRecords() {
-		at, err := time.Parse(time.RFC3339, r.Updated)
+		at, err := time.Parse(time.RFC3339, r.RetiredAt)
 		if r.RetiredBy == retiredEnded && r.RetiredFrom == channelActive && r.ChannelID != "" &&
-			err == nil && r.Updated != stamp && now.Sub(at) < reattachWindow {
+			err == nil && r.RetiredAt != stamp && now.Sub(at) < reattachWindow {
 			cands = append(cands, r)
 		}
 	}

@@ -359,7 +359,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind), NativeSession: h.Session}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind), HarnessSession: h.Session}
 	if fromHook {
 		if err := ownerDetached(b); err != nil {
 			return b, "", false, err
@@ -488,7 +488,7 @@ func heldBySession(b binding.Binding) bool {
 }
 
 // movedTarget reports whether old pins the same root and native target as b
-// under another native session. A mailbox binding pins no native session.
+// under another native session. movedTarget compares native bindings only.
 func movedTarget(old, b binding.Binding) bool {
 	return !old.Mailbox() && !b.Mailbox() && filepath.Clean(old.Root) == filepath.Clean(b.Root) &&
 		old.Target == b.Target && old.NativeSession != b.NativeSession

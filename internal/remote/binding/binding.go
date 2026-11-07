@@ -56,6 +56,11 @@ type Binding struct {
 	// NativeSession is the native identity the owner shared. The endpoint
 	// refuses every command once the target is attached to another one.
 	NativeSession string `json:"native_session,omitempty"`
+	// HarnessSession is the session id of the harness behind a mailbox
+	// handle (a pi chat's), as that harness publishes it; empty for a native
+	// binding and when it is not known. It is never a native target's
+	// session, so nothing that keys on NativeSession reads it.
+	HarnessSession string `json:"harness_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
 	// Identity is the session identity that decides name reuse (see
@@ -133,11 +138,15 @@ func (b Binding) SessionIdentity() string {
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
 }
 
-// RecordedSession is the native session id b recorded: NativeSession when
-// set, else the file stem of its transcript; "" when neither is known.
+// RecordedSession is the session id b recorded: NativeSession or
+// HarnessSession when set, else the file stem of its transcript; "" when
+// none is known.
 func (b Binding) RecordedSession() string {
 	if b.NativeSession != "" {
 		return b.NativeSession
+	}
+	if b.HarnessSession != "" {
+		return b.HarnessSession
 	}
 	if b.Transcript == "" {
 		return ""
@@ -301,12 +310,10 @@ func (b Binding) Valid() error {
 	}
 	switch b.Carrier {
 	case CarrierMailbox:
-		// A mailbox binding never names a native target. It may record the
-		// native session id of the harness behind the handle (a pi chat's);
-		// the Claude Stop receiver matches a Claude session id exactly, which
-		// a pi session id never is.
-		if b.Target != "" {
-			return errors.New("mailbox binding must not name a native target")
+		// A mailbox binding never names a native session, so nothing that
+		// keys on one (the Claude Stop receiver) treats it as native.
+		if b.Target != "" || b.NativeSession != "" {
+			return errors.New("mailbox binding must not name a native target or session")
 		}
 		return fsq.ValidateHandle(b.Handle)
 	case "", CarrierNative:
@@ -767,6 +774,9 @@ func Replace(was, now Binding) (bool, error) {
 	if err := now.Valid(); err != nil {
 		return false, err
 	}
+	if now.BoundAt == "" {
+		now.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	raw, err := json.MarshalIndent(now, "", "  ")
 	if err != nil {
 		return false, err
@@ -873,7 +883,10 @@ func PruneEnded(inspect Inspector) ([]string, error) {
 // inherits the removed session's Buzz agent through a freed name. The
 // tombstone, which records why (one of the Removed values), is written
 // before the binding is removed, so a reader that finds the binding gone
-// finds the reason too; a stop between the two leaves the binding bound.
+// finds the reason too; a stop between the two leaves the binding bound. A
+// detach also turns each tombstone match accepts that records an end into a
+// detached one and returns its name, so a session whose binding was already
+// pruned is turned off too and is never bound again by itself.
 // Tombstones are never removed. Their number is bounded by the
 // distinct session identities, and an identity derived from a target (a link
 // share, or a native session whose working directory is unknown) names a
@@ -906,6 +919,26 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 				return err
 			}
 			removed = append(removed, b.Name)
+		}
+		if why == RemovedDetached {
+			tombs, err := scanTombstones(dir)
+			if err != nil {
+				return err
+			}
+			for _, t := range tombs {
+				if t.Removed != RemovedEnded || !match(t) {
+					continue
+				}
+				t.Removed = RemovedDetached
+				raw, err := json.MarshalIndent(t, "", "  ")
+				if err != nil {
+					return err
+				}
+				if _, err := fsq.WriteFileAtomic(dir, t.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+					return err
+				}
+				removed = append(removed, t.Name)
+			}
 		}
 		if b, err := read(path); err == nil {
 			if b.Name = LegacyName; match(b) {
