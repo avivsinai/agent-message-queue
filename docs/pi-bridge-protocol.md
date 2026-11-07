@@ -42,10 +42,36 @@ adapter's temporary files.
 ## Ownership
 
 The adapter writes only `requests/` and `cancels/`. The extension writes only
-`receipts/`, `events/`, and `bridge.liveness`. Neither side deletes or rewrites a file the
-other side owns. The extension never deletes or rewrites a request; the adapter
-never deletes a request it published. Cleanup of old files is an explicit
-operator action outside this protocol.
+`receipts/`, `events/`, `activity/`, and `bridge.liveness`.
+Neither side deletes or rewrites a file the other side owns. The extension
+never deletes or rewrites a request; the adapter never deletes a request it
+published. Cleanup of old files is an explicit operator action outside this
+protocol.
+
+One extension instance serves a mailbox, and `bridge.liveness` is the only
+record of which one. Its owner is the generation it names while it is
+younger than `OWNER_STALE_MS` (60 seconds, 30 heartbeats) and has
+`live: true`. A starting instance that finds such a record for another
+generation does not serve and tells the owner once in pi; a second pi started
+with the same `AM_ROOT` and `AM_ME`, for example from a pi tool, never touches
+the first bridge's requests or liveness. When two instances start at once,
+the last liveness write wins: an instance that reads another generation in
+liveness stops at once and tells its pi once that it no longer serves Buzz
+requests.
+
+An instance that does not serve, whether it was held off at start or
+displaced, checks liveness every heartbeat and takes the mailbox by writing
+liveness, as at start, telling its pi that it now serves Buzz requests. A
+record that is absent or not live is taken at the next heartbeat; a clean
+exit writes `live: false`. A `live: true` record is taken only after two of
+these heartbeats, at least a heartbeat apart, saw it older than
+`OWNER_STALE_MS` and unchanged, so an owner that resumes from sleep refreshes
+it first. A stalled owner keeps the mailbox until then. Only the owner writes
+liveness, including `live: false` on shutdown. Only the owner opens the wake
+dialog marker or a Buzz dialog for the mailbox. A pi always closes a marker
+or dialog it opened itself, at prompt end and at every session boundary,
+even after it stopped serving, so it never holds the owner's doorbell; only
+the owner closes a marker it did not open.
 
 ## Protocol string
 
@@ -244,8 +270,10 @@ The extension replaces the whole file (temporary file plus rename) every 2
 seconds. Freshness is the file's modification time: a record older than 5
 seconds is stale. The record is live only when it is fresh, parses, carries
 this protocol, and has `live: true` and `pid > 0`. `session_generation` is the
-current generation; the adapter addresses first-contact requests to it. On shutdown the extension
-writes `live: false`, so the adapter sees the bridge offline at once.
+current generation; the adapter addresses first-contact requests to it. Only the
+owner (see [Ownership](#ownership)) writes the record; the adapter's 5-second
+staleness says whether the bridge is reachable now, not who owns the mailbox. On shutdown it writes
+`live: false`, so the adapter sees the bridge offline at once.
 `surface` is the pi run mode (`tui`, `rpc`, `json`, or `print`).
 `bridge_revision` is the extension's implementation revision. An extension
 may also publish `upgrade`, its own remedy for an owner whose bridge is too
@@ -382,7 +410,9 @@ The adapter's epoch rules:
 ## Extension processing rules
 
 The extension polls `requests/` often enough that a receipt lands well inside
-the adapter's 2-second receipt wait. For each request with neither a receipt
+the adapter's 2-second receipt wait. It lists the directory only when the
+directory changed, and at least every 5 minutes, so an idle poll does not grow
+with the retained requests. For each request with neither a receipt
 nor a terminal event, in publication order, it:
 
 1. validates the shape: `ref` matches the file name, `text` is non-empty,
@@ -437,12 +467,15 @@ delivery and pi is idle with no queued messages, the extension appends
 
 On `session_shutdown` with a request in flight, the extension appends the
 outcome it already decided; otherwise `failed` naming the shutdown reason when
-the request started, or `uncertain` when it did not. On `session_start` it
-appends `uncertain` to every receipt from another generation that has no
-terminal event, so a crash never leaves a ref running forever and never
-records an outcome nobody observed. A receipt it cannot read or close is
-retried on later polls, and a closing line whose append failed is appended
-again even when it is readable.
+the request started, or `uncertain` when it did not. On `session_start`, once
+it owns the mailbox, it appends `uncertain` to every receipt from another
+generation that has no terminal event and whose last event (or, without one,
+the receipt) is older than `OWNER_STALE_MS`; a younger one is closed when it
+reaches that age, so a stalled owner's running request is never closed under
+it. A crash never leaves a ref running forever and never records an outcome
+nobody observed. A receipt it cannot read or close is retried on later polls,
+and a closing line whose append failed is appended again even when it is
+readable.
 
 ## Adapter recovery and evidence
 

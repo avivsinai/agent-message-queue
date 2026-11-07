@@ -33,11 +33,25 @@ function normalize(text: string): string {
 		.join("");
 }
 
+// aged makes ref's receipt and events older than the bridge's owner
+// staleness bound, as an earlier generation's are.
+function aged(dir: string, ref: string): void {
+	const past = new Date(Date.now() - 120_000);
+	for (const rel of [`receipts/${ref}.json`, `events/${ref}.jsonl`]) {
+		try {
+			fs.utimesSync(path.join(dir, rel), past, past);
+		} catch {
+			// No such file yet.
+		}
+	}
+}
+
 // harness runs the extension against a fake ExtensionAPI and a real bridge
 // directory under a temporary AM_ROOT. host, when given, embeds the bridge
-// as a host application does, with no AM_ROOT or AM_ME set.
-function harness(host?: (root: string) => AmqBridgeOptions) {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
+// as a host application does, with no AM_ROOT or AM_ME set. shared, when
+// given, is another harness's root, which that harness removes.
+function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
+	const root = shared ?? fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
 	process.env.AM_ROOT = root;
 	process.env.AM_ME = "pi-seat";
 	if (host) {
@@ -79,6 +93,7 @@ function harness(host?: (root: string) => AmqBridgeOptions) {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};
 	return {
+		root,
 		dir,
 		sent,
 		state,
@@ -121,7 +136,7 @@ function harness(host?: (root: string) => AmqBridgeOptions) {
 		},
 		async done() {
 			await emit("session_shutdown", { reason: "quit" });
-			fs.rmSync(root, { recursive: true, force: true });
+			if (!shared) fs.rmSync(root, { recursive: true, force: true });
 		},
 	};
 }
@@ -246,6 +261,7 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 	// A receipt an earlier generation left without a terminal event.
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 
 	await h.start();
 	try {
@@ -271,6 +287,196 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 			assert.equal(produced(rel), golden(rel), rel);
 		}
 	} finally {
+		await h.done();
+	}
+});
+
+// Review of pi bridge ownership: a second pi on one mailbox masked the first request's real result.
+test("a second bridge on a live, even stalled, owner's mailbox stays inactive and the request keeps its real outcome", async () => {
+	const h1 = harness();
+	await h1.start();
+	const h2 = harness(undefined, h1.root);
+	try {
+		const gen = h1.generation();
+		h1.publish(REF, "remote task", gen);
+		await h1.waitFor(() => h1.hasReceipt(REF));
+		await h1.emit("message_start", userMessage("remote task"));
+		// A stalled owner (no heartbeat for 10 s) is still the owner.
+		const past = new Date(Date.now() - 10_000);
+		fs.utimesSync(path.join(h1.dir, "bridge.liveness"), past, past);
+		await h2.start();
+		assert.equal(h1.generation(), gen);
+		assert.equal(h2.notices.length, 1);
+		await h1.emit("message_end", assistantMessage("done"));
+		await h1.emit("agent_before_settle", { outcome: "completed" });
+		await h1.emit("agent_settled");
+		assert.deepEqual(h1.events(REF).map((e) => e.event), ["started", "completed"]);
+		await h2.done();
+		const live = JSON.parse(fs.readFileSync(path.join(h1.dir, "bridge.liveness"), "utf8"));
+		assert.deepEqual([live.live, live.session_generation], [true, gen]);
+	} finally {
+		await h1.done();
+	}
+});
+
+// Review of pi bridge ownership: a bridge started over another generation's live liveness.
+test("a bridge stays inactive while another generation's liveness is live, and takes over a beat after it sees it aged", async () => {
+	const h = harness();
+	const foreign = JSON.stringify({ protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 });
+	fs.mkdirSync(h.dir, { recursive: true });
+	fs.writeFileSync(path.join(h.dir, "bridge.liveness"), foreign);
+	await h.start();
+	try {
+		assert.equal(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"), foreign);
+		assert.equal(h.notices.length, 1);
+		assert.match(h.notices[0], /pid 4242/);
+		// Review of the liveness ruling: a pi restarted within 60 s of a crash stayed inactive all session.
+		const past = new Date(Date.now() - 120_000);
+		fs.utimesSync(path.join(h.dir, "bridge.liveness"), past, past);
+		// Review of sleep safety: a stale live record is not taken on the first beat that sees it.
+		await new Promise((r) => setTimeout(r, 2300));
+		assert.equal(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"), foreign);
+		for (let i = 0; i < 125 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.equal(h.sent.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of the liveness ownership: a displaced bridge stayed inactive after the bridge that displaced it left.
+test("a displaced bridge waits and serves again once the other bridge leaves", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const live = path.join(h.dir, "bridge.liveness");
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(live, JSON.stringify(other)); // a bridge that started at the same moment wrote last
+		await h.waitFor(() => h.notices.length === 1);
+		assert.match(h.notices[0], /no longer serves Buzz requests/);
+		fs.writeFileSync(live, JSON.stringify({ ...other, live: false })); // it exits
+		for (let i = 0; i < 150 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.equal(h.sent.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of dialog ownership: a pi displaced while its prompt was open left its marker, holding the serving pi's doorbell.
+test("a prompt opened while serving closes its marker after the pi is displaced", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		assert.ok(fs.existsSync(marker));
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(path.join(h.dir, "bridge.liveness"), JSON.stringify(other));
+		await h.waitFor(() => h.notices.length === 1);
+		assert.match(h.notices[0], /no longer serves Buzz requests/);
+		await h.emit("ui_prompt_end", { reason: "ui_prompt" });
+		assert.equal(fs.existsSync(marker), false);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of dialog ownership: a displaced pi's prompt end removed the serving pi's marker that had replaced its own.
+test("a displaced pi's prompt end leaves the serving pi's marker that replaced its own", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(path.join(h.dir, "bridge.liveness"), JSON.stringify(other));
+		await h.waitFor(() => h.notices.length === 1);
+		const owners = `${JSON.stringify({ schema: 1, event: "ui_prompt", harness: "pi", kind: "select", opened_at: "2000-01-01T00:00:00Z" })}\n`;
+		fs.writeFileSync(marker, owners);
+		await h.emit("ui_prompt_end", { reason: "ui_prompt" });
+		assert.equal(fs.readFileSync(marker, "utf8"), owners);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of dialog ownership: a pi that took over during its own open prompt served with no marker, so the doorbell could type into the prompt.
+test("a pi that takes over during its own open prompt holds the doorbell for it", async () => {
+	const h = harness();
+	const live = path.join(h.dir, "bridge.liveness");
+	const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+	fs.mkdirSync(h.dir, { recursive: true });
+	fs.writeFileSync(live, JSON.stringify(other));
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		assert.equal(fs.existsSync(marker), false); // held off: not this pi's doorbell yet
+		fs.writeFileSync(live, JSON.stringify({ ...other, live: false })); // the holder exits
+		for (let i = 0; i < 150 && h.notices.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+		assert.equal(h.notices[1], "amq-bridge now serves Buzz requests.");
+		assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).kind, "confirm");
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of pi admission evidence: a short receipt write was published and handed to pi.
+test("a receipt cut short by a short write is never published; the retry publishes it whole", async () => {
+	const h = harness();
+	const realWrite = nodeFs.writeSync;
+	let cut = false;
+	nodeFs.writeSync = ((fd: number, data: string | Uint8Array, ...rest: unknown[]) => {
+		const bytes = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+		if (!cut && bytes.includes("delivered_at")) {
+			cut = true;
+			return realWrite(fd, bytes.subarray(0, 8));
+		}
+		return (realWrite as (...a: unknown[]) => number)(fd, data, ...rest);
+	}) as typeof nodeFs.writeSync;
+	syncBuiltinESMExports();
+	try {
+		await h.start();
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.hasReceipt(REF));
+		assert.ok(cut);
+		assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, "receipts", `${REF}.json`), "utf8")).ref, REF);
+		assert.equal(h.sent.length, 1);
+	} finally {
+		nodeFs.writeSync = realWrite;
+		syncBuiltinESMExports();
+		await h.done();
+	}
+});
+
+// Review of pi admission evidence: a new events file's directory entry was never synced.
+test("a line written into an empty events file syncs the events directory", async () => {
+	const h = harness();
+	const synced = new Set<number>();
+	const realFsync = nodeFs.fsyncSync;
+	nodeFs.fsyncSync = (fd: number) => {
+		const st = fs.fstatSync(fd);
+		if (st.isDirectory()) synced.add(st.ino);
+		realFsync(fd);
+	};
+	syncBuiltinESMExports();
+	try {
+		fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
+		fs.writeFileSync(path.join(h.dir, "events", `${REF}.jsonl`), ""); // its entry may not be durable yet
+		await h.start();
+		h.state.idle = false;
+		h.publish(REF, "remote task", h.generation()); // refused busy: the first line in the empty file
+		await h.waitFor(() => h.events(REF).length === 1);
+		assert.equal(h.events(REF)[0].reason, "busy");
+		assert.ok(synced.has(fs.statSync(path.join(h.dir, "events")).ino));
+	} finally {
+		nodeFs.fsyncSync = realFsync;
+		syncBuiltinESMExports();
 		await h.done();
 	}
 });
@@ -340,7 +546,9 @@ test("a terminal append is retried until durable, and recovery repairs a partial
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 	fs.writeFileSync(path.join(h.dir, "events", `${ORPHAN}.jsonl`), fragment);
+	aged(h.dir, ORPHAN);
 
 	await h.start();
 	try {
@@ -455,6 +663,7 @@ test("an orphan receipt whose read failed is recovered on a later poll", async (
 	try {
 		fs.rmdirSync(receipt);
 		fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), receipt); // the filesystem recovers
+		aged(h.dir, ORPHAN);
 		await h.waitFor(() => h.events(ORPHAN).length > 0);
 		assert.deepEqual(
 			h.events(ORPHAN).map((e) => e.event),
@@ -498,6 +707,7 @@ test("a refusal and an orphan closure whose fsync failed are appended again", as
 	fs.mkdirSync(path.join(h.dir, "receipts"), { recursive: true });
 	fs.mkdirSync(path.join(h.dir, "events"), { recursive: true });
 	fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), path.join(h.dir, "receipts", `${ORPHAN}.json`));
+	aged(h.dir, ORPHAN);
 	const failOnce = new Set([`${ORPHAN}.jsonl`, `${REF}.jsonl`].map((n) => path.join(h.dir, "events", n)));
 	const realFsync = nodeFs.fsyncSync;
 	nodeFs.fsyncSync = (fd: number) => {

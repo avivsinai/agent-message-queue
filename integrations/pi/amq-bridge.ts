@@ -19,8 +19,21 @@ export const BRIDGE_REVISION = 4;
 // refused, so an old adapter cannot send work through this bridge.
 const MIN_ADAPTER_REVISION = 3;
 
-const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s as stale
+const HEARTBEAT_MS = 2000;
+// OWNER_STALE_MS is how long a live liveness record keeps the mailbox for
+// its generation. One bridge serves a mailbox: another bridge starts only on
+// a record that is older, not live, or absent, and a request is closed
+// uncertain as an orphan only when its last event is older. It is far longer
+// than the adapter's 5-second staleness, so a stalled owner keeps its
+// mailbox and its running request.
+const OWNER_STALE_MS = 60_000;
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
+// A poll lists requests/ only when the directory changed, and in any case
+// every RECONCILE_MS. A listing within COARSE_MTIME_MS of the directory's
+// mtime is repeated, because a coarse mtime cannot show a change made later
+// in the same tick.
+const RECONCILE_MS = 5 * 60 * 1000;
+const COARSE_MTIME_MS = 2000;
 const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by then dropped it
 const MAX_EVENT_TEXT = 256 * 1024;
 // Activity records are a bounded, best-effort view of the whole session for
@@ -96,17 +109,28 @@ type Bridge = {
 	surface: string;
 	timers: ReturnType<typeof setInterval>[];
 	handled: Set<string>;
+	// pending holds each listed ref not handled yet, with its request's
+	// mtime; it is the work a poll examines.
+	pending: Map<string, number>;
+	// listedMtime and listedAt are requests/'s mtime and the time of the
+	// last listing.
+	listedMtime: number;
+	listedAt: number;
 	// refusals holds a refusal decided for a ref whose append failed. The
 	// ref is never examined again; only this same refusal is retried.
 	refusals: Map<string, EventFields>;
 	inflight: Inflight | null;
-	orphansPending: boolean;
+	// orphans holds the receipts of other generations that may still need
+	// closing; null until receipts/ is listed.
+	orphans: Set<string> | null;
 	// orphanRetry holds orphan refs whose closing append failed. Their
 	// bytes may be on disk without being durable, so they are appended
 	// again until an append succeeds.
 	orphanRetry: Set<string>;
 	// revisionNoticeShown limits the old-adapter notice to once per runtime.
 	revisionNoticeShown: boolean;
+	ownerNotice: { shown: boolean };
+	displaced: (b: Bridge) => void;
 	// sessionId is pi's own session id; "" disables activity records.
 	sessionId: string;
 	// turn is the id of the open turn, "" outside one. turns counts turns.
@@ -159,6 +183,68 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // the plain extension.
 export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): void {
 	let bridge: Bridge | null = null;
+	// ownerNotice limits the notices about another bridge to once.
+	const ownerNotice = { shown: false };
+	// waiting is the beat of a pi that does not serve its mailbox: another
+	// live bridge held it off at session_start, or displaced it. A record
+	// that is absent or not live is taken at the next beat. A live record is
+	// taken only after two of these beats at least a beat apart saw it stale
+	// and unchanged, so an owner that resumes from sleep refreshes it first.
+	let waiting: ReturnType<typeof setInterval> | null = null;
+	const stopWaiting = () => {
+		if (waiting) clearInterval(waiting);
+		waiting = null;
+	};
+	const begin = (ctx: ExtensionContext, identity: AmqIdentity) => {
+		bridge = start(pi, ctx, options, identity, ownerNotice, displaced);
+		if (!bridge) return;
+		// A pi that takes over while its own prompt is open holds the
+		// doorbell for that prompt from now on.
+		if (openPrompts > 0 && !written && outerPrompt) {
+			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
+			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge.sessionId);
+		}
+		scanSafely(pi, bridge);
+	};
+	// serve starts the bridge for identity, or waits while another live
+	// bridge holds the mailbox.
+	const serve = (ctx: ExtensionContext, identity: AmqIdentity): void => {
+		stopWaiting();
+		const dir = bridgeDir(identity);
+		const held = holderOf(dir);
+		if (!held) return begin(ctx, identity);
+		if (!held.stale && !ownerNotice.shown) {
+			ownerNotice.shown = true;
+			notify(ctx, `amq-bridge inactive: another live pi bridge${typeof held.pid === "number" ? ` (pid ${held.pid})` : ""} serves this AMQ mailbox, so amq-remote reaches that pi, not this one.`);
+		}
+		let seen: { key: string; at: number } | null = null;
+		waiting = setInterval(() => {
+			const now = Date.now();
+			const h = holderOf(dir);
+			if (h && !h.stale) {
+				seen = null;
+				return;
+			}
+			if (h) {
+				// Less a poll for timer jitter: the two beats are a beat apart.
+				if (!seen || seen.key !== h.key) seen = { key: h.key, at: now };
+				if (now - seen.at < HEARTBEAT_MS - POLL_MS) return;
+			}
+			stopWaiting();
+			const told = ownerNotice.shown;
+			ownerNotice.shown = false;
+			begin(ctx, identity);
+			if (bridge && told) notify(ctx, "amq-bridge now serves Buzz requests.");
+		}, HEARTBEAT_MS);
+		waiting.unref();
+	};
+	// displaced is called by a bridge that found another generation in
+	// liveness; this pi then waits as a held-off pi does.
+	const displaced = (b: Bridge) => {
+		if (bridge !== b) return;
+		bridge = null;
+		serve(b.ctx, b.identity);
+	};
 	// session holds the identity resolved for the open session, none
 	// included; it is null outside a session.
 	let session: { identity: AmqIdentity | undefined } | null = null;
@@ -166,6 +252,17 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// session's once it started, else what the identity source gives
 	// without a session.
 	const who = (): AmqIdentity | undefined => (session ? session.identity : resolveIdentity(options, undefined));
+	// serving reports whether this pi may hold the wake doorbell and show Buzz
+	// dialogs for its mailbox: only the owning bridge may, never a pi that
+	// another live bridge holds off. Before the session starts, a pi serves
+	// unless a fresh live record names another bridge.
+	const serving = (): boolean => {
+		if (bridge) return true;
+		if (waiting) return false;
+		const id = who();
+		const h = id ? holderOf(bridgeDir(id)) : null;
+		return !h || h.stale;
+	};
 
 	// The doorbell must never answer a pi prompt. pi counts nested
 	// extension prompts itself: ui_prompt_start fires when it starts waiting
@@ -179,37 +276,63 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// marker follows one count of open prompts, which does not depend on
 	// order: it exists exactly while the count is above zero.
 	let openPrompts = 0;
+	// outerPrompt is the kind and title of the outermost open prompt.
+	let outerPrompt: { kind: string; title: string } | null = null;
+	// Opening a marker is gated on serving(); closing one is not. written
+	// holds the bytes of the marker this process last wrote, "" when none
+	// may stand. That marker is closed at prompt end and at every session
+	// boundary even after this pi stopped serving, so it never holds the
+	// serving pi's doorbell; it is removed only while the file still holds
+	// those bytes, so another pi's marker that replaced it stays. A marker
+	// this process did not write is closed only by the serving pi.
+	let written = "";
+	const openMarker = (event: string, kind: string) => {
+		written = openWakeDialog(who(), event, kind);
+	};
+	const closeMarker = () => {
+		if (written) closeWakeDialog(who(), written);
+		else if (serving()) closeWakeDialog(who());
+		written = "";
+	};
 	// The same prompt is shown in Buzz as a dialog with no options: pi
 	// exposes no way to answer a prompt from an extension (the prompt events
 	// carry only its kind and title), so the owner answers in the terminal and
 	// the dialog closes when the prompt ends.
 	pi.on("project_trust", () => {
-		openWakeDialog(who(), WAKE_DIALOG_TRUST, "select");
-		openRemoteDialog(who(), "select", "Trust project folder?", "");
+		if (serving()) {
+			openMarker(WAKE_DIALOG_TRUST, "select");
+			openRemoteDialog(who(), "select", "Trust project folder?", "");
+		}
 		return { trusted: "undecided" };
 	});
 	pi.on("ui_prompt_start", (event) => {
-		if (++openPrompts === 1) {
-			openWakeDialog(who(), WAKE_DIALOG_PROMPT, event.kind);
-			openRemoteDialog(who(), event.kind, (event as { title?: string }).title ?? "", bridge?.sessionId ?? "");
+		if (++openPrompts !== 1) return;
+		outerPrompt = { kind: event.kind, title: (event as { title?: string }).title ?? "" };
+		if (serving()) {
+			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
+			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
 		if (--openPrompts <= 0) {
-			closeWakeDialog(who());
+			outerPrompt = null;
+			closeMarker();
 			closeRemoteDialog();
 		}
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		openPrompts = 0;
-		closeWakeDialog(who());
+		outerPrompt = null;
 		closeRemoteDialog();
+		stopWaiting();
 		stop(bridge, "restart");
+		bridge = null;
+		ownerNotice.shown = false;
 		session = { identity: resolveIdentity(options, ctx) };
-		bridge = session.identity ? start(pi, ctx, options, session.identity) : null;
-		if (bridge) scanSafely(pi, bridge);
-		else if (!session.identity && !options.identity && !inactiveNoticeShown) {
+		if (session.identity) serve(ctx, session.identity);
+		closeMarker();
+		if (!session.identity && !options.identity && !inactiveNoticeShown) {
 			// A host that gives no identity for this session keeps the bridge
 			// off on purpose; only the plain extension tells the owner how to
 			// fix it.
@@ -222,8 +345,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("session_shutdown", (event) => {
 		openPrompts = 0;
-		closeWakeDialog(who());
+		outerPrompt = null;
+		closeMarker();
 		closeRemoteDialog();
+		stopWaiting();
 		stop(bridge, event.reason);
 		bridge = null;
 		session = null;
@@ -336,8 +461,15 @@ function resolveIdentity(options: AmqBridgeOptions, ctx: ExtensionContext | unde
 	return id && typeof id.root === "string" && path.isAbsolute(id.root) && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
 }
 
-function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity): Bridge | null {
-	const dir = path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
+function bridgeDir(identity: AmqIdentity): string {
+	return path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
+}
+
+// start starts the bridge and takes the mailbox by writing liveness, or
+// returns null when the bridge cannot run. displaced is called when another
+// generation's liveness later replaces this bridge's.
+function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }, displaced: (b: Bridge) => void): Bridge | null {
+	const dir = bridgeDir(identity);
 	try {
 		for (const sub of ["requests", "receipts", "events"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
@@ -352,19 +484,25 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		// Activity is optional: without its directory no activity is
 		// recorded, and requests run as before.
 	}
+	const generation = randomUUID();
 	const b: Bridge = {
 		dir,
 		identity,
 		deliver: options.deliver ?? null,
 		upgrade: options.upgrade ?? "",
 		ctx,
-		generation: randomUUID(),
+		generation,
 		surface: ctx.mode,
 		timers: [],
 		handled: new Set(),
+		pending: new Map(),
+		listedMtime: -1,
+		listedAt: 0,
 		refusals: new Map(),
 		inflight: null,
-		orphansPending: false,
+		orphans: null,
+		ownerNotice,
+		displaced,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
 		sessionId: sessionIdOf(ctx),
@@ -378,8 +516,8 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		requestUser: "",
 	};
 	writeLiveness(b, true);
-	b.orphansPending = !closeOrphanedReceipts(b);
-	const beat = setInterval(() => writeLiveness(b, true), HEARTBEAT_MS);
+	closeOrphanedReceipts(b);
+	const beat = setInterval(() => owns(b) && writeLiveness(b, true), HEARTBEAT_MS);
 	const poll = setInterval(() => scanSafely(pi, b), POLL_MS);
 	beat.unref();
 	poll.unref();
@@ -387,9 +525,72 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 	return b;
 }
 
+function retire(b: Bridge): void {
+	for (const t of b.timers.splice(0)) clearInterval(t);
+}
+
+// holderOf reads the liveness record of the bridge that holds the mailbox:
+// its pid, whether it is older than OWNER_STALE_MS, and a key that changes
+// on every write. It is null when the record is absent, unreadable, or not
+// live; such a mailbox is free.
+function holderOf(dir: string): { pid: unknown; stale: boolean; key: string } | null {
+	const file = path.join(dir, "bridge.liveness");
+	let mtime: number;
+	let text: string;
+	try {
+		mtime = fs.statSync(file).mtimeMs;
+		text = fs.readFileSync(file, "utf8");
+	} catch (err) {
+		// Only a missing record frees the mailbox; a record that cannot be
+		// read now may be a live holder's.
+		return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : { pid: undefined, stale: false, key: "" };
+	}
+	// A clock step can put the mtime ahead of now; one more than
+	// OWNER_STALE_MS ahead is stale too.
+	const age = Date.now() - mtime;
+	const stale = age >= OWNER_STALE_MS || -age > OWNER_STALE_MS;
+	let rec: { protocol?: unknown; live?: unknown; pid?: unknown };
+	try {
+		rec = JSON.parse(text);
+	} catch {
+		return { pid: undefined, stale, key: `${mtime}:${text}` };
+	}
+	if (rec?.protocol !== PROTOCOL || rec.live !== true) return null;
+	return { pid: rec.pid, stale, key: `${mtime}:${text}` };
+}
+
+// livenessOf is the generation and pid the liveness record names, or null
+// when it cannot be read.
+function livenessOf(dir: string): { generation: unknown; pid: unknown } | null {
+	try {
+		const rec = JSON.parse(fs.readFileSync(path.join(dir, "bridge.liveness"), "utf8"));
+		return { generation: rec?.session_generation, pid: rec?.pid };
+	} catch {
+		return null;
+	}
+}
+
+// owns reports whether the liveness record still names this bridge's
+// generation. When two bridges start at once the last liveness write wins;
+// a bridge that reads another generation retires at once, tells its pi
+// once, and hands its pi back to waiting, so it never writes over the
+// owner's liveness or answers its requests. A record that cannot be read
+// leaves this bridge the owner.
+function owns(b: Bridge): boolean {
+	const rec = livenessOf(b.dir);
+	if (!rec || rec.generation === b.generation) return true;
+	retire(b);
+	if (!b.ownerNotice.shown) {
+		b.ownerNotice.shown = true;
+		notify(b.ctx, `amq-bridge: this pi no longer serves Buzz requests: another pi bridge (pid ${String(rec.pid)}) took over its AMQ mailbox.`);
+	}
+	b.displaced(b);
+	return false;
+}
+
 function stop(b: Bridge | null, reason: string): void {
 	if (!b) return;
-	for (const t of b.timers.splice(0)) clearInterval(t);
+	retire(b);
 	const f = b.inflight;
 	if (f) {
 		// A decided outcome is written as decided. Otherwise a started run
@@ -404,51 +605,83 @@ function stop(b: Bridge | null, reason: string): void {
 		appendEvent(b.dir, f.ref, fields);
 		b.inflight = null;
 	}
-	writeLiveness(b, false);
+	// Only the owner marks the mailbox offline.
+	const rec = livenessOf(b.dir);
+	if (!rec || rec.generation === b.generation) writeLiveness(b, false);
 }
 
 // scanSafely is scan whose failure waits for the next poll: a transient
 // filesystem error is retried then.
 function scanSafely(pi: ExtensionAPI, b: Bridge): void {
 	try {
-		scan(pi, b);
+		if (owns(b)) scan(pi, b);
 	} catch {
 		// Retried on the next poll.
 	}
 }
 
-// scan examines every unhandled request in arrival order. Refusals are
-// written at once; at most one request is delivered and in flight, and only
-// into an idle pi. A request that arrives while pi or the bridge is busy is
-// refused busy, never queued.
-function scan(pi: ExtensionAPI, b: Bridge): void {
+// discover adds the requests listed in requests/ that are not handled yet
+// to b.pending. requests/ retains every request, so it is listed only when
+// it changed (see RECONCILE_MS): an idle poll's cost does not grow with the
+// history.
+function discover(b: Bridge): void {
 	const reqDir = path.join(b.dir, "requests");
+	const now = Date.now();
 	let names: string[];
+	let mtime: number;
 	try {
+		mtime = fs.statSync(reqDir).mtimeMs;
+		if (mtime === b.listedMtime && b.listedAt - mtime > COARSE_MTIME_MS && now - b.listedAt < RECONCILE_MS) return;
 		names = fs.readdirSync(reqDir);
 	} catch {
 		return;
 	}
-	const pending: { ref: string; mtime: number }[] = [];
+	// The first listing finds only receipts that orphan recovery listed at
+	// start; a later one can find a receipt another generation wrote since.
+	const later = b.listedMtime !== -1;
+	b.listedMtime = mtime;
+	b.listedAt = now;
+	const listed = new Set<string>();
 	for (const name of names) {
 		const m = REQUEST_FILE.exec(name);
-		if (!m || b.handled.has(m[1])) continue;
+		if (!m) continue;
 		const ref = m[1];
-		// A known refusal whose append failed stays pending even when its
-		// line is visible: the line may not be durable.
-		if (!b.refusals.has(ref) && (exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref))) {
-			b.handled.add(ref);
+		listed.add(ref);
+		if (b.handled.has(ref) || b.pending.has(ref)) continue;
+		const receipt = exists(path.join(b.dir, "receipts", `${ref}.json`));
+		if (receipt || hasTerminal(b.dir, ref)) {
+			if (receipt && later) b.orphans?.add(ref);
+			markHandled(b, ref);
 			continue;
 		}
 		try {
-			pending.push({ ref, mtime: fs.statSync(path.join(reqDir, name)).mtimeMs });
+			b.pending.set(ref, fs.statSync(path.join(reqDir, name)).mtimeMs);
 		} catch {
 			// Vanished between readdir and stat: nothing to answer.
 		}
 	}
-	pending.sort((x, y) => x.mtime - y.mtime || (x.ref < y.ref ? -1 : x.ref > y.ref ? 1 : 0));
+	// handled holds only refs in the latest listing.
+	for (const ref of b.handled) if (!listed.has(ref)) b.handled.delete(ref);
+}
 
-	if (b.orphansPending) b.orphansPending = !closeOrphanedReceipts(b);
+// markHandled records that ref needs no more work.
+function markHandled(b: Bridge, ref: string): void {
+	b.pending.delete(ref);
+	b.handled.add(ref);
+}
+
+// scan examines every pending request in arrival order. Refusals are
+// written at once; at most one request is delivered and in flight, and only
+// into an idle pi. A request that arrives while pi or the bridge is busy is
+// refused busy, never queued. A pending request stays pending until it is
+// handled, so a failed claim or refusal append is retried on the next poll;
+// a known refusal whose append failed stays pending even when its line is
+// visible, because the line may not be durable.
+function scan(pi: ExtensionAPI, b: Bridge): void {
+	discover(b);
+	const pending = [...b.pending].sort(([ra, ma], [rb, mb]) => ma - mb || (ra < rb ? -1 : ra > rb ? 1 : 0));
+
+	if (!b.orphans || b.orphans.size > 0) closeOrphanedReceipts(b);
 
 	const f = b.inflight;
 	if (f?.terminal) {
@@ -461,12 +694,12 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		settle(b, { event: "uncertain", error: "pi is idle and never started the follow-up; the outcome is unknown" });
 	}
 
-	for (const { ref } of pending) {
+	for (const [ref] of pending) {
 		const decided = b.refusals.get(ref);
 		if (decided) {
 			if (appendEvent(b.dir, ref, decided)) {
 				b.refusals.delete(ref);
-				b.handled.add(ref);
+				markHandled(b, ref);
 			}
 			continue;
 		}
@@ -489,13 +722,13 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 				notify(b.ctx, "amq-bridge refused a remote request: the amq-remote on this machine is older than this pi extension. Upgrade amq-remote to the matching release and restart it.");
 			}
 			const fields: EventFields = { event: "refused", reason: refuse, error };
-			if (appendEvent(b.dir, ref, fields)) b.handled.add(ref);
+			if (appendEvent(b.dir, ref, fields)) markHandled(b, ref);
 			else b.refusals.set(ref, fields);
 			continue;
 		}
 		const claim = claimReceipt(b, ref);
 		if (claim === "error") continue; // retried on the next poll
-		b.handled.add(ref);
+		markHandled(b, ref);
 		if (claim === "taken") continue; // another bridge process already claimed it
 		const f: Inflight = {
 			ref,
@@ -645,17 +878,28 @@ function claimReceipt(b: Bridge, ref: string): "claimed" | "taken" | "error" {
 		pid: process.pid,
 	});
 	const dir = path.join(b.dir, "receipts");
-	let tmp = "";
 	try {
-		tmp = writeTemp(dir, body);
-		fs.linkSync(tmp, path.join(dir, `${ref}.json`));
+		linkNew(dir, path.join(dir, `${ref}.json`), body);
 	} catch (err) {
 		return (err as NodeJS.ErrnoException).code === "EEXIST" ? "taken" : "error";
-	} finally {
-		if (tmp) fs.rmSync(tmp, { force: true });
 	}
+	// The link published the receipt; a failed directory sync cannot take it
+	// back, so the request is dispatched with its durability uncertain, as
+	// the adapter's own publication does.
 	syncDir(dir);
 	return "claimed";
+}
+
+// linkNew publishes body at file create-new: a complete, fsynced temporary
+// file in dir is hard-linked into place, so a reader sees the whole body or
+// no file. It throws EEXIST when file exists.
+function linkNew(dir: string, file: string, body: string): void {
+	const tmp = writeTemp(dir, body);
+	try {
+		fs.linkSync(tmp, file);
+	} finally {
+		fs.rmSync(tmp, { force: true });
+	}
 }
 
 function writeLiveness(b: Bridge, live: boolean): void {
@@ -682,40 +926,51 @@ function writeLiveness(b: Bridge, live: boolean): void {
 // closeOrphanedReceipts closes receipts that an earlier bridge process or
 // generation left without a terminal event, so the adapter does not report
 // them running forever. The outcome of such a request is unknown, so the
-// event is `uncertain`. It returns false when an append failed; scan then
-// runs it again (it is idempotent).
-function closeOrphanedReceipts(b: Bridge): boolean {
-	let names: string[];
-	try {
-		names = fs.readdirSync(path.join(b.dir, "receipts"));
-	} catch {
-		return false;
-	}
-	let done = true;
-	for (const name of names) {
-		const m = REQUEST_FILE.exec(name);
-		if (!m) continue;
-		const ref = m[1];
+// event is `uncertain`. A request whose last event (or receipt) is younger
+// than OWNER_STALE_MS may still run in a stalled owner and is left open
+// until it is older. receipts/ is listed once; later polls look only at the
+// receipts still open.
+function closeOrphanedReceipts(b: Bridge): void {
+	if (!b.orphans) {
 		try {
-			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", name), "utf8"));
+			b.orphans = new Set(fs.readdirSync(path.join(b.dir, "receipts")).flatMap((name) => REQUEST_FILE.exec(name)?.[1] ?? []));
+		} catch {
+			return;
+		}
+	}
+	for (const ref of [...b.orphans]) {
+		try {
+			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", `${ref}.json`), "utf8"));
 			const retry = b.orphanRetry.has(ref);
-			if (rc.session_generation === b.generation || (!retry && hasTerminal(b.dir, ref))) continue;
+			if (rc.session_generation === b.generation || (!retry && hasTerminal(b.dir, ref))) {
+				b.orphans.delete(ref);
+				continue;
+			}
+			if (!retry && Date.now() - lastEventAt(b.dir, ref) < OWNER_STALE_MS) continue;
 			const ok = appendEvent(b.dir, ref, {
 				event: "uncertain",
 				error: "the pi bridge restarted before the request settled; the outcome is unknown",
 			});
 			if (ok) {
 				b.orphanRetry.delete(ref);
+				b.orphans.delete(ref);
 			} else {
 				b.orphanRetry.add(ref);
-				done = false;
 			}
 		} catch {
 			// An unreadable receipt is not recovered yet; scan reads it again.
-			done = false;
 		}
 	}
-	return done;
+}
+
+// lastEventAt is when ref's last event was written, or its receipt when it
+// has no event.
+function lastEventAt(dir: string, ref: string): number {
+	try {
+		return fs.statSync(path.join(dir, "events", `${ref}.jsonl`)).mtimeMs;
+	} catch {
+		return fs.statSync(path.join(dir, "receipts", `${ref}.json`)).mtimeMs;
+	}
 }
 
 function hasTerminal(dir: string, ref: string): boolean {
@@ -752,12 +1007,14 @@ function appendEvent(dir: string, ref: string, fields: EventFields): boolean {
 
 // appendLine appends one fsynced line and reports whether it is durable. A
 // file already past maxSize (when set) is truncated first: the history is
-// not evidence.
+// not evidence. A line written into an empty file is durable only once the
+// directory entry is synced too, because the file may be new.
 function appendLine(file: string, line: string, maxSize: number): boolean {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(file, "a+", 0o600);
 		let size = fs.fstatSync(fd).size;
+		const empty = size === 0;
 		if (maxSize > 0 && size > maxSize) {
 			fs.ftruncateSync(fd, 0);
 			size = 0;
@@ -766,7 +1023,7 @@ function appendLine(file: string, line: string, maxSize: number): boolean {
 		if (size > 0 && fs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) writeAll(fd, "\n");
 		writeAll(fd, line);
 		fs.fsyncSync(fd);
-		return true;
+		return !empty || syncDir(path.dirname(file));
 	} catch {
 		return false;
 	} finally {
@@ -953,19 +1210,27 @@ function truncateUtf8(s: string, max: number): string {
 	return buf.subarray(0, end).toString("utf8");
 }
 
+// writeTemp writes body whole to a new fsynced temporary file in dir and
+// returns its path; on failure it leaves no file.
 function writeTemp(dir: string, body: string): string {
 	const tmp = path.join(dir, `.tmp-${process.pid}-${randomUUID()}`);
 	const fd = fs.openSync(tmp, "wx", 0o600);
+	let whole = false;
 	try {
-		fs.writeSync(fd, body);
+		writeAll(fd, body);
 		fs.fsyncSync(fd);
+		whole = true;
 	} finally {
 		fs.closeSync(fd);
+		if (!whole) fs.rmSync(tmp, { force: true });
 	}
 	return tmp;
 }
 
-function syncDir(dir: string): void {
+// syncDir fsyncs a directory and reports whether its entries are durable. A
+// platform that does not support directory fsync (EINVAL, ENOTSUP) counts
+// as durable; any other failure does not.
+function syncDir(dir: string): boolean {
 	try {
 		const fd = fs.openSync(dir, "r");
 		try {
@@ -973,8 +1238,10 @@ function syncDir(dir: string): void {
 		} finally {
 			fs.closeSync(fd);
 		}
-	} catch {
-		// Directory fsync is best effort on platforms that refuse it.
+		return true;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		return code === "EINVAL" || code === "ENOTSUP";
 	}
 }
 
@@ -1010,10 +1277,11 @@ function wakeAgentDir(id: AmqIdentity | undefined): string {
 }
 
 // openWakeDialog installs the marker by an exclusive temp file and a rename,
-// without fsync: the marker is advisory, and the prompt is rendering.
-function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string): void {
+// without fsync: the marker is advisory, and the prompt is rendering. It
+// returns the bytes it installed, or "" when it installed none.
+function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string): string {
 	const dir = wakeAgentDir(id);
-	if (!dir) return;
+	if (!dir) return "";
 	const marker = {
 		schema: 1,
 		event,
@@ -1022,26 +1290,35 @@ function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string
 		opened_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
 	};
 	const temp = path.join(dir, `.wake.dialog.tmp.${process.pid}.${randomUUID()}`);
+	const text = `${JSON.stringify(marker)}\n`;
 	try {
-		fs.writeFileSync(temp, `${JSON.stringify(marker)}\n`, { flag: "wx", mode: 0o600 });
+		fs.writeFileSync(temp, text, { flag: "wx", mode: 0o600 });
 		fs.renameSync(temp, path.join(dir, WAKE_DIALOG));
+		return text;
 	} catch {
 		try {
 			fs.unlinkSync(temp);
 		} catch {
 			// The temp file was never created or is already gone.
 		}
+		return "";
 	}
 }
 
 // closeWakeDialog removes the marker only when this extension wrote it, so
-// a marker another writer installed keeps holding.
-function closeWakeDialog(id: AmqIdentity | undefined): void {
+// a marker another writer installed keeps holding. With only, it removes the
+// marker only while the file holds exactly those bytes.
+function closeWakeDialog(id: AmqIdentity | undefined, only = ""): void {
 	const dir = wakeAgentDir(id);
 	if (!dir) return;
 	const file = path.join(dir, WAKE_DIALOG);
 	try {
-		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string };
+		const text = fs.readFileSync(file, "utf8");
+		if (only) {
+			if (text === only) fs.unlinkSync(file);
+			return;
+		}
+		const marker = JSON.parse(text) as { event?: string; harness?: string };
 		if ((marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi") fs.unlinkSync(file);
 	} catch {
 		// No marker, or one this extension did not write.
