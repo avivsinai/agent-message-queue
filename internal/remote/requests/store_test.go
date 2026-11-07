@@ -692,12 +692,12 @@ func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
 	}
 }
 
-// Review of the request store: Open and the first write to a creator host
-// synced only the host directory, so power loss could drop the directory
-// entries that reach a first-contact record. Every directory that owns an
-// entry on the way to the record is synced, and again on the first write to
-// a host after a restart, because an existing directory is not proof of a
-// durable one.
+// Open and the first write to a creator host synced only the host
+// directory, so power loss could drop the directory entries that reach a
+// first-contact record. Every directory that owns an entry on the way to the
+// record is synced, and again on the first write to a host after a restart,
+// because an existing directory is not proof of a durable one.
+// Regression: bead agent-message-queue-39v (B3).
 func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	reqDir := filepath.Join(state, layoutVersion, requestsDir)
@@ -736,9 +736,10 @@ func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 	}
 }
 
-// Review of the request store: a terminal update whose rename landed but
-// whose directory sync failed kept its reservation, so the next submit was
-// refused storage_full until a restart.
+// A terminal update whose rename landed but whose directory sync failed kept
+// its reservation, so the next submit was refused storage_full until a
+// restart.
+// Regression: bead agent-message-queue-39v (B4).
 func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 	quota := int64(protocol.MaxRecordBytes) + 64*1024
 	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(quota))

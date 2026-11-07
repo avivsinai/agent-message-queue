@@ -426,9 +426,14 @@ func (s *Store) Get(k Key) (*Record, bool, error) {
 }
 
 // Create writes revision 1 of a new record. It refuses if a record exists.
-func (s *Store) Create(rec *Record) error {
+//
+// A Create or Update that returns an error leaves the reservation matching
+// the file on disk, so a caller never releases after calling them: no record
+// or a terminal one releases it, a record still in flight keeps it.
+func (s *Store) Create(rec *Record) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.settleOnErrorLocked(keyOf(rec), &err)
 
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -452,9 +457,10 @@ func (s *Store) Create(rec *Record) error {
 
 // Update writes the next revision of an existing record after checking the
 // state graph, the immutable fields, and the single-dispatch rule.
-func (s *Store) Update(rec *Record) error {
+func (s *Store) Update(rec *Record) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.settleOnErrorLocked(keyOf(rec), &err)
 
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -931,14 +937,19 @@ func (s *Store) writeRecordFile(host, p string, data []byte) error {
 
 // settleLocked applies a write's size change to used, then releases the
 // reservation and reclassifies the key from rec, the record now on disk. A
-// nil rec means the write failed and the file is read back: it holds either
-// the previous record or, after a failed post-rename sync, the new one. The
-// caller holds s.mu.
+// nil rec means the write failed and the file is read back: it holds the
+// previous record, the new one after a failed post-rename sync, or nothing,
+// and then nothing was admitted under key. The caller holds s.mu.
 func (s *Store) settleLocked(key Key, delta int64, rec *Record) {
 	s.used += delta
 	if rec == nil {
 		cur, ok, err := s.Get(key)
-		if err != nil || !ok {
+		if err != nil {
+			return
+		}
+		if !ok {
+			// Nothing was admitted under this key.
+			s.releaseReservationLocked(key)
 			return
 		}
 		rec = cur
@@ -947,6 +958,14 @@ func (s *Store) settleLocked(key Key, delta int64, rec *Record) {
 		s.releaseReservationLocked(key)
 	}
 	s.indexLocked(rec)
+}
+
+// settleOnErrorLocked reconciles key from disk when *err is set. The caller
+// holds s.mu.
+func (s *Store) settleOnErrorLocked(key Key, err *error) {
+	if *err != nil {
+		s.settleLocked(key, 0, nil)
+	}
 }
 
 // fileSize is the size of the record file at p, zero when it is absent.
@@ -998,10 +1017,9 @@ func (s *Store) Reserve(key Key, bytes int64) error {
 }
 
 // ReleaseReservation releases the reservation for key, if any. The endpoint
-// calls it when a dispatch is abandoned before a terminal write (e.g. a
-// crash-point refusal or a pre-dispatch rejection after Reserve succeeded).
-// A write that leaves the record terminal releases it automatically, so this
-// is only for the gap between Reserve and the first write that does not land.
+// calls it only when it abandons a dispatch before any write (a crash point,
+// a handoff refusal). Create and Update settle the reservation themselves,
+// on success and on error, so a caller never releases after calling them.
 func (s *Store) ReleaseReservation(key Key) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

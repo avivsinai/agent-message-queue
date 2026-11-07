@@ -268,9 +268,10 @@ func TestCancelWrongEpochDoesNotInterrupt(t *testing.T) {
 	}
 }
 
-// Review of cancel ordering: an expired cancel that arrived before its submit
-// wrote a cancelled_before_admission tombstone, and the later valid submit
-// returned it without dispatching.
+// An expired cancel that arrived before its submit wrote a
+// cancelled_before_admission tombstone, and the later valid submit returned
+// it without dispatching.
+// Regression: bead agent-message-queue-39v (B5).
 func TestExpiredCancelBeforeSubmitWritesNothing(t *testing.T) {
 	store, now := openStore(t)
 	rt := fake.New("fake", "e_1")

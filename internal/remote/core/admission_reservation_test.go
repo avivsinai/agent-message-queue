@@ -1,11 +1,13 @@
 package core_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -154,6 +156,75 @@ func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 	}
 	if got := out.(protocol.Reply).Outcome.Code; got != protocol.CodeStorageFull {
 		t.Fatalf("submit C outcome = %q, want storage_full: the re-admitted B took no reservation", got)
+	}
+}
+
+// A re-admitted busy request whose dispatching write landed on disk but
+// whose directory sync failed lost its reservation to the endpoint, so other
+// work took the room its result was owed.
+// Regression: bead agent-message-queue-39v (review of the B4 fix).
+func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
+	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	ep.Register(fake.New("other", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+	local := core.Source{Host: "local"}
+
+	idA, idB := "11111111-1111-4111-8111-1111111111a8", "11111111-1111-4111-8111-1111111111b8"
+	if _, err := ep.Handle(submitCmd(idA), local); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	if _, err := ep.Handle(submitCmd(idB), local); err != nil {
+		t.Fatalf("submit B (busy): %v", err)
+	}
+	rt.Complete(idA, "done-A")
+	if !waitUntil(func() bool { return rt.UnacknowledgedResults() == 0 && len(rt.Snapshot().RunningKeys) == 0 }) {
+		t.Fatal("A's result was never acknowledged")
+	}
+
+	// Fail the sync after the rename of B's dispatching write.
+	hostDir := filepath.Join(store.Dir(), "requests", "local")
+	calls := 0
+	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		if filepath.Clean(dir) == hostDir {
+			if calls++; calls == 2 {
+				return errors.New("injected post-rename sync failure")
+			}
+		}
+		return nil
+	})
+	_, err = ep.Handle(submitCmd(idB), local)
+	restore()
+	if err == nil {
+		t.Fatal("resubmit B with a failed post-rename sync reported success")
+	}
+	keyB := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB}
+	if rec, _, _ := store.Get(keyB); rec == nil || rec.State != protocol.StateDispatching {
+		t.Fatalf("B on disk = %+v, want dispatching", rec)
+	}
+
+	c := submitCmd("11111111-1111-4111-8111-1111111111c8")
+	c.TargetID = "other"
+	out, err := ep.Handle(c, local)
+	if err != nil {
+		t.Fatalf("submit C: %v", err)
+	}
+	if got := out.(protocol.Reply).Outcome.Code; got != protocol.CodeStorageFull {
+		t.Fatalf("submit C outcome = %q, want storage_full: B's room was given away", got)
+	}
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile B: %v", err)
+	}
+	if rec, _, _ := store.Get(keyB); rec == nil || rec.Code == protocol.CodeStorageFull {
+		t.Fatalf("B after reconcile = %+v, want no storage_full", rec)
 	}
 }
 
