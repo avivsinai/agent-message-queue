@@ -386,6 +386,25 @@ test("a prompt opened while serving closes its marker after the pi is displaced"
 	}
 });
 
+// Review of dialog ownership: a displaced pi's prompt end removed the serving pi's marker that had replaced its own.
+test("a displaced pi's prompt end leaves the serving pi's marker that replaced its own", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const marker = path.join(h.dir, "..", "..", ".wake.dialog");
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 4 };
+		fs.writeFileSync(path.join(h.dir, "bridge.liveness"), JSON.stringify(other));
+		await h.waitFor(() => h.notices.length === 1);
+		const owners = `${JSON.stringify({ schema: 1, event: "ui_prompt", harness: "pi", kind: "select", opened_at: "2000-01-01T00:00:00Z" })}\n`;
+		fs.writeFileSync(marker, owners);
+		await h.emit("ui_prompt_end", { reason: "ui_prompt" });
+		assert.equal(fs.readFileSync(marker, "utf8"), owners);
+	} finally {
+		await h.done();
+	}
+});
+
 // Review of pi admission evidence: a short receipt write was published and handed to pi.
 test("a receipt cut short by a short write is never published; the retry publishes it whole", async () => {
 	const h = harness();

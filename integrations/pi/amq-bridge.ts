@@ -269,19 +269,21 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// marker follows one count of open prompts, which does not depend on
 	// order: it exists exactly while the count is above zero.
 	let openPrompts = 0;
-	// Opening a marker is gated on serving(); closing one is not. markerOpen
-	// is true while a marker this process wrote may stand, and that marker is
-	// closed at prompt end and at every session boundary even after this pi
-	// stopped serving, so it never holds the serving pi's doorbell. A marker
+	// Opening a marker is gated on serving(); closing one is not. written
+	// holds the bytes of the marker this process last wrote, "" when none
+	// may stand. That marker is closed at prompt end and at every session
+	// boundary even after this pi stopped serving, so it never holds the
+	// serving pi's doorbell; it is removed only while the file still holds
+	// those bytes, so another pi's marker that replaced it stays. A marker
 	// this process did not write is closed only by the serving pi.
-	let markerOpen = false;
+	let written = "";
 	const openMarker = (event: string, kind: string) => {
-		openWakeDialog(who(), event, kind);
-		markerOpen = true;
+		written = openWakeDialog(who(), event, kind);
 	};
 	const closeMarker = () => {
-		if (markerOpen || serving()) closeWakeDialog(who());
-		markerOpen = false;
+		if (written) closeWakeDialog(who(), written);
+		else if (serving()) closeWakeDialog(who());
+		written = "";
 	};
 	// The same prompt is shown in Buzz as a dialog with no options: pi
 	// exposes no way to answer a prompt from an extension (the prompt events
@@ -1248,10 +1250,11 @@ function wakeAgentDir(id: AmqIdentity | undefined): string {
 }
 
 // openWakeDialog installs the marker by an exclusive temp file and a rename,
-// without fsync: the marker is advisory, and the prompt is rendering.
-function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string): void {
+// without fsync: the marker is advisory, and the prompt is rendering. It
+// returns the bytes it installed, or "" when it installed none.
+function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string): string {
 	const dir = wakeAgentDir(id);
-	if (!dir) return;
+	if (!dir) return "";
 	const marker = {
 		schema: 1,
 		event,
@@ -1260,26 +1263,35 @@ function openWakeDialog(id: AmqIdentity | undefined, event: string, kind: string
 		opened_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
 	};
 	const temp = path.join(dir, `.wake.dialog.tmp.${process.pid}.${randomUUID()}`);
+	const text = `${JSON.stringify(marker)}\n`;
 	try {
-		fs.writeFileSync(temp, `${JSON.stringify(marker)}\n`, { flag: "wx", mode: 0o600 });
+		fs.writeFileSync(temp, text, { flag: "wx", mode: 0o600 });
 		fs.renameSync(temp, path.join(dir, WAKE_DIALOG));
+		return text;
 	} catch {
 		try {
 			fs.unlinkSync(temp);
 		} catch {
 			// The temp file was never created or is already gone.
 		}
+		return "";
 	}
 }
 
 // closeWakeDialog removes the marker only when this extension wrote it, so
-// a marker another writer installed keeps holding.
-function closeWakeDialog(id: AmqIdentity | undefined): void {
+// a marker another writer installed keeps holding. With only, it removes the
+// marker only while the file holds exactly those bytes.
+function closeWakeDialog(id: AmqIdentity | undefined, only = ""): void {
 	const dir = wakeAgentDir(id);
 	if (!dir) return;
 	const file = path.join(dir, WAKE_DIALOG);
 	try {
-		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as { event?: string; harness?: string };
+		const text = fs.readFileSync(file, "utf8");
+		if (only) {
+			if (text === only) fs.unlinkSync(file);
+			return;
+		}
+		const marker = JSON.parse(text) as { event?: string; harness?: string };
 		if ((marker.event === WAKE_DIALOG_PROMPT || marker.event === WAKE_DIALOG_TRUST) && marker.harness === "pi") fs.unlinkSync(file);
 	} catch {
 		// No marker, or one this extension did not write.
