@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -190,5 +191,30 @@ func TestMachineAgentPostsWhyARestoreFailed(t *testing.T) {
 	got := posts()
 	if len(got) != 1 || !strings.Contains(got[0], "the AMQ approval hook left "+settings) || !strings.Contains(got[0], `The restore failed: the hook binary "amq-remote" is not an installed file`) {
 		t.Fatalf("posts = %q; want the warning with the restore's error", got)
+	}
+}
+
+// An approval hook of the older form (--wait 600, timeout 630) becomes the
+// current form after one check, and the session's channel says so.
+func TestMachineAgentUpgradesAnOldFormApprovalHook(t *testing.T) {
+	s, settings, stable, posts := hookWatchSession(t, true)
+	tick(s, time.Now())
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Replace(bytes.Replace(raw, []byte(`claude permission-hook"`), []byte(`claude permission-hook --wait 600"`), 1), []byte(`"timeout":86400`), []byte(`"timeout":630`), 1)
+	if err := os.WriteFile(settings, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, time.Now())
+	if form, _ := claude.PermissionHookForm(os.Getenv("HOME"), settings); form != claude.HookFormCurrent {
+		t.Fatalf("form after one check = %q; want current", form)
+	}
+	if cmd, _ := claude.PermissionHookCommand(settings); !strings.HasSuffix(cmd, "'"+stable+"' claude permission-hook") {
+		t.Fatalf("upgraded hook %q; want it to run %s", cmd, stable)
+	}
+	if got := posts(); len(got) != 1 || !strings.HasPrefix(got[0], machineChanA+" The AMQ approval hook in "+settings+" was an older form") {
+		t.Fatalf("posts = %q; want one upgraded line", got)
 	}
 }

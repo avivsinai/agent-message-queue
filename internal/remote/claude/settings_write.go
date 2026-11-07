@@ -272,12 +272,12 @@ func OptInPermissionHook(home, settings, bin string) (bool, error) {
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), false)
+	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), false, settingsLockWait)
 }
 
 // OptInStopHook is OptInPermissionHook for the Stop hook.
 func OptInStopHook(home, settings, bin string) (bool, error) {
-	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), false)
+	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), false, settingsLockWait)
 }
 
 // ErrHookRemoved refuses to install a hook that the owner removed from that
@@ -286,10 +286,11 @@ var ErrHookRemoved = errors.New("the owner removed this hook with its uninstall 
 
 // optIn makes entry spec's one marked entry in the settings file settings
 // and records the opt-in of kind for bin, under one lock. With ensure set it
-// refuses with ErrHookRemoved when the owner removed that hook.
-func optIn(settings, kind, bin string, spec hookSpec, entry []byte, ensure bool) (bool, error) {
+// refuses with ErrHookRemoved when the owner removed that hook. It waits
+// for the lock at most wait (ErrSettingsBusy).
+func optIn(settings, kind, bin string, spec hookSpec, entry []byte, ensure bool, wait time.Duration) (bool, error) {
 	changed := false
-	err := withSettingsLock(settings, func() error {
+	err := withSettingsLockWait(settings, wait, func() error {
 		if ensure {
 			in, err := ReadHookOptIn(settings)
 			if err != nil {
@@ -374,21 +375,37 @@ func RestoreHook(home, settings, kind, bin string) (bool, error) {
 // with ErrHookRemoved a hook the owner removed. It reports whether it
 // changed the settings file.
 func EnsurePermissionHook(home, settings, bin string) (bool, error) {
-	cmds, _ := installedCommands(settings, permissionSpec)
-	form, _ := PermissionHookForm(home, settings)
-	bin = KeptHookBin(cmds, permissionHookBinRe, bin, form == HookFormCurrent)
-	if !filepath.IsAbs(bin) {
-		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
-	}
-	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), true)
+	return ensureHook(home, settings, HookApproval, bin, settingsLockWait)
 }
 
 // EnsureStopHook is EnsurePermissionHook for the Stop hook.
 func EnsureStopHook(home, settings, bin string) (bool, error) {
-	cmds, _ := installedCommands(settings, stopHook)
-	form, _ := StopHookForm(home, settings)
-	bin = KeptHookBin(cmds, stopHookBinRe, bin, form == HookFormCurrent)
-	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), true)
+	return ensureHook(home, settings, HookStop, bin, settingsLockWait)
+}
+
+// UpgradeHook is EnsurePermissionHook (kind HookApproval) or EnsureStopHook
+// that waits for the file's lock at most settingsLockTry (ErrSettingsBusy),
+// for the machine agent's tick.
+func UpgradeHook(home, settings, kind, bin string) (bool, error) {
+	return ensureHook(home, settings, kind, bin, settingsLockTry)
+}
+
+func ensureHook(home, settings, kind, bin string, wait time.Duration) (bool, error) {
+	spec, binRe, form := permissionSpec, permissionHookBinRe, PermissionHookForm
+	if kind == HookStop {
+		spec, binRe, form = stopHook, stopHookBinRe, StopHookForm
+	}
+	cmds, _ := installedCommands(settings, spec)
+	f, _ := form(home, settings)
+	bin = KeptHookBin(cmds, binRe, bin, f == HookFormCurrent)
+	if !filepath.IsAbs(bin) {
+		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
+	}
+	entry := permissionHookEntry(home, bin)
+	if kind == HookStop {
+		entry = stopHookEntry(home, bin)
+	}
+	return optIn(settings, kind, bin, spec, entry, true, wait)
 }
 
 // KeptHookBin is the binary that the installed hook commands all run, as

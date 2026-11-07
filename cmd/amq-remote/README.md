@@ -975,6 +975,11 @@ this session stay in the terminal: the AMQ approval hook left <path> at
 `uninstall-stop-hook`) it never warns about that hook in that file. A hook
 removed any other way while the opt-in exists, Claude Code's `/hooks` menu
 included, comes back; the uninstall command is the way to stop it.
+A hook that is present in an older form (for example the approval hook with
+the 10-minute timeout) the agent upgrades as `doctor --fix` does, with or
+without an opt-in, unless the owner removed it with the uninstall command,
+and posts once: "The AMQ approval hook in <path> was an older form (changed
+<mtime>); upgraded."
 
 ### Turns in the session's channel
 
