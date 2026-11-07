@@ -60,5 +60,5 @@ func writePiBridge(amqHome string) (string, error) {
 			return path, nil
 		}
 	}
-	return fsq.WriteFileAtomicFollowLinks(dir, "amq-bridge.ts", pibridge.Source, 0o600)
+	return fsq.WriteStateFile(amqHome, filepath.Join("pi", "amq-bridge.ts"), pibridge.Source, 0o600)
 }

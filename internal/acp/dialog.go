@@ -15,7 +15,6 @@ import (
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip19"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
@@ -476,7 +475,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		return
 	}
 	p.Event = id
-	_ = writeDialogPost(path, p)
+	_ = s.writeDialogPost(path, p)
 }
 
 // dialogClose edits the post of each dialog that is no longer open and has
@@ -522,13 +521,12 @@ func readDialogPost(path string) (dialogPost, bool) {
 	return p, true
 }
 
-func writeDialogPost(path string, p dialogPost) error {
+func (s *Server) writeDialogPost(path string, p dialogPost) error {
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), raw, 0o600)
-	return err
+	return s.writeState(path, raw)
 }
 
 // dialogText is the Buzz message for one dialog: who asks, the dialog body,

@@ -121,11 +121,8 @@ func (ps *pageServer) ensure(ctx context.Context) error {
 	port := l.Addr().(*net.TCPAddr).Port
 	if rec.Port == 0 {
 		data, _ := json.Marshal(map[string]int{"port": port})
-		if err := os.MkdirAll(linkio.Dir(ps.stateDir), 0o700); err != nil {
-			_ = l.Close()
-			return err
-		}
-		if _, err := fsq.WriteFileAtomicFollowLinks(linkio.Dir(ps.stateDir), pagesFile, data, 0o600); err != nil {
+		dir := linkio.Dir(ps.stateDir)
+		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), pagesFile), data, 0o600); err != nil {
 			_ = l.Close()
 			return err
 		}

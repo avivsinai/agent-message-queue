@@ -175,6 +175,7 @@ func run(o options, confirm func(body string) (bool, error), readKey func() ([32
 	if err != nil {
 		return err
 	}
+	// The owner names the output file; its path is theirs, links included.
 	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(abs), filepath.Base(abs), out, 0o600); err != nil {
 		return err
 	}

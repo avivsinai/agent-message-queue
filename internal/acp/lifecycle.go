@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -442,11 +441,7 @@ func (s *Server) recordDM(channel string) {
 	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
 		return
 	}
-	dir := s.agentMarkerDir(s.cfg.Pin)
-	if os.MkdirAll(dir, 0o700) != nil {
-		return
-	}
-	_, _ = fsq.WriteFileAtomicFollowLinks(dir, buzzSelf+".dm", []byte(channel+"\n"), 0o600)
+	_ = s.writeState(filepath.Join(s.agentMarkerDir(s.cfg.Pin), buzzSelf+".dm"), []byte(channel+"\n"))
 }
 
 // writeAgentMarker stamps m as this process's and writes it under dir. Only
@@ -467,10 +462,7 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	if err != nil {
 		return
 	}
-	if os.MkdirAll(dir, 0o700) != nil {
-		return
-	}
-	_, _ = fsq.WriteFileAtomicFollowLinks(dir, buzzSelf+".json", append(raw, '\n'), 0o600)
+	_ = s.writeState(filepath.Join(dir, buzzSelf+".json"), append(raw, '\n'))
 }
 
 // The per-machine helper ("AMQ Remote helper" in its system prompt) creates
@@ -714,12 +706,12 @@ func (s *Server) requestSessionAgent(channel string, b binding.Binding, req help
 	req.Count++
 	req.Last = now.UTC().Format(time.RFC3339)
 	raw, err := json.Marshal(req)
-	if err != nil || os.MkdirAll(dir, 0o700) != nil {
+	if err != nil {
 		return false, nil
 	}
 	// The attempt is recorded first, so a failing Desktop or relay never
 	// gets more than helperRequestTries requests.
-	if _, err := fsq.WriteFileAtomicFollowLinks(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
+	if err := s.writeState(filepath.Join(dir, b.Name+".json"), append(raw, '\n')); err != nil {
 		return false, nil
 	}
 	return true, buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)

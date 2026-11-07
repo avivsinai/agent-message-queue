@@ -1458,15 +1458,15 @@ func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
 	return nil
 }
 
-// writeStateFile publishes one state file through
-// internal/fsq.WriteFileAtomic: tmp + fsync + directory sync around the
-// rename, so a crash never truncates the target and the publication is
-// durable, not merely atomically visible: the parent directory is synced
-// too, so cleanup cannot remove recovery state before the publication is
-// durably named.
+// writeStateFile publishes one state file through fsq.WriteStateFile: tmp +
+// fsync + directory sync around the rename, so a crash never truncates the
+// target and the publication is durable, not merely atomically visible: the
+// parent directory is synced too, so cleanup cannot remove recovery state
+// before the publication is durably named. The directory above the file's
+// own anchors the write, so the file's directory is never a followed link.
 func writeStateFile(path string, raw []byte) error {
 	dir, name := filepath.Dir(path), filepath.Base(path)
-	if _, err := fsq.WriteFileAtomicFollowLinks(dir, name, raw, 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), name), raw, 0o600); err != nil {
 		return fmt.Errorf("atomic write %s: %w", path, err)
 	}
 	return nil

@@ -50,7 +50,7 @@ func PutTx(root string, priv ed25519.PrivateKey, rec Record, payload []byte) (ID
 	if bytes.Equal(got.sig.raw[:], signed.sig.raw[:]) {
 		return id, nil
 	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(dir, id.String(), body, 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(root, filepath.Join("bridge", txDirName, rec.dest.host.s, id.String()), body, 0o600); err != nil {
 		return ID{}, err
 	}
 	return id, nil

@@ -178,7 +178,7 @@ func writeServeFile(r serveRecord) error {
 		return err
 	}
 	return withServeLock(func(dir string) error {
-		_, err := fsq.WriteFileAtomicFollowLinks(dir, serveFile, append(data, '\n'), 0o600)
+		_, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), serveFile), append(data, '\n'), 0o600)
 		return err
 	})
 }

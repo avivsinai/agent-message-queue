@@ -207,8 +207,21 @@ func (s *Server) save(r *channelRecord, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	path := s.recordPath(*r)
-	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
+	return s.writeState(s.recordPath(*r), append(raw, '\n'))
+}
+
+// writeState atomically replaces path, a file below the state directory.
+// The directory above the state directory anchors the write, so no directory
+// from the state directory down is followed as a link.
+func (s *Server) writeState(path string, raw []byte) error {
+	// The state dir is the operator's choice (AMQ_ACP_STATE_DIR may name a
+	// link); everything AMQ creates below it is checked.
+	anchor := s.cfg.StateDir
+	rel, err := filepath.Rel(anchor, path)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteStateFile(anchor, rel, raw, 0o600)
 	return err
 }
 
@@ -631,7 +644,7 @@ func (s *Server) retire(r channelRecord, by string, now time.Time) bool {
 	// The active slot says retired first, so routing stops before anything
 	// else happens.
 	slot := s.slotPath(r.Name)
-	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(slot), filepath.Base(slot), append(raw, '\n'), 0o600); err != nil {
+	if err := s.writeState(slot, append(raw, '\n')); err != nil {
 		return false
 	}
 	moved, ok := s.finishRetire(r, now)
@@ -1193,7 +1206,7 @@ func RequestChannelReset(name string) (MachineChannel, error) {
 	if err != nil {
 		return MachineChannel{}, err
 	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(c.dir, name+".reset", append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(filepath.Dir(c.dir), filepath.Join(filepath.Base(c.dir), name+".reset"), append(raw, '\n'), 0o600); err != nil {
 		return MachineChannel{}, err
 	}
 	return c, nil

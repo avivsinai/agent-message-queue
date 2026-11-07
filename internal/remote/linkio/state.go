@@ -352,11 +352,7 @@ func Retire(stateDir, name string) (string, error) {
 		return "", err
 	}
 	host := key.Host()
-	dir := filepath.Join(Dir(stateDir), retiredDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(dir, host, []byte(name+"\n"), 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(Dir(stateDir), filepath.Join(retiredDir, host), []byte(name+"\n"), 0o600); err != nil {
 		return "", err
 	}
 	if err := os.RemoveAll(LinkDir(stateDir, name)); err != nil {
@@ -397,14 +393,11 @@ func RetiredLinks(stateDir string) (map[string]string, error) {
 }
 
 func writeJSON(dir, file string, v any) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(dir, file, append(data, '\n'), 0o600)
+	_, err = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), file), append(data, '\n'), 0o600)
 	return err
 }
 

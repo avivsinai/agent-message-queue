@@ -112,6 +112,7 @@ func setHookOptIn(path, kind string, shape *HookShape) error {
 	if err != nil {
 		return err
 	}
+	// Claude Code owns its settings file and may keep it behind a link.
 	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(file), filepath.Base(file), append(raw, '\n'), 0o600)
 	return err
 }

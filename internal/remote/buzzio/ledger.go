@@ -311,7 +311,7 @@ func (l *Ledger) updateOwed(key string, set func(*Outbound)) error {
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(dir, keyFile(key), raw, 0o600)
+	_, err = l.write(filepath.Join("outbox", keyFile(key)), raw)
 	return err
 }
 
@@ -447,7 +447,7 @@ func (l *Ledger) PutReceipt(r Receipt) error {
 	if err := l.ensureRowMap(r); err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Join(l.dir, "receipts"), keyFile("ref/"+r.RequestRef), raw, 0o600)
+	_, err = l.write(filepath.Join("receipts", keyFile("ref/"+r.RequestRef)), raw)
 	return err
 }
 
@@ -460,7 +460,7 @@ func (l *Ledger) ensureRowMap(r Receipt) error {
 	if ref, ok, err := l.RequestForRow(r.RootEventID); err != nil || (ok && ref == r.RequestRef) {
 		return err
 	}
-	_, err := fsq.WriteFileAtomicFollowLinks(filepath.Join(l.dir, "receipts"), keyFile("row/"+r.RootEventID), []byte(r.RequestRef), 0o600)
+	_, err := l.write(filepath.Join("receipts", keyFile("row/"+r.RootEventID)), []byte(r.RequestRef))
 	return err
 }
 
@@ -515,6 +515,13 @@ func createOnce(dir, name string, data []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return stored, created, nil
+}
+
+// write atomically replaces rel below the ledger directory. The directory
+// above the ledger anchors the write, so no directory from the ledger down is
+// followed as a link.
+func (l *Ledger) write(rel string, raw []byte) (string, error) {
+	return fsq.WriteStateFile(filepath.Dir(l.dir), filepath.Join(filepath.Base(l.dir), rel), raw, 0o600)
 }
 
 func readBounded(path string) ([]byte, error) {
