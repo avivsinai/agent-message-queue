@@ -365,6 +365,38 @@ func TestMirrorLastAnswerLandsPastTheCap(t *testing.T) {
 	}
 }
 
+// Review of the mirror: a looping Stop hook past the cap left its turn
+// live while its post showed an answer, and turning the mirror off then
+// erased that answer.
+func TestMirrorOffKeepsTheShownAnswer(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
+	f.tick(0)
+	var sec int
+	for i := 1; i <= 13; i++ {
+		sec = 40 * i
+		f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
+			f.assistantLine("t"+strconv.Itoa(i), float64(sec), "tool_use", toolBlock("Bash")))
+		f.tick(sec)
+		f.add(f.assistantLine("m"+strconv.Itoa(i), float64(sec+2), "end_turn", textBlock("done "+strconv.Itoa(i))))
+		f.tick(sec + 2)
+	}
+	dir, _ := mirror.DirFor("alpha")
+	if st, _, _ := readMirrorFile(dir); !slices.ContainsFunc(st.Queue, func(ev mirror.Event) bool { return ev.Kind == mirror.Continued }) {
+		t.Fatalf("queue %+v; want a Continued waiting", st.Queue)
+	}
+	if err := mirror.SetOff("alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	for after := sec + 4; after <= sec+int(mirrorEditGapMax/time.Second); after += 30 {
+		for _, sent := range f.tick(after) {
+			if !strings.Contains(sent, "\ndone ") {
+				t.Fatalf("at +%ds sent %q; want the post to keep its answer", after, sent)
+			}
+		}
+	}
+}
+
 // A doorbell turn whose reply to a Buzz message reached the buzz inbox
 // during the turn shows Buzz as its cause.
 func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {
@@ -396,11 +428,11 @@ func TestMirrorEditKeepsEarlierNote(t *testing.T) {
 	f := newMirrorFixture(t)
 	claim := filepath.Join(canonicalTempDir(t), "o1.json")
 	turn := mirror.Turn{ID: "o1", Cause: "ship", End: mirror.EndDone, Text: "Shipped.", Earlier: 3}
-	if _, err := f.s.mirrorPost(claim, f.target, f.b, turn); err != nil {
+	if _, err := f.s.mirrorPost(claim, f.target, f.b, turn, f.now); err != nil {
 		t.Fatal(err)
 	}
 	turn.Earlier, turn.Text = 0, "Shipped and tagged."
-	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, mirrorEditGap); err != nil {
+	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, f.now.Add(mirrorEditGap), 0); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}; !slices.Equal(f.sent, want) {
