@@ -482,6 +482,9 @@ func doctorMailboxes(all []binding.Binding, fail, note reportFunc) []mailboxRow 
 		case !wake.LiveWake:
 			fail("mailbox", subject, fmt.Sprintf("handle %q has no live wake (%s), so a Buzz message waits in its inbox until the session drains", b.Handle, nonEmpty(wake.WakeStatus, "no wake")),
 				remedy("start the session with `amq launch`, which starts its wake"))
+		case wakeCannotReadDialogEntries(wake.RunningVersion):
+			fail("mailbox", subject, fmt.Sprintf("the wake of handle %q runs AMQ %s, which cannot read the current dialog marker form, so a Claude dialog can hold its doorbell until the session restarts", b.Handle, wake.RunningVersion),
+				"restart that session (exit and resume it)")
 		case wake.ImageStatus == "different" || wake.ImageStatus == "outdated":
 			fail("mailbox", subject, fmt.Sprintf("the wake of handle %q runs another AMQ image than the installed one (image %s)", b.Handle, wake.ImageStatus),
 				remedy("run `amq wake check --me "+b.Handle+" --root "+shQuote(b.Root)+"` and follow its action"))
@@ -493,10 +496,18 @@ func doctorMailboxes(all []binding.Binding, fail, note reportFunc) []mailboxRow 
 
 // wakeView is the part of `amq wake check --json` doctor reads.
 type wakeView struct {
-	LiveWake    bool   `json:"live_wake"`
-	WakeStatus  string `json:"wake_status"`
-	ImageStatus string `json:"image_status"`
-	NextAction  string `json:"next_action"`
+	LiveWake       bool   `json:"live_wake"`
+	WakeStatus     string `json:"wake_status"`
+	ImageStatus    string `json:"image_status"`
+	NextAction     string `json:"next_action"`
+	RunningVersion string `json:"running_version"`
+}
+
+// wakeCannotReadDialogEntries reports a wake of a known AMQ release that
+// reads only the single-file dialog marker.
+func wakeCannotReadDialogEntries(version string) bool {
+	reads, known := amqcli.WakeVersionReadsDialogEntries(version)
+	return known && !reads
 }
 
 // wakeCheckTimeout bounds one `amq wake check`.
