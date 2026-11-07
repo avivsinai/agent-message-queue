@@ -730,8 +730,9 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			stopped = true
 			// Evidence pressure prunes the oldest unheld history by its
 			// evidence bytes, so a later publication removes those files
-			// and ingestion resumes.
-			if state.pruneHistory(evidenceLimit/4, func(m Message) int {
+			// and ingestion resumes. While a retirement is pending, its
+			// removal comes first and nothing more is pruned.
+			if len(state.RetiredEvidence) == 0 && state.pruneHistory(evidenceLimit/4, func(m Message) int {
 				info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
 				if err != nil {
 					return 0
