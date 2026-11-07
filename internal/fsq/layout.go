@@ -103,6 +103,25 @@ func refuseNonDirectoryAmbient(dir string) error {
 	}
 }
 
+// MkdirAllSynced creates dir and its missing parents, then fsyncs every
+// directory in ancestorChain(dir, stop). It always syncs, whether or not this
+// call created anything, unlike the pinned mkdirAllSynced in syncIfCreated
+// mode: its callers acknowledge what they write next. It serves stores that
+// own a plain directory tree. dir itself is not synced: the writer that
+// commits a file in it syncs it.
+func MkdirAllSynced(dir, stop string) error {
+	dir = filepath.Clean(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, d := range ancestorChain(dir, stop) {
+		if err := SyncDir(d); err != nil {
+			return fmt.Errorf("sync ancestor %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
 // ancestorChain returns the directories that OWN an entry on the path to dir:
 // dir's parent, that directory's parent, and so on, ending at and INCLUDING
 // stop. Deepest first.

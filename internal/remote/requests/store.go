@@ -154,8 +154,8 @@ type Store struct {
 	// while bookkeeping writes such as MarkAcknowledged may run
 	// on an async native-event goroutine. A plain bool tore under -race.
 	closed atomic.Bool
-	// mu serializes every durable mutation (Create/Update/WriteMemo/
-	// writeMarker). The endpoint's e.mu does not cover the async ack markers,
+	// mu serializes every durable mutation (Create, Update, WriteMemo, the
+	// markers, CompactOne). The endpoint's e.mu does not cover the async ack markers,
 	// so without this lock a raw Get->mutate->write lets MarkAcknowledged and
 	// MarkPublished lose each other's update. Revision CAS
 	// alone cannot close marker-vs-marker races: markers do not bump the
@@ -178,8 +178,8 @@ type Store struct {
 	// reserved is the sum of MaxRecordBytes reservations held for
 	// admitted-but-not-yet-terminal records. A real
 	// reservation, not a point-in-time check: Reserve increments it and
-	// tracks the per-key amount; Create/Update convert or release it when the
-	// record reaches a terminal state. The quota invariant is
+	// tracks the per-key amount; a write that leaves the record terminal on
+	// disk releases it. The quota invariant is
 	// used+reserved <= maxStoreBytes, so a result write for an admitted
 	// record is never quota-refused — the reservation already paid for it.
 	// Fail closed at the door, never after the work ran.
@@ -188,8 +188,8 @@ type Store struct {
 	// The sweep index holds the records the endpoint's per-tick paths may act
 	// on, so a sweep reads those files and
 	// not every retained record. The record files stay the truth: Open
-	// rebuilds the index from them, and write and writeSettlement, the only
-	// paths that change a record, reclassify it under mu.
+	// rebuilds the index from them, and persist, the only path that changes
+	// a record, reclassifies it under mu.
 	//
 	// sweep is the records Record.NeedsSweep selects. compactable is the
 	// records Record.compactCandidate selects, with their UpdatedAt;
@@ -197,6 +197,11 @@ type Store struct {
 	// the tombstones nothing deletes.
 	sweep       map[Key]struct{}
 	compactable map[Key]string
+	// syncedHosts is the creator hosts whose directory ancestry this process
+	// has synced. The first write to a host syncs it even when the directory
+	// exists, because an earlier process may have created it and died before
+	// the sync. A failed write forgets the host so the next one syncs again.
+	syncedHosts map[string]struct{}
 }
 
 // Option configures Open.
@@ -226,14 +231,16 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 		return nil, protocol.Refuse(protocol.CodeInvalid, "state directory is required")
 	}
 	dir := filepath.Join(stateDir, layoutVersion)
-	if err := os.MkdirAll(filepath.Join(dir, requestsDir), dirMode); err != nil {
+	// The state directory's own entry is synced too: Open may be the call
+	// that created it.
+	if err := fsq.MkdirAllSynced(filepath.Join(dir, requestsDir), filepath.Dir(filepath.Clean(stateDir))); err != nil {
 		return nil, fmt.Errorf("create request store: %w", err)
 	}
 	lock, err := acquireOwnerLock(filepath.Join(dir, ownerLockFile))
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{}}
+	s := &Store{dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{}, syncedHosts: map[string]struct{}{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -308,16 +315,6 @@ func (s *Store) loadRecords() error {
 	}
 	s.used = used
 	return nil
-}
-
-// reindexFromDiskLocked reclassifies key from its file after a write that
-// returned an error. WriteFileAtomic can fail after the rename (the
-// directory sync), and then the file already holds the new record; the
-// index follows the file, never the attempted write. The caller holds s.mu.
-func (s *Store) reindexFromDiskLocked(key Key) {
-	if cur, ok, err := s.Get(key); err == nil && ok {
-		s.indexLocked(cur)
-	}
 }
 
 // indexLocked reclassifies one record after it was read or durably written.
@@ -429,9 +426,14 @@ func (s *Store) Get(k Key) (*Record, bool, error) {
 }
 
 // Create writes revision 1 of a new record. It refuses if a record exists.
-func (s *Store) Create(rec *Record) error {
+//
+// A Create or Update that returns an error leaves the reservation matching
+// the file on disk, so a caller never releases after calling them: no record
+// or a terminal one releases it, a record still in flight keeps it.
+func (s *Store) Create(rec *Record) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.settleOnErrorLocked(keyOf(rec), &err)
 
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -450,14 +452,15 @@ func (s *Store) Create(rec *Record) error {
 	default:
 		return protocol.Refuse(protocol.CodeInvalid, "a new record starts as received, rejected, or cancelled")
 	}
-	return s.write(rec)
+	return s.persist(rec, admitWork)
 }
 
 // Update writes the next revision of an existing record after checking the
 // state graph, the immutable fields, and the single-dispatch rule.
-func (s *Store) Update(rec *Record) error {
+func (s *Store) Update(rec *Record) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.settleOnErrorLocked(keyOf(rec), &err)
 
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -498,7 +501,7 @@ func (s *Store) Update(rec *Record) error {
 	if rec.PublishedRevision < prev.PublishedRevision || rec.PublishedRevision > rec.Revision {
 		return protocol.Refuse(protocol.CodeInvalid, "published_revision must be monotonic and not ahead of revision")
 	}
-	return s.write(rec)
+	return s.persist(rec, admitWork)
 }
 
 // MarkPublished records that revision left through the publisher. It rewrites
@@ -531,7 +534,7 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 		return nil // already marked; nothing to write
 	}
 	rec.PublishedRevision = revision
-	return s.writeSettlement(rec)
+	return s.persist(rec, settle)
 }
 
 // MarkAcknowledged records that the native AcknowledgeResult call RETURNED
@@ -540,10 +543,7 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 // rewrites the record in place without a revision bump: ack bookkeeping is
 // not new evidence about the request (mirrors MarkPublished). Callers invoke
 // it only after the call returned, and only for records whose ack digest is
-// non-empty. The write is a revision-CAS (writeMarker): a concurrent marker
-// writer or commitLocked can advance the revision
-// between Get and write; losing that race REFUSES instead of silently
-// reverting the other writer's field, and this caller re-reads and retries.
+// non-empty.
 func (s *Store) MarkAcknowledged(k Key) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -564,7 +564,7 @@ func (s *Store) MarkAcknowledged(k Key) error {
 		return nil // already marked; nothing to write
 	}
 	rec.Acknowledged = true
-	return s.writeSettlement(rec)
+	return s.persist(rec, settle)
 }
 
 // writeMemo rewrites one record in place without a revision bump or a state
@@ -572,7 +572,7 @@ func (s *Store) MarkAcknowledged(k Key) error {
 // It is the durable-write half of acknowledgement replay: the memo lands
 // before the native AcknowledgeResult call so a crash in between leaves a
 // record Reconcile can replay the ack from. It validates nothing about the
-// record beyond what write already enforces; callers must set the memo field
+// record beyond what persist already enforces; callers must set the memo field
 // on a freshly read record, never on a stale snapshot.
 func (s *Store) WriteMemo(rec *Record) error {
 	s.mu.Lock()
@@ -581,7 +581,7 @@ func (s *Store) WriteMemo(rec *Record) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	return s.writeSettlement(rec)
+	return s.persist(rec, settle)
 }
 
 // Poison is one undecodable record encountered during List. The key is
@@ -783,7 +783,7 @@ func normalizeRecord(rec *Record) {
 // process, so CompactOne takes s.mu like every other writer.
 //
 // The tombstone write is a settlement write, not new work, so it is
-// quota-exempt (writeSettlement). A terminal record with
+// quota-exempt (the settle policy). A terminal record with
 // no result GROWS on compaction (tombstone flag + revision bump); refusing
 // that growth at quota would deadlock the sweep forever, since key-ordered
 // List means one refused record stops every later compaction too.
@@ -821,7 +821,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if rec.State == protocol.StateCompleted {
 		rec.Code = protocol.CodeResultExpired
 	}
-	if err := s.writeSettlement(rec); err != nil {
+	if err := s.persist(rec, settle); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -839,7 +839,32 @@ func (s *Store) checkClosed() error {
 	return nil
 }
 
-func (s *Store) write(rec *Record) error {
+// quotaPolicy says whether a write may be refused for the aggregate quota.
+type quotaPolicy int
+
+const (
+	// admitWork is Create and Update: a write that may carry new work. A key
+	// holding a reservation (admitted via Reserve before dispatch) grows up
+	// to MaxRecordBytes unchecked, because the reservation already paid for
+	// the work and its bounded result. A key without one must fit:
+	// used+reserved+delta <= maxStoreBytes, or the write refuses
+	// storage_full before the work is admitted. This is a refuse-before-write
+	// gate, never an eviction: tombstones for active epochs are not deleted
+	// to make space.
+	admitWork quotaPolicy = iota
+	// settle is compaction, the publish and ack markers, and the ack memo.
+	// They never admit work, so they are quota-exempt: a terminal record
+	// with no result grows on compaction, and refusing that growth would
+	// stop the sweep that frees space.
+	settle
+)
+
+// persist is the one path that writes a record. It serializes rec, applies
+// the quota policy, writes the file atomically, and then brings used, the
+// reservation, and the indexes into agreement with the file on disk. A
+// record that is terminal on disk releases its reservation under either
+// policy; the release is idempotent.
+func (s *Store) persist(rec *Record, policy quotaPolicy) error {
 	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
@@ -859,7 +884,8 @@ func (s *Store) write(rec *Record) error {
 		rec.ObservedAt = protocol.FormatTime(s.now())
 	}
 	rec.UpdatedAt = protocol.FormatTime(s.now())
-	p, err := s.path(keyOf(rec))
+	key := keyOf(rec)
+	p, err := s.path(key)
 	if err != nil {
 		return err
 	}
@@ -870,118 +896,84 @@ func (s *Store) write(rec *Record) error {
 	if len(data) > MaxRecordBytes {
 		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
 	}
-	key := keyOf(rec)
-	// A real reservation, not a point-in-time check. A key with a reservation
-	// (admitted via Reserve before dispatch) may
-	// grow up to MaxRecordBytes without a quota check — the reservation
-	// already paid for the accepted work AND its bounded result. A result
-	// write for an admitted record is never quota-refused. A key WITHOUT a
-	// reservation (a deferred Create that was not preceded by Reserve) is
-	// fail-closed: used+reserved+delta must fit, or the write refuses
-	// storage_full before the work is admitted. Tombstones for active epochs
-	// are never deleted to make space: this is a refuse-before-write gate,
-	// not an eviction. Local native harness work does not reach this store.
-	if s.maxStoreBytes > 0 {
-		prevSize := int64(0)
-		if fi, err := os.Stat(p); err == nil {
-			prevSize = fi.Size()
-		}
-		delta := int64(len(data)) - prevSize
-		_, hasRes := s.reservedKeys[key]
-		if delta > 0 && !hasRes && s.used+s.reserved+delta > s.maxStoreBytes {
-			return protocol.Refuse(protocol.CodeStorageFull,
-				"store at quota: %d bytes used, %d reserved, %d requested, limit %d",
-				s.used, s.reserved, delta, s.maxStoreBytes)
-		}
-		if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
-			s.reindexFromDiskLocked(key)
-			if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
-				return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
-			}
-			return fmt.Errorf("persist record: %w", err)
-		}
-		// Account for the actual delta only after a successful write. A
-		// compaction that shrank the record (prevSize > new) reduces used.
-		s.used += delta
-		// Release the reservation when the record reaches a terminal
-		// state — the result has landed, the bounded space is now consumed
-		// by the actual record, and the reservation has served its purpose.
-		// Non-terminal updates (received->dispatching->running) keep the
-		// reservation: the result is still pending.
-		if rec.State.Terminal() {
-			s.releaseReservationLocked(key)
-		}
-		s.indexLocked(rec)
-		return nil
+	prevSize := fileSize(p)
+	delta := int64(len(data)) - prevSize
+	if _, hasRes := s.reservedKeys[key]; policy == admitWork && s.maxStoreBytes > 0 &&
+		delta > 0 && !hasRes && s.used+s.reserved+delta > s.maxStoreBytes {
+		return protocol.Refuse(protocol.CodeStorageFull,
+			"store at quota: %d bytes used, %d reserved, %d requested, limit %d",
+			s.used, s.reserved, delta, s.maxStoreBytes)
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
-		s.reindexFromDiskLocked(keyOf(rec))
+	if err := s.writeRecordFile(key.CreatorHost, p, data); err != nil {
+		// The write can fail after the rename (the directory sync), and then
+		// the file already holds the new record. Every derived view follows
+		// the file, never the attempted write.
+		s.settleLocked(key, fileSize(p)-prevSize, nil)
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
 		return fmt.Errorf("persist record: %w", err)
 	}
-	s.indexLocked(rec)
+	s.settleLocked(key, delta, rec)
 	return nil
 }
 
-// writeSettlement persists a settlement write (CompactOne, MarkPublished,
-// MarkAcknowledged, WriteMemo) that is exempt from the aggregate quota.
-// Settlement writes never admit new work: a tombstone grows a terminal
-// record, a marker confirms delivery, a memo
-// annotates. Refusing them at quota would deadlock the sweep — a terminal
-// record with no result GROWS on compaction, and key-ordered List means one
-// refused record stops every later compaction too, so the quota can never
-// be released. Settlement writes also never touch the reservation: the
-// reservation is released on the terminal Update that precedes compaction.
-func (s *Store) writeSettlement(rec *Record) error {
-	if s.closed.Load() {
-		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
+// writeRecordFile writes data at p in the host directory, after making the
+// host directory's ancestry durable once per host in this process.
+func (s *Store) writeRecordFile(host, p string, data []byte) error {
+	hostDir := filepath.Dir(p)
+	if _, ok := s.syncedHosts[host]; !ok {
+		if err := fsq.MkdirAllSynced(hostDir, filepath.Join(s.dir, requestsDir)); err != nil {
+			return err
+		}
+		s.syncedHosts[host] = struct{}{}
 	}
-	if s.readOnly {
-		return protocol.Refuse(protocol.CodeUnsupported, "store opened read-only")
-	}
-	if rec.Schema == "" {
-		rec.Schema = protocol.SchemaRequest
-	}
-	if rec.Schema != protocol.SchemaRequest {
-		return protocol.Refuse(protocol.CodeInvalid, "record schema must be %s", protocol.SchemaRequest)
-	}
-	if rec.RequestRef == "" {
-		rec.RequestRef = protocol.EncodeRef(rec.CreatorHost, rec.TargetID, rec.RequestID)
-	}
-	if rec.ObservedAt == "" {
-		rec.ObservedAt = protocol.FormatTime(s.now())
-	}
-	rec.UpdatedAt = protocol.FormatTime(s.now())
-	p, err := s.path(keyOf(rec))
-	if err != nil {
+	if _, err := fsq.WriteFileAtomic(hostDir, filepath.Base(p), data, fileMode); err != nil {
+		delete(s.syncedHosts, host)
 		return err
 	}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("encode record: %w", err)
-	}
-	if len(data) > MaxRecordBytes {
-		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
-	}
-	prevSize := int64(0)
-	if fi, err := os.Stat(p); err == nil {
-		prevSize = fi.Size()
-	}
-	delta := int64(len(data)) - prevSize
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
-		s.reindexFromDiskLocked(keyOf(rec))
-		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
-			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
-		}
-		return fmt.Errorf("persist record: %w", err)
-	}
-	// Account for the actual delta after a successful write. Settlement
-	// writes are quota-exempt but still keep used honest.
-	s.used += delta
-	s.indexLocked(rec)
 	return nil
+}
+
+// settleLocked applies a write's size change to used, then releases the
+// reservation and reclassifies the key from rec, the record now on disk. A
+// nil rec means the write failed and the file is read back: it holds the
+// previous record, the new one after a failed post-rename sync, or nothing,
+// and then nothing was admitted under key. The caller holds s.mu.
+func (s *Store) settleLocked(key Key, delta int64, rec *Record) {
+	s.used += delta
+	if rec == nil {
+		cur, ok, err := s.Get(key)
+		if err != nil {
+			return
+		}
+		if !ok {
+			// Nothing was admitted under this key.
+			s.releaseReservationLocked(key)
+			return
+		}
+		rec = cur
+	}
+	if rec.State.Terminal() {
+		s.releaseReservationLocked(key)
+	}
+	s.indexLocked(rec)
+}
+
+// settleOnErrorLocked reconciles key from disk when *err is set. The caller
+// holds s.mu.
+func (s *Store) settleOnErrorLocked(key Key, err *error) {
+	if *err != nil {
+		s.settleLocked(key, 0, nil)
+	}
+}
+
+// fileSize is the size of the record file at p, zero when it is absent.
+func fileSize(p string) int64 {
+	if fi, err := os.Stat(p); err == nil {
+		return fi.Size()
+	}
+	return 0
 }
 
 // releaseReservationLocked releases the reservation for key, if any. The
@@ -1001,7 +993,7 @@ func (s *Store) releaseReservationLocked(key Key) {
 // The quota invariant used+reserved <= maxStoreBytes is maintained. A zero
 // maxStoreBytes store (quota disabled) always succeeds. Callers hold no
 // lock; Reserve takes s.mu. The reservation is released automatically when
-// the record reaches a terminal state via write, or explicitly via
+// a write leaves the record terminal on disk, or explicitly via
 // ReleaseReservation if the dispatch is abandoned before a write.
 func (s *Store) Reserve(key Key, bytes int64) error {
 	if s.maxStoreBytes <= 0 || bytes <= 0 {
@@ -1025,10 +1017,9 @@ func (s *Store) Reserve(key Key, bytes int64) error {
 }
 
 // ReleaseReservation releases the reservation for key, if any. The endpoint
-// calls it when a dispatch is abandoned before a terminal write (e.g. a
-// crash-point refusal or a pre-dispatch rejection after Reserve succeeded).
-// A terminal write releases the reservation automatically via write, so this
-// is only for the gap between Reserve and the first write that does not land.
+// calls it only when it abandons a dispatch before any write (a crash point,
+// a handoff refusal). Create and Update settle the reservation themselves,
+// on success and on error, so a caller never releases after calling them.
 func (s *Store) ReleaseReservation(key Key) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

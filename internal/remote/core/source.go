@@ -51,6 +51,11 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if outsideNamespace(src, host) {
 		return protocol.Reply{}, noRecord()
 	}
+	// A cancel whose own admission window has closed acts on nothing: it
+	// neither interrupts a run nor plants a tombstone ahead of its submit.
+	// Each branch still applies its authority refusals first.
+	exp, perr := protocol.ParseTime(cmd.NotAfter)
+	expired := perr == nil && e.now().After(exp)
 
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
@@ -79,6 +84,10 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		if strings.HasPrefix(strings.ToLower(host), linkHostPrefix) {
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the link that submitted a request can cancel it")
+		}
+		if expired {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeExpired, "cancel arrived after its not_after")
 		}
 		rec = &requests.Record{
 			Snapshot: protocol.Snapshot{
@@ -118,9 +127,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Code: protocol.CodeStaleEpoch}}, nil
 	}
-	if exp, perr := protocol.ParseTime(cmd.NotAfter); perr == nil && e.now().After(exp) {
-		// The cancel command's own admission window has closed; do not act on
-		// a stale interrupt.
+	if expired {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Code: protocol.CodeExpired}}, nil
 	}
