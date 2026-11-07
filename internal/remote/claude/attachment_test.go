@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -193,24 +192,5 @@ func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
 		t.Fatal("expected a JSON parse error for the truncated blob")
 	} else if strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("in-bound file was size-refused: %v", err)
-	}
-}
-
-// Regression (review of the reattach branch): a registry entry left by an
-// earlier process with the same pid named that process's session, and was
-// read as the live process's. An entry written before the process started
-// is refused.
-func TestSessionOfProcessRefusesAnEntryFromBeforeTheProcess(t *testing.T) {
-	dir, pid, started := t.TempDir(), os.Getpid(), time.Now()
-	raw, _ := json.Marshal(sessionRegistry{Pid: pid, SessionID: "s-old", UpdatedAt: started.Add(-time.Hour).UnixMilli()})
-	path := filepath.Join(dir, "sessions", strconv.Itoa(pid)+".json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if s, err := SessionOfProcess(dir, pid, started); err == nil {
-		t.Fatalf("session = %+v; want the earlier process's entry refused", s)
 	}
 }

@@ -656,16 +656,13 @@ When a shared session's process ends and the same session comes back in a
 new process (for example a resumed conversation), its share comes back
 without a new `/amq-remote`, and never after `/amq-remote off`:
 
-- A mailbox session (Claude or pi): the machine agent binds it again and
-  restores its channel when the new process is the live wake owner of the
-  same root and handle and its own record names the session id the ended
-  binding recorded: Claude's `<config dir>/sessions/<pid>.json` with the same
-  transcript, or the pi bridge's `bridge.liveness`. It looks at sessions that
-  ended within the last 7 days.
-- A pi native session: the machine agent binds it again when the pi bridge
-  of the same root and handle names the recorded session id.
-- A native Claude session: the approval hook binds it again on its first
-  approval dialog, and the machine agent then restores its channel.
+- A pi session (mailbox or native): the machine agent binds it again and
+  restores its channel when the pi bridge of the same root and handle
+  (`bridge.liveness`) names the session id the ended binding recorded. It
+  looks at sessions that ended within the last 7 days.
+- A Claude session (mailbox or native): the approval hook binds it again on
+  the session's first approval dialog, from the Claude process that runs the
+  hook, and the machine agent then restores its channel.
 - A Codex session is not restored, because Codex publishes no record of a
   resumed thread; run `$amq-remote` in it again.
 

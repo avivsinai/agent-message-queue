@@ -14,16 +14,17 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// A mailbox session whose process ended and that came back in a new process
+// A pi session whose process ended and that came back in a new process
 // under the same session id gets its binding and its channel back by
-// itself: the new process is the live wake owner of the root and handle,
-// and its own harness record (Claude's session registry, a pi bridge's
-// liveness) names the session id the ended binding recorded. The Claude
-// rows start from a pruned binding (a tombstone), as the field saw it; the
-// pi row from an ended binding not yet pruned.
+// itself: the pi bridge of its root and handle names the session id the
+// ended binding recorded. One pi row starts from a pruned binding (a
+// tombstone), as the field saw it; the other from an ended binding not yet
+// pruned.
 //
-// Regression (review of the reattach branch): a Claude process that named
-// the session id but was not the handle's wake owner took the binding.
+// Regression (review of the reattach branch): a Claude process whose
+// registry entry named the session id took a mailbox binding without proof
+// that it ran as that handle at that root. The machine agent leaves Claude
+// to the approval hook.
 func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 	self, err := launch.HolderOf(os.Getpid())
 	if err != nil {
@@ -31,19 +32,19 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 	}
 	ended := self
 	ended.ProcessStart = laterStart(t, self.ProcessStart)
-	savedOwner, savedPi := reattachWakeOwner, piLiveBridge
-	t.Cleanup(func() { reattachWakeOwner, piLiveBridge = savedOwner, savedPi })
+	savedPi := piLiveBridge
+	t.Cleanup(func() { piLiveBridge = savedPi })
 	piLiveBridge = func(string, string, time.Time) (int, string, int, bool) { return self.PID, "pi-s-1", 0, true }
 
 	for _, tc := range []struct {
 		name    string
 		harness string
 		prune   bool
-		owner   bool // the new process is the handle's live wake owner
+		want    bool
 	}{
-		{"claude", "claude", true, true},
 		{"pi", "pi", false, true},
-		{"claude, not the wake owner", "claude", true, false},
+		{"pi, pruned", "pi", true, true},
+		{"claude", "claude", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, rec := machineServer(t)
@@ -51,7 +52,6 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 			if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
 				t.Fatal(err)
 			}
-			reattachWakeOwner = func(string, string) (launch.HolderIdentity, bool) { return self, tc.owner }
 			b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Harness: tc.harness,
 				Holder: ended, Label: tc.harness + " · proj @ box", Name: "agent-proj"}
 			if tc.harness == "pi" {
@@ -77,9 +77,9 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 			tick(s, now.Add(2*time.Minute))
 
 			got, err := binding.ReadNamed(b.Name)
-			if !tc.owner {
+			if !tc.want {
 				if err == nil {
-					t.Fatalf("binding = %+v; want none for a process that is not the wake owner", got)
+					t.Fatalf("binding = %+v; want none: the approval hook restores a Claude session", got)
 				}
 				return
 			}
