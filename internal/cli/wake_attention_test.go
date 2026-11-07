@@ -185,3 +185,28 @@ func TestWakeLogFoldsRepeatedNotices(t *testing.T) {
 		t.Fatalf("wake log = %q", lines)
 	}
 }
+
+// Review of the disk bounds: a folded repeat, which writes nothing, recorded
+// an output effect.
+func TestWakeLogFoldedRepeatRecordsNoOutput(t *testing.T) {
+	var log strings.Builder
+	var effects [][]string
+	cfg := &wakeConfig{
+		me:             "codex",
+		logNotices:     &wakeLogNoticeFold{},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(b []byte) (int, error) { return log.Write(b) },
+		recordAttention: func(e wakeAttentionEmission) error {
+			effects = append(effects, e.Effects)
+			return nil
+		},
+	}
+	for range 3 {
+		if err := emitWakeAttention(cfg, wakePayload{text: "AMQ: a", provenance: wakePayloadPeerHeaders}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(effects) != 3 || len(effects[0]) != 1 || len(effects[1]) != 0 || len(effects[2]) != 0 {
+		t.Fatalf("effects = %#v, want output only for the first notice", effects)
+	}
+}
