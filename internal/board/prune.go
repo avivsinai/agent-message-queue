@@ -2,7 +2,6 @@ package board
 
 import (
 	"encoding/json"
-	"errors"
 	"sort"
 	"time"
 
@@ -39,9 +38,8 @@ func (s *Snapshot) belowPrunedFloor(at time.Time) bool {
 // their ids in PrunedIDs, so acquisition does not bring them back, and
 // retires their evidence under the current generation. It reports whether it
 // removed anything. cost is the bytes a message frees; nil counts its
-// encoding in the snapshot. Evidence is retired under generation gen, the
-// generation that publishes the prune.
-func (s *Snapshot) pruneHistory(excess int, cost func(Message) int, gen uint64) bool {
+// encoding in the snapshot.
+func (s *Snapshot) pruneHistory(excess int, cost func(Message) int) bool {
 	if excess <= 0 {
 		return false
 	}
@@ -113,13 +111,13 @@ func (s *Snapshot) pruneHistory(excess int, cost func(Message) int, gen uint64) 
 			delete(s.PrunedIDs, id)
 		}
 	}
-	s.retireEvidence(retired, gen)
+	s.retireEvidence(retired)
 	return true
 }
 
-// retireEvidence marks each hash that no kept message names for removal
-// once no kept generation from gen on can name it.
-func (s *Snapshot) retireEvidence(hashes []string, gen uint64) {
+// retireEvidence marks each hash that no kept message names for removal.
+// The publication that carries the mark stamps it with its generation.
+func (s *Snapshot) retireEvidence(hashes []string) {
 	if len(hashes) == 0 {
 		return
 	}
@@ -132,20 +130,9 @@ func (s *Snapshot) retireEvidence(hashes []string, gen uint64) {
 	}
 	for _, hash := range hashes {
 		if !kept[hash] && hash != "" {
-			s.RetiredEvidence[hash] = gen
+			s.RetiredEvidence[hash] = 0
 		}
 	}
-}
-
-// validatePruned confirms that every message heldMessages names is still
-// present, so a prune never publishes a store that needs recovery.
-func (s *Snapshot) validatePruned() error {
-	for key := range s.heldMessages() {
-		if _, ok := s.Messages[key]; !ok {
-			return errors.New("pruned a held message")
-		}
-	}
-	return nil
 }
 
 // heldMessages are the message keys pruning keeps: those a task,

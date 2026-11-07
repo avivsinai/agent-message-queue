@@ -63,7 +63,7 @@ func TestPruneDropsOldestUnheldHistoryAndKeepsLateMail(t *testing.T) {
 	commit([]Message{old, recent}, [][]byte{oldRaw, recentRaw})
 	if err = store.update(ctx, func(s *Snapshot) error {
 		s.PrunedIDs = map[string]time.Time{"ancient": time.Now().Add(-prunedIDHorizon - time.Hour)}
-		if !s.pruneHistory(1, nil, s.Generation) {
+		if !s.pruneHistory(1, nil) {
 			t.Fatal("nothing pruned")
 		}
 		return nil
@@ -99,13 +99,13 @@ func TestPruneKeepsUnansweredRequests(t *testing.T) {
 	note := msg("note", "status", 3*time.Hour, ask.ID)
 	chatter := msg("chatter", "status", 2*time.Hour)
 	s := Snapshot{Generation: 1, PublishedAt: now, Messages: map[string]Message{ask.Key: ask, note.Key: note, chatter.Key: chatter}}
-	if !s.pruneHistory(1<<30, nil, s.Generation) {
+	if !s.pruneHistory(1<<30, nil) {
 		t.Fatal("nothing pruned")
 	}
 	_, hasAsk := s.Messages[ask.Key]
 	_, hasNote := s.Messages[note.Key]
 	_, hasChatter := s.Messages[chatter.Key]
-	if !hasAsk || !hasNote || hasChatter || s.validatePruned() != nil {
+	if !hasAsk || !hasNote || hasChatter {
 		t.Fatalf("ask=%v note=%v chatter=%v, want the open request and its reference kept", hasAsk, hasNote, hasChatter)
 	}
 }

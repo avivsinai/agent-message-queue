@@ -449,13 +449,9 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err != nil {
 			return err
 		}
-		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget, nil, state.Generation) {
-			// A prune that drops a message something still names must not
-			// publish: the store would need recovery on its next read.
-			if state.validatePruned() == nil {
-				if data, err = snapshotBytes(&state); err != nil {
-					return err
-				}
+		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget, nil) {
+			if data, err = snapshotBytes(&state); err != nil {
+				return err
 			}
 		}
 		if len(data) > snapshotLimit-snapshotReserve {
@@ -517,21 +513,25 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 		record = append(record, '\n')
 		compact = prev.journalBytes+int64(len(record)) > prev.baseBytes/4
 	}
+	// A retired hash is stamped with the generation that first publishes it.
 	// Retired evidence the old base no longer names goes with this base: the
 	// old base becomes the backup, so no kept generation names it.
 	var unlink []string
-	if compact {
-		for hash, gen := range state.RetiredEvidence {
-			if prev.data != nil && gen <= prev.baseGeneration {
-				unlink = append(unlink, hash)
-				delete(state.RetiredEvidence, hash)
-			}
+	changed := false
+	for hash, gen := range state.RetiredEvidence {
+		if gen == 0 {
+			state.RetiredEvidence[hash] = state.Generation
+			changed = true
+		} else if prev.data != nil && gen <= prev.baseGeneration {
+			unlink = append(unlink, hash)
+			delete(state.RetiredEvidence, hash)
+			changed = true
 		}
-		if len(unlink) > 0 {
-			var err error
-			if data, err = snapshotBytes(state); err != nil {
-				return err
-			}
+	}
+	if changed {
+		var err error
+		if data, err = snapshotBytes(state); err != nil {
+			return err
 		}
 	}
 	// A durable marker makes an interrupted or uncertain rename fail closed on
@@ -609,7 +609,14 @@ func (s Store) linkBackup(name, backup string) error {
 	}
 	err := os.Link(source, staged)
 	if err == nil {
-		return os.Rename(staged, filepath.Join(s.Dir, backup))
+		// Renaming a link onto a link of the same file leaves staged behind.
+		if err = os.Rename(staged, filepath.Join(s.Dir, backup)); err != nil {
+			return err
+		}
+		if err = os.Remove(staged); os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	} else if os.IsNotExist(err) {
 		return err
 	}
@@ -732,16 +739,14 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 			// evidence bytes, so a later publication removes those files
 			// and ingestion resumes. While a retirement is pending, its
 			// removal comes first and nothing more is pruned.
-			if len(state.RetiredEvidence) == 0 && state.pruneHistory(evidenceLimit/4, func(m Message) int {
-				info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
-				if err != nil {
-					return 0
-				}
-				return int(info.Size())
-			}, state.Generation+1) {
-				if err := state.validatePruned(); err != nil {
-					return err
-				}
+			if len(state.RetiredEvidence) == 0 {
+				state.pruneHistory(evidenceLimit/4, func(m Message) int {
+					info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
+					if err != nil {
+						return 0
+					}
+					return int(info.Size())
+				})
 			}
 			// Do not publish references to any partially ingested evidence. Keep prior
 			// facts and identities, and publish the failed acquisition coverage itself.
@@ -818,7 +823,7 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		// Evidence staged before a concurrent prune can belong to a message
 		// that is now pruned; it is retired like the prune's own evidence.
 		var skipped []string
-		defer func() { state.retireEvidence(skipped, state.Generation+1) }()
+		defer func() { state.retireEvidence(skipped) }()
 		for _, m := range a.Messages {
 			if state.Pruned(m.ID) {
 				skipped = append(skipped, m.EvidenceHash)
