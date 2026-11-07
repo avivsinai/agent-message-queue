@@ -443,6 +443,31 @@ func TestMirrorQueueBoundsWaitingContinued(t *testing.T) {
 	}
 }
 
+// Review of the mirror: a running post's Ended was dropped by the queue
+// cap when six turns arrived after a backoff, so the post showed its turn
+// running for ever.
+func TestMirrorRunningPostEndsAfterABacklog(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
+	f.tick(1)
+	edit := editMessage
+	editMessage = func(string, string, time.Duration) error { return &notSentError{errors.New("relay down")} }
+	f.add(f.assistantLine("m2", 35, "tool_use", toolBlock("Read")))
+	f.tick(35) // the progress edit is not sent: the binding backs off
+	editMessage = edit
+	f.add(f.assistantLine("m3", 40, "end_turn", textBlock("Shipped.")))
+	for i := 2; i <= 7; i++ {
+		n := strconv.Itoa(i)
+		f.add(f.userLine("o"+n, "p"+n, float64(40+2*i), "task "+n, nil), f.assistantLine("m"+n+"x", float64(41+2*i), "end_turn", textBlock("done "+n)))
+	}
+	f.tick(35 + int(mirrorBackoffMin/time.Second) + 1)
+	dir, _ := mirror.DirFor("alpha")
+	c, _ := readMirrorClaim(filepath.Join(dir, "posted", "o1.json"))
+	if c.Running || !strings.HasSuffix(c.Text, "\nShipped.") {
+		t.Fatalf("post of the running turn: running %t, %q; want it ended with its answer", c.Running, c.Text)
+	}
+}
+
 // A doorbell turn whose reply to a Buzz message reached the buzz inbox
 // during the turn shows Buzz as its cause.
 func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {

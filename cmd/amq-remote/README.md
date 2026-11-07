@@ -1015,8 +1015,10 @@ session go on after a turn, that turn's message shows it running again and
 is edited while what it shows changes, at most every 30 s. After 10 edits
 it no longer shows the turn running, and from the 11th edit on each wait
 doubles, up to 10 minutes; the newest answer is shown at the end of the
-wait. When more than five turns have changes waiting, the oldest waiting
-change is dropped and its message keeps the earlier answer it shows.
+wait. The mirror queues at most five changes besides those of a message
+that shows its turn running; past that, the oldest waiting change to an
+ended message is dropped, and that message keeps the earlier answer it
+shows.
 
 The machine agent reads the session's transcript, which Claude Code names in
 its session registry and in each approval hook; attach, and the approval hook

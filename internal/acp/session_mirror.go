@@ -71,10 +71,11 @@ func mirrorGap(edits int) time.Duration {
 // mirrorReadMax bounds the transcript bytes one binding reads in one tick.
 const mirrorReadMax = 64 << 20
 
-// mirrorQueueMax is the most turn events a binding's queue holds. Past it
-// the oldest Continued is dropped first, since its post already shows an
-// earlier answer; a queue still longer keeps only its last event, which
-// counts the turns it dropped, and the running turn's last event.
+// mirrorQueueMax is the most turn events a binding's queue holds, besides
+// the events of turns whose post shows them running, which are never
+// dropped. Past it the oldest Continued is dropped first, since its post
+// already shows an earlier answer; a queue still longer keeps only its last
+// event, which counts the turns it dropped.
 const mirrorQueueMax = 5
 
 // Backoff of one binding after a failed post.
@@ -276,9 +277,9 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	case !s.mirrorRead(dir, src, &st, path, now):
 		s.mirrorUnavailable(dir, &st, path, off)
 	}
-	st.Queue = mergeQueue(st.Queue, st.Watermark, st.runningTurn(dir))
+	st.Queue = mergeQueue(st.Queue, st.Watermark, func(id string) bool { return mirrorRunning(dir, id) })
 	if off {
-		st.offQueue(dir)
+		st.offQueue(st.runningTurn(dir))
 	}
 	if raw, err := json.Marshal(st); err != nil || !bytes.Equal(raw, saved) && writeMirrorFile(dir, st) != nil {
 		return false
@@ -372,47 +373,48 @@ func (s *Server) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path
 }
 
 // mergeQueue drops each event at or before the watermark, which is never
-// sent, except a Continued and one of the running turn (live). It keeps one event for each change of a
-// turn's post: a Progress replaces the turn's queued Opened or Progress; an
-// Ended or Continued replaces the turn's queued Progress and folds into its
+// sent, except a Continued. It keeps one event for each change of a turn's
+// post: a Progress replaces the turn's queued Opened or Progress; an Ended
+// or Continued replaces the turn's queued Progress and folds into its
 // queued Opened (then an Ended: the turn is posted once, ended), Ended or
-// Continued. A queue longer than mirrorQueueMax drops its oldest Continued
-// of another turn than live, then keeps only its last event, which counts
-// the turns it dropped, and live's last event.
-func mergeQueue(q []mirror.Event, watermark int64, live string) []mirror.Event {
+// Continued. A queue longer than mirrorQueueMax drops its oldest Continued,
+// then keeps only its last event, which counts the turns it dropped. It
+// never drops an event of a turn whose post shows it running (running),
+// which it asks only of an event it would drop.
+func mergeQueue(q []mirror.Event, watermark int64, running func(id string) bool) []mirror.Event {
 	var out []mirror.Event
 	for _, ev := range q {
-		if ev.Kind != mirror.Continued && ev.Turn.LastTS <= watermark && ev.Turn.ID != live {
+		if ev.Kind != mirror.Continued && ev.Turn.LastTS <= watermark && !running(ev.Turn.ID) {
 			continue
 		}
 		out = mergeEvent(out, ev)
 	}
-	for len(out) > mirrorQueueMax {
-		i := slices.IndexFunc(out[:len(out)-1], func(ev mirror.Event) bool { return ev.Kind == mirror.Continued && ev.Turn.ID != live })
-		if i < 0 {
-			break
-		}
-		out = slices.Delete(out, i, i+1)
-	}
 	if len(out) <= mirrorQueueMax {
 		return out
 	}
-	last := out[len(out)-1]
-	keep := -1
-	for i := len(out) - 2; i >= 0 && live != "" && last.Turn.ID != live; i-- {
-		if out[i].Turn.ID == live {
-			keep = i
-			break
-		}
-	}
+	last, n := out[len(out)-1], len(out)
 	var kept []mirror.Event
-	for i, ev := range out[:len(out)-1] {
-		switch {
-		case i == keep:
-			kept = append(kept, ev)
-		case ev.Kind == mirror.Ended && ev.Turn.ID != live:
-			last.Turn.Earlier += 1 + ev.Turn.Earlier
+	for _, ev := range out[:len(out)-1] {
+		if n > mirrorQueueMax && ev.Kind == mirror.Continued && !running(ev.Turn.ID) {
+			last.Turn.Earlier += ev.Turn.Earlier
+			n--
+			continue
 		}
+		kept = append(kept, ev)
+	}
+	if n > mirrorQueueMax {
+		held := kept[:0]
+		for _, ev := range kept {
+			switch {
+			case running(ev.Turn.ID):
+				held = append(held, ev)
+			case ev.Kind == mirror.Ended:
+				last.Turn.Earlier += 1 + ev.Turn.Earlier
+			default:
+				last.Turn.Earlier += ev.Turn.Earlier
+			}
+		}
+		kept = held
 	}
 	return append(kept, last)
 }
@@ -456,25 +458,40 @@ func mergeEvent(out []mirror.Event, ev mirror.Event) []mirror.Event {
 	return append(out, ev)
 }
 
-// runningTurn is the fold's open or last turn whose claim (in dir) records
-// that its post shows it running; "" for none.
+// mirrorRunning reports whether the claim (in dir) of turn id records that
+// its post shows the turn running.
+func mirrorRunning(dir, id string) bool {
+	if !turnIDRe.MatchString(id) {
+		return false
+	}
+	c, _ := readMirrorClaim(filepath.Join(dir, "posted", id+".json"))
+	return c.Running && c.Event != ""
+}
+
+// runningTurn is the turn whose post shows it running (mirrorRunning): the
+// fold's open or last turn, else a turn with a queued event; "" for none.
 func (st *mirrorFile) runningTurn(dir string) string {
+	var ids []string
 	for _, t := range []*mirror.Turn{st.Fold.Open, st.Fold.Last} {
-		if t == nil || !turnIDRe.MatchString(t.ID) {
-			continue
+		if t != nil {
+			ids = append(ids, t.ID)
 		}
-		if c, _ := readMirrorClaim(filepath.Join(dir, "posted", t.ID+".json")); c.Running && c.Event != "" {
-			return t.ID
+	}
+	for i := len(st.Queue) - 1; i >= 0; i-- {
+		ids = append(ids, st.Queue[i].Turn.ID)
+	}
+	for _, id := range ids {
+		if mirrorRunning(dir, id) {
+			return id
 		}
 	}
 	return ""
 }
 
 // offQueue is the queue while the mirror is off: nothing, or one final edit
-// of the post that shows its turn running (runningTurn), which shows it
-// ended by the switch. A turn that ended keeps its answer.
-func (st *mirrorFile) offQueue(dir string) {
-	running := st.runningTurn(dir)
+// of the post that shows its turn running (running, from runningTurn),
+// which shows it ended by the switch. A turn that ended keeps its answer.
+func (st *mirrorFile) offQueue(running string) {
 	var ev mirror.Event
 	found := false
 	for i := len(st.Queue) - 1; i >= 0 && running != ""; i-- {
