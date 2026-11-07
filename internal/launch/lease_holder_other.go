@@ -2,7 +2,10 @@
 
 package launch
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 func inspectProcessPlatform(pid int) processInfo {
 	info := processInfo{PID: pid, Running: processAlive(pid)}
@@ -19,6 +22,6 @@ func parentProcessIDPlatform(int) (int, error) {
 // pidNamespace is empty: this platform has no pid namespaces.
 func pidNamespace() string { return "" }
 
-func processStartUnix(string) (int64, error) {
-	return 0, fmt.Errorf("process start time unavailable on this platform")
+func processStartTime(string) (time.Time, error) {
+	return time.Time{}, fmt.Errorf("process start time unavailable on this platform")
 }

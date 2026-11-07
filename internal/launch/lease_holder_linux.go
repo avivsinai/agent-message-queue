@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func inspectProcessPlatform(pid int) processInfo {
@@ -87,17 +88,18 @@ func pidNamespace() string {
 // fixed USER_HZ of the Linux userspace ABI.
 const linuxUserHZ = 100
 
-// processStartUnix is the wall-clock start second of a start token, which
+// processStartTime is the wall-clock start second of a start token, which
 // on Linux is stat starttime in clock ticks since boot, added to the boot
-// time from /proc/stat (the same computation as ps lstart).
-func processStartUnix(token string) (int64, error) {
+// time from /proc/stat (the same computation as ps lstart). The boot time
+// has whole-second precision, so the start does too.
+func processStartTime(token string) (time.Time, error) {
 	ticks, err := strconv.ParseInt(token, 10, 64)
 	if err != nil || ticks < 0 {
-		return 0, fmt.Errorf("process start token %q is malformed", token)
+		return time.Time{}, fmt.Errorf("process start token %q is malformed", token)
 	}
 	stat, err := os.ReadFile("/proc/stat")
 	if err != nil {
-		return 0, err
+		return time.Time{}, err
 	}
 	for _, line := range strings.Split(string(stat), "\n") {
 		if value, ok := strings.CutPrefix(line, "btime "); ok {
@@ -105,8 +107,8 @@ func processStartUnix(token string) (int64, error) {
 			if err != nil || boot <= 0 {
 				break
 			}
-			return boot + ticks/linuxUserHZ, nil
+			return time.Unix(boot+ticks/linuxUserHZ, 0), nil
 		}
 	}
-	return 0, fmt.Errorf("boot time unavailable")
+	return time.Time{}, fmt.Errorf("boot time unavailable")
 }
