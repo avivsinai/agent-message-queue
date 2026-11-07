@@ -275,7 +275,9 @@ supports it.
   executable name is matched, so an npm install that runs as `node` has a
   host too. An `open` hook of the older form passes no pid and records no
   host; `amq doctor` reports that form as stale, and
-  `amq wake install-dialog-hook` replaces it. A dialog cannot outlive its
+  `amq wake install-dialog-hook` replaces it. After an upgrade of amq, run
+  `amq wake install-dialog-hook` or `amq-remote doctor --fix` once. A
+  dialog cannot outlive its
   process, so while the doorbell is held an entry
   whose host is proven gone (not running, or its pid now runs another process)
   closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An

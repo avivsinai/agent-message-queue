@@ -1032,7 +1032,7 @@ func claudeDialogHookCheckAt(path string, version claudeVersion, known bool) (do
 		}
 		if hook.command != claudeDialogHookCommand(bin, wakeDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, DialogGuardIncomplete
+			return check, DialogGuardStale
 		}
 	}
 	check.Status = "ok"
