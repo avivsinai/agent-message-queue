@@ -457,10 +457,12 @@ first by the creation stamp in the message id, else the modification time. A siz
 (B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,
 dead letters and their receipts, a message whose header does not parse,
 extension data, every copy of a message that 'amq thread open --max-age 0'
-lists as open, with the replies that ref it, a reply whose parent keeps a
-copy, and a remote file that unread mail or such a message names as
+lists as open, with the replies that ref it, a reply that closed an
+obligation whose opener keeps a read or sent copy, and a remote file that
+unread mail or such a message names as
 [image: <path>] are never removed, and nothing is removed unless you run
-this command.
+this command. A size bound can remove an image an agent has not opened
+yet when no unread or open message names it.
 --mailbox uses --root as given and removes <root>/agents/<handle>, with its
 read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
 inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a

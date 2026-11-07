@@ -59,10 +59,12 @@ func runCleanup(args []string) error {
 		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
 		"dead letters and their receipts, a message whose header does not parse,",
 		"extension data, every copy of a message that 'amq thread open --max-age 0'",
-		"lists as open, with the replies that ref it, a reply whose parent keeps a",
-		"copy, and a remote file that unread mail or such a message names as",
+		"lists as open, with the replies that ref it, a reply that closed an",
+		"obligation whose opener keeps a read or sent copy, and a remote file that",
+		"unread mail or such a message names as",
 		"[image: <path>] are never removed, and nothing is removed unless you run",
-		"this command.",
+		"this command. A size bound can remove an image an agent has not opened",
+		"yet when no unread or open message names it.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
 		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
 		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
@@ -189,17 +191,18 @@ func runCleanup(args []string) error {
 		if historyDuration > 0 {
 			cutoff = now.Add(-historyDuration)
 		}
-		open, err := openObligationIDs(absPath(root))
+		open, closers, err := openObligationIDs(absPath(root))
 		if err != nil {
 			return err
 		}
-		if err = keepReferencedRemoteFiles(root, open); err != nil {
+		images, err := referencedRemoteFiles(root, open)
+		if err != nil {
 			return err
 		}
-		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
+		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open, images); err != nil {
 			return err
 		}
-		if historyCandidates, err = keepRepliesOfKeptMessages(root, historyCandidates); err != nil {
+		if historyCandidates, err = keepClosersOfKeptOpeners(root, historyCandidates, closers); err != nil {
 			return err
 		}
 	}
@@ -444,15 +447,16 @@ func historyMessageDirs(root, agent string) []string {
 	return []string{fsq.AgentInboxNew(root, agent), fsq.AgentInboxCur(root, agent), fsq.AgentOutboxSent(root, agent)}
 }
 
-// keepReferencedRemoteFiles adds to keep the name of every remote file that
-// an unread message, or a message whose id keep holds (an open obligation
-// and its replies), names as [image: <path>].
-func keepReferencedRemoteFiles(root string, keep map[string]bool) error {
+// referencedRemoteFiles are the names of the remote files that an unread
+// message, or a message whose id open holds (an open obligation and its
+// replies), names as [image: <path>].
+func referencedRemoteFiles(root string, open map[string]bool) (map[string]bool, error) {
+	names := map[string]bool{}
 	agents, err := fsq.ListAgents(root)
 	if os.IsNotExist(err) {
-		return nil
+		return names, nil
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 	for _, agent := range agents {
 		for i, dir := range historyMessageDirs(root, agent) {
@@ -460,11 +464,11 @@ func keepReferencedRemoteFiles(root string, keep map[string]bool) error {
 			if os.IsNotExist(err) {
 				continue
 			} else if err != nil {
-				return err
+				return nil, err
 			}
 			for _, e := range entries {
 				name := e.Name()
-				if !e.Type().IsRegular() || !strings.HasSuffix(name, ".md") || i > 0 && !keep[fsq.HistoryID(name)] {
+				if !e.Type().IsRegular() || !strings.HasSuffix(name, ".md") || i > 0 && !open[fsq.HistoryID(name)] {
 					continue
 				}
 				msg, err := format.ReadMessageFile(filepath.Join(dir, name))
@@ -472,29 +476,35 @@ func keepReferencedRemoteFiles(root string, keep map[string]bool) error {
 					continue // kept as unparsable; it names nothing readable
 				}
 				for _, m := range imageReference.FindAllStringSubmatch(msg.Body, -1) {
-					keep[filepath.Base(m[1])] = true
+					names[filepath.Base(m[1])] = true
 				}
 			}
 		}
 	}
-	return nil
+	return names, nil
 }
 
-// keepRepliesOfKeptMessages removes from candidates every message, with its
-// receipts, whose direct parent (its last ref) keeps a copy under root, so
-// an opener never stays without the reply that closed it.
-func keepRepliesOfKeptMessages(root string, candidates []fsq.HistoryFile) ([]fsq.HistoryFile, error) {
+// keepClosersOfKeptOpeners removes from candidates every message, with its
+// receipts, that closed an obligation (closers maps it to its opener) whose
+// opener keeps a read or sent copy outside candidates, so an answered
+// opener never stays without its answer. It looks one step: a kept closer
+// keeps nothing else.
+func keepClosersOfKeptOpeners(root string, candidates []fsq.HistoryFile, closers map[string]string) ([]fsq.HistoryFile, error) {
 	removing := map[string]bool{}
 	for _, c := range candidates {
 		removing[c.Path] = true
 	}
-	copies := map[string][]string{}
+	openers := map[string]bool{}
+	for _, opener := range closers {
+		openers[opener] = true
+	}
+	keptCopy := map[string]bool{}
 	agents, err := fsq.ListAgents(root)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	for _, agent := range agents {
-		for _, dir := range historyMessageDirs(root, agent) {
+		for _, dir := range []string{fsq.AgentInboxCur(root, agent), fsq.AgentOutboxSent(root, agent)} {
 			entries, err := os.ReadDir(dir)
 			if os.IsNotExist(err) {
 				continue
@@ -502,47 +512,16 @@ func keepRepliesOfKeptMessages(root string, candidates []fsq.HistoryFile) ([]fsq
 				return nil, err
 			}
 			for _, e := range entries {
-				if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".md") {
-					id := fsq.HistoryID(e.Name())
-					copies[id] = append(copies[id], filepath.Join(dir, e.Name()))
+				id := fsq.HistoryID(e.Name())
+				if openers[id] && e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".md") && !removing[filepath.Join(dir, e.Name())] {
+					keptCopy[id] = true
 				}
-			}
-		}
-	}
-	parent := map[string]string{}
-	for _, c := range candidates {
-		if !strings.HasSuffix(c.Path, ".md") {
-			continue
-		}
-		header, err := format.ReadHeaderFile(c.Path)
-		if err == nil && len(header.Refs) > 0 {
-			parent[fsq.HistoryID(filepath.Base(c.Path))] = header.Refs[len(header.Refs)-1]
-		}
-	}
-	keptCopy := func(id string) bool {
-		for _, path := range copies[id] {
-			if !removing[path] {
-				return true
-			}
-		}
-		return false
-	}
-	kept := map[string]bool{}
-	for changed := true; changed; {
-		changed = false
-		for id, ref := range parent {
-			if !kept[id] && keptCopy(ref) {
-				kept[id] = true
-				for _, path := range copies[id] {
-					removing[path] = false
-				}
-				changed = true
 			}
 		}
 	}
 	out := candidates[:0]
 	for _, c := range candidates {
-		if removing[c.Path] && !kept[fsq.HistoryID(filepath.Base(c.Path))] {
+		if opener, ok := closers[fsq.HistoryID(filepath.Base(c.Path))]; !ok || !keptCopy[opener] {
 			out = append(out, c)
 		}
 	}

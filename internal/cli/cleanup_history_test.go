@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,8 +115,9 @@ func TestCleanupHistoryKeepsRepliesToOpenObligations(t *testing.T) {
 	}
 }
 
-// Review of the disk bounds: history cleanup deleted a corrupt message, a
-// dead-letter receipt and a fetched remote file that unread mail names.
+// Review of the disk bounds, round 1, finding 1: history cleanup deleted a
+// corrupt message, a dead-letter receipt and a fetched remote file that
+// unread mail names.
 func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndReferencedRemoteFile(t *testing.T) {
 	rootPath := newCleanupMailboxRoot(t, "claude")
 	base := fsq.AgentBase(rootPath, "claude")
@@ -148,8 +150,9 @@ func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndReferencedRemoteFile(t *t
 	}
 }
 
-// Review of the disk bounds: size cleanup deleted the answer of a question
-// while a copy of the question stayed, so the question looked open again.
+// Review of the disk bounds, round 1, finding 5: size cleanup deleted the
+// answer of a question while a copy of the question stayed, so the question
+// looked open again.
 func TestCleanupHistoryKeepsAReplyWhileItsParentStays(t *testing.T) {
 	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
 		t.Setenv(key, "")
@@ -187,5 +190,54 @@ func TestCleanupHistoryKeepsAReplyWhileItsParentStays(t *testing.T) {
 	}
 	if after := runThreadOpenJSON(t, base); len(after.Obligations) != 0 {
 		t.Fatalf("obligations after cleanup = %+v, want none", after.Obligations)
+	}
+}
+
+// Review of the disk bounds, round 2, finding 1: keeping replies whose
+// parent stays was transitive, so a chain of plain replies under one kept
+// copy of its first message outgrew the size bound.
+func TestCleanupHistoryCutsAPlainReplyChainToTheBound(t *testing.T) {
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe} {
+		t.Setenv(key, "")
+	}
+	base := filepath.Join(t.TempDir(), defaultCoopRoot)
+	start := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	chain := []threadOpenMessage{{name: "m0", from: "alpha@s1", to: "beta@s1,gamma@s1", kind: format.KindStatus, thread: "chain"}}
+	for i := 1; i < 10; i++ {
+		from, to := "beta@s1", "alpha@s1"
+		if i%2 == 0 {
+			from, to = to, from
+		}
+		chain = append(chain, threadOpenMessage{name: fmt.Sprintf("m%d", i), from: from, to: to, kind: format.KindStatus, thread: "chain", refs: []string{fmt.Sprintf("m%d", i-1)}})
+	}
+	ids, _ := writeThreadOpenMessages(t, base, chain, func(i int, _ threadOpenMessage) time.Time { return start.Add(time.Duration(i) * time.Hour) })
+	s1 := filepath.Join(base, "s1")
+	for _, agent := range []string{"alpha", "beta", "gamma"} {
+		for _, id := range ids {
+			from := filepath.Join(fsq.AgentInboxNew(s1, agent), id+".md")
+			if _, err := os.Stat(from); err == nil {
+				if err := os.Rename(from, filepath.Join(fsq.AgentInboxCur(s1, agent), id+".md")); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	const bound = 2048
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--history-max-size", fmt.Sprintf("%dB", bound), "--root", s1, "--yes"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, dir := range []string{fsq.AgentInboxCur(s1, "alpha"), fsq.AgentOutboxSent(s1, "alpha")} {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if info, err := e.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+	}
+	if total > bound {
+		t.Fatalf("alpha keeps %d bytes of a plain reply chain, want at most %d", total, bound)
 	}
 }

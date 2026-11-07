@@ -303,19 +303,22 @@ func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError fu
 // lists as open under root, and of every message whose refs name one: a
 // reply that acknowledges an opener decides its state. A message whose header
 // does not parse is included too: its obligation is unknown and it belongs to
-// dead-letter handling.
-func openObligationIDs(root string) (map[string]bool, error) {
-	ids := map[string]bool{}
+// dead-letter handling. closers maps the id of each message that closed an
+// obligation under root to its opener's id.
+func openObligationIDs(root string) (ids map[string]bool, closers map[string]string, err error) {
+	ids, closers = map[string]bool{}, map[string]string{}
 	scan, red, err := reduceObligations([]thread.ScanRoot{threadOpenScanRoot(root)}, time.Time{}, func(path string, _ error) error {
 		ids[strings.TrimSuffix(filepath.Base(path), ".md")] = true
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, ob := range red.Obligations {
 		if ob.Open() {
 			ids[ob.Opener.ID] = true
+		} else if ob.Closed && ob.ClosedBy != nil {
+			closers[ob.ClosedBy.ID] = ob.Opener.ID
 		}
 	}
 	var replies []string
@@ -330,7 +333,7 @@ func openObligationIDs(root string) (map[string]bool, error) {
 	for _, id := range replies {
 		ids[id] = true
 	}
-	return ids, nil
+	return ids, closers, nil
 }
 
 // report returns the obligations filter keeps that are still open, oldest

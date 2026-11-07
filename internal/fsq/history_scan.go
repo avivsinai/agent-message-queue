@@ -24,8 +24,8 @@ type HistoryFile struct {
 // when the name has none. Unread mail, dead letters and temporary files are
 // never history, dead-letter receipts are the only record of a corrupt
 // message and stay, a message whose id is in keep stays with its receipts,
-// and a remote file whose name is in keep stays.
-func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[string]bool) ([]HistoryFile, error) {
+// and a remote file whose name is in keepFiles stays.
+func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep, keepFiles map[string]bool) ([]HistoryFile, error) {
 	agents, err := ListAgents(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -37,7 +37,8 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 	for _, agent := range agents {
 		var files []HistoryFile
 		var total int64
-		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent), AgentRemoteFiles(root, agent)} {
+		remoteFiles := AgentRemoteFiles(root, agent)
+		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent), remoteFiles} {
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -53,7 +54,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 				if err != nil {
 					continue // removed while scanning
 				}
-				if keep[HistoryID(entry.Name())] {
+				if dir == remoteFiles && keepFiles[entry.Name()] || dir != remoteFiles && keep[HistoryID(entry.Name())] {
 					total += info.Size()
 					continue
 				}
@@ -88,8 +89,7 @@ func historyStamp(name string, modified time.Time) time.Time {
 }
 
 // HistoryID is the message id a history file holds: the name of a message
-// file without .md, or the id that starts a receipt name. A remote file's id
-// is its name.
+// file without .md, or the id that starts a receipt name.
 func HistoryID(name string) string {
 	if id, _, ok := strings.Cut(name, "__"); ok {
 		return id
