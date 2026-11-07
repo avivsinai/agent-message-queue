@@ -34,6 +34,8 @@ func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, er
 	defer func() { _ = r.Close() }()
 	dir, name := filepath.Split(rel)
 	dir = filepath.Clean(dir)
+	// The no-follow walk is the guard: WriteFileAtomic's own MkdirAll
+	// follows links that stay inside the root.
 	if err := r.mkdirAllNoFollow(dir); err != nil {
 		return "", err
 	}
