@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // currentWakeMachineID returns a stable identity for this machine, cached for
@@ -59,8 +61,8 @@ func classifyWakeLockMachine(lock wakeLock) (wakeMachineComparison, string) {
 			return wakeMachineDifferent, "machine id mismatch"
 		}
 	}
-	if isDarwinBootUUID(lock.BootID) {
-		if boot := currentWakeBootID(); isDarwinBootUUID(boot) && strings.EqualFold(lock.BootID, boot) {
+	if launch.IsBootUUID(lock.BootID) {
+		if boot := currentWakeBootID(); launch.IsBootUUID(boot) && strings.EqualFold(lock.BootID, boot) {
 			return wakeMachineSame, ""
 		}
 	}

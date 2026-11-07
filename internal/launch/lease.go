@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -323,11 +325,27 @@ func classifyHolder(recorded HolderIdentity, live processInfo) (LeaseState, stri
 		if live.StartToken == "" {
 			return LeaseUnverified, evidenceOr("process start time unavailable", live.InspectError)
 		}
-		if recorded.BootID != "" && live.BootID != "" && recorded.BootID != live.BootID {
-			return LeaseStale, "boot id mismatch"
+		unknownBoot := false
+		if recorded.BootID != "" && live.BootID != "" {
+			switch CompareBootID(recorded.BootID, live.BootID) {
+			case BootIDMismatch:
+				return LeaseStale, "boot id mismatch"
+			case BootIDUnknown:
+				unknownBoot = true
+			}
 		}
 		if recorded.BootID != "" && live.BootID == "" {
 			return LeaseUnverified, evidenceOr("boot id unavailable", live.InspectError)
+		}
+		if unknownBoot {
+			// Boot ids in two representations prove nothing either way.
+			// Only a mixed pair from darwin reaches here, whose start
+			// token is an absolute time: a different start still proves
+			// the pid belongs to another process.
+			if recorded.ProcessStart != live.StartToken {
+				return LeaseStale, "process start time mismatch"
+			}
+			return LeaseUnverified, "boot ids use different representations"
 		}
 		if recorded.ProcessStart != live.StartToken {
 			if recorded.BootID == "" {
@@ -366,6 +384,87 @@ func HolderOf(pid int) (HolderIdentity, error) {
 		return HolderIdentity{}, fmt.Errorf("process start time unavailable")
 	}
 	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID, PIDNamespace: pidNamespace()}, nil
+}
+
+// BootIDComparison is the outcome of comparing a recorded boot id with one
+// read now.
+type BootIDComparison int
+
+const (
+	BootIDMatch BootIDComparison = iota
+	BootIDMismatch
+	BootIDUnknown
+)
+
+// CompareBootID compares a recorded boot id with one read now. Ids equal but
+// for case match, as do two kern.boottime ("sec.nsec") forms within one
+// second, since macOS moves boottime while it corrects wall-clock time. Only
+// two unlike UUIDs prove another boot: a UUID cannot be disproved by a
+// boottime form, nor the reverse.
+func CompareBootID(recorded, current string) BootIDComparison {
+	if strings.EqualFold(recorded, current) || boottimeBootIDsMatch(recorded, current) {
+		return BootIDMatch
+	}
+	if IsBootUUID(recorded) && IsBootUUID(current) {
+		return BootIDMismatch
+	}
+	return BootIDUnknown
+}
+
+// IsBootUUID reports whether value has the UUID form of a boot id.
+func IsBootUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func boottimeBootIDsMatch(first, second string) bool {
+	firstTime, firstOK := parseBoottimeBootID(first)
+	secondTime, secondOK := parseBoottimeBootID(second)
+	if !firstOK || !secondOK {
+		return false
+	}
+	secDelta := firstTime.Unix() - secondTime.Unix()
+	if secDelta < -1 || secDelta > 1 {
+		return false
+	}
+	return firstTime.Sub(secondTime) <= time.Second && secondTime.Sub(firstTime) <= time.Second
+}
+
+func parseBoottimeBootID(value string) (time.Time, bool) {
+	seconds, nanos, ok := strings.Cut(value, ".")
+	if !ok || seconds == "" || len(nanos) != 9 || strings.Contains(nanos, ".") {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	nsec, err := strconv.ParseInt(nanos, 10, 64)
+	if err != nil || nsec < 0 || nsec >= int64(time.Second) {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, nsec), true
+}
+
+// LocalHolder is a recorded process identity stamped with this process's pid
+// namespace. The record itself carries no namespace: the caller asserts it
+// was made in this namespace, so a record from another namespace would be
+// compared against an unrelated process with the same pid.
+func LocalHolder(pid int, processStart, bootID string) HolderIdentity {
+	return HolderIdentity{PID: pid, ProcessStart: processStart, BootID: bootID, PIDNamespace: pidNamespace()}
 }
 
 // ProcessStartUnix is the wall-clock second the holder's process started.

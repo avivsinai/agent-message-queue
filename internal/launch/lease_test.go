@@ -188,3 +188,22 @@ func TestRunsUnderProcessRefusesAParentThatExitedDuringTheWalk(t *testing.T) {
 		t.Fatalf("RunsUnderProcess(%+v) = true after the parent exited during the walk", parent)
 	}
 }
+
+// Review of the restart one-writer change: a boot id recorded in the
+// kern.boottime form read as a mismatch against the UUID form, so a live
+// restart requester was retired as exited.
+func TestHolderWithBoottimeBootIDIsNotStaleUnderUUIDReader(t *testing.T) {
+	recorded := HolderIdentity{PID: 4242, ProcessStart: "1794000000.000000001", BootID: "1793990000.123456789"}
+	live := processInfo{PID: 4242, Running: true, StartToken: recorded.ProcessStart, BootID: "3717AE7D-3DED-40B5-9FB5-CD431E540BA6"}
+	if state, evidence := classifyHolder(recorded, live); state != LeaseUnverified {
+		t.Fatalf("classifyHolder = %v (%s), want unverified", state, evidence)
+	}
+	// Review of the one-writer change: with mixed boot-id forms after a
+	// reboot, a pid now owned by another process (another start) must still
+	// read stale, or a dead holder blocks a launch for as long as that pid
+	// lives.
+	live.StartToken = "1794100000.000000002"
+	if state, evidence := classifyHolder(recorded, live); state != LeaseStale {
+		t.Fatalf("classifyHolder with another start = %v (%s), want stale", state, evidence)
+	}
+}
