@@ -15,9 +15,10 @@ channel, adds the owner and mentions them. The owner writes in that channel
 from the Buzz phone app or Buzz Desktop. Several sessions can be connected
 at once; each has its own channel. The same session connecting again gets
 its own channel back. A resumed session gets its channel back by itself
-unless the owner turned it off: a pi session or a Claude mailbox seat within
-about 35 s, a native Claude session at its first approval dialog. A Codex
-session needs `$amq-remote` again. A different session never gets another
+unless the owner turned it off: a pi session within about 35 s; on macOS, a
+Claude mailbox seat started directly by `amq coop exec claude` within about
+35 s; any other Claude session at its first approval dialog. A Codex session
+needs `$amq-remote` again. A different session never gets another
 session's channel. A session that already has its own Buzz agent keeps its DM.
 
 In Codex the skill is invoked as `$amq-remote` (Codex does not register `/`

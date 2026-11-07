@@ -162,20 +162,19 @@ func liveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
 }
 
 // claudeRunsSession reports whether the Claude process owner runs session id
-// with b's transcript: its registry entry, under b's Claude config dir, was
-// not written before owner started and names both. An empty transcript proves
-// nothing, so it is never a match.
+// with b's transcript: its registry entry, under the Claude config dir b
+// recorded, was not written before owner started and names both. A binding
+// without a recorded config dir or transcript proves nothing; the session id
+// may come from the harness session rather than the transcript, so an empty
+// transcript on both sides is never a match.
 func claudeRunsSession(b binding.Binding, owner launch.HolderIdentity, id string) bool {
-	started, err := launch.ProcessStartUnix(owner)
+	if b.ConfigDir == "" || b.Transcript == "" {
+		return false
+	}
+	started, err := launch.ProcessStartTime(owner)
 	if err != nil {
 		return false
 	}
-	dir := b.ConfigDir
-	if dir == "" {
-		if dir, err = harness.UserClaudeConfigDir(); err != nil {
-			return false
-		}
-	}
-	s, err := claude.SessionOfProcess(dir, owner.PID, time.Unix(started, 0))
-	return err == nil && s.ID == id && b.Transcript != "" && s.Transcript == b.Transcript
+	s, err := claude.SessionOfProcess(b.ConfigDir, owner.PID, started)
+	return err == nil && s.ID == id && s.Transcript == b.Transcript
 }

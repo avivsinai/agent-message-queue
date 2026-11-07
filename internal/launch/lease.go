@@ -469,7 +469,17 @@ func LocalHolder(pid int, processStart, bootID string) HolderIdentity {
 
 // ProcessStartUnix is the wall-clock second the holder's process started.
 func ProcessStartUnix(h HolderIdentity) (int64, error) {
-	return processStartUnix(h.ProcessStart)
+	t, err := processStartTime(h.ProcessStart)
+	if err != nil {
+		return 0, err
+	}
+	return t.Unix(), nil
+}
+
+// ProcessStartTime is when the holder's process started, at the precision
+// the platform's start token records.
+func ProcessStartTime(h HolderIdentity) (time.Time, error) {
+	return processStartTime(h.ProcessStart)
 }
 
 // InspectHolder classifies a recorded holder against the live process:
