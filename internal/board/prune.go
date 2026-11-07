@@ -164,6 +164,26 @@ func (s *Snapshot) heldMessages() map[string]bool {
 		held[key] = true
 		held[withdrawal] = true
 	}
+	horizon := s.PublishedAt.Add(-prunedIDHorizon)
+	open := map[string]bool{}
+	for key := range s.openRequests() {
+		m := s.Messages[key]
+		if at, ok := format.IDTime(m.ID); !ok || !at.Before(horizon) {
+			held[key] = true
+			open[m.Namespace+"#"+m.ID] = true
+		}
+	}
+	for key, m := range s.Messages {
+		if slices.ContainsFunc(m.Refs, func(ref string) bool { return open[m.Namespace+"#"+ref] }) {
+			held[key] = true
+		}
+	}
+	return held
+}
+
+// openRequests are the keys of the messages that open an obligation the
+// thread reduction, the one that amq thread open uses, holds open.
+func (s Snapshot) openRequests() map[string]bool {
 	project := ""
 	for _, nr := range s.Input.Results {
 		if nr.Name == "amq" && nr.Result.AMQ != nil {
@@ -172,34 +192,28 @@ func (s *Snapshot) heldMessages() map[string]bool {
 	}
 	type namespace struct {
 		entries []thread.Entry
-		keys    []string
+		keys    map[string]string
 	}
 	namespaces := map[string]*namespace{}
 	for key, m := range s.Messages {
 		ns := namespaces[m.Namespace]
 		if ns == nil {
-			ns = &namespace{}
+			ns = &namespace{keys: map[string]string{}}
 			namespaces[m.Namespace] = ns
 		}
 		ns.entries = append(ns.entries, obligationEntry(m, project))
-		ns.keys = append(ns.keys, key)
+		ns.keys[m.ID] = key
 	}
-	horizon := s.PublishedAt.Add(-prunedIDHorizon)
+	open := map[string]bool{}
 	for _, ns := range namespaces {
-		open := map[string]bool{}
 		// No roots: the reduction judges the snapshot and reads no mailbox.
-		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}, reservedHuman).Obligations {
-			if at, ok := format.IDTime(ob.Opener.ID); ob.Open() && (!ok || !at.Before(horizon)) {
-				open[ob.Opener.ID] = true
-			}
-		}
-		for i, e := range ns.entries {
-			if open[e.ID] || slices.ContainsFunc(e.Refs, func(ref string) bool { return open[ref] }) {
-				held[ns.keys[i]] = true
+		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}).Obligations {
+			if ob.Open() {
+				open[ns.keys[ob.Opener.ID]] = true
 			}
 		}
 	}
-	return held
+	return open
 }
 
 // obligationEntry is the obligation reduction's view of m on a board of

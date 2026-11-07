@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // ThreadOpenSchema is the obligation format this reader accepts.
@@ -358,7 +359,7 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 	return entries, gate, nil
 }
 
-const reservedHuman = "user"
+const reservedHuman = thread.HumanHandle
 
 type participant struct {
 	Project string `json:"project"`

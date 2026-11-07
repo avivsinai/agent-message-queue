@@ -122,9 +122,10 @@ func (s Snapshot) Classify(classifier string, next int, now time.Time) (Classify
 	x := newRequestIndex(s)
 	batch := ClassifyBatch{Schema: ClassifySchema, ProjectID: s.ProjectID, Classifier: classifier, Candidates: []ClassifyCandidate{}}
 	var pending []Request
+	open := s.openRequests()
 	for _, key := range x.candidates() {
 		r := x.request(key, now)
-		if r.Age != RequestRecent {
+		if r.Age != RequestRecent || !open[key] {
 			continue
 		}
 		if _, ok := s.RequestLabels[RequestLabelKey(key, r.EvidenceDigest, classifier)]; !ok {
@@ -165,11 +166,15 @@ func putLabels(state *Snapshot, batch LabelBatch) (int, error) {
 	}
 	x := newRequestIndex(*state)
 	now := time.Now()
+	open := state.openRequests()
 	staged := map[string]RequestLabel{}
 	for _, entry := range batch.Labels {
 		m, ok := state.Messages[entry.MessageKey]
 		if !ok || !isRequestKind(m.Kind) {
 			return 0, fmt.Errorf("%s: not a request message in the published history", entry.MessageKey)
+		}
+		if !open[entry.MessageKey] {
+			return 0, fmt.Errorf("%s: not an open request; export a fresh batch", entry.MessageKey)
 		}
 		if _, ok := requestLabelValues[entry.Value]; !ok {
 			return 0, fmt.Errorf("%s: value must be done, open, superseded, not_an_ask, or unclear", entry.MessageKey)

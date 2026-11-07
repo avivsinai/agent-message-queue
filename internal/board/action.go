@@ -6,6 +6,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // Action is a copy-only command. The board never runs it. Argv is built only
@@ -29,7 +30,7 @@ type Action struct {
 // never data: Quote renders every argv element, this string included, literally.
 const userLiteral = `"$USER"`
 
-const reservedHuman = "user"
+const reservedHuman = thread.HumanHandle
 
 var (
 	messageIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)

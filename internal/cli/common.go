@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 type commonFlags struct {
@@ -24,7 +25,7 @@ type commonFlags struct {
 	flagSet *flag.FlagSet
 }
 
-const reservedHumanHandle = "user"
+const reservedHumanHandle = thread.HumanHandle
 
 var implicitRootFlagsBySet sync.Map
 

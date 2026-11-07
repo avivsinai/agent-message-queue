@@ -265,7 +265,7 @@ func unitsFor(s Snapshot, key string) ([]EvidenceUnit, error) {
 }
 
 // NEW needs positive current intent in addition to structural outcome text,
-// and a request that some scoped recipient has not directly replied to.
+// and a request that the thread reduction holds open.
 func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
 	m := s.Messages[u.MessageKey]
 	episode, episodeErr := buildEpisode(s, []EvidenceUnit{u})
@@ -274,7 +274,7 @@ func newEligible(s Snapshot, u EvidenceUnit, now time.Time) bool {
 	}
 	o, ok := s.Observations[m.Key]
 	created, err := time.Parse(time.RFC3339Nano, m.Created)
-	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] || !newRequestIndex(s).request(m.Key, now).NoDirectReply {
+	if !ok || err != nil || s.HistoryBaseline.IsZero() || o.Bootstrap || !o.FirstSeen.After(s.HistoryBaseline) || !created.After(s.HistoryBaseline) || created.After(now) || created.After(o.FirstSeen) || !historyComplete(s) || (m.Kind != "todo" && m.Kind != "question") || s.Dismissed[m.Key] || s.ActionCancelled[m.Key] || !s.openRequests()[m.Key] {
 		return false
 	}
 	for _, prior := range s.Messages {

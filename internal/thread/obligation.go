@@ -53,10 +53,16 @@ type Obligation struct {
 	Requester Participant
 	State     string
 	Closed    bool
+	// ClosedBy is the message that closed the obligation.
+	ClosedBy *Entry
 	// Expired marks an opener created before the reduction's cutoff.
 	Expired bool
 	Last    *Entry
 }
+
+// HumanHandle is the reserved handle of the human in every project: it
+// may act for an owner by exact reference.
+const HumanHandle = "user"
 
 // Open reports whether the obligation is still owed: neither closed nor
 // created before the cutoff.
@@ -108,7 +114,6 @@ type Reduction struct {
 
 	roots    []ScanRoot
 	cutoff   time.Time
-	human    string
 	records  map[string]*record
 	order    []*record
 	byThread map[string][]*Obligation
@@ -133,8 +138,7 @@ type record struct {
 // ReduceObligations applies the obligation rules to entries in one pass in
 // created order, then id. A direct target missing from entries is read by
 // name from roots; with no roots nothing is read. An opener created before a
-// nonzero cutoff is Expired. human is the reserved human handle of the
-// project under scan.
+// nonzero cutoff is Expired.
 //
 // Every header is classified from headers alone before the pass: its direct
 // parent and whether its lineage reaches a root. Openers open at their own
@@ -143,7 +147,7 @@ type record struct {
 // A message with refs acts on its parent's lineage as soon as that lineage
 // is settled; when the parent's lineage settles later (clock skew), the
 // action is deferred until then and counted in Deferred.
-func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time, human string) *Reduction {
+func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time) *Reduction {
 	red := &Reduction{
 		Skipped:         []Skipped{},
 		Unresolved:      []Unresolved{},
@@ -153,7 +157,6 @@ func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time, huma
 		Deferred:        map[string]int{},
 		roots:           roots,
 		cutoff:          cutoff,
-		human:           human,
 		records:         map[string]*record{},
 		byThread:        map[string][]*Obligation{},
 	}
@@ -464,8 +467,8 @@ func (red *Reduction) roleOf(ob *Obligation, sender Participant, byReference boo
 		return true, false
 	case sender == ob.Requester:
 		return false, true
-	case byReference && sender.Handle == red.human && sender.Project == "" &&
-		ob.Owner.Handle == red.human && ob.Owner.Project == "":
+	case byReference && sender.Handle == HumanHandle && sender.Project == "" &&
+		ob.Owner.Handle == HumanHandle && ob.Owner.Project == "":
 		return true, false
 	}
 	return false, false
@@ -487,6 +490,7 @@ func act(ob *Obligation, fromOwner bool, msg *Entry) {
 	}
 	if closesObligation(ob.Opener.Kind, fromOwner, msg) {
 		ob.Closed = true
+		ob.ClosedBy = msg
 		return
 	}
 	if fromOwner {
