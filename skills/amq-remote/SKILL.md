@@ -14,7 +14,9 @@ agent per machine, "AMQ Remote @ <machine>", imported once, makes the
 channel, adds the owner and mentions them. The owner writes in that channel
 from the Buzz phone app or Buzz Desktop. Several sessions can be connected
 at once; each has its own channel. The same session connecting again gets
-its own channel back. A different session never gets another session's
+its own channel back. A Claude or pi session resumed in a new process gets
+its channel back by itself, unless the owner turned it off; a Codex session
+needs `$amq-remote` again. A different session never gets another session's
 channel. A session that already has its own Buzz agent keeps its DM.
 
 In Codex the skill is invoked as `$amq-remote` (Codex does not register `/`

@@ -472,11 +472,14 @@ func TestApprovalHookBindsAnAMQSessionsMailbox(t *testing.T) {
 }
 
 // After /amq-remote off the approval hook writes no binding for the
-// session's process again: its dialogs stay in the terminal until the owner
-// connects it. A session in another process is not off.
+// session again: its dialogs stay in the terminal until the owner connects
+// it, also when the same session resumes in another process. Another
+// session in another process is not off.
 //
 // Regression: code review of the hook-written binding found that the first
 // dialog after /amq-remote off connected the session again.
+// Regression (review of the resumed-session reattach): the hook keyed a
+// detach on the process only, so a resumed session connected again.
 func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 	this, err := launch.HolderOf(os.Getpid())
 	if err != nil {
@@ -490,14 +493,20 @@ func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 	saved := detectHarness
 	t.Cleanup(func() { detectHarness = saved })
 	var holder launch.HolderIdentity
+	transcript := ""
 	detectHarness = func(*codexView, string, string) harnessSession {
-		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder}
+		return harnessSession{Kind: "claude", PID: holder.PID, Holder: holder, Transcript: transcript}
 	}
 	for _, tc := range []struct {
-		name     string
-		detached launch.HolderIdentity
-		want     int
-	}{{"this process", this, 0}, {"another process", other, 1}} {
+		name       string
+		detached   launch.HolderIdentity
+		transcript string
+		want       int
+	}{
+		{"this process", this, "", 0},
+		{"another process", other, "", 1},
+		{"this session resumed in another process", other, "/projects/p/s-1.jsonl", 0},
+	} {
 		dir := canonicalTempDir(t)
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
@@ -506,7 +515,7 @@ func TestApprovalHookLeavesADetachedSessionOff(t *testing.T) {
 		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		holder = tc.detached
+		holder, transcript = tc.detached, tc.transcript
 		attachMailboxAs(t, root)
 		if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
 			t.Fatalf("detach: code=%d err=%v", code, err)

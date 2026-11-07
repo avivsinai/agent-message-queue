@@ -1,6 +1,8 @@
 // Package binding stores which live session the per-user Buzz agent drives.
 // `amq-remote attach --self` writes it at the moment the owner consents
-// inside that session; amq-acp in binding mode reads it on every prompt.
+// inside that session; the machine agent writes it again only to restore that
+// share for the same identity and the same recorded session, never after a
+// detach. amq-acp in binding mode reads it on every prompt.
 // A request keeps the binding it was submitted under, so a later attach
 // never moves work that is already running.
 package binding
@@ -129,6 +131,18 @@ func (b Binding) SessionIdentity() string {
 		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
 	}
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
+}
+
+// RecordedSession is the native session id b recorded: NativeSession when
+// set, else the file stem of its transcript; "" when neither is known.
+func (b Binding) RecordedSession() string {
+	if b.NativeSession != "" {
+		return b.NativeSession
+	}
+	if b.Transcript == "" {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(b.Transcript), filepath.Ext(b.Transcript))
 }
 
 // NativeIdentity is the session identity of a native session: its harness,
@@ -287,10 +301,12 @@ func (b Binding) Valid() error {
 	}
 	switch b.Carrier {
 	case CarrierMailbox:
-		// A mailbox binding never names a native session, so nothing that
-		// keys on one (the Claude Stop receiver) treats it as native.
-		if b.Target != "" || b.NativeSession != "" {
-			return errors.New("mailbox binding must not name a native target or session")
+		// A mailbox binding never names a native target. It may record the
+		// native session id of the harness behind the handle (a pi chat's);
+		// the Claude Stop receiver matches a Claude session id exactly, which
+		// a pi session id never is.
+		if b.Target != "" {
+			return errors.New("mailbox binding must not name a native target")
 		}
 		return fsq.ValidateHandle(b.Handle)
 	case "", CarrierNative:

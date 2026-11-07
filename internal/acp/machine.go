@@ -138,9 +138,12 @@ type channelRecord struct {
 	RetiredBy   string   `json:"retired_by,omitempty"`
 	RetiredFrom string   `json:"retired_from,omitempty"`
 	SaidEnded   bool     `json:"said_ended,omitempty"`
-	LastError   string   `json:"last_error,omitempty"`
-	LastTry     string   `json:"last_try,omitempty"`
-	Updated     string   `json:"updated"`
+	// SaidShared records that two live processes named this session, so
+	// it was restored to neither; it is said once.
+	SaidShared bool   `json:"said_shared,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	LastTry    string `json:"last_try,omitempty"`
+	Updated    string `json:"updated"`
 }
 
 // inDoubt reports whether a create of r may have made a channel that is not
@@ -274,6 +277,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	}
 	s.applyResets(now)
 	s.retireGone(now)
+	s.reattach(now)
 	all, err := s.snapshot().list()
 	if err == nil {
 		for _, b := range all {
@@ -297,9 +301,9 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 // machineState is the machine worker's own state: its context, pacing,
 // and the settings files it watches (machine_hooks.go).
 type machineState struct {
-	ctx           context.Context
-	marked, swept string
-	settings      map[string]settingsSeen
+	ctx                    context.Context
+	marked, swept, rebound string
+	settings               map[string]settingsSeen
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
@@ -690,20 +694,25 @@ func (s *Server) removeDurably(path string) error {
 func goneReason(r channelRecord) string {
 	tombs, _ := binding.Tombstones()
 	for _, t := range tombs {
-		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
-			continue
+		if t.Name == r.Name && t.SessionIdentity() == r.Identity {
+			return tombReason(t)
 		}
-		switch t.Removed {
-		case binding.RemovedEnded:
-			return retiredEnded
-		case binding.RemovedMoved:
-			return retiredMoved
-		case binding.RemovedDetached:
-			return retiredDetached
-		}
-		if state, _ := t.Liveness(); state == binding.Ended {
-			return retiredEnded
-		}
+	}
+	return retiredDetached
+}
+
+// tombReason is the retirement reason a tombstone records.
+func tombReason(t binding.Binding) string {
+	switch t.Removed {
+	case binding.RemovedEnded:
+		return retiredEnded
+	case binding.RemovedMoved:
+		return retiredMoved
+	case binding.RemovedDetached:
+		return retiredDetached
+	}
+	if state, _ := t.Liveness(); state == binding.Ended {
+		return retiredEnded
 	}
 	return retiredDetached
 }

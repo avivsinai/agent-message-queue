@@ -44,6 +44,8 @@ const attachReadyTimeout = 20 * time.Second
 // in. Typing the command is the sharing choice, so the invoking session is
 // found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
+// The machine agent may later restore that share for the same identity and
+// the same recorded session id in a new process; it never undoes a detach.
 func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -357,9 +359,9 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	machine := binding.Machine()
 	b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
-		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind)}
+		AppServer: h.AppServer, Transcript: nonEmpty(transcript, h.Transcript), ConfigDir: sessionConfigDir(h.Kind), NativeSession: h.Session}
 	if fromHook {
-		if err := ownerDetached(b.Holder); err != nil {
+		if err := ownerDetached(b); err != nil {
 			return b, "", false, err
 		}
 	}
@@ -522,6 +524,9 @@ type harnessSession struct {
 	// Transcript is a Claude session's transcript or a Codex thread's
 	// rollout file; empty when not known.
 	Transcript string
+	// Session is a pi chat's session id as its bridge publishes it; empty
+	// for other harnesses and when not known.
+	Session string
 	// Holder is the exact identity captured while proving a Codex ancestor.
 	Holder launch.HolderIdentity
 	// AppServer is a Codex session's thread, which proves its liveness in
@@ -835,7 +840,8 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // When the harness execs directly (pi does), the holder is the harness; a
 // wrapper that forks is the holder itself, and the binding follows the
 // wrapper's lifetime. Without a recorded owner the holder stays unknown.
-// The holder is pi when the handle's live pi bridge runs in it.
+// The holder is pi when the handle's live pi bridge runs in it, and the
+// session is the pi session id that bridge publishes.
 func wakeOwnerSession(root, handle string) harnessSession {
 	owner, ok := amqcli.WakeOwner(root, handle)
 	if !ok {
@@ -849,8 +855,8 @@ func wakeOwnerSession(root, handle string) harnessSession {
 		return harnessSession{}
 	}
 	h := harnessSession{PID: cur.PID, Holder: cur}
-	if pid, _, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
-		h.Kind = "pi"
+	if pid, session, _, ok := pi.LiveBridge(root, handle, time.Now()); ok && pid == cur.PID {
+		h.Kind, h.Session = "pi", session
 	}
 	return h
 }

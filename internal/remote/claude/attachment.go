@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -627,6 +628,50 @@ func SessionForPID(pid int) (Session, error) {
 		s.Transcript = path
 	}
 	return s, nil
+}
+
+// maxLiveSessions bounds the registry entries LiveSessions examines.
+const maxLiveSessions = 512
+
+// LiveSession is the registry entry of a running Claude process.
+type LiveSession struct {
+	PID int
+	Session
+}
+
+// LiveSessions reads the session registry under the Claude config dir
+// configDir and returns the entries whose process still runs, from at most
+// maxLiveSessions entries. A missing registry is no session; an entry that
+// does not read is skipped.
+func LiveSessions(configDir string) ([]LiveSession, error) {
+	entries, err := os.ReadDir(registryDir(configDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []LiveSession
+	for _, e := range entries[:min(len(entries), maxLiveSessions)] {
+		stem, ok := strings.CutSuffix(e.Name(), ".json")
+		pid, err := strconv.Atoi(stem)
+		if !ok || err != nil || pid <= 0 {
+			continue
+		}
+		reg, err := readSessionRegistry(configDir, pid)
+		if err != nil || reg == nil {
+			continue
+		}
+		if alive, err := pidAlive(pid); err != nil || !alive {
+			continue
+		}
+		s := LiveSession{PID: pid, Session: Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}}
+		if path := transcriptPath(configDir, reg.Cwd, reg.SessionID); regularFile(path) {
+			s.Transcript = path
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 func regularFile(path string) bool {
