@@ -181,6 +181,8 @@ func (st *State) codexItem(l codex.RolloutLine, carried Carried) []Event {
 		case it.ClientID != "" && carried.has(CodexCarriedID(it.ClientID)):
 			if first {
 				t.Cause = CauseBuzz
+			} else {
+				t.AnsweredBuzz()
 			}
 		case !first:
 		case promptCause(it.Text) == harness.Doorbell:

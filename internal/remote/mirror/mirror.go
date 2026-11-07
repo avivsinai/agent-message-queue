@@ -8,6 +8,8 @@
 package mirror
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -74,8 +76,11 @@ type Turn struct {
 	Cause      string      `json:"cause"`
 	MessageIDs []string    `json:"message_ids,omitempty"`
 	Tools      []ToolCount `json:"tools,omitempty"`
-	// Text is the last assistant text, trimmed, bounded by bound.
-	Text string `json:"text,omitempty"`
+	// Text is the answer, trimmed, bounded by bound. For Claude it joins the
+	// text blocks of TextID, the latest assistant message with text: a
+	// message's later block extends it, another message's text replaces it.
+	Text   string `json:"text,omitempty"`
+	TextID string `json:"text_id,omitempty"`
 	// StartTS is when the turn started: its opener's time, but not before
 	// the previous turn's last line (an opener typed while that turn ran is
 	// written with the time it was typed). FirstAssistantTS is the time of
@@ -255,7 +260,10 @@ func (st *State) assistant(l claude.TranscriptLine, out []Event) []Event {
 		}
 	}
 	if text != "" {
-		t.Text = bound(text)
+		if l.MessageID != "" && l.MessageID == t.TextID {
+			text = t.Text + "\n" + text
+		}
+		t.Text, t.TextID = bound(text), l.MessageID
 	}
 	first := t.FirstAssistantTS == 0
 	if first {
@@ -331,8 +339,12 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	}
 	o := st.Open
 	switch {
-	case l.Absorbed:
+	case l.Absorbed, o != nil && metaOpener(l):
+		// Input folded into the running turn only touches it.
 		if o != nil {
+			if l.Absorbed && carried.has(l.MsgID) {
+				o.AnsweredBuzz()
+			}
 			o.touch(l.TS)
 		}
 		return out
@@ -349,7 +361,8 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 		return out
 	case hasPrefix(text, localPrefixes...):
 		return out
-	case o == nil && l.Meta && st.Last != nil && l.PromptID != "" && l.PromptID == st.Last.PromptID:
+	case o == nil && l.Meta && !metaOpener(l) && st.Last != nil && l.PromptID != "" && l.PromptID == st.Last.PromptID:
+		// Stop hook feedback: the ended turn goes on.
 		st.Open, st.Last = st.Last, nil
 		st.Open.Reopened, st.Open.End = st.Open.End, ""
 		st.Open.touch(l.TS)
@@ -382,7 +395,7 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	case l.OriginKind == "peer", l.OriginKind == "" && l.CrossSession:
 		t.Cause = "message from another session"
 	case l.OriginKind == "task-notification":
-		t.Cause = "background task finished"
+		t.Cause = CauseTask
 	case l.OriginKind == "auto-continuation":
 		t.Cause = "continued"
 	case l.TurnOrigin == "scheduled":
@@ -433,13 +446,26 @@ func hasPrefix(s string, prefixes ...string) bool {
 }
 
 // CauseBuzz names a turn that answered a Buzz message. CauseMail names a
-// turn the AMQ doorbell started: the doorbell text cannot tell whose mail
-// it was, so the machine agent turns CauseMail into CauseBuzz once it sees
-// the turn's reply in the buzz inbox.
+// turn the AMQ doorbell started, CauseTask one a background task's
+// notification started: neither tells whose message the turn answered.
 const (
 	CauseBuzz = "Buzz"
 	CauseMail = "AMQ message"
+	CauseTask = "background task finished"
 )
+
+// BuzzReplaces reports whether a turn with cause shows Buzz once it answered
+// a Buzz message: its cause does not name the message it answered.
+func BuzzReplaces(cause string) bool { return cause == CauseMail || cause == CauseTask }
+
+// AnsweredBuzz records that t answered a Buzz message: a frame the carrier
+// sent reached it, or it replied to a Buzz message. Its cause becomes Buzz
+// where BuzzReplaces it, so the owner finds the answer by that label.
+func (t *Turn) AnsweredBuzz() {
+	if BuzzReplaces(t.Cause) {
+		t.Cause = CauseBuzz
+	}
+}
 
 // causeMax bounds the prompt text a post shows, in characters.
 const causeMax = 200
@@ -553,16 +579,12 @@ func Render(t Turn) string {
 	return Unmention(b.String())
 }
 
-// Fingerprint is what Render shows of t that can change while it runs:
-// its tools by name and count, whether it is interrupted, and its end. The
-// elapsed time is not part of it.
+// Fingerprint identifies everything Render shows of t except the elapsed
+// time: a post changed exactly when its fingerprint did.
 func Fingerprint(t Turn) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%t", t.End, t.Halted)
-	for _, c := range t.Tools {
-		fmt.Fprintf(&b, "|%s×%d", c.Name, c.N)
-	}
-	return b.String()
+	t.StartTS, t.LastTS = 0, 0
+	sum := sha256.Sum256([]byte(Render(t)))
+	return hex.EncodeToString(sum[:])
 }
 
 // wordJoiner is invisible and is not a name character.
