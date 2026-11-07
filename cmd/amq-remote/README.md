@@ -982,10 +982,10 @@ The machine agent's channel of a Claude session also shows each turn of the
 session, wherever it started: the terminal, the desktop app, a Buzz message,
 a peer session or a background task. One message shows one turn. It appears
 when the model first answers and shows `… running` with the tools used so
-far. While the turn runs it is updated at most every 30 s while it changes
-(new tools or an interrupt; elapsed time alone is no change), at most 10
-times plus one to show an interrupt, and it shows the answer as soon as the
-turn ends:
+far. While the turn runs it is updated at most every 30 s while what it
+shows changes (new tools or an interrupt; elapsed time alone is no change),
+at most 10 times plus one to show an interrupt, and it shows the answer as
+soon as the turn ends:
 
 ```text
 ▶ run the tests and fix the failure
@@ -995,19 +995,26 @@ turn ends:
 
 The first line is what started the turn: the first line of a typed prompt (at
 most 200 characters, harness markup left out), a slash command's name,
-`image`, `pasted text`, `message from a teammate`, `Buzz`, `message from
-another session`, `background task finished`, `scheduled task`, `shell
-command`, or `continued`. The second line is how
+`image`, `pasted text`, `message from a teammate`, `Buzz`, `AMQ message`,
+`message from another session`, `background task finished`, `scheduled
+task`, `shell command`, or `continued`. A turn that answered a Buzz message
+(the message reached the running turn, or the session replied to it during
+the turn) shows `Buzz` in place of `AMQ message` or `background task
+finished`, and keeps that label. The second line is how
 the turn ended (`✓`; `✗ interrupted`, `unfinished`, `error` or `refused`;
 `■ ended` when the session ended or was cleared), the tools it used by name
-and count, and how long it ran. Tool input never leaves the machine. An
-answer longer than 3,500 bytes is cut and says so. A turn that answered Buzz
-keeps its answer too, although the reply is also a thread reply under the Buzz
-message. A shell command typed with `!` shows only
+and count, and how long it ran. Tool input never leaves the machine. The
+answer is all the text of the turn's last message; one longer than 3,500
+bytes is cut and says so. A turn that answered Buzz keeps its answer too,
+although the reply is also a thread reply under the Buzz message. A shell
+command typed with `!` shows only
 when the model answers it, and never with the command itself; local slash
-commands and a subagent's own steps are not shown. When a Stop hook
-makes the session go on after a turn, that turn's message is edited, at
-most every 30 s, ending with the last answer.
+commands and a subagent's own steps are not shown. A background task's
+notification that arrives while a turn runs is part of that turn; one that
+arrives after it starts a new turn. When a Stop hook makes the session go
+on after a turn, that turn's message shows it running again and is edited
+while what it shows changes, at most every 30 s and at most 10 times after
+it ended, ending with the last answer.
 
 The machine agent reads the session's transcript, which Claude Code names in
 its session registry and in each approval hook; attach, and the approval hook

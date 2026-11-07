@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -182,7 +186,10 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		}
 		steps = append(steps, st)
 	}
-	steps = append(steps, step{after: 800})
+	// Review of the mirror: a late line of an ended turn edited its post
+	// only to show a longer elapsed time.
+	steps = append(steps, step{after: 800},
+		step{lines: []string{assistant("h20", 790, "end_turn", `{"type":"thinking","thinking":"…"}`)}, after: 840})
 	for i, step := range steps {
 		if step.lines != nil {
 			appendLines(step.lines...)
@@ -198,6 +205,151 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		if !slices.Equal(sent, step.want) {
 			t.Fatalf("step %d at +%ds: sent %q; want %q", i+1, step.after, sent, step.want)
 		}
+	}
+}
+
+// mirrorFixture is a mailbox binding whose transcript the test appends to,
+// mirrored into a channel by a server that records each post and edit.
+type mirrorFixture struct {
+	t          *testing.T
+	s          *Server
+	b          binding.Binding
+	target     dialogTarget
+	transcript string
+	now        time.Time
+	sent       []string
+}
+
+func newMirrorFixture(t *testing.T) *mirrorFixture {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	f := &mirrorFixture{t: t, transcript: filepath.Join(canonicalTempDir(t), "session.jsonl"), now: time.Now()}
+	if err := os.WriteFile(f.transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedPost, savedEdit := postAnswer, editMessage
+	t.Cleanup(func() { postAnswer, editMessage = savedPost, savedEdit })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		f.sent = append(f.sent, "post: "+content)
+		return strings.Repeat("a", 64), nil
+	}
+	editMessage = func(_, content string, _ time.Duration) error {
+		f.sent = append(f.sent, "edit: "+content)
+		return nil
+	}
+	f.b = binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: f.transcript}
+	f.s = NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
+	f.target = dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
+	f.s.mirrorBinding(f.target, f.b, f.now, false) // first sight: starts at the end
+	return f
+}
+
+// ts is sec seconds after 09:01:00.
+func (f *mirrorFixture) ts(sec float64) string {
+	return time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).Add(time.Duration(sec * float64(time.Second))).Format(time.RFC3339Nano)
+}
+
+// add appends transcript lines, each given as its top-level fields.
+func (f *mirrorFixture) add(lines ...map[string]any) {
+	f.t.Helper()
+	var b strings.Builder
+	for _, l := range lines {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	file, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	_, err = file.WriteString(b.String())
+	_ = file.Close()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// tick runs one mirror tick after seconds and returns what it sent.
+func (f *mirrorFixture) tick(after int) []string {
+	f.sent = nil
+	f.s.mirrorBinding(f.target, f.b, f.now.Add(time.Duration(after)*time.Second), false)
+	return f.sent
+}
+
+func (f *mirrorFixture) userLine(uuid, promptID string, sec float64, text string, extra map[string]any) map[string]any {
+	l := map[string]any{"type": "user", "uuid": uuid, "promptId": promptID, "timestamp": f.ts(sec), "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}}}
+	for k, v := range extra {
+		l[k] = v
+	}
+	return l
+}
+
+func (f *mirrorFixture) assistantLine(id string, sec float64, stop string, block map[string]any) map[string]any {
+	return map[string]any{"type": "assistant", "uuid": "a" + id, "timestamp": f.ts(sec), "message": map[string]any{"id": id, "stop_reason": stop, "content": []any{block}}}
+}
+
+func toolBlock(name string) map[string]any {
+	return map[string]any{"type": "tool_use", "id": "t" + name, "name": name, "input": map[string]any{}}
+}
+
+func textBlock(text string) map[string]any { return map[string]any{"type": "text", "text": text} }
+
+// Review of the mirror: a turn a Stop hook continued was no longer the live
+// turn, so its post never showed it running again.
+func TestMirrorReopenedTurnShowsRunning(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
+	if got, want := f.tick(1), []string{"post: ▶ ship\n✓ 1s\nShipped."}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+	f.add(f.userLine("g1", "p1", 2, "Stop hook feedback: run the tests", map[string]any{"isMeta": true}), f.assistantLine("m2", 3, "tool_use", toolBlock("Bash")))
+	if got, want := f.tick(40), []string{"edit: ▶ ship\n… running · 1 tool (Bash) · 3s"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
+
+// A doorbell turn whose reply to a Buzz message reached the buzz inbox
+// during the turn shows Buzz as its cause.
+func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {
+	f := newMirrorFixture(t)
+	write := func(dir string, m format.Message) {
+		t.Helper()
+		data, err := m.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, m.Header.ID+".md"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(fsq.AgentInboxCur(f.b.Root, "agent"), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "prompt-1", From: mailboxSender, To: []string{"agent"}, Thread: "buzz-1", Created: f.ts(-5)}, Body: "deploy"})
+	write(fsq.AgentInboxNew(f.b.Root, mailboxSender), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "reply-1", From: "agent", To: []string{mailboxSender}, Thread: "buzz-1", Created: f.ts(1.5), Refs: []string{"prompt-1"}}, Body: "Deployed."})
+	f.add(f.userLine("o1", "p1", 0, harness.Doorbell, nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")), f.assistantLine("m2", 2, "end_turn", textBlock("Replied.")))
+	if got, want := f.tick(2), []string{"post: ▶ Buzz\n✓ 1 tool (Bash) · 2s\nReplied."}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
+
+// Review of the mirror: the "earlier turns" note of a backlog's turn was
+// lost at the post's next edit.
+func TestMirrorEditKeepsEarlierNote(t *testing.T) {
+	f := newMirrorFixture(t)
+	claim := filepath.Join(canonicalTempDir(t), "o1.json")
+	turn := mirror.Turn{ID: "o1", Cause: "ship", End: mirror.EndDone, Text: "Shipped.", Earlier: 3}
+	if _, err := f.s.mirrorPost(claim, f.target, f.b, turn); err != nil {
+		t.Fatal(err)
+	}
+	turn.Earlier, turn.Text = 0, "Shipped and tagged."
+	if _, err := f.s.mirrorEdit(claim, f.target, f.b, turn, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}; !slices.Equal(f.sent, want) {
+		t.Fatalf("sent %q; want %q", f.sent, want)
 	}
 }
 
