@@ -189,7 +189,7 @@ func (s *Snapshot) heldMessages() map[string]bool {
 		open := map[string]bool{}
 		// No roots: the reduction judges the snapshot and reads no mailbox.
 		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}, reservedHuman).Obligations {
-			if at, ok := format.IDTime(ob.Opener.ID); ob.Open() && !(ok && at.Before(horizon)) {
+			if at, ok := format.IDTime(ob.Opener.ID); ob.Open() && (!ok || !at.Before(horizon)) {
 				open[ob.Opener.ID] = true
 			}
 		}
