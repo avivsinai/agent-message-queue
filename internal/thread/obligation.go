@@ -114,6 +114,7 @@ type Reduction struct {
 
 	roots    []ScanRoot
 	cutoff   time.Time
+	settled  func(id string) bool
 	records  map[string]*record
 	order    []*record
 	byThread map[string][]*Obligation
@@ -138,7 +139,9 @@ type record struct {
 // ReduceObligations applies the obligation rules to entries in one pass in
 // created order, then id. A direct target missing from entries is read by
 // name from roots; with no roots nothing is read. An opener created before a
-// nonzero cutoff is Expired.
+// nonzero cutoff is Expired. A direct target that is missing and for which
+// settled reports true is a settled root outside entries: the message's
+// lineage reaches it and holds no obligation; settled may be nil.
 //
 // Every header is classified from headers alone before the pass: its direct
 // parent and whether its lineage reaches a root. Openers open at their own
@@ -147,7 +150,7 @@ type record struct {
 // A message with refs acts on its parent's lineage as soon as that lineage
 // is settled; when the parent's lineage settles later (clock skew), the
 // action is deferred until then and counted in Deferred.
-func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time) *Reduction {
+func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time, settled func(id string) bool) *Reduction {
 	red := &Reduction{
 		Skipped:         []Skipped{},
 		Unresolved:      []Unresolved{},
@@ -157,6 +160,7 @@ func ReduceObligations(roots []ScanRoot, entries []Entry, cutoff time.Time) *Red
 		Deferred:        map[string]int{},
 		roots:           roots,
 		cutoff:          cutoff,
+		settled:         settled,
 		records:         map[string]*record{},
 		byThread:        map[string][]*Obligation{},
 	}
@@ -227,7 +231,12 @@ func (red *Reduction) run() {
 		if opened := red.open(rec); len(opened) > 0 {
 			red.settle(rec, opened)
 		}
-		if rec.parent.ready {
+		if rec.parent == nil {
+			// A settled root outside entries: nothing to act on.
+			if !rec.ready {
+				red.settle(rec, nil)
+			}
+		} else if rec.parent.ready {
 			red.actOnParent(rec)
 		} else {
 			rec.parent.waiters = append(rec.parent.waiters, rec)
@@ -249,6 +258,7 @@ func (red *Reduction) classifyLineage(rec *record, visiting map[*record]bool) *U
 	reason := ""
 	missing := parentID
 	switch {
+	case rec.parent == nil && red.settled != nil && red.settled(parentID):
 	case rec.parent == nil:
 		reason = "missing"
 	case rec.parent.entry.RawTime.IsZero():

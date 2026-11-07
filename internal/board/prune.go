@@ -182,7 +182,9 @@ func (s *Snapshot) heldMessages() map[string]bool {
 }
 
 // openRequests are the keys of the messages that open an obligation the
-// thread reduction, the one that amq thread open uses, holds open.
+// thread reduction, the one that amq thread open uses, holds open. A ref to
+// a pruned message counts as a settled root, as thread open reads that
+// message from its mailbox.
 func (s Snapshot) openRequests() map[string]bool {
 	project := ""
 	for _, nr := range s.Input.Results {
@@ -207,7 +209,7 @@ func (s Snapshot) openRequests() map[string]bool {
 	open := map[string]bool{}
 	for _, ns := range namespaces {
 		// No roots: the reduction judges the snapshot and reads no mailbox.
-		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}).Obligations {
+		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}, s.Pruned).Obligations {
 			if ob.Open() {
 				open[ns.keys[ob.Opener.ID]] = true
 			}

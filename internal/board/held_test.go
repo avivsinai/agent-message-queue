@@ -27,3 +27,18 @@ func TestPruneHoldsOpenObligationsWithinTheHorizon(t *testing.T) {
 		t.Fatalf("acked=%v ack=%v stale=%v note=%v, want the acknowledged todo and its reply kept and the todo past the horizon pruned", kept(acked), kept(ack), kept(stale), kept(note))
 	}
 }
+
+// Review of the disk bounds, round 3, finding 2: a request whose parent was
+// pruned read as an unresolved lineage, so the board closed what thread open
+// still lists as open.
+func TestRequestIntoAPrunedThreadStaysOpen(t *testing.T) {
+	now := time.Now().UTC()
+	at := now.Add(-time.Hour)
+	pruned := now.Add(-2*time.Hour).Format("2006-01-02T15-04-05.000Z") + "_pid1_gone"
+	id := at.Format("2006-01-02T15-04-05.000Z") + "_pid1_ask"
+	ask := Message{Namespace: "ns", Copies: []MessageCopy{{Root: "r", Agents: []string{"user", "worker"}}}, Key: "ns#" + id, ID: id, Thread: "work", From: "user", To: []string{"worker"}, Kind: "todo", Refs: []string{pruned}, Created: at.Format(time.RFC3339Nano), EvidenceHash: "ask"}
+	s := Snapshot{Generation: 1, PublishedAt: now, PrunedIDs: map[string]time.Time{pruned: now.Add(-2 * time.Hour)}, Messages: map[string]Message{ask.Key: ask}}
+	if !s.openRequests()[ask.Key] {
+		t.Fatal("a request replying into a pruned thread is not open")
+	}
+}

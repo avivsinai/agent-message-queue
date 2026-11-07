@@ -296,7 +296,7 @@ func reduceObligations(scanRoots []thread.ScanRoot, cutoff time.Time, onError fu
 	if err != nil {
 		return thread.ScanResult{}, nil, err
 	}
-	return scan, thread.ReduceObligations(scanRoots, scan.Entries, cutoff), nil
+	return scan, thread.ReduceObligations(scanRoots, scan.Entries, cutoff, nil), nil
 }
 
 // openObligationIDs are the ids of the openers that `thread open --max-age 0`
