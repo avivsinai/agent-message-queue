@@ -27,7 +27,9 @@ import (
 // <agent>/.wake.dialog/, named for its key (session_id, agent_id or "main",
 // tool_use_id) and holding its marker. The doorbell is held while any entry
 // holds, and each entry closes only by its own facts. Every other writer
-// keeps the single-file marker <agent>/.wake.dialog. When a Claude Code
+// keeps the single-file marker <agent>/.wake.dialog, and so does a Claude
+// Code open while the agent's wake reads only that form
+// (wakeReadsDialogEntries). When a Claude Code
 // dialog opens over a single file, that file becomes the directory's entry
 // legacy.json in one exchange, so the path is never absent, and it keeps the
 // single-file rules. The directory goes when its last entry goes, so the
@@ -268,12 +270,15 @@ func writeWakeDialogEntryFileAt(dirfd int, name string, data []byte, modTime tim
 }
 
 // writeWakeDialogEntryAt installs data as the entry name under the marker
-// lock. Over a single-file marker it builds the directory with that marker
-// as its legacy entry and exchanges it in, then removes the file it
-// replaced. Where the file system refuses the exchange, the new dialog's
-// marker replaces the single file as a single-file marker
-// (writeWakeDialogSingleMarkerAt).
+// lock. Over a single-file marker or none it builds the directory, with a
+// present marker as its legacy entry, and exchanges it in, then removes the
+// file it replaced. Where the file system refuses the exchange, or the
+// agent's wake reads only the single file (wakeReadsDialogEntries), the new
+// dialog's marker replaces the single file as a single-file marker
+// (writeWakeDialogSingleMarkerAt). A present directory always takes the
+// entry; it goes when its last entry closes, and the single file follows.
 func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data []byte) error {
+	entries := wakeReadsDialogEntries(agentDir)
 	return withWakeDialogMarkerLock(dirfd, func() error {
 		dir, ok, err := openWakeDialogEntriesAt(dirfd, agentDir.path)
 		if err != nil {
@@ -287,6 +292,9 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 			filepath.Join(agentDir.path, wakeDialogFileName), maxWakeMetadataFileBytes)
 		if err != nil {
 			return err
+		}
+		if !entries {
+			return writeWakeDialogSingleMarkerAt(dirfd, legacy, data)
 		}
 		temp, err := wakeDialogTempName("dir")
 		if err != nil {
@@ -329,6 +337,21 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 		}
 		return nil
 	})
+}
+
+// wakeReadsDialogEntries reports whether the agent's wake reads the
+// directory of entries: false only for a wake lock that is not stale and
+// records a release before WakeDialogEntriesSince. Every such release
+// records its version, so a lock without a release version (a local build,
+// or a lock being created) is a wake that reads entries, and keeps the
+// guard of each dialog.
+func wakeReadsDialogEntries(agentDir *wakeAgentDir) bool {
+	inspection := inspectWakeLock(filepath.Dir(filepath.Dir(agentDir.path)), filepath.Base(agentDir.path))
+	if !inspection.Exists || inspection.Status == wakeLockStale {
+		return true
+	}
+	reads, known := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion)
+	return reads || !known
 }
 
 // wakeDialogExchangeAt swaps two names in one step (wakeRenameExchangeAt).

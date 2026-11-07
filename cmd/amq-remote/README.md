@@ -676,8 +676,10 @@ without a new `/amq-remote`, and never after `/amq-remote off`:
 The machine agent looks at sessions that ended within the last 7 days.
 
 Attach tells the owner only what is still needed. It prints `Connected:
-<label>`, the session's label (`<harness> · <project>/<session> @
-<machine>`), then one line from the markers amq-acp writes under
+<label>`, the session's label (`<handle> · <project>/<session> @
+<machine>` for an AMQ seat, so two seats of one harness in one session have
+distinct channels; `<harness> · <directory> @ <machine>` for a native
+session), then one line from the markers amq-acp writes under
 `~/.amq/remote/acp/agents/` and the machine agent's channel record. While the
 machine agent runs and serves the session, and the session is proven live,
 attach waits up to 15 s for the channel to become active. The line is the

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -35,8 +36,8 @@ func coopHookCommand(bin, verb string) string {
 	return gate + "exec " + quoted + " --no-update-check coop hook " + verb
 }
 
-func coopHooks(bin string) []claude.CommandHook {
-	return []claude.CommandHook{
+func coopHooks(bin string) []hookfile.CommandHook {
+	return []hookfile.CommandHook{
 		{
 			Event:   "SessionStart",
 			Matcher: coopSessionStartSources,

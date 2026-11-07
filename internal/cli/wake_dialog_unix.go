@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
@@ -747,10 +748,10 @@ func wakeDialogHookVerb(event string) string {
 	return "close"
 }
 
-func wakeDialogHooks(bin string, events []string) []claude.CommandHook {
-	hooks := make([]claude.CommandHook, 0, len(events))
+func wakeDialogHooks(bin string, events []string) []hookfile.CommandHook {
+	hooks := make([]hookfile.CommandHook, 0, len(events))
 	for _, event := range events {
-		hook := claude.CommandHook{
+		hook := hookfile.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
 			Command: claudeDialogHookCommand(bin, wakeDialogHookVerb(event)),
@@ -837,7 +838,7 @@ func runWakeInstallDialogHook(args []string) error {
 }
 
 // printDialogHooks prints the hooks an install would write, one per line.
-func printDialogHooks(hooks []claude.CommandHook) error {
+func printDialogHooks(hooks []hookfile.CommandHook) error {
 	for _, hook := range hooks {
 		matcher := hook.Matcher
 		if matcher == "" {
@@ -958,7 +959,7 @@ func ClaudeDialogGuardAt(settings string) (state, detail string) {
 // it changed the file.
 func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
 	bin = installedGuardBin(settings, wakeDialogHookEvents, wakeDialogHookBinRe, bin)
-	return claude.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
+	return hookfile.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
 }
 
 // installedGuardBin is claude.KeptHookBin of the installed guard entries in
@@ -966,7 +967,7 @@ func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
 func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
 	var all []string
 	for _, event := range events {
-		commands, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
+		commands, err := hookfile.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
 		if err != nil {
 			return bin
 		}
@@ -991,7 +992,7 @@ func claudeDialogHookCheckAt(path string, version claudeVersion, known bool) (do
 		supported[event] = true
 	}
 	for _, event := range wakeDialogHookEvents {
-		found, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
+		found, err := hookfile.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
 		if err != nil {
 			check.Message = fmt.Sprintf("read Claude settings: %v", err)
 			return check, DialogGuardUnreadable
@@ -1133,7 +1134,7 @@ func dialogHookBinaries(name string) []string {
 			return nil
 		}
 		for _, event := range cursorDialogHookEvents {
-			found, _ := claude.MarkedCursorHookCommandsAt(path, event, wakeDialogHookMarker)
+			found, _ := hookfile.MarkedCursorHookCommandsAt(path, event, wakeDialogHookMarker)
 			commands = append(commands, found...)
 		}
 		re = cursorDialogHookBinRe

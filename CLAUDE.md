@@ -106,6 +106,7 @@ internal/format/     JSON frontmatter plus Markdown message serialization
 internal/config/     Queue and project configuration
 internal/receipt/    Consumer-local drained and DLQ receipts
 internal/integration Shared adapter support for Symphony and Kanban
+internal/hookfile/   Byte-surgery hooks-file editor with a per-file lock
 internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
 internal/keepalive/  Companion registry, adapters, hooks, and supervision
 internal/bridge/     Envelope, auth, and crash-idempotent local apply

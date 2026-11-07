@@ -166,3 +166,21 @@ func TestAttachReportsAMissingApprovalHook(t *testing.T) {
 		t.Fatalf("binding config_dir = %q (%v); want %s", b.ConfigDir, err, os.Getenv("CLAUDE_CONFIG_DIR"))
 	}
 }
+
+// A live wake of a release before dialog entries reads only the single-file
+// marker, so doctor warns to restart its session.
+func TestDoctorMailboxesWarnsOfAWakeBeforeDialogEntries(t *testing.T) {
+	_, root := machineFixture(t)
+	doctorWakeCheck = func(string, string) (wakeView, error) {
+		return wakeView{LiveWake: true, WakeStatus: "live", ImageStatus: "outdated", RunningVersion: "0.126.1"}, nil
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", Name: "claude-p-session1", Harness: "claude"}
+	var failed, noted []string
+	doctorMailboxes([]binding.Binding{b},
+		func(_, _, detail, _ string) { failed = append(failed, detail) },
+		func(_, _, detail, remedy string) { noted = append(noted, detail+"; "+remedy) })
+	want := `the wake of handle "claude" runs amq 0.126.1, which cannot read the dialog marker form of 0.128.0 or later; restart that session (exit and resume it)`
+	if len(failed) != 0 || len(noted) != 1 || noted[0] != want {
+		t.Fatalf("failed = %q, noted = %q; want one note %q", failed, noted, want)
+	}
+}

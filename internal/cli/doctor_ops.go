@@ -851,6 +851,9 @@ func checkWakeLocksWithHintsSchema(
 			hints = append(hints, hint)
 			staleBinary = true
 		}
+		if hint, ok := outdatedDialogWakeHint(inspection); ok {
+			hints = append(hints, hint)
+		}
 
 		lock := opsWakeLock{
 			Status:          string(inspection.Status),
