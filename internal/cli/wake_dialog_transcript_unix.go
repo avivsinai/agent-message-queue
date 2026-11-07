@@ -54,8 +54,9 @@ type claudeTranscriptBlock struct {
 }
 
 // claudeDialogAnswered reports whether the transcript the marker names
-// proves its dialog gone: a tool_result for the marker's tool_use_id (in a
-// subagent's own transcript when the marker names one), or for
+// proves its dialog gone (a subagent's marker only by that subagent's own
+// transcript, claudeSubagentTranscript): a tool_result for the marker's
+// tool_use_id, or for
 // a permission marker (claudePermissionMarker) a new assistant message of
 // its own chain after it opened (claudeTurnMovedOn): the main chain, or for
 // a subagent's marker only that subagent's transcript. Any other marker is
@@ -91,29 +92,21 @@ func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read c
 	if marker.ToolUseID == "" && !permission {
 		return false, nil
 	}
-	if permission && marker.AgentID != "" {
+	path := marker.TranscriptPath
+	if marker.AgentID != "" {
 		// A subagent's dialog: only its own transcript, every record of
 		// which is the subagent's, proves it closed.
-		path, err := claudeSubagentTranscript(marker)
-		if err != nil {
+		var err error
+		if path, err = claudeSubagentTranscript(marker); err != nil {
 			return false, err
 		}
-		tail, err := read(path)
-		if err != nil {
-			return false, err
-		}
-		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), true), nil
-	}
-	path := marker.TranscriptPath
-	if marker.AgentID != "" && marker.AgentTranscriptPath != "" {
-		path = marker.AgentTranscriptPath
 	}
 	tail, err := read(path)
 	if err != nil {
 		return false, err
 	}
 	if permission {
-		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), false), nil
+		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), marker.AgentID != ""), nil
 	}
 	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
 		var record claudeTranscriptRecord

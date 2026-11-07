@@ -57,8 +57,8 @@ var wakeDialogHookEvents = []string{
 
 // wakeDialogHookEventFloor is the first Claude Code version known to have
 // each gated event: the changelog first names PostToolUseFailure in
-// 2.1.119, and agent_id in SubagentStop input in 2.0.42; SubagentStop
-// closes nothing without it. Before 2.1.101 an unknown event made Claude Code ignore the
+// 2.1.119, and agent_id in SubagentStop input per the Claude Code
+// changelog (2.0.42); SubagentStop closes nothing without it. Before 2.1.101 an unknown event made Claude Code ignore the
 // whole settings file, so the installer adds a gated event only for a
 // version at or past its floor.
 var wakeDialogHookEventFloor = map[string]claudeVersion{
@@ -147,12 +147,6 @@ type wakeDialogHookInput struct {
 	GenerationID string `json:"generation_id"`
 	Status       string `json:"status"`
 	emptyInput   bool
-	// host is the Claude Code process the hook runs under
-	// (wakeDialogHookHost), read for a dialog open and a SessionStart.
-	host *launch.HolderIdentity
-	// received is when the close began; a typed prompt closes only the
-	// dialogs opened before it.
-	received time.Time
 }
 
 // wakeDialogMarker is the .wake.dialog content. The wake uses the file's
@@ -493,9 +487,6 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		return nil
 	}
 	defer func() { _ = agentDir.Close() }()
-	if !turn && (open || in.Event == "SessionStart") {
-		in.host = wakeDialogHookHost()
-	}
 	_ = agentDir.withFD(func(dirfd int) error {
 		if !open && !turn {
 			acknowledgeClaudeNativeHook(dirfd, agentDir, in)
@@ -529,7 +520,7 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		TranscriptPath:      in.TranscriptPath,
 		AgentID:             in.AgentID,
 		AgentTranscriptPath: in.AgentTranscriptPath,
-		Host:                in.host,
+		Host:                wakeDialogHookHost(),
 		SessionID:           in.SessionID,
 		OpenedAt:            time.Now().UTC().Format(time.RFC3339),
 	})
@@ -666,11 +657,10 @@ func removeWakeDialogMarkerIf(dirfd int, agentDir *wakeAgentDir, remove func(cur
 // (wakeDialogEntriesClosedBy). Any other single-file marker keeps the rules
 // of wakeDialogMarkerClosedBy.
 func clearWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
-	in.received = time.Now()
 	return withWakeDialogMarkerLock(dirfd, func() error {
-		return removeWakeDialogEntriesAt(dirfd, agentDir, func(name string, raw []byte, info os.FileInfo) bool {
+		return removeWakeDialogEntriesAt(dirfd, agentDir, func(name string, raw []byte, _ os.FileInfo) bool {
 			if wakeDialogKeyedEntry(name) || claudeDialogHookMarker(raw) {
-				return wakeDialogEntriesClosedBy(raw, info.ModTime(), in)
+				return wakeDialogEntriesClosedBy(raw, in)
 			}
 			return wakeDialogMarkerClosedBy(dirfd, agentDir, raw, in)
 		})

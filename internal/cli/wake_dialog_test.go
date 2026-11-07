@@ -262,15 +262,11 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// life of the Claude Code process. SubagentStop closes them.
 		{name: "a subagent's stop closes its dialog", claudeHook: true, transcript: asked, rings: 1,
 			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "SubagentStop", SessionID: "s1", AgentID: "a1"}}},
-		// Review of the wake dialog entries: a typed prompt left a subagent's
-		// entry open, though it proves that no dialog had focus.
-		{name: "a typed prompt closes a subagent's dialog", claudeHook: true, transcript: asked, rings: 1,
+		// Review of the wake dialog close rules: the prompt hook runs after
+		// the prompt was typed, so a queued prompt closed a background
+		// subagent's open dialog and the doorbell typed into it.
+		{name: "a typed prompt keeps a subagent's dialog", claudeHook: true, transcript: asked, notices: 1,
 			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "UserPromptSubmit", SessionID: "s1"}}},
-		// Review of the wake dialog entries: /clear gives the same process a
-		// new session id, so no event closed the old session's entry.
-		{name: "a clear in the same process closes the old session's dialog", claudeHook: true, transcript: asked, rings: 1,
-			hooks: []wakeDialogHookInput{{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1", host: &self},
-				{Event: "SessionStart", Source: "clear", SessionID: "s2", host: &self}}},
 		// Review of the wake dialog entries: a single-file marker closed on
 		// another session's events.
 		{name: "another session's Stop keeps a single-file marker", marker: permission, age: wakeDialogQuietHold + time.Minute,

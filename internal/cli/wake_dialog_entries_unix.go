@@ -369,19 +369,16 @@ func removeWakeDialogTempDirAt(dirfd int, temp string) error {
 
 // wakeDialogEntriesClosedBy reports whether a Claude Code hook event proves
 // closed the dialog of a Claude Code dialog hook's marker, keyed entry or
-// single file, last written at modTime. Every way a dialog ends yields one
-// of these proofs:
+// single file:
 //   - an explicit close with no input closes all;
-//   - a tool call's close closes only its own tool_use_id;
 //   - a subagent's SubagentStop closes every entry of that agent_id;
-//   - a SessionStart from clear closes the entries its own host process
-//     recorded under another session, the one it replaced; without a
-//     known host on both sides it closes nothing;
-//   - otherwise only events of the entry's own session: SessionEnd closes
-//     all, a SessionStart of a new process (startup or resume) too, a typed
-//     prompt every entry opened before it, and a main-thread Stop the
-//     main-thread entries. compact and fork close nothing.
-func wakeDialogEntriesClosedBy(raw []byte, modTime time.Time, in wakeDialogHookInput) bool {
+//   - otherwise only events of the entry's own session: a tool call's close
+//     closes only its own tool_use_id, SessionEnd (a clear included) all,
+//     a SessionStart of a new process (startup or resume) all, and a
+//     main-thread Stop or prompt only the main-thread entries. A subagent
+//     can show a dialog while the main thread takes a prompt, so a prompt
+//     proves nothing about it. Other SessionStart sources close nothing.
+func wakeDialogEntriesClosedBy(raw []byte, in wakeDialogHookInput) bool {
 	if in.emptyInput {
 		return true
 	}
@@ -392,8 +389,6 @@ func wakeDialogEntriesClosedBy(raw []byte, modTime time.Time, in wakeDialogHookI
 	switch {
 	case in.Event == "SubagentStop":
 		return in.AgentID != "" && marker.AgentID == in.AgentID
-	case in.Event == "SessionStart" && in.Source == "clear":
-		return in.host != nil && marker.Host != nil && *marker.Host == *in.host && marker.SessionID != in.SessionID
 	case marker.SessionID != in.SessionID:
 		return false
 	case in.ToolUseID != "":
@@ -402,9 +397,7 @@ func wakeDialogEntriesClosedBy(raw []byte, modTime time.Time, in wakeDialogHookI
 		return true
 	case in.Event == "SessionStart":
 		return in.Source == "startup" || in.Source == "resume"
-	case in.Event == "UserPromptSubmit":
-		return !modTime.After(in.received)
-	case in.Event == "Stop":
+	case in.Event == "Stop", in.Event == "UserPromptSubmit":
 		return in.AgentID == "" && marker.AgentID == ""
 	}
 	return false

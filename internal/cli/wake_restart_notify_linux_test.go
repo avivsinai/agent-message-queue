@@ -95,7 +95,8 @@ func TestNotifyWakeRestartLinuxUsesPidfdAfterExactLockRead(t *testing.T) {
 	}
 	if want := []string{"open", "inspect", "send", "close"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("call order = %v, want %v", events, want)
-	} // Review of the wake restart (D5): a signaled request stayed untaken,
+	}
+	// Review of the wake restart (D5): a signaled request stayed untaken,
 	// so the orphan rule could retire a request the wake had received.
 	if err := fixture.agentDir.withFD(func(dirfd int) error {
 		record, exists, err := readWakeRestartRecordAt(dirfd, fixture.agentDir)
