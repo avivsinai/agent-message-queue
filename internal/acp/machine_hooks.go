@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
@@ -248,7 +247,7 @@ func (s *Server) warnOnce(path, kind string, info os.FileInfo) bool {
 	if err != nil {
 		return false
 	}
-	_, _ = fsq.WriteFileAtomicFollowLinks(filepath.Dir(file), filepath.Base(file), append(raw, '\n'), 0o600)
+	_ = s.writeState(file, append(raw, '\n'))
 	return true
 }
 

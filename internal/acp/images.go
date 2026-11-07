@@ -245,7 +245,7 @@ func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, err
 	if err := fsq.EnsureAgentDirs(root, mailboxSender); err != nil {
 		return "", err
 	}
-	return fsq.WriteFileAtomicFollowLinks(dir, sha+"."+ext, data, 0o600)
+	return fsq.WriteStateFile(root, filepath.Join(fsq.AgentRemoteFiles("", mailboxSender), sha+"."+ext), data, 0o600)
 }
 
 // storedImage finds a stored file by its sha256 and marks it used now, so

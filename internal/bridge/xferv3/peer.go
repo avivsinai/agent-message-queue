@@ -110,7 +110,6 @@ func StorePeer(root string, peer Peer) error {
 	if peer.host.s == "" {
 		return ErrName
 	}
-	dir := filepath.Join(root, "bridge", peersDirName)
 	allow := make([]string, 0, len(peer.allow))
 	for _, handle := range peer.allow {
 		allow = append(allow, handle.s)
@@ -124,7 +123,7 @@ func StorePeer(root string, peer Peer) error {
 		return err
 	}
 	body = append(body, '\n')
-	return commitBytes(dir, peer.host.s+".json", body)
+	return commitBytes(root, peer.host.s+".json", body)
 }
 
 func RemovePeer(root string, host Host) error {
@@ -177,10 +176,11 @@ func peerPath(root string, host Host) string {
 	return filepath.Join(root, "bridge", peersDirName, host.s+".json")
 }
 
-func commitBytes(dir, name string, body []byte) error {
+// commitBytes atomically replaces the peer file name below root.
+func commitBytes(root, name string, body []byte) error {
 	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 		return ErrName
 	}
-	_, err := fsq.WriteFileAtomicFollowLinks(dir, name, body, 0o600)
+	_, err := fsq.WriteStateFile(root, filepath.Join("bridge", peersDirName, name), body, 0o600)
 	return err
 }

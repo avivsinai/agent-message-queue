@@ -344,7 +344,7 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 		return // a retired link keeps no state dir
 	}
 	if data, err := json.Marshal(st); err == nil {
-		_, _ = fsq.WriteFileAtomicFollowLinks(dir, "status.json", data, 0o600)
+		_, _ = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "status.json"), data, 0o600)
 	}
 }
 

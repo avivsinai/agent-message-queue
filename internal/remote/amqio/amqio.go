@@ -1422,14 +1422,15 @@ func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
 		// ledgerDir (path traversal). Reject before touching the filesystem.
 		return fmt.Errorf("reply ledger id: %w", err)
 	}
-	if err := os.MkdirAll(c.ledgerDir(), 0o700); err != nil {
-		return fmt.Errorf("reply ledger: %w", err)
-	}
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(c.ledgerDir(), msgID+".json", data, 0o600); err != nil {
+	rel, err := filepath.Rel(c.root, filepath.Join(c.ledgerDir(), msgID+".json"))
+	if err != nil {
+		return fmt.Errorf("reply ledger: %w", err)
+	}
+	if _, err := fsq.WriteStateFile(c.root, rel, data, 0o600); err != nil {
 		return fmt.Errorf("reply ledger %s: %w", msgID, err)
 	}
 	return nil

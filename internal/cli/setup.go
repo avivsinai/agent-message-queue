@@ -1092,29 +1092,29 @@ func commitSetup(state setupState) ([]string, error) {
 			return written, err
 		}
 	}
-	baseConfigPath := filepath.Join(state.queueRoot, "meta", "config.json")
-	if changed, err := setupWriteAtomicIfChanged(baseConfigPath, state.unionConfigData, 0o600); err != nil {
+	baseConfig := filepath.Join("meta", "config.json")
+	if changed, err := setupWriteAtomicIfChanged(state.queueRoot, baseConfig, state.unionConfigData, 0o600); err != nil {
 		return written, err
 	} else if changed {
 		if err := step("roster_compatible"); err != nil {
 			return written, err
 		}
 	}
-	if changed, err := setupWriteAtomicIfChanged(setupConfigPath, state.projectData, 0o644); err != nil {
+	if changed, err := setupWriteAtomicIfChanged(".", setupConfigPath, state.projectData, 0o644); err != nil {
 		return written, err
 	} else if changed {
 		if err := step("project_config"); err != nil {
 			return written, err
 		}
 	}
-	if changed, err := setupWriteAtomicIfChanged(baseConfigPath, state.baseConfigData, 0o600); err != nil {
+	if changed, err := setupWriteAtomicIfChanged(state.queueRoot, baseConfig, state.baseConfigData, 0o600); err != nil {
 		return written, err
 	} else if changed {
 		if err := step("roster_final"); err != nil {
 			return written, err
 		}
 	}
-	if changed, err := setupWriteAtomicIfChanged(setupLocalConfigPath, state.localData, 0o600); err != nil {
+	if changed, err := setupWriteAtomicIfChanged(".", setupLocalConfigPath, state.localData, 0o600); err != nil {
 		return written, err
 	} else if changed {
 		if err := step("local_config"); err != nil {
@@ -1122,7 +1122,7 @@ func commitSetup(state setupState) ([]string, error) {
 		}
 	}
 	if !state.noGitignore && len(state.gitignoreData) > 0 {
-		if changed, err := setupWriteAtomicIfChanged(".gitignore", state.gitignoreData, 0o644); err != nil {
+		if changed, err := setupWriteAtomicIfChanged(".", ".gitignore", state.gitignoreData, 0o644); err != nil {
 			return written, err
 		} else if changed {
 			if err := step("gitignore"); err != nil {
@@ -1130,7 +1130,7 @@ func commitSetup(state setupState) ([]string, error) {
 			}
 		}
 	}
-	if changed, err := setupWriteAtomicIfChanged(".amqrc", state.amqrcData, 0o644); err != nil {
+	if changed, err := setupWriteAtomicIfChanged(".", ".amqrc", state.amqrcData, 0o644); err != nil {
 		return written, err
 	} else if changed {
 		if err := step("amqrc"); err != nil {
@@ -1140,14 +1140,17 @@ func commitSetup(state setupState) ([]string, error) {
 	return written, nil
 }
 
-func setupWriteAtomicIfChanged(path string, data []byte, mode os.FileMode) (bool, error) {
-	current, exists, err := readOptionalRegular(path)
+// setupWriteAtomicIfChanged replaces rel below root (the queue root or the
+// project directory) when its bytes differ; no directory below root is
+// followed as a link.
+func setupWriteAtomicIfChanged(root, rel string, data []byte, mode os.FileMode) (bool, error) {
+	current, exists, err := readOptionalRegular(filepath.Join(root, rel))
 	if err != nil {
 		return false, err
 	}
 	if exists && bytes.Equal(current, data) {
 		return false, nil
 	}
-	_, err = fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), data, mode)
+	_, err = fsq.WriteStateFile(root, rel, data, mode)
 	return err == nil, err
 }

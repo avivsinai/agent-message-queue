@@ -66,7 +66,7 @@ func TestSubmitDeliversNothingWhenTheWindowClosesDuringTheJournalBarrier(t *test
 	a, root := newTestAttachment(t, &clk)
 	req := submitReq(clk)
 	faultSyncs(t, func(dir string) error {
-		if strings.HasPrefix(filepath.ToSlash(dir), "extensions/remote/mailbox") {
+		if strings.HasPrefix(dir, filepath.Join(root, "extensions", "remote", "mailbox")) {
 			clk = clk.Add(2 * time.Minute)
 		}
 		return nil
@@ -141,7 +141,7 @@ func TestSubmitMakesAVisibleTombstoneDurableBeforeRefusing(t *testing.T) {
 	a, root := newTestAttachment(t, &clk)
 	failing := true
 	faultSyncs(t, func(dir string) error {
-		if failing && strings.HasPrefix(filepath.ToSlash(dir), "extensions/remote/mailbox") {
+		if failing && strings.HasPrefix(dir, filepath.Join(root, "extensions", "remote", "mailbox")) {
 			return errors.New("injected journal sync failure")
 		}
 		return nil

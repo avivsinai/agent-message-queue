@@ -64,8 +64,8 @@ func Emit(root string, r Receipt) error {
 		return fmt.Errorf("receipt marshal: %w", err)
 	}
 
-	consumerDir := fsq.AgentReceipts(root, r.Consumer)
-	if _, err := fsq.WriteFileAtomicFollowLinks(consumerDir, r.filename(), data, 0o600); err != nil {
+	rel := filepath.Join(fsq.AgentReceipts("", r.Consumer), r.filename())
+	if _, err := fsq.WriteStateFile(root, rel, data, 0o600); err != nil {
 		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
 	}
 

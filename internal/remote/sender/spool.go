@@ -569,7 +569,7 @@ func (s *Spool) write(env *Envelope) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(name), filepath.Base(name), data, fileMode); err != nil {
+	if _, err := fsq.WriteStateFile(filepath.Dir(s.dir), filepath.Join(filepath.Base(s.dir), filepath.Base(name)), data, fileMode); err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist envelope: %v", err)
 		}

@@ -5,7 +5,7 @@ package fsq
 // packageSyncDirFaultForTest, when set, applies to every DeliveryRoot opened
 // in this process — including roots the test never sees directly (e.g. a
 // courier's internally opened handle). Instance-level SetSyncDirFaultForTest
-// takes precedence.
+// takes precedence. It sees the absolute path, as SyncDir passes it.
 var packageSyncDirFaultForTest func(dir string) error
 
 func (r *DeliveryRoot) syncDir(dir string) error {
@@ -13,7 +13,7 @@ func (r *DeliveryRoot) syncDir(dir string) error {
 		return r.syncDirForTest(dir)
 	}
 	if packageSyncDirFaultForTest != nil {
-		return packageSyncDirFaultForTest(dir)
+		return packageSyncDirFaultForTest(r.displayPath(dir))
 	}
 	return r.syncDirPlatform(dir)
 }

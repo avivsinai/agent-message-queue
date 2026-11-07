@@ -9,7 +9,7 @@ func (r *DeliveryRoot) syncDir(dir string) error {
 		return r.syncDirForTest(dir)
 	}
 	if packageSyncDirFaultForTest != nil {
-		return packageSyncDirFaultForTest(dir)
+		return packageSyncDirFaultForTest(r.displayPath(dir))
 	}
 	return r.syncDirPlatform(dir)
 }

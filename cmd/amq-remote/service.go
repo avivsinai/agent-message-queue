@@ -158,6 +158,7 @@ func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, erro
 	if err := os.MkdirAll(filepath.Join(root, stateDirName), 0o700); err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	// The service manager owns its unit directory, which may be a link.
 	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), serviceContent(exe, root), 0o644); err != nil {
 		return protocol.ExitActionRequired, err
 	}

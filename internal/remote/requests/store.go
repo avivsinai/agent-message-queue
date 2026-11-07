@@ -928,7 +928,11 @@ func (s *Store) writeRecordFile(host, p string, data []byte) error {
 		}
 		s.syncedHosts[host] = struct{}{}
 	}
-	if _, err := fsq.WriteFileAtomicFollowLinks(hostDir, filepath.Base(p), data, fileMode); err != nil {
+	rel, err := filepath.Rel(s.dir, p)
+	if err != nil {
+		return err
+	}
+	if _, err := fsq.WriteStateFile(s.dir, rel, data, fileMode); err != nil {
 		delete(s.syncedHosts, host)
 		return err
 	}
