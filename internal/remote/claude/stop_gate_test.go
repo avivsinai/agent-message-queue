@@ -14,9 +14,9 @@ import (
 // The defect lives in the installed shell, so the test runs it. A bindings
 // directory that holds only the tombstones of removed bindings opened the
 // Stop and PermissionRequest hook gates, so every event of every Claude
-// session started amq-remote (perf audit 2026-11-05). A live binding beside
-// them still starts it. Review of the gate: under zsh an empty directory
-// failed the unmatched glob with an error.
+// session started amq-remote (bead agent-message-queue-033). A live binding
+// beside them still starts it. Review of the gate: under zsh an empty
+// directory failed the unmatched glob with an error.
 func TestHookGatesStartNothingForTombstonesOnly(t *testing.T) {
 	shells := []string{"/bin/sh"}
 	if zsh, err := exec.LookPath("zsh"); err == nil {
@@ -60,5 +60,17 @@ func TestHookGatesStartNothingForTombstonesOnly(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Review of bead agent-message-queue-033: the receiver counted a file whose
+// name is no valid binding name as a binding, which the binding scan skips.
+func TestBindingsDirStateSkipsInvalidNames(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Bad Name.json"), []byte(`{"native_session":"s1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if allow, present := bindingsDirState(dir, "s1"); allow || present {
+		t.Fatalf("bindingsDirState = %v, %v; want an invalid name skipped", allow, present)
 	}
 }
