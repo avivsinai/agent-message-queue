@@ -308,6 +308,48 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 	}
 }
 
+// Review of the wake restart (D4): a full restart queue refused the request
+// after it was marked taken, so the record stayed taken and pending forever.
+// A request is taken only once queued, and a repeat of a taken request is
+// acknowledged without a second queue.
+func TestDarwinWakeRestartControlTakesOnlyAQueuedRequest(t *testing.T) {
+	root, agent, owner, lock, _ := testDarwinWakeRestartControlLock(t)
+	record := writeDarwinWakeRestartRecordForTest(t, root, agent, owner, lock)
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	restartSignals := make(chan os.Signal, 1)
+	restartSignals <- syscall.SIGUSR2
+	cleanup, _, _, err := startWakeControlListenerInDirWithRestart(agentDir, root, agent, lock, restartSignals, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	expected := inspectWakeLock(root, agent)
+	if err := notifyWakeRestartPlatform(agentDir, expected, record); err == nil {
+		t.Fatal("a full restart queue accepted the request")
+	}
+	if observed, _ := readDarwinWakeRestartRecordForTest(t, root, agent); observed.Taken {
+		t.Fatal("a request the queue refused was marked taken")
+	}
+	<-restartSignals
+	for range 2 {
+		// A repeat adopts the request as it is on disk.
+		current, _ := readDarwinWakeRestartRecordForTest(t, root, agent)
+		if err := notifyWakeRestartPlatform(agentDir, expected, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if observed, _ := readDarwinWakeRestartRecordForTest(t, root, agent); !observed.Taken {
+		t.Fatal("a queued request was not marked taken")
+	}
+	if got := len(restartSignals); got != 1 {
+		t.Fatalf("queued restart signals = %d, want 1", got)
+	}
+}
+
 func TestDarwinWakeHealthForwardsToLoopAndReturnsStatus(t *testing.T) {
 	root, agent, _, lock, _ := testDarwinWakeRestartControlLock(t)
 	lock.HealthSchema = wakeHealthSchema

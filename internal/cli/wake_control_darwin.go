@@ -686,10 +686,9 @@ func handleDarwinWakeRestartControl(
 				finishRefusedDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, root, me, lock, request, peerPID, err)
 				return err
 			}
-			if err := markDarwinWakeRestartTakenAt(scope, dirfd, scopedAgentDir, request); err != nil {
-				return err
-			}
-			return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
+			return takeDarwinWakeRestartAt(scope, dirfd, scopedAgentDir, request, func() error {
+				return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
+			})
 		},
 	)
 	if err != nil {
@@ -785,14 +784,17 @@ func wakeRestartPeerIsRequester(peerPID int, requester *wakeOwner) bool {
 		compareWakeBootID(requester.BootID, peer) == bootIDMatch
 }
 
-// markDarwinWakeRestartTakenAt records that this wake accepted the request
-// before it queues the restart, so the request is never retired as orphaned
-// once its requester exits.
-func markDarwinWakeRestartTakenAt(
+// takeDarwinWakeRestartAt queues the restart of the exact pending request
+// and then records it taken, so a taken request is one this wake queued and
+// is never retired as orphaned once its requester exits. A taken request was
+// queued already: it is acknowledged again without a second queue. Once the
+// queue accepts, the restart runs even when the record cannot be written.
+func takeDarwinWakeRestartAt(
 	scope *wakeMutationScope,
 	dirfd int,
 	agentDir *wakeAgentDir,
 	request wakeControlOwnerRequest,
+	queue func() error,
 ) error {
 	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
 	if err != nil {
@@ -804,11 +806,10 @@ func markDarwinWakeRestartTakenAt(
 	if record.Taken {
 		return nil
 	}
-	record.Taken = true
-	if err := writeWakeRestartRecordAt(scope, record); err != nil {
-		return fmt.Errorf("record taken wake restart request: %w", err)
+	if err := queue(); err != nil {
+		return err
 	}
-	return nil
+	return markWakeRestartTakenAt(scope, record)
 }
 
 func startWakeControlListenerInDirWithRestart(

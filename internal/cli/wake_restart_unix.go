@@ -1044,6 +1044,20 @@ func refuseWakeRestartRecordAt(
 	return writeWakeRestartRecordAt(scope, current)
 }
 
+// markWakeRestartTakenAt records that the wake received the pending request
+// record, under the caller's scope; a taken request is never retired as
+// orphaned.
+func markWakeRestartTakenAt(scope *wakeMutationScope, record wakeRestartRecord) error {
+	if record.Taken {
+		return nil
+	}
+	record.Taken = true
+	if err := writeWakeRestartRecordAt(scope, record); err != nil {
+		return fmt.Errorf("record taken wake restart request: %w", err)
+	}
+	return nil
+}
+
 // wakeRestartRequestOrphaned reports a pending request that no one can
 // complete: no wake took it and its recorded requester is conclusively gone.
 // A request without a requester identity, or with a requester whose state is

@@ -95,7 +95,10 @@ func notifyWakeRestartPlatform(
 				return fmt.Errorf("wake restart request changed before signal")
 			}
 
-			return scope.sendPidfdSignal(pidfd, unix.SIGUSR1)
+			if err := scope.sendPidfdSignal(pidfd, unix.SIGUSR1); err != nil {
+				return err
+			}
+			return markWakeRestartTakenAt(scope, observed)
 		},
 	)
 }
