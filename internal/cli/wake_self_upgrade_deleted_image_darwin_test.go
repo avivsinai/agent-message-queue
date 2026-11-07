@@ -183,14 +183,6 @@ func TestMaintainWakeSelfUpgradeProceedsAfterUnfinishableRestartRequest(t *testi
 			}); err != nil {
 				t.Fatal(err)
 			}
-			previousObserve := observeAuthoritativeWakeOwner
-			observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
-				if got == requester {
-					return wakeOwnerObservation{State: wakeOwnerDead, Reason: "owner process is not running"}, nil
-				}
-				return previousObserve(got)
-			}
-			t.Cleanup(func() { observeAuthoritativeWakeOwner = previousObserve })
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -261,14 +253,6 @@ func TestMaintainWakeSelfUpgradeKeepsTakenRequestAfterRequesterExits(t *testing.
 	if response != "ACK" {
 		t.Fatalf("restart response = %q, want ACK", response)
 	}
-	previousObserve := observeAuthoritativeWakeOwner
-	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
-		if got == requester {
-			return wakeOwnerObservation{State: wakeOwnerDead, Reason: "owner process is not running"}, nil
-		}
-		return previousObserve(got)
-	}
-	t.Cleanup(func() { observeAuthoritativeWakeOwner = previousObserve })
 	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
 	state := selfUpgradeStateForCandidate(t, candidate)
 	stubWakeSelfUpgradeVersion(t, "0.57.0")

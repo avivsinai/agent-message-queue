@@ -455,10 +455,11 @@ func reconcileWakeRestartPublicationAt(
 		}
 	}
 	write := !adopted
-	if adopted && needsNotify && !record.Taken &&
+	if adopted && needsNotify && !record.Taken && state.record.Requester != nil &&
 		!sameWakeOwner(record.Requester, state.record.Requester) {
 		// The adopting process now waits on the untaken request, so its
-		// exit, not the publisher's, makes the request orphaned.
+		// exit, not the publisher's, makes the request orphaned. An adopter
+		// without an identity keeps the publisher's.
 		record.Requester = state.record.Requester
 		write = true
 	}
