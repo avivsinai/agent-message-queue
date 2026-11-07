@@ -53,7 +53,7 @@ func piLocate(b binding.Binding, saved string) string {
 	if saved != "" {
 		return saved
 	}
-	return pi.ActivityFile(b.Root, handle, b.NativeSession)
+	return pi.ActivityFile(b.Root, handle, b.RecordedSession())
 }
 
 // foldPi applies one pi activity record. A record with no run is skipped

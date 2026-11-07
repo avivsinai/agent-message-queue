@@ -1,6 +1,8 @@
 // Package binding stores which live session the per-user Buzz agent drives.
 // `amq-remote attach --self` writes it at the moment the owner consents
-// inside that session; amq-acp in binding mode reads it on every prompt.
+// inside that session; the machine agent writes it again only to restore that
+// share for the same identity and the same recorded session, never after a
+// detach. amq-acp in binding mode reads it on every prompt.
 // A request keeps the binding it was submitted under, so a later attach
 // never moves work that is already running.
 package binding
@@ -54,6 +56,11 @@ type Binding struct {
 	// NativeSession is the native identity the owner shared. The endpoint
 	// refuses every command once the target is attached to another one.
 	NativeSession string `json:"native_session,omitempty"`
+	// HarnessSession is the session id of the harness behind a mailbox
+	// handle (a pi chat's), as that harness publishes it; empty for a native
+	// binding and when it is not known. It is never a native target's
+	// session, so nothing that keys on NativeSession reads it.
+	HarnessSession string `json:"harness_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
 	// Identity is the session identity that decides name reuse (see
@@ -129,6 +136,22 @@ func (b Binding) SessionIdentity() string {
 		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
 	}
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
+}
+
+// RecordedSession is the session id b recorded: NativeSession or
+// HarnessSession when set, else the file stem of its transcript; "" when
+// none is known.
+func (b Binding) RecordedSession() string {
+	if b.NativeSession != "" {
+		return b.NativeSession
+	}
+	if b.HarnessSession != "" {
+		return b.HarnessSession
+	}
+	if b.Transcript == "" {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(b.Transcript), filepath.Ext(b.Transcript))
 }
 
 // NativeIdentity is the session identity of a native session: its harness,
@@ -741,19 +764,23 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 }
 
 // Replace writes now in place of the binding called was.Name when that
-// binding is still exactly was, and reports whether it wrote. A binding that
+// binding is still exactly was, and reports whether it wrote, with the
+// binding as written (bound_at stamped when now has none). A binding that
 // changed or was removed meanwhile is left as it is. The check and the write
 // share one transaction.
-func Replace(was, now Binding) (bool, error) {
+func Replace(was, now Binding) (Binding, bool, error) {
 	if err := ValidName(was.Name); err != nil {
-		return false, err
+		return Binding{}, false, err
 	}
 	if err := now.Valid(); err != nil {
-		return false, err
+		return Binding{}, false, err
+	}
+	if now.BoundAt == "" {
+		now.BoundAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	raw, err := json.MarshalIndent(now, "", "  ")
 	if err != nil {
-		return false, err
+		return Binding{}, false, err
 	}
 	replaced := false
 	err = transact(func(string) error {
@@ -777,7 +804,11 @@ func Replace(was, now Binding) (bool, error) {
 		replaced = true
 		return nil
 	})
-	return replaced, err
+	if !replaced {
+		return Binding{}, false, err
+	}
+	now.Name = was.Name
+	return now, true, err
 }
 
 func writeNamed(b Binding, allow func(old Binding) bool) error {
@@ -864,8 +895,21 @@ func PruneEnded(inspect Inspector) ([]string, error) {
 // process, so each such session leaves one. The legacy single binding has no
 // name to hold and is deleted.
 func Retire(why string, match func(Binding) bool) ([]string, error) {
-	var removed []string
-	err := transact(func(path string) error {
+	removed, _, err := retire(why, match, nil)
+	return removed, err
+}
+
+// Detach retires every binding match accepts as detached, and in the same
+// transaction turns each tombstone ended accepts that records an end into a
+// detached one, so a session whose binding was already pruned is turned off
+// too and is never bound again by itself. It returns the names of the
+// bindings removed and of the tombstones turned off.
+func Detach(match, ended func(Binding) bool) (removed, keptOff []string, err error) {
+	return retire(RemovedDetached, match, ended)
+}
+
+func retire(why string, match, ended func(Binding) bool) (removed, keptOff []string, err error) {
+	err = transact(func(path string) error {
 		dir, err := namedDir(false)
 		if err != nil {
 			return err
@@ -891,6 +935,26 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 			}
 			removed = append(removed, b.Name)
 		}
+		if ended != nil {
+			tombs, err := scanTombstones(dir)
+			if err != nil {
+				return err
+			}
+			for _, t := range tombs {
+				if t.Removed != RemovedEnded || !ended(t) {
+					continue
+				}
+				t.Removed = RemovedDetached
+				raw, err := json.MarshalIndent(t, "", "  ")
+				if err != nil {
+					return err
+				}
+				if _, err := fsq.WriteFileAtomic(dir, t.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+					return err
+				}
+				keptOff = append(keptOff, t.Name)
+			}
+		}
 		if b, err := read(path); err == nil {
 			if b.Name = LegacyName; match(b) {
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -901,7 +965,75 @@ func Retire(why string, match func(Binding) bool) ([]string, error) {
 		}
 		return nil
 	})
-	return removed, err
+	return removed, keptOff, err
+}
+
+// DetachedFor reports whether the owner turned b's session off, and the
+// name of the tombstone that says so: a tombstone that detach left which
+// records the same session as b (a resumed session is the same session),
+// or whose holder is b's (another session in that process is still off).
+func DetachedFor(b Binding, tombs []Binding) (string, bool) {
+	for _, t := range tombs {
+		if t.Removed != RemovedDetached {
+			continue
+		}
+		if t.RecordedSession() != "" && t.RecordedSession() == b.RecordedSession() ||
+			t.Holder.PID > 0 && t.Holder == b.Holder {
+			return t.Name, true
+		}
+	}
+	return "", false
+}
+
+// ReviveEnded writes b under the name of the tombstone tomb, as read, and
+// removes that tombstone, when under the binding lock the tombstone is still
+// exactly tomb, it records an end, and no binding holds the name. It
+// reports whether it wrote. A tombstone of any other reason is never
+// removed.
+func ReviveEnded(tomb, b Binding) (bool, error) {
+	if err := ValidName(tomb.Name); err != nil {
+		return false, err
+	}
+	if tomb.Removed != RemovedEnded {
+		return false, nil
+	}
+	if err := b.Valid(); err != nil {
+		return false, err
+	}
+	b.Removed, b.Identity = "", b.SessionIdentity()
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	wrote := false
+	err = transact(func(string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		cur, err := read(filepath.Join(dir, tomb.Name+TombstoneSuffix))
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if cur.Name = tomb.Name; cur != tomb {
+			return nil
+		}
+		if _, err := os.Lstat(filepath.Join(dir, tomb.Name+".json")); !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if _, err := fsq.WriteFileAtomic(dir, tomb.Name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		wrote = true
+		return os.Remove(filepath.Join(dir, tomb.Name+TombstoneSuffix))
+	})
+	return wrote, err
 }
 
 // Tombstones returns the binding each tombstone recorded, named by its
