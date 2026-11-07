@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -51,6 +52,7 @@ type claudeTranscriptRecord struct {
 type claudeTranscriptBlock struct {
 	Type      string `json:"type"`
 	ToolUseID string `json:"tool_use_id"`
+	Text      string `json:"text"`
 }
 
 // claudeDialogAnswered reports whether the transcript the marker names
@@ -59,8 +61,9 @@ type claudeTranscriptBlock struct {
 // tool_use_id, or for
 // a permission marker (claudePermissionMarker) a new assistant message of
 // its own chain after it opened (claudeTurnMovedOn): the main chain, or for
-// a subagent's marker only that subagent's transcript. Any other marker is
-// never proven answered. An error means no proof: the hold stays.
+// a subagent's marker only that subagent's transcript, which also proves it
+// by a later tool_result or interrupt (claudeSubagentWaitEnded). Any other
+// marker is never proven answered. An error means no proof: the hold stays.
 func claudeDialogAnswered(marker wakeDialogMarker, modTime time.Time) (bool, error) {
 	return claudeDialogAnsweredFrom(marker, modTime, readClaudeTranscriptTail)
 }
@@ -106,7 +109,11 @@ func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read c
 		return false, err
 	}
 	if permission {
-		return claudeTurnMovedOn(tail, wakeDialogMarkerOpened(marker, modTime), marker.AgentID != ""), nil
+		opened := wakeDialogMarkerOpened(marker, modTime)
+		if marker.AgentID != "" && claudeSubagentWaitEnded(tail, opened) {
+			return true, nil
+		}
+		return claudeTurnMovedOn(tail, opened, marker.AgentID != ""), nil
 	}
 	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
 		var record claudeTranscriptRecord
@@ -208,6 +215,44 @@ func wakeDialogMarkerOpened(marker wakeDialogMarker, modTime time.Time) time.Tim
 		}
 	}
 	return opened
+}
+
+// claudeInterruptPrefix starts the text of the user record Claude Code
+// writes when the person interrupts a turn or a tool call.
+const claudeInterruptPrefix = "[Request interrupted by user"
+
+// claudeSubagentWaitEnded reports whether a subagent's own transcript tail
+// holds a user record dated after opened that carries a tool_result or an
+// interrupt. While its permission dialog shows, the subagent waits on the
+// blocked call; a reject or an Esc writes such a record at once, so it
+// proves the dialog gone even when no SubagentStop follows.
+func claudeSubagentWaitEnded(tail []byte, opened time.Time) bool {
+	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
+		var record claudeTranscriptRecord
+		if json.Unmarshal(line, &record) != nil || record.Type != "user" {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, record.Timestamp); err != nil || !at.After(opened) {
+			continue
+		}
+		var text string
+		if json.Unmarshal(record.Message.Content, &text) == nil {
+			if strings.HasPrefix(text, claudeInterruptPrefix) {
+				return true
+			}
+			continue
+		}
+		var blocks []claudeTranscriptBlock
+		if json.Unmarshal(record.Message.Content, &blocks) != nil {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "tool_result" || (block.Type == "text" && strings.HasPrefix(block.Text, claudeInterruptPrefix)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // claudeTranscriptSyntheticModel marks an assistant record Claude Code

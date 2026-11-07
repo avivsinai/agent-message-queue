@@ -398,6 +398,8 @@ func wakeDialogEntriesClosedBy(raw []byte, in wakeDialogHookInput) bool {
 	case in.Event == "SessionStart":
 		return in.Source == "startup" || in.Source == "resume"
 	case in.Event == "Stop", in.Event == "UserPromptSubmit":
+		// A prompt's hook runs before its turn, while no main-thread
+		// dialog can be on screen, so it closes every main-thread entry.
 		return in.AgentID == "" && marker.AgentID == ""
 	}
 	return false

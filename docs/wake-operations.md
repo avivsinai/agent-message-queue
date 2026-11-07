@@ -257,22 +257,22 @@ supports it.
   its `tool_use_id`, each entry one marker. The doorbell is held while any
   entry holds. `open` runs on `PreToolUse` for AskUserQuestion and
   ExitPlanMode, and on every `PermissionRequest`, and writes that dialog's
-  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the
-  same two tools, which close only the entry of that tool call, and on
-  `UserPromptSubmit`, `Stop`, `SubagentStop`, `SessionStart`, and
-  `SessionEnd`. `SubagentStop` closes every entry of its `agent_id`. The
-  other events close only entries of their own session: `Stop` and
-  `UserPromptSubmit` its main-thread entries, `SessionEnd` (whatever its
-  reason, `clear` included) and a `SessionStart` from `startup` or `resume`
-  (a new process) all of them; a `--resume` of the same session in a second
-  terminal therefore also closes the first terminal's entries of that
-  session. A `SessionStart` from `clear`, `compact` or `fork` closes
-  nothing. An entry also records its host: the nearest of the hook's first
-  three ancestors, each parent edge proven
-  by its process start token, that runs Claude Code (an executable named
-  `claude`, or a native install's `claude/versions/<version>`). A dialog
-  cannot outlive its process, so while the doorbell is held an entry whose
-  host is proven gone (not running, or its pid now runs another process)
+  entry. `close` runs on `PostToolUse` and `PostToolUseFailure` for the same
+  two tools, and on `UserPromptSubmit`, `Stop`, `SubagentStop`,
+  `SessionStart`, and `SessionEnd`. A `close` with empty input closes every
+  entry. `SubagentStop` closes every entry of its `agent_id`. The other
+  events close only entries of their own session: a tool call's close only
+  the entry of that tool call, `Stop` and `UserPromptSubmit` its main-thread
+  entries, `SessionEnd` (whatever its reason, `clear` included) and a
+  `SessionStart` from `startup` or `resume` (a new process) all of them; a
+  `--resume` of the same session in a second terminal therefore also closes
+  the first terminal's entries of that session. A `SessionStart` from
+  `clear`, `compact` or `fork` closes nothing. An entry also records its
+  host: the nearest of the hook's first three ancestors, each parent edge
+  proven by its process start token, that runs Claude Code (an executable
+  named `claude`, or a native install's `claude/versions/<version>`). A
+  dialog cannot outlive its process, so while the doorbell is held an entry
+  whose host is proven gone (not running, or its pid now runs another process)
   closes, and `.wake.log` says `dialog host <pid> exited; entry closed`. An
   entry with no host, or a host the wake cannot prove gone, holds. Other writers (Codex, Cursor, agy,
   pi, `amq coop exec`) keep the single file `.wake.dialog`. When a Claude
@@ -345,11 +345,15 @@ supports it.
   itself) can land while a dialog shows, so none of them proves anything.
   A dialog of a subagent (the hook input names its `agent_id`) blocks only
   that subagent while the main chain runs on, so the main transcript never
-  proves it; only an assistant record in the subagent's own transcript
-  does, by the same rule without the sidechain filter. A permission hook
-  gives no `agent_transcript_path`, so the wake reads the transcript where
-  Claude Code writes it: `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl`
-  or one or two subdirectories deeper (a workflow's subagents write to
+  proves it; only the subagent's own transcript does: an assistant record
+  by the same rule without the sidechain filter, or a `user` record dated
+  after the marker opened that carries a `tool_result` or an interrupt
+  (`[Request interrupted by user`), which a reject or an Esc writes at
+  once, so the hold ends even when no `SubagentStop` follows. A permission
+  hook gives no `agent_transcript_path`, so the wake reads the transcript
+  where Claude Code writes it:
+  `<dir>/<session_id>/subagents/agent-<agent_id>.jsonl` or one or two
+  subdirectories deeper (a workflow's subagents write to
   `subagents/workflows/<wf>/`), beside the session transcript
   `<dir>/<session_id>.jsonl`. It reads only a regular file reached through
   no symbolic link, found exactly once across those depths; none, several, or

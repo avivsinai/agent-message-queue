@@ -267,6 +267,20 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		// subagent's open dialog and the doorbell typed into it.
 		{name: "a typed prompt keeps a subagent's dialog", claudeHook: true, transcript: asked, notices: 1,
 			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "UserPromptSubmit", SessionID: "s1"}}},
+		// Review of the wake dialog close rules: a rejected or Escaped
+		// subagent permission dialog writes a tool_result, not a new
+		// assistant message, so its entry held until a SubagentStop that an
+		// interrupt may never send.
+		{name: "a rejected subagent permission rings", marker: subagentPermission, age: wakeDialogQuietHold + time.Minute,
+			claudeHook: true, transcript: asked, rings: 1, agentTranscript: func(opened time.Time) string {
+				return assistant("msg_sub_asked", true, opened.Add(-time.Second)) +
+					fmt.Sprintf(`{"type":"user","isSidechain":true,"timestamp":%q,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bash","is_error":true}]}}`,
+						opened.Add(time.Minute).UTC().Format(time.RFC3339Nano)) + "\n"
+			}},
+		// Review of the wake dialog close rules: with no clear rule, the
+		// SessionEnd of a cleared session is what closes its subagent entries.
+		{name: "a session's end closes its subagent's dialog", claudeHook: true, transcript: asked, rings: 1,
+			hooks: []wakeDialogHookInput{subagentPermissionOpen, {Event: "SessionEnd", SessionID: "s1"}}},
 		// Review of the wake dialog entries: a single-file marker closed on
 		// another session's events.
 		{name: "another session's Stop keeps a single-file marker", marker: permission, age: wakeDialogQuietHold + time.Minute,

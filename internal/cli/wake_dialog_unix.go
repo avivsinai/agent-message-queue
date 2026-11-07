@@ -56,11 +56,11 @@ var wakeDialogHookEvents = []string{
 }
 
 // wakeDialogHookEventFloor is the first Claude Code version known to have
-// each gated event: the changelog first names PostToolUseFailure in
-// 2.1.119, and agent_id in SubagentStop input per the Claude Code
-// changelog (2.0.42); SubagentStop closes nothing without it. Before 2.1.101 an unknown event made Claude Code ignore the
-// whole settings file, so the installer adds a gated event only for a
-// version at or past its floor.
+// each gated event, per the Claude Code changelog: PostToolUseFailure in
+// 2.1.119, and agent_id in SubagentStop input in 2.0.42 (SubagentStop
+// closes nothing without it). Before 2.1.101 an unknown event made Claude
+// Code ignore the whole settings file, so the installer adds a gated event
+// only for a version at or past its floor.
 var wakeDialogHookEventFloor = map[string]claudeVersion{
 	"PostToolUseFailure": {2, 1, 119},
 	"SubagentStop":       {2, 0, 42},
