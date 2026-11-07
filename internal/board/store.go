@@ -449,7 +449,7 @@ func (s Store) update(ctx context.Context, change func(*Snapshot) error) error {
 		if err != nil {
 			return err
 		}
-		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget) {
+		if len(data) > snapshotLimit-snapshotReserve && state.pruneHistory(len(data)-pruneTarget, nil, state.Generation) {
 			// A prune that drops a message something still names must not
 			// publish: the store would need recovery on its next read.
 			if state.validatePruned() == nil {
@@ -728,6 +728,20 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 				return err
 			}
 			stopped = true
+			// Evidence pressure prunes the oldest unheld history by its
+			// evidence bytes, so a later publication removes those files
+			// and ingestion resumes.
+			if state.pruneHistory(evidenceLimit/4, func(m Message) int {
+				info, err := os.Stat(filepath.Join(s.Dir, "evidence", m.EvidenceHash+".json"))
+				if err != nil {
+					return 0
+				}
+				return int(info.Size())
+			}, state.Generation+1) {
+				if err := state.validatePruned(); err != nil {
+					return err
+				}
+			}
 			// Do not publish references to any partially ingested evidence. Keep prior
 			// facts and identities, and publish the failed acquisition coverage itself.
 			found := false
@@ -800,8 +814,13 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 		a.Input.Known = known
 		state.Input = a.Input
 		state.Usage = a.Usage
+		// Evidence staged before a concurrent prune can belong to a message
+		// that is now pruned; it is retired like the prune's own evidence.
+		var skipped []string
+		defer func() { state.retireEvidence(skipped, state.Generation+1) }()
 		for _, m := range a.Messages {
 			if state.Pruned(m.ID) {
+				skipped = append(skipped, m.EvidenceHash)
 				continue
 			}
 			if previous, ok := state.Messages[m.Key]; ok {

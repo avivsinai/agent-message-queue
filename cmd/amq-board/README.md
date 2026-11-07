@@ -259,9 +259,12 @@ creation; a message older than that which appears for the first time after a
 prune is not acquired. A pruned message's dismissal, action cancellation, and request
 labels go with it; tasks, their attachments, and task-level corrections stay.
 Pruned evidence files go once neither the snapshot nor the recovery copy names
-them. If the snapshot is still at its bound, or evidence reaches its bound,
-ingestion stops and publishes incomplete source coverage; identities and
-corrections are not evicted.
+them. A publication that would pass the evidence bound prunes the same way, a
+quarter of the evidence bound by evidence bytes, and publishes incomplete
+source coverage; the pruned evidence goes at a later publication, and
+ingestion resumes. If the snapshot is still at its bound, or nothing is left
+to prune, ingestion stops and publishes incomplete source coverage;
+identities and corrections are not evicted.
 
 ## Sources and configuration
 

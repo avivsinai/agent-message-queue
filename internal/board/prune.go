@@ -34,12 +34,14 @@ func (s *Snapshot) belowPrunedFloor(at time.Time) bool {
 }
 
 // pruneHistory removes the oldest messages that heldMessages does not hold,
-// by the stamp that starts their ids, until about excess encoded bytes are gone, with their
+// by the stamp that starts their ids, until about excess bytes are gone, with their
 // observations, dismissals, cancellations and request labels. It records
 // their ids in PrunedIDs, so acquisition does not bring them back, and
 // retires their evidence under the current generation. It reports whether it
-// removed anything.
-func (s *Snapshot) pruneHistory(excess int) bool {
+// removed anything. cost is the bytes a message frees; nil counts its
+// encoding in the snapshot. Evidence is retired under generation gen, the
+// generation that publishes the prune.
+func (s *Snapshot) pruneHistory(excess int, cost func(Message) int, gen uint64) bool {
 	if excess <= 0 {
 		return false
 	}
@@ -76,13 +78,19 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 			break
 		}
 		m := s.Messages[c.key]
-		m.Body = ""
-		b, _ := json.Marshal(m)
-		o, _ := json.Marshal(s.Observations[c.key])
-		freed += len(b) + len(o) + 2*len(c.key) - len(m.ID)
+		if cost != nil {
+			freed += cost(m)
+		} else {
+			m.Body = ""
+			b, _ := json.Marshal(m)
+			o, _ := json.Marshal(s.Observations[c.key])
+			freed += len(b) + len(o) + 2*len(c.key) - len(m.ID)
+		}
 		for _, label := range labels[c.key] {
-			l, _ := json.Marshal(s.RequestLabels[label])
-			freed += len(l) + len(label)
+			if cost == nil {
+				l, _ := json.Marshal(s.RequestLabels[label])
+				freed += len(l) + len(label)
+			}
 			delete(s.RequestLabels, label)
 		}
 		delete(s.Messages, c.key)
@@ -105,6 +113,16 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 			delete(s.PrunedIDs, id)
 		}
 	}
+	s.retireEvidence(retired, gen)
+	return true
+}
+
+// retireEvidence marks each hash that no kept message names for removal
+// once no kept generation from gen on can name it.
+func (s *Snapshot) retireEvidence(hashes []string, gen uint64) {
+	if len(hashes) == 0 {
+		return
+	}
 	kept := map[string]bool{}
 	for _, m := range s.Messages {
 		kept[m.EvidenceHash] = true
@@ -112,12 +130,11 @@ func (s *Snapshot) pruneHistory(excess int) bool {
 	if s.RetiredEvidence == nil {
 		s.RetiredEvidence = map[string]uint64{}
 	}
-	for _, hash := range retired {
-		if !kept[hash] {
-			s.RetiredEvidence[hash] = s.Generation
+	for _, hash := range hashes {
+		if !kept[hash] && hash != "" {
+			s.RetiredEvidence[hash] = gen
 		}
 	}
-	return true
 }
 
 // validatePruned confirms that every message heldMessages names is still
