@@ -1616,7 +1616,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1632,6 +1632,8 @@ Always exits 0 once the arguments parse and prints nothing.
 Options:
   -harness string
         Hook input of claude, codex or cursor (default "claude")
+  -host-pid int
+        Pid of the process that ran the hook ($PPID); a Claude Code open records it as the dialog's host
   -me string
         Agent handle (or AM_ME)
   -root string
