@@ -2,6 +2,5 @@
 
 package cli
 
-var runFromVersionStore = func(string) error { return nil }
-
-func runWakeFromVersionStore() {}
+// Off Darwin the version store is a no-op, so no wake needs to keep a stage.
+func wakeRunsFromRestartStage() bool { return false }
