@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -66,14 +66,14 @@ var codexDialogHookBinRe = regexp.MustCompile(`; '((?:[^']|'\\'')*)' --no-update
 // singleQuote always single-quotes s for a POSIX shell.
 func singleQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-func codexDialogHooks(bin, store string) []claude.CommandHook {
-	hooks := make([]claude.CommandHook, 0, len(codexDialogHookEvents))
+func codexDialogHooks(bin, store string) []hookfile.CommandHook {
+	hooks := make([]hookfile.CommandHook, 0, len(codexDialogHookEvents))
 	for _, event := range codexDialogHookEvents {
 		verb := "close"
 		if event == "PermissionRequest" {
 			verb = "open"
 		}
-		hook := claude.CommandHook{Event: event, Marker: wakeDialogHookMarker, Command: codexDialogHookCommand(bin, store, verb), Timeout: 5}
+		hook := hookfile.CommandHook{Event: event, Marker: wakeDialogHookMarker, Command: codexDialogHookCommand(bin, store, verb), Timeout: 5}
 		switch event {
 		case "SessionStart":
 			hook.Matcher = "startup|resume|clear"
@@ -208,7 +208,7 @@ func installCodexDialogHook(bin string, dryRun bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err := claude.InstallCommandHooksAt(path, hooks); err != nil {
+	if _, err := hookfile.InstallCommandHooksAt(path, hooks); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook installed in %s\n%s", path, codexHookTrustNote)
@@ -219,7 +219,7 @@ func uninstallCodexDialogHook() error {
 	if err != nil {
 		return err
 	}
-	if err := claude.UninstallCommandHooksAt(path, wakeDialogHookMarker, codexDialogHookEvents); err != nil {
+	if err := hookfile.UninstallCommandHooksAt(path, wakeDialogHookMarker, codexDialogHookEvents); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook removed from %s\n", path)
@@ -307,7 +307,7 @@ func checkCodexDialogHook() (doctorCheck, bool) {
 				return check, true
 			}
 			want := codexDialogHooks(bin, store)
-			current := want[slices.IndexFunc(want, func(h claude.CommandHook) bool { return h.Event == event })]
+			current := want[slices.IndexFunc(want, func(h hookfile.CommandHook) bool { return h.Event == event })]
 			// An async open would let the prompt show before the marker.
 			if entry.Command != current.Command || entry.Matcher != current.Matcher || entry.Timeout != current.Timeout || entry.Async {
 				check.Message = fmt.Sprintf("stale form on %s (command, matcher, timeout or async); %s", event, remedy)

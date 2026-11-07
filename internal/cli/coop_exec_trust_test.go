@@ -16,7 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"golang.org/x/sys/unix"
 )
 
@@ -443,7 +443,7 @@ func installTrustedCodexDialogHookForTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
+	if _, err := hookfile.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
 		t.Fatal(err)
 	}
 	writeCodexConfigForTest(t, filepath.Join(filepath.Dir(path), "config.toml"), "")

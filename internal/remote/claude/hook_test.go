@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 )
 
 func TestUninstallWithoutMarkedEntryLeavesFileUntouched(t *testing.T) {
@@ -380,11 +382,11 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if err := InstallPermissionHook(home, "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	cmds, err := installedCommands(SettingsPath(home), permissionSpec)
+	cmds, err := hookfile.InstalledCommands(SettingsPath(home), permissionSpec)
 	if err != nil || len(cmds) != 1 || !strings.HasSuffix(cmds[0], ` || exec '/opt/amq-remote' claude permission-hook`) {
 		t.Fatalf("approval hook commands = %q, %v", cmds, err)
 	}
-	if groups, _ := markedGroups(SettingsPath(home), permissionSpec); len(groups) != 1 || !strings.Contains(string(groups[0]), `"timeout":86400`) {
+	if groups, _ := hookfile.MarkedGroups(SettingsPath(home), permissionSpec); len(groups) != 1 || !strings.Contains(string(groups[0]), `"timeout":86400`) {
 		t.Fatalf("approval hook group = %q; want the one-day timeout", groups)
 	}
 	if form, err := PermissionHookForm(home, SettingsPath(home)); err != nil || form != HookFormCurrent {
@@ -396,7 +398,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	old := t.TempDir()
 	remote := old + "/.amq/remote"
 	for _, c := range []struct {
-		spec    hookSpec
+		spec    hookfile.Spec
 		cmd     string
 		timeout int
 		form    func(home, settings string) (string, error)
@@ -406,11 +408,11 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 		{permissionSpec, `AMQ_APPROVAL_HOOK=1 set -- "${AMQ_REMOTE_BINDING-}" '` + remote + `/binding.json' '` + remote + `/acp/agents/_machine/'*.json '` +
 			remote + `/bindings/'*.json; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec '/opt/amq-remote' claude permission-hook`, permissionHookTimeout, PermissionHookForm},
 	} {
-		if _, err := replaceHook(SettingsPath(old), c.spec, commandHookEntry(CommandHook{Command: c.cmd, Timeout: c.timeout})); err != nil {
+		if _, err := hookfile.Replace(SettingsPath(old), c.spec, hookfile.CommandEntry(hookfile.CommandHook{Command: c.cmd, Timeout: c.timeout})); err != nil {
 			t.Fatal(err)
 		}
 		if form, err := c.form(old, SettingsPath(old)); err != nil || form != HookFormStale {
-			t.Fatalf("0.132.0 %s form = %q, %v; want stale", c.spec.event, form, err)
+			t.Fatalf("0.132.0 %s form = %q, %v; want stale", c.spec.Event, form, err)
 		}
 	}
 	if err := UninstallPermissionHook(home); err != nil {

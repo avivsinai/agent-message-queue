@@ -25,6 +25,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
@@ -857,7 +858,7 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldForm := func(bin string) []claude.CommandHook {
+	oldForm := func(bin string) []hookfile.CommandHook {
 		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
 		for i := range hooks {
 			hooks[i].Command = wakeDialogHookMarker + "'" + bin + "' --no-update-check wake dialog " +
@@ -866,7 +867,7 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		return hooks
 	}
 	// previousForm opens without naming the process that ran the hook.
-	previousForm := func(bin string) []claude.CommandHook {
+	previousForm := func(bin string) []hookfile.CommandHook {
 		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
 		for i := range hooks {
 			hooks[i].Command = wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hooks[i].Event))
@@ -875,7 +876,7 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name  string
-		hooks []claude.CommandHook
+		hooks []hookfile.CommandHook
 		want  string
 	}{
 		{"old form", oldForm(bin), "stale form"},

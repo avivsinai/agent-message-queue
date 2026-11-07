@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // The Codex approval guard, happy path. The installed Codex commands run
@@ -174,7 +174,7 @@ func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
 		"Interrupt":         "sha256:2f4bc142493a7c72b8392f4537f5e8ee40b0d0df3f0e6eae3eb2fc726bca1c90",
 	}
 	vecPath := filepath.Join(t.TempDir(), "hooks.json")
-	if _, err := claude.InstallCommandHooksAt(vecPath, codexDialogHooks("/opt/amq/bin/amq", "/home/user/.amq/codex-threads/current")); err != nil {
+	if _, err := hookfile.InstallCommandHooksAt(vecPath, codexDialogHooks("/opt/amq/bin/amq", "/home/user/.amq/codex-threads/current")); err != nil {
 		t.Fatal(err)
 	}
 	vecEntries, err := readCodexHookEntries(vecPath)
@@ -207,7 +207,7 @@ func TestCodexDialogDoctorRequiresTheCurrentTrustHashAndEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(codexHome, "hooks.json")
-	if _, err := claude.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
+	if _, err := hookfile.InstallCommandHooksAt(path, codexDialogHooks(bin, store)); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := readCodexHookEntries(path)
