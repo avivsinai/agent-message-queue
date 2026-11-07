@@ -811,7 +811,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newEligible(state, oldUnits[0], time.Now()) {
+	if newEligible(state, oldUnits[0], time.Now(), state.openRequests()) {
 		t.Fatal("bootstrap history became current NEW work")
 	}
 	units, err := unitsFor(state, current.Key)
@@ -831,7 +831,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	noise.Thread = current.Thread
 	shared.Messages[noise.Key] = noise
 	episode, episodeErr := buildEpisode(shared, units)
-	if episodeErr != nil || episode.Included != 1 || episode.Omitted != 1 || !episode.Partial || episode.Messages[0].Body != current.Body || newEligible(shared, units[0], time.Now()) {
+	if episodeErr != nil || episode.Included != 1 || episode.Omitted != 1 || !episode.Partial || episode.Messages[0].Body != current.Body || newEligible(shared, units[0], time.Now(), shared.openRequests()) {
 		t.Fatalf("shared thread context was imported or NEW ignored its gap: %v", episodeErr)
 	}
 
@@ -937,7 +937,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 		t.Fatal(err)
 	}
 	pending, err := unitsFor(detached, current.Key)
-	if err != nil || len(pending) != 1 || !newEligible(detached, pending[0], time.Now()) {
+	if err != nil || len(pending) != 1 || !newEligible(detached, pending[0], time.Now(), detached.openRequests()) {
 		t.Fatalf("retained donor still governed detached evidence: %v", err)
 	}
 	_, choices = buildDecision(detached, pending, false, time.Now())
@@ -1040,7 +1040,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 		t.Fatal(err)
 	}
 	statusUnits, err := unitsFor(withStatus, status.Key)
-	if err != nil || len(statusUnits) != 1 || statusUnits[0].Quote != status.Body || newEligible(withStatus, statusUnits[0], time.Now()) {
+	if err != nil || len(statusUnits) != 1 || statusUnits[0].Quote != status.Body || newEligible(withStatus, statusUnits[0], time.Now(), withStatus.openRequests()) {
 		t.Fatalf("status evidence must be selectable without becoming NEW work: %v", err)
 	}
 }
