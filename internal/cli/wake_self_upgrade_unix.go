@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 	"golang.org/x/sys/unix"
 )
 
@@ -313,8 +314,8 @@ func validateWakeSelfUpgradeLaunchLocator(path string, info os.FileInfo) error {
 	// as 0777 even though chmod does not control link traversal. Ownership of
 	// the unresolved locator is still required; the resolved executable keeps
 	// the existing strict mode and ownership validation in the per-tick probe.
-	ownerUID, ownerOK := wakeTargetFileOwnerUID(info)
-	currentUID, currentOK := wakeTargetCurrentUID()
+	ownerUID, ownerOK := wakelock.FileOwnerUID(info)
+	currentUID, currentOK := wakelock.CurrentUID()
 	if ownerOK && currentOK && ownerUID != currentUID {
 		return fmt.Errorf(
 			"wake self-upgrade launch locator %s is owned by uid %d, want current uid %d",

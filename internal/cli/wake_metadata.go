@@ -9,19 +9,17 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
-const maxWakeMetadataFileBytes = 64 * 1024
+const maxWakeMetadataFileBytes = wakelock.MaxMetadataFileBytes
 
 func readWakeMetadata(file *os.File, label, path string) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(file, maxWakeMetadataFileBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", label, err)
-	}
-	if len(data) > maxWakeMetadataFileBytes {
-		return nil, fmt.Errorf("%s %s is too large", label, path)
-	}
-	return data, nil
+	return wakelock.ReadBounded(file, label, path)
+}
+
+func openWakeMetadataFile(path string) (*os.File, error) {
+	return wakelock.OpenReadOnly(path)
 }
 
 func writeWakeMetadataFile(path string, data []byte, label string) error {

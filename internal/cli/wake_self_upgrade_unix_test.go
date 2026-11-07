@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 func writeWakeSelfUpgradeCandidate(t *testing.T, dir, name string) string {
@@ -88,18 +90,18 @@ func TestProbeWakeSelfUpgradeLocatorRevalidatesUnresolvedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previousCurrentUID := wakeTargetCurrentUID
-	previousOwnerUID := wakeTargetFileOwnerUID
+	previousCurrentUID := wakelock.CurrentUID
+	previousOwnerUID := wakelock.FileOwnerUID
 	previousEval := wakeSelfUpgradeEvalSymlinks
-	wakeTargetCurrentUID = func() (int, bool) { return 1000, true }
-	wakeTargetFileOwnerUID = func(os.FileInfo) (int, bool) { return 2000, true }
+	wakelock.CurrentUID = func() (int, bool) { return 1000, true }
+	wakelock.FileOwnerUID = func(os.FileInfo) (int, bool) { return 2000, true }
 	wakeSelfUpgradeEvalSymlinks = func(string) (string, error) {
 		t.Fatal("unsafe unresolved locator was followed")
 		return "", nil
 	}
 	t.Cleanup(func() {
-		wakeTargetCurrentUID = previousCurrentUID
-		wakeTargetFileOwnerUID = previousOwnerUID
+		wakelock.CurrentUID = previousCurrentUID
+		wakelock.FileOwnerUID = previousOwnerUID
 		wakeSelfUpgradeEvalSymlinks = previousEval
 	})
 
