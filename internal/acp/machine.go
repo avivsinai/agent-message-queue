@@ -214,7 +214,9 @@ func (s *Server) save(r *channelRecord, now time.Time) error {
 // The directory above the state directory anchors the write, so no directory
 // from the state directory down is followed as a link.
 func (s *Server) writeState(path string, raw []byte) error {
-	anchor := filepath.Dir(s.cfg.StateDir)
+	// The state dir is the operator's choice (AMQ_ACP_STATE_DIR may name a
+	// link); everything AMQ creates below it is checked.
+	anchor := s.cfg.StateDir
 	rel, err := filepath.Rel(anchor, path)
 	if err != nil {
 		return err
