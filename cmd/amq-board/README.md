@@ -226,18 +226,29 @@ renamed, and its directory synchronized. Readers wait cancellably on the writer 
 after lock acquisition requires recovery. An uncertain publication stops writes.
 Each publication appends its changes to `journal.jsonl` beside the snapshot, so
 a refresh writes what changed, not the whole history. When the journal reaches
-a quarter of the snapshot, the next publication writes a new snapshot; the old
-snapshot becomes `snapshot.backup.json` and its journal
-`snapshot.backup.journal.jsonl`, which together are the previous generation.
-Readers replay the journal over the snapshot; a journal that does not continue
-the snapshot's generation one by one requires recovery.
+a quarter of the snapshot, the next publication writes a new snapshot: the
+old snapshot and its journal are kept as `snapshot.backup.json` and
+`snapshot.backup.journal.jsonl`, which together are the last generation before
+the new snapshot, and `journal.jsonl` is removed once the new snapshot is
+durable. Readers replay the journal over the snapshot; a journal that does not
+continue the snapshot's generation one by one requires recovery.
 
-A publication interrupted while appending leaves `write-pending` and can leave
-a last journal line without a newline. Its generation was never published:
-remove that partial line, then `write-pending`. To restore the recovery copy,
-copy `snapshot.backup.json` to `snapshot.json` and
-`snapshot.backup.journal.jsonl` to `journal.jsonl` (or remove `journal.jsonl`
-when there is no backup journal).
+An interrupted publication leaves `write-pending`, and its text says which
+step was interrupted:
+
+- `journal append pending`: the last journal line can lack a newline. Its
+  generation was never published: remove that partial line, then
+  `write-pending`.
+- `new base pending: generation N`: if `snapshot.json` has generation N, the
+  new snapshot is published: remove `journal.jsonl` if it is still there, then
+  `write-pending`. Otherwise the old snapshot and `journal.jsonl` are still the
+  published state: remove only `write-pending`.
+- `durability uncertain`: the publication is written, but its directory sync
+  failed. Once the disk is healthy, remove `write-pending`.
+
+To restore the recovery copy, copy `snapshot.backup.json` to `snapshot.json`
+and `snapshot.backup.journal.jsonl` to `journal.jsonl` (or remove
+`journal.jsonl` when there is no backup journal).
 
 The snapshot bound is 64 MiB, including 1 MiB reserved for coverage-only
 publication; the evidence bound is 256 MiB. A publication past the snapshot

@@ -495,9 +495,11 @@ func (s Store) publish(state *Snapshot, prev document) error {
 // It appends the leaf changes from prev to the journal, or writes a new base
 // when prev is none or an older schema, when the journal would pass a quarter
 // of the base, or while pruned evidence waits to be removed. A new base keeps
-// the old base and its journal as the recovery copy (keepBackup), so every
-// crash point leaves the previous generation recoverable under the
-// write-pending marker.
+// the old base and its journal as the recovery copy (keepBackup) without
+// moving them, and journal.jsonl goes only after the new base is durable, so
+// at every crash point snapshot.json with journal.jsonl, or the new base
+// alone, is the last published generation. The write-pending marker names
+// which publication was interrupted.
 func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	if len(data) > snapshotLimit {
 		return errors.New("board snapshot reached 64 MiB; ingestion stopped, existing state preserved")
@@ -534,7 +536,11 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	}
 	// A durable marker makes an interrupted or uncertain rename fail closed on
 	// the next writer. Readers never fall back to source reads or a backup.
-	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte("publication pending\n"), 0o600); err != nil {
+	marker := "journal append pending\n"
+	if compact {
+		marker = fmt.Sprintf("new base pending: generation %d\n", state.Generation)
+	}
+	if _, err := fsq.WriteFileAtomic(s.Dir, "write-pending", []byte(marker), 0o600); err != nil {
 		return err
 	}
 	if compact {
@@ -542,6 +548,9 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 			return err
 		}
 		if _, err := fsq.WriteFileAtomic(s.Dir, "snapshot.json", append(data, '\n'), 0o600); err != nil {
+			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
+		}
+		if err := os.Remove(filepath.Join(s.Dir, journalName)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("board durability uncertain; stop writes and recover: %w", err)
 		}
 	} else if err := s.appendJournal(record); err != nil {
@@ -568,41 +577,47 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 // before the current base.
 const backupJournalName = "snapshot.backup.journal.jsonl"
 
-// keepBackup makes the current base snapshot.backup.json without copying it,
-// then moves the current journal beside it, so the recovery copy replays to
-// the previous generation. Until the new base replaces snapshot.json, the
-// current base is unchanged.
+// keepBackup makes the current base and its journal snapshot.backup.json and
+// snapshot.backup.journal.jsonl, which replay to the current generation. It
+// never moves or changes snapshot.json or journal.jsonl.
 func (s Store) keepBackup() error {
-	current := filepath.Join(s.Dir, "snapshot.json")
-	if _, err := os.Lstat(current); os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(s.Dir, "snapshot.json")); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	staged := filepath.Join(s.Dir, "snapshot.backup.json.tmp")
-	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+	if err := s.linkBackup("snapshot.json", "snapshot.backup.json"); err != nil {
 		return err
 	}
-	if err := os.Link(current, staged); err == nil {
-		if err = os.Rename(staged, filepath.Join(s.Dir, "snapshot.backup.json")); err != nil {
-			return err
-		}
-	} else {
-		old, err := readBounded(current, snapshotLimit)
-		if err != nil {
-			return err
-		}
-		if _, err = fsq.WriteFileAtomic(s.Dir, "snapshot.backup.json", old, 0o600); err != nil {
-			return err
-		}
-	}
-	err := os.Rename(filepath.Join(s.Dir, journalName), filepath.Join(s.Dir, backupJournalName))
+	err := s.linkBackup(journalName, backupJournalName)
 	if os.IsNotExist(err) {
 		err = os.Remove(filepath.Join(s.Dir, backupJournalName))
 		if os.IsNotExist(err) {
 			return nil
 		}
 	}
+	return err
+}
+
+// linkBackup makes backup hold the bytes of name, a hard link where the file
+// system allows one and a durable copy otherwise. name is not changed.
+func (s Store) linkBackup(name, backup string) error {
+	source := filepath.Join(s.Dir, name)
+	staged := filepath.Join(s.Dir, backup+".tmp")
+	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	err := os.Link(source, staged)
+	if err == nil {
+		return os.Rename(staged, filepath.Join(s.Dir, backup))
+	} else if os.IsNotExist(err) {
+		return err
+	}
+	data, err := readBounded(source, snapshotLimit)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteFileAtomic(s.Dir, backup, data, 0o600)
 	return err
 }
 
