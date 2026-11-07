@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent),
-// receipt or remote file (remote-files) in an agent mailbox.
+// HistoryFile is one read message (inbox/cur), sent copy (outbox/sent) or
+// receipt in an agent mailbox.
 type HistoryFile struct {
 	Path    string
 	Agent   string
@@ -22,7 +22,10 @@ type HistoryFile struct {
 // in maxBytes. A zero cutoff or maxBytes leaves that limit off. A file's age
 // is the creation stamp that starts its message id, or its modification time
 // when the name has none. Unread mail, dead letters and temporary files are
-// never history, and a message whose id is in keep stays with its receipts.
+// never history, dead-letter receipts are the only record of a corrupt
+// message and stay, remote files (which an unread message may still
+// reference) are not scanned, and a message whose id is in keep stays with
+// its receipts.
 func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[string]bool) ([]HistoryFile, error) {
 	agents, err := ListAgents(root)
 	if err != nil {
@@ -35,7 +38,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 	for _, agent := range agents {
 		var files []HistoryFile
 		var total int64
-		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent), AgentRemoteFiles(root, agent)} {
+		for _, dir := range []string{AgentInboxCur(root, agent), AgentOutboxSent(root, agent), AgentReceipts(root, agent)} {
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -44,7 +47,7 @@ func FindHistoryFiles(root string, cutoff time.Time, maxBytes int64, keep map[st
 				return nil, err
 			}
 			for _, entry := range entries {
-				if !entry.Type().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
+				if !entry.Type().IsRegular() || strings.HasPrefix(entry.Name(), ".") || strings.HasSuffix(entry.Name(), "__dlq.json") {
 					continue
 				}
 				info, err := entry.Info()

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -37,12 +38,12 @@ func runCleanup(args []string) error {
 	historyOlderFlag := fs.String(
 		"history-older-than",
 		"",
-		"Remove read messages, sent copies, receipts and remote files older than this duration (e.g. 720h)",
+		"Remove read messages, sent copies, receipts older than this duration (e.g. 720h)",
 	)
 	historyMaxFlag := fs.String(
 		"history-max-size",
 		"",
-		"Remove the oldest read messages, sent copies, receipts and remote files until each mailbox's history fits this size (e.g. 100MB)",
+		"Remove the oldest read messages, sent copies, receipts until each mailbox's history fits this size (e.g. 100MB)",
 	)
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
@@ -51,10 +52,11 @@ func runCleanup(args []string) error {
 		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
 		"--history-older-than and --history-max-size remove history from every agent",
 		"mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),",
-		"receipts, and fetched remote files such as Buzz images (remote-files), oldest",
+		"and receipts, oldest",
 		"first by the creation stamp in the message id, else the modification time. A size",
 		"(B, KB, MB or GB) bounds each mailbox's history by file size. Unread mail,",
-		"dead letters, extension data, and every copy of a message that",
+		"dead letters and their receipts, fetched remote files, a message whose header",
+		"does not parse, extension data, and every copy of a message that",
 		"'amq thread open --max-age 0' lists as open, with the replies that ref it,",
 		"are never removed, and nothing is removed unless you run this command.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
@@ -187,9 +189,11 @@ func runCleanup(args []string) error {
 		if err != nil {
 			return err
 		}
-		if historyCandidates, err = fsq.FindHistoryFiles(root, cutoff, historyMax, open); err != nil {
+		found, err := fsq.FindHistoryFiles(root, cutoff, historyMax, open)
+		if err != nil {
 			return err
 		}
+		historyCandidates = dropUnparsableMessages(found)
 	}
 	candidates := append([]string{}, tmpCandidates...)
 	for _, candidate := range wakeQuarantineCandidates {
@@ -393,6 +397,21 @@ func writeLaunchJournalCleanupReport(action string, report launchJournalCleanupR
 		}
 	}
 	return nil
+}
+
+// dropUnparsableMessages keeps every message file whose header does not
+// parse: such a file belongs to dead-letter handling, not to history.
+func dropUnparsableMessages(files []fsq.HistoryFile) []fsq.HistoryFile {
+	kept := files[:0]
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, ".md") {
+			if _, err := format.ReadHeaderFile(f.Path); err != nil {
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 func historyNote(bytes int64) string {

@@ -11,6 +11,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// validHistoryMessage is a message whose header parses.
+const validHistoryMessage = "---json\n{\"schema\":1}\n---\nx\n"
+
 // cleanup with a size policy brings each mailbox's history under the size it
 // is given, oldest first, and leaves unread mail (unbounded mailboxes: 13.4k
 // read, 14.7k sent and 13.5k receipt files in one mailbox, bead
@@ -19,12 +22,11 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 	rootPath := newCleanupMailboxRoot(t, "claude")
 	base := fsq.AgentBase(rootPath, "claude")
 	files := map[string]string{
-		"inbox/cur/2026-01-01T00-00-00.000Z_pid1_a.md":                   "old read",
-		"outbox/sent/2026-01-02T00-00-00.000Z_pid1_b.md":                 "old sent",
+		"inbox/cur/2026-01-01T00-00-00.000Z_pid1_a.md":                   validHistoryMessage,
+		"outbox/sent/2026-01-02T00-00-00.000Z_pid1_b.md":                 validHistoryMessage,
 		"receipts/2026-01-03T00-00-00.000Z_pid1_c__claude__drained.json": "receipt1",
-		"inbox/cur/2026-02-01T00-00-00.000Z_pid1_d.md":                   "new read",
+		"inbox/cur/2026-02-01T00-00-00.000Z_pid1_d.md":                   validHistoryMessage,
 		"inbox/new/2025-01-01T00-00-00.000Z_pid1_e.md":                   "unread!!",
-		"remote-files/" + strings.Repeat("f", 64) + ".png":               "an image",
 	}
 	for rel, body := range files {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(base, rel)), 0o700); err != nil {
@@ -34,14 +36,8 @@ func TestCleanupHistoryMaxSizeRemovesOldestHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A remote file's age is its modification time (Buzz images kept
-	// forever, bead agent-message-queue-ho2).
-	imageTime := time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(filepath.Join(base, "remote-files", strings.Repeat("f", 64)+".png"), imageTime, imageTime); err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := captureEnvOutput(t, func() error {
-		return runCleanup([]string{"--history-max-size", "10B", "--root", rootPath, "--yes"})
+		return runCleanup([]string{"--history-max-size", "30B", "--root", rootPath, "--yes"})
 	}); err != nil {
 		t.Fatalf("cleanup --history-max-size: %v", err)
 	}
@@ -109,6 +105,38 @@ func TestCleanupHistoryKeepsRepliesToOpenObligations(t *testing.T) {
 		}
 		if after := runThreadOpenJSON(t, base); len(after.Obligations) != 1 || after.Obligations[0].State != "acknowledged" {
 			t.Fatalf("%s: obligations after cleanup = %+v, want one acknowledged", session, after.Obligations)
+		}
+	}
+}
+
+// Review of the disk bounds: history cleanup deleted a corrupt message, a
+// dead-letter receipt and a fetched remote file instead of keeping them.
+func TestCleanupHistoryKeepsCorruptDeadLetterReceiptAndRemoteFiles(t *testing.T) {
+	rootPath := newCleanupMailboxRoot(t, "claude")
+	base := fsq.AgentBase(rootPath, "claude")
+	files := map[string]string{
+		"inbox/cur/2026-01-01T00-00-00.000Z_pid1_a.md":                   "not a message",
+		"receipts/2026-01-02T00-00-00.000Z_pid1_b__claude__dlq.json":     "dlq receipt",
+		"receipts/2026-01-03T00-00-00.000Z_pid1_c__claude__drained.json": "drained",
+		"remote-files/" + strings.Repeat("f", 64) + ".png":               "an image",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(base, rel)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, rel), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--history-max-size", "1B", "--history-older-than", "1h", "--root", rootPath, "--yes"})
+	}); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	for rel := range files {
+		_, err := os.Lstat(filepath.Join(base, rel))
+		if kept := !strings.Contains(rel, "drained"); kept != (err == nil) {
+			t.Fatalf("%s kept=%v, want %v", rel, err == nil, kept)
 		}
 	}
 }
