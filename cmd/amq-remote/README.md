@@ -608,7 +608,8 @@ after `amq wake repair`, or a wake that could not record its process), the
 binding stays unknown.
 
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
-the session is found exactly and never guessed from a discovery list. Claude
+the session is found exactly and never guessed from a discovery list. (A
+resumed session may get that same share back by itself; see below.) Claude
 is found by the command's process ancestry. A pi chat is found the
 same way: its tools run under the pi process whose pid the chat's bridge
 publishes in `bridge.liveness`, with the chat's session id. Codex is found by
@@ -650,6 +651,20 @@ own Buzz agent, pinned to its binding by the system prompt line `AMQ Remote
 session: <name>`, which `amq-acp setup --session <name>` writes into its
 import file, or by the model `amq-remote:<name>`; such a session keeps its DM
 while its agent runs or is idle.
+
+When a shared session's process ends and the same session comes back in a
+new process (for example a resumed conversation), its share comes back
+without a new `/amq-remote`, and never after `/amq-remote off`:
+
+- A pi session (mailbox or native): the machine agent binds it again and
+  restores its channel when the pi bridge of the same root and handle
+  (`bridge.liveness`) names the session id the ended binding recorded. It
+  looks at sessions that ended within the last 7 days.
+- A Claude session (mailbox or native): the approval hook binds it again on
+  the session's first approval dialog, from the Claude process that runs the
+  hook, and the machine agent then restores its channel.
+- A Codex session is not restored, because Codex publishes no record of a
+  resumed thread; run `$amq-remote` in it again.
 
 Attach tells the owner only what is still needed. It prints `Connected:
 <label>`, the session's label (`<harness> · <project>/<session> @

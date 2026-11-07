@@ -147,6 +147,9 @@ type wakeDialogHookInput struct {
 	GenerationID string `json:"generation_id"`
 	Status       string `json:"status"`
 	emptyInput   bool
+	// hostPID is the process that ran a Claude Code hook (--host-pid); an
+	// open records it as the dialog's host (wakeDialogHookHost).
+	hostPID int
 }
 
 // wakeDialogMarker is the .wake.dialog content. The wake uses the file's
@@ -418,7 +421,8 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	meFlag := fs.String("me", defaultMe(), "Agent handle (or AM_ME)")
 	rootFlag := fs.String("root", "", "Root directory for the queue (default: AM_ROOT, else .amqrc discovery from the hook's cwd)")
 	harness := fs.String("harness", "claude", "Hook input of claude, codex or cursor")
-	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] open|close",
+	hostPID := fs.Int("host-pid", 0, "Pid of the process that ran the hook ($PPID); a Claude Code open records it as the dialog's host")
+	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close",
 		"Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook",
 		"installs it. Reads the hook input JSON on stdin.",
 		"",
@@ -450,6 +454,7 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		inputErr = nil
 		in.emptyInput = true
 	}
+	in.hostPID = *hostPID
 	if !open && inputErr != nil {
 		return nil
 	}
@@ -520,7 +525,7 @@ func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookI
 		TranscriptPath:      in.TranscriptPath,
 		AgentID:             in.AgentID,
 		AgentTranscriptPath: in.AgentTranscriptPath,
-		Host:                wakeDialogHookHost(),
+		Host:                wakeDialogHookHost(in.hostPID),
 		SessionID:           in.SessionID,
 		OpenedAt:            time.Now().UTC().Format(time.RFC3339),
 	})
@@ -696,7 +701,8 @@ func wakeDialogMarkerClosedBy(dirfd int, agentDir *wakeAgentDir, raw []byte, in 
 // directory) runs the receiver, which resolves the root itself. Claude Code
 // reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and Stop,
 // and an older amq at this path would exit 2 on the unknown subcommand.
-// harnessFlag is empty for Claude Code, or a --harness flag and a space.
+// harnessFlag is the receiver's flags before verb, each followed by a space:
+// claudeDialogHookHostFlag for a Claude Code open, or a --harness flag.
 func wakeDialogHookCommand(bin, harnessFlag, verb string) string {
 	gate := `[ -z "${AM_ME-}" ] || `
 	if verb == "close" {
@@ -704,6 +710,20 @@ func wakeDialogHookCommand(bin, harnessFlag, verb string) string {
 	}
 	return wakeDialogHookMarker + gate + singleQuote(bin) +
 		" --no-update-check wake dialog " + harnessFlag + verb + " || true"
+}
+
+// claudeDialogHookHostFlag passes a Claude Code open the pid of the process
+// that ran the hook: the $PPID of its sh -c is Claude Code.
+const claudeDialogHookHostFlag = `--host-pid "$PPID" `
+
+// claudeDialogHookCommand is wakeDialogHookCommand of the Claude Code hook
+// for verb; an open names its host.
+func claudeDialogHookCommand(bin, verb string) string {
+	flags := ""
+	if verb == "open" {
+		flags = claudeDialogHookHostFlag
+	}
+	return wakeDialogHookCommand(bin, flags, verb)
 }
 
 // wakeDialogNoMarkerTest succeeds only when AM_ROOT and AM_ME name exactly
@@ -715,8 +735,9 @@ const wakeDialogNoMarkerTest = `{ case "${AM_ROOT-}" in */./*|*/../*|*/.|*/..) f
 	`[ ! -e "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ] && ` +
 	`[ ! -L "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ]; }`
 
-// wakeDialogHookBinRe reads the binary back from wakeDialogHookCommand.
-var wakeDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:open|close) \|\| true$`)
+// wakeDialogHookBinRe reads the binary back from claudeDialogHookCommand,
+// and from its form without the host flag, which doctor reports as stale.
+var wakeDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:--host-pid "\$PPID" )?(?:open|close) \|\| true$`)
 
 // wakeDialogHookVerb is the receiver verb the installer wires to event.
 func wakeDialogHookVerb(event string) string {
@@ -732,7 +753,7 @@ func wakeDialogHooks(bin string, events []string) []claude.CommandHook {
 		hook := claude.CommandHook{
 			Event:   event,
 			Marker:  wakeDialogHookMarker,
-			Command: wakeDialogHookCommand(bin, "", wakeDialogHookVerb(event)),
+			Command: claudeDialogHookCommand(bin, wakeDialogHookVerb(event)),
 			Timeout: 5,
 		}
 		switch event {
@@ -1009,9 +1030,9 @@ func claudeDialogHookCheckAt(path string, version claudeVersion, known bool) (do
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)
 			return check, DialogGuardIncomplete
 		}
-		if hook.command != wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hook.event)) {
+		if hook.command != claudeDialogHookCommand(bin, wakeDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, DialogGuardIncomplete
+			return check, DialogGuardStale
 		}
 	}
 	check.Status = "ok"

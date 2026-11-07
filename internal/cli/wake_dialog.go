@@ -18,9 +18,12 @@ const (
 	DialogGuardUnsupported = "unsupported"
 	DialogGuardOK          = "ok"
 	DialogGuardMissing     = "missing"
-	DialogGuardIncomplete  = "incomplete" // some events, a stale form, or a missing amq binary
-	DialogGuardDisabled    = "disabled"   // installed, but the file sets disableAllHooks
-	DialogGuardUnreadable  = "unreadable"
+	DialogGuardIncomplete  = "incomplete" // some events, an unknown command, or a missing amq binary
+	// DialogGuardStale: every hook holds, but an older form whose open names
+	// no host, so a hold does not close when Claude Code exits.
+	DialogGuardStale      = "stale"
+	DialogGuardDisabled   = "disabled" // installed, but the file sets disableAllHooks
+	DialogGuardUnreadable = "unreadable"
 )
 
 type wakeDialogState uint8

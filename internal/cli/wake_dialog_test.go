@@ -173,6 +173,8 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 		agentPath string
 		// host is the marker's host process.
 		host launch.HolderIdentity
+		// ancestors replaces the hook receiver's proven ancestors.
+		ancestors []launch.HolderIdentity
 		// noExchange makes the file system refuse an exchange rename.
 		noExchange bool
 		notices    int
@@ -251,6 +253,12 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			claudeHook: true, transcript: asked, rings: 1, log: "dialog host 99999999 exited; entry closed"},
 		{name: "an entry whose host pid runs another process closes", marker: permissionWithHost, host: reusedHost, age: wakeDialogQuietHold + time.Minute,
 			claudeHook: true, transcript: asked, rings: 1},
+		// Review of the dialog-hold release: the host was the ancestor that
+		// ran an executable named claude, so an npm Claude Code, which runs
+		// as node, recorded none and its entry never closed on its exit.
+		{name: "an entry of an npm Claude Code closes when the process that ran its hook exits", claudeHook: true, transcript: asked,
+			ancestors: []launch.HolderIdentity{self, deadHost}, rings: 1, log: "dialog host 99999999 exited; entry closed",
+			hooks: []wakeDialogHookInput{{Event: "PermissionRequest", Tool: "Bash", SessionID: "s1", hostPID: deadHost.PID}}},
 		// Pre-merge review of agent-message-queue-zu3: an AskUserQuestion
 		// that opened past a permission marker kept that marker, so the
 		// doorbell answered a dialog seconds old once that marker released.
@@ -310,6 +318,11 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				exchange := wakeDialogExchangeAt
 				wakeDialogExchangeAt = func(int, string, int, string) error { return unix.EINVAL }
 				t.Cleanup(func() { wakeDialogExchangeAt = exchange })
+			}
+			if tt.ancestors != nil {
+				ancestors := wakeDialogAncestors
+				wakeDialogAncestors = func() []launch.HolderIdentity { return tt.ancestors }
+				t.Cleanup(func() { wakeDialogAncestors = ancestors })
 			}
 			for _, in := range tt.hooks {
 				if wakeDialogHookVerb(in.Event) == "open" {
@@ -651,8 +664,8 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 		event, matcher, verb string
 		timeout              int
 	}{
-		{"PreToolUse", "AskUserQuestion|ExitPlanMode", "open", 5},
-		{"PermissionRequest", "", "open", 5},
+		{"PreToolUse", "AskUserQuestion|ExitPlanMode", `--host-pid "$PPID" open`, 5},
+		{"PermissionRequest", "", `--host-pid "$PPID" open`, 5},
 		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close", 5},
 		{"PostToolUseFailure", "AskUserQuestion|ExitPlanMode", "close", 5},
 		{"UserPromptSubmit", "", "close", 5},
@@ -852,12 +865,21 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		}
 		return hooks
 	}
+	// previousForm opens without naming the process that ran the hook.
+	previousForm := func(bin string) []claude.CommandHook {
+		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
+		for i := range hooks {
+			hooks[i].Command = wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hooks[i].Event))
+		}
+		return hooks
+	}
 	for _, tc := range []struct {
 		name  string
 		hooks []claude.CommandHook
 		want  string
 	}{
 		{"old form", oldForm(bin), "stale form"},
+		{"form without the host pid", previousForm(bin), "stale form on PreToolUse"},
 		{"missing binary", wakeDialogHooks(filepath.Join(t.TempDir(), "gone", "amq"), wakeDialogHookEvents), "missing amq binary"},
 		{"current", wakeDialogHooks(bin, wakeDialogHookEvents), "installed"},
 	} {
