@@ -119,6 +119,24 @@ func refuseNonDirectoryAmbient(dir string) error {
 // may have created it and then failed or crashed before syncing its parent, so
 // it is visible to Stat while its entry is not yet on stable storage. Stat
 // proves existence, never durability.
+// MkdirAllSynced creates dir and its missing parents, then fsyncs every
+// directory in ancestorChain(dir, stop) on every call, whether or not this
+// call created anything. It is the ambient-path twin of the pinned
+// mkdirAllSynced for stores that own a plain directory tree. dir itself is
+// not synced: the writer that commits a file in it syncs it.
+func MkdirAllSynced(dir, stop string) error {
+	dir = filepath.Clean(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, d := range ancestorChain(dir, stop) {
+		if err := SyncDir(d); err != nil {
+			return fmt.Errorf("sync ancestor %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
 func ancestorChain(dir, stop string) []string {
 	// The walk compares against stop, and filepath.Dir returns cleaned paths.
 	// An operator's --root may carry a trailing slash, so clean stop too: a

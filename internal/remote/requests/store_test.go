@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -687,5 +689,103 @@ func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
 	defer func() { _ = s2.Close() }()
 	if s2.used < 4096 {
 		t.Fatalf("used = %d, want the poison record's bytes counted", s2.used)
+	}
+}
+
+// Review of the request store: Open and the first write to a creator host
+// synced only the host directory, so power loss could drop the directory
+// entries that reach a first-contact record. Every directory that owns an
+// entry on the way to the record is synced, and again on the first write to
+// a host after a restart, because an existing directory is not proof of a
+// durable one.
+func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	reqDir := filepath.Join(state, layoutVersion, requestsDir)
+	var synced []string
+	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	defer restore()
+
+	s, err := Open(state, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.Create(newRecord("11111111-1111-4111-8111-111111111301")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, d := range []string{filepath.Dir(state), state, filepath.Join(state, layoutVersion), reqDir} {
+		if !slices.Contains(synced, d) {
+			t.Fatalf("first-contact write never synced %s; synced %v", d, synced)
+		}
+	}
+	_ = s.Close()
+
+	synced = nil
+	s2, err := Open(state, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if err := s2.Create(newRecord("11111111-1111-4111-8111-111111111302")); err != nil {
+		t.Fatalf("create after reopen: %v", err)
+	}
+	if !slices.Contains(synced, reqDir) {
+		t.Fatalf("first write to an existing host after reopen did not sync %s; synced %v", reqDir, synced)
+	}
+}
+
+// Review of the request store: a terminal update whose rename landed but
+// whose directory sync failed kept its reservation, so the next submit was
+// refused storage_full until a restart.
+func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
+	quota := int64(protocol.MaxRecordBytes) + 64*1024
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(quota))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	k1 := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111401"}
+	if err := s.Reserve(k1, protocol.MaxRecordBytes); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	rec := newRecord(k1.RequestID)
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	if err := s.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+
+	// WriteFileAtomic syncs the host directory before and after the rename;
+	// fail the second, so the terminal record is on disk and the write errs.
+	calls := 0
+	restore := fsq.SyncDirAmbientSwapForTest(func(string) error {
+		calls++
+		if calls == 2 {
+			return fmt.Errorf("injected post-rename sync failure")
+		}
+		return nil
+	})
+	rec.Revision, rec.State = 3, protocol.StateCompleted
+	rec.Result = &protocol.Result{Text: "done"}
+	err = s.Update(rec)
+	restore()
+	if err == nil {
+		t.Fatal("terminal update with a failed post-rename sync reported success")
+	}
+	if got, _, gerr := s.Get(k1); gerr != nil || got.State != protocol.StateCompleted {
+		t.Fatalf("record on disk after the ambiguous write = %v, %v; want completed", got, gerr)
+	}
+
+	k2 := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111402"}
+	if err := s.Reserve(k2, protocol.MaxRecordBytes); err != nil {
+		t.Fatalf("next submit refused after the settled record: %v", err)
+	}
+	if err := s.Create(newRecord(k2.RequestID)); err != nil {
+		t.Fatalf("next create: %v", err)
 	}
 }

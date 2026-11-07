@@ -472,7 +472,9 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 // does Revision++, ObservedAt, store.Update, notify, and memo AckDigest — so
 // no caller can forget notify or the ack memo. Returns the ackDigest + the
 // storage error (if any). The caller holds e.mu and owns unlocking + publish.
-// applyTransition+commitLocked is the ONLY persist path.
+// Every transition after admission persists through it; admission writes its
+// received and dispatching revisions itself, because each must land between
+// its own crash points.
 func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error) {
 	rec.Revision++
 	rec.ObservedAt = protocol.FormatTime(e.now())

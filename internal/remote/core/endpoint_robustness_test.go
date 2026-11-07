@@ -267,3 +267,33 @@ func TestCancelWrongEpochDoesNotInterrupt(t *testing.T) {
 		t.Fatalf("run no longer running after a refused cancel: %s", rec.State)
 	}
 }
+
+// Review of cancel ordering: an expired cancel that arrived before its submit
+// wrote a cancelled_before_admission tombstone, and the later valid submit
+// returned it without dispatching.
+func TestExpiredCancelBeforeSubmitWritesNothing(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-1111111115b5"
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	_, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel,
+		RequestRef: protocol.EncodeRef("local", "fake", id), TargetID: "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now().Add(-time.Minute)),
+	}, ownerShare)
+	if protocol.RefusalCode(err) != protocol.CodeExpired {
+		t.Fatalf("expired cancel with no record: err = %v, want an expired refusal", err)
+	}
+	if _, exists, _ := store.Get(key); exists {
+		t.Fatal("expired cancel wrote a record")
+	}
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if rec, _, _ := store.Get(key); rec == nil || rec.NativeDispatches != 1 {
+		t.Fatalf("valid submit after an expired cancel did not dispatch: %+v", rec)
+	}
+}
