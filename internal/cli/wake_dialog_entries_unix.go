@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
@@ -412,33 +411,31 @@ func claudeDialogHookMarker(raw []byte) bool {
 	return json.Unmarshal(raw, &marker) == nil && marker.Harness == "" && wakeDialogHookVerb(marker.Event) == "open"
 }
 
-// maxWakeDialogHostHops bounds the walk from the hook receiver to its
-// Claude Code process: the hook runs as sh -c, which starts amq.
-const maxWakeDialogHostHops = 3
+// maxWakeDialogHostHops bounds the walk from the hook receiver to the
+// process that ran the hook: its sh -c starts amq, or execs into it.
+const maxWakeDialogHostHops = 2
 
-// wakeDialogHookHost is the nearest of this process's first
+// wakeDialogAncestors is launch.Ancestors; tests replace it.
+var wakeDialogAncestors = launch.Ancestors
+
+// wakeDialogHookHost is the process that ran the hook, named by pid (the
+// $PPID of the hook's sh -c): the one of this process's first
 // maxWakeDialogHostHops ancestors, each edge proven by its start token, that
-// runs a Claude Code executable, or nil.
-func wakeDialogHookHost() *launch.HolderIdentity {
-	for i, ancestor := range launch.Ancestors() {
+// has that pid, or nil. The identity is the walk's, so a pid outside that
+// chain records no host.
+func wakeDialogHookHost(pid int) *launch.HolderIdentity {
+	if pid <= 0 {
+		return nil
+	}
+	for i, ancestor := range wakeDialogAncestors() {
 		if i == maxWakeDialogHostHops {
 			break
 		}
-		if exe, err := launch.ProcessExecutable(ancestor.PID); err == nil && claudeCodeExecutable(exe) {
+		if ancestor.PID == pid {
 			return &ancestor
 		}
 	}
 	return nil
-}
-
-// claudeCodeExecutable reports a Claude Code executable: one named claude,
-// or a native install's <...>/claude/versions/<version>.
-func claudeCodeExecutable(exe string) bool {
-	if facts, _ := harness.ForExecutable(exe); facts.Name == harness.Claude {
-		return true
-	}
-	versions := filepath.Dir(exe)
-	return filepath.Base(versions) == "versions" && filepath.Base(filepath.Dir(versions)) == "claude"
 }
 
 // wakeDialogHostGone reports a marker whose recorded host process is proven
