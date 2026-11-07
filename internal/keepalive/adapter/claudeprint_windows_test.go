@@ -33,7 +33,9 @@ func TestWindowsProcessHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		if err := os.WriteFile(os.Getenv(windowsProcessGrandchildPIDEnv), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		// Write then rename, so the test never reads a created but empty file.
+		pidFile := os.Getenv(windowsProcessGrandchildPIDEnv)
+		if err := os.WriteFile(pidFile+".tmp", []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil || os.Rename(pidFile+".tmp", pidFile) != nil {
 			_ = child.Process.Kill()
 			os.Exit(4)
 		}
