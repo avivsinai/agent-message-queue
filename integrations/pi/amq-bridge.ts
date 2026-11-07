@@ -589,8 +589,8 @@ function scanSafely(pi: ExtensionAPI, b: Bridge): void {
 
 // discover adds the requests listed in requests/ that are not handled yet
 // to b.pending. requests/ retains every request, so it is listed only when
-// it changed (see RECONCILE_MS): an idle poll costs one stat, not a pass
-// over the history.
+// it changed (see RECONCILE_MS): an idle poll's cost does not grow with the
+// history.
 function discover(b: Bridge): void {
 	const reqDir = path.join(b.dir, "requests");
 	const now = Date.now();

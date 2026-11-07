@@ -277,9 +277,7 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 	}
 });
 
-// Review of pi bridge ownership: a second pi on the same AM_ROOT and AM_ME
-// closed the first bridge's running request uncertain, and the adapter keeps
-// the first terminal event, so the real outcome was lost.
+// Review of pi bridge ownership: a second pi on one mailbox masked the first request's real result.
 test("a second bridge on a live owner's mailbox stays inactive and the request keeps its real outcome", async () => {
 	const h1 = harness();
 	await h1.start();
@@ -304,8 +302,7 @@ test("a second bridge on a live owner's mailbox stays inactive and the request k
 	}
 });
 
-// Review of pi admission evidence: a short write of the receipt was synced,
-// linked, and handed to pi, so the adapter could not parse the admission proof.
+// Review of pi admission evidence: a short receipt write was published and handed to pi.
 test("a short receipt write publishes nothing, and the retry publishes the whole receipt", async () => {
 	const h = harness();
 	const realWrite = nodeFs.writeSync;
