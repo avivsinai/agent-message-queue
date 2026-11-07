@@ -663,6 +663,7 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 		// The host reports its own admission and outcome; pi's events do not
 		// decide the request.
 		report({ event: "started" });
+		await h.emit("message_start", userMessage("remote task"));
 		await h.emit("message_end", userMessage("remote task"));
 		await h.emit("message_end", assistantMessage("pi's own text"));
 		await h.emit("agent_before_settle", { outcome: "completed" });
@@ -692,6 +693,153 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 		assert.equal(h.hasReceipt(OTHER), false);
 		assert.equal(handed.length, 1);
 	} finally {
+		await h.done();
+	}
+});
+
+// hostHarness embeds the bridge with a host identity at root and the given
+// delivery.
+const hostHarness = (deliver: AmqBridgeOptions["deliver"]) => harness((root) => ({ identity: () => ({ root, handle: "pi-seat" }), deliver }));
+
+// Review of host-mode activity: the request's ref tags its own user message,
+// matched by its text, not whichever user message ends after the report.
+test("a host request's ref tags only its own user message", async () => {
+	let report: ((outcome: AmqOutcome) => void) | undefined;
+	const h = hostHarness({
+		busy: () => false,
+		send(_ctx, _request, r) {
+			report = r;
+		},
+	});
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => report !== undefined);
+		report?.({ event: "started" });
+		for (const text of ["queued local note", "remote task"]) {
+			await h.emit("message_start", userMessage(text));
+			await h.emit("message_end", userMessage(text));
+		}
+		const users = fs
+			.readFileSync(path.join(h.dir, "activity", "pi-session-1.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((l) => JSON.parse(l))
+			.filter((l) => l.kind === "user")
+			.map((l) => [l.text, l.id ?? ""]);
+		assert.deepEqual(users, [
+			["queued local note", ""],
+			["remote task", REF],
+		]);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of host reports: a report outside the AmqOutcome shapes, such as a
+// busy refusal after the receipt, settles the request uncertain.
+test("a host report outside the outcome shapes settles the request uncertain", async () => {
+	const h = hostHarness({
+		busy: () => false,
+		send(_ctx, _request, report) {
+			report({ event: "started" });
+			report({ event: "refused", reason: "busy" } as never);
+		},
+	});
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.events(REF).length > 1);
+		const events = h.events(REF);
+		assert.deepEqual(
+			events.map((e) => e.event),
+			["started", "uncertain"],
+		);
+		assert.match(events[1].error, /"reason":"busy"/);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of host delivery: a send that throws after it reported the start
+// leaves the outcome unknown, never failed.
+test("a host send that throws after the start settles the request uncertain", async () => {
+	const h = hostHarness({
+		busy: () => false,
+		send(_ctx, _request, report) {
+			report({ event: "started" });
+			throw new Error("host broke");
+		},
+	});
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.events(REF).length > 1);
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.error]),
+			[
+				["started", undefined],
+				["uncertain", "deliver: Error: host broke"],
+			],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of host delivery: a busy check that throws refuses the request
+// busy instead of stopping every scan.
+test("a host busy check that throws refuses the request busy", async () => {
+	const h = hostHarness({
+		busy: () => {
+			throw new Error("busy check broke");
+		},
+		send() {
+			assert.fail("a request was sent past a broken busy check");
+		},
+	});
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.events(REF).length > 0);
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.reason, e.error]),
+			[["refused", "busy", "deliver.busy: Error: busy check broke"]],
+		);
+		assert.equal(h.hasReceipt(REF), false);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of host identity: a session the host keeps inactive shows no wake
+// marker for the identity the host gives without a session.
+test("a session the host keeps inactive holds no wake doorbell", async () => {
+	let agentDir = "";
+	const h = harness((root) => {
+		agentDir = path.join(root, "agents", "pi-seat");
+		fs.mkdirSync(agentDir, { recursive: true });
+		return { identity: (ctx) => (ctx ? undefined : { root, handle: "pi-seat" }) };
+	});
+	await h.start();
+	try {
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm", title: "Run it?" });
+		assert.equal(fs.existsSync(path.join(agentDir, ".wake.dialog")), false);
+	} finally {
+		await h.done();
+	}
+});
+
+// Review of host identity: a relative root is no identity, so the bridge
+// never writes under the working directory.
+test("a host identity with a relative root keeps the bridge inactive", async () => {
+	const rel = `amq-pi-relative-${process.pid}`;
+	const h = harness(() => ({ identity: () => ({ root: rel, handle: "pi-seat" }) }));
+	await h.start();
+	try {
+		assert.equal(fs.existsSync(path.resolve(rel)), false);
+	} finally {
+		fs.rmSync(path.resolve(rel), { recursive: true, force: true });
 		await h.done();
 	}
 });

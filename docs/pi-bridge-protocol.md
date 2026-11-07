@@ -518,8 +518,8 @@ is optional; without options the extension behaves as described above.
 
 | Option | Default | Host value |
 | --- | --- | --- |
-| `identity(ctx)` | `AM_ROOT` and `AM_ME` | `{root, handle}` for the session, or `undefined` to stay inactive. `ctx` is `undefined` before the session starts. The same identity places the bridge directory, the wake marker, and the Buzz dialog. |
-| `deliver.busy(ctx)` | `ctx.isIdle()` is false or `ctx.hasPendingMessages()` is true | `true` when a request would wait behind the host's own work. The extension then refuses it `busy`. |
+| `identity(ctx)` | `AM_ROOT` and `AM_ME` | `{root, handle}` for the session, or `undefined` to stay inactive. `root` must be absolute; any other value is no identity. `ctx` is `undefined` before the session starts. The extension resolves the identity once per session, at its start, and keeps that result, `undefined` included, until the session ends. The same identity places the bridge directory, the wake marker, and the Buzz dialog. |
+| `deliver.busy(ctx)` | `ctx.isIdle()` is false or `ctx.hasPendingMessages()` is true | `true` when a request would wait behind the host's own work. The extension then refuses it `busy`. A throw counts as busy. |
 | `deliver.send(ctx, request, report)` | `sendUserMessage(text, { deliverAs: "followUp" })` with the correlation above | Hands `{ref, text, notAfter, origin}` to the host. `origin` is present only when the request carries a valid one. |
 | `upgrade` | none | The liveness `upgrade` remedy. |
 
@@ -530,7 +530,12 @@ request into a run, and then exactly one terminal outcome: `completed` with
 `text`, `failed` or `uncertain` with `error`, `cancelled`, or `refused` with
 reason `expired`. The extension writes these as the request's events, applies
 no correlation and no start watchdog of its own to that request, and ignores
-a report for a request that is no longer in flight. The host must report a
+a report for a request that is no longer in flight. A terminal report of any
+other shape settles the request `uncertain`, with an error that names what the
+host sent. A throw from `send` after a terminal report changes nothing; after
+`started` it settles the request `uncertain`, and before it `failed`. In
+activity, the request's ref tags the first user message whose text is the
+request's text, as without a host. The host must report a
 terminal outcome: until it does, the request stays in flight and the
 extension refuses every other request `busy`. `session_shutdown` closes it as
 described above.

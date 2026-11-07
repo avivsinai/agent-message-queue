@@ -124,7 +124,8 @@ type Bridge = {
 	// run_start record was written, -1 before the first.
 	runStartAt: number;
 	// requestUser is the ref of the in-flight request whose own user
-	// message started and has not ended yet.
+	// message started and has not ended yet: the first user message, after
+	// the hand-off, whose text is the request's text.
 	requestUser: string;
 };
 
@@ -133,6 +134,8 @@ type Inflight = {
 	text: string;
 	deliveredAt: number;
 	started: boolean;
+	// tagged is true once the request's own user message started.
+	tagged: boolean;
 	lastText: string;
 	lastError: string;
 	// finalText is the text of the request's last assistant message when
@@ -156,10 +159,13 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // the plain extension.
 export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): void {
 	let bridge: Bridge | null = null;
+	// session holds the identity resolved for the open session, none
+	// included; it is null outside a session.
+	let session: { identity: AmqIdentity | undefined } | null = null;
 	// who is the identity the wake marker and the Buzz dialog use: the
 	// session's once it started, else what the identity source gives
 	// without a session.
-	const who = (): AmqIdentity | undefined => bridge?.identity ?? resolveIdentity(options, undefined);
+	const who = (): AmqIdentity | undefined => (session ? session.identity : resolveIdentity(options, undefined));
 
 	// The doorbell must never answer a pi prompt. pi counts nested
 	// extension prompts itself: ui_prompt_start fires when it starts waiting
@@ -200,8 +206,16 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		closeWakeDialog(who());
 		closeRemoteDialog();
 		stop(bridge, "restart");
-		bridge = start(pi, ctx, options);
-		if (bridge) scan(pi, bridge);
+		session = { identity: resolveIdentity(options, ctx) };
+		bridge = session.identity ? start(pi, ctx, options, session.identity) : null;
+		if (bridge) scanSafely(pi, bridge);
+		else if (!session.identity && !options.identity && !inactiveNoticeShown) {
+			// A host that gives no identity for this session keeps the bridge
+			// off on purpose; only the plain extension tells the owner how to
+			// fix it.
+			inactiveNoticeShown = true;
+			notify(ctx, "amq-bridge inactive: AM_ROOT and AM_ME are not set to a valid AMQ identity. Run pi under `amq coop exec` to make it reachable by amq-remote.");
+		}
 	});
 
 	pi.on("session_shutdown", (event) => {
@@ -210,6 +224,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		closeRemoteDialog();
 		stop(bridge, event.reason);
 		bridge = null;
+		session = null;
 	});
 
 	// active is the in-flight request whose outcome is still open and that
@@ -220,18 +235,27 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		return f && !f.terminal && !bridge?.deliver ? f : null;
 	};
 
-	// Output and outcome belong to the request only after its own user
-	// message starts. The buffers reset at that boundary, so a local turn
-	// that ran before it never becomes the remote result. The start of any
-	// later user message ends that ownership: the request completes only
-	// when its last assistant message is a final answer, otherwise it is
-	// uncertain (a tool-use preamble is never an answer).
+	// The request's own user message is the first user message whose text
+	// is the request's text; its activity record carries the request's ref,
+	// whichever delivery sent it. Without a host's delivery, output and
+	// outcome belong to the request only after that message starts. The
+	// buffers reset at that boundary, so a local turn that ran before it
+	// never becomes the remote result. The start of any later user message
+	// ends that ownership: the request completes only when its last
+	// assistant message is a final answer, otherwise it is uncertain (a
+	// tool-use preamble is never an answer).
 	pi.on("message_start", (event) => {
 		const b = bridge;
-		const f = active();
-		if (!b || !f) return;
+		const f = b?.inflight;
+		if (!b || !f || f.terminal) return;
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user") return;
+		const own = !f.tagged && textOf(msg.content) === f.text;
+		if (own) {
+			f.tagged = true;
+			b.requestUser = f.ref;
+		}
+		if (b.deliver) return;
 		if (f.started) {
 			if (f.finalText && !f.lastError) {
 				settle(b, { event: "completed", text: f.finalText });
@@ -240,13 +264,12 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 			}
 			return;
 		}
-		if (textOf(msg.content) === f.text) {
+		if (own) {
 			f.started = true;
 			f.lastText = "";
 			f.lastError = "";
 			f.finalText = "";
 			f.outcome = "";
-			b.requestUser = f.ref;
 			appendEvent(b.dir, f.ref, { event: "started" });
 		}
 	});
@@ -284,7 +307,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		} else {
 			settle(b, { event: "completed", text: f.lastText });
 		}
-		if (!b.inflight) scan(pi, b);
+		if (!b.inflight) scanSafely(pi, b);
 	});
 }
 
@@ -297,38 +320,21 @@ function settle(b: Bridge, fields: EventFields): void {
 	if (appendEvent(b.dir, f.ref, fields)) b.inflight = null;
 }
 
-// envIdentity is the AMQ participation contract: AM_ROOT and AM_ME, set by
-// `amq coop exec`.
-function envIdentity(): AmqIdentity | undefined {
-	const root = process.env.AM_ROOT ?? "";
-	const handle = process.env.AM_ME ?? "";
-	return root && HANDLE.test(handle) ? { root, handle } : undefined;
-}
-
 // resolveIdentity is the identity from the configured source, or undefined
-// when it gives none that is valid.
+// when it gives none that is valid: an absolute root and a valid handle. The
+// default source is the AMQ participation contract, AM_ROOT and AM_ME, set
+// by `amq coop exec`.
 function resolveIdentity(options: AmqBridgeOptions, ctx: ExtensionContext | undefined): AmqIdentity | undefined {
-	if (!options.identity) return envIdentity();
 	let id: AmqIdentity | undefined;
 	try {
-		id = options.identity(ctx);
+		id = options.identity ? options.identity(ctx) : { root: process.env.AM_ROOT ?? "", handle: process.env.AM_ME ?? "" };
 	} catch {
 		return undefined;
 	}
-	return id && typeof id.root === "string" && id.root && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
+	return id && typeof id.root === "string" && path.isAbsolute(id.root) && typeof id.handle === "string" && HANDLE.test(id.handle) ? { root: id.root, handle: id.handle } : undefined;
 }
 
-function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions): Bridge | null {
-	const identity = resolveIdentity(options, ctx);
-	if (!identity) {
-		// A host that gives no identity for this session keeps the bridge off
-		// on purpose; only the plain extension tells the owner how to fix it.
-		if (!options.identity && !inactiveNoticeShown) {
-			inactiveNoticeShown = true;
-			notify(ctx, "amq-bridge inactive: AM_ROOT and AM_ME are not set to a valid AMQ identity. Run pi under `amq coop exec` to make it reachable by amq-remote.");
-		}
-		return null;
-	}
+function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity): Bridge | null {
 	const dir = path.join(identity.root, "agents", identity.handle, "extensions", "pi-bridge");
 	try {
 		for (const sub of ["requests", "receipts", "events"]) {
@@ -372,13 +378,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 	writeLiveness(b, true);
 	b.orphansPending = !closeOrphanedReceipts(b);
 	const beat = setInterval(() => writeLiveness(b, true), HEARTBEAT_MS);
-	const poll = setInterval(() => {
-		try {
-			scan(pi, b);
-		} catch {
-			// A transient filesystem error is retried on the next poll.
-		}
-	}, POLL_MS);
+	const poll = setInterval(() => scanSafely(pi, b), POLL_MS);
 	beat.unref();
 	poll.unref();
 	b.timers.push(beat, poll);
@@ -403,6 +403,16 @@ function stop(b: Bridge | null, reason: string): void {
 		b.inflight = null;
 	}
 	writeLiveness(b, false);
+}
+
+// scanSafely is scan whose failure waits for the next poll: a transient
+// filesystem error is retried then.
+function scanSafely(pi: ExtensionAPI, b: Bridge): void {
+	try {
+		scan(pi, b);
+	} catch {
+		// Retried on the next poll.
+	}
 }
 
 // scan examines every unhandled request in arrival order. Refusals are
@@ -462,9 +472,10 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		let { refuse, error } = verdict;
 		// v1 refuses a busy target (the remote-control ADR). The check sits
 		// at the admission boundary, before the receipt and the hand-off.
-		if (!refuse && (b.inflight || (b.deliver ? b.deliver.busy(b.ctx) : !b.ctx.isIdle() || b.ctx.hasPendingMessages()))) {
+		const busy = refuse ? "" : busyReason(b);
+		if (busy) {
 			refuse = "busy";
-			error = b.inflight ? "another remote request is in flight" : "pi is busy with other work";
+			error = busy;
 		}
 		if (refuse) {
 			// The refusal is final for the ref. A failed append keeps it,
@@ -484,24 +495,28 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		if (claim === "error") continue; // retried on the next poll
 		b.handled.add(ref);
 		if (claim === "taken") continue; // another bridge process already claimed it
-		b.inflight = {
+		const f: Inflight = {
 			ref,
 			text: verdict.text,
 			deliveredAt: Date.now(),
 			started: false,
+			tagged: false,
 			lastText: "",
 			lastError: "",
 			finalText: "",
 			outcome: "",
 			terminal: null,
 		};
+		b.inflight = f;
 		if (b.deliver) {
 			const request: AmqRequest = { ref, text: verdict.text, notAfter: verdict.notAfter };
 			if (verdict.origin) request.origin = verdict.origin;
 			try {
 				b.deliver.send(b.ctx, request, reporter(b, ref));
 			} catch (err) {
-				settle(b, { event: "failed", error: `deliver: ${String(err)}` });
+				// A reported outcome stands. A request the host reported
+				// started may have run, so its outcome is unknown.
+				if (!f.terminal && b.inflight === f) settle(b, { event: f.started ? "uncertain" : "failed", error: `deliver: ${String(err)}` });
 			}
 			continue;
 		}
@@ -521,16 +536,54 @@ function reporter(b: Bridge, ref: string): (outcome: AmqOutcome) => void {
 	return (outcome) => {
 		const f = b.inflight;
 		if (!f || f.ref !== ref || f.terminal) return;
-		if (outcome.event !== "started") {
-			settle(b, outcome);
+		if ((outcome as { event?: unknown } | null)?.event !== "started") {
+			settle(b, reportedFields(outcome));
 			return;
 		}
 		if (f.started) return;
 		f.started = true;
-		// The request's own user message, next, carries its ref.
-		b.requestUser = ref;
 		appendEvent(b.dir, ref, { event: "started" });
 	};
+}
+
+// reportedFields is the terminal event a host's report records: the report
+// when it has a terminal AmqOutcome shape, else uncertain, with an error that
+// names what the host sent.
+function reportedFields(outcome: unknown): EventFields {
+	const o = (outcome ?? {}) as { event?: unknown; text?: unknown; error?: unknown; reason?: unknown };
+	switch (o.event) {
+		case "completed":
+			if (typeof o.text === "string") return { event: "completed", text: o.text };
+			break;
+		case "failed":
+		case "uncertain":
+			if (typeof o.error === "string") return { event: o.event, error: o.error };
+			break;
+		case "cancelled":
+			return { event: "cancelled" };
+		case "refused":
+			if (o.reason === "expired" && (o.error === undefined || typeof o.error === "string")) return { event: "refused", reason: "expired", error: o.error };
+			break;
+	}
+	let sent = "an unprintable value";
+	try {
+		sent = JSON.stringify(outcome) ?? String(outcome);
+	} catch {
+		// sent stays the placeholder.
+	}
+	return { event: "uncertain", error: `the host reported an outcome that is not an AmqOutcome: ${truncateUtf8(sent, 1024)}` };
+}
+
+// busyReason is why a request would wait behind other work, or "" when it
+// would not. A host busy check that throws counts as busy.
+function busyReason(b: Bridge): string {
+	if (b.inflight) return "another remote request is in flight";
+	if (!b.deliver) return !b.ctx.isIdle() || b.ctx.hasPendingMessages() ? "pi is busy with other work" : "";
+	try {
+		return b.deliver.busy(b.ctx) ? "pi is busy with other work" : "";
+	} catch (err) {
+		return `deliver.busy: ${String(err)}`;
+	}
 }
 
 type Verdict = { refuse: string; error: string; text: string; notAfter: string; origin?: { carrier: string; name: string } };
