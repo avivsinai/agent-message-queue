@@ -53,8 +53,12 @@ func writePiBridge(amqHome string) (string, error) {
 	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("%s is not a plain directory", dir)
 	}
-	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, pibridge.Source) {
-		return path, nil
+	// Only a plain file is kept as it is; a symlink is replaced by one, so
+	// the path pi runs never resolves elsewhere.
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, pibridge.Source) {
+			return path, nil
+		}
 	}
 	return fsq.WriteFileAtomic(dir, "amq-bridge.ts", pibridge.Source, 0o600)
 }
