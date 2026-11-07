@@ -949,7 +949,7 @@ func retire(why string, match, ended func(Binding) bool) (removed, keptOff []str
 				if err != nil {
 					return err
 				}
-				if _, err := fsq.WriteFileAtomic(dir, t.Name+tombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
+				if _, err := fsq.WriteFileAtomic(dir, t.Name+TombstoneSuffix, append(raw, '\n'), 0o600); err != nil {
 					return err
 				}
 				keptOff = append(keptOff, t.Name)
@@ -1014,7 +1014,7 @@ func ReviveEnded(tomb, b Binding) (bool, error) {
 		if err != nil {
 			return err
 		}
-		cur, err := read(filepath.Join(dir, tomb.Name+tombstoneSuffix))
+		cur, err := read(filepath.Join(dir, tomb.Name+TombstoneSuffix))
 		if errors.Is(err, ErrNone) {
 			return nil
 		}
@@ -1031,7 +1031,7 @@ func ReviveEnded(tomb, b Binding) (bool, error) {
 			return err
 		}
 		wrote = true
-		return os.Remove(filepath.Join(dir, tomb.Name+tombstoneSuffix))
+		return os.Remove(filepath.Join(dir, tomb.Name+TombstoneSuffix))
 	})
 	return wrote, err
 }
