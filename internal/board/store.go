@@ -587,6 +587,38 @@ func (s Store) write(state *Snapshot, data []byte, prev document) error {
 	return nil
 }
 
+// holdsUnnamedEvidence reports whether the evidence directory holds bytes
+// that neither a published message nor a pending retirement names: the
+// bytes a new base would sweep.
+func (s Store) holdsUnnamedEvidence(ctx context.Context) (bool, error) {
+	state, err := s.ReadContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	named := map[string]bool{}
+	for _, m := range state.Messages {
+		named[m.EvidenceHash+".json"] = true
+	}
+	for hash := range state.RetiredEvidence {
+		named[hash+".json"] = true
+	}
+	entries, err := os.ReadDir(filepath.Join(s.Dir, "evidence"))
+	if os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if named[e.Name()] || !e.Type().IsRegular() {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.Size() > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // sweepEvidence removes every evidence file that the published state, the
 // recovery copy (prev) and RetiredEvidence leave unnamed. It holds the
 // evidence lock, so no staging measures the bound while it runs; evidence
@@ -758,8 +790,20 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 			}
 		}
 		if len(b) > snapshotLimit || used+int64(len(b)) > evidenceLimit {
+			// The excess counts only blobs this batch would add: not on
+			// disk, not pruned, not repeated.
 			excess := used - evidenceLimit
+			counted := map[string]bool{}
 			for _, rest := range blobs[i:] {
+				sum := sha256.Sum256(rest)
+				h := hex.EncodeToString(sum[:])
+				if pruned[h] || counted[h] {
+					continue
+				}
+				counted[h] = true
+				if _, err := os.Lstat(filepath.Join(dir, h+".json")); err == nil {
+					continue
+				}
 				excess += int64(len(rest))
 			}
 			return evidenceBoundError{excess: excess}
@@ -794,13 +838,19 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 	if errors.Is(stageErr, errEvidenceBound) {
 		// A new base removes the evidence nothing names; only what is
 		// still past the bound after it is pressure.
-		if err := s.update(ctx, func(state *Snapshot) error {
-			state.newBase = true
-			return nil
-		}); err != nil {
+		unnamed, err := s.holdsUnnamedEvidence(ctx)
+		if err != nil {
 			return err
 		}
-		stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
+		if unnamed {
+			if err := s.update(ctx, func(state *Snapshot) error {
+				state.newBase = true
+				return nil
+			}); err != nil {
+				return err
+			}
+			stageErr = s.stageEvidence(ctx, a.Evidence, a.Messages)
+		}
 	}
 	if stageErr != nil && !errors.Is(stageErr, errEvidenceBound) {
 		return stageErr
