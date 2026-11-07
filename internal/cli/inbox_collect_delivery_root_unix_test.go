@@ -206,7 +206,7 @@ func TestDrainInboxItemsReportsEarlierClaimWhenLaterClaimCannotBeRead(t *testing
 	assertInboxCollectFixtureState(t, root, secondFilename, "cur")
 }
 
-// Review of receipt recovery: a drained receipt that failed to write was only
+// Regression: bead agent-message-queue-fbp (B6). A drained receipt that failed to write was only
 // a warning, and no later drain could write it, so `send --wait-for drained`
 // timed out although the message was consumed. A receipt fault must not stop
 // the batch either: every waiting message is delivered.

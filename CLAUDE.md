@@ -144,8 +144,11 @@ P2P thread names use `p2p/<lower_handle>__<higher_handle>`.
 mailbox. Use `receipts list`, `receipts wait`, or `send --wait-for` to inspect
 delivery without treating a wake notification as consumption proof.
 A receipt that fails to write after a committed claim is parked in
-`receipts-pending/`; the command still prints the payload, fails, and the next
-`drain` or `read` writes the receipt without delivering the message again.
+`receipts-pending/` when the park write succeeds; the command still prints the
+payload and fails, and the next `drain`, `read`, or `monitor` writes the
+receipt without delivering the message again. A crash between the claim and
+the receipt write, or a failed park (for example a full disk), still leaves
+that receipt unwritten.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity

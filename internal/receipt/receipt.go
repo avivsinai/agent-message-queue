@@ -87,10 +87,25 @@ func EmitDeliveryRoot(root *fsq.DeliveryRoot, r Receipt) error {
 
 // pendingDir holds receipts a consumer owes but could not write. It is a
 // sibling of receipts/ so a failing receipts directory cannot also lose the
-// obligation. Each entry is the full receipt under its final filename.
+// obligation. Each entry is the full receipt under its final filename; an
+// invalid entry is renamed with a quarantineSuffix, which the scan skips.
+//
+// The obligation is recorded only after the receipt write fails, not ahead of
+// the claim, so a claim costs no extra fsync. A crash between the claim and
+// the receipt write, or a failed park (for example a full disk), therefore
+// still leaves that receipt unwritten.
 func pendingDir(consumer string) string {
 	return filepath.Join("agents", consumer, "receipts-pending")
 }
+
+const quarantineSuffix = ".bad"
+
+// RepairError reports receipts that RepairPending could not write or entries
+// it quarantined. The owed receipts stay parked for the next repair.
+type RepairError struct{ Err error }
+
+func (e *RepairError) Error() string { return "receipt repair: " + e.Err.Error() }
+func (e *RepairError) Unwrap() error { return e.Err }
 
 // EmitOwed writes a receipt for an outcome that already happened. When the
 // write fails, the receipt is parked in the consumer's pending directory so
@@ -143,7 +158,15 @@ func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
 			err = fmt.Errorf("receipt names %s", r.filename())
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("pending receipt %s: %w", name, err))
+			// An invalid entry can never become a receipt. Move it aside once
+			// so it is reported once instead of failing every later repair.
+			bad := fmt.Sprintf("%s.%d%s", name, time.Now().UnixNano(), quarantineSuffix)
+			if mvErr := root.RenameNoReplace(path, filepath.Join(dir, bad)); mvErr != nil && !os.IsNotExist(mvErr) {
+				err = errors.Join(err, fmt.Errorf("quarantine: %w", mvErr))
+			} else if mvErr == nil {
+				err = fmt.Errorf("%w (moved to %s)", err, bad)
+			}
+			errs = append(errs, fmt.Errorf("invalid pending receipt %s: %w", name, err))
 			continue
 		}
 		if err := EmitDeliveryRoot(root, r); err != nil {
@@ -154,7 +177,10 @@ func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
 			errs = append(errs, fmt.Errorf("remove pending receipt %s: %w", name, err))
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) == 0 {
+		return nil
+	}
+	return &RepairError{Err: errors.Join(errs...)}
 }
 
 // WaitFor polls for a specific consumer-local receipt by deterministic filename.
