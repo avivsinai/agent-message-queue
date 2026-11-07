@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -147,6 +146,26 @@ func (s hookSpec) owns(el []byte) bool {
 	return false
 }
 
+// duplicate reports whether group i of the chain groups is a byte-identical
+// copy of an earlier group and holds a command of the installer's family
+// (the marker prefix), when match narrows ownership below that family. A
+// second copy is never the owner's choice, so an install removes it.
+func (s hookSpec) duplicate(raw []byte, groups [][2]int, i int) bool {
+	if s.flat || s.match == nil || s.marker == "" {
+		return false
+	}
+	el := raw[groups[i][0]:groups[i][1]]
+	if !(hookSpec{event: s.event, marker: s.marker}).owns(el) {
+		return false
+	}
+	for _, g := range groups[:i] {
+		if bytes.Equal(raw[g[0]:g[1]], el) {
+			return true
+		}
+	}
+	return false
+}
+
 // seed is the content a missing file starts as. Cursor ignores a hooks
 // file without a positive integer "version".
 func (s hookSpec) seed() []byte {
@@ -163,22 +182,21 @@ var (
 
 // InstallPermissionHook adds the PermissionRequest hook that carries tool
 // dialogs to Buzz: one entry with no matcher (every tool), marked
-// AMQ_APPROVAL_HOOK=1, whose own deadline is wait and whose installed
-// timeout is wait plus PermissionHookGrace. bin must be absolute: an
-// app-launched session's PATH may not hold it. A marked entry with another
-// command is replaced; the same one is kept.
-func InstallPermissionHook(home, bin string, wait time.Duration) error {
-	_, err := InstallPermissionHookAt(home, SettingsPath(home), bin, wait)
+// AMQ_APPROVAL_HOOK=1, with the timeout permissionHookTimeout. bin must be
+// absolute: an app-launched session's PATH may not hold it. A marked entry
+// with another command is replaced; the same one is kept.
+func InstallPermissionHook(home, bin string) error {
+	_, err := InstallPermissionHookAt(home, SettingsPath(home), bin)
 	return err
 }
 
 // InstallPermissionHookAt is InstallPermissionHook for the settings file
 // settings, and reports whether it changed the file.
-func InstallPermissionHookAt(home, settings, bin string, wait time.Duration) (bool, error) {
+func InstallPermissionHookAt(home, settings, bin string) (bool, error) {
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
 	}
-	return replaceHook(settings, permissionSpec, permissionHookEntry(home, bin, wait))
+	return replaceHook(settings, permissionSpec, permissionHookEntry(home, bin))
 }
 
 // replaceHook makes entry the only marked entry of spec's chain in the
@@ -187,14 +205,17 @@ func InstallPermissionHookAt(home, settings, bin string, wait time.Duration) (bo
 // a lock or a write; anything else marked (an older binary path, other
 // flags, another timeout or matcher) is replaced in one write.
 func replaceHook(path string, spec hookSpec, entry []byte) (bool, error) {
-	groups, err := markedGroups(path, spec)
-	if err != nil {
+	if same, err := installedAs(path, spec, entry); same || err != nil {
 		return false, err
 	}
-	if len(groups) == 1 && sameJSON(groups[0], entry) {
-		return false, nil // already installed as asked
-	}
 	return editSettings(path, spec.seed(), replaceEdit(spec, entry))
+}
+
+// installedAs reports whether spec's one marked group in the settings file
+// at path is entry, field for field.
+func installedAs(path string, spec hookSpec, entry []byte) (bool, error) {
+	groups, err := markedGroups(path, spec)
+	return err == nil && len(groups) == 1 && sameJSON(groups[0], entry), err
 }
 
 // replaceEdit is the edit that removes spec's entries and appends entry. It
@@ -232,14 +253,34 @@ func sameJSON(a, b []byte) bool {
 // markedGroups returns the raw matcher groups of spec's chain in the
 // settings file at path that hold a marked hook. A missing file has none.
 func markedGroups(path string, spec hookSpec) ([][]byte, error) {
-	raw, err := readRegularBounded(path, maxSettingsBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	raw, exists, err := readSettings(path)
+	if err != nil || !exists {
 		return nil, err
 	}
-	return markedGroupsIn(raw, spec)
+	groups, err := markedGroupsIn(raw, spec)
+	if err != nil {
+		return nil, fmt.Errorf("settings %s: %w", path, err)
+	}
+	return groups, nil
+}
+
+// CheckSettings refuses, naming path, a hooks file the writer refuses to
+// edit for event: one it cannot read as a regular file within its size
+// bound, one that is not a single JSON value, or one whose root, hooks or
+// event value has the wrong type or a duplicate key. A missing file
+// passes: the writer starts it.
+func CheckSettings(path, event string) error {
+	raw, exists, err := readSettings(path)
+	if err != nil || !exists {
+		return err
+	}
+	if !json.Valid(raw) {
+		return fmt.Errorf("settings %s: not one JSON value (a syntax error or trailing JSON)", path)
+	}
+	if _, err := markedGroupsIn(raw, hookSpec{event: event}); err != nil {
+		return fmt.Errorf("settings %s: %w", path, err)
+	}
+	return nil
 }
 
 // markedGroupsIn is markedGroups for the bytes of a settings file.
@@ -253,12 +294,33 @@ func markedGroupsIn(raw []byte, spec hookSpec) ([][]byte, error) {
 		return nil, err
 	}
 	var out [][]byte
-	for _, g := range groups {
-		if spec.owns(raw[g[0]:g[1]]) {
+	for i, g := range groups {
+		if err := checkGroup(raw[g[0]:g[1]], spec); err != nil {
+			return nil, err
+		}
+		if spec.owns(raw[g[0]:g[1]]) || spec.duplicate(raw, groups, i) {
 			out = append(out, raw[g[0]:g[1]])
 		}
 	}
 	return out, nil
+}
+
+// checkGroup refuses a matcher group whose "hooks" member is not an array:
+// the writer cannot tell whether it holds an owned hook.
+func checkGroup(el []byte, spec hookSpec) error {
+	if spec.flat {
+		return nil
+	}
+	var g map[string]json.RawMessage
+	if json.Unmarshal(el, &g) != nil {
+		return nil
+	}
+	if h, ok := g["hooks"]; ok {
+		if v := bytes.TrimSpace(h); len(v) == 0 || v[0] != '[' && !bytes.Equal(v, []byte("null")) {
+			return fmt.Errorf("%s: %q must be a JSON array", spec.event, "hooks")
+		}
+	}
+	return nil
 }
 
 // installedCommands lists the commands of spec's marked hooks in the
@@ -464,7 +526,7 @@ const (
 
 var (
 	stopHookBinRe       = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude stop-hook$`)
-	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook --wait ([0-9]+)$`)
+	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook(?: --wait [0-9]+)?$`)
 )
 
 // StopHookForm reports the form of the one installed Stop hook in the
@@ -480,20 +542,21 @@ func StopHookForm(home, settings string) (string, error) {
 	})
 }
 
-// PermissionHookForm is StopHookForm for the PermissionRequest hook; the
-// current form keeps the installed wait.
+// PermissionHookForm is StopHookForm for the PermissionRequest hook.
 func PermissionHookForm(home, settings string) (string, error) {
 	return hookForm(settings, permissionSpec, func(cmd string) []byte {
 		m := permissionHookBinRe.FindStringSubmatch(cmd)
 		if m == nil {
 			return nil
 		}
-		wait, err := strconv.Atoi(m[2])
-		if err != nil {
-			return nil
-		}
-		return permissionHookEntry(home, shellUnquote(m[1]), time.Duration(wait)*time.Second)
+		return permissionHookEntry(home, shellUnquote(m[1]))
 	})
+}
+
+// FormFlagged reports whether doctor flags an installed hook's form, so
+// doctor --fix and the machine agent upgrade it.
+func FormFlagged(form string) bool {
+	return form == HookFormStale || form == HookFormUngated
 }
 
 // hookForm compares the one marked group of spec's chain with the group
@@ -518,11 +581,11 @@ func hookForm(path string, spec hookSpec, render func(cmd string) []byte) (strin
 
 func shellUnquote(s string) string { return strings.ReplaceAll(s, `'\''`, `'`) }
 
-// Stop hook states in the user settings file (StopHookState).
+// Hook states in a settings file (StopHookState, PermissionHookState).
 const (
-	StopHookPresent  = "installed"
-	StopHookMissing  = "missing"
-	StopHookDisabled = "disabled" // present, but disableAllHooks is true
+	HookPresent  = "installed"
+	HookMissing  = "missing"
+	HookDisabled = "disabled" // present, but disableAllHooks is true
 )
 
 // StopHookState reports whether the user settings file under home holds the
@@ -542,7 +605,7 @@ func StopHookStateAt(path string) (string, error) {
 func hookState(path string, spec hookSpec) (string, error) {
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
-		return StopHookMissing, nil
+		return HookMissing, nil
 	}
 	if err != nil {
 		return "", err
@@ -565,11 +628,11 @@ func hookState(path string, spec hookSpec) (string, error) {
 	}
 	switch {
 	case !found:
-		return StopHookMissing, nil
+		return HookMissing, nil
 	case disablesAllHooks(raw):
-		return StopHookDisabled, nil
+		return HookDisabled, nil
 	}
-	return StopHookPresent, nil
+	return HookPresent, nil
 }
 
 // HooksDisabled reports whether the user settings file under home sets
@@ -637,25 +700,30 @@ func shellQuote(s string) string {
 }
 
 // permissionHookCommand runs the PermissionRequest receiver by its
-// absolute path with its wait, exec'd so Claude's TERM reaches it, and only
+// absolute path, exec'd so Claude's TERM reaches it, and only
 // when something can post a dialog: a machine agent's marker, or a binding
 // (the binding env path, the binding file, a named binding) under the AMQ
 // home that home resolves now. With none, no dialog can reach Buzz, so the
 // hook starts nothing and the terminal dialog decides. The globs run inside
 // sh; an unmatched one stays the pattern itself, which does not exist.
-func permissionHookCommand(home, bin string, wait time.Duration) string {
+func permissionHookCommand(home, bin string) string {
 	remote := filepath.Join(amqhome.Under(home), "remote")
 	return permissionHookMarker + `set -- "${` + binding.EnvPath + `-}" ` + shellQuote(filepath.Join(remote, "binding.json")) + " " +
 		shellQuote(filepath.Join(remote, "acp", "agents", "_machine")+"/") + "*.json " +
 		shellQuote(filepath.Join(remote, "bindings")+"/") + `*.json; for f; do [ -e "$f" ] && break; done; [ ! -e "$f" ] || exec ` +
-		shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+		shellQuote(bin) + " claude permission-hook"
 }
 
-// permissionHookEntry is the PermissionRequest group: no matcher, and a
-// timeout PermissionHookGrace longer than the hook's own wait, so the hook
-// ends first and the terminal dialog decides.
-func permissionHookEntry(home, bin string, wait time.Duration) []byte {
-	return commandHookEntry(CommandHook{Command: permissionHookCommand(home, bin, wait), Timeout: int((wait + PermissionHookGrace) / time.Second)})
+// permissionHookTimeout is the installed timeout of the PermissionRequest
+// hook, in seconds, and the hook's own deadline. The hook waits until Buzz
+// or the terminal answers, so the timeout only bounds a dialog nobody
+// answers for a day. Claude Code documents no maximum.
+const permissionHookTimeout = 86400
+
+// permissionHookEntry is the PermissionRequest group: no matcher, and the
+// timeout permissionHookTimeout.
+func permissionHookEntry(home, bin string) []byte {
+	return commandHookEntry(CommandHook{Command: permissionHookCommand(home, bin), Timeout: permissionHookTimeout})
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
@@ -1034,7 +1102,10 @@ func cutOneMarkedHook(raw []byte, stop jsonSpan, spec hookSpec) ([]byte, bool, e
 	if err != nil {
 		return nil, false, err
 	}
-	for _, g := range groups {
+	for i, g := range groups {
+		if spec.duplicate(raw, groups, i) {
+			return cutItem(raw, g[0], g[1]), true, nil
+		}
 		if spec.flat {
 			if spec.ownsHook(raw[g[0]:g[1]]) {
 				return cutItem(raw, g[0], g[1]), true, nil

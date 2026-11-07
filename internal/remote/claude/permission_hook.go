@@ -37,13 +37,6 @@ const permissionHookMarker = "AMQ_APPROVAL_HOOK=1 "
 // permissionHookType is the hook event name in settings.json.
 const permissionHookType = "PermissionRequest"
 
-// DefaultPermissionWait is the hook's own deadline. The installed timeout is
-// this plus PermissionHookGrace, so the hook normally ends first.
-const (
-	DefaultPermissionWait = 600 * time.Second
-	PermissionHookGrace   = 30 * time.Second
-)
-
 // harnessClaude names the harness in the request.
 const harnessClaude = "claude"
 
@@ -88,24 +81,42 @@ type Seat struct {
 type Binder func(Seat) (string, error)
 
 // permissionHook holds the hook's clock and pacing, so tests can drive it,
-// and the writer of a new binding.
+// and the writer of a new binding. It ends when Buzz or the terminal
+// answers, when done closes, when the process that started it is gone
+// (parentGone), or at the installed timeout, which Claude enforces too.
 type permissionHook struct {
-	now  func() time.Time
-	wait time.Duration
-	poll time.Duration
-	bind Binder // nil: a session no binding serves answers in the terminal
+	now        func() time.Time
+	poll       time.Duration
+	parentGone func() bool // nil: no parent check
+	bind       Binder      // nil: a session no binding serves answers in the terminal
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
 // configured timeout. bind writes the binding of a session no binding
 // serves. It always returns 0.
-func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration, bind Binder) int {
-	if wait <= 0 {
-		wait = DefaultPermissionWait
-	}
-	h := permissionHook{now: time.Now, wait: wait, poll: 250 * time.Millisecond, bind: bind}
+func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, bind Binder) int {
+	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, parentGone: parentWatch(), bind: bind}
 	return h.run(stdin, stdout, done)
+}
+
+// parentWatch reports, on each call, whether the process that started the
+// hook is gone: the hook was reparented, or that pid no longer runs. A
+// Claude process killed without a signal (SIGKILL, a crash) sends the hook
+// no TERM. A hook started already orphaned (ppid 1 or less) has no parent
+// to watch: nil.
+func parentWatch() func() bool {
+	ppid := os.Getppid()
+	if ppid <= 1 {
+		return nil
+	}
+	return func() bool {
+		if os.Getppid() != ppid {
+			return true
+		}
+		alive, err := pidAlive(ppid)
+		return err == nil && !alive
+	}
 }
 
 func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struct{}) int {
@@ -143,7 +154,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
-	deadline := opened.Add(h.wait)
+	deadline := opened.Add(permissionHookTimeout * time.Second)
 	ticker := time.NewTicker(h.poll)
 	defer ticker.Stop()
 	resolve := func(outcome, label, by string) bool {
@@ -171,7 +182,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
 		}
-		if !h.now().Before(deadline) {
+		if h.parentGone != nil && h.parentGone() || !h.now().Before(deadline) {
 			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
 			return 0
 		}

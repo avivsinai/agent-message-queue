@@ -179,18 +179,24 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 			continue
 		}
 		row.Approval = approval
-		switch approval {
-		case claude.StopHookMissing:
+		optIn, err := claude.ReadHookOptIn(path)
+		if err != nil {
+			fail("hooks", path, "cannot read the owner's hook opt-in: "+err.Error(), "move that opt-in file away, then run the hook's install command")
+		}
+		switch {
+		case approval == claude.HookMissing && optIn.Removed(claude.HookApproval):
+			note("hooks", path, "the owner removed the AMQ approval hook with uninstall-approval-hook, so tool approvals of a Claude session that reads this file stay in the terminal", fix("amq-remote claude install-approval-hook"))
+		case approval == claude.HookMissing:
 			gateReport("hooks", path, "the AMQ approval hook (PermissionRequest) is not installed, so every tool approval of a Claude session that reads this file stays in the terminal", fix("amq-remote claude install-approval-hook"))
 		default:
 			row.ApprovalForm, _ = claude.PermissionHookForm(home, path)
 			hookFormFinding(row.ApprovalForm, path, "approval (PermissionRequest)", fix("amq-remote claude install-approval-hook"), fail, note)
 			row.Probe, row.ProbeVersion = probeApprovalHook(path, probeGate(path, all, machine), fix("amq-remote claude install-approval-hook"), fail, note)
 		}
-		if row.Stop, err = claude.StopHookStateAt(path); err == nil && row.Stop == claude.StopHookMissing {
+		if row.Stop, err = claude.StopHookStateAt(path); err == nil && row.Stop == claude.HookMissing {
 			// Only native mode needs it; on a mailbox-only machine it is advice.
 			report := note
-			if native {
+			if native && !optIn.Removed(claude.HookStop) {
 				report = fail
 			}
 			report("hooks", path, "the AMQ Stop hook is not installed, so a native Claude session (/amq-remote --native) is admitted but never completes", fix("amq-remote claude install-stop-hook"))
@@ -316,7 +322,7 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 	row := machineAgentRow{State: machine.State}
 	if machine.State == agentMissing {
 		note("machine_agent", "", "this machine has no AMQ Remote machine agent, so no session gets a channel of its own",
-			"run `amq-acp setup --machine --out \"$HOME/Downloads/AMQ Remote machine.agent.json\"`, then in Buzz Desktop: Agents, +, Import that file, Start, and turn on Auto-start")
+			"run `amq-acp setup --machine --out \"$HOME/"+machineImportFile+"\"`, then in Buzz Desktop: Agents, +, Import that file, Start, and turn on Auto-start")
 		return row
 	}
 	row.Name = nonEmpty(machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
@@ -523,4 +529,4 @@ var doctorWakeCheck = func(root, handle string) (wakeView, error) {
 
 // installedAMQ is the amq beside this amq-remote, symlinks resolved, else
 // the amq on PATH.
-func installedAMQ() (string, error) { return siblingBinary("amq") }
+func installedAMQ() (string, error) { return claude.SiblingBinary("amq") }

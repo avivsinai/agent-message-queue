@@ -30,22 +30,25 @@ func fixSandbox(t *testing.T) (home string) {
 	return home
 }
 
-// On a fresh home --fix installs the approval hook and the wake dialog
-// guard in the settings file of the environment, records the owner's
-// opt-in, writes the machine agent's import file and installs the login
-// service; a second run changes nothing and keeps the file's mtime.
+// On a fresh home with Claude Code --fix installs the approval hook and the
+// wake dialog guard in the settings file of the environment, records the
+// owner's opt-in and writes the machine agent's import file; a second run
+// changes nothing and keeps the file's mtime.
 func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	home := fixSandbox(t)
 	settings := claude.SettingsPath(home)
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	out, _, err := doctor([]string{"--fix"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixed := out.(map[string]any)["fixed"].([]string)
-	if len(fixed) != 4 {
-		t.Fatalf("fixed = %q; want the approval hook, the guard, the import file and the service", fixed)
+	if len(fixed) != 3 {
+		t.Fatalf("fixed = %q; want the approval hook, the guard and the import file", fixed)
 	}
-	if state, _ := claude.PermissionHookState(settings); state != claude.StopHookPresent {
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookPresent {
 		t.Fatalf("approval hook %q after --fix", state)
 	}
 	if state, detail := amqcli.ClaudeDialogGuardAt(settings); state != amqcli.DialogGuardOK {
@@ -54,18 +57,13 @@ func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	if in, err := claude.ReadHookOptIn(settings); err != nil || in.Approval == nil {
 		t.Fatalf("opt-in = %+v, %v", in, err)
 	}
-	if !fileExists(filepath.Join(home, "Downloads", machineImportName)) {
+	if !fileExists(filepath.Join(home, filepath.FromSlash(machineImportFile))) {
 		t.Fatal("no import file")
-	}
-	if path, _ := loginservice.Path(); !fileExists(path) {
-		t.Fatal("no login service")
 	}
 	before, err := os.Stat(settings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The installed service starts no endpoint here, so the second run
-	// still fails the endpoint; it repairs nothing more.
 	out, _, err = doctor([]string{"--fix"})
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +71,51 @@ func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	after, _ := os.Stat(settings)
 	if fixed := out.(map[string]any)["fixed"].([]string); len(fixed) != 0 || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatalf("second --fix changed %q (mtime %v -> %v)", fixed, before.ModTime(), after.ModTime())
+	}
+}
+
+// Review of doctor --fix: on a home without Claude Code it created
+// ~/.claude/settings.json, and it installed a login service doctor never
+// asked for.
+func TestDoctorFixCreatesNothingDoctorDidNotFlag(t *testing.T) {
+	home := fixSandbox(t)
+	if _, _, err := doctor([]string{"--fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if fileExists(claude.SettingsPath(home)) {
+		t.Fatal("--fix created a Claude settings file on a home without Claude Code")
+	}
+	if path, _ := loginservice.Path(); fileExists(path) {
+		t.Fatal("--fix installed a login service doctor did not advise")
+	}
+}
+
+// Review of doctor --fix: it installed again the approval hook the owner
+// had removed with uninstall-approval-hook.
+func TestDoctorFixKeepsAHookTheOwnerRemoved(t *testing.T) {
+	home := fixSandbox(t)
+	settings := claude.SettingsPath(home)
+	bin, _, err := stableExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.OptInPermissionHook(home, settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.OptOutHook(settings, claude.HookApproval); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := doctor([]string{"--fix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := claude.PermissionHookState(settings); state != claude.HookMissing {
+		t.Fatalf("approval hook %q after --fix; want it left removed", state)
+	}
+	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
+		if f.Boundary == "hooks" && strings.Contains(f.Detail, "approval hook") {
+			t.Fatalf("doctor fails the hook the owner removed: %+v", f)
+		}
 	}
 }
 
@@ -128,5 +171,39 @@ func TestApprovalProbeNeedsAnEmptyStdin(t *testing.T) {
 	out.Reset()
 	if permissionHook(nil, strings.NewReader(""), &out); !strings.HasPrefix(out.String(), "amq-remote ") {
 		t.Fatalf("probe = %q", out.String())
+	}
+}
+
+// An approval hook of the older form (--wait 600, timeout 630) becomes the
+// current form, with the one-day timeout, after doctor --fix.
+func TestDoctorFixUpgradesTheTenMinuteApprovalHook(t *testing.T) {
+	home := fixSandbox(t)
+	settings := claude.SettingsPath(home)
+	bin, _, err := stableExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.OptInPermissionHook(home, settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Replace(bytes.Replace(raw, []byte(`claude permission-hook"`), []byte(`claude permission-hook --wait 600"`), 1), []byte(`"timeout":86400`), []byte(`"timeout":630`), 1)
+	if err := os.WriteFile(settings, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if form, _ := claude.PermissionHookForm(home, settings); form != claude.HookFormStale {
+		t.Fatalf("old form reads as %q; want stale", form)
+	}
+	if _, _, err := doctor([]string{"--fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if form, _ := claude.PermissionHookForm(home, settings); form != claude.HookFormCurrent {
+		t.Fatalf("form after --fix = %q; want current", form)
+	}
+	if raw, _ := os.ReadFile(settings); !bytes.Contains(raw, []byte(`"timeout":86400`)) {
+		t.Fatalf("settings after --fix = %s; want the one-day timeout", raw)
 	}
 }

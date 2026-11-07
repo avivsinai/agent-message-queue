@@ -200,6 +200,7 @@ func TestInstallRefusesTrailingJSON(t *testing.T) {
 	}
 }
 
+// Review of the hookinstall preflight: an inner "hooks" of the wrong type must be refused, not edited around.
 func TestInstallCodexRefusesWrongTypeInnerHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "hooks.json")
@@ -216,8 +217,8 @@ func TestInstallCodexRefusesWrongTypeInnerHooks(t *testing.T) {
 	if err == nil {
 		t.Fatal("Install() error = nil, want wrong-type inner hooks refusal")
 	}
-	if !strings.Contains(err.Error(), `"hooks" must be a JSON array`) {
-		t.Fatalf("Install() error = %v, want typed inner hooks", err)
+	if !strings.Contains(err.Error(), `"hooks" must be a JSON array`) || !strings.Contains(err.Error(), configPath) {
+		t.Fatalf("Install() error = %v, want typed inner hooks naming the file", err)
 	}
 	got, readErr := os.ReadFile(configPath)
 	if readErr != nil || !bytes.Equal(got, original) {
@@ -1137,11 +1138,11 @@ func TestInstallDoesNotTouchRealHomeWhenDefaultsResolve(t *testing.T) {
 	}
 }
 
-// TestSelfHealPrunesStaleAMQHooksAndPreservesForeign is the WP-646 self-heal
+// TestInstallPrunesStaleAMQHooksAndPreservesForeign is the install
 // contract: a config seeded with 3 dead AMQ entries + 1 foreign entry + 1 live
 // AMQ entry results, after install, in the foreign entry preserved verbatim,
 // exactly one live AMQ entry, and all dead entries gone.
-func TestSelfHealPrunesStaleAMQHooksAndPreservesForeign(t *testing.T) {
+func TestInstallPrunesStaleAMQHooksAndPreservesForeign(t *testing.T) {
 	withIsolatedHome(t, func(t *testing.T) {
 		dir := t.TempDir()
 		liveScript := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
@@ -1186,21 +1187,21 @@ func TestSelfHealPrunesStaleAMQHooksAndPreservesForeign(t *testing.T) {
 			t.Fatalf("foreign hook not preserved verbatim:\n%s", mustMarshal(t, doc))
 		}
 		// Exactly one live AMQ entry (the install command equals the live one,
-		// so self-heal keeps it and install does not append a duplicate).
+		// so install keeps it and install does not append a duplicate).
 		if countCommand(doc, result.Commands[AgentCodex]) != 1 {
 			t.Fatalf("live AMQ command count != 1 after install:\n%s", mustMarshal(t, doc))
 		}
 		// All dead entries gone.
 		if countCommand(doc, dead1) != 0 || countCommand(doc, dead2) != 0 || countCommand(doc, dead3) != 0 {
-			t.Fatalf("dead AMQ entries survived self-heal:\n%s", mustMarshal(t, doc))
+			t.Fatalf("dead AMQ entries survived install:\n%s", mustMarshal(t, doc))
 		}
 	})
 }
 
-// TestSelfHealPreservesForeignWhenNoAMQEntryExists confirms the self-heal pass
+// TestInstallPreservesForeignWhenNoAMQEntryExists confirms the install pass
 // touches only AMQ-owned hooks: a foreign-only config is rewritten only by the
 // normal install append, never by pruning.
-func TestSelfHealPreservesForeignWhenNoAMQEntryExists(t *testing.T) {
+func TestInstallPreservesForeignWhenNoAMQEntryExists(t *testing.T) {
 	withIsolatedHome(t, func(t *testing.T) {
 		dir := t.TempDir()
 		scriptPath := filepath.Join(dir, "hook.sh")
@@ -1265,7 +1266,7 @@ func TestStaleSessionStartHooksDetectsDeadAMQEntries(t *testing.T) {
 
 // TestIsAMQOwnedCommandRejectsForeignEchoOfEnvVar is the R2 negative: a foreign
 // hook that merely echoes the AMQ env var name (e.g. `echo AMQ_KEEPALIVE_BIN=x`)
-// must NOT be classified as AMQ-owned, so it is preserved verbatim by self-heal
+// must NOT be classified as AMQ-owned, so it is preserved verbatim by install
 // and never reported stale by the doctor scan. isAMQOwnedCommand matches the
 // prefix at the start of the command, not anywhere inside it.
 func TestIsAMQOwnedCommandRejectsForeignEchoOfEnvVar(t *testing.T) {
@@ -1309,12 +1310,12 @@ func TestIsAMQOwnedCommandRejectsForeignEchoOfEnvVar(t *testing.T) {
 	})
 }
 
-// TestSelfHealPreservesUnparseableAMQCommand is the R4 contract: an AMQ-owned
+// TestInstallPreservesUnparseableAMQCommand is the R4 contract: an AMQ-owned
 // command whose script path cannot be parsed (here: a malformed command missing
 // the trailing single quote that buildHookCommand always emits) is preserved
 // verbatim, never deleted. Self-heal only drops a hook when the path parsed and
 // os.Stat reports it missing.
-func TestSelfHealPreservesUnparseableAMQCommand(t *testing.T) {
+func TestInstallPreservesUnparseableAMQCommand(t *testing.T) {
 	withIsolatedHome(t, func(t *testing.T) {
 		dir := t.TempDir()
 		scriptPath := filepath.Join(dir, "hook.sh")
@@ -1337,7 +1338,7 @@ func TestSelfHealPreservesUnparseableAMQCommand(t *testing.T) {
 		}
 		doc := readJSON(t, claudeConfig)
 		if countCommand(doc, unparseable) != 1 {
-			t.Fatalf("unparseable AMQ-owned command was dropped by self-heal:\n%s", mustMarshal(t, doc))
+			t.Fatalf("unparseable AMQ-owned command was dropped by install:\n%s", mustMarshal(t, doc))
 		}
 		// Doctor scan must not report an unparseable command as stale.
 		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
@@ -1384,7 +1385,7 @@ func TestScriptPathFromAMQCommandRoundTrip(t *testing.T) {
 
 // TestScriptPathFromAMQCommandRejectsNonFixedShape is the B1 contract: a command
 // that has the AMQ prefix but is not the exact fixed shape buildHookCommand
-// emits must NOT parse, so self-heal preserves it and the doctor does not
+// emits must NOT parse, so install preserves it and the doctor does not
 // report it stale. Cases: missing AMQ_KEEPALIVE_TIMEOUT_SECONDS= prefix; a
 // non-digit timeout token.
 func TestScriptPathFromAMQCommandRejectsNonFixedShape(t *testing.T) {
@@ -1410,10 +1411,10 @@ func TestScriptPathFromAMQCommandRejectsNonFixedShape(t *testing.T) {
 	}
 }
 
-// TestSelfHealPreservesNonFixedShapeAMQCommand is the B1 self-heal side: a
+// TestInstallPreservesNonFixedShapeAMQCommand is the B1 install side: a
 // non-fixed-shape owned command is preserved verbatim (not pruned) and not
 // reported stale by the doctor, because it is owned-but-unparseable.
-func TestSelfHealPreservesNonFixedShapeAMQCommand(t *testing.T) {
+func TestInstallPreservesNonFixedShapeAMQCommand(t *testing.T) {
 	withIsolatedHome(t, func(t *testing.T) {
 		dir := t.TempDir()
 		scriptPath := filepath.Join(dir, "hook.sh")
@@ -1435,7 +1436,7 @@ func TestSelfHealPreservesNonFixedShapeAMQCommand(t *testing.T) {
 		}
 		doc := readJSON(t, claudeConfig)
 		if countCommand(doc, nonFixed) != 1 {
-			t.Fatalf("non-fixed-shape owned command was pruned by self-heal:\n%s", mustMarshal(t, doc))
+			t.Fatalf("non-fixed-shape owned command was pruned by install:\n%s", mustMarshal(t, doc))
 		}
 		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
 		if err != nil {
@@ -1520,4 +1521,60 @@ func TestInstalledCommandStartsScriptOnlyWithTargetAndHandle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Review of the hookinstall preflight: it read an empty Codex hooks.json as
+// {} while the writer refuses it, so --agent both wrote the Claude config
+// and then failed on Codex, with an error that named no file.
+func TestInstallBothRefusesAnEmptyCodexConfigBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	claudeConfig := filepath.Join(dir, "claude", "settings.json")
+	claudeOriginal := []byte(`{}`)
+	mustWrite(t, claudeConfig, claudeOriginal)
+	codexConfig := filepath.Join(dir, "codex", "hooks.json")
+	mustWrite(t, codexConfig, nil)
+
+	_, err := Install(Options{
+		Agent:        AgentBoth,
+		ScriptPath:   filepath.Join(dir, "hook.sh"),
+		BinaryPath:   writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		ClaudeConfig: claudeConfig,
+		CodexConfig:  codexConfig,
+		Timeout:      time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), codexConfig) || strings.Contains(err.Error(), "partial hookinstall commit") {
+		t.Fatalf("Install() error = %v; want a refusal that names %s before any write", err, codexConfig)
+	}
+	if got, readErr := os.ReadFile(claudeConfig); readErr != nil || !bytes.Equal(got, claudeOriginal) {
+		t.Fatalf("Claude config changed: err=%v bytes=%q", readErr, got)
+	}
+}
+
+// Review of the hookinstall ownership rule: a byte-identical second copy of
+// the owned hook of another script stayed, so doctor's "duplicate" remedy
+// (install again) could not clear it.
+func TestInstallRemovesASecondIdenticalCopyOfAnOwnedHook(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		other := filepath.Join(dir, "other", "hook.sh")
+		mustWrite(t, other, []byte(SessionStartScript))
+		otherCommand := buildHookCommand(binaryPath, other, time.Second)
+		group := fmt.Sprintf(`{"hooks":[{"type":"command","command":%q,"timeout":6}]}`, otherCommand)
+		codexConfig := filepath.Join(dir, "codex", "hooks.json")
+		mustWrite(t, codexConfig, []byte(`{"hooks":{"SessionStart":[`+group+`,`+group+`]}}`))
+
+		if _, err := Install(Options{
+			Agent:       AgentCodex,
+			ScriptPath:  filepath.Join(dir, "hooks", "hook.sh"),
+			BinaryPath:  binaryPath,
+			CodexConfig: codexConfig,
+			Timeout:     time.Second,
+		}); err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		if doc := readJSON(t, codexConfig); countCommand(doc, otherCommand) != 1 {
+			t.Fatalf("copies of the other script's hook != 1:\n%s", mustMarshal(t, doc))
+		}
+	})
 }

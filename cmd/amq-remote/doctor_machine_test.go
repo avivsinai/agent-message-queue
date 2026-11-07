@@ -68,7 +68,7 @@ func installHooks(t *testing.T, approval, stop bool) {
 	home, _ := os.UserHomeDir()
 	bin := filepath.Join(home, "bin", "amq-remote")
 	if approval {
-		if err := claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait); err != nil {
+		if err := claude.InstallPermissionHook(home, bin); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -101,8 +101,8 @@ func TestDoctorHookPassFindsEveryHook(t *testing.T) {
 		t.Fatalf("doctor: code=%d err=%v failing=%v", code, err, out.(map[string]any)["failing"])
 	}
 	rows := out.(map[string]any)["hooks"].([]hookFile)
-	if len(rows) != 1 || rows[0].Settings != settings || rows[0].Approval != claude.StopHookPresent ||
-		rows[0].Stop != claude.StopHookPresent || rows[0].Guard != amqcli.DialogGuardOK || rows[0].Probe != probeOK {
+	if len(rows) != 1 || rows[0].Settings != settings || rows[0].Approval != claude.HookPresent ||
+		rows[0].Stop != claude.HookPresent || rows[0].Guard != amqcli.DialogGuardOK || rows[0].Probe != probeOK {
 		t.Fatalf("hook rows = %+v", rows)
 	}
 	want, _ := claude.PermissionHookCommand(settings)

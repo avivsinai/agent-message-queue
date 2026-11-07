@@ -348,14 +348,16 @@ func Install(opts Options) (Result, error) {
 	return result, nil
 }
 
+// preflightHookConfigs refuses, before any write, a config the settings
+// writer would refuse, with the writer's own check.
 func preflightHookConfigs(opts Options) error {
 	if opts.Agent == AgentClaude || opts.Agent == AgentBoth {
-		if err := validateHookConfig(opts.ClaudeConfig); err != nil {
+		if err := claude.CheckSettings(opts.ClaudeConfig, "SessionStart"); err != nil {
 			return err
 		}
 	}
 	if opts.Agent == AgentCodex || opts.Agent == AgentBoth {
-		if err := validateHookConfig(opts.CodexConfig); err != nil {
+		if err := claude.CheckSettings(opts.CodexConfig, "SessionStart"); err != nil {
 			return err
 		}
 	}
@@ -429,14 +431,13 @@ func NormalizeOptions(opts Options) (Options, error) {
 // which edits the file's bytes in place: other content is kept as it is
 // and no backup is needed. The entry replaces every owned hook for
 // scriptPath and every owned hook whose script is gone; an owned hook it
-// cannot read, or one for another script that exists, stays.
+// cannot read, or one for another script that exists, stays, except a
+// byte-identical second copy of an owned group, which is removed.
 func installHook(path, scriptPath, agent, command string, hookTimeoutSeconds int) (FileResult, error) {
-	if err := validateHookConfig(path); err != nil {
-		return FileResult{}, err
-	}
 	changed, err := claude.InstallCommandHooksAt(path, []claude.CommandHook{{
 		Event:   "SessionStart",
 		Matcher: sessionStartMatcher,
+		Marker:  amqOwnedCommandPrefix,
 		Command: command,
 		Timeout: hookTimeoutSeconds,
 		Async:   agent == AgentClaude,
@@ -446,25 +447,6 @@ func installHook(path, scriptPath, agent, command string, hookTimeoutSeconds int
 		return FileResult{}, err
 	}
 	return FileResult{Path: path, Changed: changed}, nil
-}
-
-// validateHookConfig refuses a config the installer must not edit: one that
-// does not parse as one JSON object, or whose hooks, SessionStart or inner
-// hook lists have the wrong type.
-func validateHookConfig(path string) error {
-	doc, err := loadJSONObject(path)
-	if err != nil {
-		return err
-	}
-	hooks, err := objectField(doc, "hooks")
-	if err != nil {
-		return err
-	}
-	sessionStart, err := arrayField(hooks, "SessionStart")
-	if err != nil {
-		return err
-	}
-	return validateSessionStartEntries(sessionStart)
 }
 
 // ownsForScript reports the owned SessionStart commands an install for
@@ -525,11 +507,11 @@ func isAMQOwnedCommand(command string) bool {
 }
 
 // hookClass is the shared classification of a single hook command used by both
-// the install-time self-heal and the read-only doctor scan so the two never
+// the installer (ownsForScript) and the read-only doctor scans so the two never
 // disagree. owned is true for AMQ-written commands; scriptPath is the parsed
 // installed script path (empty when the command could not be parsed); stale is
 // true only when the path parsed and the script does not exist on disk. An
-// owned command that cannot be parsed is NOT stale: self-heal and doctor never
+// owned command that cannot be parsed is NOT stale: install and doctor never
 // delete or report what they cannot read.
 type hookClass struct {
 	owned      bool
@@ -539,8 +521,7 @@ type hookClass struct {
 
 // classifyHook inspects a single hook object and returns its classification.
 // It is the single source of truth for ownership, path extraction, and
-// staleness shared by pruneStaleAMQHooks (install-time self-heal) and
-// StaleSessionStartHooks (doctor scan).
+// staleness shared by the installer (ownsForScript) and the doctor scans.
 func classifyHook(hookObj map[string]interface{}) hookClass {
 	command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
 	if !isAMQOwnedCommand(command) {
@@ -717,7 +698,7 @@ type StaleSessionStartHook struct {
 // StaleSessionStartHooks scans a Claude or Codex hook config file for AMQ-owned
 // SessionStart hook commands whose script path does not exist. It does not
 // modify the file. Returns one entry per stale hook. Uses classifyHook so it
-// agrees with the install-time self-heal. Owned hooks that cannot be parsed are
+// agrees with the installer. Owned hooks that cannot be parsed are
 // not reported (they are preserved, not stale).
 func StaleSessionStartHooks(configPath, agent string) ([]StaleSessionStartHook, error) {
 	doc, err := loadJSONObject(configPath)
@@ -928,61 +909,11 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func objectField(doc map[string]interface{}, key string) (map[string]interface{}, error) {
-	if raw, ok := doc[key]; ok {
-		if obj, ok := raw.(map[string]interface{}); ok {
-			return obj, nil
-		}
-		return nil, fmt.Errorf("%q must be a JSON object", key)
-	}
-	obj := map[string]interface{}{}
-	doc[key] = obj
-	return obj, nil
-}
-
-func arrayField(doc map[string]interface{}, key string) ([]interface{}, error) {
-	if raw, ok := doc[key]; ok {
-		values, ok := raw.([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("%q must be a JSON array", key)
-		}
-		return values, nil
-	}
-	values := []interface{}{}
-	doc[key] = values
-	return values, nil
-}
-
 func interfaceArray(raw interface{}) []interface{} {
 	if values, ok := raw.([]interface{}); ok {
 		return values
 	}
 	return []interface{}{}
-}
-
-func validateSessionStartEntries(entries []interface{}) error {
-	for _, entry := range entries {
-		obj, ok := entry.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if _, err := innerHookList(obj); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func innerHookList(entry map[string]interface{}) ([]interface{}, error) {
-	raw, exists := entry["hooks"]
-	if !exists || raw == nil {
-		return []interface{}{}, nil
-	}
-	values, ok := raw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%q must be a JSON array", "hooks")
-	}
-	return values, nil
 }
 
 // hookGate sits between the timeout assignment and the quoted script path.

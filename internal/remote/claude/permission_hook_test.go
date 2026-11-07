@@ -3,10 +3,12 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,7 +46,7 @@ func boundHookEnv(t *testing.T) string {
 // waits for it and returns what it printed.
 func runHook(t *testing.T, stdin string) func() string {
 	t.Helper()
-	h := permissionHook{now: time.Now, wait: time.Minute, poll: 5 * time.Millisecond}
+	h := permissionHook{now: time.Now, poll: 5 * time.Millisecond}
 	var out bytes.Buffer
 	ended := make(chan struct{})
 	go func() {
@@ -229,5 +231,63 @@ func TestSessionScopeLabels(t *testing.T) {
 		if got := sessionScope([]json.RawMessage{json.RawMessage(raw)}); got != want {
 			t.Fatalf("sessionScope(%s) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// The owner's report: approval dialogs in Buzz expired after 10 minutes.
+// The hook has no deadline: an hour later it still waits, and a Buzz
+// answer still decides.
+func TestPermissionHookWaitsPastTenMinutes(t *testing.T) {
+	dir := boundHookEnv(t)
+	start := time.Now()
+	var calls atomic.Int32
+	h := permissionHook{poll: time.Millisecond, now: func() time.Time {
+		if calls.Add(1) == 1 {
+			return start
+		}
+		return start.Add(time.Hour)
+	}}
+	var out bytes.Buffer
+	ended := make(chan struct{})
+	go func() {
+		h.run(strings.NewReader(`{"session_id":"s-1","tool_name":"Bash","tool_input":{"command":"make"}}`), &out, make(chan struct{}))
+		close(ended)
+	}()
+	req := openRequest(t, dir)
+	time.Sleep(50 * time.Millisecond)
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); ok {
+		t.Fatalf("resolved %+v with nobody answering", r)
+	}
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook did not end")
+	}
+	if d := decisionOf(t, out.String()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v; want the Buzz answer", d)
+	}
+}
+
+// Review of the hook without a deadline: a Claude process killed without a
+// signal left the hook waiting for ever, and its dialog open in Buzz.
+func TestPermissionHookEndsWhenItsClaudeProcessIsGone(t *testing.T) {
+	dir := boundHookEnv(t)
+	h := permissionHook{now: time.Now, poll: time.Millisecond, parentGone: func() bool { return true }}
+	ended := make(chan struct{})
+	go func() {
+		h.run(strings.NewReader(`{"session_id":"s-1","tool_name":"Bash","tool_input":{"command":"make"}}`), io.Discard, make(chan struct{}))
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook outlived its Claude process")
+	}
+	reqs, _ := dialog.Requests(dir)
+	if len(reqs) != 0 {
+		t.Fatalf("open dialogs = %+v; want the dialog closed", reqs)
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -72,7 +71,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		// IDE starts may not have its directory on PATH.
 		bin, err := hookExecutable()
 		if err == nil {
-			_, err = claude.OptInPermissionHook(home, claude.SettingsPath(home), bin, claude.DefaultPermissionWait)
+			_, err = claude.OptInPermissionHook(home, claude.SettingsPath(home), bin)
 		}
 		if err != nil {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
@@ -95,16 +94,10 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 
 // hookExecutable is the absolute amq-remote path a hook runs: the stable
 // path a login service would run, so an upgrade that removes the versioned
-// path keeps the hook working, else this binary's own absolute path.
+// path keeps the hook working. A temporary build is refused.
 func hookExecutable() (string, error) {
-	if exe, _, err := stableExecutable(); err == nil {
-		return exe, nil
-	}
-	bin, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Abs(bin)
+	exe, _, err := stableExecutable()
+	return exe, err
 }
 
 // hookProbeEnv set to 1, with an empty stdin, makes the PermissionRequest
@@ -130,7 +123,9 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 	}
 	fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+	// An installed hook of an older form passes --wait; the hook has no
+	// deadline, so the value is ignored.
+	_ = fs.Int("wait", 0, "ignored")
 	if fs.Parse(args) != nil {
 		return 0
 	}
@@ -142,7 +137,7 @@ func permissionHook(args []string, stdin io.Reader, stdout io.Writer) int {
 		<-sigs
 		close(done)
 	}()
-	return claude.RunPermissionHook(stdin, stdout, done, time.Duration(*wait)*time.Second, hookBinding)
+	return claude.RunPermissionHook(stdin, stdout, done, hookBinding)
 }
 
 // hookBinding writes the binding of a Claude session that no binding serves,

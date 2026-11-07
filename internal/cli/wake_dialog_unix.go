@@ -940,33 +940,18 @@ func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
 	return claude.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
 }
 
-// installedGuardBin is the amq binary the installed guard entries in the
-// hooks file path all run, when that binary exists, else bin. A repair
-// keeps the binary an install chose, so two installers never rewrite the
-// file back and forth (and Codex never asks for trust again for nothing).
+// installedGuardBin is claude.KeptHookBin of the installed guard entries in
+// the hooks file path (Codex never asks for trust again for nothing).
 func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
-	found := ""
+	var all []string
 	for _, event := range events {
 		commands, err := claude.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
 		if err != nil {
 			return bin
 		}
-		for _, command := range commands {
-			match := binRe.FindStringSubmatch(command)
-			if match == nil {
-				return bin
-			}
-			got := strings.ReplaceAll(match[1], `'\''`, `'`)
-			if found != "" && got != found {
-				return bin
-			}
-			found = got
-		}
+		all = append(all, commands...)
 	}
-	if info, err := os.Stat(found); found == "" || err != nil || info.IsDir() {
-		return bin
-	}
-	return found
+	return claude.KeptHookBin(all, binRe, bin)
 }
 
 // installedClaudeVersionOnce is installedClaudeVersion, run once per
