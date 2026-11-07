@@ -156,7 +156,7 @@ func sameIdentity(a, b Config) bool {
 }
 
 // Category maps an error to a fixed, AMQ-worded category for status files:
-// relay-controlled text (OK reasons, close reasons) never reaches them
+// relay-controlled text (OK reasons, close reasons) never reaches them.
 // Local configuration errors keep their text.
 func Category(err error) string {
 	var remote *RemoteError
