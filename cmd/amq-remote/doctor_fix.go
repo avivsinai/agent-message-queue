@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
@@ -79,14 +79,14 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 				ensure(path, "Stop hook", func() (bool, error) { return claude.EnsureStopHook(home, path, bin) })
 			}
 		}
-		switch state, _ := amqcli.ClaudeDialogGuardAt(path); state {
-		case amqcli.DialogGuardOK, amqcli.DialogGuardDisabled, amqcli.DialogGuardUnsupported:
+		switch state, _ := dialogguard.ClaudeAt(path); state {
+		case dialogguard.OK, dialogguard.Disabled, dialogguard.Unsupported:
 		default:
 			if amqErr != nil {
 				fail("hooks", path, "cannot install the wake dialog guard: no amq binary: "+amqErr.Error(), "install amq, then run `amq-remote doctor --fix` again")
 				continue
 			}
-			if wrote, err := amqcli.InstallClaudeDialogGuardAt(path, amq); err != nil {
+			if wrote, err := dialogguard.InstallClaudeAt(path, amq); err != nil {
 				fail("hooks", path, "cannot install the wake dialog guard: "+err.Error(), "repair "+path)
 			} else if wrote {
 				changed("hooks", path, "installed the wake dialog guard")

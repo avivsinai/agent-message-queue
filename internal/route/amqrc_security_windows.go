@@ -1,6 +1,6 @@
 //go:build windows
 
-package cli
+package route
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 )
 
 // Windows has no portable Unix ownership or mode bits to validate.
-func validateAmqrcFile(path string) error {
+func ValidateAmqrcFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

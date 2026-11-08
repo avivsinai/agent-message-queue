@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
@@ -51,7 +51,7 @@ func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	if state, _ := claude.PermissionHookState(settings); state != claude.HookPresent {
 		t.Fatalf("approval hook %q after --fix", state)
 	}
-	if state, detail := amqcli.ClaudeDialogGuardAt(settings); state != amqcli.DialogGuardOK {
+	if state, detail := dialogguard.ClaudeAt(settings); state != dialogguard.OK {
 		t.Fatalf("guard %q after --fix: %s", state, detail)
 	}
 	if in, err := claude.ReadHookOptIn(settings); err != nil || in.Approval == nil {

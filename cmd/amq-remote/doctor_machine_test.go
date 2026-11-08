@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -77,7 +77,11 @@ func installHooks(t *testing.T, approval, stop bool) {
 			t.Fatal(err)
 		}
 	}
-	if err := amqcli.Run([]string{"wake", "install-dialog-hook", "--harness", "claude"}, "test"); err != nil {
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dialogguard.InstallClaudeAt(claude.SettingsPath(home), amq); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -102,7 +106,7 @@ func TestDoctorHookPassFindsEveryHook(t *testing.T) {
 	}
 	rows := out.(map[string]any)["hooks"].([]hookFile)
 	if len(rows) != 1 || rows[0].Settings != settings || rows[0].Approval != claude.HookPresent ||
-		rows[0].Stop != claude.HookPresent || rows[0].Guard != amqcli.DialogGuardOK || rows[0].Probe != probeOK {
+		rows[0].Stop != claude.HookPresent || rows[0].Guard != dialogguard.OK || rows[0].Probe != probeOK {
 		t.Fatalf("hook rows = %+v", rows)
 	}
 	want, _ := claude.PermissionHookCommand(settings)
