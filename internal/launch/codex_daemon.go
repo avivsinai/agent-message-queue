@@ -22,13 +22,16 @@ func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest) (AgentPlan, er
 	if err != nil {
 		return AgentPlan{}, err
 	}
-	if len(request.CommittedArgs) != 0 || len(request.BypassArgs) != 0 || len(request.EnvOverlay) != 0 || request.Wrapper != nil {
-		return AgentPlan{}, fmt.Errorf("codex daemon launch options require verified resume equivalence")
+	if reason := CodexDaemonOptionsReason(request); reason != "" {
+		return AgentPlan{}, fmt.Errorf("%s", reason)
 	}
+	argv := append([]string{executable, "resume", "-C", request.Cwd}, request.CommittedArgs...)
+	identityIndex := len(argv)
+	argv = append(argv, preSpawnConversationPlaceholder)
 	plan := AgentPlan{
-		Handle: request.Handle, Argv: []string{executable, "resume", "-C", request.Cwd, preSpawnConversationPlaceholder}, Cwd: request.Cwd,
+		Handle: request.Handle, Argv: argv, Cwd: request.Cwd,
 		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
-		PreSpawnAcquire: true, DynamicArgv: []DynamicArg{{Index: 4, Kind: DynamicArgConversationID}},
+		PreSpawnAcquire: true, DynamicArgv: []DynamicArg{{Index: identityIndex, Kind: DynamicArgConversationID}},
 	}
 	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
 		return AgentPlan{}, err
@@ -96,14 +99,65 @@ func decodeCodexDaemonPayload(raw []byte) (codexDaemonPayload, error) {
 func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 	if ticket.ProviderVersion != CodexDaemonVersion || len(ticket.TargetEnv) != 0 || ticket.Wrapper != nil ||
 		len(ticket.TargetArgv) < 5 ||
-		ticket.TargetArgv[1] != "resume" || ticket.TargetArgv[2] != "-C" || ticket.TargetArgv[3] != ticket.Cwd || ticket.TargetArgv[4] != preSpawnConversationPlaceholder ||
-		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0] != (DynamicArg{Index: 4, Kind: DynamicArgConversationID}) {
+		ticket.TargetArgv[1] != "resume" || ticket.TargetArgv[2] != "-C" || ticket.TargetArgv[3] != ticket.Cwd ||
+		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0].Kind != DynamicArgConversationID {
 		return fmt.Errorf("codex daemon execution template is invalid")
 	}
-	if len(ticket.TargetArgv) != 5 && (len(ticket.TargetArgv) != 6 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != 5) {
+	identityIndex := ticket.DynamicArgv[0].Index
+	if identityIndex < 4 || identityIndex >= len(ticket.TargetArgv) || ticket.TargetArgv[identityIndex] != preSpawnConversationPlaceholder {
+		return fmt.Errorf("codex daemon conversation slot is invalid")
+	}
+	if reason := codexDaemonArgumentsReason(ticket.TargetArgv[4:identityIndex]); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
+	if len(ticket.TargetArgv) != identityIndex+1 && (len(ticket.TargetArgv) != identityIndex+2 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != identityIndex+1) {
 		return fmt.Errorf("codex daemon execution options require verified resume equivalence")
 	}
 	return nil
+}
+
+// CodexDaemonOptionsReason admits only invocation settings that Codex 0.167
+// forwards to a local-daemon TUI resume. Configuration overrides select the
+// embedded backend in Codex itself and must retain that path.
+func CodexDaemonOptionsReason(request PlanRequest) string {
+	if request.Wrapper != nil || len(request.EnvOverlay) != 0 || len(request.BypassArgs) != 0 {
+		return "wrapper, environment, or bypass options require verified TUI resume equivalence"
+	}
+	return codexDaemonArgumentsReason(request.CommittedArgs)
+}
+
+func codexDaemonArgumentsReason(args []string) string {
+	if err := validateCommittedArgs(args, codexArgRules()); err != nil {
+		return "launch arguments do not match the verified Codex resume grammar"
+	}
+	seen := make(map[string]bool)
+	for i := 0; i < len(args); i++ {
+		flag := args[i]
+		if seen[flag] {
+			return "duplicate launch options require verified TUI resume equivalence"
+		}
+		seen[flag] = true
+		switch flag {
+		case "--no-alt-screen":
+		case "--model":
+			i++
+		case "--sandbox":
+			i++
+			if !oneOf("read-only", "workspace-write")(args[i]) {
+				return "sandbox option requires verified TUI resume equivalence"
+			}
+		case "--ask-for-approval":
+			i++
+			if args[i] != "on-request" {
+				return "approval option requires verified TUI resume equivalence"
+			}
+		case "-c", "--search":
+			return fmt.Sprintf("Codex %s selects an embedded app-server for command-line configuration or search overrides", CodexDaemonVersion)
+		default:
+			return "launch option requires verified TUI resume equivalence"
+		}
+	}
+	return ""
 }
 
 func validateCodexDaemonExecutable(ticket ExecutionTicket) error {

@@ -134,3 +134,21 @@ The other full startup admission probes run during planning and new acquisition.
 Prepare authorizes the selected native or embedded identity contract. A daemon
 or sign-in change that changes that selection before Apply requires a new
 Prepare; Apply does not execute a different plan under the earlier authorization.
+
+## Native resume settings
+
+The Codex 0.167.0 TUI forwards `--model <value>`,
+`--sandbox read-only|workspace-write`, and `--ask-for-approval on-request` on
+resume, and retains `--no-alt-screen` for terminal presentation. That the daemon
+applies the forwarded settings is not yet verified live. Native admission fixes
+these sandbox and approval values independently of the embedded argument grammar. Settings keep
+their order in the execution ticket, followed by its acquired thread ID and any
+initial prompt.
+
+Codex selects embedded execution for command-line configuration overrides such
+as `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and for
+`--search`. Those launches retain the original arguments and explain the
+terminal-only approval capability. Wrappers, environment overlays, bypass
+options, and unverified or duplicate options also retain the embedded path.
+AMQ does not translate reviewer choices into protocol settings or alter saved
+Codex configuration.
