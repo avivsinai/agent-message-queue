@@ -48,6 +48,8 @@ func runRoute(args []string) error {
 	switch args[0] {
 	case "explain":
 		return runRouteExplain(args[1:])
+	case "peers":
+		return runRoutePeers(args[1:])
 	default:
 		return formatUnknownSubcommand("route", args[0])
 	}
@@ -328,4 +330,85 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+type routePeersResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	SourceRoot    string `json:"source_root"`
+	route.PeerGraph
+	Error string `json:"error,omitempty"`
+}
+
+func runRoutePeers(args []string) error {
+	fs := flag.NewFlagSet("route peers", flag.ContinueOnError)
+	rootFlag := fs.String("root", "", "Source AMQ root (default: resolved like other commands)")
+	depthFlag := fs.Int("depth", route.DefaultPeerDepth, fmt.Sprintf("Follow peers' own .amqrc this many hops (1-%d)", route.MaxPeerDepth))
+	jsonFlag := fs.Bool("json", false, "Emit JSON output")
+
+	usage := usageWithFlags(fs, "amq route peers [--depth N] [--json]",
+		"Lists each peer in this project's .amqrc peers map and whether it can answer.",
+		"status is ok, unreadable, missing_root, or no_amqrc. reply_back is yes only",
+		"when the peer's .amqrc lists this project under its exact project name and",
+		"that entry is this project's base root; with no, replies from that peer fail.",
+		fmt.Sprintf("--depth follows the peers' own .amqrc, visiting each project once (at most %d).", route.MaxPeerProjects),
+		"Reads only .amqrc files and base roots, never message files.",
+		"",
+		"Examples:",
+		"  amq route peers",
+		"  amq route peers --depth 2 --json",
+	)
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if *depthFlag < 1 || *depthFlag > route.MaxPeerDepth {
+		return UsageError("--depth must be between 1 and %d", route.MaxPeerDepth)
+	}
+
+	result := routePeersResult{SchemaVersion: 1, PeerGraph: route.PeerGraph{Peers: []route.PeerEdge{}}}
+	root, _, _, err := resolveEnvConfigWithSource(*rootFlag, "")
+	if err == nil {
+		result.SourceRoot = resolveRoot(root)
+		var graph route.PeerGraph
+		if graph, err = routeWalker().Peers(result.SourceRoot, *depthFlag); err == nil {
+			result.PeerGraph = graph
+		}
+	}
+	if *jsonFlag {
+		if err != nil {
+			result.Error = err.Error()
+		}
+		return writeJSON(os.Stdout, result)
+	}
+	if err != nil {
+		return err
+	}
+	return writeRoutePeersText(result.PeerGraph)
+}
+
+func writeRoutePeersText(graph route.PeerGraph) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%s)\n", graph.Project, graph.Config)
+	if len(graph.Peers) == 0 {
+		b.WriteString("  no peers configured\n")
+	}
+	for _, peer := range graph.Peers {
+		name := peer.Name
+		if peer.Depth > 1 {
+			name = peer.Via + " -> " + peer.Name
+		}
+		fmt.Fprintf(&b, "  %s  %s  reply_back: %s  %s\n", name, peer.Status, peer.ReplyBack, peer.BaseRoot)
+		switch {
+		case peer.ReplyBack == route.ReplyBackNo:
+			fmt.Fprintf(&b, "    warning: reply_back: no: %s\n", peer.Detail)
+		case peer.Status != route.PeerOK && peer.Detail != "":
+			fmt.Fprintf(&b, "    %s\n", peer.Detail)
+		}
+	}
+	if graph.Truncated {
+		fmt.Fprintf(&b, "  truncated at %d projects\n", route.MaxPeerProjects)
+	}
+	_, err := os.Stdout.WriteString(b.String())
+	return err
 }

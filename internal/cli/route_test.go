@@ -116,6 +116,52 @@ func TestRouteExplainNamesRouteProvenance(t *testing.T) {
 	}
 }
 
+func TestRoutePeersShowsWhetherRepliesComeBack(t *testing.T) {
+	tmp := t.TempDir()
+	rootOf := func(project string) string { return filepath.Join(tmp, project, ".agent-mail") }
+	for _, project := range []string{"project-a", "project-b", "project-c"} {
+		ensureRouteAgents(t, rootOf(project), "alice")
+	}
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-a"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-a",
+		"peers":   map[string]string{"project-b": rootOf("project-b"), "project-c": rootOf("project-c")},
+	})
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-b"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-b",
+		"peers":   map[string]string{"project-a": rootOf("project-a")},
+	})
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-c"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-c",
+	})
+
+	output, err := captureEnvStdout(t, func() error {
+		return runRoutePeers([]string{"--root", rootOf("project-a"), "--json"})
+	})
+	if err != nil {
+		t.Fatalf("runRoutePeers: %v", err)
+	}
+	var result routePeersResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal route peers output: %v, output was: %s", err, output)
+	}
+	if result.Error != "" || len(result.Peers) != 2 {
+		t.Fatalf("route peers = %s", output)
+	}
+	got := map[string]route.PeerEdge{}
+	for _, peer := range result.Peers {
+		got[peer.Name] = peer
+	}
+	if peer := got["project-b"]; peer.Status != route.PeerOK || peer.ReplyBack != route.ReplyBackYes {
+		t.Errorf("project-b = %+v, want ok with reply_back yes", peer)
+	}
+	if peer := got["project-c"]; peer.Status != route.PeerOK || peer.ReplyBack != route.ReplyBackNo {
+		t.Errorf("project-c = %+v, want ok with reply_back no", peer)
+	}
+}
+
 func runRouteExplainJSONForTest(t *testing.T, args ...string) routeExplainResult {
 	t.Helper()
 
