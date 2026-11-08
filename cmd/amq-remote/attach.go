@@ -34,6 +34,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
@@ -172,7 +173,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
-	if err := acp.VerifySessionPin(filepath.Clean(sessionRoot)); err == nil {
+	if err := sessionguard.VerifyEnvPin(filepath.Clean(sessionRoot)); err == nil {
 		recordAttachIdentity(stderr, sessionRoot, strings.TrimSpace(*me), cand.Kind)
 	}
 	if *linkName != "" {
@@ -346,7 +347,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	}
 	// The inherited session pin must name this root, exactly as a direct
 	// amq-acp mailbox checks it.
-	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
+	if err := sessionguard.VerifyEnvPin(filepath.Clean(root)); err != nil {
 		return b, "", false, err
 	}
 	explicit := name != ""
@@ -417,7 +418,7 @@ func listBuzzInRoster(root string) error {
 		return err
 	}
 	defer func() { _ = dr.Close() }()
-	if err := acp.VerifySessionPinOn(dr); err != nil {
+	if err := sessionguard.VerifyEnvPinOn(dr); err != nil {
 		return err
 	}
 	if _, err := dr.ReadFile("meta/config.json"); errors.Is(err, os.ErrNotExist) {
@@ -1493,7 +1494,7 @@ func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 			return err
 		}
 		defer func() { _ = deliveryRoot.Close() }()
-		if err := acp.VerifySessionPinOn(deliveryRoot); err != nil {
+		if err := sessionguard.VerifyEnvPinOn(deliveryRoot); err != nil {
 			return err
 		}
 		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, harness.Lookup(kind).Name, "", time.Now()))
