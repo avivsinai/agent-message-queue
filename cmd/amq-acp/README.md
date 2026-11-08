@@ -295,15 +295,20 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   reply's post fails before the Buzz CLI starts (for example, no CLI is
   found), the same sweep posts it once the CLI works; a post that started
   and then failed is uncertain and is not repeated.
-- The message's header carries `context.buzz.event`, the complete signed
-  Nostr event, when amq-acp fetched it from the relay as the agent (within
-  2 s) and it is the event the prompt named: id and signature verify, kind 9,
-  and exactly one `h` tag, equal to the channel the prompt arrived on. Any
-  other result delivers the message without the key and logs one line; the
-  `nostr:<id>` label stays either way. The event proves who signed which
-  content in which channel, not ownership: a gate pins the owner key itself,
-  acts on `event.content` rather than the body, records consumed event ids,
-  bounds the age and future skew of `created_at`, and binds the answer to its
+- The message's header carries `context.buzz.event`, the signed Nostr
+  event's fields, re-encoded, when amq-acp fetched it from the relay as the
+  agent (within 2 s) and it is the prompt's triggering event: the id from the
+  ACP `_meta`, else the Event ID of the prompt's `<buzz-event>` block (Buzz
+  Desktop sends no `_meta` id). Its id and signature verify, its kind is 9,
+  and it has exactly one `h` tag, equal to the channel the prompt arrived on.
+  Any other result delivers the message without the key and logs one line;
+  the `nostr:<id>` label names the looked-up id either way. Any local sender
+  can write header context (`amq send/reply --context`), so the key's
+  presence is not provenance: a gate re-runs every check itself (`CheckID`,
+  `VerifySignature`, kind 9, exactly one `h` equal to the channel it expects,
+  and `pubkey` equal to the owner key it pins). It also acts on
+  `event.content` rather than the body, records consumed event ids, bounds
+  the age and future skew of `created_at`, and binds the answer to its
   request. See the [message format](../../skills/amq-cli/references/message-format.md#verified-buzz-event).
 - An image the owner sends reaches both carriers as a local file. Each
   NIP-92 `imeta` tag of the event (else each Blossom URL on the relay's host)
