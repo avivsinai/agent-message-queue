@@ -4,6 +4,8 @@ package codexlaunch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,7 +71,15 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			nonce := "96969696-9696-4969-8969-969696969696"
-			plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: nonce, ProjectRoot: project,
+			var settings []string
+			var initial *launch.InitialInputRequest
+			if scenario == "publish" {
+				settings = []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
+				text := "Keep the requested settings."
+				sum := sha256.Sum256([]byte(text))
+				initial = &launch.InitialInputRequest{Kind: launch.InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
+			}
+			plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: nonce, ProjectRoot: project, CommittedArgs: settings, InitialInput: initial,
 				SessionRoot: session, Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
 			if err != nil || !plan.PreSpawnAcquire {
 				t.Fatalf("native plan = %#v, %v", plan, err)
@@ -77,7 +88,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion,
 				PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 				ProjectRoot: project, SessionRoot: session, Cwd: project, ProviderExecutable: executable, AMQExecutable: amq,
-				TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
+				TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv, InitialInput: plan.InitialInput})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,6 +203,19 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			}
 			if err != nil || prepared.State != launch.ExecutionAcknowledged {
 				t.Fatalf("prepare = %#v, %v", prepared, err)
+			}
+			if scenario == "publish" {
+				// S2: settings remain in the ticket-owned resume argv while only
+				// the acquired thread slot is substituted at execution.
+				argv, resolveErr := launch.ResolveExecutionArgv(prepared, env)
+				if resolveErr != nil {
+					t.Fatal(resolveErr)
+				}
+				expected := append([]string{executable, "resume", "-C", project}, settings...)
+				expected = append(expected, thread, initial.Value)
+				if !slices.Equal(argv, expected) {
+					t.Fatalf("native settings changed at resume: got %q want %q", argv, expected)
+				}
 			}
 			record, err := codexidentity.Lookup(thread, home)
 			if err != nil || record.Root != session || record.Me != "codex" {
@@ -390,5 +414,31 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 	argv := prepared.Participants[0].Command.Argv
 	if len(argv) < 3 || argv[0] != wrapper || argv[1] != executable || argv[2] != "-c" {
 		t.Fatalf("wrapper was omitted from embedded admission: %q", argv)
+	}
+}
+
+// S2: Codex 0.167 deliberately selects an embedded app-server for these
+// overrides. Preserve the caller's settings rather than acquire a native thread.
+func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	for _, args := range [][]string{{"-c", `approvals_reviewer="user"`}, {"-c", "model_reasoning_effort=high"}, {"--search"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			project, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+			plan, err := New(nativeProvider(t)).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
+				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: args})
+			if err != nil || plan.PreSpawnAcquire || !strings.Contains(plan.TerminalOnlyReason, "Codex 0.167 selects an embedded") {
+				t.Fatalf("unverified native settings=%#v, %v", plan, err)
+			}
+			if !slices.Equal(plan.Argv[1:1+len(args)], args) {
+				t.Fatalf("embedded settings changed: %q", plan.Argv)
+			}
+		})
 	}
 }

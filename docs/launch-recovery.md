@@ -134,3 +134,19 @@ The other full startup admission probes run during planning and new acquisition.
 Prepare authorizes the selected native or embedded identity contract. A daemon
 or sign-in change that changes that selection before Apply requires a new
 Prepare; Apply does not execute a different plan under the earlier authorization.
+
+## Native resume settings
+
+On Codex 0.167.0, managed native resume retains `--model <value>`,
+`--sandbox read-only|workspace-write`, `--ask-for-approval on-request`, and
+`--no-alt-screen`. The existing managed argument grammar and values remain the
+admission boundary. Settings keep their order in the execution ticket, followed
+by its acquired thread ID and any initial prompt.
+
+Codex selects embedded execution for command-line configuration overrides such
+as `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and for
+`--search`. Those launches retain the original arguments and explain the
+terminal-only approval capability. Wrappers, environment overlays, bypass
+options, and unverified or duplicate options also retain the embedded path.
+AMQ does not translate reviewer choices into protocol settings or alter saved
+Codex configuration.
