@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
+
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 )
 
 // Prepare validates and compiles caller intent, then inspects the exact target
@@ -96,7 +98,7 @@ func defaultPrepareAdapter(provider, executable string) internallaunch.HarnessAd
 	case internallaunch.ClaudeProvider:
 		return internallaunch.NewClaudeAdapter(executable)
 	case internallaunch.CodexProvider:
-		return internallaunch.NewCodexAdapter(executable)
+		return codexlaunch.New(executable)
 	case internallaunch.CursorProvider:
 		return internallaunch.NewCursorAdapter(executable)
 	case internallaunch.GrokProvider:

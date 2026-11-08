@@ -109,7 +109,8 @@ type coopExecRun struct {
 	wakeStartupHold *os.File
 	// managedProvider is the managed launch ticket's provider: the harness
 	// a wrapped seat runs behind its wrapper executable.
-	managedProvider string
+	managedProvider    string
+	managedCodexDaemon bool
 	// managedInvocation is the harness and wrapper the managed launch ticket
 	// runs, for the identity record.
 	managedInvocation harness.Invocation
@@ -152,6 +153,7 @@ func runCoopExec(args []string) error {
 		defer func() { _ = c.managedGuard.Close() }()
 		if ticket, ticketErr := launch.LoadExecutionTicket(c.managedGuard.root, c.agentHandle); ticketErr == nil && ticket.LaunchNonce == c.managedLaunchNonce {
 			c.managedProvider = ticket.Provider
+			c.managedCodexDaemon = ticket.Provider == launch.CodexProvider && ticket.PreSpawnAcquire
 			c.managedInvocation = managedInvocation(ticket)
 			managedTicket = &ticket
 		}
@@ -954,7 +956,7 @@ func (c *coopExecRun) execAgent() error {
 	// reads that marker. recordResumedCodexThread records exactly the
 	// thread codexResumeSelection selects, or fails the launch.
 	_, selected, unresolved := codexResumeSelection(c.agentArgs)
-	recorded := codex && selected && !unresolved && !embeddedOnly
+	recorded := codex && selected && !unresolved && !embeddedOnly || c.managedCodexDaemon
 	if c.managedLaunchNonce == "" && wdErr == nil {
 		c.agentArgs = pinCodexResumeLaunchDir(c.binaryPath, c.agentArgs, wd, recorded, resumeChoice)
 	}
@@ -1006,7 +1008,7 @@ func (c *coopExecRun) execAgent() error {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
 	}
-	if !embeddedOnly {
+	if !embeddedOnly && !c.managedCodexDaemon {
 		if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {
 			return cleanupAfterError(err)
 		}

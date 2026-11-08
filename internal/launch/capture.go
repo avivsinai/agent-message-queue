@@ -317,7 +317,7 @@ func captureCodexIdentity(request CaptureRequest) CaptureResult {
 		if !evidence.verified {
 			return degradedCapture(CaptureStale, CaptureReasonEvidenceUnverified)
 		}
-		if evidence.source != CodexNotifyV1 {
+		if evidence.source != CodexNotifyV1 && evidence.source != CodexDaemonThreadV1 {
 			return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonEvidenceSource}
 		}
 		if evidence.provider != CodexProvider {

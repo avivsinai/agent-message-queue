@@ -10,6 +10,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -54,10 +55,19 @@ func runLaunchExec(args []string) error {
 		return ActionRequiredError("resolve launch wrapper executable: %v", err)
 	}
 	environment := os.Environ()
-	prepared, err := launch.PrepareExecution(root, *handleFlag, *nonceFlag, launch.ExecutionEnvelope{
+	envelope := launch.ExecutionEnvelope{
 		Cwd: cwd, AMQExecutable: amqExecutable, ProviderExecutable: *targetFlag,
 		TargetArgv: targetArgv, Environment: environment, Execution: executionOptions,
-	})
+	}
+	ticket, err := launch.LoadExecutionTicket(root, *handleFlag)
+	if err != nil {
+		return ActionRequiredError("read managed launch execution: %v", err)
+	}
+	if ticket.Provider == launch.CodexProvider && ticket.PreSpawnAcquire {
+		envelope.AcquireIdentity = codexlaunch.Acquire
+		envelope.RecordIdentity = func(acquired launch.ExecutionTicket) error { return codexlaunch.RecordIdentity(acquired, environment) }
+	}
+	prepared, err := launch.PrepareExecution(root, *handleFlag, *nonceFlag, envelope)
 	if err != nil {
 		return ActionRequiredError("refusing managed launch execution: %v", err)
 	}
@@ -65,6 +75,13 @@ func runLaunchExec(args []string) error {
 	if err != nil {
 		revertErr := launch.RevertExecution(root, *handleFlag, *nonceFlag)
 		return errors.Join(ActionRequiredError("refusing unresolved managed launch execution: %v", err), revertErr)
+	}
+	if prepared.Provider == launch.CodexProvider {
+		if prepared.PreSpawnAcquire {
+			environment = codexDaemonSeatEnv(prepared.ProviderExecutable, environment, true)
+		} else if prepared.TerminalOnlyReason != "" {
+			_ = writeStderr("Buzz approvals: terminal only: %s\n", prepared.TerminalOnlyReason)
+		}
 	}
 	execErr := launchExecProcess(*targetFlag, resolvedArgv, environment)
 	if execErr == nil {

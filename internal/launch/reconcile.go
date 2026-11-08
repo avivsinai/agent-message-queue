@@ -105,6 +105,7 @@ type AgentReconcileResult struct {
 	Code                    int                     `json:"code"`
 	ConversationDisposition ConversationDisposition `json:"conversation_disposition"`
 	Reason                  string                  `json:"reason"`
+	TerminalOnlyReason      string                  `json:"terminal_only_reason,omitempty"`
 }
 
 type ReconcileResult struct {
@@ -855,7 +856,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 		ticketRequest := ExecutionTicketRequest{
 			Handle: agent.plan.Handle, LaunchNonce: agent.plan.LaunchNonce,
 			Mode: agent.plan.AdapterMode, Provider: agent.adapter.Name(), ProviderVersion: agent.providerVersion,
-			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire,
+			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire, TerminalOnlyReason: agent.plan.TerminalOnlyReason,
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
 			ProviderExecutable: provider, AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
@@ -1192,6 +1193,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		execution.Named = named && disposition != DispositionResumed
 		agentPlan.Execution = clonePrepareExecutionOptions(&execution)
 		item.ConversationDisposition, item.Reason = disposition, planReason
+		item.TerminalOnlyReason = agentPlan.TerminalOnlyReason
 		result.Agents = append(result.Agents, item)
 		record := ConversationRecord{
 			Version: ConversationVersion, Handle: cfg.Handle, State: CapturePending,

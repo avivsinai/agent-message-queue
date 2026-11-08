@@ -75,3 +75,26 @@ generation back to pending with reason `spawn_failed`. A process kill in the
 small interval after ready promotion and before the kernel replaces the AMQ
 image can leave a ready record. The normal stale-conversation policy absorbs
 this case; AMQ does not infer a second successful spawn.
+
+## Codex daemon capture
+
+A managed Codex seat uses an existing compatible app-server daemon when its
+startup state is clear and its launch options have a verified native resume
+contract. AMQ never starts the daemon or edits saved Codex settings. Otherwise
+the existing embedded launch is retained, and launch output, remote bindings,
+and `doctor --ops` share its `Buzz approvals: terminal only: <reason>` line.
+
+The native execution ticket owns a pre-spawn `thread/start` observation. Its
+`codex_daemon_thread_v1` evidence binds the handle, launch nonce, provider
+version, working directory, physical session identity, socket, and daemon
+process identity. It is distinct from the embedded seat's notify evidence.
+The thread's AMQ routing record replaces shell-environment overrides, and is
+published while the exact generation and handle remain locked, before provider
+execution is acknowledged.
+
+Before creating the thread, AMQ durably records `identity_requested`. If the
+request outcome is uncertain and no evidence was persisted, automatic execution,
+replacement, and ticket removal refuse and preserve the state. Persisted evidence
+is reused after a crash; a journal replay cannot reset the acquisition to pending.
+The TUI resumes only the acquired thread ID, after startup and directory checks
+succeed again. A failed provider exec retains that identity for recovery.

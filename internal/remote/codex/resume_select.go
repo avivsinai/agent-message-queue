@@ -73,7 +73,7 @@ func ResolveResumeThread(ctx context.Context, sock string, q ResumeQuery) (strin
 		return "", err
 	}
 	defer func() { _ = client.Close() }()
-	if err := initializeAMQ(ctx, client); err != nil {
+	if _, err := initializeAMQ(ctx, client); err != nil {
 		return "", err
 	}
 	provider, err := historyProvider(ctx, client, q.ConfigCwd)

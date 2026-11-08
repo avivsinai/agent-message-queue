@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/term"
@@ -247,7 +248,7 @@ func defaultLaunchAdapters(cfg launch.ProjectConfig) map[string]launch.HarnessAd
 		case launch.ClaudeProvider:
 			adapters[agent.Adapter] = launch.NewClaudeAdapter(agent.Command[0])
 		case launch.CodexProvider:
-			adapters[agent.Adapter] = launch.NewCodexAdapter(agent.Command[0])
+			adapters[agent.Adapter] = codexlaunch.New(agent.Command[0])
 		case launch.CursorProvider:
 			adapters[agent.Adapter] = launch.NewCursorAdapter(agent.Command[0])
 		case launch.GrokProvider:
@@ -279,6 +280,13 @@ func outputLaunchResult(jsonOutput bool, result launch.ReconcileResult) error {
 		}
 		if err := writeStdout("\n"); err != nil {
 			return err
+		}
+	}
+	for _, agent := range result.Agents {
+		if agent.TerminalOnlyReason != "" {
+			if err := writeStdout("  %s: Buzz approvals: terminal only: %s\n", agent.Handle, agent.TerminalOnlyReason); err != nil {
+				return err
+			}
 		}
 	}
 	for _, command := range result.Commands {

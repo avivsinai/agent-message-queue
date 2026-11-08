@@ -190,14 +190,8 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 				}
 				cursorCapture = true
 			case CodexProvider:
-				payload, decodeErr := decodeCodexNotifyPayload(evidence.Payload)
-				if decodeErr != nil {
-					return decodeErr
-				}
-				if payload.Handle != record.Handle || payload.LaunchNonce != record.LaunchNonce ||
-					payload.Provider != record.Identity.Provider || payload.ProviderVersion != record.ProviderVersion ||
-					payload.ConversationID != record.Identity.ID {
-					return fmt.Errorf("codex conversation evidence binding mismatch")
+				if err := validateCodexConversationCapture(evidence.Payload, record); err != nil {
+					return err
 				}
 				codexCapture = true
 			}

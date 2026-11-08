@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
@@ -420,7 +421,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	// thread/start records trust for a directory Codex has no decision for,
 	// before the TUI asks the user. Only an already trusted directory is
 	// started on the daemon.
-	if !codexTrustsDir(codexHome, cwd) {
+	if !codexlaunch.TrustsDir(codexHome, cwd) {
 		return report("Codex does not trust " + cwd + " yet")
 	}
 	// With terminal_visualization_instructions off the TUI's thread/resume
@@ -453,7 +454,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	notice := time.AfterFunc(codexDaemonNamingNotice, func() {
 		_ = writeStderr("naming %s on the Codex daemon; it is busy, this can take up to a minute\n", name)
 	})
-	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
+	id, err := codex.StartThread(ctx, sock, cwd, name, "")
 	notice.Stop()
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
