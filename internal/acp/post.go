@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 )
 
 // A Buzz agent's chat reply exists only if the agent publishes it: buzz-acp
@@ -189,6 +191,26 @@ func captureBuzzIdentity() {
 	}
 	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
 	buzzRelayURL, buzzRelayKey = strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), relayKey(os.Getenv("BUZZ_RELAY_URL"))
+	buzzRelay = agentRelay(buzzRelayURL, os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+}
+
+// buzzRelay is the managed agent's own relay identity: the relay URL, the
+// agent key and its NIP-OA grant. It is zero when the key or the grant is
+// unreadable, and a zero Config never authenticates.
+var buzzRelay relay.Config
+
+// agentRelay is the relay identity for url, a hex or nsec secret, and the
+// JSON auth tag, or a zero Config when the secret or the tag does not parse.
+func agentRelay(url, secret, authTag string) relay.Config {
+	sk, err := agentSecret(strings.TrimSpace(secret))
+	if err != nil {
+		return relay.Config{}
+	}
+	var tag []string
+	if json.Unmarshal([]byte(strings.TrimSpace(authTag)), &tag) != nil {
+		return relay.Config{}
+	}
+	return relay.Config{URL: url, Secret: sk, AuthTag: tag}
 }
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`

@@ -295,6 +295,21 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   reply's post fails before the Buzz CLI starts (for example, no CLI is
   found), the same sweep posts it once the CLI works; a post that started
   and then failed is uncertain and is not repeated.
+- The message's header carries `context.buzz.event`, the signed Nostr
+  event's fields, re-encoded, when amq-acp fetched it from the relay as the
+  agent (within 2 s) and it is the prompt's triggering event: the id from the
+  ACP `_meta`, else the Event ID of the prompt's `<buzz-event>` block (Buzz
+  Desktop sends no `_meta` id). Its id and signature verify, its kind is 9,
+  and it has exactly one `h` tag, equal to the channel the prompt arrived on.
+  Any other result delivers the message without the key and logs one line;
+  the `nostr:<id>` label names the looked-up id either way. Any local sender
+  can write header context (`amq send/reply --context`), so the key's
+  presence is not provenance: a gate re-runs every check itself (`CheckID`,
+  `VerifySignature`, kind 9, exactly one `h` equal to the channel it expects,
+  and `pubkey` equal to the owner key it pins). It also acts on
+  `event.content` rather than the body, records consumed event ids, bounds
+  the age and future skew of `created_at`, and binds the answer to its
+  request. See the [message format](../../skills/amq-cli/references/message-format.md#verified-buzz-event).
 - An image the owner sends reaches both carriers as a local file. Each
   NIP-92 `imeta` tag of the event (else each Blossom URL on the relay's host)
   is fetched as the agent with `buzz media get`, at most 8 per message, 20
@@ -453,7 +468,9 @@ replacement: pathname validation is not atomic with exec.
 Buzz Desktop owns the managed agent's identity and grant, and starts amq-acp
 with that agent's key (`BUZZ_PRIVATE_KEY`) in its environment. amq-acp keeps
 the key in memory, strips it from its own environment, and passes it only to
-the Buzz CLI child that posts, reads reactions, and archives. amq-acp
+the Buzz CLI child that posts, reads reactions, and archives. It also signs
+the relay AUTH of its own read connection with that key and grant, to fetch
+a DM's signed event. amq-acp
 receives no owner private key, only the owner's signed grant
 (`BUZZ_AUTH_TAG`). Desktop signs a grant with no kind limit
 and no expiry. Archiving the agent is a relay request that hides it; it does
