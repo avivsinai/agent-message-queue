@@ -54,6 +54,23 @@ type permissionInput struct {
 	ToolName       string            `json:"tool_name"`
 	ToolInput      json.RawMessage   `json:"tool_input"`
 	Suggestions    []json.RawMessage `json:"permission_suggestions"`
+	// AgentID names the subagent whose call asks; absent on the main
+	// thread. A subagent's calls and results are only in its own
+	// transcript.
+	AgentID             string `json:"agent_id"`
+	AgentTranscriptPath string `json:"agent_transcript_path"`
+}
+
+// callTranscript is the transcript that records the asking call and its
+// result: the session's for the main thread, else the subagent's own.
+func (in permissionInput) callTranscript() (string, error) {
+	switch {
+	case in.AgentID == "":
+		return in.TranscriptPath, nil
+	case in.AgentTranscriptPath != "":
+		return in.AgentTranscriptPath, nil
+	}
+	return SubagentTranscript(in.TranscriptPath, in.SessionID, in.AgentID)
 }
 
 // Option values the hook applies.
@@ -84,9 +101,12 @@ type Binder func(Seat) (string, error)
 // and the writer of a new binding. It ends when Buzz or the terminal
 // answers, when done closes, when the process that started it is gone
 // (parentGone), or at the installed timeout, which Claude enforces too.
+// It polls every poll, doubling the wait after each poll up to maxPoll
+// (zero: no growth), so a dialog nobody answers costs little.
 type permissionHook struct {
 	now        func() time.Time
 	poll       time.Duration
+	maxPoll    time.Duration
 	parentGone func() bool // nil: no parent check
 	bind       Binder      // nil: a session no binding serves answers in the terminal
 }
@@ -96,7 +116,7 @@ type permissionHook struct {
 // configured timeout. bind writes the binding of a session no binding
 // serves. It always returns 0.
 func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, bind Binder) int {
-	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, parentGone: parentWatch(), bind: bind}
+	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, maxPoll: 2 * time.Second, parentGone: parentWatch(), bind: bind}
 	return h.run(stdin, stdout, done)
 }
 
@@ -148,15 +168,16 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
 	// Claude signals no terminal approve: the call's tool_result in the
-	// transcript is the proof, so the watch starts before the request is
-	// visible.
-	watch := newToolWatch(in.TranscriptPath, in.ToolName, in.ToolInput)
+	// transcript that records the call is the proof, so the watch starts
+	// before the request is visible.
+	watch := newToolWatch(in.callTranscript, in.ToolName, in.ToolInput)
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
 	deadline := opened.Add(permissionHookTimeout * time.Second)
-	ticker := time.NewTicker(h.poll)
-	defer ticker.Stop()
+	wait := h.poll
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	resolve := func(outcome, label, by string) bool {
 		won, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: outcome, Label: label, By: by, At: h.now().UTC()})
 		return won && err == nil
@@ -190,8 +211,12 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		case <-done:
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
-		case <-ticker.C:
+		case <-timer.C:
 		}
+		if wait < h.maxPoll {
+			wait = min(2*wait, h.maxPoll)
+		}
+		timer.Reset(wait)
 	}
 }
 
@@ -573,8 +598,11 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 
 // toolWatch follows a Claude transcript for the tool_result of the call a
 // dialog is about: a tool_use with the same name and input that had no
-// result when the hook started, or that appears later.
+// result when the hook started, or that appears later. It locates the
+// transcript (locate) until it is found; a transcript first found after the
+// hook started holds only lines written since, so its first read can answer.
 type toolWatch struct {
+	locate           func() (string, error)
 	path, name, hash string
 	// off is the next byte to read; skip drops the first line of a tail
 	// read, which may start mid-line.
@@ -590,23 +618,38 @@ type toolWatch struct {
 // tool_use is among the newest lines.
 const transcriptTail = 4 << 20
 
-func newToolWatch(path, name string, input json.RawMessage) *toolWatch {
+func newToolWatch(locate func() (string, error), name string, input json.RawMessage) *toolWatch {
 	hash, ok := actionHash(name, input)
-	if !ok || !filepath.IsAbs(path) {
+	if !ok {
 		return nil
 	}
-	w := &toolWatch{path: path, name: name, hash: hash, pending: map[string]bool{}}
-	if fi, err := os.Stat(path); err == nil && fi.Size() > transcriptTail {
-		w.off, w.skip = fi.Size()-transcriptTail, true
+	w := &toolWatch{locate: locate, name: name, hash: hash, pending: map[string]bool{}}
+	if w.found() {
+		w.read()
 	}
-	w.read()
 	w.primed = true
 	return w
 }
 
+// found reports whether the transcript is located, locating it once.
+func (w *toolWatch) found() bool {
+	if w.path != "" {
+		return true
+	}
+	path, err := w.locate()
+	if err != nil || !filepath.IsAbs(path) {
+		return false
+	}
+	w.path = path
+	if fi, err := os.Stat(path); err == nil && fi.Size() > transcriptTail {
+		w.off, w.skip = fi.Size()-transcriptTail, true
+	}
+	return true
+}
+
 // answered reads the lines written since the last read and reports whether
 // a pending call got its tool_result.
-func (w *toolWatch) answered() bool { return w.read() }
+func (w *toolWatch) answered() bool { return w.found() && w.read() }
 
 func (w *toolWatch) read() bool {
 	f, err := os.Open(w.path)

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -497,4 +499,66 @@ func ParseTranscriptLine(line string) (TranscriptLine, bool) {
 		return TranscriptLine{}, false
 	}
 	return e.line(), true
+}
+
+// transcriptNameRe is a session or subagent id that names exactly one
+// path component.
+var transcriptNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// SubagentTranscript is the transcript of subagent agentID in session
+// sessionID, at the path Claude Code lays out beside the session transcript
+// <dir>/<session_id>.jsonl:
+// <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one or two
+// subdirectories deeper (a workflow's subagents write to
+// subagents/workflows/<wf>/). Invariant: the proof reads only a regular
+// file, reached through no symlink below <dir>, named for exactly this
+// agent_id, and found exactly once across the three depths; anything else
+// is an error and no proof.
+func SubagentTranscript(sessionTranscript, sessionID, agentID string) (string, error) {
+	if !transcriptNameRe.MatchString(agentID) || !transcriptNameRe.MatchString(sessionID) ||
+		!filepath.IsAbs(sessionTranscript) || filepath.Base(sessionTranscript) != sessionID+".jsonl" {
+		return "", errors.New("no subagent transcript path for this session")
+	}
+	session := filepath.Join(filepath.Dir(sessionTranscript), sessionID)
+	subagents := filepath.Join(session, "subagents")
+	for _, dir := range []string{session, subagents} {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("subagent transcripts: %s is not a directory", dir)
+		}
+	}
+	name := "agent-" + agentID + ".jsonl"
+	regular := func(path string) bool {
+		info, err := os.Lstat(path)
+		return err == nil && info.Mode().IsRegular()
+	}
+	var found []string
+	var search func(dir string, depth int) error
+	search = func(dir string, depth int) error {
+		if path := filepath.Join(dir, name); regular(path) {
+			found = append(found, path)
+		}
+		if depth == 2 {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("read subagent transcripts: %w", err)
+		}
+		for _, entry := range entries {
+			// A symlink is not a directory here, so the search follows none.
+			if entry.IsDir() {
+				if err := search(filepath.Join(dir, entry.Name()), depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := search(subagents, 0); err != nil {
+		return "", err
+	}
+	if len(found) != 1 {
+		return "", fmt.Errorf("%d subagent transcripts named %s", len(found), name)
+	}
+	return found[0], nil
 }
