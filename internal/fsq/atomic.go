@@ -140,8 +140,9 @@ func writeAllAndSync(file writeSyncer, data []byte) error {
 	return syncFile(file)
 }
 
-// syncFile fsyncs file's contents. Every file sync in this package goes
-// through it, so the package file-sync fault reaches all of them.
+// syncFile fsyncs file's contents. Every file-content sync in this package
+// goes through it, so the package file-sync fault reaches all of them;
+// directory syncs have their own fault.
 func syncFile(file interface{ Sync() error }) error {
 	if packageFileSyncFaultForTest != nil {
 		return packageFileSyncFaultForTest()

@@ -95,14 +95,14 @@ func SetPackageSyncDirFaultForTest(fn func(dir string) error) (restore func()) {
 	return func() { packageSyncDirFaultForTest = prev }
 }
 
-// packageFileSyncFaultForTest, when set, makes every file Sync through a
-// DeliveryRoot fail with the injected error (out-of-package regression hook
+// packageFileSyncFaultForTest, when set, makes every file-content sync in this
+// package (syncFile) fail with the injected error (out-of-package regression hook
 // for durability barriers that must prove a claim file is fsynced before
 // publishing; nil is the normal path).
 var packageFileSyncFaultForTest func() error
 
 // SetPackageFileSyncFaultForTest installs a process-wide file-sync fault
-// that applies to every Sync through every DeliveryRoot in this process.
+// that applies to every file-content sync fsq makes in this process.
 // Restore with a nil fn in t.Cleanup.
 func SetPackageFileSyncFaultForTest(fn func() error) {
 	packageFileSyncFaultForTest = fn
