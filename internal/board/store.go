@@ -950,6 +950,10 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}
 			nr.Result.Items = admitted
 		}
+		checked := make(map[string]time.Time, len(state.Facts))
+		for alias, fact := range state.Facts {
+			checked[alias] = state.checkedAt(fact)
+		}
 		previous := map[string]NamedResult{}
 		for _, nr := range state.Input.Results {
 			previous[nr.Name] = nr
@@ -1092,6 +1096,14 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			results[i].Result.Items = storedItems(results[i].Result.Items)
 		}
 		state.Input.Results = results
+		// A fact's checked time never moves back: when the new results no
+		// longer show a later check, that check is stored on the fact.
+		for alias, fact := range state.Facts {
+			if at := checked[alias]; at.After(state.checkedAt(fact)) {
+				fact.ObservedAt = at
+				state.Facts[alias] = fact
+			}
+		}
 		return nil
 	})
 	if err == nil && stopped {

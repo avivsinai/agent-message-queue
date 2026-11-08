@@ -103,17 +103,31 @@ func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
 			{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: at, Items: obligations}},
 		}}
 	}
+	unreported := func(in Input) Input {
+		in.Results[0].Result.Items = nil
+		return in
+	}
 	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	later := first.Add(time.Minute)
+	last := later.Add(time.Minute)
 	for _, row := range []struct {
-		name          string
-		before, after Input
-		// factStamped allows the one change an incomplete scope makes.
-		factStamped bool
+		name string
+		// The last refresh is the one checked; checked is the fact's
+		// expected "checked" time after it.
+		refreshes []Input
+		checked   time.Time
+		// factChanged allows the last refresh to change the fact;
+		// reportChanged rows change the source's report, so any write is
+		// allowed and only the checked time is asserted.
+		factChanged, reportChanged bool
 	}{
-		{name: "unchanged fact in a complete scope", before: refresh(first, true), after: refresh(later, true)},
-		{name: "unchanged fact in an incomplete scope", before: refresh(first, false), after: refresh(later, false), factStamped: true},
-		{name: "one item removed", before: refresh(first, true, obligation("a"), obligation("b")), after: refresh(later, true, obligation("b"))},
+		{name: "unchanged fact in a complete scope", refreshes: []Input{refresh(first, true), refresh(later, true)}, checked: later},
+		{name: "unchanged fact in an incomplete scope", refreshes: []Input{refresh(first, false), refresh(later, false)}, checked: later, factChanged: true},
+		{name: "one item removed", refreshes: []Input{refresh(first, true, obligation("a"), obligation("b")), refresh(later, true, obligation("b"))}, checked: later},
+		// Review of the derived checked time: a fact checked by a complete
+		// result fell back to its first report once no result showed it.
+		{name: "last check kept when a complete scope drops the fact", refreshes: []Input{refresh(first, true), refresh(later, true), unreported(refresh(last, true))}, checked: later, reportChanged: true},
+		{name: "last check kept when an incomplete scope omits the fact", refreshes: []Input{refresh(first, true), refresh(later, true), unreported(refresh(last, false))}, checked: later, reportChanged: true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -133,14 +147,16 @@ func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.before}); err != nil {
-				t.Fatal(err)
+			for _, in := range row.refreshes[:len(row.refreshes)-1] {
+				if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: in}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before, err := store.readDocument()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.after}); err != nil {
+			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.refreshes[len(row.refreshes)-1]}); err != nil {
 				t.Fatal(err)
 			}
 			after, err := store.readDocument()
@@ -155,8 +171,8 @@ func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
 				p := op.Path
 				clock := p[0] == "generation" || p[0] == "published_at" ||
 					len(p) == 5 && p[0] == "input" && p[1] == "Results" && p[3] == "Result" && p[4] == "ObservedAt" ||
-					row.factStamped && p[0] == "source_facts" && p[len(p)-1] == "observed_at"
-				if !clock {
+					row.factChanged && p[0] == "source_facts"
+				if !clock && !row.reportChanged {
 					t.Fatalf("idle refresh rewrote %v", p)
 				}
 			}
@@ -164,8 +180,8 @@ func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := state.Catalogue()[0].Facts[0].ObservedAt; !got.Equal(later) {
-				t.Fatalf("fact still reported reads as checked at %v, want %v", got, later)
+			if got := state.Catalogue()[0].Facts[0].ObservedAt; !got.Equal(row.checked) {
+				t.Fatalf("fact reads as checked at %v, want %v", got, row.checked)
 			}
 		})
 	}
