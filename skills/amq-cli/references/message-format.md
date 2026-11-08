@@ -73,3 +73,20 @@ Notes:
 Messages emitted by `amq integration ...` commands carry orchestrator metadata
 under `context.orchestrator`; the shape and labels are in
 [integrations](integrations.md#message-shape).
+
+## Verified Buzz event
+
+A prompt that `amq-acp` delivers from a Buzz DM can carry
+`context.buzz.event`: the complete NIP-01 signed event (`id`, `pubkey`,
+`created_at`, `kind`, `tags`, `content`, `sig`) as the relay returned it. The
+key is present only when `amq-acp` fetched the event by the id it was given,
+the id and signature verify, the id matches, the kind is 9 (a plaintext
+channel message), and the event has exactly one `h` tag, equal to the channel
+the prompt arrived on. Otherwise the key is absent and the message is
+unverified; there is no partial form. The event proves that `pubkey` signed
+`content` in that channel at `created_at`; it does not say who owns the agent.
+A gate that acts on it pins the owner key itself and compares `pubkey`, acts
+on `content` (never on the body), verifies the signature again, records
+consumed event ids, bounds both the age and the future skew of
+`created_at`, and binds the answer to its request (a reply tag that names the
+request event, or a nonce in `content`).
