@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.136.0](https://github.com/avivsinai/agent-message-queue/compare/v0.135.0...v0.136.0) (2026-11-08)
+
+
+### Bug Fixes
+
+* **acp:** Codex app-server sessions get a machine-agent channel ([#1387](https://github.com/avivsinai/agent-message-queue/issues/1387)) ([a3d7ea1](https://github.com/avivsinai/agent-message-queue/commit/a3d7ea1c951c334a5862f0d94363b6caef76f45f))
+* **acp:** idle hosts stop paying for fsyncs and inbox listings ([#1385](https://github.com/avivsinai/agent-message-queue/issues/1385)) ([df42ee1](https://github.com/avivsinai/agent-message-queue/commit/df42ee1ab607c2f8919388d6bf1b73ec8a1b93b7))
+* **wake:** long-running processes run from AMQ's own version store ([#1379](https://github.com/avivsinai/agent-message-queue/issues/1379)) ([57ded60](https://github.com/avivsinai/agent-message-queue/commit/57ded60b114e87bfb1850ef5ba1b116b769ea323))
+
 ## [0.135.0](https://github.com/avivsinai/agent-message-queue/compare/v0.134.0...v0.135.0) (2026-11-08)
 
 
