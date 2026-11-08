@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -439,4 +442,81 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody bool)
 		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
 	}
 	return result
+}
+
+// A sandbox that grants write access only to <root>/agents/<me>/ relies on
+// drain writing nothing else, as `amq drain --help` documents.
+func TestRunDrainWritesOnlyItsDocumentedSet(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := format.Message{Header: format.Header{Schema: 1, ID: "good", From: "bob", To: []string{"alice"}, Thread: "p2p/alice__bob", Subject: "Hi", Created: "2025-12-24T10:00:00Z"}, Body: "Hello"}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "good.md", data); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(root, "alice"), "corrupt.md"), []byte("not valid frontmatter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type stamp struct {
+		mod  time.Time
+		size int64
+	}
+	snapshot := func() map[string]stamp {
+		out := map[string]stamp{}
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, path)
+			out[filepath.ToSlash(rel)] = stamp{info.ModTime(), info.Size()}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	allowed := func(rel string) bool {
+		if rel == "agents/alice" {
+			return true // the parent of presence.json and .presence.lock
+		}
+		for _, p := range []string{"inbox/new", "inbox/cur", "receipts", "receipts-pending", "dlq/tmp", "dlq/new", ".presence.lock", "presence.json"} {
+			p = "agents/alice/" + p
+			if rel == p || strings.HasPrefix(rel, p+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	// A write in the same clock tick as the setup must still change a time.
+	time.Sleep(10 * time.Millisecond)
+	before := snapshot()
+
+	if result := runDrainJSON(t, root, "alice", 0, false); result.Count != 2 {
+		t.Fatalf("drained %d messages, want 2", result.Count)
+	}
+	after := snapshot()
+	for rel, s := range after {
+		if old, ok := before[rel]; (!ok || old != s) && !allowed(rel) {
+			t.Errorf("drain wrote %s outside its documented set", rel)
+		}
+	}
+	for rel := range before {
+		if _, ok := after[rel]; !ok && !allowed(rel) {
+			t.Errorf("drain removed %s outside its documented set", rel)
+		}
+	}
 }
