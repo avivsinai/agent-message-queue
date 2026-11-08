@@ -205,15 +205,17 @@ func storeImageLocked(root string, exclusive bool, candidate ImageEvidence) (Ima
 	}
 
 	dir := filepath.Join(root, strings.TrimPrefix(candidate.SHA256, "sha256:"))
+	stored := filepath.Join(dir, filepath.Base(candidate.ExecutionPath))
+	// Prune before the entry is made: a prune removes a directory it empties,
+	// so after it the entry this call publishes into must be made again.
+	if exclusive {
+		_ = pruneStore(root, stored)
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return ImageEvidence{}, fmt.Errorf("create version store entry: %w", err)
 	}
 	if err := checkPrivateDir(dir, 0o077); err != nil {
 		return ImageEvidence{}, err
-	}
-	stored := filepath.Join(dir, filepath.Base(candidate.ExecutionPath))
-	if exclusive {
-		_ = pruneStore(root, stored)
 	}
 	if _, err := os.Lstat(stored); errors.Is(err, os.ErrNotExist) {
 		if err := publishStoreImage(source, dir, stored); err != nil {

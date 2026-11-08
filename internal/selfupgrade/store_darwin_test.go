@@ -87,6 +87,37 @@ func TestExecImageKeepsANamedImageAfterTheInstallDirIsDeleted(t *testing.T) {
 	}
 }
 
+// Review of the version store: a prune ran after the entry directory was made,
+// removed an abandoned temporary file there and then the emptied directory, so
+// the publish into it failed with ENOENT and startup ran from the installed
+// image.
+func TestStoreImagePublishesIntoAnEntryWithAnAbandonedTempFile(t *testing.T) {
+	root := realTempDir(t)
+	candidate, err := CaptureImageEvidence(signedDarwinCandidate(t), "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, strings.TrimPrefix(candidate.SHA256, "sha256:"))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := filepath.Join(dir, "."+filepath.Base(candidate.ExecutionPath)+".tmp-1")
+	if err := os.WriteFile(abandoned, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := storeProcessPaths
+	t.Cleanup(func() { storeProcessPaths = saved })
+	storeProcessPaths = func(map[string]bool) (map[string]bool, error) { return map[string]bool{}, nil }
+
+	stored, err := storeImageLocked(root, true, candidate)
+	if err != nil {
+		t.Fatalf("store image into an entry with an abandoned temp file: %v", err)
+	}
+	if _, err := os.Stat(stored.ExecutionPath); err != nil {
+		t.Fatalf("stored image: %v", err)
+	}
+}
+
 // TestExecImageStoreHelperProcess is the child of the test above. It execs
 // its own image through ExecImage, then reports and waits for stdin to close.
 func TestExecImageStoreHelperProcess(t *testing.T) {
