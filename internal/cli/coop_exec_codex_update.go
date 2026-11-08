@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 const (
@@ -130,7 +132,7 @@ func codexVersionNewer(a, b [3]uint64) bool {
 func codexInstalledVersion(binaryPath string) ([3]uint64, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), codexVersionProbeTimeout)
 	defer cancel()
-	output, ok := probeHarnessVersion(ctx, binaryPath)
+	output, ok := harness.ProbeVersion(ctx, binaryPath)
 	if !ok {
 		return [3]uint64{}, false
 	}
