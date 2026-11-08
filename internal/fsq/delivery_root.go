@@ -806,6 +806,36 @@ func (r *DeliveryRoot) WriteFileAtomic(dir, filename string, data []byte, perm o
 	return committedPath, nil
 }
 
+// WriteHeartbeatFile replaces a root-relative heartbeat: a file its writer
+// rewrites every few seconds and whose readers treat absent, malformed or
+// old content as "not live". The rename keeps every read whole, but nothing
+// is fsynced, so a crash may leave the previous beat, an empty file or none.
+// A file that records a decision or a commitment uses WriteFileAtomic.
+func (r *DeliveryRoot) WriteHeartbeatFile(dir, filename string, data []byte, perm os.FileMode) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(dir, fmt.Sprintf(".%s.tmp-%d", filename, time.Now().UnixNano()))
+	file, err := r.root.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	n, err := file.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = r.root.Rename(tmpPath, filepath.Join(dir, filename))
+	}
+	return r.cleanupTemp(tmpPath, err)
+}
+
 // WriteFileExclusive publishes one immutable root-relative file. It never
 // replaces an existing final name; callers that use content-addressed names
 // must treat os.ErrExist as a collision or an explicit idempotence decision.

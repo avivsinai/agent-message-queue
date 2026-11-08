@@ -1508,3 +1508,34 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 		t.Fatalf("posts after the CLI was fixed: %q; want the answer once", posts)
 	}
 }
+
+// The reply poll skips listing an inbox whose mtime has not moved; a reply
+// that lands after the inbox sat idle still ends the turn.
+func TestReplyAfterAnIdleInboxEndsTheTurn(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, h := range []string{mailboxSender, "agent"} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: mailboxSender, To: "agent"}
+	d, err := DeliverCockpitPrompt(cfg, "build the thing", cockpitThread("s"), strings.Repeat("8", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := fsq.AgentInboxNew(root, mailboxSender)
+	idle := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(inbox, idle, idle); err != nil {
+		t.Fatal(err)
+	}
+	s, scan := NewServer(cfg, "test"), newInboxScan(inbox)
+	for range 2 {
+		if _, found, err := s.replyForDelivery(d, scan); err != nil || found {
+			t.Fatalf("idle inbox: found=%v err=%v", found, err)
+		}
+	}
+	replyAs(t, root, d.Thread, d.MessageID, format.KindAnswer, "done")
+	if got, found, err := s.replyForDelivery(d, scan); err != nil || !found || got != "done" {
+		t.Fatalf("reply after an idle inbox: %q found=%v err=%v", got, found, err)
+	}
+}
