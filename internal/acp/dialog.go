@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -286,6 +287,41 @@ func (s *Server) serves(r channelRecord, b binding.Binding) bool {
 	return b.SessionIdentity() == r.Identity && s.live(b)
 }
 
+// targetCache holds a machine agent's dialog targets for one session
+// snapshot and one machine tick's app-server judge, so the dialog and mirror
+// workers, which tick at the same pace, judge each binding's liveness once.
+type targetCache struct {
+	mu      sync.Mutex
+	snap    *sessionSnapshot
+	judge   *appServerJudge
+	at      time.Time
+	targets []dialogTarget
+}
+
+// machineTargets are a machine agent's live channels. They are judged again
+// when the snapshot or the machine tick changes, and at least every
+// machineScanInterval. Callers must not modify the result.
+func (s *Server) machineTargets() []dialogTarget {
+	c := &s.targets
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap, judge, now := s.snapshot(), s.appServers.Load(), time.Now()
+	if c.snap == snap && c.judge == judge && !now.Before(c.at) && now.Sub(c.at) < machineScanInterval {
+		return c.targets
+	}
+	var out []dialogTarget
+	for _, r := range snap.activeRecords() {
+		if !routable(r) {
+			continue
+		}
+		if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
+			out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b})
+		}
+	}
+	c.snap, c.judge, c.at, c.targets = snap, judge, now, out
+	return out
+}
+
 // dialogTargets are the bindings this worker posts dialogs for: a machine
 // agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
@@ -296,17 +332,7 @@ func (s *Server) dialogTargets() []dialogTarget {
 		if buzzRelayKey == "" || buzzOwner == "" {
 			return nil
 		}
-		var out []dialogTarget
-		snap := s.snapshot()
-		for _, r := range snap.activeRecords() {
-			if !routable(r) {
-				continue
-			}
-			if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
-				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b})
-			}
-		}
-		return out
+		return s.machineTargets()
 	}
 	if s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil {
 		return nil
