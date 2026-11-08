@@ -54,7 +54,7 @@ type lateReplySweep struct {
 	cursor    *os.File
 	cursorDir int
 	scans     map[string][2]*inboxScan
-	// inDoubt holds the events whose final post crashed while sending,
+	// inDoubt holds the events whose final post was seen sending,
 	// already logged. Such events are rare and the set is not pruned.
 	inDoubt map[string]struct{}
 }
@@ -386,7 +386,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 					s.late.inDoubt = map[string]struct{}{}
 				}
 				s.late.inDoubt[eventID] = struct{}{}
-				fmt.Fprintf(os.Stderr, "amq-acp: final post of event %s is in doubt (crashed while sending); not retried\n", eventID)
+				fmt.Fprintf(os.Stderr, "amq-acp: final post of event %s is in doubt (sending, or crashed while sending); not retried\n", eventID)
 			}
 			return nil, false
 		}
