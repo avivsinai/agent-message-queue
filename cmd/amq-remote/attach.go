@@ -87,6 +87,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	var stateDir string
 	var err error
 	if *linkName == "" {
+		// A session that is no AMQ participant has no root of its own; the
+		// machine root, where the machine agent serves, is its native root.
+		if c.root == "" {
+			if c.root, err = binding.MachineRoot(); err != nil {
+				return protocol.ExitActionRequired, err
+			}
+		}
 		if stateDir, err = c.stateDir(); err != nil {
 			return protocol.ExitUsage, err
 		}

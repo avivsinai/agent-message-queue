@@ -1274,3 +1274,61 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 		t.Fatalf("record = %+v err=%v stderr=%q, want harness pi", rec, err, stderr.String())
 	}
 }
+
+// Live check of a Codex --remote seat (2026-11-08): a session that is no AMQ
+// participant ran attach --self --native and was refused with "--root or
+// AM_ROOT is required". With no root, a native attach uses the machine root.
+func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
+	home, err := os.MkdirTemp("", "h") // short: the endpoint socket path is bounded
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	root, err := binding.EnsureMachineRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("pi:s1", "e_1"))
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
+	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	var stderr bytes.Buffer
+	if code, err := attach([]string{"--self", "--native", "--json"}, io.Discard, &stderr); code != 0 || err != nil {
+		t.Fatalf("attach --native with no root: code=%d err=%v stderr=%q", code, err, stderr.String())
+	}
+	all, err := binding.List()
+	if err != nil || len(all) != 1 || !sameRoot(all[0].Root, root) {
+		t.Fatalf("bindings = %+v, %v; want one bound through the machine root %s", all, err, root)
+	}
+}
