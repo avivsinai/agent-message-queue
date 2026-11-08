@@ -1138,8 +1138,8 @@ func (r *Record) compactCandidate() bool {
 
 // OwesAck reports whether this record has a result we have not released.
 // A result we have not acknowledged must not be erased. Terminal && Result !=
-// nil && AckDigest == "" refuses compaction, REGARDLESS of NativeRun. The
-// endpoint's owesAck delegates to this — one predicate, one place.
+// nil && AckDigest == "" refuses compaction, REGARDLESS of NativeRun. It is
+// the one ack predicate.
 func (r *Record) OwesAck() bool {
 	return r.State.Terminal() && r.Result != nil && r.AckDigest == ""
 }
