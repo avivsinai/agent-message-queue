@@ -54,6 +54,9 @@ func runHost(args []string) int {
 		fmt.Fprint(os.Stderr, hostUsage)
 		return exitUsage
 	}
+	if !*check {
+		runFromVersionStore()
+	}
 	dir := *cwd
 	if dir == "" {
 		wd, err := os.Getwd()

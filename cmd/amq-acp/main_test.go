@@ -33,11 +33,30 @@ var builtBinaries struct {
 	err  error
 }
 
+// buildHome is the HOME go build keeps, for its module cache.
+var buildHome string
+
 func TestMain(m *testing.M) {
+	// A long-running amq-acp copies itself into a per-user version store
+	// below HOME; the package gets a private HOME below the real one.
+	realHome, err := os.UserHomeDir()
+	home := ""
+	if err == nil {
+		buildHome = realHome
+		home, err = os.MkdirTemp(realHome, ".amq-acp-test-home-")
+	}
+	if err == nil {
+		err = os.Setenv("HOME", home)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "isolate amq-acp test home: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	if builtBinaries.dir != "" {
 		_ = os.RemoveAll(builtBinaries.dir)
 	}
+	_ = os.RemoveAll(home)
 	os.Exit(code)
 }
 
@@ -69,7 +88,7 @@ func buildCommand(dir, target string) error {
 	name := filepath.Base(target)
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", filepath.Join(dir, name), target)
 	cmd.Dir = repoRoot()
-	cmd.Env = cleanEnv()
+	cmd.Env = append(cleanEnv(), "HOME="+buildHome)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("build %s: %w\n%s", target, err, output)
