@@ -1,9 +1,12 @@
 package codex
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"sync"
+	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -85,4 +88,20 @@ func (v *View) Liveness(b binding.Binding) (binding.State, string) {
 		return binding.Unknown, "thread is not loaded, and the app-server process is not confirmed: " + ev
 	}
 	return binding.Ended, "thread is no longer loaded in the app-server it was bound in"
+}
+
+// Absent reports whether b's thread is confirmed not running at its socket:
+// no daemon listens there (the socket path is gone or refuses the
+// connection), or the daemon that answers there does not have it loaded.
+// Any other failed probe, such as a timeout or a protocol error, proves
+// nothing, so it is not absence.
+func (v *View) Absent(b binding.Binding) bool {
+	if b.AppServer.Thread == "" {
+		return false
+	}
+	loaded, err := v.LoadedThreads(b.AppServer.Socket)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+	}
+	return !slices.Contains(loaded, b.AppServer.Thread)
 }

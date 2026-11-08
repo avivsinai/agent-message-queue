@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 // execIdentity is one executable's filesystem identity: its device and
@@ -93,6 +95,10 @@ func installedACPPathFn() (string, error) {
 	return filepath.Join(filepath.Dir(real), "amq-acp"), nil
 }
 
+// storedCopyOf reports whether a running image is the version-store copy of
+// the installed amq-acp.
+var storedCopyOf = selfupgrade.StoredCopyOf
+
 // installedIdentity is the (dev, inode) of the resolved installed amq-acp.
 var installedIdentity = installedIdentityOS
 
@@ -124,10 +130,18 @@ func staleACPInspect(ctx context.Context) staleInspection {
 			probe.Reason = "the installed amq-acp could not be resolved"
 		default:
 			id, err := processIdentity(ctx, p.PID)
+			stale := err == nil && !idSame(id, installed)
+			if stale {
+				// A process that runs from the version store runs a copy:
+				// it is current when the copy holds the installed content.
+				var stored bool
+				stored, err = storedCopyOf(id.Path, insp.Path)
+				stale = !stored
+			}
 			switch {
 			case err != nil:
 				probe.Reason = err.Error()
-			case !idSame(id, installed):
+			case stale:
 				probe.Stale, probe.Deleted = true, imageDeleted(id.Path)
 			}
 		}

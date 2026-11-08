@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/pelletier/go-toml/v2"
@@ -53,18 +54,15 @@ var codexDialogHookEvents = []string{
 func codexDialogHookCommand(bin, store, verb string) string {
 	gate := ""
 	if verb == "close" {
-		gate = `[ -n "${AM_ME-}" ] && ` + wakeDialogNoMarkerTest + ` && exit 0; `
+		gate = `[ -n "${AM_ME-}" ] && ` + dialogguard.NoMarkerTest + ` && exit 0; `
 	}
-	gate += `[ -n "${AM_ME-}" ] || [ -d ` + singleQuote(store) + ` ] || exit 0; `
-	return wakeDialogHookMarker + gate + singleQuote(bin) +
+	gate += `[ -n "${AM_ME-}" ] || [ -d ` + dialogguard.SingleQuote(store) + ` ] || exit 0; `
+	return wakeDialogHookMarker + gate + dialogguard.SingleQuote(bin) +
 		" --no-update-check wake dialog --harness codex " + verb + " || true"
 }
 
 // codexDialogHookBinRe reads the binary back from codexDialogHookCommand.
 var codexDialogHookBinRe = regexp.MustCompile(`; '((?:[^']|'\\'')*)' --no-update-check wake dialog --harness codex (?:open|close) \|\| true$`)
-
-// singleQuote always single-quotes s for a POSIX shell.
-func singleQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func codexDialogHooks(bin, store string) []hookfile.CommandHook {
 	hooks := make([]hookfile.CommandHook, 0, len(codexDialogHookEvents))

@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,15 +12,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -29,100 +26,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	// wakeDialogHookMarker starts every hook command the installer writes;
-	// uninstall and doctor find AMQ's entries by it.
-	wakeDialogHookMarker = "AMQ_DIALOG_HOOK=1 "
-	// wakeDialogHookTools are the tools whose dialog opens in PreToolUse and
-	// closes in PostToolUse or PostToolUseFailure.
-	wakeDialogHookTools = "AskUserQuestion|ExitPlanMode"
-	// ExitPlanMode carries the whole plan in its hook input.
-	maxWakeDialogHookInputBytes = 8 << 20
-)
-
-// wakeDialogHookEvents are the events the installer wires, in order: the
-// closing events first, so an install that fails part way never leaves an
-// open without its close. Only long-standing events: a settings file with an
-// event an older Claude Code does not know could cost every other hook in it.
-var wakeDialogHookEvents = []string{
-	"PostToolUse",
-	"PostToolUseFailure",
-	"UserPromptSubmit",
-	"Stop",
-	"SubagentStop",
-	"SessionStart",
-	"SessionEnd",
-	"PreToolUse",
-	"PermissionRequest",
-}
-
-// wakeDialogHookEventFloor is the first Claude Code version known to have
-// each gated event, per the Claude Code changelog: PostToolUseFailure in
-// 2.1.119, and agent_id in SubagentStop input in 2.0.42 (SubagentStop
-// closes nothing without it). Before 2.1.101 an unknown event made Claude
-// Code ignore the whole settings file, so the installer adds a gated event
-// only for a version at or past its floor.
-var wakeDialogHookEventFloor = map[string]claudeVersion{
-	"PostToolUseFailure": {2, 1, 119},
-	"SubagentStop":       {2, 0, 42},
-}
-
-// claudeVersion is a Claude Code major.minor.patch.
-type claudeVersion [3]int
-
-func (v claudeVersion) less(floor claudeVersion) bool {
-	for i := range v {
-		if v[i] != floor[i] {
-			return v[i] < floor[i]
-		}
-	}
-	return false
-}
-
-var claudeVersionRe = regexp.MustCompile(`^\s*(\d+)\.(\d+)\.(\d+)`)
-
-// installedClaudeVersion reads `claude --version` from the claude on PATH,
-// through probeHarnessVersion: bounded output, and the process group killed
-// and reaped at the deadline, so a launcher's child that keeps the pipe open
-// cannot stall the installer or doctor. ok is false when it is missing,
-// fails, or prints no version.
-func installedClaudeVersion() (claudeVersion, bool) {
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		return claudeVersion{}, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, ok := probeHarnessVersion(ctx, path)
-	if !ok {
-		return claudeVersion{}, false
-	}
-	match := claudeVersionRe.FindStringSubmatch(out)
-	if match == nil {
-		return claudeVersion{}, false
-	}
-	var v claudeVersion
-	for i := range v {
-		if v[i], err = strconv.Atoi(match[i+1]); err != nil {
-			return claudeVersion{}, false
-		}
-	}
-	return v, true
-}
-
-// wakeDialogHookEventsFor is wakeDialogHookEvents without the events the
-// given Claude Code version may not know; an unknown version gets none of
-// the gated events.
-func wakeDialogHookEventsFor(version claudeVersion, known bool) []string {
-	events := make([]string, 0, len(wakeDialogHookEvents))
-	for _, event := range wakeDialogHookEvents {
-		if floor, gated := wakeDialogHookEventFloor[event]; gated && (!known || version.less(floor)) {
-			continue
-		}
-		events = append(events, event)
-	}
-	return events
-}
+// ExitPlanMode carries the whole plan in its hook input.
+const maxWakeDialogHookInputBytes = 8 << 20
 
 // wakeDialogHookInput is the part of Claude Code's hook input the receiver
 // reads.
@@ -689,87 +594,6 @@ func wakeDialogMarkerClosedBy(dirfd int, agentDir *wakeAgentDir, raw []byte, in 
 	return in.ToolUseID == "" || marker.ToolUseID == in.ToolUseID
 }
 
-// wakeDialogHookCommand is the shell command one hook runs: the marker, a
-// POSIX sh gate, the single-quoted binary, and a trailing || true. The gate
-// repeats what the receiver checks, so a gated call leaves state as the
-// receiver would and starts no amq: without AM_ME the receiver does nothing,
-// and a close has nothing to remove when the agent directory at AM_ROOT holds
-// no marker. The close skips only when the shell inspects exactly the
-// directory the receiver opens: AM_ROOT is absolute, has no "." or ".."
-// segment (sh resolves those through symlinks, filepath.Clean lexically),
-// and ends in a character that TrimSpace keeps; AM_ME holds only handle
-// characters. Any doubt (AM_ROOT unset, relative, padded, or naming no agent
-// directory) runs the receiver, which resolves the root itself. Claude Code
-// reads exit 2 as a blocking error for PreToolUse, UserPromptSubmit and Stop,
-// and an older amq at this path would exit 2 on the unknown subcommand.
-// harnessFlag is the receiver's flags before verb, each followed by a space:
-// claudeDialogHookHostFlag for a Claude Code open, or a --harness flag.
-func wakeDialogHookCommand(bin, harnessFlag, verb string) string {
-	gate := `[ -z "${AM_ME-}" ] || `
-	if verb == "close" {
-		gate += `{ [ -z "${AMQ_CLAUDE_NATIVE_LAUNCH-}" ] && ` + wakeDialogNoMarkerTest + `; } || `
-	}
-	return wakeDialogHookMarker + gate + singleQuote(bin) +
-		" --no-update-check wake dialog " + harnessFlag + verb + " || true"
-}
-
-// claudeDialogHookHostFlag passes a Claude Code open the pid of the process
-// that ran the hook: the $PPID of its sh -c is Claude Code.
-const claudeDialogHookHostFlag = `--host-pid "$PPID" `
-
-// claudeDialogHookCommand is wakeDialogHookCommand of the Claude Code hook
-// for verb; an open names its host.
-func claudeDialogHookCommand(bin, verb string) string {
-	flags := ""
-	if verb == "open" {
-		flags = claudeDialogHookHostFlag
-	}
-	return wakeDialogHookCommand(bin, flags, verb)
-}
-
-// wakeDialogNoMarkerTest succeeds only when AM_ROOT and AM_ME name exactly
-// the agent directory the receiver opens and it holds no marker; see
-// wakeDialogHookCommand.
-const wakeDialogNoMarkerTest = `{ case "${AM_ROOT-}" in */./*|*/../*|*/.|*/..) false ;; /*[[:alnum:]._/-]) ;; *) false ;; esac && ` +
-	`case "$AM_ME" in *[![:alnum:]_-]*) false ;; esac && ` +
-	`[ -d "$AM_ROOT/agents/$AM_ME" ] && ` +
-	`[ ! -e "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ] && ` +
-	`[ ! -L "$AM_ROOT/agents/$AM_ME/` + wakeDialogFileName + `" ]; }`
-
-// wakeDialogHookBinRe reads the binary back from claudeDialogHookCommand,
-// and from its form without the host flag, which doctor reports as stale.
-var wakeDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:--host-pid "\$PPID" )?(?:open|close) \|\| true$`)
-
-// wakeDialogHookVerb is the receiver verb the installer wires to event.
-func wakeDialogHookVerb(event string) string {
-	if event == "PreToolUse" || event == "PermissionRequest" {
-		return "open"
-	}
-	return "close"
-}
-
-func wakeDialogHooks(bin string, events []string) []hookfile.CommandHook {
-	hooks := make([]hookfile.CommandHook, 0, len(events))
-	for _, event := range events {
-		hook := hookfile.CommandHook{
-			Event:   event,
-			Marker:  wakeDialogHookMarker,
-			Command: claudeDialogHookCommand(bin, wakeDialogHookVerb(event)),
-			Timeout: 5,
-		}
-		switch event {
-		case "PreToolUse", "PostToolUse", "PostToolUseFailure":
-			hook.Matcher = wakeDialogHookTools
-		case "SessionEnd":
-			// SessionEnd hooks share a 1.5 s exit budget that a longer
-			// timeout raises for every hook.
-			hook.Timeout = 1
-		}
-		hooks = append(hooks, hook)
-	}
-	return hooks
-}
-
 func runWakeInstallDialogHook(args []string) error {
 	fs := flag.NewFlagSet("wake install-dialog-hook", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "Print the hooks without changing the settings file")
@@ -817,7 +641,7 @@ func runWakeInstallDialogHook(args []string) error {
 	if !claudeOn {
 		return nil
 	}
-	hooks := wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersion()))
+	hooks := dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEventsFor(dialogguard.InstalledClaudeVersion()))
 	if *dryRun {
 		return printDialogHooks(hooks)
 	}
@@ -915,7 +739,7 @@ func runWakeUninstallDialogHook(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve home for the dialog hook: %w", err)
 	}
-	if err := claude.UninstallCommandHooks(home, wakeDialogHookMarker, wakeDialogHookEvents); err != nil {
+	if err := claude.UninstallCommandHooks(home, wakeDialogHookMarker, dialogguard.ClaudeEvents); err != nil {
 		return err
 	}
 	return writeStdout("dialog hook removed from %s\n", claude.SettingsPath(home))
@@ -924,13 +748,13 @@ func runWakeUninstallDialogHook(args []string) error {
 // checkClaudeDialogHook reports a missing or partly installed dialog hook,
 // or one whose amq binary is gone, when ~/.claude exists. It is read-only.
 func checkClaudeDialogHook() (doctorCheck, bool) {
-	return claudeDialogHookCheck(installedClaudeVersion())
+	return claudeDialogHookCheck(dialogguard.InstalledClaudeVersion())
 }
 
 // claudeDialogHookCheck is checkClaudeDialogHook for a known or unknown
 // Claude Code version. An unknown version needs only the ungated events, so
 // the check runs without starting claude.
-func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool) {
+func claudeDialogHookCheck(version dialogguard.ClaudeVersion, known bool) (doctorCheck, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return doctorCheck{}, false
@@ -939,106 +763,12 @@ func claudeDialogHookCheck(version claudeVersion, known bool) (doctorCheck, bool
 	if info, err := os.Stat(filepath.Dir(path)); err != nil || !info.IsDir() {
 		return doctorCheck{}, false
 	}
-	check, _ := claudeDialogHookCheckAt(path, version, known)
-	return check, true
-}
-
-// ClaudeDialogGuardAt reports the wake dialog guard in the Claude settings
-// file settings: its state and, when it is not ok, why and the remedy. It
-// gives amq doctor's verdict: the events it requires follow the installed
-// Claude Code version, read once per process.
-func ClaudeDialogGuardAt(settings string) (state, detail string) {
-	version, known := installedClaudeVersionOnce()
-	check, state := claudeDialogHookCheckAt(settings, version, known)
-	return state, check.Message
-}
-
-// InstallClaudeDialogGuardAt installs or migrates the wake dialog guard,
-// run by the amq binary bin, in the Claude settings file settings, with
-// the events the installed Claude Code version knows. It reports whether
-// it changed the file.
-func InstallClaudeDialogGuardAt(settings, bin string) (bool, error) {
-	bin = installedGuardBin(settings, wakeDialogHookEvents, wakeDialogHookBinRe, bin)
-	return hookfile.InstallCommandHooksAt(settings, wakeDialogHooks(bin, wakeDialogHookEventsFor(installedClaudeVersionOnce())))
-}
-
-// installedGuardBin is claude.KeptHookBin of the installed guard entries in
-// the hooks file path (Codex never asks for trust again for nothing).
-func installedGuardBin(path string, events []string, binRe *regexp.Regexp, bin string) string {
-	var all []string
-	for _, event := range events {
-		commands, err := hookfile.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
-		if err != nil {
-			return bin
-		}
-		all = append(all, commands...)
+	check := dialogguard.CheckClaudeAt(path, version, known)
+	status := "warn"
+	if check.State == dialogguard.OK {
+		status = "ok"
 	}
-	return claude.KeptHookBin(all, binRe, bin)
-}
-
-// installedClaudeVersionOnce is installedClaudeVersion, run once per
-// process: one doctor run checks many settings files.
-var installedClaudeVersionOnce = sync.OnceValues(installedClaudeVersion)
-
-// claudeDialogHookCheckAt checks the dialog guard in the settings file at
-// path and returns the doctor check with its guard state.
-func claudeDialogHookCheckAt(path string, version claudeVersion, known bool) (doctorCheck, string) {
-	check := doctorCheck{Name: "Claude dialog hook", Status: "warn"}
-	type installed struct{ event, command string }
-	var commands []installed
-	var missing []string
-	supported := make(map[string]bool)
-	for _, event := range wakeDialogHookEventsFor(version, known) {
-		supported[event] = true
-	}
-	for _, event := range wakeDialogHookEvents {
-		found, err := hookfile.MarkedHookCommandsAt(path, event, wakeDialogHookMarker)
-		if err != nil {
-			check.Message = fmt.Sprintf("read Claude settings: %v", err)
-			return check, DialogGuardUnreadable
-		}
-		if len(found) == 0 && supported[event] {
-			missing = append(missing, event)
-		}
-		for _, command := range found {
-			commands = append(commands, installed{event, command})
-		}
-	}
-	if len(commands) == 0 {
-		check.Message = "not installed: a wake doorbell can answer an open Claude Code dialog; remedy: amq wake install-dialog-hook"
-		return check, DialogGuardMissing
-	}
-	if len(missing) > 0 {
-		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
-		return check, DialogGuardIncomplete
-	}
-	if disabled, err := claude.HooksDisabledAt(path); err != nil || disabled {
-		check.Message = "installed, but the user settings set disableAllHooks, so Claude Code does not run it and the wake rings a plain doorbell"
-		if err != nil {
-			check.Message = fmt.Sprintf("read Claude settings: %v", err)
-			return check, DialogGuardUnreadable
-		}
-		return check, DialogGuardDisabled
-	}
-	for _, hook := range commands {
-		match := wakeDialogHookBinRe.FindStringSubmatch(hook.command)
-		if match == nil {
-			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, DialogGuardIncomplete
-		}
-		bin := strings.ReplaceAll(match[1], `'\''`, `'`)
-		if _, err := os.Stat(bin); err != nil {
-			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)
-			return check, DialogGuardIncomplete
-		}
-		if hook.command != claudeDialogHookCommand(bin, wakeDialogHookVerb(hook.event)) {
-			check.Message = fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)
-			return check, DialogGuardStale
-		}
-	}
-	check.Status = "ok"
-	check.Message = "installed"
-	return check, DialogGuardOK
+	return doctorCheck{Name: "Claude dialog hook", Status: status, Message: check.Message}, true
 }
 
 // dialogGuardEnabled reports whether the AMQ dialog hook of the harness
@@ -1052,7 +782,7 @@ func dialogGuardEnabled(name string) bool {
 	var check func() (doctorCheck, bool)
 	switch name {
 	case harness.Claude:
-		check = func() (doctorCheck, bool) { return claudeDialogHookCheck(claudeVersion{}, false) }
+		check = func() (doctorCheck, bool) { return claudeDialogHookCheck(dialogguard.ClaudeVersion{}, false) }
 	case harness.Codex:
 		check = checkCodexDialogHook
 	case harness.Cursor:
@@ -1111,11 +841,11 @@ func dialogHookBinaries(name string) []string {
 		if err != nil {
 			return nil
 		}
-		for _, event := range wakeDialogHookEvents {
+		for _, event := range dialogguard.ClaudeEvents {
 			found, _ := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
 			commands = append(commands, found...)
 		}
-		re = wakeDialogHookBinRe
+		re = dialogguard.ClaudeBinRe
 	case harness.Codex:
 		path, err := codexHooksPath()
 		if err != nil {

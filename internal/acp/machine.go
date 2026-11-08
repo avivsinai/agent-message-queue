@@ -364,15 +364,16 @@ func (s *Server) judgeAppServers(view *codex.View, prev map[string]launch.Holder
 	return j
 }
 
-// daemonGone reports whether b's thread is loaded in no daemon that answers
-// at its socket while the daemon it was bound in is proven not running. A
-// Codex update restarts the daemon and the thread is loaded again in the new
-// one, so this alone is not proof that the session ended.
+// daemonGone reports whether b's thread is confirmed absent at its socket
+// while the daemon it was bound in is proven not running. A failed probe is
+// not absence, so it never counts. A Codex update restarts the daemon and the
+// thread is loaded again in the new one, so this alone is not proof that the
+// session ended.
 func daemonGone(view *codex.View, b binding.Binding) bool {
 	if b.AppServer.Thread == "" || b.AppServer.Daemon.PID <= 0 {
 		return false
 	}
-	if state, _ := view.Liveness(b); state != binding.Unknown {
+	if !view.Absent(b) {
 		return false
 	}
 	state, _ := launch.InspectHolder(b.AppServer.Daemon)
