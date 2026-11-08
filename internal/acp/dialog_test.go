@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,6 +160,50 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 	s.dialogTick(now.Add(reactionPollMax))
 	if strings.Join(reads, ",") != "new,old" {
 		t.Fatalf("reads after %v = %v; want the old dialog read again at its cap", reactionPollMax, reads)
+	}
+}
+
+// Regression (idle profile of a machine agent): a post edit that failed
+// was tried again on every 2 s tick, one buzz process each, for about 20
+// minutes. A failed edit now waits 4 s, then 8 s; the first is immediate.
+func TestDialogFailedEditBacksOff(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	withBuzzSelf(t)
+	savedOwner, savedEdit, savedPost := buzzOwner, editMessage, postAnswer
+	t.Cleanup(func() { buzzOwner, editMessage, postAnswer = savedOwner, savedEdit, savedPost })
+	buzzOwner = strings.Repeat("0b", 32)
+	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("e", 64), nil }
+	edits := 0
+	editMessage = func(string, string, time.Duration) error {
+		edits++
+		return errors.New("relay refused the edit")
+	}
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ ls", Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}, OpenedAt: now}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	s.dialogTick(now) // posts
+	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		after time.Duration
+		edits int
+	}{{0, 1}, {2 * time.Second, 1}, {dialogEditBackoffMin, 2}, {dialogEditBackoffMin + 2*time.Second, 2}, {3 * dialogEditBackoffMin, 3}} {
+		s.dialogTick(now.Add(step.after))
+		if edits != step.edits {
+			t.Fatalf("edits after %v = %d; want %d", step.after, edits, step.edits)
+		}
 	}
 }
 

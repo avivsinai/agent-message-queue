@@ -184,6 +184,8 @@ type dialogTarget struct {
 // runs dialogTick.
 type dialogState struct {
 	polled map[string]time.Time // dialog id -> last reaction read
+	// edits holds the backoff of each dialog whose post edit failed.
+	edits map[string]mirrorBackoff
 	// quit closes when the dialog worker stops; nil outside it.
 	quit <-chan struct{}
 	// release drops a pinned agent's dialog lead; nil when not held.
@@ -192,6 +194,13 @@ type dialogState struct {
 
 // dialogKeep is how long a resolved dialog's files are kept.
 const dialogKeep = time.Hour
+
+// A failed post edit is tried again after dialogEditBackoffMin, doubling to
+// dialogEditBackoffMax.
+const (
+	dialogEditBackoffMin = 4 * time.Second
+	dialogEditBackoffMax = 5 * time.Minute
+)
 
 // dialogTick posts the open dialogs of every live binding this worker
 // serves, newest first, reads the owner's reactions on them, and edits the
@@ -247,7 +256,7 @@ func (s *Server) dialogTick(now time.Time) {
 		if s.dialogStopped() {
 			return
 		}
-		s.dialogClose(sc.t.name, sc.dir, sc.open)
+		s.dialogClose(sc.t.name, sc.dir, sc.open, now)
 		s.pruneDialogs(sc.t.name, sc.dir, now)
 	}
 	if !s.dialogStopped() {
@@ -372,7 +381,7 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		for _, req := range reqs {
 			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
 		}
-		s.dialogClose(name, dir, nil)
+		s.dialogClose(name, dir, nil, now)
 		if seamsLeft(dir, now) {
 			_ = os.RemoveAll(dir)
 			_ = os.RemoveAll(s.dialogPostDir(name))
@@ -431,6 +440,8 @@ func (s *Server) pruneDialogs(name, dir string, now time.Time) {
 		_ = os.Remove(filepath.Join(s.dialogPostDir(name), e.Name()))
 		_ = os.Remove(filepath.Join(s.dialogPostDir(name), "done", e.Name()))
 		_ = os.Remove(filepath.Join(dir, "resolved", e.Name()))
+		delete(s.dialogs.polled, id)
+		delete(s.dialogs.edits, id)
 	}
 }
 
@@ -528,8 +539,8 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 
 // dialogClose edits the post of each dialog that is no longer open and has
 // a resolution with its outcome, and moves its record to done/. A failed
-// edit is tried again on the next tick.
-func (s *Server) dialogClose(name, dir string, open map[string]bool) {
+// edit is tried again after a backoff (dialogEditBackoffMin, doubling).
+func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Time) {
 	postDir := s.dialogPostDir(name)
 	entries, _ := os.ReadDir(postDir)
 	for _, e := range entries {
@@ -546,15 +557,31 @@ func (s *Server) dialogClose(name, dir string, open map[string]bool) {
 		if !found {
 			continue
 		}
+		if bo, ok := s.dialogs.edits[id]; ok && now.Before(bo.until) {
+			continue
+		}
 		if p.Event != "" && editMessage(p.Event, p.Text+"\n\n"+outcomeLine(res), s.cfg.PostTimeout) != nil {
+			s.dialogEditBackOff(id, now)
 			continue
 		}
 		delete(s.dialogs.polled, id)
+		delete(s.dialogs.edits, id)
 		done := filepath.Join(postDir, "done")
 		if os.MkdirAll(done, 0o700) == nil {
 			_ = os.Rename(path, filepath.Join(done, e.Name()))
 		}
 	}
+}
+
+// dialogEditBackOff delays the next edit of dialog id's post.
+func (s *Server) dialogEditBackOff(id string, now time.Time) {
+	if s.dialogs.edits == nil {
+		s.dialogs.edits = map[string]mirrorBackoff{}
+	}
+	bo := s.dialogs.edits[id]
+	bo.step = min(max(bo.step*2, dialogEditBackoffMin), dialogEditBackoffMax)
+	bo.until = now.Add(bo.step)
+	s.dialogs.edits[id] = bo
 }
 
 func readDialogPost(path string) (dialogPost, bool) {
