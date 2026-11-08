@@ -73,6 +73,10 @@ func (in permissionInput) callTranscript() (string, error) {
 	return SubagentTranscript(in.TranscriptPath, in.SessionID, in.AgentID)
 }
 
+// syntheticModel is the model of an assistant line Claude Code writes
+// itself, such as an API error; it can land while a dialog shows.
+const syntheticModel = "<synthetic>"
+
 // Option values the hook applies.
 const (
 	valueAllow        = "allow"
@@ -170,7 +174,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	// Claude signals no terminal approve: the call's tool_result in the
 	// transcript that records the call is the proof, so the watch starts
 	// before the request is visible.
-	watch := newToolWatch(in.callTranscript, in.ToolName, in.ToolInput)
+	watch := newToolWatch(in.callTranscript, in.AgentID != "", in.ToolName, in.ToolInput)
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
@@ -596,14 +600,30 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 	return err
 }
 
-// toolWatch follows a Claude transcript for the tool_result of the call a
-// dialog is about: a tool_use with the same name and input that had no
-// result when the hook started, or that appears later. It locates the
-// transcript (locate) until it is found; a transcript first found after the
-// hook started holds only lines written since, so its first read can answer.
+// toolWatch follows the transcript of the chain that asks (the main thread,
+// or a subagent in its own transcript) for proof that the dialog is gone:
+//   - the tool_result of the call: a tool_use with the same name and input
+//     that had no result when the hook started, or that appears later;
+//   - the chain moved on: an assistant message the chain had not written
+//     when the dialog opened. While a dialog blocks a call the chain writes
+//     none, because the model waits for the whole tool batch; a line Claude
+//     Code writes itself (syntheticModel, an API error) proves nothing;
+//   - an interrupt of the chain, which Esc and a reject write.
+//
+// It locates the transcript (locate) until it is found; a transcript first
+// found after the hook started holds only lines written since, so its first
+// read can answer a result, and the chain proofs start at the asking call.
 type toolWatch struct {
 	locate           func() (string, error)
 	path, name, hash string
+	// ownChain: the transcript is the asking subagent's own, so its
+	// sidechain lines are the chain; otherwise sidechain lines are other
+	// chains'.
+	ownChain bool
+	// armed: lines read from now on were written after the dialog opened.
+	// seen holds the assistant message ids read before them.
+	armed bool
+	seen  map[string]bool
 	// off is the next byte to read; skip drops the first line of a tail
 	// read, which may start mid-line.
 	off  int64
@@ -618,14 +638,15 @@ type toolWatch struct {
 // tool_use is among the newest lines.
 const transcriptTail = 4 << 20
 
-func newToolWatch(locate func() (string, error), name string, input json.RawMessage) *toolWatch {
+func newToolWatch(locate func() (string, error), ownChain bool, name string, input json.RawMessage) *toolWatch {
 	hash, ok := actionHash(name, input)
 	if !ok {
 		return nil
 	}
-	w := &toolWatch{locate: locate, name: name, hash: hash, pending: map[string]bool{}}
+	w := &toolWatch{locate: locate, ownChain: ownChain, name: name, hash: hash, pending: map[string]bool{}, seen: map[string]bool{}}
 	if w.found() {
 		w.read()
+		w.armed = true
 	}
 	w.primed = true
 	return w
@@ -676,9 +697,17 @@ func (w *toolWatch) read() bool {
 		if !ok {
 			continue
 		}
+		if chain := !e.Sidechain || w.ownChain; chain {
+			if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
+				answered = answered || w.armed && !w.seen[e.MessageID]
+				w.seen[e.MessageID] = true
+			}
+			answered = answered || w.armed && e.Type == "user" && interrupted(e)
+		}
 		for _, u := range e.ToolUses {
 			if u.Name == w.name && u.Hash == w.hash {
 				w.pending[u.ID] = true
+				w.armed = w.armed || w.primed
 			}
 		}
 		for _, id := range e.ToolResults {
@@ -688,6 +717,16 @@ func (w *toolWatch) read() bool {
 			}
 		}
 	}
+}
+
+// interrupted reports a user line that interrupts its chain.
+func interrupted(e transcriptEntry) bool {
+	for _, b := range e.Blocks {
+		if b.Type == "text" && strings.HasPrefix(b.Text, interruptPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // actionHash identifies one exact tool call: SHA-256 over the tool name and

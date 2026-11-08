@@ -266,6 +266,9 @@ type transcriptEntry struct {
 	// APIError is isApiErrorMessage: a synthetic assistant line for a
 	// failed API call.
 	APIError bool
+	// Model is message.model; "<synthetic>" on a line Claude Code writes
+	// itself.
+	Model string
 }
 
 // toolUseRef is one tool_use block: its id, tool name and actionHash of
@@ -309,6 +312,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		} `json:"attachment"`
 		Message struct {
 			ID         string          `json:"id"`
+			Model      string          `json:"model"`
 			StopReason string          `json:"stop_reason"`
 			Content    json.RawMessage `json:"content"`
 		} `json:"message"`
@@ -319,7 +323,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	text, blocks, uses := decodeContentWalk(raw.Message.Content)
 	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
 		TurnOrigin: raw.TurnOrigin, Sidechain: raw.IsSidechain, CompactSummary: raw.IsCompact, VisibleOnly: raw.IsVisibleOnly,
-		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError}
+		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError, Model: raw.Message.Model}
 	for _, b := range blocks {
 		if b.Type == "tool_result" && b.ID != "" {
 			e.ToolResults = append(e.ToolResults, b.ID)

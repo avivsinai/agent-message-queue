@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -292,39 +293,58 @@ func TestPermissionHookEndsWhenItsClaudeProcessIsGone(t *testing.T) {
 	}
 }
 
-// A subagent's dialog answered in the terminal: the hook watched the
-// session transcript, which never records a subagent's calls, and waited
-// until its deadline (14 live hooks found waiting, the oldest 19 hours).
-func TestPermissionHookEndsWhenASubagentDialogIsAnsweredInTheTerminal(t *testing.T) {
-	dir := boundHookEnv(t)
-	projects := t.TempDir()
-	session := filepath.Join(projects, "s-1.jsonl")
-	if err := os.WriteFile(session, nil, 0o600); err != nil {
-		t.Fatal(err)
+// A dialog answered in the terminal ends the hook with no decision, by the
+// proof the terminal leaves in the transcript of the chain that asked. The
+// live finding: 14 hooks waited for their 24 h deadline (the oldest 19 h)
+// because the hook knew only the call's tool_result in the session
+// transcript. A subagent writes its calls to its own transcript; Esc writes
+// only an interrupt; and a call recorded with another input never matches.
+func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
+	call := func(id, command string, sidechain bool) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"message":{"id":"msg_%s","content":[{"type":"tool_use","id":"toolu_%s","name":"Bash","input":{"command":%q}}]}}`+"\n", sidechain, id, id, command)
 	}
-	subagents := filepath.Join(projects, "s-1", "subagents")
-	if err := os.MkdirAll(subagents, 0o700); err != nil {
-		t.Fatal(err)
+	result := func(id string, sidechain bool) string {
+		return fmt.Sprintf(`{"type":"user","isSidechain":%t,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_%s","content":"ok"}]}}`+"\n", sidechain, id)
 	}
-	call := `{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"toolu_9","name":"Bash","input":{"command":"make"}}]}}` + "\n"
-	agent := filepath.Join(subagents, "agent-a1.jsonl")
-	if err := os.WriteFile(agent, []byte(call), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stdin, _ := json.Marshal(map[string]any{
-		"session_id": "s-1", "transcript_path": session, "agent_id": "a1", "hook_event_name": "PermissionRequest",
-		"tool_name": "Bash", "tool_input": map[string]any{"command": "make"},
-	})
-	wait := runHook(t, string(stdin))
-	req := openRequest(t, dir)
-	result := `{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_9","content":"ok"}]}}` + "\n"
-	if err := os.WriteFile(agent, []byte(call+result), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if out := wait(); out != "" {
-		t.Fatalf("a terminal answer printed %q", out)
-	}
-	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.By != dialog.ByTerminal {
-		t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
+	for _, row := range []struct {
+		name, agent, before, after string
+	}{
+		{name: "a subagent's call gets its result", agent: "a1", before: call("1", "make", true), after: result("1", true)},
+		{name: "Esc interrupts the turn", before: call("1", "make", false), after: `{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"},
+		{name: "the turn moves on past a call recorded with another input", before: call("1", "make all", false), after: result("1", false) + `{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}]}}` + "\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dir := boundHookEnv(t)
+			projects := t.TempDir()
+			session := filepath.Join(projects, "s-1.jsonl")
+			transcript := session
+			if row.agent != "" {
+				transcript = filepath.Join(projects, "s-1", "subagents", "agent-"+row.agent+".jsonl")
+				if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(session, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(transcript, []byte(row.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdin, _ := json.Marshal(map[string]any{
+				"session_id": "s-1", "transcript_path": session, "agent_id": row.agent, "hook_event_name": "PermissionRequest",
+				"tool_name": "Bash", "tool_input": map[string]any{"command": "make"},
+			})
+			wait := runHook(t, string(stdin))
+			req := openRequest(t, dir)
+			if err := os.WriteFile(transcript, []byte(row.before+row.after), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out := wait(); out != "" {
+				t.Fatalf("a terminal answer printed %q", out)
+			}
+			if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.By != dialog.ByTerminal {
+				t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
+			}
+		})
 	}
 }
