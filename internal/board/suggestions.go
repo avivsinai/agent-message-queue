@@ -62,7 +62,8 @@ const (
 )
 
 type Suggestion struct {
-	Status     SuggestionStatus      `json:"status"`
+	// Status is set on views only; a stored proposal leaves it empty.
+	Status     SuggestionStatus      `json:"status,omitempty"`
 	Stale      bool                  `json:"stale"`
 	Candidates []SuggestionCandidate `json:"candidates"`
 	ID         string                `json:"id"`
