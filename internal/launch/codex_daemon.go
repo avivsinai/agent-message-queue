@@ -139,10 +139,20 @@ func codexDaemonArgumentsReason(args []string) string {
 		seen[flag] = true
 		switch flag {
 		case "--no-alt-screen":
-		case "--model", "--sandbox", "--ask-for-approval":
+		case "--model":
 			i++
+		case "--sandbox":
+			i++
+			if !oneOf("read-only", "workspace-write")(args[i]) {
+				return "sandbox option requires verified TUI resume equivalence"
+			}
+		case "--ask-for-approval":
+			i++
+			if args[i] != "on-request" {
+				return "approval option requires verified TUI resume equivalence"
+			}
 		case "-c", "--search":
-			return "Codex 0.167 selects an embedded app-server for command-line configuration or search overrides"
+			return fmt.Sprintf("Codex %s selects an embedded app-server for command-line configuration or search overrides", CodexDaemonVersion)
 		default:
 			return "launch option requires verified TUI resume equivalence"
 		}
