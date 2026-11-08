@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 const (
@@ -377,6 +378,62 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	tick(s, now.Add(3*time.Minute))
 	if len(synced) == 0 || synced[0] != s.retiredDir() {
 		t.Fatalf("directory syncs on retirement = %q; want the retired store synced first", synced)
+	}
+}
+
+// A Codex app-server session records no holder, only its thread, so the
+// holder alone left it unknown: the machine agent made no channel for it and
+// never archived one. Its liveness comes from the daemon that runs the
+// thread.
+func TestMachineServesACodexAppServerThreadUntilItEnds(t *testing.T) {
+	s, rec := machineServer(t)
+	daemon, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	const sock, thread = "/daemon.sock", "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+	loaded := []string{thread}
+	probes := 0
+	saved := newAppServerView
+	t.Cleanup(func() { newAppServerView = saved })
+	newAppServerView = func() *codex.View {
+		return codex.NewView(func(string) ([]string, error) { probes++; return loaded, nil },
+			func(string) (int, error) { return daemon.PID, nil })
+	}
+	root := canonicalTempDir(t)
+	b := binding.Binding{Root: root, Target: "codex:" + thread, NativeSession: thread, Harness: "codex", Name: "codex-proj",
+		Label: "codex · proj @ box", Identity: binding.NativeIdentity("codex", root, root),
+		AppServer: binding.AppServerThread{Socket: sock, Thread: thread, Daemon: daemon}}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	rec.reply = func(args []string) ([]byte, error) {
+		if args[0]+" "+args[1] == "channels create" {
+			return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
+		}
+		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
+	}
+	now := time.Now()
+	tick(s, now)
+	if r := channelState(t, s, b.Name); r.State != channelActive || r.ChannelID != machineChanA {
+		t.Fatalf("record for a loaded thread = %+v", r)
+	}
+	if probes != 1 {
+		t.Fatalf("daemon asked %d times in one tick, want 1", probes)
+	}
+
+	loaded = nil // the thread ends in the same daemon
+	rec.reset()
+	tick(s, now.Add(time.Minute))
+	if r := onlyRetired(t, s); r.RetiredBy != retiredEnded || !r.Archived {
+		t.Fatalf("record after the thread ended = %+v", r)
+	}
+	want := []string{
+		"messages send --channel " + machineChanA + " --content Session ended: " + b.Label + ". This channel no longer reaches it.",
+		"channels archive --channel " + machineChanA,
+	}
+	if got := rec.list(); !slices.Equal(got, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", got, want)
 	}
 }
 

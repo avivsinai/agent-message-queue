@@ -606,37 +606,9 @@ func homeCodexRollout(thread string) string {
 // codexView asks each Codex app-server daemon at most once per command:
 // one daemon pid and one loaded-thread list per socket, reused by every
 // binding and by the attaching session.
-type codexView struct {
-	pids   map[string]codexAnswer[int]
-	loaded map[string]codexAnswer[[]string]
-}
+type codexView = codex.View
 
-type codexAnswer[T any] struct {
-	v   T
-	err error
-}
-
-func newCodexView() *codexView {
-	return &codexView{pids: map[string]codexAnswer[int]{}, loaded: map[string]codexAnswer[[]string]{}}
-}
-
-func (c *codexView) daemonPID(sock string) (int, error) {
-	a, ok := c.pids[sock]
-	if !ok {
-		a.v, a.err = codexDaemonPID(sock)
-		c.pids[sock] = a
-	}
-	return a.v, a.err
-}
-
-func (c *codexView) loadedThreads(sock string) ([]string, error) {
-	a, ok := c.loaded[sock]
-	if !ok {
-		a.v, a.err = codexLoadedThreads(sock)
-		c.loaded[sock] = a
-	}
-	return a.v, a.err
-}
+func newCodexView() *codexView { return codex.NewView(codexLoadedThreads, codexDaemonPID) }
 
 // loadedThread is the thread to record for a Codex session: the thread with
 // the daemon process that has it loaded now. Unless that daemon confirms the
@@ -648,7 +620,7 @@ func loadedThread(codexes *codexView, sock, thread string) binding.AppServerThre
 	if err != nil {
 		return binding.AppServerThread{}
 	}
-	if loaded, err := codexes.loadedThreads(sock); err != nil || !slices.Contains(loaded, thread) {
+	if loaded, err := codexes.LoadedThreads(sock); err != nil || !slices.Contains(loaded, thread) {
 		return binding.AppServerThread{}
 	}
 	return binding.AppServerThread{Socket: sock, Thread: thread, Daemon: daemon}
@@ -656,44 +628,14 @@ func loadedThread(codexes *codexView, sock, thread string) binding.AppServerThre
 
 // daemonHolder is the identity of the daemon process serving sock.
 func daemonHolder(codexes *codexView, sock string) (launch.HolderIdentity, error) {
-	pid, err := codexes.daemonPID(sock)
+	pid, err := codexes.DaemonPID(sock)
 	if err != nil {
 		return launch.HolderIdentity{}, err
 	}
 	return processHolder(pid)
 }
 
-// livenessOf is a binding's liveness. A Codex thread's comes from the
-// app-server daemon that had it loaded when it was bound: the thread has
-// ended only when that same daemon process, still running, no longer has it
-// loaded. A restarted or other daemon, or an unreachable one, proves nothing,
-// so the thread is unknown.
-func livenessOf(codexes *codexView, b binding.Binding) (binding.State, string) {
-	state, evidence := b.Liveness()
-	if state == binding.Ended || b.AppServer.Thread == "" {
-		return state, evidence
-	}
-	loaded, err := codexes.loadedThreads(b.AppServer.Socket)
-	if err != nil {
-		return binding.Unknown, fmt.Sprintf("app-server unreachable: %v", err)
-	}
-	if slices.Contains(loaded, b.AppServer.Thread) {
-		return binding.Live, "thread is loaded in the app-server"
-	}
-	recorded := b.AppServer.Daemon
-	if recorded.PID <= 0 {
-		return binding.Unknown, "thread is not loaded, and no app-server process was recorded to compare"
-	}
-	if pid, err := codexes.daemonPID(b.AppServer.Socket); err != nil || pid != recorded.PID {
-		return binding.Unknown, "thread is not loaded in another app-server process than the one it was bound in"
-	}
-	if st, ev := launch.InspectHolder(recorded); st != launch.LeaseValid {
-		return binding.Unknown, "thread is not loaded, and the app-server process is not confirmed: " + ev
-	}
-	return binding.Ended, "thread is no longer loaded in the app-server it was bound in"
-}
-
-// inspectOutsideLock runs livenessOf for each current binding that names a
+// inspectOutsideLock runs codexView.Liveness for each current binding that names a
 // Codex thread, before the binding lock is taken, and returns an inspector
 // for use under the lock. That inspector reuses those results for a binding
 // that is still exactly as inspected and reads every other binding without
@@ -709,7 +651,7 @@ func inspectOutsideLock(codexes *codexView) binding.Inspector {
 	all, _ := binding.List()
 	for _, b := range all {
 		if b.AppServer.Thread != "" {
-			state, evidence := livenessOf(codexes, b)
+			state, evidence := codexes.Liveness(b)
 			if state == binding.Live {
 				b = followDaemon(codexes, b)
 			}
@@ -733,7 +675,7 @@ func inspectOutsideLock(codexes *codexView) binding.Inspector {
 // later prove it ended. The binding is rewritten only if it is still exactly
 // b, and the binding as it is afterwards is returned.
 func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
-	pid, err := codexes.daemonPID(b.AppServer.Socket)
+	pid, err := codexes.DaemonPID(b.AppServer.Socket)
 	if err != nil || pid == b.AppServer.Daemon.PID {
 		return b
 	}

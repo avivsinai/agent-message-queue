@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -196,6 +198,9 @@ type Server struct {
 	// view is the bindings and channel records the machine, dialog and
 	// mirror workers share.
 	view sessionView
+	// codexes is the app-server daemons' answers for the current machine
+	// tick, or nil before the first one.
+	codexes atomic.Pointer[codex.View]
 }
 
 // NewServer builds a server bound to one already authenticated routing context.

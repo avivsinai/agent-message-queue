@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 // The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
@@ -288,6 +289,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	if buzzRelayKey == "" || buzzOwner == "" {
 		return
 	}
+	s.codexes.Store(newAppServerView())
 	s.applyResets(now)
 	s.retireGone(now)
 	s.reattach(now)
@@ -319,6 +321,22 @@ type machineState struct {
 	settings               map[string]settingsSeen
 }
 
+// newAppServerView asks the Codex app-server daemons. It is a variable so
+// tests dial none.
+var newAppServerView = func() *codex.View {
+	return codex.NewView(func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }, codex.DaemonPID)
+}
+
+// liveness is b's liveness as the machine agent judges it: a Codex
+// app-server thread's from its daemon, asked at most once per socket in a
+// tick, and any other binding's from its holder.
+func (s *Server) liveness(b binding.Binding) (binding.State, string) {
+	if v := s.codexes.Load(); v != nil {
+		return v.Liveness(b)
+	}
+	return b.Liveness()
+}
+
 // provisionable reports whether the machine agent serves b: a named binding
 // whose session is proven live and that has no agent of its own that runs
 // or is idle. An offline marker, or one without an identity that is stale,
@@ -328,7 +346,7 @@ func (s *Server) provisionable(b binding.Binding) bool {
 	if b.Name == binding.LegacyName || binding.ValidName(b.Name) != nil {
 		return false
 	}
-	if state, _ := b.Liveness(); state != binding.Live {
+	if state, _ := s.liveness(b); state != binding.Live {
 		return false
 	}
 	for _, m := range s.agentMarkers(b.Name) {
@@ -418,7 +436,7 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	b, err := binding.ReadNamed(r.Name)
 	switch {
 	case errors.Is(err, binding.ErrNone):
-		s.retire(r, goneReason(r), now)
+		s.retire(r, s.goneReason(r), now)
 		return false
 	case err != nil:
 		return false
@@ -426,7 +444,7 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 		s.retire(r, retiredReplaced, now)
 		return false
 	}
-	if state, _ := b.Liveness(); state == binding.Ended {
+	if state, _ := s.liveness(b); state == binding.Ended {
 		s.retire(r, retiredEnded, now)
 		return false
 	}
@@ -704,7 +722,7 @@ func (s *Server) removeDurably(path string) error {
 // session records it. A tombstone without a reason counts as ended only
 // when its session is proven ended, else as detached, because a detach
 // leaves the session running.
-func goneReason(r channelRecord) string {
+func (s *Server) goneReason(r channelRecord) string {
 	tombs, _ := binding.Tombstones()
 	for _, t := range tombs {
 		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
@@ -718,7 +736,7 @@ func goneReason(r channelRecord) string {
 		case binding.RemovedDetached:
 			return retiredDetached
 		}
-		if state, _ := t.Liveness(); state == binding.Ended {
+		if state, _ := s.liveness(t); state == binding.Ended {
 			return retiredEnded
 		}
 	}
@@ -746,15 +764,17 @@ func (s *Server) retireGone(now time.Time) {
 		// The snapshot only lets a live binding be skipped: whether it is
 		// gone or ended is decided from a fresh read, since a session can
 		// attach again while an earlier record's relay call runs.
-		if b, ok := snap.binding(r.Name); ok && live(b) {
-			continue
+		if b, ok := snap.binding(r.Name); ok {
+			if state, _ := s.liveness(b); state != binding.Ended {
+				continue
+			}
 		}
 		b, err := binding.ReadNamed(r.Name)
 		// A record under a name no binding can have serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
-			s.retire(r, goneReason(r), now)
+			s.retire(r, s.goneReason(r), now)
 		} else if err == nil {
-			if state, _ := b.Liveness(); state == binding.Ended {
+			if state, _ := s.liveness(b); state == binding.Ended {
 				s.retire(r, retiredEnded, now)
 			}
 		}
@@ -925,7 +945,7 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 	if err != nil || cur.SessionIdentity() != r.Identity {
 		return false
 	}
-	if state, _ := cur.Liveness(); state == binding.Ended {
+	if state, _ := s.liveness(cur); state == binding.Ended {
 		return false
 	}
 	_, held, err := loadChannelRecord(s.slotPath(b.Name))
@@ -1084,7 +1104,7 @@ func (s *Server) machineDirectory() string {
 	all, _ := binding.List()
 	listed := 0
 	for _, bd := range all {
-		if state, _ := bd.Liveness(); state != binding.Live || bd.Name == binding.LegacyName {
+		if state, _ := s.liveness(bd); state != binding.Live || bd.Name == binding.LegacyName {
 			continue
 		}
 		if listed == 0 {
