@@ -24,12 +24,20 @@ type routeExplainResult struct {
 	Argv                    []string           `json:"argv"`
 	DisplayCommand          string             `json:"display_command"`
 	SourceRoot              string             `json:"source_root"`
-	DeliveryRoot            string             `json:"delivery_root"`
-	SourceProject           string             `json:"source_project"`
-	TargetProject           string             `json:"target_project"`
-	SourceSession           string             `json:"source_session"`
-	TargetSession           string             `json:"target_session"`
-	Error                   string             `json:"error,omitempty"`
+	// RootSource names where the source root came from, in the vocabulary
+	// of `amq env --json`.
+	RootSource string `json:"root_source,omitempty"`
+	// SourceConfig is the .amqrc that decided the route: the one whose peers
+	// map chose the peer, or else the one that supplied the source root.
+	SourceConfig string `json:"source_config,omitempty"`
+	// PeerKey is the peers-map key a cross-project route went through.
+	PeerKey       string `json:"peer_key,omitempty"`
+	DeliveryRoot  string `json:"delivery_root"`
+	SourceProject string `json:"source_project"`
+	TargetProject string `json:"target_project"`
+	SourceSession string `json:"source_session"`
+	TargetSession string `json:"target_session"`
+	Error         string `json:"error,omitempty"`
 }
 
 func runRoute(args []string) error {
@@ -40,6 +48,8 @@ func runRoute(args []string) error {
 	switch args[0] {
 	case "explain":
 		return runRouteExplain(args[1:])
+	case "peers":
+		return runRoutePeers(args[1:])
 	default:
 		return formatUnknownSubcommand("route", args[0])
 	}
@@ -58,6 +68,9 @@ func runRouteExplain(args []string) error {
 
 	usage := usageWithFlags(fs, "amq route explain --to <handle> [--project <project>] [--session <session>] --json",
 		"Explains canonical AMQ routing without sending a message.",
+		"root_source names where the source root came from (as in 'amq env --json'),",
+		"source_config names the .amqrc that decided the route, and peer_key names",
+		"the peers-map key a cross-project route went through.",
 		"",
 		"Examples:",
 		"  amq route explain --to codex --json",
@@ -104,12 +117,15 @@ type routeExplainOptions struct {
 func explainRoute(opts routeExplainOptions) routeExplainResult {
 	result := newRouteExplainResult()
 
-	sourceRoot, me, err := resolveRouteSource(opts.FromRoot, opts.Me)
+	source, me, err := resolveRouteSource(opts.FromRoot, opts.Me)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
+	sourceRoot := source.Root
 	result.SourceRoot = sourceRoot
+	result.RootSource = string(source.Source)
+	result.SourceConfig = source.ConfigPath
 	result.SourceProject = resolveProject(sourceRoot)
 	result.SourceSession = resolveSessionName(sourceRoot)
 
@@ -173,6 +189,10 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 
 	result.Routable = true
 	result.DeliveryRoot = plan.DeliveryRoot
+	if plan.PeerBaseRoot != "" {
+		result.PeerKey = plan.TargetProject
+		result.SourceConfig = plan.SourceConfigPath
+	}
 	deliveryBase := plan.PeerBaseRoot
 	if targetProject == "" {
 		deliveryBase = classifyRoot(plan.DeliveryRoot)
@@ -202,25 +222,32 @@ func newRouteExplainResult() routeExplainResult {
 	}
 }
 
-func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err error) {
+// routeSource is a resolved source root and where it came from.
+type routeSource struct {
+	Root       string
+	Source     rootSource
+	ConfigPath string
+}
+
+func resolveRouteSource(fromRoot, meFlag string) (source routeSource, me string, err error) {
 	if strings.TrimSpace(fromRoot) != "" {
-		sourceRoot = resolveRoot(fromRoot)
+		source = routeSource{Root: resolveRoot(fromRoot), Source: rootSourceFlag}
 		me = strings.TrimSpace(meFlag)
 		if me == "" {
-			return sourceRoot, "", fmt.Errorf("--me is required (or set AM_ME)")
+			return source, "", fmt.Errorf("--me is required (or set AM_ME)")
 		}
-		return sourceRoot, me, nil
+		return source, me, nil
 	}
 
-	root, _, resolvedMe, err := resolveEnvConfigWithSource("", meFlag)
+	root, kind, configPath, resolvedMe, err := resolveEnvConfigWithProvenance("", meFlag)
 	if err != nil {
-		return "", "", err
+		return routeSource{}, "", err
 	}
-	sourceRoot = resolveRoot(root)
+	source = routeSource{Root: resolveRoot(root), Source: kind, ConfigPath: configPath}
 	if strings.TrimSpace(resolvedMe) == "" {
-		return sourceRoot, "", fmt.Errorf("--me is required (or set AM_ME)")
+		return source, "", fmt.Errorf("--me is required (or set AM_ME)")
 	}
-	return sourceRoot, resolvedMe, nil
+	return source, resolvedMe, nil
 }
 
 func validatePlannedMailbox(plan route.DeliveryPlan, target string) error {
@@ -303,4 +330,85 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+type routePeersResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	SourceRoot    string `json:"source_root"`
+	route.PeerGraph
+	Error string `json:"error,omitempty"`
+}
+
+func runRoutePeers(args []string) error {
+	fs := flag.NewFlagSet("route peers", flag.ContinueOnError)
+	rootFlag := fs.String("root", "", "Source AMQ root (default: resolved like other commands)")
+	depthFlag := fs.Int("depth", route.DefaultPeerDepth, fmt.Sprintf("Follow peers' own .amqrc this many hops (1-%d)", route.MaxPeerDepth))
+	jsonFlag := fs.Bool("json", false, "Emit JSON output")
+
+	usage := usageWithFlags(fs, "amq route peers [--depth N] [--json]",
+		"Lists each peer in this project's .amqrc peers map and whether it can answer.",
+		"status is ok, unreadable, missing_root, or no_amqrc. reply_back is yes only",
+		"when the peer's .amqrc lists this project under its exact project name and",
+		"that entry is this project's base root; with no, replies from that peer fail.",
+		fmt.Sprintf("--depth follows the peers' own .amqrc, visiting each project once (at most %d).", route.MaxPeerProjects),
+		"Reads only .amqrc files and base roots, never message files.",
+		"",
+		"Examples:",
+		"  amq route peers",
+		"  amq route peers --depth 2 --json",
+	)
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if *depthFlag < 1 || *depthFlag > route.MaxPeerDepth {
+		return UsageError("--depth must be between 1 and %d", route.MaxPeerDepth)
+	}
+
+	result := routePeersResult{SchemaVersion: 1, PeerGraph: route.PeerGraph{Peers: []route.PeerEdge{}}}
+	root, _, _, err := resolveEnvConfigWithSource(*rootFlag, "")
+	if err == nil {
+		result.SourceRoot = resolveRoot(root)
+		var graph route.PeerGraph
+		if graph, err = routeWalker().Peers(result.SourceRoot, *depthFlag); err == nil {
+			result.PeerGraph = graph
+		}
+	}
+	if *jsonFlag {
+		if err != nil {
+			result.Error = err.Error()
+		}
+		return writeJSON(os.Stdout, result)
+	}
+	if err != nil {
+		return err
+	}
+	return writeRoutePeersText(result.PeerGraph)
+}
+
+func writeRoutePeersText(graph route.PeerGraph) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%s)\n", graph.Project, graph.Config)
+	if len(graph.Peers) == 0 {
+		b.WriteString("  no peers configured\n")
+	}
+	for _, peer := range graph.Peers {
+		name := peer.Name
+		if peer.Depth > 1 {
+			name = peer.Via + " -> " + peer.Name
+		}
+		fmt.Fprintf(&b, "  %s  %s  reply_back: %s  %s\n", name, peer.Status, peer.ReplyBack, peer.BaseRoot)
+		switch {
+		case peer.ReplyBack == route.ReplyBackNo:
+			fmt.Fprintf(&b, "    warning: reply_back: no: %s\n", peer.Detail)
+		case peer.Status != route.PeerOK && peer.Detail != "":
+			fmt.Fprintf(&b, "    %s\n", peer.Detail)
+		}
+	}
+	if graph.Truncated {
+		fmt.Fprintf(&b, "  truncated at %d projects\n", route.MaxPeerProjects)
+	}
+	_, err := os.Stdout.WriteString(b.String())
+	return err
 }

@@ -320,7 +320,15 @@ const (
 //   - Outside Git: ~/.amqrc > auto-detect
 //   - Me:   flags > env (NOT from .amqrc)
 func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, string, error) {
-	var root, me string
+	root, source, _, me, err := resolveEnvConfigWithProvenance(rootFlag, meFlag)
+	return root, source, me, err
+}
+
+// resolveEnvConfigWithProvenance is resolveEnvConfigWithSource that also
+// returns the path of the .amqrc that supplied the root. The path is empty
+// unless source is project_amqrc or global_amqrc.
+func resolveEnvConfigWithProvenance(rootFlag, meFlag string) (string, rootSource, string, string, error) {
+	var root, me, configPath string
 	var source rootSource
 
 	// Collect values from all sources, then apply precedence
@@ -348,11 +356,12 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	gitTop, insideGit := gitWorktreeRootFromCWD()
 
 	// 4. Try global ~/.amqrc outside Git worktrees only.
-	var globalRCRoot string
+	var globalRCRoot, globalRCPath string
 	var globalRCErr error
 	if !insideGit {
 		globalResult, err := loadGlobalAmqrc()
 		if err == nil && globalResult.Config.Root != "" {
+			globalRCPath = globalResult.Path
 			globalRCRoot = globalResult.Config.Root
 			if !filepath.IsAbs(globalRCRoot) {
 				globalRCRoot = filepath.Join(globalResult.Dir, globalRCRoot)
@@ -379,13 +388,13 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	case envRootVal != "":
 		root, source = envRootVal, rootSourceEnv
 	case rcRoot != "":
-		root, source = rcRoot, rootSourceProjectRC
+		root, source, configPath = rcRoot, rootSourceProjectRC, rcResult.Path
 	case globalEnvRoot != "":
 		root, source = globalEnvRoot, rootSourceGlobalEnv
 	case insideGit && autoRoot != "":
 		root, source = autoRoot, rootSourceAutoDetect
 	case globalRCRoot != "":
-		root, source = globalRCRoot, rootSourceGlobalRC
+		root, source, configPath = globalRCRoot, rootSourceGlobalRC, globalRCPath
 	case autoRoot != "":
 		root, source = autoRoot, rootSourceAutoDetect
 	}
@@ -401,23 +410,23 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	if rcErr != nil {
 		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != ""
 		if !hasHigherPrecedenceRoot {
-			return "", "", "", rcErr
+			return "", "", "", "", rcErr
 		}
 		_ = writeStderr("warning: %v (using override from flags/env)\n", rcErr)
 	}
 	if globalRCErr != nil {
 		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != "" || rcRoot != "" || globalEnvRoot != ""
 		if !hasHigherPrecedenceRoot {
-			return "", "", "", globalRCErr
+			return "", "", "", "", globalRCErr
 		}
 		_ = writeStderr("warning: %v (using higher-precedence root)\n", globalRCErr)
 	}
 
 	if root == "" {
 		if insideGit {
-			return "", "", "", noEligibleRootInGitError(gitTop)
+			return "", "", "", "", noEligibleRootInGitError(gitTop)
 		}
-		return "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
+		return "", "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
 	}
 
 	// Canonicalize the winning root before pin validation, JSON/shell output,
@@ -430,12 +439,12 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	if me != "" {
 		normalized, err := normalizeHandle(me)
 		if err != nil {
-			return "", "", "", fmt.Errorf("invalid agent handle: %w", err)
+			return "", "", "", "", fmt.Errorf("invalid agent handle: %w", err)
 		}
 		me = normalized
 	}
 
-	return root, source, me, nil
+	return root, source, configPath, me, nil
 }
 
 func loadGlobalAmqrc() (amqrcResult, error) { return routeWalker().LoadGlobalAmqrc() }

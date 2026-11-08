@@ -225,14 +225,16 @@ func init() {
 		{
 			Name:        "route",
 			Summary:     "Explain canonical routing",
-			Description: "Explain AMQ route resolution without sending a message",
+			Description: "Explain AMQ route resolution and peer reachability without sending a message",
 			Examples: []string{
 				"amq route explain --to codex --json",
 				"amq route explain --to qa --project project-b --session qa --json",
+				"amq route peers --depth 2",
 			},
 			Handler: runRoute,
 			Children: []CommandInfo{
 				{Name: "explain", Summary: "Explain a send route as canonical JSON", Handler: runRouteExplain},
+				{Name: "peers", Summary: "List peers and whether replies come back", Handler: runRoutePeers},
 			},
 		},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
