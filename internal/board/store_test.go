@@ -59,7 +59,7 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		target.EvidenceHash = hex.EncodeToString(sum[:])
 		evidence = append(evidence, raw)
 	}
-	acquisition := Acquisition{ProjectID: initial.ProjectID, Evidence: evidence, Input: Input{Dir: base, Known: map[string]string{"demo-a1b": "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{{Ref: ref, Title: "Deliver feature", State: StateActive, Owner: Owner{Kind: OwnerAgent, Handle: "worker"}, Structural: true}}}}}}, BeadsStore: filepath.Join(base, ".beads"), Messages: []Message{ask, withdrawal}}
+	acquisition := Acquisition{ProjectID: initial.ProjectID, Evidence: evidence, Input: Input{Dir: base, Known: map[string]string{"demo-a1b": "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, Namespace: filepath.Join(base, ".beads"), ObservedAt: now, Items: []Item{{Ref: ref, Title: "Deliver feature", State: StateActive, Owner: Owner{Kind: OwnerAgent, Handle: "worker"}, Structural: true}}}}}}, Messages: []Message{ask, withdrawal}}
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,8 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 		t.Fatal("worktree created a second native task")
 	}
 	otherStore := acquisition
-	otherStore.BeadsStore = filepath.Join(base, "different-database")
+	otherStore.Input.Results = append([]NamedResult(nil), acquisition.Input.Results...)
+	otherStore.Input.Results[0].Result.Namespace = filepath.Join(base, "different-database")
 	if err = store.Commit(ctx, otherStore); err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +628,7 @@ func checkIdentityCorrections(t *testing.T, ctx context.Context) {
 	home := t.TempDir()
 	bead := Item{Ref: beadRef, Title: "Bead outcome", State: StateActive, Structural: true}
 	goal := Item{Namespace: home, Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Title: "Chosen outcome", State: StateDone, Structural: true}
-	acquisition := Acquisition{ProjectID: project.ProjectID, BeadsStore: home, Input: Input{Known: map[string]string{beadRef.ID: "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, Items: []Item{bead}}}, {Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}}}}
+	acquisition := Acquisition{ProjectID: project.ProjectID, Input: Input{Known: map[string]string{beadRef.ID: "in_progress"}, Results: []NamedResult{{Name: "beads", Result: Result{Status: StatusOK, Namespace: home, Items: []Item{bead}}}, {Name: "codex-goals", Result: Result{Status: StatusOK, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}}}}
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
@@ -985,8 +986,7 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	}
 	beadRef, _ := Bead("demo-span")
 	sourceStore := t.TempDir()
-	acquisition.BeadsStore = sourceStore
-	acquisition.Input.Results = append(acquisition.Input.Results, NamedResult{Name: "beads", Result: Result{Status: StatusOK, Items: []Item{{Ref: beadRef, Title: "Native destination", State: StateActive, Structural: true}}}})
+	acquisition.Input.Results = append(acquisition.Input.Results, NamedResult{Name: "beads", Result: Result{Status: StatusOK, Namespace: sourceStore, Items: []Item{{Ref: beadRef, Title: "Native destination", State: StateActive, Structural: true}}}})
 	if err = store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
