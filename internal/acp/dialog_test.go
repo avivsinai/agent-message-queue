@@ -341,6 +341,72 @@ func TestOldMirrorOnDoesNotUndoALaterOff(t *testing.T) {
 	}
 }
 
+// Review of the verified owner gate (recut): a prompt chose its dialog but
+// wrote the answer later; when the terminal closed that dialog first, a
+// steer of the same signed event answered the next dialog.
+func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
+	s, dir, owner, lr := ownerDialogServer(t)
+	first := openPostedDialog(t, s, dir, "1")
+	evt := signedBy(t, owner, "yes", dmChannel)
+	lr.Inject(evt)
+	text := buzzPrompt(dmChannel, buzzOwner, "yes")
+	params, _ := json.Marshal(promptParams{SessionID: "s", Meta: eventMeta(evt), Prompt: []contentBlock{{Type: "text", Text: text}}})
+	run, _, rpcErr := s.beginPrompt(params)
+	if rpcErr != nil || run == nil {
+		t.Fatalf("the prompt did not choose its dialog: %v", rpcErr)
+	}
+	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: first.ID, Outcome: dialog.OutcomeDenied, By: dialog.ByTerminal, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	second := openPostedDialog(t, s, dir, "2")
+	prompt, _ := json.Marshal([]contentBlock{{Type: "text", Text: text}})
+	steer, _ := json.Marshal(steeringParams{SessionID: "s", Meta: eventMeta(evt), Prompt: prompt})
+	s.steeringDialogReply(steer)
+	if _, err := run(func(any) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if a, ok, err := dialog.ReadAnswer(dir, second.ID); err != nil || ok {
+		t.Fatalf("the event chosen for the first dialog answered the second: %+v (err %v)", a, err)
+	}
+}
+
+// Review of the verified owner gate (recut): a mirror switched off before
+// the switch time was recorded has only its off marker; an hour-old signed
+// "mirror on" turned it on again.
+func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
+	s, _ := machineServer(t)
+	b := liveSession(t, "alpha")
+	b.Harness = "claude"
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, s, b, dmChannel)
+	lr := agentRelayForTest(t)
+	owner := nostr.Generate()
+	buzzOwner = owner.Public().Hex()
+	dir, err := mirror.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "off"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Add(-time.Hour).Unix()), Kind: 9, Content: "mirror on", Tags: nostr.Tags{{"h", dmChannel}}}
+	if err := old.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	lr.Inject(old)
+	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "mirror on")); ok {
+		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
+	}
+	if !mirror.Off(dir) {
+		t.Fatal("an hour-old mirror on undid an off marker with no recorded switch time")
+	}
+}
+
 // ownerDialogServer is a pinned agent of binding alpha whose owner is owner,
 // with a local relay that serves the events a test injects.
 func ownerDialogServer(t *testing.T) (*Server, string, nostr.SecretKey, *relaytest.Relay) {

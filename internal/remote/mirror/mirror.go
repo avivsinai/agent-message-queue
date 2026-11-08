@@ -677,7 +677,8 @@ func Off(dir string) bool {
 }
 
 // switchedFile holds when the decision that set the current switch was
-// made (RFC 3339). Without it the switch dates from time zero.
+// made (RFC 3339). Without it an off marker dates the switch, else no
+// decision was made.
 const switchedFile = "switched"
 
 // SetOff turns the mirror of binding name off or on from this machine's
@@ -702,7 +703,8 @@ func Switch(name string, off bool, at time.Time) (applied bool, err error) {
 
 // setSwitch records the decision time and then the switch, under the
 // switch lock. A zero at is a terminal decision: made now, and never before
-// the current one.
+// the current one; it applies over an unreadable decision time and replaces
+// it. An owner decision is refused while that time is unreadable.
 func setSwitch(name string, off bool, at time.Time) (applied bool, err error) {
 	dir, err := DirFor(name)
 	if err != nil {
@@ -712,8 +714,10 @@ func setSwitch(name string, off bool, at time.Time) (applied bool, err error) {
 		return false, err
 	}
 	err = lock.WithExclusiveFileLock(filepath.Join(dir, switchedFile+".lock"), func() error {
-		since := switchedAt(dir)
+		since, err := switchedAt(dir)
 		switch {
+		case err != nil && !at.IsZero():
+			return err
 		case at.IsZero():
 			at = time.Now()
 			if at.Before(since) {
@@ -735,15 +739,26 @@ func setSwitch(name string, off bool, at time.Time) (applied bool, err error) {
 	return applied, err
 }
 
-// switchedAt is when the current switch was decided; zero when unrecorded
-// or unreadable.
-func switchedAt(dir string) time.Time {
-	raw, err := os.ReadFile(filepath.Join(dir, switchedFile))
-	var at time.Time
-	if err != nil || at.UnmarshalText(bytes.TrimSpace(raw)) != nil {
-		return time.Time{}
+// switchedAt is when the current switch was decided. With no switchedFile
+// it is the off marker's time when the mirror is off, and zero when it is
+// on. A switchedFile that cannot be read or parsed is an error: no
+// decision may be dated before it.
+func switchedAt(dir string) (time.Time, error) {
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, switchedFile), 64)
+	if errors.Is(err, os.ErrNotExist) {
+		if fi, err := os.Lstat(filepath.Join(dir, offFile)); err == nil && fi.Mode().IsRegular() {
+			return fi.ModTime(), nil
+		}
+		return time.Time{}, nil
 	}
-	return at
+	if err != nil {
+		return time.Time{}, fmt.Errorf("mirror switch time: %w", err)
+	}
+	var at time.Time
+	if err := at.UnmarshalText(bytes.TrimSpace(raw)); err != nil {
+		return time.Time{}, fmt.Errorf("mirror switch time: %w", err)
+	}
+	return at, nil
 }
 
 // writeOff creates or removes the off marker in dir.

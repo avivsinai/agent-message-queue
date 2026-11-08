@@ -702,8 +702,9 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 // when it has no e tag at all, the only dialog open in its channel. It
 // answers nothing when its refs name no open dialog or more than one, when
 // it fails the time rule against its dialog's opening (signedWithin), or
-// when it already answered another dialog. posted maps each open dialog to
-// its post's event id.
+// when it is bound to another dialog. Choosing binds evt to its dialog
+// (BindEvent) before any answer is written, so no later path moves it.
+// posted maps each open dialog to its post's event id.
 func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map[string]string, now time.Time) (dialog.Request, bool) {
 	refs, tagged := replyRefs(evt)
 	var here []dialog.Request
@@ -715,7 +716,7 @@ func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map
 	if len(here) != 1 || !signedWithin(evt, here[0].OpenedAt.Add(-ownerSkew), now) {
 		return dialog.Request{}, false
 	}
-	if id, used, err := dialog.DecidedBy(dir, evt.ID.Hex()); err != nil || used && id != here[0].ID {
+	if bound, err := dialog.BindEvent(dir, evt.ID.Hex(), here[0].ID); err != nil || bound != here[0].ID {
 		return dialog.Request{}, false
 	}
 	return here[0], true
