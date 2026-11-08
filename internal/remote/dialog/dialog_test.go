@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -47,8 +48,8 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if won, _ := WriteAnswer(dir, Answer{ID: req.ID, Option: 1}); won {
 		t.Fatal("a second answer replaced the first")
 	}
-	if got, ok, _ := ReadAnswer(dir, req.ID); !ok || got.Option != 2 {
-		t.Fatalf("ReadAnswer = %+v, %v", got, ok)
+	if phase, _, got, _, err := Lookup(dir, req.ID); phase != PhaseAnswered || got == nil || got.Option != 2 || err != nil {
+		t.Fatalf("Lookup = %s, %+v, %v; want answered with option 2", phase, got, err)
 	}
 	if won, err := Resolve(dir, Resolved{ID: req.ID, Outcome: OutcomeDenied, By: ByBuzz}); !won || err != nil {
 		t.Fatalf("Resolve = %v, %v", won, err)
@@ -56,10 +57,32 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if won, _ := Resolve(dir, Resolved{ID: req.ID, Outcome: OutcomeTerminal, By: ByTerminal}); won {
 		t.Fatal("a second resolution won")
 	}
-	if r, ok, _ := ReadResolved(dir, req.ID); !ok || r.Outcome != OutcomeDenied {
-		t.Fatalf("ReadResolved = %+v, %v", r, ok)
+	if phase, _, _, r, err := Lookup(dir, req.ID); phase != PhaseResolved || r == nil || r.Outcome != OutcomeDenied || err != nil {
+		t.Fatalf("Lookup = %s, %+v, %v; want resolved denied", phase, r, err)
 	}
 	if open, _ := Requests(dir); len(open) != 0 {
 		t.Fatalf("a resolved request is still open: %+v", open)
+	}
+}
+
+// Review of the dialog phase lookup: a terminal resolution must win over a
+// leftover answer that cannot be read; before, Lookup returned the parse
+// error and a waiting hook kept waiting.
+func TestLookupResolutionWinsOverAnUnreadableAnswer(t *testing.T) {
+	dir, id := t.TempDir(), NewID()
+	if err := Open(dir, Request{ID: id, OpenedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(dir, Resolved{ID: id, Outcome: OutcomeTerminal, By: ByTerminal}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "answers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "answers", id+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if phase, _, _, r, err := Lookup(dir, id); phase != PhaseResolved || r == nil || err != nil {
+		t.Fatalf("Lookup = %q, %+v, %v; want the terminal resolution", phase, r, err)
 	}
 }

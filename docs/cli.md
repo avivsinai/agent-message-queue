@@ -415,7 +415,8 @@ Usage:
 Join current on-disk evidence for one message without mutating the queue.
 
 It reports message copies, route fields, visible delivery artifacts, DLQ entries,
-delivery receipts, thread references, and durable agent-owned notification write attempts.
+delivery receipts, owed receipts (consumed, receipt not written yet; stage "owed"),
+thread references, and durable agent-owned notification write attempts.
 Notification evidence never proves that a TUI or person saw, displayed, or submitted it.
 
 Options:
@@ -2124,6 +2125,11 @@ $ amq receipts list --help
 Usage:
   amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [options]
 
+List the receipts this consumer wrote, plus the receipts it owes: a message it
+already consumed whose receipt write failed and was parked. Owed rows carry
+"owed": true in JSON and are marked owed in text; the next drain, read, or
+monitor writes them.
+
 Options:
   -json
         Emit JSON output
@@ -2145,6 +2151,10 @@ Options:
 $ amq receipts wait --help
 Usage:
   amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [options]
+
+Wait for this consumer's receipt for one message. A timeout exits 4. When the
+message was already consumed and its receipt is owed (parked, not written yet),
+the timeout says so, and JSON adds "owed": true.
 
 Options:
   -json

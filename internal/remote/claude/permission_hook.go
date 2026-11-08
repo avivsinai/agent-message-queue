@@ -187,11 +187,17 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		return won && err == nil
 	}
 	for {
-		if _, closed, _ := dialog.ReadResolved(dir, req.ID); closed {
+		phase, _, a, _, _ := dialog.Lookup(dir, req.ID)
+		if phase == dialog.PhaseResolved {
 			return 0
 		}
-		if a, ok, _ := dialog.ReadAnswer(dir, req.ID); ok {
-			if opt, ok := chosen(options, a.Option); ok {
+		if phase == dialog.PhaseAnswered {
+			opt, ok := chosen(options, a.Option)
+			if !ok {
+				// The answer fits no option: reject it, so the owner can
+				// answer again, and keep waiting.
+				_ = dialog.RejectAnswer(dir, req.ID)
+			} else {
 				outcome := dialog.OutcomeAllowed
 				if opt.Deny {
 					outcome = dialog.OutcomeDenied

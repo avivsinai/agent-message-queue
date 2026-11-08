@@ -64,7 +64,8 @@ func TestHTMLEscapesHostileTextAndRoundTripsTheModel(t *testing.T) {
 			Other:  []Usage{{Window: hostile, CostUSD: &cost, CostKind: hostile}}}},
 	}
 	m.Suggestions = []Suggestion{{
-		ID: hostile, Unit: EvidenceUnit{MessageKey: hostile, Field: hostile, Quote: hostile + "\n\tSource continuation"},
+		Status: SuggestionNeedsReview,
+		ID:     hostile, Unit: EvidenceUnit{MessageKey: hostile, Field: hostile, Quote: hostile + "\n\tSource continuation"},
 		Choices: []SuggestionChoice{{Kind: "new", Outcome: &EvidenceUnit{Quote: hostile}}},
 	}}
 	m.SuggestionDiagnostic = SuggestionAttempt{Status: "unavailable", Detail: hostile}
@@ -219,5 +220,35 @@ func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 	want := `<span class="gap"><span class="gap-name">beads</span>: 238 mentioned bead ids over the lookup cap</span></span> <span class="gaps-count">1 source.</span> <a href="#view-sources">See Sources</a></p>`
 	if !strings.Contains(page.String(), want) {
 		t.Error("the coverage line does not name the beads gap with its Sources link")
+	}
+}
+
+// Each suggestion status renders its own label and is published as JSON.
+func TestHTMLSuggestionStatusLabels(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	m := Build(Input{Config: DefaultConfig(), Now: now})
+	rows := []struct {
+		status SuggestionStatus
+		label  string
+	}{
+		{SuggestionNeedsReview, "Needs your review"},
+		{SuggestionInvalid, "No actionable commands"},
+		{SuggestionStale, "Outdated; run suggestions again before adoption"},
+		{SuggestionIgnored, "Ignored; source evidence retained"},
+		{SuggestionAdopted, "Adopted"},
+	}
+	for _, r := range rows {
+		m.Suggestions = []Suggestion{{ID: "s", Status: r.status}}
+		var page strings.Builder
+		if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(page.String(), r.label) {
+			t.Errorf("status %s: page lacks label %q", r.status, r.label)
+		}
+		raw, err := json.Marshal(m.Suggestions[0])
+		if err != nil || !strings.Contains(string(raw), `"status":"`+string(r.status)+`"`) {
+			t.Errorf("status %s: JSON lacks status: %s", r.status, raw)
+		}
 	}
 }

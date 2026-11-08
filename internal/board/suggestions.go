@@ -50,7 +50,20 @@ type SuggestionCandidate struct {
 	Aliases     []string `json:"aliases"`
 }
 
+// SuggestionStatus is the one named state of a suggestion view.
+type SuggestionStatus string
+
+const (
+	SuggestionNeedsReview SuggestionStatus = "needs_review"
+	SuggestionInvalid     SuggestionStatus = "invalid"
+	SuggestionStale       SuggestionStatus = "stale"
+	SuggestionIgnored     SuggestionStatus = "ignored"
+	SuggestionAdopted     SuggestionStatus = "adopted"
+)
+
 type Suggestion struct {
+	// Status is set on views only; a stored proposal leaves it empty.
+	Status     SuggestionStatus      `json:"status,omitempty"`
 	Stale      bool                  `json:"stale"`
 	Candidates []SuggestionCandidate `json:"candidates"`
 	ID         string                `json:"id"`
@@ -581,7 +594,19 @@ func (s Snapshot) SuggestionViews() []Suggestion {
 		p.Ignored = s.SuggestionIgnored[p.Unit.ID]
 		p.Adopted = s.SuggestionAdopted[p.ID] != ""
 		p.Commands = []Action{}
-		if p.Ignored || p.Adopted || fp != s.Suggestions.Fingerprint || validateProposal(s, *p) != nil {
+		switch {
+		case p.Adopted:
+			p.Status = SuggestionAdopted
+		case p.Ignored:
+			p.Status = SuggestionIgnored
+		case p.Stale:
+			p.Status = SuggestionStale
+		case validateProposal(s, *p) != nil:
+			p.Status = SuggestionInvalid
+		default:
+			p.Status = SuggestionNeedsReview
+		}
+		if p.Status != SuggestionNeedsReview {
 			continue
 		}
 		mutates := false
