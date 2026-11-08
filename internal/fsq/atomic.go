@@ -15,7 +15,7 @@ import (
 // anchor: it is created 0700 when missing, and links in its own path are the
 // caller's choice. Every directory below root is checked without following a
 // symlink and created 0700 when missing, so a planted link cannot redirect the
-// write. rel must be local.
+// write; a directory it creates is synced into its parent. rel must be local.
 func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, error) {
 	if !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("state file %q is not a local path below %s", rel, root)
@@ -43,17 +43,24 @@ func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, er
 }
 
 // mkdirAllNoFollow creates each missing component of the root-relative dir at
-// 0700 and refuses any component that is a symlink or not a directory.
+// 0700 and refuses any component that is a symlink or not a directory. A
+// component it creates is durable before the next one is made: its parent,
+// which owns its entry, is synced.
 func (r *DeliveryRoot) mkdirAllNoFollow(dir string) error {
 	if dir == "." {
 		return nil
 	}
-	current := ""
+	parent, current := ".", ""
 	for _, part := range strings.Split(dir, string(filepath.Separator)) {
 		current = filepath.Join(current, part)
 		info, err := r.root.Lstat(current)
 		if errors.Is(err, fs.ErrNotExist) {
-			if err := r.root.Mkdir(current, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			err = r.root.Mkdir(current, 0o700)
+			if err == nil {
+				if err := r.syncDir(parent); err != nil {
+					return fmt.Errorf("sync %s after creating %s: %w", r.displayPath(parent), r.displayPath(current), err)
+				}
+			} else if !errors.Is(err, fs.ErrExist) {
 				return err
 			}
 			info, err = r.root.Lstat(current)
@@ -67,6 +74,7 @@ func (r *DeliveryRoot) mkdirAllNoFollow(dir string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("state path %s exists and is not a directory", r.displayPath(current))
 		}
+		parent = current
 	}
 	return nil
 }
