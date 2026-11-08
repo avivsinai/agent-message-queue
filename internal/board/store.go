@@ -159,12 +159,11 @@ type Message struct {
 // Acquisition is fetched without a store lock. Commit reloads the current
 // generation so an owner correction made during acquisition is retained.
 type Acquisition struct {
-	ProjectID  string
-	Input      Input
-	Usage      *UsageView
-	Messages   []Message
-	Evidence   [][]byte
-	BeadsStore string
+	ProjectID string
+	Input     Input
+	Usage     *UsageView
+	Messages  []Message
+	Evidence  [][]byte
 }
 
 func NewStore(base, identity, hostID string) (Store, error) {
@@ -876,11 +875,9 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 	}
 	stopped := false
 	err := s.update(ctx, func(state *Snapshot) error {
-		if a.BeadsStore == "" {
-			for _, nr := range a.Input.Results {
-				if nr.Name == "beads" && len(nr.Result.Items) > 0 {
-					return errors.New("beads facts require a bound source store")
-				}
+		for _, nr := range a.Input.Results {
+			if nr.Name == "beads" && nr.Result.Namespace == "" && len(nr.Result.Items) > 0 {
+				return errors.New("beads facts require a bound source store")
 			}
 		}
 		if err := stageErr; err != nil {
@@ -1024,13 +1021,13 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}
 			scopes := nr.Result.NativeScopes
 			if nr.Name == "beads" {
-				scopes = map[string]NativeScope{a.BeadsStore: {Complete: beadsComplete(nr.Result)}}
+				scopes = map[string]NativeScope{nr.Result.Namespace: {Complete: beadsComplete(nr.Result)}}
 			}
 			present := map[string]bool{}
 			for _, it := range nr.Result.Items {
 				it.Source = nr.Name
 				if nr.Name == "beads" {
-					it.Namespace = a.BeadsStore
+					it.Namespace = nr.Result.Namespace
 				}
 				alias, ok := nativeAlias(nr.Name, it)
 				_, scoped := scopes[it.Namespace]
@@ -1090,12 +1087,32 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				}
 			}
 		}
+		results := append([]NamedResult(nil), state.Input.Results...)
+		for i := range results {
+			results[i].Result.Items = storedItems(results[i].Result.Items)
+		}
+		state.Input.Results = results
 		return nil
 	})
 	if err == nil && stopped {
 		return errEvidenceBound
 	}
 	return err
+}
+
+// storedItems is the part of a result's items that a published state keeps:
+// Project reads only forge items back, and source facts hold the native
+// ones. They are ordered by ref, so a refresh that reorders a source's items
+// publishes no change.
+func storedItems(items []Item) []Item {
+	var forge []Item
+	for _, it := range items {
+		if it.Ref.Kind == RefForge {
+			forge = append(forge, it)
+		}
+	}
+	sort.SliceStable(forge, func(i, j int) bool { return forge[i].Ref.String() < forge[j].Ref.String() })
+	return forge
 }
 
 // OwnerAction applies one exact local operator correction. Source reports

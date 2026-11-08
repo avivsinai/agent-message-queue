@@ -89,60 +89,84 @@ func TestCompactionCrashBeforeNewBaseKeepsPublishedGeneration(t *testing.T) {
 }
 
 // Review of the board's idle disk cost: every refresh restamped each source
-// fact's observed_at, so an idle refresh journaled every fact again.
-func TestIdleCommitLeavesSourceFactsUnchanged(t *testing.T) {
-	ctx := context.Background()
-	base := t.TempDir()
-	identity, err := fsq.StableTreeIdentity(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewStore(base, identity, "host-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Init(ctx); err != nil {
-		t.Fatal(err)
-	}
-	initial, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
+// fact's observed_at and wrote back every source item list whose length
+// changed, so an idle refresh journaled the facts and lists again.
+func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
 	home := t.TempDir()
 	goal := Item{Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Namespace: home, Title: "Deliver Codex goal", State: StateActive, Structural: true}
-	refresh := func(at time.Time) Acquisition {
-		return Acquisition{ProjectID: initial.ProjectID, Input: Input{Results: []NamedResult{{Name: "codex-goals", Result: Result{Status: StatusOK, ObservedAt: at, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: true}}}}}}}
+	obligation := func(id string) Item {
+		return Item{Ref: Ref{Kind: "amq-obligation", ID: id}, Title: "Answer " + id, State: StateRequested, Structural: true}
+	}
+	refresh := func(at time.Time, complete bool, obligations ...Item) Input {
+		return Input{Results: []NamedResult{
+			{Name: "codex-goals", Result: Result{Status: StatusOK, ObservedAt: at, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: complete}}}},
+			{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: at, Items: obligations}},
+		}}
 	}
 	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err = store.Commit(ctx, refresh(first)); err != nil {
-		t.Fatal(err)
-	}
-	before, err := store.readDocument()
-	if err != nil {
-		t.Fatal(err)
-	}
 	later := first.Add(time.Minute)
-	if err = store.Commit(ctx, refresh(later)); err != nil {
-		t.Fatal(err)
-	}
-	after, err := store.readDocument()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ops, err := diffRaw(before.data, after.data, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, op := range ops {
-		if op.Path[0] == "source_facts" {
-			t.Fatalf("idle refresh rewrote %v", op.Path)
-		}
-	}
-	state, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := state.Catalogue()[0].Facts[0].ObservedAt; !got.Equal(later) {
-		t.Fatalf("fact still reported reads as checked at %v, want %v", got, later)
+	for _, row := range []struct {
+		name          string
+		before, after Input
+		// factStamped allows the one change an incomplete scope makes.
+		factStamped bool
+	}{
+		{name: "unchanged fact in a complete scope", before: refresh(first, true), after: refresh(later, true)},
+		{name: "unchanged fact in an incomplete scope", before: refresh(first, false), after: refresh(later, false), factStamped: true},
+		{name: "one item removed", before: refresh(first, true, obligation("a"), obligation("b")), after: refresh(later, true, obligation("b"))},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ctx := context.Background()
+			base := t.TempDir()
+			identity, err := fsq.StableTreeIdentity(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewStore(base, identity, "host-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			initial, err := store.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.before}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.readDocument()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.after}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.readDocument()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops, err := diffRaw(before.data, after.data, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, op := range ops {
+				p := op.Path
+				clock := p[0] == "generation" || p[0] == "published_at" ||
+					len(p) == 5 && p[0] == "input" && p[1] == "Results" && p[3] == "Result" && p[4] == "ObservedAt" ||
+					row.factStamped && p[0] == "source_facts" && p[len(p)-1] == "observed_at"
+				if !clock {
+					t.Fatalf("idle refresh rewrote %v", p)
+				}
+			}
+			state, err := store.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := state.Catalogue()[0].Facts[0].ObservedAt; !got.Equal(later) {
+				t.Fatalf("fact still reported reads as checked at %v, want %v", got, later)
+			}
+		})
 	}
 }
