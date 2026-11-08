@@ -1,119 +1,50 @@
 package cli
 
-import "fmt"
+import "github.com/avivsinai/agent-message-queue/internal/exitcode"
 
-// Exit codes for CLI commands.
-// These provide semantic meaning for scripting and automation.
+// The exit codes and their error types live in internal/exitcode. These
+// aliases keep one identity, so errors.As and type assertions match either
+// name.
 const (
-	// ExitSuccess indicates the command completed successfully.
-	ExitSuccess = 0
-
-	// ExitError indicates a general error occurred.
-	ExitError = 1
-
-	// ExitUsage indicates invalid arguments or flags were provided.
-	ExitUsage = 2
-
-	// ExitNotFound indicates a requested resource was not found
-	// (message, config, agent, etc.).
-	ExitNotFound = 3
-
-	// ExitTimeout indicates a timeout occurred (watch, monitor commands).
-	ExitTimeout = 4
-
-	// ExitContextMismatch indicates a valid command was blocked because its
-	// resolved mailbox root conflicts with the pinned AMQ session context.
-	ExitContextMismatch = 5
-
-	// ExitActionRequired indicates the command cannot proceed without an
-	// operator action (stale conversation token, Inspect unknown, untrusted
-	// config digest, refused committed-command shape, blocked auto-rebind).
-	ExitActionRequired = 6
+	ExitSuccess         = exitcode.ExitSuccess
+	ExitError           = exitcode.ExitError
+	ExitUsage           = exitcode.ExitUsage
+	ExitNotFound        = exitcode.ExitNotFound
+	ExitTimeout         = exitcode.ExitTimeout
+	ExitContextMismatch = exitcode.ExitContextMismatch
+	ExitActionRequired  = exitcode.ExitActionRequired
 )
 
-// SessionContextError identifies an unsafe or incoherent mailbox context.
-// It is distinct from a usage error: the command syntax was valid.
-type SessionContextError struct {
-	Message string
-}
+type (
+	SessionContextError = exitcode.SessionContextError
+	ExitCodeError       = exitcode.ExitCodeError
+)
 
-func (e *SessionContextError) Error() string { return e.Message }
+// GetExitCode returns the process exit code for err.
+func GetExitCode(err error) int { return exitcode.GetExitCode(err) }
 
-// ExitCodeError wraps an error with a specific exit code.
-type ExitCodeError struct {
-	Code int
-	Err  error
-}
-
-func (e *ExitCodeError) Error() string {
-	if e.Err != nil {
-		return e.Err.Error()
-	}
-	return fmt.Sprintf("exit code %d", e.Code)
-}
-
-func (e *ExitCodeError) Unwrap() error {
-	return e.Err
-}
-
-// GetExitCode extracts the exit code from an error.
-// Returns ExitSuccess (0) if err is nil.
-// Returns the wrapped code if err is an *ExitCodeError.
-// Returns ExitError (1) for all other errors.
-func GetExitCode(err error) int {
-	if err == nil {
-		return ExitSuccess
-	}
-	if exitErr, ok := err.(*ExitCodeError); ok {
-		return exitErr.Code
-	}
-	return ExitError
-}
-
-// WithExitCode wraps an error with a specific exit code.
-func WithExitCode(code int, err error) error {
-	if err == nil {
-		return nil
-	}
-	return &ExitCodeError{Code: code, Err: err}
-}
+// WithExitCode wraps err with code.
+func WithExitCode(code int, err error) error { return exitcode.WithExitCode(code, err) }
 
 // UsageError creates an error with ExitUsage code.
-func UsageError(format string, args ...any) error {
-	return &ExitCodeError{
-		Code: ExitUsage,
-		Err:  fmt.Errorf(format, args...),
-	}
-}
+func UsageError(format string, args ...any) error { return exitcode.UsageError(format, args...) }
 
 // NotFoundError creates an error with ExitNotFound code.
 func NotFoundError(format string, args ...any) error {
-	return &ExitCodeError{
-		Code: ExitNotFound,
-		Err:  fmt.Errorf(format, args...),
-	}
+	return exitcode.NotFoundError(format, args...)
 }
 
 // TimeoutError creates an error with ExitTimeout code.
 func TimeoutError(format string, args ...any) error {
-	return &ExitCodeError{
-		Code: ExitTimeout,
-		Err:  fmt.Errorf(format, args...),
-	}
+	return exitcode.TimeoutError(format, args...)
 }
 
 // ContextMismatchError creates an error with ExitContextMismatch code.
 func ContextMismatchError(format string, args ...any) error {
-	return &ExitCodeError{
-		Code: ExitContextMismatch,
-		Err:  &SessionContextError{Message: fmt.Sprintf(format, args...)},
-	}
+	return exitcode.ContextMismatchError(format, args...)
 }
 
 // ActionRequiredError creates an error with ExitActionRequired code.
 func ActionRequiredError(format string, args ...any) error {
-	return &ExitCodeError{
-		Code: ExitActionRequired,
-		Err:  fmt.Errorf(format, args...),
-	}
+	return exitcode.ActionRequiredError(format, args...)
 }
