@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -61,5 +62,27 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	}
 	if open, _ := Requests(dir); len(open) != 0 {
 		t.Fatalf("a resolved request is still open: %+v", open)
+	}
+}
+
+// Review of the dialog phase lookup: a terminal resolution must win over a
+// leftover answer that cannot be read; before, Lookup returned the parse
+// error and a waiting hook kept waiting.
+func TestLookupResolutionWinsOverAnUnreadableAnswer(t *testing.T) {
+	dir, id := t.TempDir(), NewID()
+	if err := Open(dir, Request{ID: id, OpenedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(dir, Resolved{ID: id, Outcome: OutcomeTerminal, By: ByTerminal}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "answers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "answers", id+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if phase, _, _, r, err := Lookup(dir, id); phase != PhaseResolved || r == nil || err != nil {
+		t.Fatalf("Lookup = %q, %+v, %v; want the terminal resolution", phase, r, err)
 	}
 }

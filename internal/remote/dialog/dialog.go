@@ -247,7 +247,9 @@ const (
 // resolved when resolved/<id>.json exists, whatever else does; else answered
 // when answers/<id>.json exists; else open when requests/<id>.json exists.
 // The request is returned when its file still exists. An error wrapping
-// os.ErrNotExist means none of the three files exists.
+// os.ErrNotExist means none of the three files exists. A resolution is
+// authoritative: a leftover answer or request that cannot be read never
+// hides it, so those are only best-effort details of a resolved dialog.
 func Lookup(dir, id string) (Phase, Request, *Answer, *Resolved, error) {
 	var (
 		req Request
@@ -257,6 +259,16 @@ func Lookup(dir, id string) (Phase, Request, *Answer, *Resolved, error) {
 	resolved, err := readID(dir, "resolved", id, &res)
 	if err != nil {
 		return "", Request{}, nil, nil, err
+	}
+	if resolved {
+		var a *Answer
+		if ok, err := readID(dir, "answers", id, &ans); err == nil && ok {
+			a = &ans
+		}
+		if ok, err := readID(dir, "requests", id, &req); err != nil || !ok {
+			req = Request{}
+		}
+		return PhaseResolved, req, a, &res, nil
 	}
 	answered, err := readID(dir, "answers", id, &ans)
 	if err != nil {
@@ -271,8 +283,6 @@ func Lookup(dir, id string) (Phase, Request, *Answer, *Resolved, error) {
 		a = &ans
 	}
 	switch {
-	case resolved:
-		return PhaseResolved, req, a, &res, nil
 	case answered:
 		return PhaseAnswered, req, a, nil, nil
 	case requested:
