@@ -426,6 +426,9 @@ root and session, the delivery (new, cur, dlq) and the receipt (drained, dlq, ow
 The session is the one whose root holds the receipt. A root that cannot be read is
 reported, and a recipient it might hold is unknown. --from <sender> reads
 agents/<sender>/outbox/sent/<id>.md directly and skips the scan of the root.
+For a request (review_request, question, todo) --follow also finds the replies whose
+refs name it, in the recipient's outbox or the requester's inbox, and reports whether
+each reply was delivered to the requester and drained.
 
 Options:
   -follow
@@ -1211,15 +1214,21 @@ Examples:
 ```text
 $ amq thread open --help
 Usage:
-  amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]
+  amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [--follow] [options]
 
 List open review requests, questions, and todos per thread.
 An obligation closes when its owner replies with the expected kind or a closing label.
 Read-only: it never moves a message, writes a receipt, or reads a body.
 
+--follow adds, for each listed request and each request sent to a root outside
+the scan (outbound_routed_openers), where it was delivered and drained and whether
+a reply came back and was drained, with the result of 'amq trace <id> --follow'.
+
 Options:
   -all-sessions
         Scan every canonical session under the base root
+  -follow
+        Follow each listed request and each request routed outside the scan, as trace --follow does
   -include-base
         Include base-root mailboxes with --all-sessions
   -json

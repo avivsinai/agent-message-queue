@@ -138,6 +138,9 @@ func runTrace(args []string) error {
 		"The session is the one whose root holds the receipt. A root that cannot be read is",
 		"reported, and a recipient it might hold is unknown. --from <sender> reads",
 		"agents/<sender>/outbox/sent/<id>.md directly and skips the scan of the root.",
+		"For a request (review_request, question, todo) --follow also finds the replies whose",
+		"refs name it, in the recipient's outbox or the requester's inbox, and reports whether",
+		"each reply was delivered to the requester and drained.",
 	)
 
 	messageID := ""
@@ -272,7 +275,7 @@ func followTraceTargets(root, messageID string, targets []traceLocatedHeader) *t
 		}
 		h := target.header
 		follow := newFollower().follow(followedMessage{
-			ID: h.ID, From: h.From, To: h.To, ReplyTo: h.ReplyTo, ReplyProject: h.ReplyProject, Root: root,
+			ID: h.ID, From: h.From, Kind: h.Kind, To: h.To, ReplyTo: h.ReplyTo, ReplyProject: h.ReplyProject, Root: root,
 		})
 		return &follow
 	}

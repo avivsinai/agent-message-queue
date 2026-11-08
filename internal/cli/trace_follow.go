@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/route"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // Follow scopes: the header decides which roots a message can have reached.
@@ -30,6 +34,7 @@ const (
 type followedMessage struct {
 	ID           string
 	From         string
+	Kind         string
 	To           []string
 	ReplyTo      string
 	ReplyProject string
@@ -68,13 +73,49 @@ type followRecipient struct {
 	Session  string `json:"session"`
 	Delivery string `json:"delivery"`
 	Receipt  string `json:"receipt"`
+	// Reply is set when the message is a request (review_request, question
+	// or todo).
+	Reply *followReply `json:"reply,omitempty"`
+}
+
+// followReply says whether a reply to a request came back. Status is
+// replied when a message whose refs name the request is in the recipient's
+// outbox or, failing that, in the requester's inbox at the destination;
+// none when neither holds one; unknown when the route back or a mailbox
+// cannot be read, with Error no_return_peer, unreachable,
+// malformed_reply_metadata or unreadable. The destination is where amq reply
+// from the recipient's root delivers.
+type followReply struct {
+	Status      string               `json:"status"`
+	Error       string               `json:"error,omitempty"`
+	Detail      string               `json:"detail,omitempty"`
+	Destination *followDestination   `json:"destination,omitempty"`
+	Replies     []followReplyMessage `json:"replies"`
+}
+
+type followDestination struct {
+	Root    string `json:"root"`
+	Session string `json:"session"`
+	Handle  string `json:"handle"`
+}
+
+// followReplyMessage is one reply and its copy in the requester's mailbox,
+// in the terms of followRecipient.
+type followReplyMessage struct {
+	ID       string `json:"id"`
+	From     string `json:"from"`
+	Kind     string `json:"kind"`
+	Delivery string `json:"delivery"`
+	Receipt  string `json:"receipt"`
 }
 
 // follower follows messages across roots. It caches the candidate roots of
-// each sender root, so one process follows many messages with one walk.
+// each sender root and the headers of each mailbox it reads, so one process
+// follows many messages with one walk and one read per mailbox.
 type follower struct {
 	walker     route.Walker
 	candidates map[string]followCandidates
+	headers    map[string][]format.Header
 }
 
 type followCandidates struct {
@@ -84,7 +125,7 @@ type followCandidates struct {
 }
 
 func newFollower() *follower {
-	return &follower{walker: routeWalker(), candidates: map[string]followCandidates{}}
+	return &follower{walker: routeWalker(), candidates: map[string]followCandidates{}, headers: map[string][]format.Header{}}
 }
 
 // follow locates msg's copy and receipt for each recipient in the roots its
@@ -109,6 +150,11 @@ func (f *follower) follow(msg followedMessage) traceFollow {
 		hits, unreadable := f.locateAll(out.Searched, handle, msg.ID)
 		switch {
 		case len(hits) > 0:
+			if slices.Contains(thread.OpenerKinds, msg.Kind) {
+				for i := range hits {
+					hits[i].Reply = f.followReply(msg, hits[i])
+				}
+			}
 			located++
 			ambiguous = ambiguous || len(hits) > 1
 			out.Recipients = append(out.Recipients, hits...)
@@ -197,6 +243,101 @@ func locateCopy(root, handle, id string) (delivery, stage string, err error) {
 		delivery = "dlq"
 	}
 	return delivery, stage, nil
+}
+
+func (f *follower) followReply(msg followedMessage, hit followRecipient) *followReply {
+	out := &followReply{Status: "unknown", Replies: []followReplyMessage{}}
+	dest, code, err := f.replyDestination(msg, hit)
+	if err != nil {
+		out.Error, out.Detail = code, err.Error()
+		return out
+	}
+	out.Destination = dest
+	found, err := f.repliesIn(msg.ID, filepath.Join(hit.Root, "agents", hit.Handle, "outbox", "sent"))
+	if err == nil && len(found) == 0 {
+		inbox := filepath.Join(dest.Root, "agents", dest.Handle, "inbox")
+		found, err = f.repliesIn(msg.ID, filepath.Join(inbox, "new"), filepath.Join(inbox, "cur"))
+	}
+	if err != nil {
+		out.Error, out.Detail = followRootUnreadable, err.Error()
+		return out
+	}
+	out.Status = "none"
+	if len(found) > 0 {
+		out.Status = "replied"
+	}
+	for _, h := range found {
+		delivery, stage, err := locateCopy(dest.Root, dest.Handle, h.ID)
+		switch {
+		case err != nil:
+			delivery, stage, out.Detail = "unknown", "none", err.Error()
+		case delivery == "" && stage == "none":
+			delivery = "not_found"
+		}
+		out.Replies = append(out.Replies, followReplyMessage{ID: h.ID, From: h.From, Kind: h.Kind, Delivery: delivery, Receipt: stage})
+	}
+	return out
+}
+
+// replyDestination applies amq reply's route from the recipient's root: a
+// request with neither reply_to nor reply_project is answered in that root.
+func (f *follower) replyDestination(msg followedMessage, hit followRecipient) (*followDestination, string, error) {
+	if msg.ReplyProject == "" && msg.ReplyTo == "" {
+		return &followDestination{Root: hit.Root, Session: hit.Session, Handle: msg.From}, "", nil
+	}
+	_, session, err := route.ParseReplyTo(msg.ReplyTo, msg.ReplyProject != "")
+	if err != nil {
+		return nil, "malformed_reply_metadata", err
+	}
+	root, handle, err := f.walker.ResolveReplyRoute(hit.Root, msg.ReplyProject, msg.ReplyTo)
+	switch {
+	case errors.Is(err, route.ErrPeerRootUnreachable):
+		return nil, "unreachable", err
+	case err != nil:
+		return nil, "no_return_peer", err
+	}
+	return &followDestination{Root: root, Session: session, Handle: handle}, "", nil
+}
+
+// repliesIn returns the headers in dirs whose refs name id.
+func (f *follower) repliesIn(id string, dirs ...string) ([]format.Header, error) {
+	var found []format.Header
+	for _, dir := range dirs {
+		headers, err := f.mailboxHeaders(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range headers {
+			if h.ID != id && slices.Contains(h.Refs, id) {
+				found = append(found, h)
+			}
+		}
+	}
+	return found, nil
+}
+
+// mailboxHeaders reads the parsable headers in one mailbox directory once.
+// A missing directory holds none; a file that does not parse is no reply.
+func (f *follower) mailboxHeaders(dir string) ([]format.Header, error) {
+	if headers, ok := f.headers[dir]; ok {
+		return headers, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	var headers []format.Header
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		if h, err := format.ReadHeaderFile(filepath.Join(dir, name)); err == nil {
+			headers = append(headers, h)
+		}
+	}
+	f.headers[dir] = headers
+	return headers, nil
 }
 
 func statExists(path string) (bool, error) {
@@ -288,6 +429,24 @@ func writeFollowText(follow traceFollow) error {
 		}
 		if err := writeStdout("    - %s in %s: delivery %s, receipt %s\n", r.Handle, where, r.Delivery, r.Receipt); err != nil {
 			return err
+		}
+		if r.Reply == nil {
+			continue
+		}
+		line := "      reply " + r.Reply.Status
+		if r.Reply.Error != "" {
+			line += " (" + r.Reply.Error + ": " + r.Reply.Detail + ")"
+		}
+		if d := r.Reply.Destination; d != nil {
+			line += fmt.Sprintf(" to %s in %s", d.Handle, followWhere("", d.Session, d.Root))
+		}
+		if err := writeStdoutLine(line); err != nil {
+			return err
+		}
+		for _, reply := range r.Reply.Replies {
+			if err := writeStdout("      - %s %s from %s: delivery %s, receipt %s\n", reply.Kind, reply.ID, reply.From, reply.Delivery, reply.Receipt); err != nil {
+				return err
+			}
 		}
 	}
 	for _, root := range follow.Searched {
