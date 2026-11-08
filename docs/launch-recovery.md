@@ -101,3 +101,27 @@ succeed again. A failed provider exec retains that identity for recovery.
 Ready conversation evidence remains bound to its physical session root. Routing
 publication requires the recorded socket and daemon process; a daemon restart or
 endpoint change requires explicit recovery rather than silent re-adoption.
+
+A failure proven to occur before `thread/start` returns the ticket to `pending`;
+thread creation and later protocol failures preserve uncertain progress. Native
+thread startup uses the same 60-second contention budget as session naming.
+An incomplete acquired ticket refuses a replacement generation: retry the
+original emitted command to reuse its thread.
+
+For an uncertain request with no persisted acquisition evidence, inspect the
+Codex daemon for an orphan thread, then inspect the exact cleanup target:
+
+```bash
+amq cleanup --launch-execution <handle> --root <session-root> --dry-run
+amq cleanup --launch-execution <handle> --root <session-root> --yes
+```
+
+Cleanup abandons only an unchanged `identity_requested` ticket, under its exact
+session lease and handle lock. It leaves any Codex thread, evidence, conversation,
+and launch journal untouched. Persisted acquisition evidence refuses cleanup and
+requires retrying the original execution instead. An uncertain acquisition is an
+action-required outcome (exit 6), with this recovery command in the diagnostic.
+
+Prepare authorizes the selected native or embedded identity contract. A daemon
+or sign-in change that changes that selection before Apply requires a new
+Prepare; Apply does not execute a different plan under the earlier authorization.

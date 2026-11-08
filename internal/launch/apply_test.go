@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -521,5 +522,63 @@ func TestApplyV1RunnableParticipantsRequireReprepare(t *testing.T) {
 	}
 	if afterRoster := prepareTreeSnapshot(t, filepath.Join(fixture.sessionRoot, "agents")); afterRoster != beforeRoster {
 		t.Fatalf("v1 reprepare refusal changed durable roster: before=%s after=%s", beforeRoster, afterRoster)
+	}
+}
+
+type changingCodexPlanAdapter struct {
+	*CodexAdapter
+	native *bool
+}
+
+func (a changingCodexPlanAdapter) Capabilities(context.Context) AdapterCapabilities {
+	return AdapterCapabilities{Provider: CodexProvider, Mode: AdapterModeCapture, Available: true,
+		ProviderVersion: CodexDaemonVersion, Fresh: true, Resume: true, Capture: true, PreSpawnAcquire: true}
+}
+
+func (a changingCodexPlanAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
+	if *a.native {
+		return a.PlanFreshDaemon(request)
+	}
+	return a.CodexAdapter.PlanFresh(request)
+}
+
+// Claude F4: a daemon transition correctly invalidates authorization, but
+// Apply reported only a digest mismatch without an explanation or next action.
+func TestApplyExplainsChangedCodexDaemonPlan(t *testing.T) {
+	for _, phase := range []string{"before_apply", "before_reconcile"} {
+		t.Run(phase, func(t *testing.T) {
+			request, dependencies, backend := committedRunnableApplyFixture(t)
+			_, executable := testExecutable(t, CodexProvider)
+			participant := &request.Prepare.Participants[0]
+			participant.Handle, participant.Provider, participant.Executable = "codex", CodexProvider, executable
+			native := true
+			dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+				return changingCodexPlanAdapter{CodexAdapter: NewCodexAdapter(executable), native: &native}
+			}
+			prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.SubjectDigest, request.Decisions = prepared.SubjectDigest, nil
+			for _, action := range prepared.RequiredActions {
+				request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+			}
+			if phase == "before_apply" {
+				native = false
+			} else {
+				beforeApplyReconcileForTest = func() { native = false }
+				t.Cleanup(func() { beforeApplyReconcileForTest = nil })
+			}
+			result, err := Apply(context.Background(), request, dependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != "action_required" || !strings.Contains(result.FailureDetail, "Codex daemon") || !strings.Contains(result.FailureDetail, "prepare the launch again") || backend.creates != 0 {
+				t.Fatalf("changed daemon Apply = %#v; creates=%d", result, backend.creates)
+			}
+			if phase == "before_reconcile" && !strings.Contains(result.FailureDetail, "daemon -> embedded") {
+				t.Fatalf("missing transition: %s", result.FailureDetail)
+			}
+		})
 	}
 }

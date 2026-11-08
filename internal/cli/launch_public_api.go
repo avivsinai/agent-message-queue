@@ -66,7 +66,7 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	if applyExplicit {
 		data, err := readLaunchAPIDocument(applySource)
 		if err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		request, err := launchapi.DecodeApplyRequestV1(data)
 		if err != nil {
@@ -74,10 +74,10 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 		}
 		result, err := launchapi.Apply(ctx, request)
 		if err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		if err := outputPublicLaunchResult(result); err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		return publicApplyExit(result)
 	}
@@ -85,7 +85,7 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	if requestExplicit {
 		data, err := readLaunchAPIDocument(requestSource)
 		if err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		prepareRequest, err := launchapi.DecodePrepareRequestV1(data)
 		if err != nil {
@@ -96,11 +96,11 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 
 	target, err := resolvePublicLaunchTarget(common, session)
 	if err != nil {
-		return err
+		return launchCLIError(err)
 	}
 	data, err := readLaunchAPIDocument(planSource)
 	if err != nil {
-		return err
+		return launchCLIError(err)
 	}
 	intent, err := launchapi.DecodeLaunchIntentV1(data)
 	if err != nil {
@@ -115,7 +115,7 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	if flagWasVisited(fs, "placement") {
 		placement, err := decodePublicPlacement(placementJSON)
 		if err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		request.Placement = placement
 	}
@@ -134,11 +134,11 @@ func outputPublicLaunchResult(result any) error {
 func runPublicPrepareThenApply(ctx context.Context, request launchapi.PrepareRequestV1, prepareOnly bool) error {
 	prepared, err := launchapi.Prepare(ctx, request)
 	if err != nil {
-		return err
+		return launchCLIError(err)
 	}
 	if prepareOnly || prepared.Outcome != launchapi.PrepareOutcomeReady || len(prepared.RequiredActions) != 0 {
 		if err := outputPublicLaunchResult(prepared); err != nil {
-			return err
+			return launchCLIError(err)
 		}
 		if prepared.Outcome == launchapi.PrepareOutcomeActionRequired || len(prepared.RequiredActions) != 0 {
 			return ActionRequiredError("%s", publicPrepareReason(prepared))
@@ -156,10 +156,10 @@ func runPublicPrepareThenApply(ctx context.Context, request launchapi.PrepareReq
 		Decisions:      []launchapi.DecisionV1{},
 	})
 	if err != nil {
-		return err
+		return launchCLIError(err)
 	}
 	if err := outputPublicLaunchResult(result); err != nil {
-		return err
+		return launchCLIError(err)
 	}
 	return publicApplyExit(result)
 }
@@ -278,7 +278,7 @@ func publicApplyExit(result launchapi.ApplyResultV1) error {
 	}
 	if result.FailureDetail != "" {
 		if err := writeStderr("amq launch: %s\n", result.FailureDetail); err != nil {
-			return err
+			return launchCLIError(err)
 		}
 	}
 	reason := result.ReasonCode

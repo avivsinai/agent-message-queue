@@ -36,9 +36,14 @@ func (a *adapter) Capabilities(ctx context.Context) launch.AdapterCapabilities {
 }
 
 func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error) {
-	reason := eligibility(a.executable, request.Cwd)
-	if reason == "" && (len(request.CommittedArgs) != 0 || len(request.BypassArgs) != 0 || len(request.EnvOverlay) != 0 || request.Wrapper != nil) {
-		reason = "launch options require verified TUI resume equivalence"
+	var reason string
+	if len(request.CommittedArgs) != 0 || len(request.BypassArgs) != 0 || len(request.EnvOverlay) != 0 || request.Wrapper != nil {
+		_, _, reason = daemonEndpoint()
+		if reason == "" {
+			reason = "launch options require verified TUI resume equivalence"
+		}
+	} else {
+		reason = eligibility(a.executable, request.Cwd)
 	}
 	if reason == "" {
 		return a.PlanFreshDaemon(request)
@@ -50,11 +55,14 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 
 func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, error) {
 	plan, err := a.CodexAdapter.PlanResume(request)
-	plan.TerminalOnlyReason = eligibility(a.executable, request.Cwd)
+	if err != nil {
+		return launch.AgentPlan{}, err
+	}
+	_, _, plan.TerminalOnlyReason = daemonEndpoint()
 	if plan.TerminalOnlyReason == "" {
 		plan.TerminalOnlyReason = "resumed launch settings require verified TUI resume equivalence"
 	}
-	return plan, err
+	return plan, nil
 }
 
 func codexHome() (string, error) {
@@ -84,23 +92,31 @@ func EmbeddedEnvironment() bool {
 	return false
 }
 
-func eligibility(executable, cwd string) string {
+func daemonEndpoint() (home, socket, reason string) {
 	if EmbeddedEnvironment() {
-		return "the configured executor requires an embedded app-server"
+		return "", "", "the configured executor requires an embedded app-server"
+	}
+	home, err := codexHome()
+	if err != nil {
+		return "", "", "Codex home cannot be verified"
+	}
+	socket, err = codex.ControlSocket(home)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", "no Codex app-server daemon is running (start one with codex app-server daemon start)"
+	}
+	if err != nil {
+		return "", "", "Codex app-server daemon cannot be verified"
+	}
+	return home, socket, ""
+}
+
+func eligibility(executable, cwd string) string {
+	home, sock, reason := daemonEndpoint()
+	if reason != "" {
+		return reason
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	home, err := codexHome()
-	if err != nil {
-		return "Codex home cannot be verified"
-	}
-	sock, err := codex.ControlSocket(home)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "no Codex app-server daemon is running (start one with codex app-server daemon start)"
-		}
-		return "Codex app-server daemon cannot be verified"
-	}
 	capabilities := launch.NewCodexAdapter(executable).Capabilities(ctx)
 	if !capabilities.Available || capabilities.ProviderVersion != launch.CodexDaemonVersion {
 		return "Codex daemon launch requires a verified provider version"
@@ -159,19 +175,22 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if err != nil {
 		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
 	defer cancel()
 	thread, err := codex.StartThread(ctx, sock, ticket.Cwd, "", launch.CodexDaemonVersion)
 	if err != nil {
+		if errors.Is(err, codex.ErrThreadNotStarted) {
+			return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+		}
 		return launch.CaptureEvidence{}, err
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {
-		return launch.CaptureEvidence{}, fmt.Errorf("codex daemon changed during thread acquisition")
+		return launch.CaptureEvidence{}, fmt.Errorf("codex daemon changed after acquiring thread %s; preserve this attempt for operator inspection", thread)
 	}
 	current, err := launch.HolderOf(currentPID)
 	if err != nil || current != holder {
-		return launch.CaptureEvidence{}, fmt.Errorf("codex daemon identity changed during thread acquisition")
+		return launch.CaptureEvidence{}, fmt.Errorf("codex daemon identity changed after acquiring thread %s; preserve this attempt for operator inspection", thread)
 	}
 	return launch.ObserveCodexDaemonThread(ticket, thread, sock, holder)
 }
@@ -179,9 +198,6 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 // RecordIdentity publishes routing only after the acquired thread and current
 // daemon have been checked, while the ticket's generation still holds its lease.
 func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env []string) error {
-	if reason := eligibility(ticket.ProviderExecutable, ticket.Cwd); reason != "" {
-		return fmt.Errorf("cannot prepare native seat: Buzz approvals: terminal only: %s; replan this launch", reason)
-	}
 	home, err := codexHome()
 	if err != nil {
 		return err
@@ -213,8 +229,19 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 		}
 		return ""
 	}
-	if get("AM_ROOT") != ticket.SessionRoot || get("AM_ME") != ticket.Handle {
+	if get("AM_ROOT") != ticket.SessionRoot || get("AM_ME") != ticket.Handle || get("AM_ROOT_ID") != ticket.SessionIdentity {
 		return fmt.Errorf("codex daemon routing does not match the execution ticket")
+	}
+	base := ticket.SessionRoot
+	if session := get("AM_SESSION"); session != "" {
+		if filepath.Base(ticket.SessionRoot) != session {
+			return fmt.Errorf("codex daemon routing session does not match the execution ticket")
+		}
+		base = filepath.Dir(ticket.SessionRoot)
+	}
+	baseIdentity, err := fsq.StableTreeIdentity(base)
+	if err != nil || get("AM_BASE_ROOT") != base || get("AM_BASE_ROOT_ID") != baseIdentity {
+		return fmt.Errorf("codex daemon routing base does not match the execution ticket")
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {

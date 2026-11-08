@@ -148,7 +148,7 @@ func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 // codexDaemonNamingTimeout bounds the daemon calls made before exec. They
 // take about 2 s, and up to 30 s while the daemon starts other sessions
 // (measured on codex-cli 0.160.1).
-const codexDaemonNamingTimeout = 60 * time.Second
+const codexDaemonNamingTimeout = codex.ThreadStartTimeout
 
 // codexDaemonNamingNotice is how long naming runs before coop exec says why
 // the launch waits.

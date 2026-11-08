@@ -210,6 +210,11 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 	if err := ticket.Validate(); err != nil {
 		return ExecutionTicket{}, err
 	}
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
+		if err := validateCodexDaemonExecutable(ticket); err != nil {
+			return ExecutionTicket{}, err
+		}
+	}
 	return ticket, nil
 }
 
@@ -479,8 +484,8 @@ func writeExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, ticket Execution
 		return err
 	}
 	if current, err := LoadExecutionTicket(root, ticket.Handle); err == nil && current.Provider == CodexProvider && current.PreSpawnAcquire {
-		if current.State == ExecutionIdentityRequested && current.LaunchNonce != ticket.LaunchNonce {
-			return fmt.Errorf("codex thread acquisition is uncertain; preserve the prior execution generation")
+		if current.State != ExecutionPending && current.State != ExecutionAcknowledged && current.LaunchNonce != ticket.LaunchNonce {
+			return codexExecutionRecoveryRequired(current)
 		}
 		if preserveProgress && current.LaunchNonce == ticket.LaunchNonce && current.State != ExecutionPending && ticket.State == ExecutionPending {
 			template := current
@@ -505,38 +510,47 @@ func writeExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, ticket Execution
 }
 
 func LoadExecutionTicket(root *fsq.DeliveryRoot, handle string) (ExecutionTicket, error) {
+	ticket, _, _, err := readExecutionTicket(root, handle)
+	return ticket, err
+}
+
+func readExecutionTicket(root *fsq.DeliveryRoot, handle string) (ExecutionTicket, []byte, os.FileInfo, error) {
 	if root == nil {
-		return ExecutionTicket{}, fmt.Errorf("missing pinned session root")
+		return ExecutionTicket{}, nil, nil, fmt.Errorf("missing pinned session root")
 	}
 	if err := fsq.ValidateHandle(handle); err != nil {
-		return ExecutionTicket{}, err
+		return ExecutionTicket{}, nil, nil, err
 	}
 	file, info, err := root.OpenRegularNoFollow(filepath.Join(executionDirectory, handle+".json"))
 	if err != nil {
-		return ExecutionTicket{}, err
+		return ExecutionTicket{}, nil, nil, err
 	}
 	defer func() { _ = file.Close() }()
 	if info.Mode().Perm() != 0o600 {
-		return ExecutionTicket{}, fmt.Errorf("execution ticket permissions are %04o, want 0600", info.Mode().Perm())
+		return ExecutionTicket{}, nil, nil, fmt.Errorf("execution ticket permissions are %04o, want 0600", info.Mode().Perm())
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return ExecutionTicket{}, err
+		return ExecutionTicket{}, nil, nil, err
 	}
 	var ticket ExecutionTicket
 	if err := decodeExecutionJSON(data, &ticket); err != nil {
-		return ExecutionTicket{}, fmt.Errorf("decode execution ticket: %w", err)
+		return ExecutionTicket{}, nil, nil, fmt.Errorf("decode execution ticket: %w", err)
 	}
 	if ticket.Handle != handle {
-		return ExecutionTicket{}, fmt.Errorf("execution ticket handle mismatch")
+		return ExecutionTicket{}, nil, nil, fmt.Errorf("execution ticket handle mismatch")
 	}
 	if err := ticket.Validate(); err != nil {
-		return ExecutionTicket{}, err
+		return ExecutionTicket{}, nil, nil, err
 	}
 	if ticket.SessionRoot != canonicalOrRaw(root.Base()) {
-		return ExecutionTicket{}, fmt.Errorf("execution ticket session root does not match pinned root")
+		return ExecutionTicket{}, nil, nil, fmt.Errorf("execution ticket session root does not match pinned root")
 	}
-	return ticket, nil
+	return ticket, data, info, nil
+}
+
+func ExecutionTicketPath(sessionRoot, handle string) string {
+	return filepath.Join(sessionRoot, executionDirectory, handle+".json")
 }
 
 // RemoveExecutionTicket removes only the exact pending generation while the
@@ -795,7 +809,7 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 		}
 		if !found {
 			if ticket.State == ExecutionIdentityRequested {
-				return ticket, fmt.Errorf("codex thread acquisition is uncertain; preserve this execution ticket for operator recovery")
+				return ticket, uncertainCodexAcquisition(ticket)
 			}
 			if ticket.Provider == CodexProvider {
 				ticket, err = CompareAndSwapExecutionTicket(root, lease, ticket.Handle, ExecutionPending, ExecutionIdentityRequested, "identity_requested")
@@ -811,6 +825,9 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 				if ticket.State == ExecutionIdentityRequested && errors.Is(err, ErrIdentityNotRequested) {
 					_, resetErr := CompareAndSwapExecutionTicket(root, lease, ticket.Handle, ExecutionIdentityRequested, ExecutionPending, "")
 					return ticket, errors.Join(err, resetErr)
+				}
+				if ticket.State == ExecutionIdentityRequested {
+					return ticket, errors.Join(err, uncertainCodexAcquisition(ticket))
 				}
 				return ticket, err
 			}
@@ -1281,6 +1298,12 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		if actualEnv[key] != value {
 			return fmt.Errorf("provider environment %q changed", key)
 		}
+	}
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
+		if err := ticket.Validate(); err != nil {
+			return err
+		}
+		return validateCodexDaemonExecutable(ticket)
 	}
 	return nil
 }

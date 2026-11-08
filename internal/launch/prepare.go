@@ -1129,6 +1129,9 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 	}
 	if state.sessionRoot != nil {
 		if ticket, err := LoadExecutionTicket(state.sessionRoot, participant.Handle); err == nil {
+			if participant.Runnable && ticket.Provider == CodexProvider && ticket.PreSpawnAcquire && ticket.State != ExecutionPending && ticket.State != ExecutionAcknowledged {
+				return prepared, observation, nil, nil, codexExecutionRecoveryRequired(ticket)
+			}
 			observation.Execution = string(ticket.State)
 			observation.ExecutionIdentityDigest, err = digestCanonical(ticket)
 			if err != nil {

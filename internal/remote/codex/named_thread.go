@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// ErrThreadNotStarted proves that thread/start was never sent. Once the
+// request begins, a failed reply cannot establish whether a thread exists.
+var ErrThreadNotStarted = errors.New("thread/start was not sent")
+
+// ThreadStartTimeout covers the observed 30-second contention while the daemon
+// loads other seats, including protocol initialization and persistence.
+const ThreadStartTimeout = 60 * time.Second
+
 // ControlSocket is the managed app-server daemon's control socket under
 // codexHome, checked the way discovery checks it. An error wrapping
 // os.ErrNotExist means no daemon is running.
@@ -27,15 +35,15 @@ func ControlSocket(codexHome string) (string, error) {
 func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (string, error) {
 	client, err := Dial(sock, Handlers{})
 	if err != nil {
-		return "", err
+		return "", errors.Join(ErrThreadNotStarted, err)
 	}
 	defer func() { _ = client.Close() }()
 	version, err := initializeAMQ(ctx, client)
 	if err != nil {
-		return "", err
+		return "", errors.Join(ErrThreadNotStarted, err)
 	}
 	if expectedVersion != "" && version != expectedVersion {
-		return "", fmt.Errorf("codex daemon version %q does not match %q", version, expectedVersion)
+		return "", fmt.Errorf("%w: codex daemon version %q does not match %q", ErrThreadNotStarted, version, expectedVersion)
 	}
 	var started struct {
 		Thread struct {

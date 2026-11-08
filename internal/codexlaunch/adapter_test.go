@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
@@ -24,8 +24,8 @@ import (
 // Pro S1 finding 5: recovery could publish routing under a different
 // CODEX_HOME containing the same thread ID and cwd as the acquired thread.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, switchHome := range []bool{false, true} {
-		t.Run(strconv.FormatBool(switchHome), func(t *testing.T) {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root"} {
+		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
 				_ = os.Unsetenv(key)
@@ -51,7 +51,14 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = root.Close() }()
-			home := nativeDaemon(t, project)
+			// Claude F1: use the real pre-thread/start protocol failure from
+			// the reviewer wedge proof, then exercise a later generation.
+			home := nativeDaemon(t, project, func(sequence int32) string {
+				if scenario == "pre_start_version_failure" && sequence == 3 {
+					return "0.168.0"
+				}
+				return "0.167.0"
+			})
 			t.Setenv("CODEX_HOME", home)
 			executable := nativeProvider(t)
 			amq, err := os.Executable()
@@ -90,19 +97,56 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			env := []string{"AM_ROOT=" + session, "AM_BASE_ROOT=" + session, "AM_ME=codex", "AM_ROOT_ID=" + ticket.SessionIdentity, "AM_BASE_ROOT_ID=" + ticket.SessionIdentity}
+			// Claude recovery review: inherited base-root pins must not
+			// substitute another routing context for the acquired ticket.
+			if scenario == "wrong_base_root" {
+				env[1] = "AM_BASE_ROOT=" + t.TempDir()
+			}
 			routingHome := home
 			envelope := launch.ExecutionEnvelope{Cwd: project, AMQExecutable: amq, ProviderExecutable: executable,
 				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
 				RecordIdentity: func(acquired launch.ExecutionTicket) error {
-					if switchHome {
+					if scenario == "switch_home" {
 						routingHome = nativeDaemon(t, project)
 						t.Setenv("CODEX_HOME", routingHome)
 					}
 					return RecordIdentity(root, acquired, env)
 				}}
 			prepared, err := launch.PrepareExecution(root, "codex", nonce, envelope)
+			if scenario == "pre_start_version_failure" {
+				if !errors.Is(err, launch.ErrIdentityNotRequested) {
+					t.Fatalf("pre-start failure was classified as uncertain: %v", err)
+				}
+				stored, loadErr := launch.LoadExecutionTicket(root, "codex")
+				if loadErr != nil || stored.State != launch.ExecutionPending {
+					t.Fatalf("pre-start ticket = %#v, %v", stored, loadErr)
+				}
+				nextNonce := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+				lease, err := launch.AcquireLease(root, nextNonce)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = lease.Release() }()
+				if err := lease.LockHandles("codex"); err != nil {
+					t.Fatal(err)
+				}
+				ticket.LaunchNonce = nextNonce
+				if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+					t.Fatalf("a later launch generation cannot write its ticket: %v", err)
+				}
+				return
+			}
 			const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"
-			if switchHome {
+			if scenario == "wrong_base_root" {
+				if err == nil || !strings.Contains(err.Error(), "routing base") {
+					t.Fatalf("substituted routing context = %v", err)
+				}
+				if _, lookupErr := codexidentity.Lookup(thread, home); !errors.Is(lookupErr, codexidentity.ErrNone) {
+					t.Fatalf("foreign context published: %v", lookupErr)
+				}
+				return
+			}
+			if scenario == "switch_home" {
 				if err == nil || !strings.Contains(err.Error(), "endpoint changed") {
 					t.Fatalf("substituted endpoint = %v", err)
 				}
@@ -158,7 +202,8 @@ func nativeProvider(t *testing.T) string {
 
 // The protocol boundary is the behavior under test: these are real local
 // WebSocket connections, including kernel peer identity and routing writes.
-func nativeDaemon(t *testing.T, cwd string) string {
+func nativeDaemon(t *testing.T, cwd string, initializeVersion ...func(int32) string) string {
+	var initializes atomic.Int32
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "amq-native-")
 	if err != nil {
@@ -197,7 +242,12 @@ func nativeDaemon(t *testing.T, cwd string) string {
 			result := any(map[string]any{})
 			switch request.Method {
 			case "initialize":
-				result = map[string]any{"userAgent": "codex/0.167.0"}
+				version := "0.167.0"
+				sequence := initializes.Add(1)
+				if len(initializeVersion) != 0 {
+					version = initializeVersion[0](sequence)
+				}
+				result = map[string]any{"userAgent": "codex/" + version}
 			case "hooks/list":
 				result = map[string]any{"data": []any{map[string]any{"cwd": cwd, "hooks": []any{}}}}
 			case "configRequirements/read":
@@ -216,4 +266,31 @@ func nativeDaemon(t *testing.T, cwd string) string {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 	return home
+}
+
+// Pro S1 review R1: resume planning probed an executable after static
+// containment validation had already rejected it as repository-controlled.
+func TestRejectedResumeProviderIsNeverExecuted(t *testing.T) {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	project := t.TempDir()
+	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+	executable := filepath.Join(project, "codex")
+	sentinel := filepath.Join(project, "executed")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch '"+sentinel+"'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(executable).PlanResume(launch.ResumeRequest{
+		PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "98989898-9898-4989-8989-989898989898",
+			ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled},
+		Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "inside the project") {
+		t.Fatalf("resume refusal = %v", err)
+	}
+	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected provider was executed: %v", err)
+	}
 }

@@ -100,12 +100,16 @@ func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0] != (DynamicArg{Index: 4, Kind: DynamicArgConversationID}) {
 		return fmt.Errorf("codex daemon execution template is invalid")
 	}
+	if len(ticket.TargetArgv) != 5 && (len(ticket.TargetArgv) != 6 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != 5) {
+		return fmt.Errorf("codex daemon execution options require verified resume equivalence")
+	}
+	return nil
+}
+
+func validateCodexDaemonExecutable(ticket ExecutionTicket) error {
 	executable, identity, err := canonicalFile(ticket.TargetArgv[0])
 	if err != nil || executable != ticket.ProviderExecutable || identity != ticket.ProviderExecutableIdentity {
 		return fmt.Errorf("codex daemon executable identity changed")
-	}
-	if len(ticket.TargetArgv) != 5 && (len(ticket.TargetArgv) != 6 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != 5) {
-		return fmt.Errorf("codex daemon execution options require verified resume equivalence")
 	}
 	return nil
 }

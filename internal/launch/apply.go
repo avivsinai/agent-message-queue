@@ -184,7 +184,14 @@ func authorizeApply(ctx context.Context, request ApplyRequest, dependencies Appl
 		return prepared, nil, applyActionResult(prepared, "reprepare_required"), false, nil
 	}
 	if prepared.SubjectDigest != request.SubjectDigest {
-		return prepared, nil, applyActionResult(prepared, "subject_changed"), false, nil
+		refusal := applyActionResult(prepared, "subject_changed")
+		for _, participant := range prepared.Participants {
+			if participant.Runnable && participant.Provider == CodexProvider {
+				refusal.FailureDetail = "the launch inputs or Codex daemon state changed since this plan was prepared; prepare the launch again"
+				break
+			}
+		}
+		return prepared, nil, refusal, false, nil
 	}
 	if prepared.Outcome == PrepareOutcomeUnsupported {
 		return prepared, nil, applyActionResult(prepared, prepared.Reason), false, nil
@@ -662,7 +669,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 				return false, err
 			}
 			if planDigest != snapshot.PlanDigest {
-				return false, fmt.Errorf("static plan changed after Apply authorization")
+				return false, changedApplyPlanError(snapshot, plan)
 			}
 			trustPlanDigest, err := plan.TrustSemanticDigest()
 			if err != nil {
@@ -702,6 +709,27 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		}
 	}
 	return request, nil
+}
+
+func changedApplyPlanError(snapshot PrepareResult, plan Plan) error {
+	for _, previous := range snapshot.Participants {
+		if previous.Provider != CodexProvider || previous.Command == nil {
+			continue
+		}
+		argv := previous.Command.Argv
+		wasDaemon := len(argv) >= 5 && argv[1] == "resume" && argv[2] == "-C" && argv[4] == "${conversation_id}"
+		for _, next := range plan.Agents {
+			if next.Handle != previous.Handle || next.PreSpawnAcquire == wasDaemon {
+				continue
+			}
+			from, to := "embedded", "daemon"
+			if wasDaemon {
+				from, to = to, from
+			}
+			return fmt.Errorf("the Codex daemon state changed since this plan was prepared (%s -> %s); prepare the launch again", from, to)
+		}
+	}
+	return fmt.Errorf("the launch plan changed after Apply authorization; prepare the launch again")
 }
 
 func authorizedIdentitiesEqual(first, second PrepareResult) bool {
