@@ -732,6 +732,9 @@ func prepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 		return ticket, fmt.Errorf("execution ticket nonce mismatch")
 	}
 	if err := ValidateExecutionEnvelope(root, ticket, envelope); err != nil {
+		if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire && (ticket.State == ExecutionIdentityRequested || ticket.State == ExecutionIdentityAcquired || ticket.State == ExecutionSpawnAttempted) {
+			return ticket, errors.Join(err, codexExecutionRecoveryRequired(ticket))
+		}
 		return ticket, err
 	}
 	switch ticket.Mode {
@@ -865,7 +868,7 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 			return ticket, fmt.Errorf("codex daemon identity recorder is unavailable")
 		}
 		if err := recordIdentity(ticket); err != nil {
-			return ticket, err
+			return ticket, errors.Join(err, codexExecutionRecoveryRequired(ticket))
 		}
 	}
 	if ticket.State == ExecutionIdentityAcquired {

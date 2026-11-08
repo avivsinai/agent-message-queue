@@ -20,13 +20,13 @@ func cleanupLaunchExecution(rootPath, handle string, jsonOutput, dryRun, yes, ig
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	target, err := launch.InspectUncertainExecution(root, handle)
+	target, err := launch.InspectExecutionCleanup(root, handle)
 	if err != nil {
-		return ActionRequiredError("inspect uncertain execution: %v", err)
+		return ActionRequiredError("inspect incomplete native execution: %v", err)
 	}
 	report := map[string]any{"path": launch.ExecutionTicketPath(root.Base(), handle), "handle": handle,
-		"launch_nonce": target.Ticket.LaunchNonce, "state": target.Ticket.State,
-		"effect": "abandon uncertain thread/start; any Codex thread and launch journal remain untouched"}
+		"launch_nonce": target.Ticket.LaunchNonce, "state": target.Ticket.State, "thread_id": target.ThreadID,
+		"effect": "abandon incomplete native execution; Codex threads, evidence, routing, and journal remain untouched"}
 	output := func(removed bool) error {
 		if jsonOutput {
 			return writeJSON(os.Stdout, map[string]any{"removed": removed, "launch_execution": report})
@@ -35,7 +35,11 @@ func cleanupLaunchExecution(rootPath, handle string, jsonOutput, dryRun, yes, ig
 		if removed {
 			action = "Removed"
 		}
-		return writeStdout("%s uncertain execution ticket %s (nonce %s). Any Codex thread and launch journal remain untouched.\n", action, report["path"], target.Ticket.LaunchNonce)
+		thread := target.ThreadID
+		if thread == "" {
+			thread = "unknown"
+		}
+		return writeStdout("%s native execution ticket %s (nonce %s, state %s, thread %s). Codex threads, evidence, routing, and journal remain untouched.\n", action, report["path"], target.Ticket.LaunchNonce, target.Ticket.State, thread)
 	}
 	if dryRun {
 		return output(false)
@@ -44,7 +48,7 @@ func cleanupLaunchExecution(rootPath, handle string, jsonOutput, dryRun, yes, ig
 		if err := output(false); err != nil {
 			return err
 		}
-		confirmed, err := confirmPrompt("Abandon this uncertain attempt and leave any Codex thread untouched?")
+		confirmed, err := confirmPrompt("Abandon this incomplete native execution and leave its Codex thread untouched?")
 		if err != nil {
 			return err
 		}
@@ -63,8 +67,8 @@ func cleanupLaunchExecution(rootPath, handle string, jsonOutput, dryRun, yes, ig
 	if err := lease.LockHandles(handle); err != nil {
 		return ActionRequiredError("execution cleanup cannot lock %s: %v", handle, err)
 	}
-	if err := launch.ClearUncertainExecution(root, lease, target); err != nil {
-		return ActionRequiredError("preserve uncertain execution: %v", err)
+	if err := launch.ClearExecutionForCleanup(root, lease, target); err != nil {
+		return ActionRequiredError("preserve native execution: %v", err)
 	}
 	return output(true)
 }

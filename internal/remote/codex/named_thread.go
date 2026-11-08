@@ -163,3 +163,21 @@ func ReadStartupState(ctx context.Context, sock, cwd string) (StartupState, erro
 	}
 	return state, nil
 }
+
+// ReadHooks reads only the hook-trust state needed before a recovered TUI
+// resumes on its already bound endpoint.
+func ReadHooks(ctx context.Context, sock, cwd string) (json.RawMessage, error) {
+	client, err := Dial(sock, Handlers{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := initializeAMQ(ctx, client); err != nil {
+		return nil, err
+	}
+	var result json.RawMessage
+	if err := client.Call(ctx, "hooks/list", map[string]any{"cwds": []string{cwd}}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}

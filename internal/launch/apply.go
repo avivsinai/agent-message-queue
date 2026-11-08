@@ -662,15 +662,18 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		OnLive:               onLivePolicies(runnable),
 		CallerContext:        cloneCallerContext(prepared.CallerContext),
 	}
+	request.ValidatePlan = func(plan Plan) error {
+		digest, err := plan.SemanticDigest()
+		if err != nil {
+			return err
+		}
+		if digest != snapshot.PlanDigest {
+			return changedApplyPlanError(snapshot, plan)
+		}
+		return nil
+	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {
-			planDigest, err := plan.SemanticDigest()
-			if err != nil {
-				return false, err
-			}
-			if planDigest != snapshot.PlanDigest {
-				return false, changedApplyPlanError(snapshot, plan)
-			}
 			trustPlanDigest, err := plan.TrustSemanticDigest()
 			if err != nil {
 				return false, err
@@ -716,8 +719,7 @@ func changedApplyPlanError(snapshot PrepareResult, plan Plan) error {
 		if previous.Provider != CodexProvider || previous.Command == nil {
 			continue
 		}
-		argv := previous.Command.Argv
-		wasDaemon := len(argv) >= 5 && argv[1] == "resume" && argv[2] == "-C" && argv[4] == "${conversation_id}"
+		wasDaemon := previous.preSpawnAcquire
 		for _, next := range plan.Agents {
 			if next.Handle != previous.Handle || next.PreSpawnAcquire == wasDaemon {
 				continue

@@ -322,17 +322,18 @@ type PrepareCommand struct {
 }
 
 type PreparedParticipant struct {
-	Handle         string                  `json:"handle"`
-	Runnable       bool                    `json:"runnable"`
-	Provider       string                  `json:"provider,omitempty"`
-	Command        *PrepareCommand         `json:"command,omitempty"`
-	ResumePolicy   ResumePolicy            `json:"resume_policy,omitempty"`
-	Execution      PrepareExecutionOptions `json:"execution,omitempty"`
-	PlannedOutcome string                  `json:"planned_outcome"`
-	CwdIdentity    string                  `json:"cwd_identity,omitempty"`
-	OnLive         string                  `json:"on_live,omitempty"`
-	Executable     *ConsultedExecutable    `json:"executable_identity,omitempty"`
-	Wrapper        *ConsultedExecutable    `json:"wrapper_executable_identity,omitempty"`
+	Handle          string `json:"handle"`
+	Runnable        bool   `json:"runnable"`
+	Provider        string `json:"provider,omitempty"`
+	preSpawnAcquire bool
+	Command         *PrepareCommand         `json:"command,omitempty"`
+	ResumePolicy    ResumePolicy            `json:"resume_policy,omitempty"`
+	Execution       PrepareExecutionOptions `json:"execution,omitempty"`
+	PlannedOutcome  string                  `json:"planned_outcome"`
+	CwdIdentity     string                  `json:"cwd_identity,omitempty"`
+	OnLive          string                  `json:"on_live,omitempty"`
+	Executable      *ConsultedExecutable    `json:"executable_identity,omitempty"`
+	Wrapper         *ConsultedExecutable    `json:"wrapper_executable_identity,omitempty"`
 }
 
 type PrepareRoster struct {
@@ -1211,6 +1212,7 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		AMQExecutable: dependencies.AMQPath, Cwd: cwd, AllowExternalCwd: true,
 		LaunchNonce: preparePlaceholderUUID, Named: execution.Named, ResumePolicy: participant.ResumePolicy,
 		CommittedArgs: slices.Clone(participant.Args), BypassArgs: slices.Clone(participant.BypassArgs), EnvOverlay: cloneEnv(participant.EnvOverlay),
+		Wrapper: cloneWrapper(participant.Wrapper),
 	}
 	if participant.InitialInput != nil {
 		digest := initialInputDigest(participant.InitialInput.Text)
@@ -1218,6 +1220,7 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 	}
 	var plan AgentPlan
 	var actions []PrepareRequiredAction
+	pendingCapture := false
 	useResume := participant.ResumePolicy == ResumeEnabled && hasConversation && conversation.State == CaptureReady
 	if execution.InjectorMode == "claude-native" {
 		if runtime.GOOS != "darwin" || participant.Provider != ClaudeProvider || participant.Wrapper != nil ||
@@ -1242,8 +1245,9 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 				AllowedDecisions: []string{"fresh_once", "abort"}, ReasonCode: ReasonStaleConversation,
 			})
 			if conversation.State == CapturePending {
-				prepared.PlannedOutcome = "capture_pending"
-				return prepared, observation, nil, actions, nil
+				// A fresh_once decision authorizes a concrete candidate. Include
+				// its static shape in the subject before the caller approves it.
+				pendingCapture = true
 			}
 		}
 		reason, capabilityErr := prepareFreshCaptureRefusal(ctx, adapter, participant, state.target.ProjectRoot)
@@ -1261,6 +1265,9 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		if participant.ResumePolicy == ResumeDisabled {
 			prepared.PlannedOutcome = "fresh_without_continuation"
 		}
+		if pendingCapture {
+			prepared.PlannedOutcome = "capture_pending"
+		}
 	}
 	if err != nil {
 		return prepared, observation, nil, actions, err
@@ -1272,6 +1279,7 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 	}
 	plan.Execution = clonePrepareExecutionOptions(&execution)
 	prepared.Command = previewStaticCommand(plan)
+	prepared.preSpawnAcquire = plan.PreSpawnAcquire
 	return prepared, observation, &plan, actions, nil
 }
 

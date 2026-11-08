@@ -33,7 +33,7 @@ func runCleanup(args []string) error {
 		false,
 		"Remove one exact stuck managed-launch recovery journal",
 	)
-	launchExecutionFlag := fs.String("launch-execution", "", "Abandon one exact uncertain native Codex thread/start attempt")
+	launchExecutionFlag := fs.String("launch-execution", "", "Abandon one exact incomplete native Codex execution")
 	ignorePinFlag := fs.Bool("ignore-session-pin", false, "With --launch-execution and explicit --root, ignore a conflicting session pin")
 	mailboxFlag := fs.String(
 		"mailbox",

@@ -494,7 +494,7 @@ Options:
   -json
         Emit JSON output
   -launch-execution string
-        Abandon one exact uncertain native Codex thread/start attempt
+        Abandon one exact incomplete native Codex execution
   -launch-journal
         Remove one exact stuck managed-launch recovery journal
   -mailbox string

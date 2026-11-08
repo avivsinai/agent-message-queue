@@ -198,6 +198,9 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 // RecordIdentity publishes routing only after the acquired thread and current
 // daemon have been checked, while the ticket's generation still holds its lease.
 func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env []string) error {
+	if EmbeddedEnvironment() {
+		return fmt.Errorf("the current executor environment requires an embedded app-server; restore the original environment before retrying this native execution")
+	}
 	home, err := codexHome()
 	if err != nil {
 		return err
@@ -242,6 +245,12 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	baseIdentity, err := fsq.StableTreeIdentity(base)
 	if err != nil || get("AM_BASE_ROOT") != base || get("AM_BASE_ROOT_ID") != baseIdentity {
 		return fmt.Errorf("codex daemon routing base does not match the execution ticket")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hooks, err := codex.ReadHooks(ctx, sock, ticket.Cwd)
+	if err != nil || !HooksListClear(hooks, ticket.Cwd) {
+		return fmt.Errorf("codex hook review is unresolved; resolve it and retry the original emitted command")
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {

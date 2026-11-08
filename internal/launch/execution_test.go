@@ -963,7 +963,7 @@ func TestUncertainExecutionCleanupPreservesChangedTicket(t *testing.T) {
 	if _, err := PrepareExecution(fixture.root, "codex", nonce, envelope); !errors.Is(err, ErrCodexAcquisitionUncertain) {
 		t.Fatalf("uncertain acquisition = %v", err)
 	}
-	target, err := InspectUncertainExecution(fixture.root, "codex")
+	target, err := InspectExecutionCleanup(fixture.root, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,14 +980,14 @@ func TestUncertainExecutionCleanupPreservesChangedTicket(t *testing.T) {
 	if err := WriteExecutionTicket(fixture.root, lease, changed); err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearUncertainExecution(fixture.root, lease, target); err == nil || !strings.Contains(err.Error(), "changed") {
+	if err := ClearExecutionForCleanup(fixture.root, lease, target); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("changed cleanup = %v", err)
 	}
-	current, err := InspectUncertainExecution(fixture.root, "codex")
+	current, err := InspectExecutionCleanup(fixture.root, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearUncertainExecution(fixture.root, lease, current); err != nil {
+	if err := ClearExecutionForCleanup(fixture.root, lease, current); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadExecutionTicket(fixture.root, "codex"); !errors.Is(err, os.ErrNotExist) {

@@ -108,19 +108,28 @@ thread startup uses the same 60-second contention budget as session naming.
 An incomplete acquired ticket refuses a replacement generation: retry the
 original emitted command to reuse its thread.
 
-For an uncertain request with no persisted acquisition evidence, inspect the
-Codex daemon for an orphan thread, then inspect the exact cleanup target:
+When retrying an incomplete native launch cannot succeed, inspect the Codex
+daemon for the known thread or an orphan, then inspect the exact cleanup target:
 
 ```bash
 amq cleanup --launch-execution <handle> --root <session-root> --dry-run
 amq cleanup --launch-execution <handle> --root <session-root> --yes
 ```
 
-Cleanup abandons only an unchanged `identity_requested` ticket, under its exact
-session lease and handle lock. It leaves any Codex thread, evidence, conversation,
-and launch journal untouched. Persisted acquisition evidence refuses cleanup and
-requires retrying the original execution instead. An uncertain acquisition is an
-action-required outcome (exit 6), with this recovery command in the diagnostic.
+Cleanup explicitly abandons an unchanged `identity_requested`,
+`identity_acquired`, or `spawn_attempted` ticket under its exact session lease and
+handle lock. The dry run prints the known thread ID so it can be resumed by hand.
+Acquired progress requires valid bound evidence; when capture committed before
+the ticket's identity update, cleanup validates that capture and displays its
+thread too. Removal compares ticket bytes, file identity, and evidence references
+again under the lease. It leaves all Codex threads, evidence, routing records,
+conversations, and launch journals untouched. Cleanup does not require the old
+executable or daemon to remain available. Recovery refusals use exit 6 and name
+the retry or cleanup command.
+
+Every execution attempt, including recovery, checks inherited native-backend
+exclusions and rechecks hook trust on the bound daemon before publishing routing.
+The other full startup admission probes run during planning and new acquisition.
 
 Prepare authorizes the selected native or embedded identity contract. A daemon
 or sign-in change that changes that selection before Apply requires a new

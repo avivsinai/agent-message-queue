@@ -87,6 +87,9 @@ type ReconcileRequest struct {
 	// backend Create unless AMQPath still resolves to it, and every ticket
 	// binds exactly that path and identity.
 	AuthorizedAMQ *PreparedExecutable
+	// ValidatePlan binds this invocation's authorized shape independently of
+	// any previously saved trust for another plan.
+	ValidatePlan func(Plan) error
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
@@ -218,6 +221,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	planDigest, err := plan.SemanticDigest()
 	if err != nil {
 		return result, err
+	}
+	if request.ValidatePlan != nil {
+		if err := request.ValidatePlan(plan); err != nil {
+			return result, err
+		}
 	}
 	trustDigest, err := ExecutionTrustDigestWithAuthority(plan, request.Session, request.Root, request.TrustAuthorityDigest)
 	if err != nil {

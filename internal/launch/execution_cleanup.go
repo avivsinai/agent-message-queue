@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -18,7 +19,7 @@ func codexExecutionRecoveryRequired(ticket ExecutionTicket) error {
 	if ticket.State == ExecutionIdentityRequested {
 		return uncertainCodexAcquisition(ticket)
 	}
-	return fmt.Errorf("%w for %s (nonce %s, thread %s); retry the original emitted command to reuse the acquired identity", ErrCodexExecutionRecoveryRequired, ticket.Handle, ticket.LaunchNonce, ticket.ConversationID)
+	return fmt.Errorf("%w for %s (nonce %s, thread %s); retry the original emitted command to reuse the acquired identity; if the daemon or executable changed, inspect amq cleanup --launch-execution %s --root %s --dry-run to explicitly abandon it", ErrCodexExecutionRecoveryRequired, ticket.Handle, ticket.LaunchNonce, ticket.ConversationID, ticket.Handle, shellQuote(ticket.SessionRoot))
 }
 
 func uncertainCodexAcquisition(ticket ExecutionTicket) error {
@@ -26,15 +27,17 @@ func uncertainCodexAcquisition(ticket ExecutionTicket) error {
 		ErrCodexAcquisitionUncertain, ticket.Handle, ticket.Handle, shellQuote(ticket.SessionRoot))
 }
 
-// ExecutionCleanupTarget captures the exact uncertain ticket shown to the
+// ExecutionCleanupTarget captures the exact incomplete native ticket shown to the
 // operator. Its private bytes and file identity cannot be reconstructed by a caller.
 type ExecutionCleanupTarget struct {
-	Ticket ExecutionTicket
-	raw    []byte
-	info   os.FileInfo
+	Ticket       ExecutionTicket
+	ThreadID     string
+	evidenceRefs []string
+	raw          []byte
+	info         os.FileInfo
 }
 
-func InspectUncertainExecution(root *fsq.DeliveryRoot, handle string) (ExecutionCleanupTarget, error) {
+func InspectExecutionCleanup(root *fsq.DeliveryRoot, handle string) (ExecutionCleanupTarget, error) {
 	ticket, raw, info, err := readExecutionTicket(root, handle)
 	if err != nil {
 		return ExecutionCleanupTarget{}, err
@@ -46,35 +49,51 @@ func InspectUncertainExecution(root *fsq.DeliveryRoot, handle string) (Execution
 	if err != nil || sessionIdentity != ticket.SessionIdentity {
 		return ExecutionCleanupTarget{}, fmt.Errorf("execution ticket belongs to another physical session root")
 	}
-	if ticket.Provider != CodexProvider || !ticket.PreSpawnAcquire || ticket.State != ExecutionIdentityRequested {
-		return ExecutionCleanupTarget{}, fmt.Errorf("cleanup requires an identity_requested native Codex ticket")
+	if ticket.Provider != CodexProvider || !ticket.PreSpawnAcquire {
+		return ExecutionCleanupTarget{}, fmt.Errorf("cleanup requires an incomplete native Codex execution ticket")
 	}
-	// Persisted evidence proves more progress than this state alone records.
-	// Such a ticket must be recovered rather than abandoned as an unknown request.
-	_, _, found, err := findProviderCaptureEvidence(root, CodexProvider, handle, ticket.LaunchNonce, ticket.ProviderVersion)
-	if err != nil {
-		return ExecutionCleanupTarget{}, err
+	threadID := ticket.ConversationID
+	refs := slices.Clone(ticket.EvidenceRefs)
+	switch ticket.State {
+	case ExecutionIdentityRequested:
+		evidence, ref, found, err := findProviderCaptureEvidence(root, CodexProvider, handle, ticket.LaunchNonce, ticket.ProviderVersion)
+		if err != nil {
+			return ExecutionCleanupTarget{}, err
+		}
+		if found {
+			// A crash may leave capture durable before the ticket's identity update.
+			// Validate and display that known thread without needing the old provider.
+			bound := ticket
+			bound.ConversationID, bound.EvidenceRefs = evidence.conversationID, []string{ref}
+			if err := validateCodexDaemonExecutionEvidence(root, bound); err != nil {
+				return ExecutionCleanupTarget{}, err
+			}
+			threadID, refs = bound.ConversationID, bound.EvidenceRefs
+		}
+	case ExecutionIdentityAcquired, ExecutionSpawnAttempted:
+		if err := validateCodexDaemonExecutionEvidence(root, ticket); err != nil {
+			return ExecutionCleanupTarget{}, err
+		}
+	default:
+		return ExecutionCleanupTarget{}, fmt.Errorf("cleanup requires identity_requested, identity_acquired, or spawn_attempted state")
 	}
-	if found {
-		return ExecutionCleanupTarget{}, fmt.Errorf("native acquisition evidence exists; retry execution to recover its thread")
-	}
-	return ExecutionCleanupTarget{Ticket: ticket, raw: raw, info: info}, nil
+	return ExecutionCleanupTarget{Ticket: ticket, ThreadID: threadID, evidenceRefs: refs, raw: raw, info: info}, nil
 }
 
-// ClearUncertainExecution abandons only an unchanged, evidence-free request
+// ClearExecutionForCleanup abandons only an unchanged incomplete native execution
 // under its original session lease and handle lock. It never touches Codex.
-func ClearUncertainExecution(root *fsq.DeliveryRoot, lease *Lease, expected ExecutionCleanupTarget) error {
+func ClearExecutionForCleanup(root *fsq.DeliveryRoot, lease *Lease, expected ExecutionCleanupTarget) error {
 	if err := lease.authorizeWrite(root); err != nil {
 		return err
 	}
 	if !lease.holdsHandle(expected.Ticket.Handle) || lease.LaunchNonce() != expected.Ticket.LaunchNonce {
 		return fmt.Errorf("execution cleanup does not hold the exact launch generation and handle")
 	}
-	current, err := InspectUncertainExecution(root, expected.Ticket.Handle)
+	current, err := InspectExecutionCleanup(root, expected.Ticket.Handle)
 	if err != nil {
 		return err
 	}
-	if current.Ticket.LaunchNonce != lease.LaunchNonce() || expected.info == nil || !os.SameFile(current.info, expected.info) || !bytes.Equal(current.raw, expected.raw) {
+	if current.Ticket.LaunchNonce != lease.LaunchNonce() || expected.info == nil || !os.SameFile(current.info, expected.info) || !bytes.Equal(current.raw, expected.raw) || !slices.Equal(current.evidenceRefs, expected.evidenceRefs) {
 		return fmt.Errorf("execution ticket changed before cleanup; inspect it again")
 	}
 	return root.Remove(filepath.Join(executionDirectory, expected.Ticket.Handle+".json"))

@@ -24,7 +24,7 @@ import (
 // Pro S1 finding 5: recovery could publish routing under a different
 // CODEX_HOME containing the same thread ID and cwd as the acquired thread.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root"} {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment"} {
 		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
@@ -53,12 +53,14 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			defer func() { _ = root.Close() }()
 			// Claude F1: use the real pre-thread/start protocol failure from
 			// the reviewer wedge proof, then exercise a later generation.
-			home := nativeDaemon(t, project, func(sequence int32) string {
+			hooksTrusted := new(atomic.Bool)
+			hooksTrusted.Store(true)
+			home := nativeDaemon(t, project, nativeDaemonOptions{initializeVersion: func(sequence int32) string {
 				if scenario == "pre_start_version_failure" && sequence == 3 {
 					return "0.168.0"
 				}
 				return "0.167.0"
-			})
+			}, hooksTrusted: hooksTrusted.Load})
 			t.Setenv("CODEX_HOME", home)
 			executable := nativeProvider(t)
 			amq, err := os.Executable()
@@ -103,16 +105,31 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				env[1] = "AM_BASE_ROOT=" + t.TempDir()
 			}
 			routingHome := home
+			firstRegistration := true
 			envelope := launch.ExecutionEnvelope{Cwd: project, AMQExecutable: amq, ProviderExecutable: executable,
 				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
 				RecordIdentity: func(acquired launch.ExecutionTicket) error {
+					if scenario == "recovered_embedded_environment" && firstRegistration {
+						firstRegistration = false
+						return errors.New("interrupted before routing publication")
+					}
 					if scenario == "switch_home" {
 						routingHome = nativeDaemon(t, project)
 						t.Setenv("CODEX_HOME", routingHome)
 					}
+					if scenario == "hook_review" {
+						hooksTrusted.Store(false)
+					}
 					return RecordIdentity(root, acquired, env)
 				}}
 			prepared, err := launch.PrepareExecution(root, "codex", nonce, envelope)
+			if scenario == "recovered_embedded_environment" {
+				if err == nil {
+					t.Fatal("expected interrupted first execution")
+				}
+				t.Setenv("CODEX_EXEC_SERVER_URL", "")
+				prepared, err = launch.PrepareExecution(root, "codex", nonce, envelope)
+			}
 			if scenario == "pre_start_version_failure" {
 				if !errors.Is(err, launch.ErrIdentityNotRequested) {
 					t.Fatalf("pre-start failure was classified as uncertain: %v", err)
@@ -137,6 +154,24 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				return
 			}
 			const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"
+			if scenario == "recovered_embedded_environment" {
+				if err == nil || !strings.Contains(err.Error(), "requires an embedded") {
+					t.Fatalf("recovered executor exclusion=%v", err)
+				}
+				if _, lookupErr := codexidentity.Lookup(thread, home); !errors.Is(lookupErr, codexidentity.ErrNone) {
+					t.Fatalf("excluded recovered routing published: %v", lookupErr)
+				}
+				return
+			}
+			if scenario == "hook_review" {
+				if err == nil || !strings.Contains(err.Error(), "hook review") {
+					t.Fatalf("unresolved recovered hook review=%v", err)
+				}
+				if _, lookupErr := codexidentity.Lookup(thread, home); !errors.Is(lookupErr, codexidentity.ErrNone) {
+					t.Fatalf("routing published before hook review: %v", lookupErr)
+				}
+				return
+			}
 			if scenario == "wrong_base_root" {
 				if err == nil || !strings.Contains(err.Error(), "routing base") {
 					t.Fatalf("substituted routing context = %v", err)
@@ -202,7 +237,12 @@ func nativeProvider(t *testing.T) string {
 
 // The protocol boundary is the behavior under test: these are real local
 // WebSocket connections, including kernel peer identity and routing writes.
-func nativeDaemon(t *testing.T, cwd string, initializeVersion ...func(int32) string) string {
+type nativeDaemonOptions struct {
+	initializeVersion func(int32) string
+	hooksTrusted      func() bool
+}
+
+func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) string {
 	var initializes atomic.Int32
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "amq-native-")
@@ -244,12 +284,16 @@ func nativeDaemon(t *testing.T, cwd string, initializeVersion ...func(int32) str
 			case "initialize":
 				version := "0.167.0"
 				sequence := initializes.Add(1)
-				if len(initializeVersion) != 0 {
-					version = initializeVersion[0](sequence)
+				if len(options) != 0 && options[0].initializeVersion != nil {
+					version = options[0].initializeVersion(sequence)
 				}
 				result = map[string]any{"userAgent": "codex/" + version}
 			case "hooks/list":
-				result = map[string]any{"data": []any{map[string]any{"cwd": cwd, "hooks": []any{}}}}
+				hooks := []any{}
+				if len(options) != 0 && options[0].hooksTrusted != nil && !options[0].hooksTrusted() {
+					hooks = append(hooks, map[string]any{"trustStatus": "untrusted"})
+				}
+				result = map[string]any{"data": []any{map[string]any{"cwd": cwd, "hooks": hooks}}}
 			case "configRequirements/read":
 				result = map[string]any{"requirements": nil}
 			case "config/read":
@@ -292,5 +336,54 @@ func TestRejectedResumeProviderIsNeverExecuted(t *testing.T) {
 	}
 	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rejected provider was executed: %v", err)
+	}
+}
+
+// Pro S1 finding 4: Prepare omitted the wrapper while selecting native mode,
+// so repeated Apply could never reproduce the retained embedded plan.
+func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+	executable := nativeProvider(t)
+	wrapper := filepath.Join(t.TempDir(), "wrapper")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	raw, _ := json.Marshal(map[string]string{"root": base})
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := launch.OpenTrustStoreForBase(t.TempDir(), project, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := launch.Prepare(context.Background(), launch.PrepareRequest{
+		Target:        launch.PrepareTarget{ProjectRoot: project, BaseRoot: base, SessionRoot: filepath.Join(base, "collab"), Session: "collab"},
+		SubjectSchema: launch.SubjectSchemaV2, Launcher: launch.LauncherCommands, IntentDigest: "sha256:" + strings.Repeat("a", 64),
+		Participants: []launch.PrepareParticipant{{Handle: "codex", Provider: launch.CodexProvider, Executable: executable, Runnable: true, Cwd: project,
+			ResumePolicy: launch.ResumeEnabled, Wrapper: &launch.Wrapper{Executable: wrapper}}},
+	}, launch.PrepareDependencies{Backends: map[string]launch.Backend{launch.LauncherCommands: launch.Commands{}}, AMQPath: amq, TrustStore: store,
+		AdapterFor: func(provider, executable string) launch.HarnessAdapter { return New(executable) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Participants) != 1 || prepared.Participants[0].Command == nil {
+		t.Fatalf("missing wrapped plan: %#v", prepared)
+	}
+	argv := prepared.Participants[0].Command.Argv
+	if len(argv) < 3 || argv[0] != wrapper || argv[1] != executable || argv[2] != "-c" {
+		t.Fatalf("wrapper was omitted from embedded admission: %q", argv)
 	}
 }
