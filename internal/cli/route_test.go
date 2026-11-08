@@ -75,6 +75,47 @@ func TestRouteExplainFromCWD(t *testing.T) {
 	}
 }
 
+func TestRouteExplainNamesRouteProvenance(t *testing.T) {
+	tmp := t.TempDir()
+	projectA := filepath.Join(tmp, "project-a")
+	projectB := filepath.Join(tmp, "project-b")
+	ensureRouteAgents(t, filepath.Join(projectA, ".agent-mail"), "alice")
+	ensureRouteAgents(t, filepath.Join(projectB, ".agent-mail"), "bob")
+	writeRouteAmqrc(t, projectA, map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-a",
+		"peers":   map[string]string{"project-b": filepath.Join(projectB, ".agent-mail")},
+	})
+
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir outside: %v", err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", projectA,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "project-b",
+	)
+
+	if !result.Routable {
+		t.Fatalf("expected routable route, got error: %s", result.Error)
+	}
+	if result.RootSource != string(rootSourceProjectRC) {
+		t.Errorf("root_source = %q, want %q", result.RootSource, rootSourceProjectRC)
+	}
+	expectSamePath(t, result.SourceConfig, filepath.Join(projectA, ".amqrc"))
+	if result.PeerKey != "project-b" {
+		t.Errorf("peer_key = %q, want project-b", result.PeerKey)
+	}
+}
+
 func runRouteExplainJSONForTest(t *testing.T, args ...string) routeExplainResult {
 	t.Helper()
 

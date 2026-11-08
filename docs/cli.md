@@ -2283,6 +2283,9 @@ Usage:
   amq route explain --to <handle> [--project <project>] [--session <session>] --json
 
 Explains canonical AMQ routing without sending a message.
+root_source names where the source root came from (as in 'amq env --json'),
+source_config names the .amqrc that decided the route, and peer_key names
+the peers-map key a cross-project route went through.
 
 Examples:
   amq route explain --to codex --json

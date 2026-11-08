@@ -24,12 +24,20 @@ type routeExplainResult struct {
 	Argv                    []string           `json:"argv"`
 	DisplayCommand          string             `json:"display_command"`
 	SourceRoot              string             `json:"source_root"`
-	DeliveryRoot            string             `json:"delivery_root"`
-	SourceProject           string             `json:"source_project"`
-	TargetProject           string             `json:"target_project"`
-	SourceSession           string             `json:"source_session"`
-	TargetSession           string             `json:"target_session"`
-	Error                   string             `json:"error,omitempty"`
+	// RootSource names where the source root came from, in the vocabulary
+	// of `amq env --json`.
+	RootSource string `json:"root_source,omitempty"`
+	// SourceConfig is the .amqrc that decided the route: the one whose peers
+	// map chose the peer, or else the one that supplied the source root.
+	SourceConfig string `json:"source_config,omitempty"`
+	// PeerKey is the peers-map key a cross-project route went through.
+	PeerKey       string `json:"peer_key,omitempty"`
+	DeliveryRoot  string `json:"delivery_root"`
+	SourceProject string `json:"source_project"`
+	TargetProject string `json:"target_project"`
+	SourceSession string `json:"source_session"`
+	TargetSession string `json:"target_session"`
+	Error         string `json:"error,omitempty"`
 }
 
 func runRoute(args []string) error {
@@ -58,6 +66,9 @@ func runRouteExplain(args []string) error {
 
 	usage := usageWithFlags(fs, "amq route explain --to <handle> [--project <project>] [--session <session>] --json",
 		"Explains canonical AMQ routing without sending a message.",
+		"root_source names where the source root came from (as in 'amq env --json'),",
+		"source_config names the .amqrc that decided the route, and peer_key names",
+		"the peers-map key a cross-project route went through.",
 		"",
 		"Examples:",
 		"  amq route explain --to codex --json",
@@ -104,12 +115,15 @@ type routeExplainOptions struct {
 func explainRoute(opts routeExplainOptions) routeExplainResult {
 	result := newRouteExplainResult()
 
-	sourceRoot, me, err := resolveRouteSource(opts.FromRoot, opts.Me)
+	source, me, err := resolveRouteSource(opts.FromRoot, opts.Me)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
+	sourceRoot := source.Root
 	result.SourceRoot = sourceRoot
+	result.RootSource = string(source.Source)
+	result.SourceConfig = source.ConfigPath
 	result.SourceProject = resolveProject(sourceRoot)
 	result.SourceSession = resolveSessionName(sourceRoot)
 
@@ -173,6 +187,10 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 
 	result.Routable = true
 	result.DeliveryRoot = plan.DeliveryRoot
+	if plan.PeerBaseRoot != "" {
+		result.PeerKey = plan.TargetProject
+		result.SourceConfig = plan.SourceConfigPath
+	}
 	deliveryBase := plan.PeerBaseRoot
 	if targetProject == "" {
 		deliveryBase = classifyRoot(plan.DeliveryRoot)
@@ -202,25 +220,32 @@ func newRouteExplainResult() routeExplainResult {
 	}
 }
 
-func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err error) {
+// routeSource is a resolved source root and where it came from.
+type routeSource struct {
+	Root       string
+	Source     rootSource
+	ConfigPath string
+}
+
+func resolveRouteSource(fromRoot, meFlag string) (source routeSource, me string, err error) {
 	if strings.TrimSpace(fromRoot) != "" {
-		sourceRoot = resolveRoot(fromRoot)
+		source = routeSource{Root: resolveRoot(fromRoot), Source: rootSourceFlag}
 		me = strings.TrimSpace(meFlag)
 		if me == "" {
-			return sourceRoot, "", fmt.Errorf("--me is required (or set AM_ME)")
+			return source, "", fmt.Errorf("--me is required (or set AM_ME)")
 		}
-		return sourceRoot, me, nil
+		return source, me, nil
 	}
 
-	root, _, resolvedMe, err := resolveEnvConfigWithSource("", meFlag)
+	root, kind, configPath, resolvedMe, err := resolveEnvConfigWithProvenance("", meFlag)
 	if err != nil {
-		return "", "", err
+		return routeSource{}, "", err
 	}
-	sourceRoot = resolveRoot(root)
+	source = routeSource{Root: resolveRoot(root), Source: kind, ConfigPath: configPath}
 	if strings.TrimSpace(resolvedMe) == "" {
-		return sourceRoot, "", fmt.Errorf("--me is required (or set AM_ME)")
+		return source, "", fmt.Errorf("--me is required (or set AM_ME)")
 	}
-	return sourceRoot, resolvedMe, nil
+	return source, resolvedMe, nil
 }
 
 func validatePlannedMailbox(plan route.DeliveryPlan, target string) error {
