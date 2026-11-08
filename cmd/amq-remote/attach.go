@@ -19,7 +19,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -35,6 +34,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 // attachReadyTimeout bounds the wait for an endpoint that attach started.
@@ -786,7 +786,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // The holder is pi when the handle's live pi bridge runs in it, and the
 // session is the pi session id that bridge publishes.
 func wakeOwnerSession(root, handle string) harnessSession {
-	owner, ok := amqcli.WakeOwner(root, handle)
+	owner, ok := wakelock.ReadOwner(root, handle)
 	if !ok {
 		return harnessSession{}
 	}

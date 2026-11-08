@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -335,7 +336,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				t.Cleanup(func() { wakeDialogAncestors = ancestors })
 			}
 			for _, in := range tt.hooks {
-				if wakeDialogHookVerb(in.Event) == "open" {
+				if dialogguard.ClaudeHookVerb(in.Event) == "open" {
 					// The hook writer ages markers by the real clock.
 					h.now = time.Now()
 				}
@@ -348,7 +349,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 				if err := os.WriteFile(bin, nil, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := claude.InstallCommandHooks(home, wakeDialogHooks(bin, wakeDialogHookEventsFor(claudeVersion{}, false))); err != nil {
+				if err := claude.InstallCommandHooks(home, dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEventsFor(dialogguard.ClaudeVersion{}, false))); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -405,7 +406,7 @@ func TestWakeDialogHoldByMarkerAge(t *testing.T) {
 			}
 			for _, in := range tt.hooks {
 				if err := agentDir.withFD(func(dirfd int) error {
-					if wakeDialogHookVerb(in.Event) == "open" {
+					if dialogguard.ClaudeHookVerb(in.Event) == "open" {
 						in.TranscriptPath = transcript
 						return writeWakeDialogMarker(dirfd, agentDir, in)
 					}
@@ -843,7 +844,7 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 		{"padded AM_ROOT, marker in the trimmed root", []string{"AM_ME=codex", "AM_ROOT=" + root + " "}, true, true, true},
 		{"AM_ROOT with .. through a symlink", []string{"AM_ME=codex", "AM_ROOT=" + dotted}, true, true, true},
 	} {
-		for _, hook := range wakeDialogHooks(fake, wakeDialogHookEvents) {
+		for _, hook := range dialogguard.ClaudeHooks(fake, dialogguard.ClaudeEvents) {
 			_ = os.Remove(ran)
 			_ = os.Remove(marker)
 			if tc.marker {
@@ -861,7 +862,7 @@ func TestWakeDialogHookStartsAmqOnlyForAParticipantWithWork(t *testing.T) {
 			_, err := os.Stat(ran)
 			started := err == nil
 			want := tc.shut
-			if wakeDialogHookVerb(hook.Event) != "close" {
+			if dialogguard.ClaudeHookVerb(hook.Event) != "close" {
 				want = tc.open
 			}
 			if started != want {
@@ -880,18 +881,18 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldForm := func(bin string) []hookfile.CommandHook {
-		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
+		hooks := dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEvents)
 		for i := range hooks {
 			hooks[i].Command = wakeDialogHookMarker + "'" + bin + "' --no-update-check wake dialog " +
-				wakeDialogHookVerb(hooks[i].Event) + " || true"
+				dialogguard.ClaudeHookVerb(hooks[i].Event) + " || true"
 		}
 		return hooks
 	}
 	// previousForm opens without naming the process that ran the hook.
 	previousForm := func(bin string) []hookfile.CommandHook {
-		hooks := wakeDialogHooks(bin, wakeDialogHookEvents)
+		hooks := dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEvents)
 		for i := range hooks {
-			hooks[i].Command = wakeDialogHookCommand(bin, "", wakeDialogHookVerb(hooks[i].Event))
+			hooks[i].Command = dialogguard.HookCommand(bin, "", dialogguard.ClaudeHookVerb(hooks[i].Event))
 		}
 		return hooks
 	}
@@ -902,8 +903,8 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 	}{
 		{"old form", oldForm(bin), "stale form"},
 		{"form without the host pid", previousForm(bin), "stale form on PreToolUse"},
-		{"missing binary", wakeDialogHooks(filepath.Join(t.TempDir(), "gone", "amq"), wakeDialogHookEvents), "missing amq binary"},
-		{"current", wakeDialogHooks(bin, wakeDialogHookEvents), "installed"},
+		{"missing binary", dialogguard.ClaudeHooks(filepath.Join(t.TempDir(), "gone", "amq"), dialogguard.ClaudeEvents), "missing amq binary"},
+		{"current", dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEvents), "installed"},
 	} {
 		home := t.TempDir()
 		t.Setenv("HOME", home)

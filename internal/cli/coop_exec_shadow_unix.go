@@ -72,7 +72,7 @@ func warnShadowedHarness(command, selected string, ticket *launch.ExecutionTicke
 }
 
 func launchHarnessVersion(ctx context.Context, executable, name string) (string, [3]uint64, bool) {
-	output, ok := probeHarnessVersion(ctx, executable)
+	output, ok := harness.ProbeVersion(ctx, executable)
 	if !ok {
 		return "", [3]uint64{}, false
 	}
