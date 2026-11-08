@@ -13,6 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
@@ -118,7 +119,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
 	peerBaseRoot := ""
-	var routePlan deliveryRoutePlan
+	var routePlan route.DeliveryPlan
 	targetSession := strings.TrimSpace(*sessionFlag)
 	// Inline session from @project:session takes effect only when not overridden.
 	if targetSession == "" && inlineSession != "" {
@@ -230,7 +231,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		sourceSession = fromSession
 	}
 	if targetProject != "" || targetSession != "" {
-		routePlan, err = planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
+		routePlan, err = routeWalker().PlanDelivery(sourceRoot, targetProject, targetSession, route.DeliveryOptions{
 			MirrorPeerSession: true,
 		})
 		if err != nil {
@@ -247,7 +248,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
 	if err != nil {
 		if targetProject != "" && !dirExists(peerBaseRoot) {
-			return peerDeliveryRootError(routePlan, deliveryRoot, err)
+			return route.PeerDeliveryRootError(routePlan, deliveryRoot, err)
 		}
 		return err
 	}

@@ -17,6 +17,9 @@ type Walker struct {
 	// HOME off the walk's ancestor chain sets it to keep the walk inside the
 	// isolated home.
 	Stop string
+	// ReadGlobal reads ~/.amqrc; nil means os.ReadFile. A test that proves
+	// a resolution never consults the global file sets it.
+	ReadGlobal func(path string) ([]byte, error)
 }
 
 // StopsAt reports whether a walk must stop before inspecting dir.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 type endpointRole string
@@ -28,9 +29,9 @@ type endpointQueue struct {
 // its selected config authority: that roster, plus root's own roster when the
 // selection is a shared base config.
 func endpointQueueFor(root, configFS *fsq.DeliveryRoot) endpointQueue {
-	q := endpointQueue{root: root, decls: agentDeclarations{readAgentRosterDeliveryRoot(configFS)}}
+	q := endpointQueue{root: root, decls: agentDeclarations{roster.ReadDeliveryRoot(configFS)}}
 	if configFS != root {
-		q.decls = append(q.decls, readAgentRosterDeliveryRoot(root))
+		q.decls = append(q.decls, roster.ReadDeliveryRoot(root))
 	}
 	return q
 }
@@ -51,7 +52,7 @@ func (q endpointQueue) classify(handle string) agentRegistration {
 	if err == nil {
 		rec, err = agentidentity.Parse(data, handle)
 	}
-	return classifyAgentRegistration(q.decls, handle, rec, err)
+	return roster.Classify(q.decls, handle, rec, err)
 }
 
 // checkEndpointRegistration is the one endpoint policy send and reply share.
@@ -62,12 +63,12 @@ func (q endpointQueue) classify(handle string) agentRegistration {
 // revalidation just before delivery. A queue with no roster at all declares
 // nothing and is not judged.
 func checkEndpointRegistration(q endpointQueue, role endpointRole, strict, warn bool, handles ...string) error {
-	if !q.decls.anyPresent() {
+	if !q.decls.AnyPresent() {
 		return nil
 	}
-	rosterErr := q.decls.err()
+	rosterErr := q.decls.Err()
 	for _, handle := range handles {
-		if q.decls.declares(handle) {
+		if q.decls.Declares(handle) {
 			continue
 		}
 		if rosterErr != nil && strict {
