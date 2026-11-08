@@ -410,7 +410,7 @@ Options:
 ```text
 $ amq trace --help
 Usage:
-  amq trace <message-id> [options]
+  amq trace <message-id> [--follow [--from <sender>]] [options]
 
 Join current on-disk evidence for one message without mutating the queue.
 
@@ -419,7 +419,19 @@ delivery receipts, owed receipts (consumed, receipt not written yet; stage "owed
 thread references, and durable agent-owned notification write attempts.
 Notification evidence never proves that a TUI or person saw, displayed, or submitted it.
 
+--follow reads the sender's outbox copy and searches the roots its header routes to:
+the sender's root, the sessions of its project (reply_to), or the peer projects of
+its .amqrc and their sessions (reply_project). For each recipient it reports the
+root and session, the delivery (new, cur, dlq) and the receipt (drained, dlq, owed).
+The session is the one whose root holds the receipt. A root that cannot be read is
+reported, and a recipient it might hold is unknown. --from <sender> reads
+agents/<sender>/outbox/sent/<id>.md directly and skips the scan of the root.
+
 Options:
+  -follow
+        Also find each recipient's copy and receipt in the roots the header routes to
+  -from string
+        With --follow: read only this sender's outbox copy instead of scanning the root
   -json
         Emit JSON output
   -root string
