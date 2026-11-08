@@ -586,24 +586,23 @@ func TestRunWakeWithLoopInterruptCommandDefaultsOffAndRemainsOptIn(t *testing.T)
 				t.Fatalf("deliver: %v", err)
 			}
 
-			logPath := filepath.Join(root, "inject.log")
-			injector := filepath.Join(root, "inject.sh")
-			if err := os.WriteFile(
-				injector,
-				[]byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+logPath+"\n"),
-				0o755,
-			); err != nil {
-				t.Fatalf("write injector: %v", err)
-			}
-
+			// A real injector process ran under a wall-clock timeout: under a
+			// loaded full-package run the ctrl-c call timed out, was classified
+			// failed, and only the notice reached the log. The hook records
+			// each injection in order with no process and no deadline.
+			var injected strings.Builder
 			errDone := errors.New("done")
 			args := []string{
 				"--root", root,
 				"--me", "alice",
-				"--inject-via", injector,
+				"--inject-via", writeExecutableForTest(t, "inject.sh"),
 			}
 			args = append(args, tt.interruptCmdArgs...)
 			err = runWakeWithLoop(args, func(cfg wakeConfig) error {
+				cfg.injectViaHook = func(text string) (string, error) {
+					injected.WriteString(text + "\n")
+					return "", nil
+				}
 				if err := notifyNewMessages(&cfg); err != nil {
 					t.Fatalf("notifyNewMessages: %v", err)
 				}
@@ -613,13 +612,9 @@ func TestRunWakeWithLoopInterruptCommandDefaultsOffAndRemainsOptIn(t *testing.T)
 				t.Fatalf("runWakeWithLoop error = %v, want sentinel", err)
 			}
 
-			got, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatalf("read injector log: %v", err)
-			}
 			want := tt.wantPrefix + coopWakeDoorbell + "\n"
-			if string(got) != want {
-				t.Fatalf("injector log = %q, want %q", string(got), want)
+			if got := injected.String(); got != want {
+				t.Fatalf("injected = %q, want %q", got, want)
 			}
 		})
 	}

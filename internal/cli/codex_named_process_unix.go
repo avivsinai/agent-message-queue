@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
@@ -327,8 +328,7 @@ func readCodexSessionMeta(path string, expected codexFileIdentity) (codexSession
 
 func codexProcessParents(ctx context.Context) (map[int]int, error) {
 	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=")
-	var output boundedOutput
-	output.limit = codexNamedMaxToolOutput
+	output := harness.BoundedOutput{Limit: codexNamedMaxToolOutput}
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Run(); err != nil {
@@ -430,8 +430,7 @@ func codexLinuxOpenRollouts(pid int) ([]codexOpenRollout, error) {
 
 func codexDarwinOpenRollouts(ctx context.Context, pid int) ([]codexOpenRollout, error) {
 	cmd := exec.CommandContext(ctx, "lsof", "-a", "-p", strconv.Itoa(pid), "-FnfDi")
-	var output boundedOutput
-	output.limit = codexNamedMaxToolOutput
+	output := harness.BoundedOutput{Limit: codexNamedMaxToolOutput}
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Run(); err != nil {
@@ -496,22 +495,6 @@ func fileIdentityFromInfo(info os.FileInfo) (codexFileIdentity, error) {
 		return codexFileIdentity{}, errors.New("file identity is unavailable")
 	}
 	return codexFileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
-}
-
-type boundedOutput struct {
-	bytes.Buffer
-	limit int
-}
-
-func (output *boundedOutput) Write(data []byte) (int, error) {
-	if output.Len()+len(data) > output.limit {
-		remaining := output.limit - output.Len()
-		if remaining > 0 {
-			_, _ = output.Buffer.Write(data[:remaining])
-		}
-		return remaining, errors.New("command output exceeds the safety limit")
-	}
-	return output.Buffer.Write(data)
 }
 
 type codexSidecarMessage struct {

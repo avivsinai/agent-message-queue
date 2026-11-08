@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,29 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
-// amqrc represents the .amqrc configuration file format.
-// Root is the literal queue root directory (e.g., ".agent-mail").
-// Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
-type amqrc struct {
-	Root    string            `json:"root"`
-	Project string            `json:"project,omitempty"` // explicit project name (defaults to directory basename)
-	Peers   map[string]string `json:"peers,omitempty"`   // peer name → peer's base root path
-}
+type (
+	amqrc       = route.Amqrc
+	amqrcResult = route.AmqrcFile
+)
 
 var (
 	globalAmqrcReadFile = os.ReadFile
 	gitMarkerLstat      = os.Lstat
 )
-
-// amqrcResult holds both the parsed config and the directory where it was found.
-type amqrcResult struct {
-	Config amqrc
-	Dir    string // Directory containing .amqrc (for resolving relative paths)
-	Path   string // Canonical path of the config file (shared provenance)
-}
 
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
@@ -51,8 +40,7 @@ type envOutput struct {
 	Wake          bool              `json:"wake,omitempty"`
 }
 
-// errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
-var errAmqrcNotFound = errors.New(".amqrc not found")
+var errAmqrcNotFound = route.ErrAmqrcNotFound
 
 func runEnv(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
@@ -301,9 +289,9 @@ func envProjectAndPeers(root string) (string, map[string]string) {
 		return "", peers
 	}
 
-	project := projectFromAmqrcResult(rcResult)
+	project := rcResult.Project()
 	for name, path := range rcResult.Config.Peers {
-		resolved, err := resolvePeerPath(rcResult, path)
+		resolved, err := rcResult.PeerPath(path)
 		if err != nil {
 			peers[name] = path
 			continue
@@ -450,35 +438,7 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	return root, source, me, nil
 }
 
-// loadGlobalAmqrc loads ~/.amqrc if it exists.
-func loadGlobalAmqrc() (amqrcResult, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return amqrcResult{}, errAmqrcNotFound
-	}
-	path := filepath.Join(home, ".amqrc")
-	if err := validateAmqrcProvenance(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return amqrcResult{}, errAmqrcNotFound
-		}
-		return amqrcResult{}, err
-	}
-	data, err := globalAmqrcReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return amqrcResult{}, errAmqrcNotFound
-		}
-		return amqrcResult{}, fmt.Errorf("cannot read ~/.amqrc at %s: %w", path, err)
-	}
-	if err := validateAmqrcFile(path); err != nil {
-		return amqrcResult{}, err
-	}
-	var cfg amqrc
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return amqrcResult{}, fmt.Errorf("invalid ~/.amqrc: %w", err)
-	}
-	return amqrcResult{Config: cfg, Dir: home, Path: path}, nil
-}
+func loadGlobalAmqrc() (amqrcResult, error) { return routeWalker().LoadGlobalAmqrc() }
 
 // resolveDiscoveredBaseRoot returns the first configured or detected base root.
 // The boolean is false only when no project, repo-local, or global source exists.
@@ -602,156 +562,7 @@ func gitWorktreeRootFromCWD() (string, bool) {
 	return gitWorktreeRootFrom(cwd)
 }
 
-// gitWorktreeRootFrom returns the innermost Git worktree or bare-repository
-// boundary that contains path. A nested or linked worktree is its own
-// ceiling, so a parent checkout's .amqrc or .agent-mail is not inferred.
-func gitWorktreeRootFrom(path string) (string, bool) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", false
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	path = abs
-	if resolved, resolveErr := filepath.EvalSymlinks(path); resolveErr == nil {
-		path = resolved
-	}
-	bareCandidate := ""
-	for dir := path; ; dir = filepath.Dir(dir) {
-		if atWalkBoundary(dir) {
-			if bareCandidate != "" {
-				return bareCandidate, true
-			}
-			return "", false
-		}
-		marker := filepath.Join(dir, ".git")
-		_, statErr := gitMarkerLstat(marker)
-		if statErr == nil {
-			return dir, true
-		}
-		if !os.IsNotExist(statErr) {
-			return dir, true
-		}
-		if bareCandidate == "" && bareGitRepositorySignal(dir) {
-			bareCandidate = dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			if bareCandidate != "" {
-				return bareCandidate, true
-			}
-			return "", false
-		}
-	}
-}
-
-func bareGitRepositorySignal(dir string) bool {
-	// A worktree's .git directory has the same internal shape as a bare
-	// repository, but it is not the routing boundary. Continue upward so the
-	// parent worktree's .git marker wins.
-	if filepath.Base(dir) == ".git" {
-		return false
-	}
-
-	head := bareGitHEADSignal(filepath.Join(dir, "HEAD"))
-	objects := bareGitTypedMarkerSignal(filepath.Join(dir, "objects"), true)
-	refs := bareGitReferenceStoreSignal(dir)
-
-	// Absence or a wrong marker type disproves the candidate. Once the other
-	// repository structure is present, an inspection failure remains a safety
-	// signal so permission errors cannot re-enable an implicit home route.
-	return head != bareGitMarkerAbsent &&
-		objects != bareGitMarkerAbsent &&
-		refs != bareGitMarkerAbsent
-}
-
-type bareGitMarkerSignal uint8
-
-const (
-	bareGitMarkerAbsent bareGitMarkerSignal = iota
-	bareGitMarkerPresent
-	bareGitMarkerUncertain
-)
-
-func bareGitHEADSignal(path string) bareGitMarkerSignal {
-	info, err := gitMarkerLstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return bareGitMarkerAbsent
-		}
-		return bareGitMarkerUncertain
-	}
-	if !info.Mode().IsRegular() || info.Size() > 4096 {
-		return bareGitMarkerAbsent
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return bareGitMarkerUncertain
-	}
-	head := strings.TrimSpace(string(data))
-	if strings.HasPrefix(head, "ref: ") {
-		ref := strings.TrimSpace(strings.TrimPrefix(head, "ref: "))
-		if ref != "" && !strings.ContainsAny(ref, " \t\r\n") {
-			return bareGitMarkerPresent
-		}
-		return bareGitMarkerAbsent
-	}
-	if len(head) != 40 && len(head) != 64 {
-		return bareGitMarkerAbsent
-	}
-	for _, char := range head {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
-			return bareGitMarkerAbsent
-		}
-	}
-	return bareGitMarkerPresent
-}
-
-func bareGitTypedMarkerSignal(path string, directory bool) bareGitMarkerSignal {
-	info, err := gitMarkerLstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return bareGitMarkerAbsent
-		}
-		return bareGitMarkerUncertain
-	}
-	if directory {
-		if info.IsDir() {
-			return bareGitMarkerPresent
-		}
-		return bareGitMarkerAbsent
-	}
-	if info.Mode().IsRegular() {
-		return bareGitMarkerPresent
-	}
-	return bareGitMarkerAbsent
-}
-
-func bareGitReferenceStoreSignal(dir string) bareGitMarkerSignal {
-	markers := []struct {
-		name      string
-		directory bool
-	}{
-		{name: "refs", directory: true},
-		{name: "packed-refs"},
-		{name: "reftable", directory: true},
-	}
-	uncertain := false
-	for _, marker := range markers {
-		switch bareGitTypedMarkerSignal(filepath.Join(dir, marker.name), marker.directory) {
-		case bareGitMarkerPresent:
-			return bareGitMarkerPresent
-		case bareGitMarkerUncertain:
-			uncertain = true
-		}
-	}
-	if uncertain {
-		return bareGitMarkerUncertain
-	}
-	return bareGitMarkerAbsent
-}
+func gitWorktreeRootFrom(path string) (string, bool) { return routeWalker().GitBoundary(path) }
 
 // resolveBaseRoot returns the base root directory (without session suffix).
 // Tries project .amqrc first, then explicit AMQ_GLOBAL_ROOT, then
@@ -767,87 +578,14 @@ func resolveBaseRoot() (string, error) {
 	return defaultCoopRoot, nil
 }
 
-// findAndLoadAmqrc searches for .amqrc in current and parent directories.
-// Returns errAmqrcNotFound if no .amqrc exists (non-fatal).
-// Returns other errors for invalid/unreadable .amqrc (fatal).
+// findAndLoadAmqrc searches for .amqrc in the current directory and its
+// eligible ancestors. See route.Walker.FindAmqrc.
 func findAndLoadAmqrc() (amqrcResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return amqrcResult{}, err
 	}
-	ceiling := ""
-	if top, insideGit := gitWorktreeRootFromCWD(); insideGit {
-		ceiling = top
-		if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
-			cwd = resolved
-		}
-	}
-
-	dir := cwd
-	// ~/.amqrc is a global fallback, not a project config. Loading it here
-	// mislabeled the global queue as project-local and let it shadow a repo's
-	// own .agent-mail. When HOME is itself the Git worktree root, however, the
-	// file is worktree-local authority and the inclusive Git ceiling wins.
-	for walkInspectsDir(dir, ceiling) {
-		rcPath := filepath.Join(dir, ".amqrc")
-		// Refuse configuration whose provenance cannot be established. In
-		// particular, symlinks and group/world-writable files are attacker
-		// controlled in common shared-directory setups.
-		if info, statErr := os.Lstat(rcPath); statErr == nil {
-			if err := validateAmqrcInfo(rcPath, info); err != nil {
-				return amqrcResult{}, err
-			}
-			if err := validateAmqrcFile(rcPath); err != nil {
-				return amqrcResult{}, err
-			}
-		} else if !os.IsNotExist(statErr) {
-			return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
-		}
-		data, err := os.ReadFile(rcPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				if ceiling != "" && sameCleanPath(dir, ceiling) {
-					break
-				}
-				// Keep searching in eligible parent directories.
-				parent := filepath.Dir(dir)
-				if parent == dir {
-					break
-				}
-				dir = parent
-				continue
-			}
-			// Other read errors (permissions, etc.) are fatal
-			return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, err)
-		}
-
-		// File exists, try to parse it
-		var rc amqrc
-		if err := json.Unmarshal(data, &rc); err != nil {
-			return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, err)
-		}
-		return amqrcResult{Config: rc, Dir: dir, Path: rcPath}, nil
-	}
-
-	return amqrcResult{}, errAmqrcNotFound
-}
-
-func validateAmqrcProvenance(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	return validateAmqrcInfo(path, info)
-}
-
-func validateAmqrcInfo(path string, info os.FileInfo) error {
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing untrusted .amqrc at %s: symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing untrusted .amqrc at %s: not a regular file", path)
-	}
-	return nil
+	return routeWalker().FindAmqrc(cwd)
 }
 
 // detectAgentMailDir searches for .agent-mail/ in current and parent directories.
@@ -896,62 +634,20 @@ func detectAgentMailDir() string {
 // which moves the home stop off the walk's ancestor chain and would let a walk
 // climb out of the isolated test home into the operator's real ~/.amqrc or
 // ~/.agent-mail. TestMain sets it to the isolated test home; production never
-// sets it. atWalkBoundary is its only production reader.
+// sets it. routeWalker is its only production reader.
 var walkCeilingForTests string
 
-// atWalkBoundary reports whether a cwd-ancestor walk must stop before
-// inspecting dir. Every resolution walk (findAndLoadAmqrc, detectAgentMailDir,
+// routeWalker reads walkCeilingForTests and globalAmqrcReadFile on every
+// call, so every resolution walk (findAndLoadAmqrc, detectAgentMailDir,
 // findAmqrcForRoot, findRootInParents, findProjectLaunchJSONPath,
-// gitWorktreeRootFrom) checks it. The boundary's own entries are never
-// inspected. It is false in production, where walks stop at the home
-// directory, the Git ceiling, or the filesystem root.
-func atWalkBoundary(dir string) bool {
-	stop := walkCeilingForTests
-	return stop != "" && sameCleanPath(dir, stop)
+// gitWorktreeRootFrom) sees the boundary the test currently sets.
+func routeWalker() route.Walker {
+	return route.Walker{Stop: walkCeilingForTests, ReadGlobal: globalAmqrcReadFile}
 }
 
-// walkInspectsDir reports whether a walk that stops at the home directory may
-// inspect dir. Inside a Git worktree (gitCeiling non-empty) the inclusive Git
-// ceiling replaces the home stop.
-func walkInspectsDir(dir, gitCeiling string) bool {
-	if atWalkBoundary(dir) {
-		return false
-	}
-	return gitCeiling != "" || !isHomeConfigDir(dir)
-}
+func walkInspectsDir(dir, gitCeiling string) bool { return routeWalker().Inspects(dir, gitCeiling) }
 
-func sameCleanPath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	if leftErr != nil || rightErr != nil {
-		return filepath.Clean(left) == filepath.Clean(right)
-	}
-	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
-}
-
-func isHomeConfigDir(dir string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return false
-	}
-	if dirInfo, dirErr := os.Stat(dir); dirErr == nil {
-		if homeInfo, homeErr := os.Stat(home); homeErr == nil {
-			return os.SameFile(dirInfo, homeInfo)
-		}
-	}
-	if resolvedDir, dirErr := filepath.EvalSymlinks(dir); dirErr == nil {
-		dir = resolvedDir
-	}
-	if resolvedHome, homeErr := filepath.EvalSymlinks(home); homeErr == nil {
-		home = resolvedHome
-	}
-	absDir, dirErr := filepath.Abs(dir)
-	absHome, homeErr := filepath.Abs(home)
-	if dirErr != nil || homeErr != nil {
-		return filepath.Clean(dir) == filepath.Clean(home)
-	}
-	return filepath.Clean(absDir) == filepath.Clean(absHome)
-}
+func sameCleanPath(left, right string) bool { return route.SameCleanPath(left, right) }
 
 func isValidShell(shell string) bool {
 	switch shell {
@@ -1125,111 +821,9 @@ func isSimpleString(s string) bool {
 	return true
 }
 
-// findAmqrcForRoot locates the .amqrc for the given root.
-// When root is provided (non-empty), project lookup is scoped to root's
-// ancestors. The global ~/.amqrc is eligible only when it configured that exact
-// base root or one of its direct sessions.
-func findAmqrcForRoot(root string) (amqrcResult, error) {
-	if root != "" {
-		absRoot, absErr := filepath.Abs(root)
-		if absErr != nil {
-			return amqrcResult{}, absErr
-		}
-		ceiling := ""
-		if top, insideGit := gitWorktreeRootFrom(absRoot); insideGit {
-			ceiling = top
-			if resolved, resolveErr := filepath.EvalSymlinks(absRoot); resolveErr == nil {
-				absRoot = resolved
-			}
-		}
-		dir := absRoot
-		for walkInspectsDir(dir, ceiling) {
-			rcPath := filepath.Join(dir, ".amqrc")
-			if info, statErr := os.Lstat(rcPath); statErr == nil {
-				if err := validateAmqrcInfo(rcPath, info); err != nil {
-					return amqrcResult{}, err
-				}
-				if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
-					return amqrcResult{}, validateErr
-				}
-			} else if !os.IsNotExist(statErr) {
-				// Do not walk past an unreadable or otherwise unverifiable config.
-				return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
-			}
-			data, readErr := os.ReadFile(rcPath)
-			if readErr == nil {
-				var rc amqrc
-				if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
-					return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
-				}
-				return amqrcResult{Config: rc, Dir: dir, Path: rcPath}, nil
-			}
-			if !os.IsNotExist(readErr) {
-				// Permission or I/O error — report it, don't mask it.
-				return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
-			}
-			if ceiling != "" && sameCleanPath(dir, ceiling) {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-		globalResult, globalErr := loadGlobalAmqrc()
-		if globalErr == nil && strings.TrimSpace(globalResult.Config.Root) != "" {
-			globalRoot := globalResult.Config.Root
-			if !filepath.IsAbs(globalRoot) {
-				globalRoot = filepath.Join(globalResult.Dir, globalRoot)
-			}
-			if isBaseOrSessionRoot(absRoot, globalRoot) {
-				return globalResult, nil
-			}
-		}
-		return amqrcResult{}, errAmqrcNotFound
-	}
-	return findAndLoadAmqrc()
-}
-
-func resolvePeerFromAmqrcResult(result amqrcResult, project string) (string, error) {
-	if len(result.Config.Peers) == 0 {
-		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)
-	}
-	peerPath, ok := result.Config.Peers[project]
-	if !ok {
-		known := make([]string, 0, len(result.Config.Peers))
-		for k := range result.Config.Peers {
-			known = append(known, k)
-		}
-		return "", fmt.Errorf("peer %q not found in .amqrc (known: %v)", project, known)
-	}
-	abs, err := resolvePeerPath(result, peerPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve peer path for %q: %w", project, err)
-	}
-	return abs, nil
-}
-
-func resolvePeerPath(result amqrcResult, peerPath string) (string, error) {
-	if !filepath.IsAbs(peerPath) {
-		peerPath = filepath.Join(result.Dir, peerPath)
-	}
-	return filepath.Abs(peerPath)
-}
-
-func projectFromAmqrcResult(result amqrcResult) string {
-	if result.Config.Project != "" {
-		return result.Config.Project
-	}
-	// Only infer project from directory basename for project-local .amqrc,
-	// not global ~/.amqrc (which is a queue locator, not a project identity).
-	home, _ := os.UserHomeDir()
-	if home != "" && result.Dir == home {
-		return ""
-	}
-	return filepath.Base(result.Dir)
-}
+// findAmqrcForRoot is route.Walker.FindAmqrcForRoot under the test walk
+// ceiling.
+func findAmqrcForRoot(root string) (amqrcResult, error) { return routeWalker().FindAmqrcForRoot(root) }
 
 // resolveProject returns the project name for the current .amqrc.
 // Uses the explicit "project" field if set, otherwise falls back to the
@@ -1239,5 +833,5 @@ func resolveProject(root string) string {
 	if err != nil {
 		return ""
 	}
-	return projectFromAmqrcResult(result)
+	return result.Project()
 }

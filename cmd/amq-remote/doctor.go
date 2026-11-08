@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
@@ -23,6 +22,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
@@ -416,7 +417,7 @@ func failDamagedRows(fail func(boundary, subject, detail, remedy string), stateD
 // handle whose registration still has diagnostics (an invalid identity
 // record) routes, so each diagnostic is a note.
 func doctorAMQRoute(root, handle string, fail, note func(boundary, subject, detail, remedy string)) {
-	status, diagnostics := amqcli.AgentRegistration(root, handle)
+	status, diagnostics := roster.AgentRegistration(route.Walker{}, root, handle)
 	const remedy = "run `amq-remote serve` once so it registers this handle in config.json"
 	switch {
 	case status == "unregistered":

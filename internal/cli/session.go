@@ -408,7 +408,7 @@ func sessionAgentDetails(scope agentInventoryScope) []sessionAgentInfo {
 	for _, row := range scope.Agents {
 		details = append(details, sessionAgentInfo{
 			Handle:                row.Handle,
-			agentRegistrationJSON: row.Registration.json(),
+			agentRegistrationJSON: row.Registration.JSON(),
 			MailboxStatus:         inventoryMailboxStatus(row),
 			MailboxIssues:         row.MailboxIssues,
 		})

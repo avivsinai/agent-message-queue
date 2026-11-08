@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // codexLoginConfigured uses only the documented success status. The command
@@ -28,7 +30,7 @@ func codexLoginConfigured(parent context.Context, binaryPath, wd, dir, codexHome
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, io.Discard, io.Discard
-	return runHarnessProbe(ctx, cmd)
+	return harness.RunProbe(ctx, cmd)
 }
 
 // codexFeaturesListOutput runs `codex features list` in dir within ctx. The
@@ -37,9 +39,9 @@ func codexLoginConfigured(parent context.Context, binaryPath, wd, dir, codexHome
 func codexFeaturesListOutput(ctx context.Context, cmdName, dir string) ([]byte, error) {
 	list := exec.CommandContext(ctx, cmdName, "features", "list")
 	list.Dir = dir
-	output := boundedOutput{limit: 1 << 20}
+	output := harness.BoundedOutput{Limit: 1 << 20}
 	list.Stdin, list.Stdout, list.Stderr = nil, &output, io.Discard
-	if !runHarnessProbe(ctx, list) {
+	if !harness.RunProbe(ctx, list) {
 		return nil, errors.New("did not complete")
 	}
 	return output.Bytes(), nil

@@ -9,6 +9,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 func runInit(args []string) error {
@@ -39,7 +40,7 @@ func runInit(args []string) error {
 	// implicit default keeps the shared resolver.
 	resolve := resolveRoot
 	if flagWasVisited(fs, "root") {
-		resolve = resolveCreateRoot
+		resolve = route.ResolveCreateRoot
 	}
 	root := resolve(*rootFlag)
 	if err := fsq.EnsureRootDirs(root); err != nil {

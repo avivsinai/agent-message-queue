@@ -2,6 +2,7 @@ package cli
 
 import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 func snapshotMailboxDeliveryRoot(root string, routed, ignorePin bool) (fsq.DeliveryRootIdentity, error) {
@@ -25,7 +26,7 @@ func snapshotMailboxDeliveryRoot(root string, routed, ignorePin bool) (fsq.Deliv
 // deliveryRootIdentityToken is the identity token of the directory an open
 // capability holds, or "" when it cannot be read; "" matches no directory.
 func deliveryRootIdentityToken(root *fsq.DeliveryRoot) string {
-	token, err := platformTreeIdentityToken("", root.FileInfo())
+	token, err := route.TreeIdentityTokenInfo(root.FileInfo())
 	if err != nil {
 		return ""
 	}

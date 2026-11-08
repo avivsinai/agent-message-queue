@@ -549,6 +549,10 @@ Usage:
 Drains new messages: reads, moves to cur, emits receipts.
 Designed for hook/script integration. Quiet when empty.
 
+Writes only under <root>/agents/<me>/: inbox/new to inbox/cur (claim),
+receipts/, receipts-pending/, dlq/tmp/, dlq/new/, .presence.lock, and
+presence.json. The presence refresh is best-effort: drain ignores its error.
+
 Options:
   -ignore-session-pin
         With explicit --root, ignore a conflicting AM_SESSION pin

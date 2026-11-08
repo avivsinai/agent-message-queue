@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
@@ -407,14 +408,14 @@ func replyDestination(ob *thread.Obligation) (*threadOpenDestination, error) {
 		if strings.TrimSpace(opener.ReplyProject) != opener.ReplyProject {
 			return nil, fmt.Errorf("invalid reply_project %q", opener.ReplyProject)
 		}
-		handle, session, err := parseReplyToRoute(opener.ReplyTo, true)
+		handle, session, err := route.ParseReplyTo(opener.ReplyTo, true)
 		if err != nil {
 			return nil, err
 		}
 		return &threadOpenDestination{Handle: handle, Session: session, Project: opener.ReplyProject, Source: "reply_project"}, nil
 	}
 	if opener.ReplyTo != "" {
-		handle, session, err := parseReplyToRoute(opener.ReplyTo, false)
+		handle, session, err := route.ParseReplyTo(opener.ReplyTo, false)
 		if err != nil {
 			return nil, err
 		}

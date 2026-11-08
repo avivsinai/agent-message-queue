@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
@@ -89,62 +90,11 @@ func (f *commonFlags) warnRootOverride() {
 // sessionName extracts the session name (last path component) from a resolved root path.
 func sessionName(root string) string { return filepath.Base(root) }
 
-// isDefaultCoopRoot recognizes the default root by filesystem identity when a
-// case-insensitive volume presents an alternate spelling.
-func isDefaultCoopRoot(path string) bool {
-	if filepath.Base(path) == defaultCoopRoot {
-		return true
-	}
-	exact := filepath.Join(filepath.Dir(path), defaultCoopRoot)
-	return relateTrees(path, exact) == TreeRelationSame
-}
+// classifyRoot is route.Walker.ClassifyRoot under the test walk ceiling.
+func classifyRoot(root string) string { return routeWalker().ClassifyRoot(root) }
 
-// classifyRoot returns the base root for the given root, or "" if it cannot
-// be determined. This is the single authoritative function for root classification.
-//
-// Resolution order:
-//  1. AM_BASE_ROOT, when root is a direct session below it
-//  2. If root's parent is the default root (.agent-mail), return that parent
-//  3. The nearest root-aware .amqrc, when root is the configured base or a direct session below it
-//  4. If root itself is the default root name (.agent-mail), return "" (known base)
-//  5. Otherwise, return "" (base or unknown — caller must handle)
-func classifyRoot(root string) string {
-	base, _ := classifyRootWithEvidence(root)
-	return base
-}
-
-// classifyRootWithEvidence distinguishes a known base from an unknown root,
-// while preserving classifyRoot's empty result for a base root itself.
 func classifyRootWithEvidence(root string) (base string, known bool) {
-	if strings.TrimSpace(root) == "" {
-		return "", false
-	}
-	resolvedRoot := absPath(resolveRoot(root))
-	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
-		base = absPath(resolveRoot(base))
-		if resolvedRoot == base {
-			return "", true
-		}
-		if isSessionRootUnderBase(resolvedRoot, base) {
-			return base, true
-		}
-	}
-	parent := filepath.Dir(resolvedRoot)
-	// A direct child of .agent-mail is always a session; this structural rule
-	// deliberately outranks root-local .amqrc and must not be rebased.
-	if isDefaultCoopRoot(parent) {
-		return parent, true
-	}
-	if base := configuredBaseRoot(resolvedRoot); base != "" {
-		if resolvedRoot == base {
-			return "", true
-		}
-		return base, true
-	}
-	if isDefaultCoopRoot(resolvedRoot) {
-		return "", true
-	}
-	return "", false
+	return routeWalker().ClassifyRootWithEvidence(root)
 }
 
 // classifyRootForDisplay adds a lexical sibling-session hint for diagnostics.
@@ -239,101 +189,9 @@ func defaultRoot() string {
 	return root
 }
 
-// resolveRoot resolves a root that names an existing queue. A relative root
-// not found below cwd falls back to the nearest ancestor that holds it.
-func resolveRoot(raw string) string {
-	root := resolveCreateRoot(raw)
-	if root == "" || filepath.IsAbs(root) {
-		return root
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return root
-	}
-	if found, ok := findRootInParents(cwd, root); ok {
-		return found
-	}
-	return root
-}
-
-// resolveCreateRoot resolves a root that a command creates. A relative root
-// always names a path below cwd; it never resolves to an ancestor queue.
-// The result stays relative when cwd holds no such directory yet.
-func resolveCreateRoot(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return raw
-	}
-	cleaned := filepath.Clean(raw)
-	if filepath.IsAbs(cleaned) {
-		return cleaned
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return cleaned
-	}
-	candidate := filepath.Join(cwd, cleaned)
-	if dirExists(candidate) {
-		return absPath(candidate)
-	}
-	return cleaned
-}
-
-func configuredBaseRoot(root string) string {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return ""
-	}
-	result, err := findAmqrcForRoot(root)
-	if err != nil {
-		if !errors.Is(err, errAmqrcNotFound) {
-			_ = writeStderr("warning: reading .amqrc for root %q: %v\n", root, err)
-		}
-		return ""
-	}
-	if result.Config.Root == "" {
-		return ""
-	}
-	base := result.Config.Root
-	if !filepath.IsAbs(base) {
-		base = filepath.Join(result.Dir, base)
-	}
-	base = absPath(base)
-	if isBaseOrSessionRoot(root, base) {
-		return base
-	}
-	return ""
-}
-
-// isBaseOrSessionRoot returns true when root is either the base itself or a
-// direct child session below it.
-func isBaseOrSessionRoot(root, base string) bool {
-	root = strings.TrimSpace(root)
-	base = strings.TrimSpace(base)
-	if root == "" || base == "" {
-		return false
-	}
-	root = absPath(resolveRoot(root))
-	base = absPath(resolveRoot(base))
-	return root == base || filepath.Dir(root) == base
-}
-
-// isSessionRootUnderBase returns true when root is a direct child of base
-// (i.e., root is a session directory like .agent-mail/collab under .agent-mail).
-// Returns false when root == base (the base root itself is not a session).
-func isSessionRootUnderBase(root, base string) bool {
-	root = strings.TrimSpace(root)
-	base = strings.TrimSpace(base)
-	if root == "" || base == "" {
-		return false
-	}
-	root = absPath(resolveRoot(root))
-	base = absPath(resolveRoot(base))
-	if root == base {
-		return false
-	}
-	return filepath.Dir(root) == base
-}
+// resolveRoot resolves a root that names an existing queue; a relative root
+// resolves from the current directory. See route.Walker.ResolveRoot.
+func resolveRoot(raw string) string { return routeWalker().ResolveRoot(raw) }
 
 // baseRootOf returns the base root for a queue root: the derived/configured base
 // when root is a session directory, or root itself otherwise.
@@ -445,32 +303,6 @@ func absPath(path string) string {
 		return path
 	}
 	return abs
-}
-
-func findRootInParents(startDir, relative string) (string, bool) {
-	ceiling := ""
-	if top, insideGit := gitWorktreeRootFrom(startDir); insideGit {
-		ceiling = top
-		if resolved, resolveErr := filepath.EvalSymlinks(startDir); resolveErr == nil {
-			startDir = resolved
-		}
-	}
-	dir := startDir
-	for !atWalkBoundary(dir) {
-		candidate := filepath.Join(dir, relative)
-		if dirExists(candidate) {
-			return absPath(candidate), true
-		}
-		if ceiling != "" && sameCleanPath(dir, ceiling) {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", false
 }
 
 func defaultMe() string {
@@ -624,16 +456,7 @@ func validateKnownHandlesFromAgents(agents []string, loadErr error, handles ...s
 	return errors.New(msg)
 }
 
-func normalizeHandle(raw string) (string, error) {
-	handle := strings.TrimSpace(raw)
-	if strings.ContainsAny(handle, "/\\") {
-		return "", fmt.Errorf("invalid handle (slashes not allowed): %s", handle)
-	}
-	if err := fsq.ValidateHandle(handle); err != nil {
-		return "", err
-	}
-	return handle, nil
-}
+func normalizeHandle(raw string) (string, error) { return route.NormalizeHandle(raw) }
 
 // validateSessionName checks that a session name uses safe characters for
 // directory names. Allows lowercase letters, digits, hyphens, and underscores
