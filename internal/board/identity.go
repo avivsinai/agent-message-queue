@@ -1,6 +1,7 @@
 package board
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,8 +71,47 @@ func (s Snapshot) projectionSnapshot() Snapshot {
 	for id, task := range s.Tasks {
 		copy.Tasks[id] = task
 	}
+	copy.Facts = make(map[string]AliasFact, len(s.Facts))
+	for alias, fact := range s.Facts {
+		fact.ObservedAt = s.checkedAt(fact)
+		copy.Facts[alias] = fact
+	}
 	copy.hydrateAuthorities()
 	return copy
+}
+
+// checkedAt is when fact's source last reported it. A fact that is not
+// missing from a complete scope of its source's latest result is in that
+// result; any other fact keeps the time it was last stamped.
+func (s Snapshot) checkedAt(fact AliasFact) time.Time {
+	if fact.Missing {
+		return fact.ObservedAt
+	}
+	for _, nr := range s.Input.Results {
+		if nr.Name != fact.Fact.Source {
+			continue
+		}
+		complete := nr.Result.NativeScopes[fact.Fact.Namespace].Complete
+		if nr.Name == "beads" {
+			complete = nr.Result.Namespace == fact.Fact.Namespace && beadsComplete(nr.Result)
+		}
+		if complete && nr.Result.ObservedAt.After(fact.ObservedAt) {
+			return nr.Result.ObservedAt
+		}
+	}
+	return fact.ObservedAt
+}
+
+// beadsComplete reports whether a beads result reports every bead of its store.
+func beadsComplete(r Result) bool {
+	return r.Status == StatusOK && !r.Coverage.Partial()
+}
+
+// sameItem reports whether a and b publish the same fact.
+func sameItem(a, b Item) bool {
+	x, errA := json.Marshal(a)
+	y, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(x, y)
 }
 func (s Snapshot) redirects() map[string]string {
 	out := map[string]string{}

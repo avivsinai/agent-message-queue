@@ -1024,7 +1024,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}
 			scopes := nr.Result.NativeScopes
 			if nr.Name == "beads" {
-				scopes = map[string]NativeScope{a.BeadsStore: {Complete: nr.Result.Status == StatusOK && !nr.Result.Coverage.Partial()}}
+				scopes = map[string]NativeScope{a.BeadsStore: {Complete: beadsComplete(nr.Result)}}
 			}
 			present := map[string]bool{}
 			for _, it := range nr.Result.Items {
@@ -1060,23 +1060,34 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 					return err
 				}
 				state.Aliases[alias] = canonical
-				old := state.Facts[alias]
+				// An unchanged fact keeps its time; a fact in a complete
+				// scope reads as checked with its source (checkedAt).
+				old, seen := state.Facts[alias]
+				if seen && !old.Missing && sameItem(old.Fact, it) {
+					continue
+				}
 				if !nr.Result.ObservedAt.Before(old.ObservedAt) {
 					state.Facts[alias] = AliasFact{Alias: alias, Fact: it, ObservedAt: nr.Result.ObservedAt}
 				}
-
 			}
+			// A complete scope marks what it no longer reports missing. An
+			// incomplete scope stamps what it reported, since checkedAt
+			// cannot tell its reported facts from the rest.
 			for namespace, scope := range scopes {
-				if !scope.Complete {
-					continue
-				}
 				for alias, fact := range state.Facts {
-					if fact.Fact.Source == nr.Name && fact.Fact.Namespace == namespace && !present[alias] {
-						fact.Missing = true
-						state.Facts[alias] = fact
+					if fact.Fact.Source != nr.Name || fact.Fact.Namespace != namespace {
+						continue
 					}
+					switch {
+					case scope.Complete && !present[alias]:
+						fact.Missing = true
+					case !scope.Complete && present[alias] && fact.ObservedAt.Before(nr.Result.ObservedAt):
+						fact.ObservedAt = nr.Result.ObservedAt
+					default:
+						continue
+					}
+					state.Facts[alias] = fact
 				}
-
 			}
 		}
 		return nil
