@@ -68,16 +68,17 @@ type Plan struct {
 }
 
 type AgentPlan struct {
-	Handle          string            `json:"handle"`
-	Argv            []string          `json:"argv"`
-	EnvOverlay      map[string]string `json:"env_overlay,omitempty"`
-	Cwd             string            `json:"cwd"`
-	AdapterMode     AdapterMode       `json:"adapter_mode"`
-	ResumePolicy    ResumePolicy      `json:"resume_policy"`
-	LaunchNonce     string            `json:"launch_nonce,omitempty"`
-	ConversationID  string            `json:"conversation_id,omitempty"`
-	DynamicArgv     []DynamicArg      `json:"dynamic_argv,omitempty"`
-	PreSpawnAcquire bool              `json:"pre_spawn_acquire,omitempty"`
+	Handle             string            `json:"handle"`
+	Argv               []string          `json:"argv"`
+	EnvOverlay         map[string]string `json:"env_overlay,omitempty"`
+	Cwd                string            `json:"cwd"`
+	AdapterMode        AdapterMode       `json:"adapter_mode"`
+	ResumePolicy       ResumePolicy      `json:"resume_policy"`
+	LaunchNonce        string            `json:"launch_nonce,omitempty"`
+	ConversationID     string            `json:"conversation_id,omitempty"`
+	DynamicArgv        []DynamicArg      `json:"dynamic_argv,omitempty"`
+	PreSpawnAcquire    bool              `json:"pre_spawn_acquire,omitempty"`
+	TerminalOnlyReason string            `json:"terminal_only_reason,omitempty"`
 	// Execution is the normalized coop-exec wrapper policy. Keeping it in the
 	// plan makes journal recovery lossless before the wrapper consumes it.
 	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`

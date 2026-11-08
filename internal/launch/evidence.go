@@ -218,6 +218,12 @@ func persistProviderCaptureEvidenceWithContext(root *fsq.DeliveryRoot, lease *Le
 			return nil, fmt.Errorf("provider capture evidence is not persistable")
 		}
 		switch item.source {
+		case CodexDaemonThreadV1:
+			payload, err := decodeCodexDaemonPayload(item.payload)
+			if err != nil || payload.Handle != handle || item.handle != handle || payload.LaunchNonce != item.launchNonce ||
+				payload.ConversationID != item.conversationID || payload.ProviderVersion != item.providerVersion {
+				return nil, fmt.Errorf("codex daemon capture evidence is not persistable")
+			}
 		case CodexNotifyV1:
 			payload, err := decodeCodexNotifyPayload(item.payload)
 			if err != nil || payload.Handle != handle || item.handle != handle || payload.LaunchNonce != item.launchNonce ||
@@ -308,6 +314,21 @@ func findProviderCaptureEvidence(root *fsq.DeliveryRoot, provider, handle, nonce
 				verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
 			}
 		case CodexProvider:
+			if envelope.Source == CodexDaemonThreadV1 {
+				payload, err := decodeCodexDaemonPayload(record.Payload)
+				if err != nil {
+					return CaptureEvidence{}, "", false, err
+				}
+				if payload.Handle != handle || payload.LaunchNonce != nonce || payload.ProviderVersion != providerVersion {
+					continue
+				}
+				candidate = CaptureEvidence{
+					source: CodexDaemonThreadV1, provider: CodexProvider, providerVersion: payload.ProviderVersion,
+					launchNonce: payload.LaunchNonce, handle: payload.Handle, conversationID: payload.ConversationID,
+					verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
+				}
+				break
+			}
 			if envelope.Source != CodexNotifyV1 {
 				continue
 			}
@@ -333,10 +354,6 @@ func findProviderCaptureEvidence(root *fsq.DeliveryRoot, provider, handle, nonce
 		foundID = id
 	}
 	return found, foundID, foundID != "", nil
-}
-
-func findCursorCaptureEvidence(root *fsq.DeliveryRoot, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
-	return findProviderCaptureEvidence(root, CursorProvider, handle, nonce, providerVersion)
 }
 
 func CollectEvidenceRefs(root *fsq.DeliveryRoot, handles []string) ([]EvidenceRef, error) {

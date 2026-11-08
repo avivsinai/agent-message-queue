@@ -448,7 +448,7 @@ Use "amq presence <subcommand> --help" for details.
 ```text
 $ amq cleanup --help
 Usage:
-  amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
+  amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--launch-execution <handle> --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
 
 --history-older-than and --history-max-size remove history from every agent
 mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),
@@ -489,8 +489,12 @@ Options:
         Remove the oldest read messages, sent copies, receipts and remote files until each mailbox's history fits this size (e.g. 100MB)
   -history-older-than string
         Remove read messages, sent copies, receipts and remote files older than this duration (e.g. 720h)
+  -ignore-session-pin
+        With --launch-execution and explicit --root, ignore a conflicting session pin
   -json
         Emit JSON output
+  -launch-execution string
+        Abandon one exact incomplete native Codex execution
   -launch-journal
         Remove one exact stuck managed-launch recovery journal
   -mailbox string

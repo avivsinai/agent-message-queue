@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -521,5 +522,101 @@ func TestApplyV1RunnableParticipantsRequireReprepare(t *testing.T) {
 	}
 	if afterRoster := prepareTreeSnapshot(t, filepath.Join(fixture.sessionRoot, "agents")); afterRoster != beforeRoster {
 		t.Fatalf("v1 reprepare refusal changed durable roster: before=%s after=%s", beforeRoster, afterRoster)
+	}
+}
+
+type changingCodexPlanAdapter struct {
+	*CodexAdapter
+	native *bool
+	onPlan func(AgentPlan)
+}
+
+func (a changingCodexPlanAdapter) Capabilities(context.Context) AdapterCapabilities {
+	return AdapterCapabilities{Provider: CodexProvider, Mode: AdapterModeCapture, Available: true,
+		ProviderVersion: CodexDaemonVersion, Fresh: true, Resume: true, Capture: true, PreSpawnAcquire: true}
+}
+
+func (a changingCodexPlanAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
+	if *a.native {
+		return a.PlanFreshDaemon(request)
+	}
+	plan, err := a.CodexAdapter.PlanFresh(request)
+	if err == nil && a.onPlan != nil {
+		a.onPlan(plan)
+	}
+	return plan, err
+}
+
+// Claude F4: a daemon transition correctly invalidates authorization, but
+// Apply reported only a digest mismatch without an explanation or next action.
+func TestApplyExplainsChangedCodexDaemonPlan(t *testing.T) {
+	for _, phase := range []string{"before_apply", "before_reconcile", "before_reconcile_cached_trust"} {
+		t.Run(phase, func(t *testing.T) {
+			request, dependencies, backend := committedRunnableApplyFixture(t)
+			_, executable := testExecutable(t, CodexProvider)
+			participant := &request.Prepare.Participants[0]
+			participant.Handle, participant.Provider, participant.Executable = "codex", CodexProvider, executable
+			native := true
+			var onPlan func(AgentPlan)
+			var prepared PrepareResult
+			var err error
+			dependencies.AdapterFor = func(provider, executable string) HarnessAdapter {
+				return changingCodexPlanAdapter{CodexAdapter: NewCodexAdapter(executable), native: &native, onPlan: func(plan AgentPlan) {
+					if onPlan != nil {
+						onPlan(plan)
+					}
+				}}
+			}
+			prepared, err = Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.SubjectDigest, request.Decisions = prepared.SubjectDigest, nil
+			for _, action := range prepared.RequiredActions {
+				request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+			}
+			if phase == "before_apply" {
+				native = false
+			} else {
+				beforeApplyReconcileForTest = func() {
+					native = false
+					if phase == "before_reconcile_cached_trust" {
+						// Pro finding: alternate cached trust must never replace
+						// this Apply's exact authorized subject.
+						onPlan = func(plan AgentPlan) {
+							plan.Execution = clonePrepareExecutionOptions(&prepared.Participants[0].Execution)
+							identity, err := fsq.SnapshotDeliveryRoot(request.Prepare.Target.SessionRoot)
+							if err != nil {
+								t.Fatal(err)
+							}
+							root, err := fsq.OpenDeliveryRoot(request.Prepare.Target.SessionRoot, identity)
+							if err != nil {
+								t.Fatal(err)
+							}
+							defer func() { _ = root.Close() }()
+							digest, err := ExecutionTrustDigestWithAuthority(Plan{Version: PlanVersion, Agents: []AgentPlan{plan}}, request.Prepare.Target.Session, root, prepared.BaseAuthorityDigest)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := dependencies.TrustStore.Replace(TrustRecord{SemanticDigest: digest}); err != nil {
+								t.Fatal(err)
+							}
+							onPlan = nil
+						}
+					}
+				}
+				t.Cleanup(func() { beforeApplyReconcileForTest = nil })
+			}
+			result, err := Apply(context.Background(), request, dependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != "action_required" || !strings.Contains(result.FailureDetail, "Codex daemon") || !strings.Contains(result.FailureDetail, "prepare the launch again") || backend.creates != 0 {
+				t.Fatalf("changed daemon Apply = %#v; creates=%d", result, backend.creates)
+			}
+			if strings.HasPrefix(phase, "before_reconcile") && !strings.Contains(result.FailureDetail, "daemon -> embedded") {
+				t.Fatalf("missing transition: %s", result.FailureDetail)
+			}
+		})
 	}
 }

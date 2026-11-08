@@ -1,4 +1,4 @@
-package cli
+package codexlaunch
 
 import (
 	"bytes"
@@ -11,22 +11,22 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// codexTrustsDir reports, read only, whether Codex already trusts dir the way
+// TrustsDir reports, read only, whether Codex already trusts dir the way
 // codex-cli 0.160 decides it (config/src/config_toml.rs get_active_project,
 // config/src/project_trust.rs): the first [projects] key that matches the
 // directory, canonical spelling before the original, then the git trust root
 // the same way, selects the project, and only trust_level "trusted" counts.
 // Only the user config.toml is read; trust that Codex finds in another layer
 // reads as untrusted, which keeps the original launch path.
-func codexTrustsDir(codexHome, dir string) bool {
-	level, recorded, err := codexProjectTrust(codexHome, dir)
+func TrustsDir(codexHome, dir string) bool {
+	level, recorded, err := ProjectTrust(codexHome, dir)
 	return err == nil && recorded && level == "trusted"
 }
 
-// codexProjectTrust returns the trust_level of the [projects] entry that
-// selects dir (see codexTrustsDir), and whether one does. err reports a
+// ProjectTrust returns the trust_level of the [projects] entry that
+// selects dir (see TrustsDir), and whether one does. err reports a
 // config.toml that cannot be read or parsed; a missing file selects none.
-func codexProjectTrust(codexHome, dir string) (level string, recorded bool, err error) {
+func ProjectTrust(codexHome, dir string) (level string, recorded bool, err error) {
 	raw, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", false, nil
@@ -42,9 +42,9 @@ func codexProjectTrust(codexHome, dir string) (level string, recorded bool, err 
 	if err := toml.Unmarshal(raw, &config); err != nil {
 		return "", false, err
 	}
-	keys := codexTrustKeys(dir)
+	keys := TrustKeys(dir)
 	if root := codexGitTrustRoot(dir); root != "" {
-		keys = append(keys, codexTrustKeys(root)...)
+		keys = append(keys, TrustKeys(root)...)
 	}
 	for _, key := range keys {
 		if project, ok := config.Projects[key]; ok {
@@ -54,7 +54,8 @@ func codexProjectTrust(codexHome, dir string) (level string, recorded bool, err 
 	return "", false, nil
 }
 
-func codexTrustKeys(path string) []string {
+// TrustKeys orders the canonical and original spellings as Codex does.
+func TrustKeys(path string) []string {
 	if canonical, err := filepath.EvalSymlinks(path); err == nil && canonical != path {
 		return []string{canonical, path}
 	}
@@ -72,7 +73,7 @@ func codexGitTrustRoot(cwd string) string {
 	}
 	var root string
 	for {
-		candidate := codexNearestGitAncestor(base)
+		candidate := NearestGitAncestor(base)
 		if candidate == "" {
 			return ""
 		}
@@ -151,7 +152,8 @@ func codexGitTrustRoot(cwd string) string {
 	return mainRoot
 }
 
-func codexNearestGitAncestor(dir string) string {
+// NearestGitAncestor finds the closest directory carrying Git metadata.
+func NearestGitAncestor(dir string) string {
 	for {
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return dir

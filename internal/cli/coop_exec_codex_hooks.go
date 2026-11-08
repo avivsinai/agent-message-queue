@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/usagetransport/command"
 	"github.com/avivsinai/agent-message-queue/usage/edge"
@@ -161,31 +162,7 @@ func runCodexStartupProbe(ctx context.Context, plan codexStartupPlan) codexStart
 // project, and the seat's overrides). ok is false when the result cannot
 // be read; value is "" when the setting is unset.
 func codexConfigResumeCwd(result []byte) (value string, ok bool) {
-	if result == nil {
-		return "", false
-	}
-	var read struct {
-		Config map[string]json.RawMessage `json:"config"`
-	}
-	if json.Unmarshal(result, &read) != nil || read.Config == nil {
-		return "", false
-	}
-	tui := bytes.TrimSpace(read.Config["tui"])
-	if len(tui) == 0 || string(tui) == "null" {
-		return "", true
-	}
-	var table map[string]json.RawMessage
-	if json.Unmarshal(tui, &table) != nil {
-		return "", false
-	}
-	mode := bytes.TrimSpace(table["resume_cwd"])
-	if len(mode) == 0 || string(mode) == "null" {
-		return "", true
-	}
-	if json.Unmarshal(mode, &value) != nil {
-		return "", false
-	}
-	return value, true
+	return codexlaunch.ConfigResumeCwd(result)
 }
 
 // codexEmbeddedStartupState asks hooks/list, configRequirements/read and
@@ -321,13 +298,7 @@ func codexStartupProbeReplies(out []byte) (state codex.StartupState, done bool) 
 // (config/src/config_layer_source.rs:22-27). Absent, true, or any other
 // value proves nothing.
 func codexConfigUpdateCheckOff(result []byte) bool {
-	var read struct {
-		Config map[string]json.RawMessage `json:"config"`
-	}
-	if json.Unmarshal(result, &read) != nil {
-		return false
-	}
-	return string(bytes.TrimSpace(read.Config[codexUpdateCheckKey])) == "false"
+	return codexlaunch.ConfigUpdateCheckOff(result)
 }
 
 // codexRequirementsAllowNoUpdateCheck reports whether a
@@ -339,15 +310,7 @@ func codexConfigUpdateCheckOff(result []byte) bool {
 // request_processors/config_processor.rs:596). true, or a reply it cannot
 // read, proves nothing.
 func codexRequirementsAllowNoUpdateCheck(result []byte) bool {
-	var read struct {
-		Requirements *struct {
-			CheckForUpdateOnStartup *bool `json:"checkForUpdateOnStartup"`
-		} `json:"requirements"`
-	}
-	if json.Unmarshal(result, &read) != nil {
-		return false
-	}
-	return read.Requirements == nil || read.Requirements.CheckForUpdateOnStartup == nil || !*read.Requirements.CheckForUpdateOnStartup
+	return codexlaunch.RequirementsAllowNoUpdateCheck(result)
 }
 
 // codexHooksListClear reports whether a hooks/list result shows no hook to
@@ -358,29 +321,5 @@ func codexRequirementsAllowNoUpdateCheck(result []byte) bool {
 // (app-server-protocol/src/protocol/v2/hook.rs:62-64); a missing status or
 // any other value proves nothing.
 func codexHooksListClear(result []byte, dir string) bool {
-	type entry struct {
-		Cwd   string `json:"cwd"`
-		Hooks *[]struct {
-			TrustStatus string `json:"trustStatus"`
-		} `json:"hooks"`
-	}
-	var list struct {
-		Data []entry `json:"data"`
-	}
-	if json.Unmarshal(result, &list) != nil {
-		return false
-	}
-	at := slices.IndexFunc(list.Data, func(e entry) bool { return e.Cwd == dir })
-	if at < 0 && len(list.Data) == 1 {
-		at = 0
-	}
-	if at < 0 || list.Data[at].Hooks == nil {
-		return false
-	}
-	for _, hook := range *list.Data[at].Hooks {
-		if hook.TrustStatus != "trusted" && hook.TrustStatus != "managed" {
-			return false
-		}
-	}
-	return true
+	return codexlaunch.HooksListClear(result, dir)
 }

@@ -216,7 +216,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	case <-c.done:
 		return nil, fmt.Errorf("relay closed before its AUTH challenge: %w", c.err())
 	case <-actx.Done():
-		c.Close()
+		c.abort()
 		return nil, errors.New("relay sent no AUTH challenge in time")
 	}
 	evt := nostr.Event{
@@ -225,22 +225,22 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		Tags:      nostr.Tags{{"relay", cfg.URL}, {"challenge", ch}, nostr.Tag(cfg.AuthTag)},
 	}
 	if err := Sign(&evt, cfg.Secret); err != nil {
-		c.Close()
+		c.abort()
 		return nil, fmt.Errorf("sign AUTH: %w", err)
 	}
 	res, err := c.roundTrip(actx, evt, nostr.AuthEnvelope{Event: evt})
 	if err != nil {
-		c.Close()
+		c.abort()
 		return nil, fmt.Errorf("relay AUTH: %w", err)
 	}
 	if !res.ok {
-		c.Close()
+		c.abort()
 		return nil, &RemoteError{Kind: ErrAuthRefused, Reason: res.reason}
 	}
 	if cfg.expiredAt(cfg.Now()) {
 		// A stale completion: the relay accepted a grant that has since run
 		// out, so the connection is never handed out.
-		c.Close()
+		c.abort()
 		return nil, ErrGrantExpired
 	}
 	return c, nil
@@ -277,6 +277,11 @@ func (c *Conn) Err() error { return c.err() }
 
 // Close ends the connection.
 func (c *Conn) Close() { _ = c.ws.Close(websocket.StatusNormalClosure, "") }
+
+// abort ends a connection that Connect will not hand out, without a close
+// handshake: a relay that stalled during AUTH would hold a handshake past
+// the caller's deadline.
+func (c *Conn) abort() { _ = c.ws.CloseNow() }
 
 // Expired reports whether the connection's grant has passed its not-after.
 func (c *Conn) Expired() bool {

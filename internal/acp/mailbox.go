@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 )
 
 // mailboxSender is the AMQ handle Buzz prompts come from in a mailbox
@@ -73,6 +75,7 @@ type mailboxOutcome struct {
 // the handle notices the message (a wake, a built-in consumer, monitor, or
 // its next drain) is the handle owner's business, not this bridge's.
 func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, turn *turnState, emit func(any) error) (any, *rpcError) {
+	nostrID := lookupEventID(eventID, text)
 	if eventID == "" {
 		key, err := s.localEvent(b)
 		if err != nil {
@@ -80,7 +83,13 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		}
 		eventID = key
 	}
-	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
+	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, nostrID: nostrID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
+	// The relay round trip runs once per turn, before the cancel and budget
+	// checks and the publish lock, so nothing slow runs between the last
+	// check and the publish.
+	if nostrID != "" {
+		r.signed = signedEventContext(nostrID, turn.channel)
+	}
 	s.mu.Lock()
 	threadID := ""
 	if session, ok := s.sessions[sessionID]; ok {
@@ -543,7 +552,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
-		err = publishOnce(b, c.Thread, c.MessageID, r.eventID, created, text)
+		err = publishOnce(b, c.Thread, c.MessageID, r.nostrID, r.signed, created, text)
 		var refused *notDeliveredError
 		if !errors.As(err, &refused) {
 			return err
@@ -607,9 +616,10 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 }
 
 // publishOnce delivers a binding's Buzz prompt to the handle through
-// PublishMailboxPrompt. A non-empty eventID labels the message
-// nostr:<eventID>, so the handle can fetch the DM event from the relay.
-func publishOnce(b binding.Binding, threadID, id, eventID string, created time.Time, text string) error {
+// PublishMailboxPrompt. A Nostr nostrID labels the message nostr:<nostrID>,
+// so the handle can fetch the DM event from the relay, and signed, the
+// verified event's header context, goes into the header unchanged.
+func publishOnce(b binding.Binding, threadID, id, nostrID string, signed map[string]any, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
 		return err
@@ -620,8 +630,8 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, created time.T
 	}
 	defer func() { _ = root.Close() }()
 	labels := []string{"acp", "buzz"}
-	if eventID != "" && !isLocalEvent(eventID) {
-		labels = append(labels, "nostr:"+eventID)
+	if nostrID != "" {
+		labels = append(labels, "nostr:"+nostrID)
 	}
 	return PublishMailboxPrompt(root, id, created, MailboxPrompt{
 		To:      b.Handle,
@@ -629,10 +639,28 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, created time.T
 		Thread:  threadID,
 		Subject: mailboxSubject,
 		Labels:  labels,
+		Context: signed,
 		Body: strings.TrimRight(text, "\n") + "\n\n" +
 			"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
 			"A reply with `--kind status` shows as progress; any other reply is the final answer.",
 	})
+}
+
+// signedEventContext is the header context {"buzz": {"event": <event>}}
+// holding the signed fields of event eventID, re-encoded, present only when
+// buzzevent.Fetch accepts it for channel. Any failure is
+// logged and gives nil: the prompt is then delivered unverified, never held.
+func signedEventContext(eventID, channel string) map[string]any {
+	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, eventID, channel)
+	var raw []byte
+	if err == nil {
+		raw, err = evt.MarshalJSON()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "amq-acp: event %s is delivered without its signed event: %v\n", eventID, err)
+		return nil
+	}
+	return map[string]any{"buzz": map[string]any{"event": json.RawMessage(raw)}}
 }
 
 // MailboxPrompt is one prompt for an AMQ handle: the handle it goes to, the
@@ -644,7 +672,9 @@ type MailboxPrompt struct {
 	Thread  string   `json:"thread"`
 	Subject string   `json:"subject"`
 	Labels  []string `json:"labels,omitempty"`
-	Body    string   `json:"body"`
+	// Context is the header's context object, written unchanged.
+	Context map[string]any `json:"context,omitempty"`
+	Body    string         `json:"body"`
 }
 
 // PublishMailboxPrompt delivers p to p.To as message id unless that message
@@ -685,6 +715,7 @@ func PublishMailboxPrompt(root *fsq.DeliveryRoot, id string, created time.Time, 
 			Created:  created.UTC().Format(time.RFC3339Nano),
 			Priority: format.PriorityNormal,
 			Labels:   p.Labels,
+			Context:  p.Context,
 		},
 		Body: p.Body,
 	}

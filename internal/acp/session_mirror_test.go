@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -295,6 +296,34 @@ func toolBlock(name string) map[string]any {
 }
 
 func textBlock(text string) map[string]any { return map[string]any{"type": "text", "text": text} }
+
+// Regression (idle profile of a machine agent): every 2 s tick opened and
+// read each live session's transcript even when it had not changed. An
+// unchanged transcript is not read again; a grown one is.
+func TestMirrorReadsATranscriptOnlyWhenItChanged(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a file mode that denies its owner a read")
+	}
+	f := newMirrorFixture(t)
+	if got := f.tick(1); len(got) != 0 {
+		t.Fatalf("sent %q; want nothing", got)
+	}
+	// A read now fails and posts the unavailable note, so a tick that
+	// sends nothing read nothing. The mode change keeps size and mtime.
+	if err := os.Chmod(f.transcript, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.tick(3); len(got) != 0 {
+		t.Fatalf("the unchanged transcript was read again: sent %q", got)
+	}
+	if err := os.Chmod(f.transcript, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
+	if got, want := f.tick(5), []string{"post: ▶ ship\n✓ 1s\nShipped."}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
 
 // Review of the mirror: a turn a Stop hook continued was no longer the live
 // turn, so its post never showed it running again.

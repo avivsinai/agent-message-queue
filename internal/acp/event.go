@@ -120,3 +120,24 @@ func rememberEvent(cfg Config, rec eventRecord) error {
 	}
 	return err
 }
+
+// lookupEventID is the id of the Buzz event that triggered a prompt, to
+// fetch it from the relay by: the Nostr id buzz-acp named in the prompt's
+// _meta (eventID), else the Event ID of the prompt's one <buzz-event> block,
+// which is the triggering event buzz-acp writes into the prompt text. It is
+// a lookup key only: buzzevent.Fetch proves the event. "" when the prompt
+// names none.
+func lookupEventID(eventID, prompt string) string {
+	if nostrEventIDRe.MatchString(eventID) {
+		return eventID
+	}
+	for line := range strings.SplitSeq(buzzEvent(prompt), "\n") {
+		if id, ok := strings.CutPrefix(line, "Event ID: "); ok {
+			if id = strings.TrimSpace(id); nostrEventIDRe.MatchString(id) {
+				return id
+			}
+			return ""
+		}
+	}
+	return ""
+}
