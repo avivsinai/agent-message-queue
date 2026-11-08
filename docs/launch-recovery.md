@@ -137,11 +137,14 @@ Prepare; Apply does not execute a different plan under the earlier authorization
 
 ## Native resume settings
 
-On Codex 0.167.0, managed native resume retains `--model <value>`,
-`--sandbox read-only|workspace-write`, `--ask-for-approval on-request`, and
-`--no-alt-screen`. The existing managed argument grammar and values remain the
-admission boundary. Settings keep their order in the execution ticket, followed
-by its acquired thread ID and any initial prompt.
+The Codex 0.167.0 TUI forwards `--model <value>`,
+`--sandbox read-only|workspace-write`, and `--ask-for-approval on-request` on
+resume, and retains `--no-alt-screen` for terminal presentation. S3 live readback,
+after the native-launch changes are merged and released, must verify that the
+daemon applies the forwarded settings. Native admission fixes these sandbox and
+approval values independently of the embedded argument grammar. Settings keep
+their order in the execution ticket, followed by its acquired thread ID and any
+initial prompt.
 
 Codex selects embedded execution for command-line configuration overrides such
 as `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and for

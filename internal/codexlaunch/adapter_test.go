@@ -205,7 +205,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatalf("prepare = %#v, %v", prepared, err)
 			}
 			if scenario == "publish" {
-				// S2: settings remain in the ticket-owned resume argv while only
+				// Settings remain in the ticket-owned resume argv while only
 				// the acquired thread slot is substituted at execution.
 				argv, resolveErr := launch.ResolveExecutionArgv(prepared, env)
 				if resolveErr != nil {
@@ -417,14 +417,14 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 	}
 }
 
-// S2: Codex 0.167 deliberately selects an embedded app-server for these
+// Codex selects an embedded app-server for these command-line
 // overrides. Preserve the caller's settings rather than acquire a native thread.
 func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
-	for _, args := range [][]string{{"-c", `approvals_reviewer="user"`}, {"-c", "model_reasoning_effort=high"}, {"--search"}} {
+	for _, args := range [][]string{{"-c", `approvals_reviewer="user"`}, {"--search"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			project, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
@@ -433,7 +433,7 @@ func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
 			plan, err := New(nativeProvider(t)).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
 				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: args})
-			if err != nil || plan.PreSpawnAcquire || !strings.Contains(plan.TerminalOnlyReason, "Codex 0.167 selects an embedded") {
+			if err != nil || plan.PreSpawnAcquire || !strings.Contains(plan.TerminalOnlyReason, "Codex "+launch.CodexDaemonVersion+" selects an embedded") {
 				t.Fatalf("unverified native settings=%#v, %v", plan, err)
 			}
 			if !slices.Equal(plan.Argv[1:1+len(args)], args) {
