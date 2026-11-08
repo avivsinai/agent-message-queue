@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.135.0](https://github.com/avivsinai/agent-message-queue/compare/v0.134.0...v0.135.0) (2026-11-08)
+
+
+### Bug Fixes
+
+* **fsq:** state files refuse a symlinked directory below their root ([#1382](https://github.com/avivsinai/agent-message-queue/issues/1382)) ([b3a4656](https://github.com/avivsinai/agent-message-queue/commit/b3a4656e2a14db5f5806ca98d13d1bbc088f32ab))
+* **state:** every AMQ state file refuses a symlinked directory ([#1383](https://github.com/avivsinai/agent-message-queue/issues/1383)) ([4fca827](https://github.com/avivsinai/agent-message-queue/commit/4fca827373dc66a4bdf04c61fe07b8caf7e05857))
+
 ## [0.134.0](https://github.com/avivsinai/agent-message-queue/compare/v0.133.0...v0.134.0) (2026-11-07)
 
 
