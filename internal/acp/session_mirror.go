@@ -210,13 +210,13 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
 		// The snapshot only lets a live binding be skipped: whether it is
 		// gone or ended is decided from a fresh read, since a session can
 		// attach again while an earlier name's relay call runs.
-		if b, ok := snap.binding(name); ok && live(b) {
+		if b, ok := snap.binding(name); ok && s.live(b) {
 			continue
 		}
 		b, err := binding.ReadNamed(name)
 		switch {
 		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
-		case err == nil && !live(b):
+		case err == nil && !s.live(b):
 		default:
 			continue
 		}
@@ -904,7 +904,7 @@ func (s *Server) mirrorSwitch(channel, prompt string) (name string, on bool, ok 
 	if !found {
 		return "", false, false
 	}
-	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !live(b) {
+	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
 		return "", false, false
 	}
 	return r.Name, on, true

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -196,6 +197,9 @@ type Server struct {
 	// view is the bindings and channel records the machine, dialog and
 	// mirror workers share.
 	view sessionView
+	// appServers judges Codex app-server threads for the current machine
+	// tick, or is nil before the first one and in a worker that runs none.
+	appServers atomic.Pointer[appServerJudge]
 }
 
 // NewServer builds a server bound to one already authenticated routing context.

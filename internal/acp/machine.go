@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 // The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
@@ -275,6 +277,11 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
+	// A daemon seen gone counts only on consecutive ticks that judge it,
+	// and no daemon answer outlives the tick that asked it.
+	gone := s.machine.goneDaemons
+	s.machine.goneDaemons = nil
+	s.appServers.Store(nil)
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
 		return
 	}
@@ -288,6 +295,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	if buzzRelayKey == "" || buzzOwner == "" {
 		return
 	}
+	s.appServers.Store(s.judgeAppServers(newAppServerView(), gone))
 	s.applyResets(now)
 	s.retireGone(now)
 	s.reattach(now)
@@ -317,6 +325,76 @@ type machineState struct {
 	ctx                    context.Context
 	marked, swept, rebound string
 	settings               map[string]settingsSeen
+	// goneDaemons is each binding name whose recorded app-server daemon the
+	// last tick saw gone (daemonGone), with that daemon.
+	goneDaemons map[string]launch.HolderIdentity
+}
+
+// newAppServerView asks the Codex app-server daemons. It is a variable so
+// tests dial none.
+var newAppServerView = func() *codex.View {
+	return codex.NewView(func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }, codex.DaemonPID)
+}
+
+// appServerJudge is one machine tick's view of the Codex app-server
+// threads: the daemons' answers, asked at most once per socket, and the
+// bindings whose daemon was gone on this tick and the one before, each with
+// that daemon.
+type appServerJudge struct {
+	view *codex.View
+	gone map[string]launch.HolderIdentity
+}
+
+// judgeAppServers makes this tick's judge from view and the daemons the
+// previous tick saw gone, and records the daemons this tick sees gone.
+func (s *Server) judgeAppServers(view *codex.View, prev map[string]launch.HolderIdentity) *appServerJudge {
+	j := &appServerJudge{view: view, gone: map[string]launch.HolderIdentity{}}
+	seen := map[string]launch.HolderIdentity{}
+	all, _ := s.snapshot().list()
+	for _, b := range all {
+		if !daemonGone(view, b) {
+			continue
+		}
+		if d, ok := prev[b.Name]; ok && d == b.AppServer.Daemon {
+			j.gone[b.Name] = d
+		}
+		seen[b.Name] = b.AppServer.Daemon
+	}
+	s.machine.goneDaemons = seen
+	return j
+}
+
+// daemonGone reports whether b's thread is loaded in no daemon that answers
+// at its socket while the daemon it was bound in is proven not running. A
+// Codex update restarts the daemon and the thread is loaded again in the new
+// one, so this alone is not proof that the session ended.
+func daemonGone(view *codex.View, b binding.Binding) bool {
+	if b.AppServer.Thread == "" || b.AppServer.Daemon.PID <= 0 {
+		return false
+	}
+	if state, _ := view.Liveness(b); state != binding.Unknown {
+		return false
+	}
+	state, _ := launch.InspectHolder(b.AppServer.Daemon)
+	return state == launch.LeaseStale
+}
+
+// liveness is b's liveness as the machine agent judges it. A Codex
+// app-server thread is live while a daemon at its socket has it loaded. It
+// has ended when the daemon it was bound in, still running, no longer has
+// it loaded, or when that daemon was gone, with the thread loaded nowhere,
+// on two ticks in a row. Any other binding's liveness is its holder's, as
+// it is in a worker that runs no machine tick.
+func (s *Server) liveness(b binding.Binding) (binding.State, string) {
+	j := s.appServers.Load()
+	if j == nil {
+		return b.Liveness()
+	}
+	state, evidence := j.view.Liveness(b)
+	if d, ok := j.gone[b.Name]; ok && state == binding.Unknown && b.AppServer.Thread != "" && d == b.AppServer.Daemon {
+		return binding.Ended, "the app-server process the thread was bound in is not running, and no app-server has it loaded"
+	}
+	return state, evidence
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
@@ -328,7 +406,7 @@ func (s *Server) provisionable(b binding.Binding) bool {
 	if b.Name == binding.LegacyName || binding.ValidName(b.Name) != nil {
 		return false
 	}
-	if state, _ := b.Liveness(); state != binding.Live {
+	if state, _ := s.liveness(b); state != binding.Live {
 		return false
 	}
 	for _, m := range s.agentMarkers(b.Name) {
@@ -418,7 +496,7 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	b, err := binding.ReadNamed(r.Name)
 	switch {
 	case errors.Is(err, binding.ErrNone):
-		s.retire(r, goneReason(r), now)
+		s.retire(r, s.goneReason(r), now)
 		return false
 	case err != nil:
 		return false
@@ -426,7 +504,7 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 		s.retire(r, retiredReplaced, now)
 		return false
 	}
-	if state, _ := b.Liveness(); state == binding.Ended {
+	if state, _ := s.liveness(b); state == binding.Ended {
 		s.retire(r, retiredEnded, now)
 		return false
 	}
@@ -704,7 +782,7 @@ func (s *Server) removeDurably(path string) error {
 // session records it. A tombstone without a reason counts as ended only
 // when its session is proven ended, else as detached, because a detach
 // leaves the session running.
-func goneReason(r channelRecord) string {
+func (s *Server) goneReason(r channelRecord) string {
 	tombs, _ := binding.Tombstones()
 	for _, t := range tombs {
 		if t.Name != r.Name || t.SessionIdentity() != r.Identity {
@@ -718,7 +796,7 @@ func goneReason(r channelRecord) string {
 		case binding.RemovedDetached:
 			return retiredDetached
 		}
-		if state, _ := t.Liveness(); state == binding.Ended {
+		if state, _ := s.liveness(t); state == binding.Ended {
 			return retiredEnded
 		}
 	}
@@ -746,15 +824,15 @@ func (s *Server) retireGone(now time.Time) {
 		// The snapshot only lets a live binding be skipped: whether it is
 		// gone or ended is decided from a fresh read, since a session can
 		// attach again while an earlier record's relay call runs.
-		if b, ok := snap.binding(r.Name); ok && live(b) {
+		if b, ok := snap.binding(r.Name); ok && s.live(b) {
 			continue
 		}
 		b, err := binding.ReadNamed(r.Name)
 		// A record under a name no binding can have serves nothing.
 		if errors.Is(err, binding.ErrNone) || binding.ValidName(r.Name) != nil {
-			s.retire(r, goneReason(r), now)
+			s.retire(r, s.goneReason(r), now)
 		} else if err == nil {
-			if state, _ := b.Liveness(); state == binding.Ended {
+			if state, _ := s.liveness(b); state == binding.Ended {
 				s.retire(r, retiredEnded, now)
 			}
 		}
@@ -925,7 +1003,7 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 	if err != nil || cur.SessionIdentity() != r.Identity {
 		return false
 	}
-	if state, _ := cur.Liveness(); state == binding.Ended {
+	if state, _ := s.liveness(cur); state == binding.Ended {
 		return false
 	}
 	_, held, err := loadChannelRecord(s.slotPath(b.Name))
@@ -1084,7 +1162,7 @@ func (s *Server) machineDirectory() string {
 	all, _ := binding.List()
 	listed := 0
 	for _, bd := range all {
-		if state, _ := bd.Liveness(); state != binding.Live || bd.Name == binding.LegacyName {
+		if state, _ := s.liveness(bd); state != binding.Live || bd.Name == binding.LegacyName {
 			continue
 		}
 		if listed == 0 {
