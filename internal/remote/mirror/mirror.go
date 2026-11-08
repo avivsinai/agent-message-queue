@@ -8,6 +8,7 @@
 package mirror
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -674,17 +676,78 @@ func Off(dir string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// SetOff turns the mirror of binding name off or on. The machine agent
+// switchedFile holds when the decision that set the current switch was
+// made (RFC 3339). Without it the switch dates from time zero.
+const switchedFile = "switched"
+
+// SetOff turns the mirror of binding name off or on from this machine's
+// terminal: it always applies, as a decision made now. The machine agent
 // reads the switch on every tick: while it is off the fold still runs and
 // nothing is queued, so turning it on posts no turn from the off time.
 func SetOff(name string, off bool) error {
+	_, err := setSwitch(name, off, time.Time{})
+	return err
+}
+
+// Switch turns the mirror of binding name off or on by the owner's decision
+// made at at. It applies only when at is after the decision that set the
+// current switch, so a replayed or delayed older decision never undoes a
+// newer one; applied is false then.
+func Switch(name string, off bool, at time.Time) (applied bool, err error) {
+	if at.IsZero() {
+		return false, nil
+	}
+	return setSwitch(name, off, at)
+}
+
+// setSwitch records the decision time and then the switch, under the
+// switch lock. A zero at is a terminal decision: made now, and never before
+// the current one.
+func setSwitch(name string, off bool, at time.Time) (applied bool, err error) {
 	dir, err := DirFor(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
+	err = lock.WithExclusiveFileLock(filepath.Join(dir, switchedFile+".lock"), func() error {
+		since := switchedAt(dir)
+		switch {
+		case at.IsZero():
+			at = time.Now()
+			if at.Before(since) {
+				at = since
+			}
+		case !at.After(since):
+			return nil
+		}
+		stamp, err := at.UTC().MarshalText()
+		if err != nil {
+			return err
+		}
+		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), switchedFile), stamp, 0o600); err != nil {
+			return err
+		}
+		applied = true
+		return writeOff(dir, off)
+	})
+	return applied, err
+}
+
+// switchedAt is when the current switch was decided; zero when unrecorded
+// or unreadable.
+func switchedAt(dir string) time.Time {
+	raw, err := os.ReadFile(filepath.Join(dir, switchedFile))
+	var at time.Time
+	if err != nil || at.UnmarshalText(bytes.TrimSpace(raw)) != nil {
+		return time.Time{}
+	}
+	return at
+}
+
+// writeOff creates or removes the off marker in dir.
+func writeOff(dir string, off bool) error {
 	path := filepath.Join(dir, offFile)
 	if !off {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

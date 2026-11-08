@@ -785,9 +785,9 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.Machine {
 			channel = hostContext(parsed.Prompt)
 		}
-		if name, on, ok := s.mirrorSwitch(channel, eventID, text); ok {
+		if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
 			return func(emit func(any) error) (any, *rpcError) {
-				return s.answerMirrorSwitch(parsed.SessionID, channel, name, on, emit)
+				return s.answerMirrorSwitch(parsed.SessionID, channel, name, on, at, emit)
 			}, nil, nil
 		}
 		if dir, answer, ok := s.dialogReply(channel, eventID, text); ok {
@@ -1293,8 +1293,8 @@ func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
 	s.mu.Unlock()
 	// A steer whose event id is unreadable verifies nothing.
 	eventID, _ := resolveEventID(parsed.Meta)
-	if name, on, ok := s.mirrorSwitch(channel, eventID, text); ok {
-		go s.publish(channel, setMirror(name, on))
+	if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
+		go s.publish(channel, setMirror(name, on, at))
 		return steeringResult{Outcome: SteeringAnswered}, true
 	}
 	dir, answer, ok := s.dialogReply(channel, eventID, text)

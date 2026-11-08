@@ -61,6 +61,9 @@ type Answer struct {
 	Text   string    `json:"text,omitempty"`   // free-text answer
 	By     string    `json:"by"`               // "buzz"
 	At     time.Time `json:"at"`
+	// Event is the signed owner message that typed this answer; "" for a
+	// reaction. One message answers at most one dialog (DecidedBy).
+	Event string `json:"event,omitempty"`
 }
 
 // Resolution outcomes and closers.
@@ -181,6 +184,33 @@ func ReadAnswer(dir, id string) (Answer, bool, error) {
 	var a Answer
 	ok, err := readID(dir, "answers", id, &a)
 	return a, ok, err
+}
+
+// DecidedBy returns the id of the dialog whose answer the owner message
+// event typed; ok=false when no answer in dir names it. An unreadable answer
+// is an error, since it may name event.
+func DecidedBy(dir, event string) (id string, ok bool, err error) {
+	entries, err := os.ReadDir(filepath.Join(dir, "answers"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, e := range entries {
+		id, isAnswer := strings.CutSuffix(e.Name(), ".json")
+		if !isAnswer || !idRe.MatchString(id) {
+			continue
+		}
+		a, found, err := ReadAnswer(dir, id)
+		if err != nil {
+			return "", false, err
+		}
+		if found && a.Event != "" && a.Event == event {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // RemoveAnswer removes answers/<id>.json, so the next answer can be written.

@@ -688,22 +688,50 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 		s.tellUnverified(channel, "dialog:"+strings.Join(openIDs, ","), "Your reply was not taken as an answer", err)
 		return "", dialog.Answer{}, false
 	}
-	refs := eventRefs(evt)
+	req, ok := answerTarget(dir, evt, open, posted, time.Now())
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	a, ok := dialog.ParseAnswer(req, dropMentions(evt.Content))
+	a.Event = evt.ID.Hex()
+	return dir, a, ok
+}
+
+// answerTarget is the open dialog that the verified owner event evt
+// answers: the one dialog whose post its NIP-10 root or reply names, or,
+// when it has no e tag at all, the only dialog open in its channel. It
+// answers nothing when its refs name no open dialog or more than one, when
+// it fails the time rule against its dialog's opening (signedWithin), or
+// when it already answered another dialog. posted maps each open dialog to
+// its post's event id.
+func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map[string]string, now time.Time) (dialog.Request, bool) {
+	refs, tagged := replyRefs(evt)
 	var here []dialog.Request
 	for _, req := range open {
-		if p := posted[req.ID]; p != "" && slices.Contains(refs, p) {
-			here = []dialog.Request{req}
-			break
-		}
-		if len(refs) == 0 {
+		if !tagged || posted[req.ID] != "" && slices.Contains(refs, posted[req.ID]) {
 			here = append(here, req)
 		}
 	}
-	if len(here) != 1 {
-		return "", dialog.Answer{}, false
+	if len(here) != 1 || !signedWithin(evt, here[0].OpenedAt.Add(-ownerSkew), now) {
+		return dialog.Request{}, false
 	}
-	a, ok := dialog.ParseAnswer(here[0], dropMentions(evt.Content))
-	return dir, a, ok
+	if id, used, err := dialog.DecidedBy(dir, evt.ID.Hex()); err != nil || used && id != here[0].ID {
+		return dialog.Request{}, false
+	}
+	return here[0], true
+}
+
+// ownerSkew bounds how far the clock that dates an owner's signed message
+// may be from this machine's.
+const ownerSkew = 60 * time.Second
+
+// signedWithin is the time rule of every owner decision: evt was signed no
+// earlier than floor and at most ownerSkew after now. A replayed message is
+// older than the state it would decide, and a message dated ahead would
+// outrank the owner's later ones.
+func signedWithin(evt nostr.Event, floor, now time.Time) bool {
+	at := evt.CreatedAt.Time()
+	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
 }
 
 // answerDialog writes a typed answer, tells the owner it was taken, and ends
@@ -856,13 +884,27 @@ func (s *Server) tellUnverified(channel, key, lead string, err error) {
 	go s.publish(channel, lead+": "+why+".")
 }
 
-// eventRefs are the event ids a signed message replies to: its e tags.
-func eventRefs(evt nostr.Event) []string {
-	var refs []string
+// replyRefs are the events a signed message replies to under NIP-10: its e
+// tags marked "root" or "reply", or, when no e tag has a marker, its first
+// and last e tag. A "mention" never counts. tagged reports whether the
+// message has any e tag.
+func replyRefs(evt nostr.Event) (refs []string, tagged bool) {
+	var es []nostr.Tag
+	marked := false
 	for _, t := range evt.Tags {
-		if len(t) >= 2 && t[0] == "e" && nostrEventIDRe.MatchString(t[1]) && !slices.Contains(refs, t[1]) {
+		if len(t) >= 2 && t[0] == "e" {
+			es = append(es, t)
+			marked = marked || len(t) >= 4 && t[3] != ""
+		}
+	}
+	for i, t := range es {
+		reply := len(t) >= 4 && (t[3] == "root" || t[3] == "reply")
+		if !marked {
+			reply = i == 0 || i == len(es)-1
+		}
+		if reply && nostrEventIDRe.MatchString(t[1]) && !slices.Contains(refs, t[1]) {
 			refs = append(refs, t[1])
 		}
 	}
-	return refs
+	return refs, len(es) > 0
 }

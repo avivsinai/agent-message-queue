@@ -882,6 +882,9 @@ func writeMirrorFile(dir string, st mirrorFile) error {
 const (
 	mirrorOffReply = "Mirror off for this session. Type `mirror on` to start it again."
 	mirrorOnReply  = "Mirror on."
+	// mirrorStaleReply answers a switch signed before the decision that set
+	// the mirror as it is.
+	mirrorStaleReply = "The mirror was not switched: a later decision set it."
 )
 
 // mirrorWord reads text that is exactly "mirror off" or "mirror on" (case
@@ -898,43 +901,47 @@ func mirrorWord(text string) (on bool, ok bool) {
 
 // mirrorSwitch reads the owner's message eventID in a machine agent's
 // channel whose verified content (ownerEvent) is exactly "mirror off" or
-// "mirror on". It returns the channel's binding and the switch. The prompt
-// text only selects which prompts are fetched; without a verified owner
-// event the switch does not apply and the channel is told why.
-func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on bool, ok bool) {
+// "mirror on". It returns the channel's binding, the switch, and when the
+// owner signed it (signedWithin). The prompt text only selects which prompts
+// are fetched; without a verified owner event the switch does not apply and
+// the channel is told why.
+func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on bool, at time.Time, ok bool) {
 	if !s.cfg.Machine || channel == "" || buzzOwner == "" {
-		return "", false, false
+		return "", false, time.Time{}, false
 	}
 	if _, ok := mirrorWord(ownerWords(prompt)); !ok {
-		return "", false, false
+		return "", false, time.Time{}, false
 	}
 	// Only a channel the mirror serves takes the switch: a live Claude
 	// binding whose session this channel serves.
 	r, found := s.channelRoute(channel)
 	if !found {
-		return "", false, false
+		return "", false, time.Time{}, false
 	}
 	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
-		return "", false, false
+		return "", false, time.Time{}, false
 	}
 	evt, err := ownerEvent(eventID, prompt, channel)
 	if err != nil {
 		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
-		return "", false, false
+		return "", false, time.Time{}, false
 	}
-	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok {
-		return "", false, false
+	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
+		return "", false, time.Time{}, false
 	}
-	return r.Name, on, true
+	return r.Name, on, evt.CreatedAt.Time(), true
 }
 
-// setMirror turns the mirror of binding name on or off and returns the
+// setMirror turns the mirror of binding name on or off by the owner's
+// message signed at at, unless a later decision set it, and returns the
 // reply for the owner.
-func setMirror(name string, on bool) string {
-	err := mirror.SetOff(name, !on)
+func setMirror(name string, on bool, at time.Time) string {
+	applied, err := mirror.Switch(name, !on, at)
 	switch {
 	case err != nil:
 		return "The mirror could not be switched: " + err.Error()
+	case !applied:
+		return mirrorStaleReply
 	case on:
 		return mirrorOnReply
 	}
@@ -943,8 +950,8 @@ func setMirror(name string, on bool) string {
 
 // answerMirrorSwitch switches the mirror, tells the owner, and ends the
 // prompt without delivering it to the session.
-func (s *Server) answerMirrorSwitch(sessionID, channel, name string, on bool, emit func(any) error) (any, *rpcError) {
-	text := setMirror(name, on)
+func (s *Server) answerMirrorSwitch(sessionID, channel, name string, on bool, at time.Time, emit func(any) error) (any, *rpcError) {
+	text := setMirror(name, on, at)
 	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
 	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
