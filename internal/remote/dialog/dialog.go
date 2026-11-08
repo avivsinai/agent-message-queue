@@ -181,13 +181,6 @@ func WriteAnswer(dir string, a Answer) (bool, error) {
 	return createExclusive(filepath.Join(dir, "answers"), a.ID, a)
 }
 
-// ReadAnswer reads answers/<id>.json; ok=false when there is none.
-func ReadAnswer(dir, id string) (Answer, bool, error) {
-	var a Answer
-	ok, err := readID(dir, "answers", id, &a)
-	return a, ok, err
-}
-
 // eventRe matches a signed message id: 64 lowercase hex characters.
 var eventRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -217,9 +210,11 @@ func BindEvent(dir, event, id string) (string, error) {
 	return "", fmt.Errorf("event %s binds no dialog id", event)
 }
 
-// RemoveAnswer removes answers/<id>.json, so the next answer can be written.
-// A seam calls it for an answer it cannot apply.
-func RemoveAnswer(dir, id string) error {
+// RejectAnswer removes answers/<id>.json, so the dialog is open again and
+// the owner's next answer can be written. A seam calls it for an answer that
+// fits none of its options; an answer left in place would keep the dialog
+// answered, and nothing would read the owner's next reply.
+func RejectAnswer(dir, id string) error {
 	if !idRe.MatchString(id) {
 		return fmt.Errorf("dialog id %q is not one NewID mints", id)
 	}
@@ -234,6 +229,56 @@ func RemoveAnswer(dir, id string) error {
 // by someone else.
 func Resolve(dir string, r Resolved) (bool, error) {
 	return createExclusive(filepath.Join(dir, "resolved"), r.ID, r)
+}
+
+// Phase is where one dialog is in its lifecycle.
+type Phase string
+
+const (
+	// PhaseOpen: the request waits for an answer.
+	PhaseOpen Phase = "open"
+	// PhaseAnswered: the owner's answer waits for the seam to apply it.
+	PhaseAnswered Phase = "answered"
+	// PhaseResolved: the dialog ended; how is in its Resolved.
+	PhaseResolved Phase = "resolved"
+)
+
+// Lookup returns the phase of dialog id with the files that decide it:
+// resolved when resolved/<id>.json exists, whatever else does; else answered
+// when answers/<id>.json exists; else open when requests/<id>.json exists.
+// The request is returned when its file still exists. An error wrapping
+// os.ErrNotExist means none of the three files exists.
+func Lookup(dir, id string) (Phase, Request, *Answer, *Resolved, error) {
+	var (
+		req Request
+		ans Answer
+		res Resolved
+	)
+	resolved, err := readID(dir, "resolved", id, &res)
+	if err != nil {
+		return "", Request{}, nil, nil, err
+	}
+	answered, err := readID(dir, "answers", id, &ans)
+	if err != nil {
+		return "", Request{}, nil, nil, err
+	}
+	requested, err := readID(dir, "requests", id, &req)
+	if err != nil {
+		return "", Request{}, nil, nil, err
+	}
+	var a *Answer
+	if answered {
+		a = &ans
+	}
+	switch {
+	case resolved:
+		return PhaseResolved, req, a, &res, nil
+	case answered:
+		return PhaseAnswered, req, a, nil, nil
+	case requested:
+		return PhaseOpen, req, nil, nil, nil
+	}
+	return "", Request{}, nil, nil, fmt.Errorf("dialog %s: %w", id, os.ErrNotExist)
 }
 
 // ReadResolved reads resolved/<id>.json; ok=false when the dialog is open.

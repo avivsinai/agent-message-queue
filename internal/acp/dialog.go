@@ -496,7 +496,7 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 	if p.Event == "" {
 		return
 	}
-	if _, answered, err := dialog.ReadAnswer(dir, req.ID); err != nil || answered {
+	if phase, _, _, _, err := dialog.Lookup(dir, req.ID); err != nil || phase != dialog.PhaseOpen {
 		return
 	}
 	if s.dialogs.polled == nil {

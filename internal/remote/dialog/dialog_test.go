@@ -47,8 +47,8 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if won, _ := WriteAnswer(dir, Answer{ID: req.ID, Option: 1}); won {
 		t.Fatal("a second answer replaced the first")
 	}
-	if got, ok, _ := ReadAnswer(dir, req.ID); !ok || got.Option != 2 {
-		t.Fatalf("ReadAnswer = %+v, %v", got, ok)
+	if phase, _, got, _, err := Lookup(dir, req.ID); phase != PhaseAnswered || got == nil || got.Option != 2 || err != nil {
+		t.Fatalf("Lookup = %s, %+v, %v; want answered with option 2", phase, got, err)
 	}
 	if won, err := Resolve(dir, Resolved{ID: req.ID, Outcome: OutcomeDenied, By: ByBuzz}); !won || err != nil {
 		t.Fatalf("Resolve = %v, %v", won, err)
@@ -56,8 +56,8 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if won, _ := Resolve(dir, Resolved{ID: req.ID, Outcome: OutcomeTerminal, By: ByTerminal}); won {
 		t.Fatal("a second resolution won")
 	}
-	if r, ok, _ := ReadResolved(dir, req.ID); !ok || r.Outcome != OutcomeDenied {
-		t.Fatalf("ReadResolved = %+v, %v", r, ok)
+	if phase, _, _, r, err := Lookup(dir, req.ID); phase != PhaseResolved || r == nil || r.Outcome != OutcomeDenied || err != nil {
+		t.Fatalf("Lookup = %s, %+v, %v; want resolved denied", phase, r, err)
 	}
 	if open, _ := Requests(dir); len(open) != 0 {
 		t.Fatalf("a resolved request is still open: %+v", open)
