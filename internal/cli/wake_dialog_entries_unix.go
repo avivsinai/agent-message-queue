@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
@@ -341,7 +342,7 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 
 // wakeReadsDialogEntries reports whether the agent's wake reads the
 // directory of entries: false only for a wake lock that is not stale and
-// records a release before WakeDialogEntriesSince. Every such release
+// records a release before dialogguard.EntriesSince. Every such release
 // records its version, so a lock without a release version (a local build,
 // or a lock being created) is a wake that reads entries, and keeps the
 // guard of each dialog.
@@ -350,7 +351,7 @@ func wakeReadsDialogEntries(agentDir *wakeAgentDir) bool {
 	if !inspection.Exists || inspection.Status == wakeLockStale {
 		return true
 	}
-	reads, known := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion)
+	reads, known := dialogguard.WakeReadsEntries(inspection.Lock.ImageVersion)
 	return reads || !known
 }
 
@@ -431,7 +432,7 @@ func wakeDialogEntriesClosedBy(raw []byte, in wakeDialogHookInput) bool {
 // wrote: no harness, and a PreToolUse or PermissionRequest event.
 func claudeDialogHookMarker(raw []byte) bool {
 	var marker wakeDialogMarker
-	return json.Unmarshal(raw, &marker) == nil && marker.Harness == "" && wakeDialogHookVerb(marker.Event) == "open"
+	return json.Unmarshal(raw, &marker) == nil && marker.Harness == "" && dialogguard.ClaudeHookVerb(marker.Event) == "open"
 }
 
 // maxWakeDialogHostHops bounds the walk from the hook receiver to the

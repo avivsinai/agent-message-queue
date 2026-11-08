@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 )
 
@@ -80,7 +81,7 @@ func cursorDialogHookVerb(event string) string {
 // permission, follow-up or environment verdict. It prints on the gated path
 // too, where no amq runs.
 func cursorDialogHookCommand(bin, verb string) string {
-	return wakeDialogHookCommand(bin, cursorDialogHookFlag, verb) + "; printf '{}'"
+	return dialogguard.HookCommand(bin, cursorDialogHookFlag, verb) + "; printf '{}'"
 }
 
 // cursorDialogHooks are the Cursor entries. Cursor runs a command in the

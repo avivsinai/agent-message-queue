@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 // HookBinary is the path a hook should run for the program name installed
@@ -19,8 +21,9 @@ func HookBinary(name string) (string, error) {
 	return path, err
 }
 
-// executable is os.Executable; tests replace it.
-var executable = os.Executable
+// executable is the program's installed path, never its version-store copy,
+// which has no program beside it; tests replace it.
+var executable = selfupgrade.InstalledImage
 
 // SiblingBinary is the program name beside the running program's resolved
 // path, else on PATH. The one beside the program as it was started (a

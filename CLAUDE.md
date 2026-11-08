@@ -11,6 +11,16 @@ messages without a database or server. AMQ owns messaging, threads, routing,
 receipts, handoff state, and operational diagnosis. Orchestrators continue to
 own worktrees, dependency scheduling, task decomposition, and PR landing.
 
+- **Unix-like tools.** Small commands compose through files, exit codes, and
+  JSON. There is no daemon or broker, and AMQ never owns another tool's
+  lifecycle.
+- **Robust.** Delivery is crash-safe. Uncertain state fails closed with a
+  typed refusal that names the reason; there is no silent fallback.
+- **Harness-agnostic.** AMQ works the same across harnesses and terminals
+  through the seams they already expose. It never starts, restarts, or
+  reconfigures a user's harness. When a capability is missing, it falls back
+  and prints a one-line reason.
+
 ## Release Contract
 
 - Run `scripts/release.sh X.Y.Z` to request a release PR on `main`. Release
@@ -328,8 +338,11 @@ Before you add a test, name the contract it protects, the regression that
 makes it fail, and why existing coverage misses it. Each contract has one
 keeper at its strongest boundary: add a row to that table, not a near
 duplicate. A test that needs an export, flag, env var, or wrapper that no
-production caller uses belongs at the real boundary instead. A regression
-test must fail on the pre-fix code; check that privately before it ships.
+production caller uses belongs at the real boundary instead. A package may
+export a named fault-injection or crash-point seam for out-of-package
+regression tests only when no production code path sets or reads it. A
+regression test must fail on the pre-fix code; check that privately before it
+ships.
 
 ## Security
 
