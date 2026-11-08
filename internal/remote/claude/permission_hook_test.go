@@ -307,9 +307,10 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 		return fmt.Sprintf(`{"type":"user","isSidechain":%t,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_%s","content":"ok"}]}}`+"\n", sidechain, id)
 	}
 	for _, row := range []struct {
-		name, agent, before, after string
+		name, agent, agentDir, before, after string
 	}{
 		{name: "a subagent's call gets its result", agent: "a1", before: call("1", "make", true), after: result("1", true)},
+		{name: "a workflow subagent's call gets its result", agent: "a1", agentDir: "workflows/wf-1", before: call("1", "make", true), after: result("1", true)},
 		{name: "Esc interrupts the turn", before: call("1", "make", false), after: `{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"},
 		{name: "the turn moves on past a call recorded with another input", before: call("1", "make all", false), after: result("1", false) + `{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}]}}` + "\n"},
 	} {
@@ -319,7 +320,7 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 			session := filepath.Join(projects, "s-1.jsonl")
 			transcript := session
 			if row.agent != "" {
-				transcript = filepath.Join(projects, "s-1", "subagents", "agent-"+row.agent+".jsonl")
+				transcript = filepath.Join(projects, "s-1", "subagents", row.agentDir, "agent-"+row.agent+".jsonl")
 				if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
 					t.Fatal(err)
 				}
