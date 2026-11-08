@@ -36,11 +36,10 @@ func (a *adapter) Capabilities(ctx context.Context) launch.AdapterCapabilities {
 }
 
 func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error) {
-	var reason string
-	if len(request.CommittedArgs) != 0 || len(request.BypassArgs) != 0 || len(request.EnvOverlay) != 0 || request.Wrapper != nil {
-		_, _, reason = daemonEndpoint()
-		if reason == "" {
-			reason = "launch options require verified TUI resume equivalence"
+	reason := launch.CodexDaemonOptionsReason(request)
+	if reason != "" {
+		if _, _, endpointReason := daemonEndpoint(); endpointReason != "" {
+			reason = endpointReason
 		}
 	} else {
 		reason = eligibility(a.executable, request.Cwd)
