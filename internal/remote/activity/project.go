@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/acp/acpwire"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -82,7 +82,7 @@ func (o observation) payload() (json.RawMessage, error) {
 			if update == "" {
 				update = "agent_message_chunk"
 			}
-			return acp.MarshalTextSessionUpdate(o.SessionID, update, o.Text, meta, o.ToolID)
+			return acpwire.MarshalTextSessionUpdate(o.SessionID, update, o.Text, meta, o.ToolID)
 		}
 	default:
 		return nil, fmt.Errorf("activity kind %q", o.Kind)

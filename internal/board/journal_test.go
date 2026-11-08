@@ -1,11 +1,15 @@
 package board
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // A journal of leaf changes replays to the published document: keys added
@@ -81,5 +85,104 @@ func TestCompactionCrashBeforeNewBaseKeepsPublishedGeneration(t *testing.T) {
 		if err = json.Unmarshal(doc.data, &got); err != nil || got.Generation != 3 {
 			t.Fatalf("%s reads generation %d (%v), want 3", name, got.Generation, err)
 		}
+	}
+}
+
+// Review of the board's idle disk cost: every refresh restamped each source
+// fact's observed_at and wrote back every source item list whose length
+// changed, so an idle refresh journaled the facts and lists again.
+func TestIdleCommitWritesOnlyWhatChanged(t *testing.T) {
+	home := t.TempDir()
+	goal := Item{Ref: Ref{Kind: "codex-goal", ID: "119f0000-0000-4000-8000-000000000001"}, Container: "019f0000-0000-7000-8000-000000000001", Namespace: home, Title: "Deliver Codex goal", State: StateActive, Structural: true}
+	obligation := func(id string) Item {
+		return Item{Ref: Ref{Kind: "amq-obligation", ID: id}, Title: "Answer " + id, State: StateRequested, Structural: true}
+	}
+	refresh := func(at time.Time, complete bool, obligations ...Item) Input {
+		return Input{Results: []NamedResult{
+			{Name: "codex-goals", Result: Result{Status: StatusOK, ObservedAt: at, Items: []Item{goal}, NativeScopes: map[string]NativeScope{home: {Complete: complete}}}},
+			{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: at, Items: obligations}},
+		}}
+	}
+	unreported := func(in Input) Input {
+		in.Results[0].Result.Items = nil
+		return in
+	}
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	later := first.Add(time.Minute)
+	last := later.Add(time.Minute)
+	for _, row := range []struct {
+		name string
+		// The last refresh is the one checked; checked is the fact's
+		// expected "checked" time after it.
+		refreshes []Input
+		checked   time.Time
+		// factChanged allows the last refresh to change the fact;
+		// reportChanged rows change the source's report, so any write is
+		// allowed and only the checked time is asserted.
+		factChanged, reportChanged bool
+	}{
+		{name: "unchanged fact in a complete scope", refreshes: []Input{refresh(first, true), refresh(later, true)}, checked: later},
+		{name: "unchanged fact in an incomplete scope", refreshes: []Input{refresh(first, false), refresh(later, false)}, checked: later, factChanged: true},
+		{name: "one item removed", refreshes: []Input{refresh(first, true, obligation("a"), obligation("b")), refresh(later, true, obligation("b"))}, checked: later},
+		// Review of the derived checked time: a fact checked by a complete
+		// result fell back to its first report once no result showed it.
+		{name: "last check kept when a complete scope drops the fact", refreshes: []Input{refresh(first, true), refresh(later, true), unreported(refresh(last, true))}, checked: later, reportChanged: true},
+		{name: "last check kept when an incomplete scope omits the fact", refreshes: []Input{refresh(first, true), refresh(later, true), unreported(refresh(last, false))}, checked: later, reportChanged: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ctx := context.Background()
+			base := t.TempDir()
+			identity, err := fsq.StableTreeIdentity(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewStore(base, identity, "host-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			initial, err := store.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, in := range row.refreshes[:len(row.refreshes)-1] {
+				if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: in}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := store.readDocument()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Commit(ctx, Acquisition{ProjectID: initial.ProjectID, Input: row.refreshes[len(row.refreshes)-1]}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.readDocument()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops, err := diffRaw(before.data, after.data, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, op := range ops {
+				p := op.Path
+				clock := p[0] == "generation" || p[0] == "published_at" ||
+					len(p) == 5 && p[0] == "input" && p[1] == "Results" && p[3] == "Result" && p[4] == "ObservedAt" ||
+					row.factChanged && p[0] == "source_facts"
+				if !clock && !row.reportChanged {
+					t.Fatalf("idle refresh rewrote %v", p)
+				}
+			}
+			state, err := store.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := state.Catalogue()[0].Facts[0].ObservedAt; !got.Equal(row.checked) {
+				t.Fatalf("fact reads as checked at %v, want %v", got, row.checked)
+			}
+		})
 	}
 }

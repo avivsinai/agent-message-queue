@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -205,13 +206,13 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 			hookFormFinding(row.StopForm, path, "Stop", fix("amq-remote claude install-stop-hook"), fail, note)
 		}
 		var detail string
-		row.Guard, detail = amqcli.ClaudeDialogGuardAt(path)
+		row.Guard, detail = dialogguard.ClaudeAt(path)
 		switch row.Guard {
-		case amqcli.DialogGuardMissing:
+		case dialogguard.Missing:
 			gateReport("hooks", path, "the wake dialog guard is not installed, so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
-		case amqcli.DialogGuardStale:
+		case dialogguard.Stale:
 			gateReport("hooks", path, "the wake dialog guard has an older hook form, so the dialog hold does not close when Claude Code exits until the hook is reinstalled", fix("amq wake install-dialog-hook"))
-		case amqcli.DialogGuardIncomplete, amqcli.DialogGuardUnreadable:
+		case dialogguard.Incomplete, dialogguard.Unreadable:
 			detail, _, _ = strings.Cut(detail, "; remedy:")
 			gateReport("hooks", path, "the wake dialog guard is "+row.Guard+" ("+detail+"), so a wake doorbell can answer an open approval dialog", fix("amq wake install-dialog-hook"))
 		}
@@ -483,7 +484,7 @@ func doctorMailboxes(all []binding.Binding, fail, note reportFunc) []mailboxRow 
 			fail("mailbox", subject, fmt.Sprintf("handle %q has no live wake (%s), so a Buzz message waits in its inbox until the session drains", b.Handle, nonEmpty(wake.WakeStatus, "no wake")),
 				remedy("start the session with `amq launch`, which starts its wake"))
 		case wakeCannotReadDialogEntries(wake.RunningVersion):
-			note("mailbox", subject, fmt.Sprintf("the wake of handle %q runs amq %s, which cannot read the dialog marker form of %s or later", b.Handle, wake.RunningVersion, amqcli.WakeDialogEntriesSince),
+			note("mailbox", subject, fmt.Sprintf("the wake of handle %q runs amq %s, which cannot read the dialog marker form of %s or later", b.Handle, wake.RunningVersion, dialogguard.EntriesSince),
 				"restart that session (exit and resume it)")
 		case wake.ImageStatus == "different" || wake.ImageStatus == "outdated":
 			fail("mailbox", subject, fmt.Sprintf("the wake of handle %q runs another AMQ image than the installed one (image %s)", b.Handle, wake.ImageStatus),
@@ -506,7 +507,7 @@ type wakeView struct {
 // wakeCannotReadDialogEntries reports a wake of a known AMQ release that
 // reads only the single-file dialog marker.
 func wakeCannotReadDialogEntries(version string) bool {
-	reads, known := amqcli.WakeVersionReadsDialogEntries(version)
+	reads, known := dialogguard.WakeReadsEntries(version)
 	return known && !reads
 }
 
