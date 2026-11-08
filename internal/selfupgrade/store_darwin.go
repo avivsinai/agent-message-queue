@@ -122,11 +122,11 @@ func validStoreKey(key string) bool {
 // that image is already in the store, an error when the store could not be
 // used, which the caller reports once and then runs on.
 func RunFromStore(embeddedVersion string) error {
-	executable, err := os.Executable()
+	started, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve running image: %w", err)
 	}
-	executable, err = filepath.EvalSymlinks(executable)
+	executable, err := filepath.EvalSymlinks(started)
 	if err != nil {
 		return fmt.Errorf("resolve running image: %w", err)
 	}
@@ -138,7 +138,9 @@ func RunFromStore(embeddedVersion string) error {
 	if err != nil {
 		return fmt.Errorf("capture running image: %w", err)
 	}
-	return ExecImage(running, os.Args, os.Environ())
+	// The path as started keeps a package manager's stable link, which
+	// InstalledImage callers resolve siblings and durable paths from.
+	return ExecImage(running, os.Args, withInstalledImage(os.Environ(), started))
 }
 
 // storeImage publishes candidate into the version store, or finds the entry
