@@ -317,12 +317,7 @@ func codexLaunchArgs(args []string) (embedded, unknown, tui bool) {
 // daemon_auto_start feature predates the daemon and runs embedded; a
 // failed feature probe establishes nothing.
 func codexLaunchBackend(ctx context.Context, cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
-	envEmbedded := false
-	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
-		if _, set := os.LookupEnv(key); set {
-			envEmbedded = true
-		}
-	}
+	envEmbedded := codexlaunch.EmbeddedEnvironment()
 	embedded, unknown, _ := codexLaunchArgs(args)
 	if unknown {
 		return codexBackendUnknown, nil

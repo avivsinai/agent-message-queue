@@ -281,17 +281,30 @@ func (acquirer *countingProviderAcquirer) Acquire(ticket ExecutionTicket) (Captu
 }
 
 func TestPreparePreSpawnCaptureReusesAcquisitionAcrossCrashes(t *testing.T) {
-	for _, provider := range []string{CursorProvider, CodexProvider} {
+	// Pro S1 finding 2: a stable symlink path was rejected even when it
+	// resolved to the ticket's bound executable identity.
+	for _, provider := range []string{CursorProvider, CodexProvider, "codex_symlink"} {
 		for _, crashStage := range []string{"", "evidence_persisted", "identity_acquired", "spawn_attempted"} {
-			if provider == CursorProvider && crashStage == "" {
+			if provider == CursorProvider && crashStage == "" || provider == "codex_symlink" && crashStage != "" {
 				continue
 			}
 			t.Run(provider+"/"+crashStage, func(t *testing.T) {
+				provider := provider
 				fixture := newExecutionFixture(t)
 				nonce := "91919191-9191-4919-8919-919191919191"
 				var ticket ExecutionTicket
 				var envelope ExecutionEnvelope
-				if provider == CodexProvider {
+				if provider == CodexProvider || provider == "codex_symlink" {
+					if provider == "codex_symlink" {
+						real := fixture.provider + "-real"
+						if err := os.Rename(fixture.provider, real); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(real, fixture.provider); err != nil {
+							t.Fatal(err)
+						}
+						provider = CodexProvider
+					}
 					ticket, envelope = seedPendingCodexDaemonExecution(t, fixture, nonce)
 				} else {
 					ticket, envelope = seedPendingCursorExecution(t, fixture, nonce)
@@ -774,5 +787,81 @@ func TestCodexDaemonRetriesAfterCreationWasNotRequested(t *testing.T) {
 	prepared, err := PrepareExecution(fixture.root, "codex", nonce, envelope)
 	if err != nil || prepared.State != ExecutionAcknowledged || calls != 2 || registrations != 1 {
 		t.Fatalf("retry = %#v, %v; acquisition=%d registration=%d", prepared, err, calls, registrations)
+	}
+}
+
+// Pro S1 finding 3: reconcile rollback deleted a pre-existing acquired ticket
+// after a template mismatch or after preserving it and failing a sibling.
+func TestReconcileRollbackPreservesAcquiredCodexTicket(t *testing.T) {
+	for _, failure := range []string{"template_mismatch", "later_sibling"} {
+		t.Run(failure, func(t *testing.T) {
+			fixture := newExecutionFixture(t)
+			nonce := "94949494-9494-4949-8949-949494949494"
+			ticket, envelope := seedPendingCodexDaemonExecution(t, fixture, nonce)
+			envelope.RecordIdentity = func(ExecutionTicket) error { return nil }
+			prepared, err := prepareExecution(fixture.root, ticket.Handle, nonce, envelope, &countingProviderAcquirer{id: testConversationID}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := AgentPlan{Handle: ticket.Handle, LaunchNonce: nonce, AdapterMode: ticket.Mode, Cwd: ticket.Cwd,
+				ResumePolicy: ResumeEnabled, PreSpawnAcquire: true, Argv: ticket.TargetArgv, DynamicArgv: ticket.DynamicArgv}
+			planned := []plannedAgent{{plan: plan, adapter: NewCodexAdapter(ticket.ProviderExecutable), providerVersion: CodexDaemonVersion}}
+			if failure == "template_mismatch" {
+				planned[0].plan.Argv = append(slices.Clone(plan.Argv), "changed prompt")
+				planned[0].plan.InitialInput = &PlannedInitialInput{Kind: InitialInputArgument, SHA256: initialInputDigest("changed prompt"), ArgvIndex: 5}
+			} else {
+				planned = append(planned, plannedAgent{plan: AgentPlan{Handle: "other"}})
+			}
+			lease, err := AcquireLease(fixture.root, nonce)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lease.Release() }()
+			if err := lease.LockHandles("codex", "other"); err != nil {
+				t.Fatal(err)
+			}
+			err = writeExecutionTickets(ReconcileRequest{Root: fixture.root, ProjectRoot: fixture.project}, lease, planned, fixture.amq, CommandsBackendName, CommandsProfile().Identity())
+			if err == nil {
+				t.Fatal("expected failed replan")
+			}
+			after, err := LoadExecutionTicket(fixture.root, ticket.Handle)
+			if err != nil || !reflect.DeepEqual(after, prepared) {
+				t.Fatalf("rollback changed acquired ticket: %#v, %v", after, err)
+			}
+		})
+	}
+}
+
+// Pro S1 finding 4: ready native conversations accepted intact capture evidence
+// copied into another physical session root.
+func TestCodexConversationRejectsCopiedSessionEvidence(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "95959595-9595-4959-8959-959595959595"
+	ticket, envelope := seedPendingCodexDaemonExecution(t, fixture, nonce)
+	envelope.RecordIdentity = func(ExecutionTicket) error { return nil }
+	prepared, err := prepareExecution(fixture.root, ticket.Handle, nonce, envelope, &countingProviderAcquirer{id: testConversationID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := newExecutionFixture(t)
+	for _, source := range []string{ConversationPath(fixture.session, ticket.Handle), EvidencePath(fixture.session, prepared.EvidenceRefs[0])} {
+		relative, err := filepath.Rel(fixture.session, source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(destination.session, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := LoadConversation(destination.root, ticket.Handle); err == nil || !strings.Contains(err.Error(), "physical session root") {
+		t.Fatalf("foreign-root conversation = %v", err)
 	}
 }

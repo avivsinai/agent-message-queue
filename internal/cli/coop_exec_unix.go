@@ -924,9 +924,11 @@ func (c *coopExecRun) execAgent() error {
 	namedLabel := coopNamedSessionLabel(sessionIdentity, c.agentHandle)
 	execStart := time.Now()
 	recordIdentity := codexThreadIdentityRecorder(env)
-	c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
-	if err != nil {
-		return err
+	if !c.managedCodexDaemon {
+		c.agentArgs, err = resolveCodexResumeLaunch(c.binaryPath, c.agentArgs)
+		if err != nil {
+			return err
+		}
 	}
 	codex := launch.ProviderForExecutable(c.binaryPath) == launch.CodexProvider
 	// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.

@@ -849,6 +849,11 @@ func plannedAgentResults(results []AgentReconcileResult, planned []plannedAgent)
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {
 	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
+		_, priorErr := LoadExecutionTicket(request.Root, agent.plan.Handle)
+		if priorErr != nil && !errors.Is(priorErr, os.ErrNotExist) {
+			return errors.Join(priorErr, removeExecutionTickets(request.Root, lease, written))
+		}
+		created := errors.Is(priorErr, os.ErrNotExist)
 		provider, err := providerExecutable(agent.plan)
 		if err != nil {
 			return errors.Join(fmt.Errorf("resolve provider executable for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
@@ -875,9 +880,14 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			return errors.Join(fmt.Errorf("build execution ticket for %s: authorized amq executable identity changed", agent.plan.Handle), removeExecutionTickets(request.Root, lease, written))
 		}
 		if err := WriteExecutionTicket(request.Root, lease, ticket); err != nil {
-			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, append(written, agent)))
+			if created {
+				written = append(written, agent)
+			}
+			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
 		}
-		written = append(written, agent)
+		if created {
+			written = append(written, agent)
+		}
 	}
 	return nil
 }

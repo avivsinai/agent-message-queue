@@ -98,3 +98,6 @@ replacement, and ticket removal refuse and preserve the state. Persisted evidenc
 is reused after a crash; a journal replay cannot reset the acquisition to pending.
 The TUI resumes only the acquired thread ID, after startup and directory checks
 succeed again. A failed provider exec retains that identity for recovery.
+Ready conversation evidence remains bound to its physical session root. Routing
+publication requires the recorded socket and daemon process; a daemon restart or
+endpoint change requires explicit recovery rather than silent re-adoption.

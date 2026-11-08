@@ -190,7 +190,7 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 				}
 				cursorCapture = true
 			case CodexProvider:
-				if err := validateCodexConversationCapture(evidence.Payload, record); err != nil {
+				if err := validateCodexConversationCapture(root, evidence.Payload, record); err != nil {
 					return err
 				}
 				codexCapture = true

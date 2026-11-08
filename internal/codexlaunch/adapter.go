@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
@@ -72,7 +73,21 @@ func codexHome() (string, error) {
 	return canonical, err
 }
 
+// EmbeddedEnvironment reports provider exclusions shared by ordinary TUI
+// discovery and managed launch admission. Presence, including empty, matters.
+func EmbeddedEnvironment() bool {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if _, set := os.LookupEnv(key); set {
+			return true
+		}
+	}
+	return false
+}
+
 func eligibility(executable, cwd string) string {
+	if EmbeddedEnvironment() {
+		return "the configured executor requires an embedded app-server"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	home, err := codexHome()
@@ -89,9 +104,6 @@ func eligibility(executable, cwd string) string {
 	capabilities := launch.NewCodexAdapter(executable).Capabilities(ctx)
 	if !capabilities.Available || capabilities.ProviderVersion != launch.CodexDaemonVersion {
 		return "Codex daemon launch requires a verified provider version"
-	}
-	if os.Getenv("CODEX_EXEC_SERVER_URL") != "" {
-		return "the configured executor requires an embedded app-server"
 	}
 	login := exec.CommandContext(ctx, executable, "login", "status")
 	login.Dir = cwd
@@ -166,7 +178,7 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 
 // RecordIdentity publishes routing only after the acquired thread and current
 // daemon have been checked, while the ticket's generation still holds its lease.
-func RecordIdentity(ticket launch.ExecutionTicket, env []string) error {
+func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env []string) error {
 	if reason := eligibility(ticket.ProviderExecutable, ticket.Cwd); reason != "" {
 		return fmt.Errorf("cannot prepare native seat: Buzz approvals: terminal only: %s; replan this launch", reason)
 	}
@@ -176,6 +188,17 @@ func RecordIdentity(ticket launch.ExecutionTicket, env []string) error {
 	}
 	sock, err := codex.ControlSocket(home)
 	if err != nil {
+		return err
+	}
+	pid, err := codex.DaemonPID(sock)
+	if err != nil {
+		return err
+	}
+	holder, err := launch.HolderOf(pid)
+	if err != nil {
+		return err
+	}
+	if err := launch.ValidateCodexDaemonEndpoint(root, ticket, sock, holder); err != nil {
 		return err
 	}
 	cwd, _, err := codex.ThreadCwd(sock, ticket.ConversationID)
@@ -192,6 +215,14 @@ func RecordIdentity(ticket launch.ExecutionTicket, env []string) error {
 	}
 	if get("AM_ROOT") != ticket.SessionRoot || get("AM_ME") != ticket.Handle {
 		return fmt.Errorf("codex daemon routing does not match the execution ticket")
+	}
+	currentPID, err := codex.DaemonPID(sock)
+	if err != nil || currentPID != pid {
+		return fmt.Errorf("codex daemon changed during routing publication")
+	}
+	currentHolder, err := launch.HolderOf(currentPID)
+	if err != nil || currentHolder != holder {
+		return fmt.Errorf("codex daemon identity changed during routing publication")
 	}
 	return codexidentity.Publish(codexidentity.Record{
 		Thread: ticket.ConversationID, CodexHome: home, Root: get("AM_ROOT"), BaseRoot: get("AM_BASE_ROOT"),

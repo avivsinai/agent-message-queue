@@ -65,7 +65,9 @@ func runLaunchExec(args []string) error {
 	}
 	if ticket.Provider == launch.CodexProvider && ticket.PreSpawnAcquire {
 		envelope.AcquireIdentity = codexlaunch.Acquire
-		envelope.RecordIdentity = func(acquired launch.ExecutionTicket) error { return codexlaunch.RecordIdentity(acquired, environment) }
+		envelope.RecordIdentity = func(acquired launch.ExecutionTicket) error {
+			return codexlaunch.RecordIdentity(root, acquired, environment)
+		}
 	}
 	prepared, err := launch.PrepareExecution(root, *handleFlag, *nonceFlag, envelope)
 	if err != nil {

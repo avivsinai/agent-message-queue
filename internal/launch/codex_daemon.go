@@ -95,10 +95,14 @@ func decodeCodexDaemonPayload(raw []byte) (codexDaemonPayload, error) {
 
 func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 	if ticket.ProviderVersion != CodexDaemonVersion || len(ticket.TargetEnv) != 0 || ticket.Wrapper != nil ||
-		len(ticket.TargetArgv) < 5 || ticket.TargetArgv[0] != ticket.ProviderExecutable ||
+		len(ticket.TargetArgv) < 5 ||
 		ticket.TargetArgv[1] != "resume" || ticket.TargetArgv[2] != "-C" || ticket.TargetArgv[3] != ticket.Cwd || ticket.TargetArgv[4] != preSpawnConversationPlaceholder ||
 		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0] != (DynamicArg{Index: 4, Kind: DynamicArgConversationID}) {
 		return fmt.Errorf("codex daemon execution template is invalid")
+	}
+	executable, identity, err := canonicalFile(ticket.TargetArgv[0])
+	if err != nil || executable != ticket.ProviderExecutable || identity != ticket.ProviderExecutableIdentity {
+		return fmt.Errorf("codex daemon executable identity changed")
 	}
 	if len(ticket.TargetArgv) != 5 && (len(ticket.TargetArgv) != 6 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != 5) {
 		return fmt.Errorf("codex daemon execution options require verified resume equivalence")
@@ -114,27 +118,45 @@ func capturePreSpawnIdentity(provider string, request CaptureRequest) CaptureRes
 }
 
 func validateCodexDaemonExecutionEvidence(root *fsq.DeliveryRoot, ticket ExecutionTicket) error {
+	_, err := codexDaemonExecutionPayload(root, ticket)
+	return err
+}
+
+func codexDaemonExecutionPayload(root *fsq.DeliveryRoot, ticket ExecutionTicket) (codexDaemonPayload, error) {
 	if len(ticket.EvidenceRefs) != 1 {
-		return fmt.Errorf("codex daemon execution requires one evidence ref")
+		return codexDaemonPayload{}, fmt.Errorf("codex daemon execution requires one evidence ref")
 	}
 	record, _, err := ReadEvidence(root, ticket.EvidenceRefs[0])
 	if err != nil {
-		return err
+		return codexDaemonPayload{}, err
 	}
 	payload, err := decodeCodexDaemonPayload(record.Payload)
 	if err != nil {
-		return err
+		return payload, err
 	}
 	if record.Kind != EvidenceProviderCapture || record.Handle != ticket.Handle || payload.Handle != ticket.Handle ||
 		payload.LaunchNonce != ticket.LaunchNonce || payload.ProviderVersion != ticket.ProviderVersion ||
 		payload.ConversationID != ticket.ConversationID || payload.Cwd != ticket.Cwd || payload.SessionIdentity != ticket.SessionIdentity ||
 		!reflect.DeepEqual(record.CallerContext, ticket.CallerContext) {
-		return fmt.Errorf("codex daemon execution evidence binding mismatch")
+		return payload, fmt.Errorf("codex daemon execution evidence binding mismatch")
+	}
+	return payload, nil
+}
+
+// ValidateCodexDaemonEndpoint requires the same endpoint and live daemon that
+// acquired this ticket. A changed daemon requires explicit recovery.
+func ValidateCodexDaemonEndpoint(root *fsq.DeliveryRoot, ticket ExecutionTicket, socket string, daemon HolderIdentity) error {
+	payload, err := codexDaemonExecutionPayload(root, ticket)
+	if err != nil {
+		return err
+	}
+	if payload.Socket != socket || payload.Daemon != daemon {
+		return fmt.Errorf("codex daemon endpoint changed since thread acquisition")
 	}
 	return nil
 }
 
-func validateCodexConversationCapture(raw []byte, record ConversationRecord) error {
+func validateCodexConversationCapture(root *fsq.DeliveryRoot, raw []byte, record ConversationRecord) error {
 	var envelope struct {
 		Source CaptureEvidenceSource `json:"source"`
 	}
@@ -146,6 +168,13 @@ func validateCodexConversationCapture(raw []byte, record ConversationRecord) err
 		payload, err := decodeCodexDaemonPayload(raw)
 		if err != nil {
 			return err
+		}
+		if err := root.VerifyBase(); err != nil {
+			return err
+		}
+		_, identity, err := canonicalDirectory(root.Base())
+		if err != nil || payload.SessionIdentity != identity {
+			return fmt.Errorf("codex conversation evidence belongs to another physical session root")
 		}
 		handle, nonce, provider, version, thread = payload.Handle, payload.LaunchNonce, payload.Provider, payload.ProviderVersion, payload.ConversationID
 	} else {

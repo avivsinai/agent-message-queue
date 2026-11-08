@@ -558,8 +558,8 @@ func RemoveExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle, nonce s
 	if ticket.LaunchNonce != nonce || nonce != lease.LaunchNonce() {
 		return fmt.Errorf("execution ticket generation changed before removal")
 	}
-	if ticket.State == ExecutionIdentityRequested {
-		return fmt.Errorf("codex thread acquisition is uncertain; preserve its execution ticket")
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire && ticket.State != ExecutionPending {
+		return fmt.Errorf("codex thread acquisition has progressed; preserve its execution ticket")
 	}
 	return root.Remove(filepath.Join(executionDirectory, handle+".json"))
 }
