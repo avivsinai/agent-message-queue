@@ -277,9 +277,11 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.ctx = ctx
-	// A daemon seen gone counts only on consecutive ticks that judge it.
+	// A daemon seen gone counts only on consecutive ticks that judge it,
+	// and no daemon answer outlives the tick that asked it.
 	gone := s.machine.goneDaemons
 	s.machine.goneDaemons = nil
+	s.appServers.Store(nil)
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
 		return
 	}
