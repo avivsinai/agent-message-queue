@@ -55,15 +55,13 @@ func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 
 // TestRemotePackagesDoNotLinkACP keeps the remote-control packages below
 // the ACP companion: cmd/amq-remote is the wiring point that may join them.
+// The match is exact, so leaf packages under internal/acp stay allowed.
 func TestRemotePackagesDoNotLinkACP(t *testing.T) {
 	graph := loadImportGraph(t)
 	allowed := map[string]bool{
-		// The mailbox prompt, reply scan, inbox probe, and session-pin check
-		// still live in internal/acp. Remove when they move out.
+		// The mailbox prompt, the reply scan, and InboxHasMessage still live
+		// in internal/acp. Remove when they move out.
 		module + "/internal/remote/mailbox": true,
-		// MarshalTextSessionUpdate still lives in internal/acp. Remove when
-		// it moves to a leaf package.
-		module + "/internal/remote/activity": true,
 	}
 	remote := module + "/internal/remote"
 	for _, pkg := range graph.packages() {

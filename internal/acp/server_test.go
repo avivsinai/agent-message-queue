@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp/acpwire"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -21,6 +22,9 @@ const (
 	testMe = "cursor"
 	testTo = "codex"
 )
+
+// sessionUpdateNotification is what emitText hands the emit callback.
+type sessionUpdateNotification = acpwire.SessionUpdateNotification
 
 // testConfig returns a routing context pointed at a fresh queue root. Delivery
 // creates the recipient mailbox itself, so a bare directory is a valid root.

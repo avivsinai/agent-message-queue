@@ -387,6 +387,7 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 type appServerSession struct {
 	b      binding.Binding
 	loaded []string
+	err    error // the loaded-thread probe's failure, if any
 	pid    int
 	probes int
 }
@@ -403,7 +404,7 @@ func bindAppServerThread(t *testing.T, daemon launch.HolderIdentity) *appServerS
 	saved := newAppServerView
 	t.Cleanup(func() { newAppServerView = saved })
 	newAppServerView = func() *codex.View {
-		return codex.NewView(func(string) ([]string, error) { a.probes++; return a.loaded, nil },
+		return codex.NewView(func(string) ([]string, error) { a.probes++; return a.loaded, a.err },
 			func(string) (int, error) { return a.pid, nil })
 	}
 	if err := binding.WriteNamed(a.b); err != nil {
@@ -503,6 +504,30 @@ func TestMachineArchivesACodexThreadWhoseDaemonIsGone(t *testing.T) {
 	}
 	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != machineChanA || r.Archived {
 		t.Fatalf("restored record = %+v", r)
+	}
+}
+
+// Review of the gone-daemon rule: a probe that timed out counted as the
+// thread being gone, so a session live in a replacement daemon was archived
+// after two slow ticks.
+func TestMachineKeepsACodexThreadWhoseProbeTimesOut(t *testing.T) {
+	s, rec := machineServer(t)
+	dead := selfHolder(t)
+	dead.ProcessStart = laterStart(t, dead.ProcessStart)
+	a := bindAppServerThread(t, dead) // a replacement daemon has it loaded
+	acceptCreates(rec)
+	now := time.Now()
+	tick(s, now)
+	if r := channelState(t, s, a.b.Name); r.State != channelActive {
+		t.Fatalf("record for a thread loaded in a replacement daemon = %+v", r)
+	}
+
+	a.err = fmt.Errorf("thread/loaded/list: %w", context.DeadlineExceeded)
+	rec.reset()
+	tick(s, now.Add(time.Minute))
+	tick(s, now.Add(2*time.Minute))
+	if r := channelState(t, s, a.b.Name); r.State != channelActive || len(rec.list()) != 0 {
+		t.Fatalf("after two timed-out probes: record %+v, buzz calls %q", r, rec.list())
 	}
 }
 
