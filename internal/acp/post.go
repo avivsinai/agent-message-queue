@@ -387,16 +387,21 @@ func (s *Server) publish(channel, text string) string {
 	return result
 }
 
-// Outbound states of an event's final post, each a marker beside the final
-// marker. accepted, uncertain and unsent are created once a post returns; a
-// retry renames unsent to sending before it posts. A final marker with no
-// unsent marker is a post in flight, interrupted, or made by an older
-// build: uncertain, never posted again.
+// finalPost is the outbound state of an event's final post, kept as a
+// marker beside the final marker. accepted, uncertain and unsent are created
+// once a post returns; a retry renames unsent to sending before it posts. A
+// final marker with no unsent marker is a post in flight, interrupted, or
+// made by an older build: never posted again.
+type finalPost string
+
 const (
-	finalAccepted  = "accepted"
-	finalUncertain = "uncertain"
-	finalUnsent    = "unsent"
-	finalSending   = "sending"
+	finalPostNone      finalPost = ""
+	finalPostAccepted  finalPost = "accepted"
+	finalPostUncertain finalPost = "uncertain"
+	finalPostUnsent    finalPost = "unsent"
+	// finalPostSending alone is a retry that crashed while it posted: in
+	// doubt, never posted again.
+	finalPostSending finalPost = "sending"
 )
 
 // publishFinal is publish for an event's final text: it also records what
@@ -415,13 +420,13 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 	if errors.Is(err, errNoBuzzIdentity) {
 		return result
 	}
-	state := finalAccepted
+	state := finalPostAccepted
 	var notSent *notSentError
 	switch {
 	case errors.As(err, &notSent):
-		state = finalUnsent
+		state = finalPostUnsent
 	case err != nil:
-		state = finalUncertain
+		state = finalPostUncertain
 	}
 	if _, err := createExclusive(s.finalStatePath(eventID, state), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n")); err != nil {
 		return result + "; record post state: " + err.Error()
@@ -445,21 +450,28 @@ func (s *Server) post(channel, text string) (string, error) {
 	}
 }
 
-func (s *Server) finalStatePath(eventID, state string) string {
-	return filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal+"."+state)
+func (s *Server) finalStatePath(eventID string, state finalPost) string {
+	return filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal+"."+string(state))
+}
+
+// finalPostState reads the event's final-post state: accepted wins over
+// uncertain, over unsent, over sending. A marker that cannot be read as
+// present or absent makes the state uncertain, so it is never posted again.
+func (s *Server) finalPostState(eventID string) finalPost {
+	for _, state := range []finalPost{finalPostAccepted, finalPostUncertain, finalPostUnsent, finalPostSending} {
+		_, err := os.Lstat(s.finalStatePath(eventID, state))
+		switch {
+		case err == nil:
+			return state
+		case !errors.Is(err, os.ErrNotExist):
+			return finalPostUncertain
+		}
+	}
+	return finalPostNone
 }
 
 // finalUnsent reports whether the event's final answer is a reply that was
-// definitely never posted: unsent, and neither accepted nor uncertain.
+// definitely never posted.
 func (s *Server) finalUnsent(eventID string, out mailboxOutcome) bool {
-	if out.ReplyID == "" || out.damaged != nil {
-		return false
-	}
-	for _, state := range []string{finalAccepted, finalUncertain} {
-		if _, err := os.Lstat(s.finalStatePath(eventID, state)); !errors.Is(err, os.ErrNotExist) {
-			return false
-		}
-	}
-	_, err := os.Lstat(s.finalStatePath(eventID, finalUnsent))
-	return err == nil
+	return out.ReplyID != "" && out.damaged == nil && s.finalPostState(eventID) == finalPostUnsent
 }
