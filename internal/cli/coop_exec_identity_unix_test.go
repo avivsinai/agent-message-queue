@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 // Bead agent-message-queue-t97.4 (research 1, Pro finding 7): coop exec
@@ -40,7 +41,7 @@ func TestCoopExecRecordsTheHarnessItStarts(t *testing.T) {
 			t.Fatalf("after coop exec %s: record %+v err=%v, want harness %s", tc.binary, rec, err, tc.harness)
 		}
 	}
-	reg := classifyAgentAt(declarationsFor(root, ""), root, "reviewer")
+	reg := roster.ClassifyAt(roster.For(root, ""), root, "reviewer")
 	if reg.Status != registrationObserved {
 		t.Fatalf("reviewer registration = %q, want observed", reg.Status)
 	}

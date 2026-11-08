@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 type doctorOpsResult struct {
@@ -249,7 +250,7 @@ func runOpsChecksWithSchema(
 	scope := inventoryDeliveryRoot(root, opsDeclarationBase(root, explicitBaseRoot...))
 	for _, row := range opsAgentRows(root, scope) {
 		handle := row.Handle
-		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.json()}
+		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.JSON()}
 		if hint, ok := codexStartupHoldHint(root, handle); ok {
 			result.Hints = append(result.Hints, hint)
 		}
@@ -485,15 +486,15 @@ func opsAgentRows(root string, scope agentInventoryScope) []inventoryAgent {
 	}
 	seen := make(map[string]bool)
 	var rows []inventoryAgent
-	for _, roster := range scope.Declarations {
-		for _, handle := range roster.Agents {
+	for _, declared := range scope.Declarations {
+		for _, handle := range declared.Agents {
 			if seen[handle] || fsq.ValidateHandle(handle) != nil || validateWakeLockAgent(root, handle) != nil {
 				continue
 			}
 			seen[handle] = true
 			row, ok := byHandle[handle]
 			if !ok {
-				row = inventoryAgent{Handle: handle, Registration: classifyAgentAt(scope.Declarations, root, handle)}
+				row = inventoryAgent{Handle: handle, Registration: roster.ClassifyAt(scope.Declarations, root, handle)}
 			}
 			rows = append(rows, row)
 		}

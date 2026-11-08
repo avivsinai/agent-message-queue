@@ -11,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
@@ -186,10 +187,10 @@ func runDoctor(args []string) error {
 	if root != "" {
 		mailboxes, repair, check := inspectDoctorMailboxes(root, baseRoot, *fixMailboxesFlag, *ignoreSessionPinFlag)
 		result.Mailboxes = mailboxes
-		decls := declarationsFor(root, opsDeclarationBase(root, baseRoot))
+		decls := roster.For(root, opsDeclarationBase(root, baseRoot))
 		for i := range result.Mailboxes {
 			mailbox := &result.Mailboxes[i]
-			registration := classifyAgentAt(decls, root, mailbox.Handle).json()
+			registration := roster.ClassifyAt(decls, root, mailbox.Handle).JSON()
 			mailbox.RegistrationStatus = string(registration.RegistrationStatus)
 			mailbox.RegistrationDiagnostics = registration.RegistrationDiagnostics
 		}

@@ -79,7 +79,7 @@ func runWho(args []string) error {
 				Handle:                row.Handle,
 				Kind:                  row.Registration.Kind,
 				PresenceApplicable:    true,
-				agentRegistrationJSON: row.Registration.json(),
+				agentRegistrationJSON: row.Registration.JSON(),
 				MailboxStatus:         inventoryMailboxStatus(row),
 				MailboxIssues:         row.MailboxIssues,
 			}

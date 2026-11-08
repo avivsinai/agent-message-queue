@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 func writeTestRoster(t *testing.T, root, body string) {
@@ -56,8 +57,8 @@ func TestClassifyAgentRegistration(t *testing.T) {
 	writeTestRoster(t, corruptSession, `{"agents":`)
 	writeTestIdentity(t, corruptSession, "observer", validTestIdentity("observer"))
 
-	sessionDecls := declarationsFor(session, base)
-	brokenDecls := declarationsFor(corruptSession, base)
+	sessionDecls := roster.For(session, base)
+	brokenDecls := roster.For(corruptSession, base)
 	tests := []struct {
 		name         string
 		decls        agentDeclarations
@@ -77,7 +78,7 @@ func TestClassifyAgentRegistration(t *testing.T) {
 		{name: "declared keeps identity", decls: sessionDecls, root: session, handle: "claude", status: registrationDeclared, kind: "agent", identity: true},
 		// A cleaned or not-yet-joined declared handle has no mailbox and
 		// stays declared (Pro 1).
-		{name: "declared without mailbox", decls: declarationsFor(base, ""), root: base, handle: "codex", status: registrationDeclared, kind: "agent"},
+		{name: "declared without mailbox", decls: roster.For(base, ""), root: base, handle: "codex", status: registrationDeclared, kind: "agent"},
 		{name: "reserved user", decls: sessionDecls, root: session, handle: reservedHumanHandle, status: registrationDeclared, kind: "human"},
 		{name: "valid identity observes", decls: sessionDecls, root: session, handle: "observer", status: registrationObserved, kind: "agent", identity: true},
 		{name: "typo mailbox unregistered", decls: sessionDecls, root: session, handle: "reviewr", status: registrationUnregistered, kind: "agent"},
@@ -91,13 +92,13 @@ func TestClassifyAgentRegistration(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyAgentAt(tt.decls, tt.root, tt.handle)
+			got := roster.ClassifyAt(tt.decls, tt.root, tt.handle)
 			if got.Status != tt.status || got.Kind != tt.kind || (got.Identity != nil) != tt.identity || len(got.Diagnostics) != tt.diagnostics {
 				t.Fatalf("classify %s = status %q kind %q identity %v diagnostics %v; want %q %q %v %d",
 					tt.handle, got.Status, got.Kind, got.Identity, got.Diagnostics, tt.status, tt.kind, tt.identity, tt.diagnostics)
 			}
-			if refuse := tt.decls.err() != nil; refuse != tt.strictRefuse {
-				t.Fatalf("declarations err = %v, want refusal %v", tt.decls.err(), tt.strictRefuse)
+			if refuse := tt.decls.Err() != nil; refuse != tt.strictRefuse {
+				t.Fatalf("declarations err = %v, want refusal %v", tt.decls.Err(), tt.strictRefuse)
 			}
 		})
 	}
@@ -145,7 +146,7 @@ func TestInventoryProjectKeepsEveryMailbox(t *testing.T) {
 		t.Fatalf("claude = %+v, want declared via base roster with presence and complete mailbox", claude)
 	}
 	// The additive JSON projection keeps a declared handle's identity.
-	projection, err := json.Marshal(claude.Registration.json())
+	projection, err := json.Marshal(claude.Registration.JSON())
 	if err != nil {
 		t.Fatal(err)
 	}

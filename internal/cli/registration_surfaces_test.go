@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 func writeTestInboxMessage(t *testing.T, root, handle, name string) {
@@ -42,11 +43,11 @@ func TestWhoAndSessionListShowEveryMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	type whoAgent struct {
-		Handle             string             `json:"handle"`
-		Kind               string             `json:"kind"`
-		RegistrationStatus string             `json:"registration_status"`
-		Identity           *agentIdentityJSON `json:"identity"`
-		MailboxStatus      string             `json:"mailbox_status"`
+		Handle             string               `json:"handle"`
+		Kind               string               `json:"kind"`
+		RegistrationStatus string               `json:"registration_status"`
+		Identity           *roster.IdentityJSON `json:"identity"`
+		MailboxStatus      string               `json:"mailbox_status"`
 	}
 	var sessions []struct {
 		Name   string     `json:"name"`

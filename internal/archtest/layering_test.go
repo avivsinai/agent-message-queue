@@ -36,14 +36,8 @@ type importGraph struct {
 // no other package may reach it directly or transitively.
 func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 	graph := loadImportGraph(t)
-	allowed := map[string]bool{
-		module + "/cmd/amq": true,
-		// amq-remote still uses AgentRegistration from internal/cli. Remove
-		// this entry when it moves to its own package.
-		module + "/cmd/amq-remote": true,
-	}
 	for _, pkg := range graph.packages() {
-		if pkg == cliPkg || allowed[pkg] {
+		if pkg == cliPkg || pkg == module+"/cmd/amq" {
 			continue
 		}
 		if chain := graph.chain(pkg, cliPkg); chain != nil {

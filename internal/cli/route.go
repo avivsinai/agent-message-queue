@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
@@ -176,7 +177,7 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 	if targetProject == "" {
 		deliveryBase = classifyRoot(plan.DeliveryRoot)
 	}
-	registration := classifyAgentAt(declarationsFor(plan.DeliveryRoot, deliveryBase), plan.DeliveryRoot, target).json()
+	registration := roster.ClassifyAt(roster.For(plan.DeliveryRoot, deliveryBase), plan.DeliveryRoot, target).JSON()
 	result.Registration = registration.RegistrationStatus
 	result.RegistrationDiagnostics = registration.RegistrationDiagnostics
 	if plan.SourceProject != "" {
@@ -221,10 +222,6 @@ func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err err
 	}
 	return sourceRoot, resolvedMe, nil
 }
-
-// ErrPeerRootUnreachable marks a transient routing failure; see
-// route.ErrPeerRootUnreachable.
-var ErrPeerRootUnreachable = route.ErrPeerRootUnreachable
 
 func validatePlannedMailbox(plan route.DeliveryPlan, target string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(plan.DeliveryRoot)
