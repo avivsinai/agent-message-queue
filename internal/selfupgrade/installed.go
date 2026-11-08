@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // EnvInstalledImage carries the path a process was started as when it moved
@@ -39,17 +38,6 @@ func installedImage(exe string, inStore bool, recorded string) (string, error) {
 		return recorded, nil
 	}
 	return "", fmt.Errorf("%s runs from the version store and records no installed image", exe)
-}
-
-// withInstalledImage is env with EnvInstalledImage set to path.
-func withInstalledImage(env []string, path string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, EnvInstalledImage+"=") {
-			out = append(out, entry)
-		}
-	}
-	return append(out, EnvInstalledImage+"="+path)
 }
 
 // StoredCopyOf reports whether running is a version-store entry that holds

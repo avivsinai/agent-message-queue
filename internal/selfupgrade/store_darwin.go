@@ -143,6 +143,17 @@ func RunFromStore(embeddedVersion string) error {
 	return ExecImage(running, os.Args, withInstalledImage(os.Environ(), started))
 }
 
+// withInstalledImage is env with EnvInstalledImage set to path.
+func withInstalledImage(env []string, path string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, EnvInstalledImage+"=") {
+			out = append(out, entry)
+		}
+	}
+	return append(out, EnvInstalledImage+"="+path)
+}
+
 // storeImage publishes candidate into the version store, or finds the entry
 // that already holds the same content, and returns the stored image's
 // evidence after its code signature verifies. The returned lock stays held
