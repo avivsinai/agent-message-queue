@@ -97,8 +97,7 @@ commands that take it are listed under [Common flags](#common). `serve` and
 to Buzz: `📡 buzz`, or `📡 buzz (mirror off)` while the session's mirror is
 off. It prints nothing for an unknown session, an ended or detached binding,
 or any error, and always exits 0, so a status line never shows an error. It
-reads the binding files and checks only the bound session's own process: no
-network, no process scan, no lock, no write.
+reads only the binding files: no network, no process scan, no lock, no write.
 `--plain` prints `buzz` without the emoji.
 
 The session is `session_id` from the Claude Code status-line JSON on stdin,

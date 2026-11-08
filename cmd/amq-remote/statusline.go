@@ -48,10 +48,8 @@ func statusline(args []string, stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	for _, b := range all {
+		// An ended or detached binding is a tombstone, which List skips.
 		if b.RecordedSession() != id {
-			continue
-		}
-		if state, _ := b.Liveness(); state == binding.Ended {
 			continue
 		}
 		seg := "buzz"
