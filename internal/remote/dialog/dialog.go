@@ -8,10 +8,12 @@
 //	  requests/<id>.json  the seam: one open dialog
 //	  answers/<id>.json   the Buzz agent: the owner's answer
 //	  resolved/<id>.json  whoever closed the dialog first
+//	  events/<event>      the Buzz agent: the one dialog an owner message answers
 //
 // Directories are 0700 and files 0600. A request is written whole by
-// rename; an answer and a resolution are written whole and create-exclusive,
-// so the first writer wins and a reader never sees a partial file.
+// rename; an answer, a resolution and an event binding are written whole and
+// create-exclusive, so the first writer wins and a reader never sees a
+// partial file. An event binding is never removed.
 package dialog
 
 import (
@@ -61,6 +63,9 @@ type Answer struct {
 	Text   string    `json:"text,omitempty"`   // free-text answer
 	By     string    `json:"by"`               // "buzz"
 	At     time.Time `json:"at"`
+	// Event is the signed owner message that typed this answer; "" for a
+	// reaction. One message answers at most one dialog (BindEvent).
+	Event string `json:"event,omitempty"`
 }
 
 // Resolution outcomes and closers.
@@ -109,7 +114,7 @@ func Root() (string, error) {
 }
 
 // DirFor returns the dialogs directory of a binding, creating it and its
-// requests/, answers/ and resolved/ subdirectories.
+// requests/, answers/, resolved/ and events/ subdirectories.
 func DirFor(bindingName string) (string, error) {
 	if bindingName != binding.LegacyName {
 		if err := binding.ValidName(bindingName); err != nil {
@@ -121,7 +126,7 @@ func DirFor(bindingName string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(root, bindingName)
-	for _, sub := range []string{"requests", "answers", "resolved"} {
+	for _, sub := range []string{"requests", "answers", "resolved", "events"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return "", err
 		}
@@ -181,6 +186,35 @@ func ReadAnswer(dir, id string) (Answer, bool, error) {
 	var a Answer
 	ok, err := readID(dir, "answers", id, &a)
 	return a, ok, err
+}
+
+// eventRe matches a signed message id: 64 lowercase hex characters.
+var eventRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// BindEvent makes request id the one dialog that the owner message event
+// answers, unless event is bound already, and returns the dialog it is bound
+// to. The first binding wins and is never removed, so one message answers at
+// most one dialog across workers and restarts.
+func BindEvent(dir, event, id string) (string, error) {
+	if !eventRe.MatchString(event) {
+		return "", fmt.Errorf("event id %q is not 64 lowercase hex characters", event)
+	}
+	if !idRe.MatchString(id) {
+		return "", fmt.Errorf("dialog id %q is not one NewID mints", id)
+	}
+	sub := filepath.Join(dir, "events")
+	won, err := linkExclusive(sub, event, []byte(id))
+	if err != nil || won {
+		return id, err
+	}
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(sub, event), int64(len(id)))
+	if err != nil {
+		return "", err
+	}
+	if bound := string(raw); idRe.MatchString(bound) {
+		return bound, nil
+	}
+	return "", fmt.Errorf("event %s binds no dialog id", event)
 }
 
 // RemoveAnswer removes answers/<id>.json, so the next answer can be written.
@@ -296,10 +330,15 @@ func createExclusive(sub, id string, v any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return linkExclusive(sub, id+".json", raw)
+}
+
+// linkExclusive writes raw to sub/name whole: false when sub/name exists.
+func linkExclusive(sub, name string, raw []byte) (bool, error) {
 	if err := os.MkdirAll(sub, 0o700); err != nil {
 		return false, err
 	}
-	tmp, err := os.CreateTemp(sub, "."+id+".tmp-*")
+	tmp, err := os.CreateTemp(sub, "."+name+".tmp-*")
 	if err != nil {
 		return false, err
 	}
@@ -319,7 +358,7 @@ func createExclusive(sub, id string, v any) (bool, error) {
 	if err := tmp.Close(); err != nil {
 		return false, err
 	}
-	if err := os.Link(tmp.Name(), filepath.Join(sub, id+".json")); err != nil {
+	if err := os.Link(tmp.Name(), filepath.Join(sub, name)); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return false, nil
 		}

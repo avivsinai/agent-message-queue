@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,8 +19,10 @@ import (
 	"fiatjaf.com/nostr/nip19"
 
 	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -734,14 +737,16 @@ func (s *Server) dialogLead() bool {
 	return true
 }
 
-// dialogReply returns the answer that an owner's Buzz message in channel
-// gives to an open dialog posted there, and the dialog's directory. A thread
-// reply to a dialog's post answers that dialog; any other message answers
-// only when exactly one dialog is open in channel. Only a message whose Buzz
-// event names the owner as its sender answers, as only the owner's
-// reactions do.
-func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, bool) {
-	if channel == "" {
+// dialogReply returns the answer that the owner's Buzz message in channel
+// gives to an open dialog posted there, and the dialog's directory. The
+// prompt text only selects a message that looks like an answer; the answer
+// itself is the verified owner event (ownerEvent): its content is the answer
+// and its e tags are its thread. A thread reply to a dialog's post answers
+// that dialog; any other message answers only when exactly one dialog is
+// open in channel. With no verified event the dialogs stay pending and the
+// channel is told why, once per open set.
+func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.Answer, bool) {
+	if channel == "" || buzzOwner == "" {
 		return "", dialog.Answer{}, false
 	}
 	name := s.cfg.Pin
@@ -754,9 +759,6 @@ func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, boo
 	} else if s.cfg.Helper || name == "" || s.cfg.PinErr != nil {
 		return "", dialog.Answer{}, false
 	}
-	if buzzOwner == "" || eventSender(prompt) != buzzOwner {
-		return "", dialog.Answer{}, false
-	}
 	dir, err := dialog.DirFor(name)
 	if err != nil {
 		return "", dialog.Answer{}, false
@@ -765,26 +767,72 @@ func (s *Server) dialogReply(channel, prompt string) (string, dialog.Answer, boo
 	if err != nil {
 		return "", dialog.Answer{}, false
 	}
-	refs := threadRefs(prompt)
-	var here []dialog.Request
+	var open []dialog.Request
+	var openIDs []string
+	posted := map[string]string{}
 	for _, req := range reqs {
 		p, found := readDialogPost(filepath.Join(s.dialogPostDir(name), req.ID+".json"))
 		if !found || p.Channel != channel {
 			continue
 		}
-		if p.Event != "" && slices.Contains(refs, p.Event) {
-			here = []dialog.Request{req}
-			break
-		}
-		if len(refs) == 0 {
+		open, openIDs, posted[req.ID] = append(open, req), append(openIDs, req.ID), p.Event
+	}
+	if len(open) == 0 || !slices.ContainsFunc(open, func(req dialog.Request) bool {
+		_, ok := dialog.ParseAnswer(req, ownerWords(prompt))
+		return ok
+	}) {
+		return "", dialog.Answer{}, false
+	}
+	evt, err := ownerEvent(eventID, prompt, channel)
+	if err != nil {
+		s.tellUnverified(channel, "dialog:"+strings.Join(openIDs, ","), "Your reply was not taken as an answer", err)
+		return "", dialog.Answer{}, false
+	}
+	req, ok := answerTarget(dir, evt, open, posted, time.Now())
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	a, ok := dialog.ParseAnswer(req, dropMentions(evt.Content))
+	a.Event = evt.ID.Hex()
+	return dir, a, ok
+}
+
+// answerTarget is the open dialog that the verified owner event evt
+// answers: the one dialog whose post its NIP-10 root or reply names, or,
+// when it has no e tag at all, the only dialog open in its channel. It
+// answers nothing when its refs name no open dialog or more than one, when
+// it fails the time rule against its dialog's opening (signedWithin), or
+// when it is bound to another dialog. Choosing binds evt to its dialog
+// (BindEvent) before any answer is written, so no later path moves it.
+// posted maps each open dialog to its post's event id.
+func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map[string]string, now time.Time) (dialog.Request, bool) {
+	refs, tagged := replyRefs(evt)
+	var here []dialog.Request
+	for _, req := range open {
+		if !tagged || posted[req.ID] != "" && slices.Contains(refs, posted[req.ID]) {
 			here = append(here, req)
 		}
 	}
-	if len(here) != 1 {
-		return "", dialog.Answer{}, false
+	if len(here) != 1 || !signedWithin(evt, here[0].OpenedAt.Add(-ownerSkew), now) {
+		return dialog.Request{}, false
 	}
-	a, ok := dialog.ParseAnswer(here[0], ownerWords(prompt))
-	return dir, a, ok
+	if bound, err := dialog.BindEvent(dir, evt.ID.Hex(), here[0].ID); err != nil || bound != here[0].ID {
+		return dialog.Request{}, false
+	}
+	return here[0], true
+}
+
+// ownerSkew bounds how far the clock that dates an owner's signed message
+// may be from this machine's.
+const ownerSkew = 60 * time.Second
+
+// signedWithin is the time rule of every owner decision: evt was signed no
+// earlier than floor and at most ownerSkew after now. A replayed message is
+// older than the state it would decide, and a message dated ahead would
+// outrank the owner's later ones.
+func signedWithin(evt nostr.Event, floor, now time.Time) bool {
+	at := evt.CreatedAt.Time()
+	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
 }
 
 // answerDialog writes a typed answer, tells the owner it was taken, and ends
@@ -818,9 +866,10 @@ func buzzEvent(prompt string) string {
 	return prompt[start : start+end]
 }
 
-// ownerWords is the text the owner typed: the Content of the prompt's one
-// Buzz event, else what follows the <context> block, with leading mentions
-// dropped. Line breaks stay: one line can answer each question of a dialog.
+// ownerWords is the text a buzz-acp prompt shows the owner typed: the
+// Content of its one Buzz event, else what follows the <context> block, with
+// leading mentions dropped. It only says whether a prompt may be an owner
+// decision; the decision itself reads the verified event (ownerEvent).
 func ownerWords(prompt string) string {
 	text := prompt
 	if evt := buzzEvent(prompt); evt != "" {
@@ -839,6 +888,12 @@ func ownerWords(prompt string) string {
 	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
 		text = after
 	}
+	return dropMentions(text)
+}
+
+// dropMentions trims text and drops its leading mentions. Line breaks stay:
+// one line can answer each question of a dialog.
+func dropMentions(text string) string {
 	text = strings.TrimSpace(text)
 	for {
 		end := strings.IndexFunc(text, unicode.IsSpace)
@@ -849,52 +904,108 @@ func ownerWords(prompt string) string {
 	}
 }
 
-// eventSender is the hex pubkey on the From line of the prompt's Buzz
-// event, or "".
-func eventSender(prompt string) string {
-	for line := range strings.SplitSeq(buzzEvent(prompt), "\n") {
-		if rest, ok := strings.CutPrefix(line, "From: "); ok {
-			if _, hex, ok := strings.Cut(rest, "hex: "); ok {
-				return strings.TrimSuffix(strings.TrimSpace(hex), ")")
-			}
-		}
+// errNotOwner is a verified event that someone other than the owner signed.
+var errNotOwner = errors.New("the event is not the owner's")
+
+// errNoEventID is a prompt that names no Nostr event to verify.
+var errNoEventID = errors.New("the message names no signed event")
+
+// ownerEvent is the one source of an owner decision: the prompt's
+// triggering event (lookupEventID of its _meta id eventID and its text) as
+// the relay serves it to this agent, accepted by buzzevent.Fetch as the
+// plaintext message in channel, and signed by the owner. A decision acts on
+// its content and tags, never on the prompt text. errNotOwner means it
+// verified but another key signed it; any other error means there is no
+// verified event.
+func ownerEvent(eventID, prompt, channel string) (nostr.Event, error) {
+	id := lookupEventID(eventID, prompt)
+	if id == "" {
+		return nostr.Event{}, errNoEventID
 	}
-	return ""
+	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, id, channel)
+	if err != nil {
+		return nostr.Event{}, err
+	}
+	if buzzOwner == "" || evt.PubKey.Hex() != buzzOwner {
+		return nostr.Event{}, errNotOwner
+	}
+	return evt, nil
 }
 
-// threadRefs are the event ids the prompt's message replies to: the Thread
-// root and Parent lines of its <context> block and the e tags of its Buzz
-// event.
-func threadRefs(prompt string) []string {
-	var refs []string
-	add := func(id string) {
-		if id = strings.ToLower(strings.TrimSpace(id)); nostrEventIDRe.MatchString(id) && !slices.Contains(refs, id) {
-			refs = append(refs, id)
+// unverifiedNoticeEvery is how often one decision may say why it was not
+// taken.
+const unverifiedNoticeEvery = 10 * time.Minute
+
+// noticeLimit lets one line per key through every unverifiedNoticeEvery.
+type noticeLimit struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func (n *noticeLimit) allow(key string, now time.Time) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for k, at := range n.last {
+		if now.Sub(at) >= unverifiedNoticeEvery {
+			delete(n.last, k)
 		}
 	}
-	if start, end := strings.Index(prompt, "<context>"), strings.Index(prompt, "</context>"); start >= 0 && end > start {
-		for line := range strings.SplitSeq(prompt[start:end], "\n") {
-			if rest, ok := strings.CutPrefix(line, "Thread root: "); ok {
-				add(rest)
-			} else if rest, ok := strings.CutPrefix(line, "Parent: "); ok {
-				add(rest)
-			}
+	if _, recent := n.last[key]; recent {
+		return false
+	}
+	if n.last == nil {
+		n.last = map[string]time.Time{}
+	}
+	n.last[key] = now
+	return true
+}
+
+// tellUnverified posts one line into channel saying why an owner decision
+// was not taken, at most once per key every unverifiedNoticeEvery. A
+// verified event from someone other than the owner says nothing.
+func (s *Server) tellUnverified(channel, key, lead string, err error) {
+	if errors.Is(err, errNotOwner) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "amq-acp: an owner decision in %s was not taken: %v\n", channel, err)
+	if !s.notices.allow(key, time.Now()) {
+		return
+	}
+	var why string
+	switch {
+	case errors.Is(err, errNoEventID):
+		why = err.Error()
+	case errors.Is(err, buzzevent.ErrNotFound):
+		why = "the relay does not serve its signed event"
+	case errors.Is(err, buzzevent.ErrWrongID), errors.Is(err, buzzevent.ErrWrongKind), errors.Is(err, buzzevent.ErrWrongChannel):
+		why = "its signed event is not a message in this channel"
+	default:
+		why = "its signed event could not be read from the relay (" + relay.Category(err) + ")"
+	}
+	go s.publish(channel, lead+": "+why+".")
+}
+
+// replyRefs are the events a signed message replies to under NIP-10: its e
+// tags marked "root" or "reply", or, when no e tag has a marker, its first
+// and last e tag. A "mention" never counts. tagged reports whether the
+// message has any e tag.
+func replyRefs(evt nostr.Event) (refs []string, tagged bool) {
+	var es []nostr.Tag
+	marked := false
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "e" {
+			es = append(es, t)
+			marked = marked || len(t) >= 4 && t[3] != ""
 		}
 	}
-	for line := range strings.SplitSeq(buzzEvent(prompt), "\n") {
-		rest, ok := strings.CutPrefix(line, "Tags: ")
-		if !ok {
-			continue
+	for i, t := range es {
+		reply := len(t) >= 4 && (t[3] == "root" || t[3] == "reply")
+		if !marked {
+			reply = i == 0 || i == len(es)-1
 		}
-		var tags [][]string
-		if json.Unmarshal([]byte(rest), &tags) != nil {
-			continue
-		}
-		for _, t := range tags {
-			if len(t) >= 2 && t[0] == "e" {
-				add(t[1])
-			}
+		if reply && nostrEventIDRe.MatchString(t[1]) && !slices.Contains(refs, t[1]) {
+			refs = append(refs, t[1])
 		}
 	}
-	return refs
+	return refs, len(es) > 0
 }
