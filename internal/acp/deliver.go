@@ -299,20 +299,8 @@ func claimEvent(cfg Config, root *fsq.DeliveryRoot, thread, eventID string) (eve
 // published until one succeeds.
 func syncEventClaim(root *fsq.DeliveryRoot, me, eventID string) error {
 	journalPath := eventJournalPath(me, eventID)
-	file, _, err := root.OpenRegularNoFollow(journalPath)
-	if err != nil {
-		return fmt.Errorf("reopen the event claim for sync: %w", err)
-	}
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if syncErr == nil {
-		syncErr = fsq.FileSyncFaultForTest()
-	}
-	if syncErr != nil {
-		return fmt.Errorf("sync the event claim file: %w", syncErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close the event claim after sync: %w", closeErr)
+	if err := root.SyncRegularNoFollow(journalPath); err != nil {
+		return fmt.Errorf("sync the event claim file: %w", err)
 	}
 	if err := root.SyncDir(filepath.Dir(journalPath)); err != nil {
 		return fmt.Errorf("sync the event claim directory: %w", err)

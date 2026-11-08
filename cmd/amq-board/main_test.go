@@ -67,6 +67,12 @@ func (noGit) RunLimited(context.Context, string, []string, int) ([]byte, error) 
 // sets the budget. Regression for Codex review of PR #1203 (P2: amq-board
 // always read the default homes with the default budget).
 func TestBoardReadsUsageSettings(t *testing.T) {
+	// The default homes come from the environment; they must name an empty
+	// temporary home, never the real one or an inherited CLAUDE_CONFIG_DIR.
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(userHome, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(userHome, ".codex"))
 	claude, err := filepath.Abs("../../internal/board/usage/testdata/claude")
 	if err != nil {
 		t.Fatal(err)
