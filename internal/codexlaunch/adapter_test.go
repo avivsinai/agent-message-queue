@@ -356,7 +356,12 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	base := t.TempDir()
+	// The base uses the same resolved form as the project: on macOS t.TempDir
+	// is under /var, a symlink to /private/var (macOS CI on PR #1402).
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw, _ := json.Marshal(map[string]string{"root": base})
 	if err := os.WriteFile(filepath.Join(project, ".amqrc"), raw, 0o600); err != nil {
 		t.Fatal(err)
