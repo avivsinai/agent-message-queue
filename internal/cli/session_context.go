@@ -295,45 +295,10 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	return target, true, nil
 }
 
-// resolveSessionRoot resolves a session beneath base using canonical paths. This
-// prevents a symlinked session (or base) from bypassing tree/session identity
-// checks performed by callers.
+// resolveSessionRoot is route.Walker.ResolveSessionRoot under the test walk
+// ceiling.
 func resolveSessionRoot(base, session string) (string, error) {
-	base = absPath(resolveRoot(base))
-	if !dirExists(base) {
-		return "", NotFoundError("base root not found at %s", base)
-	}
-	target := absPath(filepath.Join(base, session))
-	entry, err := os.Lstat(target)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", NotFoundError("session %q not found at %s", session, target)
-		}
-		// A non-ENOENT Lstat on the session directory (EACCES/EIO/ESTALE)
-		// is transient, not a permanent context mismatch. Classify it as
-		// ErrPeerRootUnreachable so retryableRouteError rescues it and the carrier
-		// retries instead of DLQing the command. Actual symlink, non-directory, and
-		// containment violations (below) remain ContextMismatchError.
-		return "", fmt.Errorf("%w: cannot inspect session %q: %v", ErrPeerRootUnreachable, session, err)
-	}
-	if !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
-		return "", ContextMismatchError("session %q is not a direct directory under base", session)
-	}
-	canonBase, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		return "", err
-	}
-	canonTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(canonBase, canonTarget)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", ContextMismatchError("session %q resolves outside base root", session)
-	}
-	// Preserve the caller's lexical root for mailbox layout and diagnostics;
-	// canonical paths above are used only for containment validation.
-	return target, nil
+	return routeWalker().ResolveSessionRoot(base, session)
 }
 
 func cwdLocalMailboxRoot(target string) (string, bool, error) {

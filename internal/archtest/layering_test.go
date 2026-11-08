@@ -38,9 +38,8 @@ func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 	graph := loadImportGraph(t)
 	allowed := map[string]bool{
 		module + "/cmd/amq": true,
-		// amq-remote still uses reply routing (ResolveReplyRoute) and
-		// AgentRegistration from internal/cli. Remove this entry when those
-		// move to their own packages.
+		// amq-remote still uses AgentRegistration from internal/cli. Remove
+		// this entry when it moves to its own package.
 		module + "/cmd/amq-remote": true,
 	}
 	for _, pkg := range graph.packages() {

@@ -1,4 +1,4 @@
-package cli
+package route
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/exitcode"
 )
 
 // TestNonEnoentSessionLstatIsTransient verifies that a non-ENOENT Lstat
@@ -44,7 +46,7 @@ func TestNonEnoentSessionLstatIsTransient(t *testing.T) {
 		_ = os.Chmod(base, 0o755)
 	})
 
-	_, err := resolveSessionRoot(base, session)
+	_, err := (Walker{}).ResolveSessionRoot(base, session)
 	if err == nil {
 		t.Fatal("expected error from resolveSessionRoot, got nil")
 	}
@@ -65,15 +67,15 @@ func TestEnoentSessionLstatIsStillNotFound(t *testing.T) {
 	base := t.TempDir()
 	session := "nonexistent"
 
-	_, err := resolveSessionRoot(base, session)
+	_, err := (Walker{}).ResolveSessionRoot(base, session)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if errors.Is(err, ErrPeerRootUnreachable) {
 		t.Fatalf("ENOENT must not be ErrPeerRootUnreachable (it IS NotFound): %v", err)
 	}
-	var ecerr *ExitCodeError
-	if !errors.As(err, &ecerr) || ecerr.Code != ExitNotFound {
-		t.Fatalf("expected ExitNotFound, got %T: %v", err, err)
+	var ecerr *exitcode.ExitCodeError
+	if !errors.As(err, &ecerr) || ecerr.Code != exitcode.ExitNotFound {
+		t.Fatalf("expected exitcode.ExitNotFound, got %T: %v", err, err)
 	}
 }
