@@ -274,7 +274,9 @@ func followTraceTargets(root, messageID string, targets []traceLocatedHeader) *t
 			continue
 		}
 		h := target.header
-		follow := newFollower().follow(followedMessage{
+		f := newFollower()
+		defer f.Close()
+		follow := f.follow(followedMessage{
 			ID: h.ID, From: h.From, Kind: h.Kind, To: h.To, ReplyTo: h.ReplyTo, ReplyProject: h.ReplyProject, Root: root,
 		})
 		return &follow

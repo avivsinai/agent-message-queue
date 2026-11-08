@@ -312,6 +312,7 @@ func followOpeners(scanRoots []thread.ScanRoot, entries []thread.Entry, open []*
 		ids = append(ids, r.ID)
 	}
 	f := newFollower()
+	defer f.Close()
 	out := []traceFollow{}
 	seen := map[string]bool{}
 	for _, id := range ids {

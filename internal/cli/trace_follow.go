@@ -64,8 +64,9 @@ type followRoot struct {
 // receipt: DLQ files are named by their envelope, not the message id.
 // Delivery is not_found when no searched root holds it and unknown when a
 // root that might hold it could not be read. Receipt is drained, dlq, owed
-// (consumed, receipt not written yet) or none. Session is that of the root
-// that holds the receipt.
+// (consumed, receipt not written yet), none, or unknown when a receipt file
+// with its name does not read as that receipt (Detail says why). Session is
+// that of the root that holds the receipt.
 type followRecipient struct {
 	Handle   string `json:"handle"`
 	Root     string `json:"root,omitempty"`
@@ -73,6 +74,7 @@ type followRecipient struct {
 	Session  string `json:"session"`
 	Delivery string `json:"delivery"`
 	Receipt  string `json:"receipt"`
+	Detail   string `json:"detail,omitempty"`
 	// Reply is set when the message is a request (review_request, question
 	// or todo).
 	Reply *followReply `json:"reply,omitempty"`
@@ -107,14 +109,18 @@ type followReplyMessage struct {
 	Kind     string `json:"kind"`
 	Delivery string `json:"delivery"`
 	Receipt  string `json:"receipt"`
+	Detail   string `json:"detail,omitempty"`
 }
 
-// follower follows messages across roots. It caches the candidate roots of
-// each sender root and the headers of each mailbox it reads, so one process
-// follows many messages with one walk and one read per mailbox.
+// follower follows messages across roots. Every read goes through a pinned
+// DeliveryRoot per queue root and opens files without following symlinks.
+// It caches the candidate roots of each sender root, the opened roots, and
+// the headers of each mailbox it reads, so one process follows many messages
+// with one walk and one read per mailbox. Close releases the roots.
 type follower struct {
 	walker     route.Walker
 	candidates map[string]followCandidates
+	roots      map[string]*fsq.DeliveryRoot
 	headers    map[string][]format.Header
 }
 
@@ -125,12 +131,38 @@ type followCandidates struct {
 }
 
 func newFollower() *follower {
-	return &follower{walker: routeWalker(), candidates: map[string]followCandidates{}, headers: map[string][]format.Header{}}
+	return &follower{
+		walker:     routeWalker(),
+		candidates: map[string]followCandidates{},
+		roots:      map[string]*fsq.DeliveryRoot{},
+		headers:    map[string][]format.Header{},
+	}
 }
 
-// follow locates msg's copy and receipt for each recipient in the roots its
-// header implies. It stats a few fixed names per root and recipient and
-// reads no message file.
+func (f *follower) Close() {
+	for _, r := range f.roots {
+		_ = r.Close()
+	}
+	f.roots = map[string]*fsq.DeliveryRoot{}
+}
+
+// open pins root once.
+func (f *follower) open(root string) (*fsq.DeliveryRoot, error) {
+	if r, ok := f.roots[root]; ok {
+		return r, nil
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	r, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return nil, err
+	}
+	f.roots[root] = r
+	return r, nil
+}
+
 func (f *follower) follow(msg followedMessage) traceFollow {
 	out := traceFollow{MessageID: msg.ID, Searched: []followRoot{}, Recipients: []followRecipient{}}
 	cands := f.candidateRoots(msg)
@@ -180,8 +212,8 @@ func (f *follower) follow(msg followedMessage) traceFollow {
 	return out
 }
 
-// locateAll finds handle's copy of id in each readable root. A root whose
-// stat fails is marked unreadable in place.
+// locateAll finds handle's copy of id in each readable root. A root that
+// cannot be opened or read is marked in place.
 func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRecipient, bool) {
 	var hits []followRecipient
 	unreadable := false
@@ -193,56 +225,83 @@ func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRec
 			unreadable = true
 			continue
 		}
-		delivery, stage, err := locateCopy(roots[i].Root, handle, id)
+		found, err := f.locateCopy(roots[i].Root, handle, id)
 		if err != nil {
 			roots[i].Status, roots[i].Detail = followRootUnreadable, err.Error()
-			unreadable = true
+			if os.IsNotExist(err) {
+				roots[i].Status = followRootMissing
+			} else {
+				unreadable = true
+			}
 			continue
 		}
-		if delivery == "" && stage == "none" {
+		if found.Delivery == "" && found.Receipt == "none" {
 			continue
 		}
-		hits = append(hits, followRecipient{
-			Handle: handle, Root: roots[i].Root, Project: roots[i].Project, Session: roots[i].Session,
-			Delivery: delivery, Receipt: stage,
-		})
+		found.Handle, found.Root, found.Project, found.Session = handle, roots[i].Root, roots[i].Project, roots[i].Session
+		hits = append(hits, found)
 	}
 	return hits, unreadable
 }
 
-// locateCopy stats handle's inbox copy of id and its written or owed receipt
-// in root. Both empty ("", "none") means root holds no trace of it.
-func locateCopy(root, handle, id string) (delivery, stage string, err error) {
+// locateCopy finds handle's inbox copy of id and its written or owed receipt
+// in root. A receipt counts only when it parses and names id, handle and its
+// stage. Delivery "" with Receipt none means root holds no trace of it.
+func (f *follower) locateCopy(root, handle, id string) (followRecipient, error) {
+	out := followRecipient{Receipt: "none"}
 	if err := fsq.ValidateHandle(handle); err != nil {
-		return "", "", err
+		return out, err
 	}
-	if _, box, err := fsq.FindMessage(root, handle, id+".md"); err == nil {
-		delivery = box
-	} else if !os.IsNotExist(err) {
-		return "", "", err
+	if err := fsq.ValidateMessageFilename(id + ".md"); err != nil {
+		return out, err
 	}
-	stage = "none"
+	r, err := f.open(root)
+	if err != nil {
+		return out, err
+	}
+	for _, box := range []string{fsq.BoxNew, fsq.BoxCur} {
+		file, _, err := r.OpenRegularNoFollow(filepath.Join("agents", handle, "inbox", box, id+".md"))
+		if err == nil {
+			_ = file.Close()
+			out.Delivery = box
+			break
+		}
+		if !os.IsNotExist(err) {
+			return out, err
+		}
+	}
 	owedDLQ := false
-	for _, s := range []string{receipt.StageDrained, receipt.StageDLQ} {
-		written := filepath.Join(fsq.AgentReceipts(root, handle), receipt.Filename(id, handle, s))
-		owed := filepath.Join(root, receipt.PendingPath(receipt.Receipt{MsgID: id, Consumer: handle, Stage: s}))
-		if ok, err := statExists(written); err != nil {
-			return "", "", err
-		} else if ok {
-			stage = s
+	for _, stage := range []string{receipt.StageDrained, receipt.StageDLQ} {
+		item, err := receipt.ReadDeliveryRoot(r, filepath.Join("agents", handle, "receipts", receipt.Filename(id, handle, stage)))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err == nil && (item.MsgID != id || item.Consumer != handle || item.Stage != stage) {
+			err = fmt.Errorf("receipt names %s/%s/%s", item.MsgID, item.Consumer, item.Stage)
+		}
+		if err != nil {
+			out.Receipt, out.Detail = "unknown", fmt.Sprintf("%s receipt: %v", stage, err)
 			break
 		}
-		if ok, err := statExists(owed); err != nil {
-			return "", "", err
-		} else if ok {
-			stage, owedDLQ = "owed", s == receipt.StageDLQ
-			break
+		out.Receipt = stage
+		break
+	}
+	if out.Receipt == "none" {
+		owed, err := receipt.ListPending(r, handle)
+		if err != nil {
+			out.Receipt, out.Detail = "unknown", err.Error()
+		}
+		for _, item := range owed {
+			if item.MsgID == id {
+				out.Receipt, owedDLQ = "owed", item.Stage == receipt.StageDLQ
+				break
+			}
 		}
 	}
-	if delivery == "" && (stage == receipt.StageDLQ || owedDLQ) {
-		delivery = "dlq"
+	if out.Delivery == "" && (out.Receipt == receipt.StageDLQ || owedDLQ) {
+		out.Delivery = "dlq"
 	}
-	return delivery, stage, nil
+	return out, nil
 }
 
 func (f *follower) followReply(msg followedMessage, hit followRecipient) *followReply {
@@ -253,10 +312,10 @@ func (f *follower) followReply(msg followedMessage, hit followRecipient) *follow
 		return out
 	}
 	out.Destination = dest
-	found, err := f.repliesIn(msg.ID, filepath.Join(hit.Root, "agents", hit.Handle, "outbox", "sent"))
+	found, err := f.repliesIn(msg.ID, hit.Handle, hit.Root, filepath.Join("agents", hit.Handle, "outbox", "sent"))
 	if err == nil && len(found) == 0 {
-		inbox := filepath.Join(dest.Root, "agents", dest.Handle, "inbox")
-		found, err = f.repliesIn(msg.ID, filepath.Join(inbox, "new"), filepath.Join(inbox, "cur"))
+		inbox := filepath.Join("agents", dest.Handle, "inbox")
+		found, err = f.repliesIn(msg.ID, hit.Handle, dest.Root, filepath.Join(inbox, "new"), filepath.Join(inbox, "cur"))
 	}
 	if err != nil {
 		out.Error, out.Detail = followRootUnreadable, err.Error()
@@ -267,14 +326,16 @@ func (f *follower) followReply(msg followedMessage, hit followRecipient) *follow
 		out.Status = "replied"
 	}
 	for _, h := range found {
-		delivery, stage, err := locateCopy(dest.Root, dest.Handle, h.ID)
+		loc, err := f.locateCopy(dest.Root, dest.Handle, h.ID)
 		switch {
 		case err != nil:
-			delivery, stage, out.Detail = "unknown", "none", err.Error()
-		case delivery == "" && stage == "none":
-			delivery = "not_found"
+			loc.Delivery, loc.Detail = "unknown", err.Error()
+		case loc.Delivery == "" && loc.Receipt == "none":
+			loc.Delivery = "not_found"
 		}
-		out.Replies = append(out.Replies, followReplyMessage{ID: h.ID, From: h.From, Kind: h.Kind, Delivery: delivery, Receipt: stage})
+		out.Replies = append(out.Replies, followReplyMessage{
+			ID: h.ID, From: h.From, Kind: h.Kind, Delivery: loc.Delivery, Receipt: loc.Receipt, Detail: loc.Detail,
+		})
 	}
 	return out
 }
@@ -299,16 +360,18 @@ func (f *follower) replyDestination(msg followedMessage, hit followRecipient) (*
 	return &followDestination{Root: root, Session: session, Handle: handle}, "", nil
 }
 
-// repliesIn returns the headers in dirs whose refs name id.
-func (f *follower) repliesIn(id string, dirs ...string) ([]format.Header, error) {
+// repliesIn returns the headers in root's mailbox dirs that the recipient
+// from sent and whose refs name id: a reply in a shared requester inbox
+// answers only for its own sender.
+func (f *follower) repliesIn(id, from, root string, dirs ...string) ([]format.Header, error) {
 	var found []format.Header
 	for _, dir := range dirs {
-		headers, err := f.mailboxHeaders(dir)
+		headers, err := f.mailboxHeaders(root, dir)
 		if err != nil {
 			return nil, err
 		}
 		for _, h := range headers {
-			if h.ID != id && slices.Contains(h.Refs, id) {
+			if h.ID != id && h.From == from && slices.Contains(h.Refs, id) {
 				found = append(found, h)
 			}
 		}
@@ -316,13 +379,19 @@ func (f *follower) repliesIn(id string, dirs ...string) ([]format.Header, error)
 	return found, nil
 }
 
-// mailboxHeaders reads the parsable headers in one mailbox directory once.
-// A missing directory holds none; a file that does not parse is no reply.
-func (f *follower) mailboxHeaders(dir string) ([]format.Header, error) {
-	if headers, ok := f.headers[dir]; ok {
+// mailboxHeaders reads the parsable headers in one root-relative mailbox
+// directory once. A missing directory holds none; a file that does not parse
+// is no reply.
+func (f *follower) mailboxHeaders(root, dir string) ([]format.Header, error) {
+	key := root + "\x00" + dir
+	if headers, ok := f.headers[key]; ok {
 		return headers, nil
 	}
-	entries, err := os.ReadDir(dir)
+	r, err := f.open(root)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := r.ReadDir(dir)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -332,22 +401,12 @@ func (f *follower) mailboxHeaders(dir string) ([]format.Header, error) {
 		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-		if h, err := format.ReadHeaderFile(filepath.Join(dir, name)); err == nil {
+		if h, err := format.ReadHeaderFileRoot(r, filepath.Join(dir, name)); err == nil {
 			headers = append(headers, h)
 		}
 	}
-	f.headers[dir] = headers
+	f.headers[key] = headers
 	return headers, nil
-}
-
-func statExists(path string) (bool, error) {
-	if _, err := os.Stat(path); err == nil {
-		return true, nil
-	} else if os.IsNotExist(err) {
-		return false, nil
-	} else {
-		return false, err
-	}
 }
 
 // candidateRoots are the roots msg can have reached, by its header: reply
