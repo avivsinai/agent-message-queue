@@ -184,8 +184,8 @@ below them is mode 0700.
 
 ## Darwin version store
 
-On macOS, `amq wake`, `amq-keepalive supervise`, and the `amq-bridge up`
-courier first re-execute themselves, with the same arguments and environment,
+On macOS, `amq wake`, `amq-keepalive supervise`, the `amq-bridge up`
+courier, and `amq-acp` (its worker and `host`) first re-execute themselves, with the same arguments and environment,
 from a private copy in `~/.amq/state/versions/<sha256>/<binary>`. A package
 manager can then delete the installed file, as Homebrew deletes an old Cellar
 version on upgrade, while the process keeps a named image; macOS cannot

@@ -379,7 +379,9 @@ func pruneStore(root, keep string) error {
 }
 
 // sameUserProcessPaths returns the image path of every process of this user
-// whose command name is one of names.
+// whose command name is one of names. Any other failure, including a process
+// whose image has no name left (ENOENT), fails the whole listing, so a prune
+// keeps every entry until that process ends.
 func sameUserProcessPaths(names map[string]bool) (map[string]bool, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.uid", os.Geteuid())
 	if err != nil {
@@ -394,8 +396,7 @@ func sameUserProcessPaths(names map[string]bool) (map[string]bool, error) {
 		pid := int(proc.Proc.P_pid)
 		path, err := ProcessExecutablePath(pid)
 		if errors.Is(err, unix.ESRCH) {
-			// The process exited, or its image has no name left, so it
-			// runs from no entry that still exists.
+			// The process exited, so it runs from no entry.
 			continue
 		}
 		if err != nil {
