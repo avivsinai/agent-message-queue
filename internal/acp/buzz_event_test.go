@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func deliverBuzzEvent(t *testing.T, eventID, channel string) format.Message {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", id, eventID, channel, time.Now(), "allow"); err != nil {
+	if err := publishOnce(b, "t", id, eventID, signedEventContext(eventID, channel), time.Now(), "allow"); err != nil {
 		t.Fatal(err)
 	}
 	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "agent"), id+".md"))
@@ -138,5 +139,37 @@ func TestBuzzMailWithoutAVerifiedEventHasNoKey(t *testing.T) {
 				t.Fatalf("context = %v body = %q, want a delivered message with no verified event", msg.Header.Context, msg.Body)
 			}
 		})
+	}
+}
+
+// Found live: Buzz Desktop names no event id in the ACP _meta, so no real
+// DM ever carried its signed event. The triggering event's id is read from
+// the prompt's <buzz-event> block, and the relay proves it.
+func TestBuzzMailWithoutAMetaIDCarriesTheTriggeringEvent(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 300 * time.Millisecond
+	lr := agentRelayForTest(t)
+	evt := signedMessage(t, 9, "continue please", nostr.Tag{"h", dmChannel})
+	lr.Inject(evt)
+	prompt := "<context>\nScope: channel\nChannel: agent (#" + dmChannel + ")\n</context>\n" +
+		"<buzz-event type=\"all\">\nEvent ID: " + evt.ID.Hex() + "\nKind: 9\nContent: continue please\n" +
+		"Tags: [[\"h\",\"" + dmChannel + "\"]]\n</buzz-event>\n"
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	if _, rpcErr := s.runRemote("s", prompt, "", turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	ids := inboxPrompts(t, root)
+	if len(ids) != 1 {
+		t.Fatalf("prompts = %v, want 1", ids)
+	}
+	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "agent"), ids[0]+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buzz, _ := msg.Header.Context["buzz"].(map[string]any)
+	got, _ := buzz["event"].(map[string]any)
+	if got["id"] != evt.ID.Hex() || !slices.Contains(msg.Header.Labels, "nostr:"+evt.ID.Hex()) {
+		t.Fatalf("context = %v labels = %v, want the triggering event %s", msg.Header.Context, msg.Header.Labels, evt.ID.Hex())
 	}
 }

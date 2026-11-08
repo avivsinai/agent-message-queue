@@ -83,9 +83,13 @@ type remoteTurn struct {
 	native    string
 	sessionID string
 	eventID   string
-	emit      func(any) error
-	turn      *turnState
-	meta      remoteMeta
+	// nostrID is the Buzz event a mailbox prompt names (lookupEventID), and
+	// signed its verified signed event as header context, nil when none.
+	nostrID string
+	signed  map[string]any
+	emit    func(any) error
+	turn    *turnState
+	meta    remoteMeta
 	// mailbox marks a mailbox turn; claimChannel is its claim's channel.
 	mailbox      bool
 	claimChannel string

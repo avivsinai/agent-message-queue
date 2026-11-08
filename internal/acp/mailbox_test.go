@@ -290,7 +290,7 @@ func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("3", 64), "", "", time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("3", 64), "", nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -324,7 +324,7 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", id, "", "", time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", id, "", nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -529,7 +529,7 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("6", 64), "", "", time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("6", 64), "", nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {
