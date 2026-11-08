@@ -64,6 +64,7 @@ type traceEvidence struct {
 	Relation     *traceRelation               `json:"relation,omitempty"`
 	Notification *notificationattempt.Attempt `json:"notification,omitempty"`
 	State        string                       `json:"state,omitempty"`
+	Stage        string                       `json:"stage,omitempty"`
 	Durability   string                       `json:"durability,omitempty"`
 	Limitation   string                       `json:"limitation,omitempty"`
 }
@@ -123,7 +124,8 @@ func runTrace(args []string) error {
 		"Join current on-disk evidence for one message without mutating the queue.",
 		"",
 		"It reports message copies, route fields, visible delivery artifacts, DLQ entries,",
-		"delivery receipts, thread references, and durable agent-owned notification write attempts.",
+		"delivery receipts, owed receipts (consumed, receipt not written yet; stage \"owed\"),",
+		"thread references, and durable agent-owned notification write attempts.",
 		"Notification evidence never proves that a TUI or person saw, displayed, or submitted it.",
 	)
 
@@ -391,6 +393,7 @@ func (c *traceCollector) scanReceipts() {
 			c.addError("receipts", fmt.Sprintf("scan %s: %v", c.relative(dir), err))
 			continue
 		}
+		written := map[string]bool{}
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasPrefix(entry.Name(), c.messageID+"__") || !strings.HasSuffix(entry.Name(), ".json") {
 				continue
@@ -410,6 +413,26 @@ func (c *traceCollector) scanReceipts() {
 				Path:      c.relative(path),
 				Agent:     agent,
 				Receipt:   &itemCopy,
+			})
+			written[entry.Name()] = true
+		}
+		owed, err := receipt.ListPending(c.deliveryRoot, agent)
+		if err != nil {
+			c.addError("receipts", fmt.Sprintf("scan agent %s owed receipts: %v", agent, err))
+			continue
+		}
+		for _, item := range owed {
+			path := receipt.PendingPath(item)
+			if item.MsgID != c.messageID || written[filepath.Base(path)] {
+				continue
+			}
+			itemCopy := item
+			c.addEvidence("receipts", traceEvidence{
+				Authority: "owed_receipt",
+				Path:      c.relative(path),
+				Agent:     agent,
+				Receipt:   &itemCopy,
+				Stage:     "owed",
 			})
 		}
 	}
@@ -801,6 +824,9 @@ func traceEvidenceText(legName string, evidence traceEvidence) string {
 			return fmt.Sprintf("%s: %s (%s)", evidence.Path, evidence.DLQ.FailureReason, evidence.DLQ.FailureDetail)
 		}
 	case "receipts":
+		if evidence.Receipt != nil && evidence.Stage == "owed" {
+			return fmt.Sprintf("%s owed by %s (consumed at %s; receipt not written yet)", evidence.Receipt.Stage, evidence.Receipt.Consumer, evidence.Receipt.EmittedAt)
+		}
 		if evidence.Receipt != nil {
 			return fmt.Sprintf("%s by %s at %s", evidence.Receipt.Stage, evidence.Receipt.Consumer, evidence.Receipt.EmittedAt)
 		}

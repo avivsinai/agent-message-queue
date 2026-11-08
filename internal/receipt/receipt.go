@@ -142,7 +142,7 @@ func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
 	var errs []error
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+		if !isPendingEntry(entry) {
 			continue
 		}
 		path := filepath.Join(dir, name)
@@ -153,10 +153,7 @@ func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
 			}
 			continue
 		}
-		r, err := parseReceipt(data)
-		if err == nil && (r.Consumer != consumer || r.filename() != name) {
-			err = fmt.Errorf("receipt names %s", r.filename())
-		}
+		r, err := parsePending(data, consumer, name)
 		if err != nil {
 			// An invalid entry can never become a receipt. Move it aside once
 			// so it is reported once instead of failing every later repair.
@@ -181,6 +178,64 @@ func RepairPending(root *fsq.DeliveryRoot, consumer string) error {
 		return nil
 	}
 	return &RepairError{Err: errors.Join(errs...)}
+}
+
+// isPendingEntry reports whether a pending directory entry can hold an owed
+// receipt; quarantined and hidden entries never can.
+func isPendingEntry(entry os.DirEntry) bool {
+	name := entry.Name()
+	return !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json")
+}
+
+// parsePending decodes a parked receipt and accepts it only when it belongs to
+// consumer under its own final filename. An entry it rejects can never become
+// a receipt.
+func parsePending(data []byte, consumer, name string) (Receipt, error) {
+	r, err := parseReceipt(data)
+	if err == nil && (r.Consumer != consumer || r.filename() != name) {
+		err = fmt.Errorf("receipt names %s", r.filename())
+	}
+	return r, err
+}
+
+// ListPending returns the receipts consumer owes: outcomes already committed
+// whose receipt write failed and was parked. It never writes; RepairPending
+// writes and quarantines. Invalid entries are skipped because they are not
+// owed receipts.
+func ListPending(root *fsq.DeliveryRoot, consumer string) ([]Receipt, error) {
+	dir := pendingDir(consumer)
+	entries, err := root.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read pending receipts: %w", err)
+	}
+	var owed []Receipt
+	for _, entry := range entries {
+		if !isPendingEntry(entry) {
+			continue
+		}
+		name := entry.Name()
+		data, err := root.ReadRegularNoFollow(filepath.Join(dir, name))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("read pending receipt %s: %w", name, err)
+		}
+		r, err := parsePending(data, consumer, name)
+		if err != nil {
+			continue
+		}
+		owed = append(owed, r)
+	}
+	return owed, nil
+}
+
+// PendingPath is the root-relative path of the parked copy of r.
+func PendingPath(r Receipt) string {
+	return filepath.Join(pendingDir(r.Consumer), r.filename())
 }
 
 // WaitFor polls for a specific consumer-local receipt by deterministic filename.
