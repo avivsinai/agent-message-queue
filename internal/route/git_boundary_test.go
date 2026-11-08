@@ -1,4 +1,4 @@
-package cli
+package route
 
 import (
 	"os"
@@ -38,12 +38,17 @@ func TestGitBoundaryPrefersEnclosingWorktreeOverGitInternalsAndFixtures(t *testi
 		fixture,
 	} {
 		t.Run(filepath.Base(cwd), func(t *testing.T) {
-			t.Chdir(cwd)
-			top, ok := gitWorktreeRootFromCWD()
+			top, ok := (Walker{}).GitBoundary(cwd)
 			if !ok {
 				t.Fatal("Git worktree boundary was not detected")
 			}
-			expectSamePath(t, top, repo)
+			want, err := filepath.EvalSymlinks(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if top != want {
+				t.Errorf("expected path %q, got %q", want, top)
+			}
 		})
 	}
 }

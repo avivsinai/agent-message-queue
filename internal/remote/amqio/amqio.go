@@ -85,10 +85,6 @@ type Carrier struct {
 	// startup's full sweep catches exactly those.
 	claimedThisRun map[string]claimedEntry
 	mu             sync.Mutex
-	// syncDirFaultForTest is a test hook that injects a fault into every
-	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
-	// can be tested for CommittedDurabilityError propagation.
-	syncDirFaultForTest func(dir string) error
 
 	// owedReceipts are DLQ receipts whose message already left inbox/new but
 	// whose receipt write failed. Nothing revisits a DLQ'd command, so the
@@ -251,9 +247,6 @@ func (c *Carrier) ImportOnce() (int, error) {
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
 		return 0, err
-	}
-	if c.syncDirFaultForTest != nil {
-		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
 	}
 	defer func() { _ = root.Close() }()
 	err = c.flushOwedReceipts(root)
@@ -960,9 +953,6 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
 		return err
-	}
-	if c.syncDirFaultForTest != nil {
-		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
 	}
 	defer func() { _ = root.Close() }()
 	return c.replyWith(root, origin, subjectPrefix+string(snap.State), snap, nil)

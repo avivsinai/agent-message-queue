@@ -279,14 +279,7 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 	}
 	input := board.Acquire(ctx, env, sources, cfg.Board, version)
 	model := withUsage(ctx, board.Build(input), env, cfg.Usage, limits)
-	beadsStore := ""
-	for _, nr := range input.Results {
-		if nr.Name == "beads" {
-			beadsStore = nr.Result.Namespace
-		}
-	}
-
-	return board.Acquisition{Input: input, Usage: model.Usage, BeadsStore: beadsStore}
+	return board.Acquisition{Input: input, Usage: model.Usage}
 }
 
 // writePage writes the static page to stdout, or to out through a temporary

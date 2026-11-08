@@ -38,10 +38,9 @@ func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 	graph := loadImportGraph(t)
 	allowed := map[string]bool{
 		module + "/cmd/amq": true,
-		// amq-remote, its doctor_fix and doctor_machine tests included, still
-		// uses the wake owner shim, the Claude dialog guard, reply routing,
-		// and agent registration from internal/cli. Remove this entry when
-		// those move to their own packages.
+		// amq-remote still uses reply routing (ResolveReplyRoute) and
+		// AgentRegistration from internal/cli. Remove this entry when those
+		// move to their own packages.
 		module + "/cmd/amq-remote": true,
 	}
 	for _, pkg := range graph.packages() {
