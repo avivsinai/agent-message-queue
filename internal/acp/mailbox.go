@@ -102,7 +102,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	r.mailboxThread = threadID
 
 	// A turn cancelled before delivery delivers nothing.
-	if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+	if outcome := r.settle(turnOpen); outcome.stopped() {
 		return s.mailboxNotDelivered(r, outcome)
 	}
 	// The turn budget starts before the claim, so a publish-lock wait counts
@@ -125,10 +125,10 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	}
 	if err != nil {
 		if errors.Is(err, errStoppedBeforePublish) {
-			return s.mailboxNotDelivered(r, r.settle(""))
+			return s.mailboxNotDelivered(r, r.settle(turnOpen))
 		}
 		if errors.Is(err, lock.ErrStopped) {
-			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
+			if outcome := r.settle(turnTimedOut); outcome != turnTimedOut {
 				return s.mailboxNotDelivered(r, outcome)
 			}
 			// This attempt published nothing, but a replay may follow an
@@ -138,8 +138,8 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			if !isLocalEvent(eventID) {
 				return r.failed(remoteUncertain, errors.New("the turn ran out of time before delivery could be confirmed"))
 			}
-			r.meta.Reason = "reply_timeout"
-			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+			r.meta.Reason = string(turnTimedOut)
+			return r.say(postStatus, turnTimedOut, StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
 		var refused *notDeliveredError
 		if errors.As(err, &refused) {
@@ -200,7 +200,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			}
 		}
 		if final != "" {
-			if outcome := r.settle("replied"); outcome != "replied" {
+			if outcome := r.settle(turnReplied); outcome != turnReplied {
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.State = DeliveryStateReplied
@@ -208,18 +208,18 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		}
 		select {
 		case <-turn.done:
-			return s.mailboxStopped(r, r.settle(""), b)
+			return s.mailboxStopped(r, r.settle(turnOpen), b)
 		case <-deadline.C:
 			// Another turn or the sweep may have decided the event after this
 			// loop's last check.
 			if out, ok := s.mailboxAnswered(eventID); ok {
 				return s.mailboxAnsweredTurn(r, b, out)
 			}
-			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
+			if outcome := r.settle(turnTimedOut); outcome != turnTimedOut {
 				return s.mailboxStopped(r, outcome, b)
 			}
-			r.meta.Reason = "reply_timeout"
-			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
+			r.meta.Reason = string(turnTimedOut)
+			return r.say(postStatus, turnTimedOut, StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
 		case <-heartbeat.C:
 			withCur = true
@@ -234,9 +234,9 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 // recall a delivered message, so the reply says the work may still run. A
 // cancel becomes the event's durable outcome unless a reply already is, and
 // then the turn returns that reply instead.
-func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding) (any, *rpcError) {
-	r.meta.Reason = outcome
-	if outcome == "client_disconnected" {
+func (s *Server) mailboxStopped(r *remoteTurn, outcome turnOutcome, b binding.Binding) (any, *rpcError) {
+	r.meta.Reason = string(outcome)
+	if outcome == turnDisconnected {
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
 	if r.eventID != "" {
@@ -259,9 +259,9 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailb
 		return r.failed(remoteUncertain, out.damaged)
 	}
 	if out.Cancelled {
-		return s.mailboxStopped(r, r.settle("session_cancelled"), b)
+		return s.mailboxStopped(r, r.settle(turnCancelled), b)
 	}
-	if outcome := r.settle("replied"); outcome != "replied" {
+	if outcome := r.settle(turnReplied); outcome != turnReplied {
 		return s.mailboxStopped(r, outcome, b)
 	}
 	return s.answeredResult(r, b, out)
@@ -391,8 +391,8 @@ func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string
 // returns the winning reply, or ends cancelled when a cancel won.
 func (s *Server) adoptOutcome(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
 	if out.Cancelled {
-		r.meta.Reason = "session_cancelled"
-		return r.say(postCancel, "session_cancelled", StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+		r.meta.Reason = string(turnCancelled)
+		return r.say(postCancel, turnCancelled, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 	}
 	return s.answeredResult(r, b, out)
 }
@@ -544,7 +544,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if _, ok := s.mailboxAnswered(r.eventID); ok {
 			return errEventDecided
 		}
-		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+		if outcome := r.settle(turnOpen); outcome.stopped() {
 			return errStoppedBeforePublish
 		}
 		// An expired budget publishes nothing, also when the lock was free
@@ -593,7 +593,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 	}
 	err := lock.WithExclusiveFileLockUntil(path, stopped, publish)
 	if errors.Is(err, lock.ErrStopped) {
-		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+		if outcome := r.settle(turnOpen); outcome.stopped() {
 			return claim, errStoppedBeforePublish
 		}
 	}
@@ -602,9 +602,9 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 
 // mailboxNotDelivered ends a turn stopped before its message was published:
 // nothing reached the handle, and a cancel is recorded against replay.
-func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcError) {
-	r.meta.Reason = outcome
-	if outcome == "client_disconnected" {
+func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome turnOutcome) (any, *rpcError) {
+	r.meta.Reason = string(outcome)
+	if outcome == turnDisconnected {
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
 	if r.eventID != "" {
@@ -839,7 +839,7 @@ func (s *Server) mailboxRefused(r *remoteTurn, b binding.Binding, reason string)
 	if dest := r.postChannel(); dest != "" {
 		r.meta.Posted = s.publish(dest, text)
 	}
-	if r.settle("replied") == "client_disconnected" {
+	if r.settle(turnReplied) == turnDisconnected {
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
 	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {

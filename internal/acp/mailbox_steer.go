@@ -91,7 +91,7 @@ func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
 	var target *mailboxSteerTarget
-	if turn := session.turn; turn != nil && turn.outcome == "" && turn.mailboxSteer != nil {
+	if turn := session.turn; turn != nil && turn.outcome == turnOpen && turn.mailboxSteer != nil {
 		copied := *turn.mailboxSteer
 		target = &copied
 	}

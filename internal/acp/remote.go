@@ -125,7 +125,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	// A cancel while queued is durable. A later delivery of the same event
 	// answers cancelled and submits nothing.
 	if s.eventCancelled(eventID) {
-		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: remoteMeta{Reason: "session_cancelled"}}}, nil
+		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: remoteMeta{Reason: string(turnCancelled)}}}, nil
 	}
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
@@ -146,7 +146,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
-			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
+			return r.say(postStatus, r.settle(turnReplied), StopReasonRefusal, text)
 		}
 		// Both carriers name the images of the owner's message as local
 		// files.
@@ -219,7 +219,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	queued := false
 	var last protocol.Snapshot
 	for {
-		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+		if outcome := r.settle(turnOpen); outcome.stopped() {
 			return r.stoppedBeforeAdmit(outcome, last)
 		}
 		rep, err := r.call(&protocol.Command{
@@ -265,10 +265,10 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 				}
 			}
 			switch stop := r.waitBusy(deadline); stop {
-			case "":
+			case turnOpen:
 				continue
-			case "reply_timeout":
-				return r.settled(r.settle("reply_timeout"), last)
+			case turnTimedOut:
+				return r.settled(r.settle(turnTimedOut), last)
 			default:
 				return r.stoppedBeforeAdmit(stop, last)
 			}
@@ -276,10 +276,10 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if rep.Outcome.Code != "" {
 			r.meta.Code, r.meta.Reason = string(rep.Outcome.Code), rep.Outcome.Message
 			r.meta.State = string(rep.Snapshot.State)
-			if outcome := r.settle("replied"); outcome != "replied" {
+			if outcome := r.settle(turnReplied); outcome != turnReplied {
 				return r.settled(outcome, rep.Snapshot)
 			}
-			return r.say(snapKind(rep.Snapshot), "replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+			return r.say(snapKind(rep.Snapshot), turnReplied, StopReasonRefusal, r.statusText(rep.Snapshot))
 		}
 		return r.follow(rep.Snapshot)
 	}
@@ -288,8 +288,8 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 // stoppedBeforeAdmit ends a queued turn that was never admitted. It does not
 // submit again and does not ask the endpoint to cancel: a busy tombstone
 // never started a native run.
-func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) (any, *rpcError) {
-	if outcome == "session_cancelled" {
+func (r *remoteTurn) stoppedBeforeAdmit(outcome turnOutcome, snap protocol.Snapshot) (any, *rpcError) {
+	if outcome == turnCancelled {
 		if err := r.s.recordEventCancel(r.eventID); err != nil {
 			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
 		}
@@ -297,8 +297,8 @@ func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) 
 	if snap.RequestRef != "" {
 		r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
 	}
-	r.meta.Reason = outcome
-	if outcome == "client_disconnected" {
+	r.meta.Reason = string(outcome)
+	if outcome == turnDisconnected {
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
 	return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
@@ -325,24 +325,24 @@ func (s *Server) recordEventCancel(eventID string) error {
 	return err
 }
 
-// waitBusy pauses between busy retries. An empty result means retry. The
+// waitBusy pauses between busy retries. turnOpen means retry. The
 // turn budget and a cancel both stop the loop without another submit.
-func (r *remoteTurn) waitBusy(deadline time.Time) string {
+func (r *remoteTurn) waitBusy(deadline time.Time) turnOutcome {
 	pause := busyRetryPause
 	if remain := time.Until(deadline); remain < pause {
 		pause = remain
 	}
 	if pause <= 0 {
-		return "reply_timeout"
+		return turnTimedOut
 	}
 	timer := time.NewTimer(pause)
 	defer timer.Stop()
 	select {
 	case <-r.turn.done:
-		return r.settle("")
+		return r.settle(turnOpen)
 	case <-timer.C:
 		if !time.Now().Before(deadline) {
-			return "reply_timeout"
+			return turnTimedOut
 		}
 		return ""
 	}
@@ -574,7 +574,7 @@ func readSmallRegular(path string) ([]byte, error) {
 // the client cancels or leaves, or the turn times out.
 func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	if settledState(snap) {
-		return r.settled(r.settle("replied"), snap)
+		return r.settled(r.settle(turnReplied), snap)
 	}
 	if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Submitted to %s as %s.", r.meta.Target, snap.RequestRef)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
@@ -615,10 +615,10 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 		select {
 		case <-r.turn.done:
 			mirror.finish(0)
-			return r.settled(r.settle(""), snap)
+			return r.settled(r.settle(turnOpen), snap)
 		case <-deadline.C:
 			mirror.finish(0)
-			return r.settled(r.settle("reply_timeout"), snap)
+			return r.settled(r.settle(turnTimedOut), snap)
 		case w := <-waits:
 			if w.err == nil {
 				w.err = w.resp.AsError()
@@ -643,7 +643,7 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 			}
 			// The endpoint ends the stream right after the request settles,
 			// so the streamed activity precedes the answer.
-			outcome := r.settle("replied")
+			outcome := r.settle(turnReplied)
 			streamed := mirror.finish(mirrorSettle)
 			r.quiet = snap.State == protocol.StateCompleted && snap.Result != nil && echoed(streamed, snap.Result.Text)
 			return r.settled(outcome, snap)
@@ -754,11 +754,11 @@ func settledState(snap protocol.Snapshot) bool {
 }
 
 // settle decides the turn's outcome if it is still open and returns the
-// outcome that stands. An empty outcome only reads it.
-func (r *remoteTurn) settle(outcome string) string {
+// outcome that stands. turnOpen only reads it.
+func (r *remoteTurn) settle(outcome turnOutcome) turnOutcome {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
-	if outcome != "" {
+	if outcome != turnOpen {
 		r.turn.settleLocked(outcome)
 	}
 	return r.turn.outcome
@@ -767,16 +767,16 @@ func (r *remoteTurn) settle(outcome string) string {
 // settled renders the turn once its outcome stands. The first settled
 // outcome wins on every path: a cancel that won is reported even when the
 // request later completed.
-func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcError) {
+func (r *remoteTurn) settled(outcome turnOutcome, snap protocol.Snapshot) (any, *rpcError) {
 	r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
 	switch outcome {
-	case "session_cancelled":
+	case turnCancelled:
 		return r.cancel(snap)
-	case "client_disconnected":
-		r.meta.Reason = outcome
+	case turnDisconnected:
+		r.meta.Reason = string(outcome)
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
-	case "reply_timeout":
-		r.meta.Reason = outcome
+	case turnTimedOut:
+		r.meta.Reason = string(outcome)
 		return r.say(postStatus, outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
 	}
 	switch snap.State {
@@ -820,7 +820,7 @@ func snapKind(snap protocol.Snapshot) string {
 // stored with. The disposition comes from the reply's outcome or, for the
 // usual path, its snapshot. Work that keeps running is said so.
 func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
-	r.meta.Reason = "session_cancelled"
+	r.meta.Reason = string(turnCancelled)
 	if snap.State.Terminal() {
 		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
@@ -850,7 +850,7 @@ func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
 	if r.meta.State == string(protocol.StateCancelled) {
 		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
-	return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
+	return r.say(postStatus, turnCancelled, StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
 }
 
 // failed ends a turn whose request is absent (not_submitted) or unknown
@@ -865,13 +865,13 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if state == remoteNotSubmitted {
 		r.meta.RequestRef = ""
 	}
-	outcome := r.settle("replied")
-	if outcome == "client_disconnected" {
-		r.meta.Reason = outcome
+	outcome := r.settle(turnReplied)
+	if outcome == turnDisconnected {
+		r.meta.Reason = string(outcome)
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
 	stopReason := StopReasonRefusal
-	if outcome == "session_cancelled" {
+	if outcome == turnCancelled {
 		stopReason = StopReasonCancelled
 	}
 	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, protocol.InertInline(r.meta.Reason))
@@ -898,11 +898,11 @@ const (
 
 // say emits text as the agent message and returns the result. A client that
 // left gets no message. kind is postStatus or postFinal.
-func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError) {
-	if outcome != "client_disconnected" && text == "" && kind == postFinal {
+func (r *remoteTurn) say(kind string, outcome turnOutcome, stopReason, text string) (any, *rpcError) {
+	if outcome != turnDisconnected && text == "" && kind == postFinal {
 		fmt.Fprintf(os.Stderr, "amq-acp: %s ended with no final text; nothing was posted\n", r.meta.Target)
 	}
-	if outcome != "client_disconnected" && text != "" {
+	if outcome != turnDisconnected && text != "" {
 		// Buzz first: a failed ACP emission never skips the post.
 		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
 		if kind == postFinal && strings.HasPrefix(r.meta.Posted, "error") {

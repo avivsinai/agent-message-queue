@@ -109,6 +109,14 @@ type pageData struct {
 	SuggestionDiagnostic string
 }
 
+var suggestionLabels = map[SuggestionStatus]string{
+	SuggestionNeedsReview: "Needs your review",
+	SuggestionInvalid:     "No actionable commands",
+	SuggestionStale:       "Outdated; run suggestions again before adoption",
+	SuggestionIgnored:     "Ignored; source evidence retained",
+	SuggestionAdopted:     "Adopted",
+}
+
 type pageSuggestion struct {
 	ID, Quote, MessageKey, Location, State string
 	Choices                                []string
@@ -362,15 +370,7 @@ func buildPage(m Model, regenerate string) pageData {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)
 	}
 	for _, suggestion := range m.Suggestions {
-		ps := pageSuggestion{ID: clean(suggestion.ID), Quote: quoteText(suggestion.Unit.Quote), MessageKey: clean(suggestion.Unit.MessageKey), Location: clean(suggestion.Unit.Field) + " bytes " + strconv.Itoa(suggestion.Unit.Start) + "–" + strconv.Itoa(suggestion.Unit.End), State: "Needs your review", Commands: suggestion.Commands}
-		switch {
-		case suggestion.Adopted:
-			ps.State = "Adopted"
-		case suggestion.Ignored:
-			ps.State = "Ignored; source evidence retained"
-		case suggestion.Stale:
-			ps.State = "Outdated; run suggestions again before adoption"
-		}
+		ps := pageSuggestion{ID: clean(suggestion.ID), Quote: quoteText(suggestion.Unit.Quote), MessageKey: clean(suggestion.Unit.MessageKey), Location: clean(suggestion.Unit.Field) + " bytes " + strconv.Itoa(suggestion.Unit.Start) + "–" + strconv.Itoa(suggestion.Unit.End), State: suggestionLabels[suggestion.Status], Commands: suggestion.Commands}
 		for _, choice := range suggestion.Choices {
 			switch choice.Kind {
 			case "attach":

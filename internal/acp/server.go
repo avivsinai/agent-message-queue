@@ -126,9 +126,8 @@ type turnState struct {
 	// delivery failed). A steer arriving before then waits for it, so it is
 	// never classified before the turn's prompt identity exists.
 	ready chan struct{}
-	// outcome is "" until settled, then "replied", "session_cancelled",
-	// "client_disconnected" or "reply_timeout".
-	outcome string
+	// outcome is turnOpen until settled.
+	outcome turnOutcome
 	// channel is the Buzz channel the prompt came from ("" when it did not
 	// come from Buzz); the owner-facing text is posted there.
 	channel string
@@ -146,10 +145,27 @@ type turnState struct {
 	route string
 }
 
+// turnOutcome is how a turn settled. Its value is the reason on the wire.
+type turnOutcome string
+
+const (
+	turnOpen         turnOutcome = ""
+	turnReplied      turnOutcome = "replied"
+	turnCancelled    turnOutcome = "session_cancelled"
+	turnDisconnected turnOutcome = "client_disconnected"
+	turnTimedOut     turnOutcome = "reply_timeout"
+)
+
+// stopped reports a turn the client ended (a cancel or a closed stream)
+// before it was answered or timed out.
+func (o turnOutcome) stopped() bool {
+	return o == turnCancelled || o == turnDisconnected
+}
+
 // settleLocked decides the turn's outcome if it is still open; it reports
 // whether this call decided it. Caller holds s.mu.
-func (t *turnState) settleLocked(outcome string) bool {
-	if t.outcome != "" {
+func (t *turnState) settleLocked(outcome turnOutcome) bool {
+	if t.outcome != turnOpen {
 		return false
 	}
 	t.outcome = outcome
@@ -888,7 +904,7 @@ func (s *Server) finishTurn(session *sessionState, turn *turnState) {
 func disconnectedRefusal() promptResult {
 	return promptResult{
 		StopReason: StopReasonRefusal,
-		Meta:       promptMeta{AMQ: amqDelivery{State: DeliveryStateNoReply, Reason: "client_disconnected"}},
+		Meta:       promptMeta{AMQ: amqDelivery{State: DeliveryStateNoReply, Reason: string(turnDisconnected)}},
 	}
 }
 
@@ -909,7 +925,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 
 	// settle decides the outcome under the mutex; if another path already
 	// decided it, that outcome wins.
-	settle := func(outcome string) string {
+	settle := func(outcome turnOutcome) turnOutcome {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		turn.settleLocked(outcome)
@@ -926,22 +942,22 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", delivery.Thread, err)
 		}
 		if found {
-			if outcome := settle("replied"); outcome != "replied" {
+			if outcome := settle(turnReplied); outcome != turnReplied {
 				return turnResult(delivery, outcome, ""), nil
 			}
 			if err := emitText(emit, sessionID, "agent_message_chunk", reply); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
-			result := turnResult(delivery, "replied", reply)
+			result := turnResult(delivery, turnReplied, reply)
 			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
 			return result, nil
 		}
 
 		select {
 		case <-turn.done:
-			return turnResult(delivery, settle(""), ""), nil
+			return turnResult(delivery, settle(turnOpen), ""), nil
 		case <-deadline.C:
-			return turnResult(delivery, settle("reply_timeout"), ""), nil
+			return turnResult(delivery, settle(turnTimedOut), ""), nil
 		case <-poll.C:
 		case <-heartbeat.C:
 			scan = inboxCur
@@ -954,7 +970,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 
 // turnResult renders a settled turn. The queued AMQ prompt is never
 // retracted, whatever the outcome.
-func turnResult(delivery Delivery, outcome, reply string) promptResult {
+func turnResult(delivery Delivery, outcome turnOutcome, reply string) promptResult {
 	meta := amqDelivery{
 		MessageID: delivery.MessageID,
 		To:        delivery.To,
@@ -968,14 +984,14 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 		Duplicate: delivery.Duplicate,
 	}
 	switch outcome {
-	case "replied":
+	case turnReplied:
 		meta.State, meta.Reply = DeliveryStateReplied, reply
 		return promptResult{StopReason: StopReasonEndTurn, Meta: promptMeta{AMQ: meta}}
-	case "session_cancelled":
-		meta.State, meta.Reason = DeliveryStateCancelled, outcome
+	case turnCancelled:
+		meta.State, meta.Reason = DeliveryStateCancelled, string(outcome)
 		return promptResult{StopReason: StopReasonCancelled, Meta: promptMeta{AMQ: meta}}
 	default: // client_disconnected, reply_timeout
-		meta.State, meta.Reason = DeliveryStateNoReply, outcome
+		meta.State, meta.Reason = DeliveryStateNoReply, string(outcome)
 		return promptResult{StopReason: StopReasonRefusal, Meta: promptMeta{AMQ: meta}}
 	}
 }
@@ -1060,7 +1076,7 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
 	t, event := session.turn, ""
-	if t != nil && t.outcome == "" {
+	if t != nil && t.outcome == turnOpen {
 		event = t.mailboxEvent
 	}
 	s.mu.Unlock()
@@ -1077,7 +1093,7 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t != nil && session.turn == t && t.settleLocked("session_cancelled") {
+	if t != nil && session.turn == t && t.settleLocked(turnCancelled) {
 		close(t.done)
 	}
 	return struct{}{}, nil
@@ -1091,7 +1107,7 @@ func (s *Server) cancelAll() {
 	defer s.mu.Unlock()
 	s.streamClosed = true
 	for _, session := range s.sessions {
-		if t := session.turn; t != nil && t.settleLocked("client_disconnected") {
+		if t := session.turn; t != nil && t.settleLocked(turnDisconnected) {
 			close(t.done)
 		}
 	}
@@ -1189,7 +1205,7 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 	}
 	// A turn whose prompt is still being delivered has no identity yet;
 	// wait for it rather than classify the steer as idle.
-	if t := session.turn; t != nil && t.outcome == "" && t.prompt == "" {
+	if t := session.turn; t != nil && t.outcome == turnOpen && t.prompt == "" {
 		ready := t.ready
 		s.mu.Unlock()
 		select {
@@ -1201,7 +1217,7 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 	}
 	// Steering into a turn goes where that turn's prompt went.
 	turnPrompt, cfg, thread := "", s.cfg, session.Thread
-	if t := session.turn; t != nil && t.outcome == "" && t.prompt != "" {
+	if t := session.turn; t != nil && t.outcome == turnOpen && t.prompt != "" {
 		turnPrompt, cfg.To, thread = t.prompt, t.to, t.thread
 	}
 	delivery, err := DeliverSteering(cfg, formatSteeringBody(text), thread, turnPrompt, eventID)
