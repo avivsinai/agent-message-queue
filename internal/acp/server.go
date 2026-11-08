@@ -198,6 +198,9 @@ type Server struct {
 	// view is the bindings and channel records the machine, dialog and
 	// mirror workers share.
 	view sessionView
+	// targets caches a machine agent's dialog targets for the dialog and
+	// mirror workers.
+	targets targetCache
 	// appServers judges Codex app-server threads for the current machine
 	// tick, or is nil before the first one and in a worker that runs none.
 	appServers atomic.Pointer[appServerJudge]
