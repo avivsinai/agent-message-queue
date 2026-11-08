@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/activity"
@@ -26,6 +25,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 // spoolReapHorizon is the age at which settled sender envelopes are reaped.
@@ -411,20 +411,20 @@ func wireCarrier(root string, warn io.Writer) func(*amqio.Carrier) {
 	}
 }
 
-// replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
-// route, and this adapter translates cli's vocabulary into the carrier's.
-// It is a named function, not an inline closure, so a test can exercise the
-// SHIPPED translation rather than reimplementing it
+// replyRouterFor returns the ReplyRouter the endpoint uses: route resolves
+// the reply route, and this adapter translates route's vocabulary into the
+// carrier's. It is a named function, not an inline closure, so a test can
+// exercise the SHIPPED translation rather than reimplementing it
 // (TestImportCrossProjectRealRouterTransientPeerAbsent fails if the
 // ErrPeerRootUnreachable -> TransientRouteError translation is removed).
 func replyRouterFor(root string) amqio.ReplyRouter {
 	return func(replyProject, replyTo string) (string, string, error) {
-		r, h, err := amqcli.ResolveReplyRoute(root, replyProject, replyTo)
-		// The adapter translates between the cli vocabulary
+		r, h, err := route.Walker{}.ResolveReplyRoute(root, replyProject, replyTo)
+		// The adapter translates between the route vocabulary
 		// (ErrPeerRootUnreachable) and the amqio vocabulary
-		// (TransientRouteError). The generic cli layer must not import amqio;
+		// (TransientRouteError). The route layer must not import amqio;
 		// this named function is the seam that already imports both sides.
-		if err != nil && errors.Is(err, amqcli.ErrPeerRootUnreachable) {
+		if err != nil && errors.Is(err, route.ErrPeerRootUnreachable) {
 			return "", "", amqio.NewTransientRouteError(err)
 		}
 		return r, h, err

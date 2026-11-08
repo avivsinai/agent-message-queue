@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 )
 
 // A linked worktree takes its trust from the main checkout, as Codex does.
@@ -18,7 +20,7 @@ func TestCodexTrustsALinkedWorktreeOfATrustedCheckout(t *testing.T) {
 	codexHome := t.TempDir()
 	main, worktree := makeLinkedWorktree(t, "")
 	writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
-	if !codexTrustsDir(codexHome, worktree) {
+	if !codexlaunch.TrustsDir(codexHome, worktree) {
 		t.Fatal("worktree of a trusted checkout reads as untrusted")
 	}
 }

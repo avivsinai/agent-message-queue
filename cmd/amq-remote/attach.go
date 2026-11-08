@@ -19,7 +19,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -35,6 +34,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
+	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
 // attachReadyTimeout bounds the wait for an endpoint that attach started.
@@ -172,7 +173,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
-	if err := acp.VerifySessionPin(filepath.Clean(sessionRoot)); err == nil {
+	if err := sessionguard.VerifyEnvPin(filepath.Clean(sessionRoot)); err == nil {
 		recordAttachIdentity(stderr, sessionRoot, strings.TrimSpace(*me), cand.Kind)
 	}
 	if *linkName != "" {
@@ -346,7 +347,7 @@ func bindMailbox(root, handle, name string, stderr io.Writer, fromHook bool, tra
 	}
 	// The inherited session pin must name this root, exactly as a direct
 	// amq-acp mailbox checks it.
-	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
+	if err := sessionguard.VerifyEnvPin(filepath.Clean(root)); err != nil {
 		return b, "", false, err
 	}
 	explicit := name != ""
@@ -417,7 +418,7 @@ func listBuzzInRoster(root string) error {
 		return err
 	}
 	defer func() { _ = dr.Close() }()
-	if err := acp.VerifySessionPinOn(dr); err != nil {
+	if err := sessionguard.VerifyEnvPinOn(dr); err != nil {
 		return err
 	}
 	if _, err := dr.ReadFile("meta/config.json"); errors.Is(err, os.ErrNotExist) {
@@ -786,7 +787,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 // The holder is pi when the handle's live pi bridge runs in it, and the
 // session is the pi session id that bridge publishes.
 func wakeOwnerSession(root, handle string) harnessSession {
-	owner, ok := amqcli.WakeOwner(root, handle)
+	owner, ok := wakelock.ReadOwner(root, handle)
 	if !ok {
 		return harnessSession{}
 	}
@@ -822,8 +823,9 @@ type bindingRow struct {
 	Agent    string        `json:"agent"`
 	// Channel and ChannelName are the machine agent's channel for the
 	// session, when it has a record of one.
-	Channel     string `json:"channel,omitempty"`
-	ChannelName string `json:"channel_name,omitempty"`
+	Channel            string `json:"channel,omitempty"`
+	ChannelName        string `json:"channel_name,omitempty"`
+	TerminalOnlyReason string `json:"terminal_only_reason,omitempty"`
 }
 
 // bindings lists the bound sessions with their liveness and their Buzz
@@ -858,6 +860,13 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 			Agent: agentOf(b.Name, now).State}
 		if ch, ok := acp.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
+		}
+		if b.Harness == "codex" && b.Carrier == binding.CarrierMailbox && b.AppServer.Thread == "" {
+			reason, err := launch.CodexTerminalOnlyReason(b.Root, b.Handle)
+			if err != nil {
+				reason = "AMQ cannot read this seat's approval capability"
+			}
+			row.TerminalOnlyReason = reason
 		}
 		rows = append(rows, row)
 		if state == binding.Unknown {
@@ -895,6 +904,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		if r.Channel != "" {
 			line += fmt.Sprintf("  channel %s %q", r.Channel, r.ChannelName)
+		}
+		if r.TerminalOnlyReason != "" {
+			line += ": Buzz approvals: terminal only: " + r.TerminalOnlyReason
 		}
 		say(stdout, "%s", line)
 	}
@@ -1493,7 +1505,7 @@ func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 			return err
 		}
 		defer func() { _ = deliveryRoot.Close() }()
-		if err := acp.VerifySessionPinOn(deliveryRoot); err != nil {
+		if err := sessionguard.VerifyEnvPinOn(deliveryRoot); err != nil {
 			return err
 		}
 		return agentidentity.Publish(deliveryRoot, agentidentity.New(handle, harness.Lookup(kind).Name, "", time.Now()))

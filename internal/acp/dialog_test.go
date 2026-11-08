@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,6 +126,107 @@ func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags .
 func eventMeta(evt nostr.Event) json.RawMessage {
 	raw, _ := json.Marshal(map[string]any{"nostr": map[string]string{"eventId": evt.ID.Hex()}})
 	return raw
+}
+
+// Regression (idle profile of a machine agent): every open dialog, hours
+// old or new, read its reactions every 3 s, oldest first, so stale dialogs
+// spawned a process each and delayed a new one. An old dialog backs off; a
+// fresh one is read at 3 s, and first.
+func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	withBuzzSelf(t)
+	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
+	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
+	buzzOwner = strings.Repeat("0b", 32)
+	events := map[string]string{} // posted event -> dialog text
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		id := fmt.Sprintf("%064x", len(events)+1)
+		events[id] = content
+		return id, nil
+	}
+	var reads []string
+	readReactions = func(event string, _ time.Duration) ([]reaction, error) {
+		reads = append(reads, strings.Fields(strings.SplitN(events[event], "\n", 2)[1])[1])
+		return nil, nil
+	}
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	options := []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}
+	for _, d := range []struct {
+		text string
+		age  time.Duration
+	}{{"$ old", 30 * time.Minute}, {"$ new", 0}} {
+		if err := dialog.Open(dir, dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: d.text, Options: options, OpenedAt: now.Add(-d.age)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.dialogTick(now) // posts both
+	s.dialogTick(now)
+	if strings.Join(reads, ",") != "new,old" {
+		t.Fatalf("first reads = %v; want both, the newest first", reads)
+	}
+	reads = nil
+	s.dialogTick(now.Add(reactionPollInterval))
+	if strings.Join(reads, ",") != "new" {
+		t.Fatalf("reads after %v = %v; want only the fresh dialog", reactionPollInterval, reads)
+	}
+	reads = nil
+	s.dialogTick(now.Add(reactionPollMax))
+	if strings.Join(reads, ",") != "new,old" {
+		t.Fatalf("reads after %v = %v; want the old dialog read again at its cap", reactionPollMax, reads)
+	}
+}
+
+// Regression (idle profile of a machine agent): a post edit that failed
+// was tried again on every 2 s tick, one buzz process each, for about 20
+// minutes. A failed edit now waits 4 s, then 8 s; the first is immediate.
+func TestDialogFailedEditBacksOff(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	withBuzzSelf(t)
+	savedOwner, savedEdit, savedPost := buzzOwner, editMessage, postAnswer
+	t.Cleanup(func() { buzzOwner, editMessage, postAnswer = savedOwner, savedEdit, savedPost })
+	buzzOwner = strings.Repeat("0b", 32)
+	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("e", 64), nil }
+	edits := 0
+	editMessage = func(string, string, time.Duration) error {
+		edits++
+		return errors.New("relay refused the edit")
+	}
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ ls", Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}, OpenedAt: now}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	s.dialogTick(now) // posts
+	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		after time.Duration
+		edits int
+	}{{0, 1}, {2 * time.Second, 1}, {dialogEditBackoffMin, 2}, {dialogEditBackoffMin + 2*time.Second, 2}, {3 * dialogEditBackoffMin, 3}} {
+		s.dialogTick(now.Add(step.after))
+		if edits != step.edits {
+			t.Fatalf("edits after %v = %d; want %d", step.after, edits, step.edits)
+		}
+	}
 }
 
 // buzzPrompt is a buzz-acp DM prompt in dm whose event from sender (a hex

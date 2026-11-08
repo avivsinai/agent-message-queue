@@ -68,6 +68,7 @@ amq-remote version
 amq-remote claude install-stop-hook | uninstall-stop-hook
 amq-remote claude install-approval-hook | uninstall-approval-hook
 amq-remote pi bridge-path
+amq-remote statusline [--session ID] [--plain]
 ```
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
@@ -89,6 +90,30 @@ banner does not list them.
 `--json` prints the result as JSON on stdout, with diagnostics on stderr. The
 commands that take it are listed under [Common flags](#common). `serve` and
 `up` accept `--json` and print no JSON result. `share` has no `--json`.
+
+## Status line
+
+`amq-remote statusline` prints one status-line segment for a session bound
+to Buzz: `📡 buzz`, or `📡 buzz (mirror off)` while the session's mirror is
+off. It prints nothing for an unknown session, an ended or detached binding,
+or any error, and always exits 0, so a status line never shows an error. It
+reads only the binding files: no network, no process scan, no lock, no write.
+`--plain` prints `buzz` without the emoji.
+
+The session is `session_id` from the Claude Code status-line JSON on stdin,
+else the file stem of its `transcript_path`; `--session ID` names it for any
+other harness that runs a command in its status line. The binding of that
+session is the one whose recorded session id matches.
+
+AMQ never edits the user's `statusLine` setting. Add one line to your own
+Claude Code status-line script, where `$input` holds the JSON it read from
+stdin and `$out` is the line it prints:
+
+```bash
+seg=$(amq-remote statusline <<<"$input" 2>/dev/null); [ -n "$seg" ] && out+=" | $seg"
+```
+
+Elsewhere: `amq-remote statusline --session <id>`.
 
 ## Manifest
 

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
@@ -144,14 +145,14 @@ func readStartupTrust(harness, dir string) startupTrust {
 // the decision there turns on project layers AMQ does not read, so trust
 // there stays pending.
 func codexStartupTrust(dir string) startupTrust {
-	if codexNearestGitAncestor(dir) == "" {
+	if codexlaunch.NearestGitAncestor(dir) == "" {
 		return startupTrustPending
 	}
 	codexHome, err := codexHomeDir()
 	if err != nil {
 		return startupTrustUnknown
 	}
-	level, _, err := codexProjectTrust(codexHome, dir)
+	level, _, err := codexlaunch.ProjectTrust(codexHome, dir)
 	switch {
 	case err != nil:
 		return startupTrustUnknown
@@ -189,8 +190,8 @@ func claudeStartupTrust(dir string) startupTrust {
 	if json.Unmarshal(raw, &config) != nil {
 		return startupTrustUnknown
 	}
-	top := codexNearestGitAncestor(dir)
-	for _, start := range codexTrustKeys(dir) {
+	top := codexlaunch.NearestGitAncestor(dir)
+	for _, start := range codexlaunch.TrustKeys(dir) {
 		for d := start; ; d = filepath.Dir(d) {
 			if config.Projects[d].HasTrustDialogAccepted {
 				return startupTrustAccepted
@@ -790,7 +791,7 @@ func codexStartupHoldRelease(marker wakeDialogMarker) string {
 	case marker.Kind == wakeStartupKindUpdate:
 		return "Codex may show its update prompt, whose default choice runs the upgrade; " + hook +
 			"; setting " + codexUpdateCheckKey + " = false in $CODEX_HOME/config.toml (default ~/.codex/config.toml) prevents ordinary update prompts; it does not release this open hold, and a later launch starts without one only when Codex reports the check off and no requirement turns it on"
-	case codexNearestGitAncestor(marker.Cwd) == "":
+	case codexlaunch.NearestGitAncestor(marker.Cwd) == "":
 		return fmt.Sprintf("Codex may ask whether to trust %s, which is outside a git checkout, where AMQ cannot read Codex's decision; %s", marker.Cwd, hook)
 	}
 	return fmt.Sprintf("Codex asks whether to trust %s; %s", marker.Cwd, hook)

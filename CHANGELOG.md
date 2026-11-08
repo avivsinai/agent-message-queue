@@ -8,6 +8,33 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.137.0](https://github.com/avivsinai/agent-message-queue/compare/v0.136.0...v0.137.0) (2026-11-08)
+
+
+### Features
+
+* **acp:** Buzz mail carries the verified signed event ([#1393](https://github.com/avivsinai/agent-message-queue/issues/1393)) ([6d9223e](https://github.com/avivsinai/agent-message-queue/commit/6d9223e9a9200eb29eebd8f422c7c0c895178b55))
+* **launch:** bind managed Codex seats to an existing daemon ([#1402](https://github.com/avivsinai/agent-message-queue/issues/1402)) ([e83cf13](https://github.com/avivsinai/agent-message-queue/commit/e83cf1320ab8195e1ca2fb6e6a13157db8c200b4))
+* **launch:** preserve Codex settings on native resume ([#1406](https://github.com/avivsinai/agent-message-queue/issues/1406)) ([a39df93](https://github.com/avivsinai/agent-message-queue/commit/a39df93fdcb60f09994ecc817cd0f1b58157e2e2))
+
+
+### Bug Fixes
+
+* a failed Codex probe never ends a session; store prune and installed paths ([#1397](https://github.com/avivsinai/agent-message-queue/issues/1397)) ([8f9d824](https://github.com/avivsinai/agent-message-queue/commit/8f9d824ed328bd0c78f8745279e28ff047d6fa17))
+* **acp:** an idle machine agent stops polling answered dialogs ([#1404](https://github.com/avivsinai/agent-message-queue/issues/1404)) ([f9a0b58](https://github.com/avivsinai/agent-message-queue/commit/f9a0b58c82ce6e6c4135d251afcee4df0c7f8b80))
+* **board:** an idle refresh writes almost nothing ([#1395](https://github.com/avivsinai/agent-message-queue/issues/1395)) ([778ce30](https://github.com/avivsinai/agent-message-queue/commit/778ce303df41532bca92b6183a0673a5682426c5))
+* **fsq:** durable new directories; no test seams in production ([#1396](https://github.com/avivsinai/agent-message-queue/issues/1396)) ([26fcf1f](https://github.com/avivsinai/agent-message-queue/commit/26fcf1f06fce0fc537d276df69d4c0f049c3be5d))
+* **remote:** a Claude permission hook ends when its dialog is answered in the terminal ([#1400](https://github.com/avivsinai/agent-message-queue/issues/1400)) ([9015860](https://github.com/avivsinai/agent-message-queue/commit/901586090f70b972c115873f117a6c14a1eaaff0))
+
+## [0.136.0](https://github.com/avivsinai/agent-message-queue/compare/v0.135.0...v0.136.0) (2026-11-08)
+
+
+### Bug Fixes
+
+* **acp:** Codex app-server sessions get a machine-agent channel ([#1387](https://github.com/avivsinai/agent-message-queue/issues/1387)) ([a3d7ea1](https://github.com/avivsinai/agent-message-queue/commit/a3d7ea1c951c334a5862f0d94363b6caef76f45f))
+* **acp:** idle hosts stop paying for fsyncs and inbox listings ([#1385](https://github.com/avivsinai/agent-message-queue/issues/1385)) ([df42ee1](https://github.com/avivsinai/agent-message-queue/commit/df42ee1ab607c2f8919388d6bf1b73ec8a1b93b7))
+* **wake:** long-running processes run from AMQ's own version store ([#1379](https://github.com/avivsinai/agent-message-queue/issues/1379)) ([57ded60](https://github.com/avivsinai/agent-message-queue/commit/57ded60b114e87bfb1850ef5ba1b116b769ea323))
+
 ## [0.135.0](https://github.com/avivsinai/agent-message-queue/compare/v0.134.0...v0.135.0) (2026-11-08)
 
 

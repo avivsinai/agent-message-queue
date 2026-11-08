@@ -25,7 +25,11 @@ func runDrain(args []string) error {
 
 	usage := usageWithFlags(fs, "amq drain --me <agent> [--session <name>] [options]",
 		"Drains new messages: reads, moves to cur, emits receipts.",
-		"Designed for hook/script integration. Quiet when empty.")
+		"Designed for hook/script integration. Quiet when empty.",
+		"",
+		"Writes only under <root>/agents/<me>/: inbox/new to inbox/cur (claim),",
+		"receipts/, receipts-pending/, dlq/tmp/, dlq/new/, .presence.lock, and",
+		"presence.json. The presence refresh is best-effort: drain ignores its error.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {

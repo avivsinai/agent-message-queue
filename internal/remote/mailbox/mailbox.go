@@ -31,6 +31,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 // Kind is the manifest kind of this adapter.
@@ -609,7 +610,7 @@ func (a *Attachment) open() (*fsq.DeliveryRoot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := acp.VerifySessionPinOn(root); err != nil {
+	if err := sessionguard.VerifyEnvPinOn(root); err != nil {
 		_ = root.Close()
 		return nil, err
 	}

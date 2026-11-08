@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 // inventoryScopeBase marks the base or sessionless queue's own agents/, which
@@ -52,7 +53,7 @@ func inventoryDeliveryRoot(root, base string) agentInventoryScope {
 	scope := agentInventoryScope{
 		Root:         root,
 		Kind:         inventoryScopeBase,
-		Declarations: declarationsFor(root, base),
+		Declarations: roster.For(root, base),
 	}
 	if base != "" && filepath.Clean(base) != filepath.Clean(root) {
 		scope.Session = filepath.Base(root)
@@ -92,7 +93,7 @@ func inventoryDeliveryRoot(root, base string) agentInventoryScope {
 		}
 		agent := inventoryAgent{
 			Handle:        handle,
-			Registration:  classifyAgentAt(scope.Declarations, root, handle),
+			Registration:  roster.ClassifyAt(scope.Declarations, root, handle),
 			MailboxIssues: inventoryMailboxIssues(root, handle),
 		}
 		if p, err := presence.Read(root, handle); err == nil {

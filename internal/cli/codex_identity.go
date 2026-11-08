@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -373,7 +374,7 @@ func codexLastCwdChanges(opts []string, wd string, features map[string]bool) str
 // codexHasLinkedWorktrees reports whether dir's checkout is a linked
 // worktree or has one.
 func codexHasLinkedWorktrees(dir string) bool {
-	root := codexNearestGitAncestor(dir)
+	root := codexlaunch.NearestGitAncestor(dir)
 	if root == "" {
 		return false
 	}

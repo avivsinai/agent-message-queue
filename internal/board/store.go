@@ -159,12 +159,11 @@ type Message struct {
 // Acquisition is fetched without a store lock. Commit reloads the current
 // generation so an owner correction made during acquisition is retained.
 type Acquisition struct {
-	ProjectID  string
-	Input      Input
-	Usage      *UsageView
-	Messages   []Message
-	Evidence   [][]byte
-	BeadsStore string
+	ProjectID string
+	Input     Input
+	Usage     *UsageView
+	Messages  []Message
+	Evidence  [][]byte
 }
 
 func NewStore(base, identity, hostID string) (Store, error) {
@@ -876,11 +875,9 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 	}
 	stopped := false
 	err := s.update(ctx, func(state *Snapshot) error {
-		if a.BeadsStore == "" {
-			for _, nr := range a.Input.Results {
-				if nr.Name == "beads" && len(nr.Result.Items) > 0 {
-					return errors.New("beads facts require a bound source store")
-				}
+		for _, nr := range a.Input.Results {
+			if nr.Name == "beads" && nr.Result.Namespace == "" && len(nr.Result.Items) > 0 {
+				return errors.New("beads facts require a bound source store")
 			}
 		}
 		if err := stageErr; err != nil {
@@ -953,6 +950,10 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}
 			nr.Result.Items = admitted
 		}
+		checked := make(map[string]time.Time, len(state.Facts))
+		for alias, fact := range state.Facts {
+			checked[alias] = state.checkedAt(fact)
+		}
 		previous := map[string]NamedResult{}
 		for _, nr := range state.Input.Results {
 			previous[nr.Name] = nr
@@ -1024,13 +1025,13 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 			}
 			scopes := nr.Result.NativeScopes
 			if nr.Name == "beads" {
-				scopes = map[string]NativeScope{a.BeadsStore: {Complete: nr.Result.Status == StatusOK && !nr.Result.Coverage.Partial()}}
+				scopes = map[string]NativeScope{nr.Result.Namespace: {Complete: beadsComplete(nr.Result)}}
 			}
 			present := map[string]bool{}
 			for _, it := range nr.Result.Items {
 				it.Source = nr.Name
 				if nr.Name == "beads" {
-					it.Namespace = a.BeadsStore
+					it.Namespace = nr.Result.Namespace
 				}
 				alias, ok := nativeAlias(nr.Name, it)
 				_, scoped := scopes[it.Namespace]
@@ -1060,23 +1061,47 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 					return err
 				}
 				state.Aliases[alias] = canonical
-				old := state.Facts[alias]
+				// An unchanged fact keeps its time; a fact in a complete
+				// scope reads as checked with its source (checkedAt).
+				old, seen := state.Facts[alias]
+				if seen && !old.Missing && sameItem(old.Fact, it) {
+					continue
+				}
 				if !nr.Result.ObservedAt.Before(old.ObservedAt) {
 					state.Facts[alias] = AliasFact{Alias: alias, Fact: it, ObservedAt: nr.Result.ObservedAt}
 				}
-
 			}
+			// A complete scope marks what it no longer reports missing. An
+			// incomplete scope stamps what it reported, since checkedAt
+			// cannot tell its reported facts from the rest.
 			for namespace, scope := range scopes {
-				if !scope.Complete {
-					continue
-				}
 				for alias, fact := range state.Facts {
-					if fact.Fact.Source == nr.Name && fact.Fact.Namespace == namespace && !present[alias] {
-						fact.Missing = true
-						state.Facts[alias] = fact
+					if fact.Fact.Source != nr.Name || fact.Fact.Namespace != namespace {
+						continue
 					}
+					switch {
+					case scope.Complete && !present[alias]:
+						fact.Missing = true
+					case !scope.Complete && present[alias] && fact.ObservedAt.Before(nr.Result.ObservedAt):
+						fact.ObservedAt = nr.Result.ObservedAt
+					default:
+						continue
+					}
+					state.Facts[alias] = fact
 				}
-
+			}
+		}
+		results := append([]NamedResult(nil), state.Input.Results...)
+		for i := range results {
+			results[i].Result.Items = storedItems(results[i].Result.Items)
+		}
+		state.Input.Results = results
+		// A fact's checked time never moves back: when the new results no
+		// longer show a later check, that check is stored on the fact.
+		for alias, fact := range state.Facts {
+			if at := checked[alias]; at.After(state.checkedAt(fact)) {
+				fact.ObservedAt = at
+				state.Facts[alias] = fact
 			}
 		}
 		return nil
@@ -1085,6 +1110,21 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 		return errEvidenceBound
 	}
 	return err
+}
+
+// storedItems is the part of a result's items that a published state keeps:
+// Project reads only forge items back, and source facts hold the native
+// ones. They are ordered by ref, so a refresh that reorders a source's items
+// publishes no change.
+func storedItems(items []Item) []Item {
+	var forge []Item
+	for _, it := range items {
+		if it.Ref.Kind == RefForge {
+			forge = append(forge, it)
+		}
+	}
+	sort.SliceStable(forge, func(i, j int) bool { return forge[i].Ref.String() < forge[j].Ref.String() })
+	return forge
 }
 
 // OwnerAction applies one exact local operator correction. Source reports

@@ -16,10 +16,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 const (
-	defaultCoopRoot    = ".agent-mail"
+	defaultCoopRoot    = route.DefaultRootName
 	defaultCoopAgents  = "claude,codex,user"
 	defaultSessionName = "collab"
 )

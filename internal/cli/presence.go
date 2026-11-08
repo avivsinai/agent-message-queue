@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 type presenceListItem struct {
@@ -102,10 +103,10 @@ func runPresenceList(args []string) error {
 		}
 	}
 	rows := scope.Agents
-	if !inventoryHasHandle(rows, reservedHumanHandle) && scope.Declarations.anyPresent() {
+	if !inventoryHasHandle(rows, reservedHumanHandle) && scope.Declarations.AnyPresent() {
 		rows = append(rows, inventoryAgent{
 			Handle:       reservedHumanHandle,
-			Registration: classifyAgentAt(scope.Declarations, root, reservedHumanHandle),
+			Registration: roster.ClassifyAt(scope.Declarations, root, reservedHumanHandle),
 		})
 	}
 
@@ -126,7 +127,7 @@ func runPresenceList(args []string) error {
 		if row.PresenceErr != nil {
 			item.PresenceError = row.PresenceErr.Error()
 		}
-		item.agentRegistrationJSON = row.Registration.json()
+		item.agentRegistrationJSON = row.Registration.JSON()
 		items = append(items, item)
 	}
 

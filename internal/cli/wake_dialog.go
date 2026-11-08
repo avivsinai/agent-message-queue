@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/update"
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 )
 
 // Dialog guard, opt-in per harness (dialogGuardEnabled); without it the
@@ -17,19 +17,6 @@ import (
 // and its CR would answer the dialog, so no input byte is written while the
 // marker is present.
 
-// WakeDialogEntriesSince is the first AMQ release whose wake reads
-// .wake.dialog as a directory of entries. An older wake reads it only as a
-// regular file and holds input while it is a directory.
-const WakeDialogEntriesSince = "0.128.0"
-
-// WakeVersionReadsDialogEntries reports whether a wake of AMQ version reads
-// the directory of dialog entries; known is false when version is not a
-// release version (empty, "unknown", or a local build name).
-func WakeVersionReadsDialogEntries(version string) (reads, known bool) {
-	cmp, ok := update.CompareVersions(version, WakeDialogEntriesSince)
-	return ok && cmp >= 0, ok
-}
-
 // outdatedDialogWakeHint names a live wake whose release predates dialog
 // entries. The dialog hook keeps the single-file marker for it, which
 // guards one dialog at a time, and an entries directory a newer wake left
@@ -38,30 +25,16 @@ func outdatedDialogWakeHint(inspection wakeLockInspection) (opsHint, bool) {
 	if !inspection.Exists || inspection.Status != wakeLockValid {
 		return opsHint{}, false
 	}
-	if reads, known := WakeVersionReadsDialogEntries(inspection.Lock.ImageVersion); reads || !known {
+	if reads, known := dialogguard.WakeReadsEntries(inspection.Lock.ImageVersion); reads || !known {
 		return opsHint{}, false
 	}
 	return opsHint{
 		Code:   "outdated_dialog_wake",
 		Status: "warn",
 		Message: fmt.Sprintf("Wake for agent %q (pid %d) runs amq %s, which cannot read the dialog marker form of amq %s or later; restart that session (exit and resume it).",
-			inspection.Agent, inspection.PID, inspection.Lock.ImageVersion, WakeDialogEntriesSince),
+			inspection.Agent, inspection.PID, inspection.Lock.ImageVersion, dialogguard.EntriesSince),
 	}, true
 }
-
-// Claude dialog guard states in one settings file (ClaudeDialogGuardAt).
-const (
-	// DialogGuardUnsupported: this platform has no wake, so no guard.
-	DialogGuardUnsupported = "unsupported"
-	DialogGuardOK          = "ok"
-	DialogGuardMissing     = "missing"
-	DialogGuardIncomplete  = "incomplete" // some events, an unknown command, or a missing amq binary
-	// DialogGuardStale: every hook holds, but an older form whose open names
-	// no host, so a hold does not close when Claude Code exits.
-	DialogGuardStale      = "stale"
-	DialogGuardDisabled   = "disabled" // installed, but the file sets disableAllHooks
-	DialogGuardUnreadable = "unreadable"
-)
 
 type wakeDialogState uint8
 
@@ -78,7 +51,8 @@ const (
 )
 
 const (
-	wakeDialogFileName = ".wake.dialog"
+	wakeDialogFileName   = dialogguard.FileName
+	wakeDialogHookMarker = dialogguard.HookMarker
 	// A held doorbell re-checks the marker this often, so it rings at most
 	// this long after the dialog closes.
 	wakeDialogRecheck = 2 * time.Second

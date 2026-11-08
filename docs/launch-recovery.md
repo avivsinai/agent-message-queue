@@ -75,3 +75,80 @@ generation back to pending with reason `spawn_failed`. A process kill in the
 small interval after ready promotion and before the kernel replaces the AMQ
 image can leave a ready record. The normal stale-conversation policy absorbs
 this case; AMQ does not infer a second successful spawn.
+
+## Codex daemon capture
+
+A managed Codex seat uses an existing compatible app-server daemon when its
+startup state is clear and its launch options have a verified native resume
+contract. AMQ never starts the daemon or edits saved Codex settings. Otherwise
+the existing embedded launch is retained, and launch output, remote bindings,
+and `doctor --ops` share its `Buzz approvals: terminal only: <reason>` line.
+
+The native execution ticket owns a pre-spawn `thread/start` observation. Its
+`codex_daemon_thread_v1` evidence binds the handle, launch nonce, provider
+version, working directory, physical session identity, socket, and daemon
+process identity. It is distinct from the embedded seat's notify evidence.
+The thread's AMQ routing record replaces shell-environment overrides, and is
+published while the exact generation and handle remain locked, before provider
+execution is acknowledged.
+
+Before creating the thread, AMQ durably records `identity_requested`. If the
+request outcome is uncertain and no evidence was persisted, automatic execution,
+replacement, and ticket removal refuse and preserve the state. Persisted evidence
+is reused after a crash; a journal replay cannot reset the acquisition to pending.
+The TUI resumes only the acquired thread ID, after startup and directory checks
+succeed again. A failed provider exec retains that identity for recovery.
+Ready conversation evidence remains bound to its physical session root. Routing
+publication requires the recorded socket and daemon process; a daemon restart or
+endpoint change requires explicit recovery rather than silent re-adoption.
+
+A failure proven to occur before `thread/start` returns the ticket to `pending`;
+thread creation and later protocol failures preserve uncertain progress. Native
+thread startup uses the same 60-second contention budget as session naming.
+An incomplete acquired ticket refuses a replacement generation: retry the
+original emitted command to reuse its thread.
+
+When retrying an incomplete native launch cannot succeed, inspect the Codex
+daemon for the known thread or an orphan, then inspect the exact cleanup target:
+
+```bash
+amq cleanup --launch-execution <handle> --root <session-root> --dry-run
+amq cleanup --launch-execution <handle> --root <session-root> --yes
+```
+
+Cleanup explicitly abandons an unchanged `identity_requested`,
+`identity_acquired`, or `spawn_attempted` ticket under its exact session lease and
+handle lock. The dry run prints the known thread ID so it can be resumed by hand.
+Acquired progress requires valid bound evidence; when capture committed before
+the ticket's identity update, cleanup validates that capture and displays its
+thread too. Removal compares ticket bytes, file identity, and evidence references
+again under the lease. It leaves all Codex threads, evidence, routing records,
+conversations, and launch journals untouched. Cleanup does not require the old
+executable or daemon to remain available. Recovery refusals use exit 6 and name
+the retry or cleanup command.
+
+Every execution attempt, including recovery, checks inherited native-backend
+exclusions and rechecks hook trust on the bound daemon before publishing routing.
+The other full startup admission probes run during planning and new acquisition.
+
+Prepare authorizes the selected native or embedded identity contract. A daemon
+or sign-in change that changes that selection before Apply requires a new
+Prepare; Apply does not execute a different plan under the earlier authorization.
+
+## Native resume settings
+
+The Codex 0.167.0 TUI forwards `--model <value>`,
+`--sandbox read-only|workspace-write`, and `--ask-for-approval on-request` on
+resume, and retains `--no-alt-screen` for terminal presentation. That the daemon
+applies the forwarded settings is not yet verified live. Native admission fixes
+these sandbox and approval values independently of the embedded argument grammar. Settings keep
+their order in the execution ticket, followed by its acquired thread ID and any
+initial prompt.
+
+Codex selects embedded execution for command-line configuration overrides such
+as `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and for
+`--search`. Those launches retain the original arguments and explain the
+terminal-only approval capability. Wrappers, environment overlays, bypass
+options, and unverified or duplicate options also retain the embedded path.
+AMQ does not translate reviewer choices into protocol settings or alter saved
+Codex configuration.

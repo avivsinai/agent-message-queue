@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // Esc or a deny on a Claude Code AskUserQuestion or ExitPlanMode dialog
@@ -133,69 +133,14 @@ func claudeDialogAnsweredFrom(marker wakeDialogMarker, modTime time.Time, read c
 	return false, nil
 }
 
-// claudeTranscriptNameRe is a session or subagent id that names exactly one
-// path component.
-var claudeTranscriptNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
 // claudeSubagentTranscript is the transcript of the marker's subagent: its
 // agent_transcript_path when the hook gave one, else the path Claude Code
-// lays out beside the session transcript <dir>/<session_id>.jsonl:
-// <dir>/<session_id>/subagents/agent-<agent_id>.jsonl, or one or two
-// subdirectories deeper (a workflow's subagents write to
-// subagents/workflows/<wf>/). Invariant: the proof reads only a regular
-// file, reached through no symlink below <dir>, named for exactly this
-// agent_id, and found exactly once across the three depths; anything else
-// is an error and no proof.
+// lays out beside the session transcript (claude.SubagentTranscript).
 func claudeSubagentTranscript(marker wakeDialogMarker) (string, error) {
 	if marker.AgentTranscriptPath != "" {
 		return marker.AgentTranscriptPath, nil
 	}
-	if !claudeTranscriptNameRe.MatchString(marker.AgentID) || !claudeTranscriptNameRe.MatchString(marker.SessionID) ||
-		!filepath.IsAbs(marker.TranscriptPath) || filepath.Base(marker.TranscriptPath) != marker.SessionID+".jsonl" {
-		return "", errors.New("no subagent transcript path for this marker")
-	}
-	session := filepath.Join(filepath.Dir(marker.TranscriptPath), marker.SessionID)
-	subagents := filepath.Join(session, "subagents")
-	for _, dir := range []string{session, subagents} {
-		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-			return "", fmt.Errorf("subagent transcripts: %s is not a directory", dir)
-		}
-	}
-	name := "agent-" + marker.AgentID + ".jsonl"
-	regular := func(path string) bool {
-		info, err := os.Lstat(path)
-		return err == nil && info.Mode().IsRegular()
-	}
-	var found []string
-	var search func(dir string, depth int) error
-	search = func(dir string, depth int) error {
-		if path := filepath.Join(dir, name); regular(path) {
-			found = append(found, path)
-		}
-		if depth == 2 {
-			return nil
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return fmt.Errorf("read subagent transcripts: %w", err)
-		}
-		for _, entry := range entries {
-			// A symlink is not a directory here, so the search follows none.
-			if entry.IsDir() {
-				if err := search(filepath.Join(dir, entry.Name()), depth+1); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	if err := search(subagents, 0); err != nil {
-		return "", err
-	}
-	if len(found) != 1 {
-		return "", fmt.Errorf("%d subagent transcripts named %s", len(found), name)
-	}
-	return found[0], nil
+	return claude.SubagentTranscript(marker.TranscriptPath, marker.SessionID, marker.AgentID)
 }
 
 // claudePermissionMarker reports a Claude Code permission marker: event

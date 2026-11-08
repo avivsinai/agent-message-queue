@@ -87,6 +87,9 @@ type ReconcileRequest struct {
 	// backend Create unless AMQPath still resolves to it, and every ticket
 	// binds exactly that path and identity.
 	AuthorizedAMQ *PreparedExecutable
+	// ValidatePlan binds this invocation's authorized shape independently of
+	// any previously saved trust for another plan.
+	ValidatePlan func(Plan) error
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
@@ -105,6 +108,7 @@ type AgentReconcileResult struct {
 	Code                    int                     `json:"code"`
 	ConversationDisposition ConversationDisposition `json:"conversation_disposition"`
 	Reason                  string                  `json:"reason"`
+	TerminalOnlyReason      string                  `json:"terminal_only_reason,omitempty"`
 }
 
 type ReconcileResult struct {
@@ -217,6 +221,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	planDigest, err := plan.SemanticDigest()
 	if err != nil {
 		return result, err
+	}
+	if request.ValidatePlan != nil {
+		if err := request.ValidatePlan(plan); err != nil {
+			return result, err
+		}
 	}
 	trustDigest, err := ExecutionTrustDigestWithAuthority(plan, request.Session, request.Root, request.TrustAuthorityDigest)
 	if err != nil {
@@ -848,6 +857,11 @@ func plannedAgentResults(results []AgentReconcileResult, planned []plannedAgent)
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {
 	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
+		_, priorErr := LoadExecutionTicket(request.Root, agent.plan.Handle)
+		if priorErr != nil && !errors.Is(priorErr, os.ErrNotExist) {
+			return errors.Join(priorErr, removeExecutionTickets(request.Root, lease, written))
+		}
+		created := errors.Is(priorErr, os.ErrNotExist)
 		provider, err := providerExecutable(agent.plan)
 		if err != nil {
 			return errors.Join(fmt.Errorf("resolve provider executable for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
@@ -855,7 +869,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 		ticketRequest := ExecutionTicketRequest{
 			Handle: agent.plan.Handle, LaunchNonce: agent.plan.LaunchNonce,
 			Mode: agent.plan.AdapterMode, Provider: agent.adapter.Name(), ProviderVersion: agent.providerVersion,
-			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire,
+			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire, TerminalOnlyReason: agent.plan.TerminalOnlyReason,
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
 			ProviderExecutable: provider, AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
@@ -874,9 +888,14 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			return errors.Join(fmt.Errorf("build execution ticket for %s: authorized amq executable identity changed", agent.plan.Handle), removeExecutionTickets(request.Root, lease, written))
 		}
 		if err := WriteExecutionTicket(request.Root, lease, ticket); err != nil {
-			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, append(written, agent)))
+			if created {
+				written = append(written, agent)
+			}
+			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
 		}
-		written = append(written, agent)
+		if created {
+			written = append(written, agent)
+		}
 	}
 	return nil
 }
@@ -1192,6 +1211,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		execution.Named = named && disposition != DispositionResumed
 		agentPlan.Execution = clonePrepareExecutionOptions(&execution)
 		item.ConversationDisposition, item.Reason = disposition, planReason
+		item.TerminalOnlyReason = agentPlan.TerminalOnlyReason
 		result.Agents = append(result.Agents, item)
 		record := ConversationRecord{
 			Version: ConversationVersion, Handle: cfg.Handle, State: CapturePending,

@@ -55,6 +55,9 @@ Commands:
   mirror on|off|status --self|--name N
                            Show or stop each finished turn of a Claude
                            session in its Buzz channel
+  statusline [--session ID] [--plain]
+                           Print one status-line segment while the session
+                           is bound to Buzz, else nothing
   service install|uninstall|status [--root R]
                            Start amq-remote up for R (default the machine
                            root) at login: launchd on macOS, systemd on Linux
@@ -296,6 +299,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, code, err = link(rest, stdin, stdout, probe)
 	case "mcp":
 		code, err = mcpServe(rest, stdin, stdout, stderr, probe)
+	case "statusline":
+		return statusline(rest, stdin, stdout)
 	case "pi":
 		return piSubcommand(rest, stdout, stderr)
 	case "claude":

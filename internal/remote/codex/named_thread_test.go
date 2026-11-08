@@ -14,15 +14,19 @@ import (
 // app-server daemon never got the session name. coop exec now creates the
 // thread on the daemon, names it, persists it, and resumes it.
 func TestStartNamedThreadCreatesNamesAndPersistsTheThread(t *testing.T) {
-	d := newFakeNamingDaemon(t)
-	id, err := StartNamedThread(context.Background(), d.sock, "/work", "session1/codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if id != "t1" || d.cwd != "/work" || d.name != "session1/codex" || !d.persisted {
-		t.Fatalf("id=%q cwd=%q name=%q persisted=%v", id, d.cwd, d.name, d.persisted)
+	for _, name := range []string{"session1/codex", ""} {
+		t.Run(name, func(t *testing.T) {
+			d := newFakeNamingDaemon(t)
+			id, err := StartThread(context.Background(), d.sock, "/work", name, "0.167.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if id != "t1" || d.cwd != "/work" || d.name != name || !d.persisted {
+				t.Fatalf("id=%q cwd=%q name=%q persisted=%v", id, d.cwd, d.name, d.persisted)
+			}
+		})
 	}
 }
 
@@ -32,7 +36,7 @@ func TestStartNamedThreadCreatesNamesAndPersistsTheThread(t *testing.T) {
 func TestStartNamedThreadArchivesAThreadItCouldNotFinish(t *testing.T) {
 	d := newFakeNamingDaemon(t)
 	d.failInject = true
-	if _, err := StartNamedThread(context.Background(), d.sock, "/work", "session1/codex"); err == nil {
+	if _, err := StartThread(context.Background(), d.sock, "/work", "session1/codex", ""); err == nil {
 		t.Fatal("naming succeeded although persisting the thread failed")
 	}
 	d.mu.Lock()
@@ -112,6 +116,8 @@ func (d *fakeNamingDaemon) serve(conn net.Conn) {
 		d.mu.Lock()
 		d.calls = append(d.calls, fakeCall{msg.Method, msg.Params})
 		switch msg.Method {
+		case "initialize":
+			result = map[string]any{"userAgent": "codex_cli_rs/0.167.0 (Mac OS; arm64)"}
 		case "config/read":
 			result = map[string]any{"config": map[string]any{"model_provider": nil}, "origins": map[string]any{}, "layers": []any{}}
 		case "thread/list":

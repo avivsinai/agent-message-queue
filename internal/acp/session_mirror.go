@@ -95,6 +95,9 @@ type mirrorState struct {
 	// release drops the mirror lead; nil when not held.
 	release func()
 	backoff map[string]mirrorBackoff
+	// seen is what each binding's last tick read when it left nothing
+	// queued; a tick whose inputs still match it reads nothing.
+	seen map[string]mirrorSeen
 	// scans are each mailbox binding's buzz inbox scans, new and cur.
 	scans map[string]mirrorScans
 }
@@ -102,6 +105,30 @@ type mirrorState struct {
 type mirrorBackoff struct {
 	until time.Time
 	step  time.Duration
+}
+
+// mirrorSeen is the inputs of a binding's tick that read its transcript to
+// the end and left nothing queued: the channel, the harness, the off switch
+// and the transcript as stat saw it before the read.
+type mirrorSeen struct {
+	channel, harness, source string
+	off                      bool
+	path                     string
+	info                     os.FileInfo
+}
+
+// unchanged reports whether a tick with these inputs would read nothing new:
+// the transcript is the same file, with the same size and modification time.
+func (m mirrorSeen) unchanged(t dialogTarget, b binding.Binding, off bool) bool {
+	if m.info == nil || m.channel != t.channel || m.harness != b.Harness || m.off != off {
+		return false
+	}
+	src := mirror.SourceFor(m.source)
+	if src == nil || src.Locate(b, m.path) != m.path {
+		return false
+	}
+	info, err := os.Stat(m.path)
+	return err == nil && os.SameFile(info, m.info) && info.Size() == m.info.Size() && info.ModTime().Equal(m.info.ModTime())
 }
 
 type mirrorScans struct {
@@ -229,6 +256,7 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
 		_ = os.RemoveAll(dir)
 		delete(s.mirrors.scans, name)
 		delete(s.mirrors.backoff, name)
+		delete(s.mirrors.seen, name)
 	}
 }
 
@@ -251,6 +279,11 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	if err != nil {
 		return true
 	}
+	off := mirror.Off(dir)
+	if !ended && s.mirrors.seen[t.name].unchanged(t, b, off) {
+		return true
+	}
+	delete(s.mirrors.seen, t.name)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -263,8 +296,10 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	if src == nil {
 		return true
 	}
-	off := mirror.Off(dir)
-	switch path := src.Locate(b, st.Path); {
+	// read is the transcript as it was before a read that reached its end.
+	var read os.FileInfo
+	path := src.Locate(b, st.Path)
+	switch {
 	case ended:
 		if st.Path != "" {
 			s.mirrorRead(dir, src, &st, st.Path, now)
@@ -274,8 +309,13 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		st.Queue = append(st.Queue, evs...)
 	case path == "":
 		s.mirrorUnavailable(dir, &st, "", off)
-	case !s.mirrorRead(dir, src, &st, path, now):
-		s.mirrorUnavailable(dir, &st, path, off)
+	default:
+		info, statErr := os.Stat(path)
+		if !s.mirrorRead(dir, src, &st, path, now) {
+			s.mirrorUnavailable(dir, &st, path, off)
+		} else if statErr == nil && st.Offset >= info.Size() {
+			read = info
+		}
 	}
 	st.Queue = mergeQueue(st.Queue, st.Watermark, func(id string) bool { return mirrorRunning(dir, id) })
 	if off {
@@ -284,7 +324,16 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	if raw, err := json.Marshal(st); err != nil || !bytes.Equal(raw, saved) && writeMirrorFile(dir, st) != nil {
 		return false
 	}
-	return s.mirrorSend(dir, t, b, &st, now)
+	if !s.mirrorSend(dir, t, b, &st, now) {
+		return false
+	}
+	if read != nil && len(st.Queue) == 0 {
+		if s.mirrors.seen == nil {
+			s.mirrors.seen = map[string]mirrorSeen{}
+		}
+		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read}
+	}
+	return true
 }
 
 // mirrorRead reads the new lines of path and queues the turn events they

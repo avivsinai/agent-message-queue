@@ -14,8 +14,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 type doctorOpsResult struct {
@@ -249,9 +251,14 @@ func runOpsChecksWithSchema(
 	scope := inventoryDeliveryRoot(root, opsDeclarationBase(root, explicitBaseRoot...))
 	for _, row := range opsAgentRows(root, scope) {
 		handle := row.Handle
-		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.json()}
+		agent := opsAgent{Handle: handle, agentRegistrationJSON: row.Registration.JSON()}
 		if hint, ok := codexStartupHoldHint(root, handle); ok {
 			result.Hints = append(result.Hints, hint)
+		}
+		if reason, err := launch.CodexTerminalOnlyReason(root, handle); err != nil {
+			result.Hints = append(result.Hints, opsHint{Code: "launch_execution_unreadable", Status: "warn", Message: fmt.Sprintf("%s: cannot read launch approval capability: %v", handle, err)})
+		} else if reason != "" {
+			result.Hints = append(result.Hints, opsHint{Code: "codex_terminal_approvals", Status: "warn", Message: fmt.Sprintf("%s: Buzz approvals: terminal only: %s", handle, reason)})
 		}
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
@@ -485,15 +492,15 @@ func opsAgentRows(root string, scope agentInventoryScope) []inventoryAgent {
 	}
 	seen := make(map[string]bool)
 	var rows []inventoryAgent
-	for _, roster := range scope.Declarations {
-		for _, handle := range roster.Agents {
+	for _, declared := range scope.Declarations {
+		for _, handle := range declared.Agents {
 			if seen[handle] || fsq.ValidateHandle(handle) != nil || validateWakeLockAgent(root, handle) != nil {
 				continue
 			}
 			seen[handle] = true
 			row, ok := byHandle[handle]
 			if !ok {
-				row = inventoryAgent{Handle: handle, Registration: classifyAgentAt(scope.Declarations, root, handle)}
+				row = inventoryAgent{Handle: handle, Registration: roster.ClassifyAt(scope.Declarations, root, handle)}
 			}
 			rows = append(rows, row)
 		}
