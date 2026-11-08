@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +103,50 @@ func TestReceiptsWaitImmediate(t *testing.T) {
 	}
 	if result.Receipt == nil || result.Receipt.MsgID != "msg-w-001" {
 		t.Errorf("unexpected receipt: %+v", result.Receipt)
+	}
+}
+
+// A receipt parked after a failed write was invisible to receipts list, so a
+// consumed message looked never read.
+func TestReceiptsListShowsOwedReceipt(t *testing.T) {
+	root := setupReceiptsTestRoot(t)
+	receipts := filepath.Join(root, "agents", "alice", "receipts")
+	// Make the receipt write fail so EmitOwed parks it, then restore the dir.
+	if err := os.Remove(receipts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipts, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	owed := receipt.New("msg-o-001", "", "bob", "alice", receipt.StageDrained, "")
+	if err := receipt.EmitOwed(deliveryRoot, owed); err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("EmitOwed = %v, want a parked write failure", err)
+	}
+	if err := os.Remove(receipts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(receipts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _ := captureOutput(t, func() error {
+		return runReceiptsList([]string{"--me", "alice", "--root", root, "--json"})
+	})
+	var result receiptsListResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal: %v\nstdout: %s", err, stdout)
+	}
+	if result.Count != 1 || !result.Receipts[0].Owed || result.Receipts[0].MsgID != "msg-o-001" || result.Receipts[0].Stage != receipt.StageDrained {
+		t.Fatalf("receipts list = %s, want one owed drained receipt for msg-o-001", stdout)
 	}
 }
 

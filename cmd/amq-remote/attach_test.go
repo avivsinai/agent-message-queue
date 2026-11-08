@@ -381,6 +381,62 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 	}
 }
 
+// bindings --json shows each session's unresolved dialogs, so the owner or
+// an agent can see one that is stuck.
+func TestBindingsShowsOpenDialogs(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: "claude", Name: "proj"}); err != nil {
+		t.Fatal(err)
+	}
+	dialogs, err := dialog.DirFor("proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ ls", OpenedAt: opened,
+		Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}}
+	if err := dialog.Open(dialogs, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dialog.WriteAnswer(dialogs, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	posts := filepath.Join(dir, "remote", "acp", "dialogs", "proj")
+	if err := os.MkdirAll(posts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	post := `{"channel":"c","event":"` + strings.Repeat("a", 64) + `","text":"$ ls"}`
+	if err := os.WriteFile(filepath.Join(posts, req.ID+".json"), []byte(post), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct {
+			Name    string
+			Dialogs []struct {
+				ID, Tool, Phase string
+				Posted          bool
+				OpenedAt        time.Time `json:"opened_at"`
+			}
+		}
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	if len(got.Bindings) != 1 || len(got.Bindings[0].Dialogs) != 1 {
+		t.Fatalf("bindings output %s; want one session with one dialog", out.String())
+	}
+	d := got.Bindings[0].Dialogs[0]
+	if d.ID != req.ID || d.Tool != "Bash" || d.Phase != string(dialog.PhaseAnswered) || !d.Posted || !d.OpenedAt.Equal(opened) {
+		t.Fatalf("dialog row %+v; want the answered, posted Bash dialog", d)
+	}
+}
+
 // attachMailboxAs runs attach --self --json as the AMQ handle claude of the
 // session at root, pinned as a real session is, and returns the bound name.
 func attachMailboxAs(t *testing.T, root string) string {

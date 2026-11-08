@@ -75,6 +75,93 @@ func TestRouteExplainFromCWD(t *testing.T) {
 	}
 }
 
+func TestRouteExplainNamesRouteProvenance(t *testing.T) {
+	tmp := t.TempDir()
+	projectA := filepath.Join(tmp, "project-a")
+	projectB := filepath.Join(tmp, "project-b")
+	ensureRouteAgents(t, filepath.Join(projectA, ".agent-mail"), "alice")
+	ensureRouteAgents(t, filepath.Join(projectB, ".agent-mail"), "bob")
+	writeRouteAmqrc(t, projectA, map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-a",
+		"peers":   map[string]string{"project-b": filepath.Join(projectB, ".agent-mail")},
+	})
+
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir outside: %v", err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", projectA,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "project-b",
+	)
+
+	if !result.Routable {
+		t.Fatalf("expected routable route, got error: %s", result.Error)
+	}
+	if result.RootSource != string(rootSourceProjectRC) {
+		t.Errorf("root_source = %q, want %q", result.RootSource, rootSourceProjectRC)
+	}
+	expectSamePath(t, result.SourceConfig, filepath.Join(projectA, ".amqrc"))
+	if result.PeerKey != "project-b" {
+		t.Errorf("peer_key = %q, want project-b", result.PeerKey)
+	}
+}
+
+func TestRoutePeersShowsWhetherRepliesComeBack(t *testing.T) {
+	tmp := t.TempDir()
+	rootOf := func(project string) string { return filepath.Join(tmp, project, ".agent-mail") }
+	for _, project := range []string{"project-a", "project-b", "project-c"} {
+		ensureRouteAgents(t, rootOf(project), "alice")
+	}
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-a"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-a",
+		"peers":   map[string]string{"project-b": rootOf("project-b"), "project-c": rootOf("project-c")},
+	})
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-b"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-b",
+		"peers":   map[string]string{"project-a": rootOf("project-a")},
+	})
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-c"), map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-c",
+	})
+
+	output, err := captureEnvStdout(t, func() error {
+		return runRoutePeers([]string{"--root", rootOf("project-a"), "--json"})
+	})
+	if err != nil {
+		t.Fatalf("runRoutePeers: %v", err)
+	}
+	var result routePeersResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal route peers output: %v, output was: %s", err, output)
+	}
+	if result.Error != "" || len(result.Peers) != 2 {
+		t.Fatalf("route peers = %s", output)
+	}
+	got := map[string]route.PeerEdge{}
+	for _, peer := range result.Peers {
+		got[peer.Name] = peer
+	}
+	if peer := got["project-b"]; peer.Status != route.PeerOK || peer.ReplyBack != route.ReplyBackYes {
+		t.Errorf("project-b = %+v, want ok with reply_back yes", peer)
+	}
+	if peer := got["project-c"]; peer.Status != route.PeerOK || peer.ReplyBack != route.ReplyBackNo {
+		t.Errorf("project-c = %+v, want ok with reply_back no", peer)
+	}
+}
+
 func runRouteExplainJSONForTest(t *testing.T, args ...string) routeExplainResult {
 	t.Helper()
 
@@ -232,4 +319,35 @@ func TestResolveReplyRouteCrossProjectMissingSessionIsRetryable(t *testing.T) {
 	if err == nil || errors.Is(err, route.ErrPeerRootUnreachable) {
 		t.Fatalf("unknown project = %v, want a permanent error", err)
 	}
+}
+
+// Review of route peers: an edge to an already visited project was dropped,
+// so with A->{B,C}, B->C and C->A at depth 2 the B->C edge and its missing
+// reply route (C lists only A) never showed.
+func TestRoutePeersKeepsEdgesToVisitedProjects(t *testing.T) {
+	tmp := t.TempDir()
+	root := func(s string) string { return filepath.Join(tmp, s, ".agent-mail") }
+	for _, s := range []string{"a", "b", "c"} {
+		ensureRouteAgents(t, root(s), "alice")
+	}
+	writeRouteAmqrc(t, filepath.Join(tmp, "a"), map[string]any{"root": ".agent-mail", "project": "a", "peers": map[string]string{"b": root("b"), "c": root("c")}})
+	writeRouteAmqrc(t, filepath.Join(tmp, "b"), map[string]any{"root": ".agent-mail", "project": "b", "peers": map[string]string{"c": root("c")}})
+	writeRouteAmqrc(t, filepath.Join(tmp, "c"), map[string]any{"root": ".agent-mail", "project": "c", "peers": map[string]string{"a": root("a")}})
+	out, err := captureEnvStdout(t, func() error { return runRoutePeers([]string{"--root", root("a"), "--depth", "2", "--json"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var graph routePeersResult
+	if err := json.Unmarshal([]byte(out), &graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range graph.Peers {
+		if e.Via == "b" && e.Name == "c" {
+			if e.ReplyBack != "no" {
+				t.Fatalf("B->C edge = %+v; want reply_back no", e)
+			}
+			return
+		}
+	}
+	t.Fatalf("the B->C edge and its missing reply route were omitted: %s", out)
 }

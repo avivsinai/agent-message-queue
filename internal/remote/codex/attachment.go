@@ -1478,15 +1478,17 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 			return
 		case <-tick.C:
 		}
-		ans, ok, err := dialog.ReadAnswer(dir, d.req.ID)
-		if err != nil || !ok {
+		// Only an answered dialog acts here; one resolved elsewhere waits
+		// for done like an open one.
+		phase, _, ans, _, err := dialog.Lookup(dir, d.req.ID)
+		if err != nil || phase != dialog.PhaseAnswered {
 			continue
 		}
-		result, outcome, label, ok := d.reply(ans)
+		result, outcome, label, ok := d.reply(*ans)
 		if !ok {
-			// The answer fits no choice. Remove it, so the owner's next
+			// The answer fits no choice: reject it, so the owner's next
 			// reply can be written, and keep waiting.
-			_ = dialog.RemoveAnswer(dir, d.req.ID)
+			_ = dialog.RejectAnswer(dir, d.req.ID)
 			continue
 		}
 		a.mu.Lock()
