@@ -422,7 +422,8 @@ Notification evidence never proves that a TUI or person saw, displayed, or submi
 --follow reads the sender's outbox copy and searches the roots its header routes to:
 the sender's root, the sessions of its project (reply_to), or the peer projects of
 its .amqrc and their sessions (reply_project). For each recipient it reports the
-root and session, the delivery (new, cur, dlq) and the receipt (drained, dlq, owed).
+root and session, the delivery (new, cur, dlq) and the receipt (drained, dlq, owed,
+or unknown when a receipt file cannot be read as a receipt).
 The session is the one whose root holds the receipt. A root that cannot be read is
 reported, and a recipient it might hold is unknown. --from <sender> reads
 agents/<sender>/outbox/sent/<id>.md directly and skips the scan of the root.
