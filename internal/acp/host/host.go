@@ -26,6 +26,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 // extensionLayer names the host's agent-scope extension directory:
@@ -142,7 +143,7 @@ func Open(cfg Config) (*Host, error) {
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
-	if err := acp.VerifySessionPinOn(root); err != nil {
+	if err := sessionguard.VerifyEnvPinOn(root); err != nil {
 		return nil, err
 	}
 	if err := root.EnsureAgentDirs(cfg.Me); err != nil {
