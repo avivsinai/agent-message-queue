@@ -225,8 +225,8 @@ func routable(r channelRecord) bool {
 
 // serves reports whether the routable record r is the channel of b's live
 // session.
-func serves(r channelRecord, b binding.Binding) bool {
-	return b.SessionIdentity() == r.Identity && live(b)
+func (s *Server) serves(r channelRecord, b binding.Binding) bool {
+	return b.SessionIdentity() == r.Identity && s.live(b)
 }
 
 // dialogTargets are the bindings this worker posts dialogs for: a machine
@@ -245,7 +245,7 @@ func (s *Server) dialogTargets() []dialogTarget {
 			if !routable(r) {
 				continue
 			}
-			if b, ok := snap.binding(r.Name); ok && serves(r, b) {
+			if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
 				out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b})
 			}
 		}
@@ -255,7 +255,7 @@ func (s *Server) dialogTargets() []dialogTarget {
 		return nil
 	}
 	b, err := binding.ReadNamed(s.cfg.Pin)
-	if err != nil || !live(b) {
+	if err != nil || !s.live(b) {
 		return nil
 	}
 	channel := ""
@@ -275,8 +275,8 @@ func (s *Server) dialogTargets() []dialogTarget {
 
 // live reports whether b's session may still run: it is not proven ended.
 // A binding written before holders were recorded has unknown liveness.
-func live(b binding.Binding) bool {
-	state, _ := b.Liveness()
+func (s *Server) live(b binding.Binding) bool {
+	state, _ := s.liveness(b)
 	return state != binding.Ended
 }
 
@@ -309,14 +309,14 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 		// The snapshot only lets a live binding be skipped: whether it is
 		// gone or ended is decided from a fresh read, since a session can
 		// attach again while an earlier name's relay call runs.
-		if b, ok := snap.binding(name); ok && live(b) {
+		if b, ok := snap.binding(name); ok && s.live(b) {
 			continue
 		}
 		b, err := binding.ReadNamed(name)
 		switch {
 		// A name no binding can have serves nothing.
 		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
-		case err == nil && !live(b):
+		case err == nil && !s.live(b):
 		default:
 			continue
 		}

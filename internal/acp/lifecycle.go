@@ -182,7 +182,7 @@ func (s *Server) noAgentText(b binding.Binding, helper bool) string {
 	if !helper || b.Name == binding.LegacyName {
 		return "no agent yet; " + importStep
 	}
-	if state, _ := b.Liveness(); state != binding.Live {
+	if state, _ := s.liveness(b); state != binding.Live {
 		return fmt.Sprintf("session state %s, so no agent is drafted; run /amq-remote in that session, or %s", state, importStep)
 	}
 	if s.helperRequest(b).Count >= helperRequestTries {
@@ -680,7 +680,7 @@ func (s *Server) draftable(b binding.Binding) bool {
 	if b.Name == binding.LegacyName || len(s.agentMarkers(b.Name)) > 0 {
 		return false
 	}
-	state, _ := b.Liveness()
+	state, _ := s.liveness(b)
 	return state == binding.Live
 }
 

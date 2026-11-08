@@ -381,59 +381,128 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	}
 }
 
-// A Codex app-server session records no holder, only its thread, so the
-// holder alone left it unknown: the machine agent made no channel for it and
-// never archived one. Its liveness comes from the daemon that runs the
-// thread.
-func TestMachineServesACodexAppServerThreadUntilItEnds(t *testing.T) {
-	s, rec := machineServer(t)
-	daemon, err := launch.HolderOf(os.Getpid())
-	if err != nil {
-		t.Skip("no process identity on this platform")
-	}
-	const sock, thread = "/daemon.sock", "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
-	loaded := []string{thread}
-	probes := 0
+// appServerSession is a bound Codex app-server thread, with no holder, and
+// what the daemon at its socket answers: its pid and the loaded threads,
+// with the number of loaded-thread probes.
+type appServerSession struct {
+	b      binding.Binding
+	loaded []string
+	pid    int
+	probes int
+}
+
+// bindAppServerThread binds a loaded thread whose binding records daemon.
+func bindAppServerThread(t *testing.T, daemon launch.HolderIdentity) *appServerSession {
+	t.Helper()
+	const thread = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+	root := canonicalTempDir(t)
+	a := &appServerSession{loaded: []string{thread}, pid: os.Getpid(),
+		b: binding.Binding{Root: root, Target: "codex:" + thread, NativeSession: thread, Harness: "codex", Name: "codex-proj",
+			Label: "codex · proj @ box", Identity: binding.NativeIdentity("codex", root, root),
+			AppServer: binding.AppServerThread{Socket: "/daemon.sock", Thread: thread, Daemon: daemon}}}
 	saved := newAppServerView
 	t.Cleanup(func() { newAppServerView = saved })
 	newAppServerView = func() *codex.View {
-		return codex.NewView(func(string) ([]string, error) { probes++; return loaded, nil },
-			func(string) (int, error) { return daemon.PID, nil })
+		return codex.NewView(func(string) ([]string, error) { a.probes++; return a.loaded, nil },
+			func(string) (int, error) { return a.pid, nil })
 	}
-	root := canonicalTempDir(t)
-	b := binding.Binding{Root: root, Target: "codex:" + thread, NativeSession: thread, Harness: "codex", Name: "codex-proj",
-		Label: "codex · proj @ box", Identity: binding.NativeIdentity("codex", root, root),
-		AppServer: binding.AppServerThread{Socket: sock, Thread: thread, Daemon: daemon}}
-	if err := binding.WriteNamed(b); err != nil {
+	if err := binding.WriteNamed(a.b); err != nil {
 		t.Fatal(err)
 	}
+	return a
+}
+
+func selfHolder(t *testing.T) launch.HolderIdentity {
+	t.Helper()
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	return self
+}
+
+func acceptCreates(rec *machineCalls) {
 	rec.reply = func(args []string) ([]byte, error) {
 		if args[0]+" "+args[1] == "channels create" {
 			return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
 		}
 		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
 	}
+}
+
+// A Codex app-server session records no holder, only its thread, so the
+// holder alone left it unknown: the machine agent made no channel for it and
+// never archived one. Its liveness comes from the daemon that runs the
+// thread.
+func TestMachineServesACodexAppServerThreadUntilItEnds(t *testing.T) {
+	s, rec := machineServer(t)
+	a := bindAppServerThread(t, selfHolder(t))
+	acceptCreates(rec)
 	now := time.Now()
 	tick(s, now)
-	if r := channelState(t, s, b.Name); r.State != channelActive || r.ChannelID != machineChanA {
+	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != machineChanA {
 		t.Fatalf("record for a loaded thread = %+v", r)
 	}
-	if probes != 1 {
-		t.Fatalf("daemon asked %d times in one tick, want 1", probes)
+	if a.probes != 1 {
+		t.Fatalf("daemon asked %d times in one tick, want 1", a.probes)
 	}
 
-	loaded = nil // the thread ends in the same daemon
+	a.loaded = nil // the thread ends in the same daemon
 	rec.reset()
 	tick(s, now.Add(time.Minute))
 	if r := onlyRetired(t, s); r.RetiredBy != retiredEnded || !r.Archived {
 		t.Fatalf("record after the thread ended = %+v", r)
 	}
 	want := []string{
-		"messages send --channel " + machineChanA + " --content Session ended: " + b.Label + ". This channel no longer reaches it.",
+		"messages send --channel " + machineChanA + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
 		"channels archive --channel " + machineChanA,
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", got, want)
+	}
+}
+
+// Review of the app-server channel: when the daemon a thread was bound in
+// ended, nothing proved the session ended, so its channel was never
+// archived. A Codex update restarts the daemon, so a gone daemon archives
+// only on two ticks in a row, and the thread loaded again gets the channel
+// back.
+func TestMachineArchivesACodexThreadWhoseDaemonIsGone(t *testing.T) {
+	s, rec := machineServer(t)
+	dead := selfHolder(t)
+	dead.ProcessStart = laterStart(t, dead.ProcessStart)
+	a := bindAppServerThread(t, dead) // a restarted daemon (this process) has it loaded
+	acceptCreates(rec)
+	now := time.Now()
+	tick(s, now)
+	if r := channelState(t, s, a.b.Name); r.State != channelActive {
+		t.Fatalf("record for a thread loaded in a restarted daemon = %+v", r)
+	}
+
+	a.loaded = nil
+	rec.reset()
+	tick(s, now.Add(time.Minute))
+	if r := channelState(t, s, a.b.Name); r.State != channelActive || len(rec.list()) != 0 {
+		t.Fatalf("after one tick with the daemon gone: record %+v, buzz calls %q", r, rec.list())
+	}
+	tick(s, now.Add(2*time.Minute))
+	if r := onlyRetired(t, s); r.RetiredBy != retiredEnded || !r.Archived {
+		t.Fatalf("record after two ticks with the daemon gone = %+v", r)
+	}
+
+	a.loaded = []string{a.b.AppServer.Thread}
+	tick(s, now.Add(3*time.Minute))
+	want := []string{
+		"messages send --channel " + machineChanA + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
+		"channels archive --channel " + machineChanA,
+		"channels unarchive --channel " + machineChanA,
+		"messages send --channel " + machineChanA + " --content Connected again: " + a.b.Label + ".",
+	}
+	if got := rec.list(); !slices.Equal(got, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", got, want)
+	}
+	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != machineChanA || r.Archived {
+		t.Fatalf("restored record = %+v", r)
 	}
 }
 

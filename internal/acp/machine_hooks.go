@@ -61,7 +61,7 @@ func (s *Server) watchHooks(all []binding.Binding) {
 			continue
 		}
 		r, ok := snap.slot(b.Name)
-		if !ok || !routable(r) || !serves(r, b) {
+		if !ok || !routable(r) || !s.serves(r, b) {
 			continue
 		}
 		path := filepath.Join(filepath.Clean(b.ConfigDir), "settings.json")

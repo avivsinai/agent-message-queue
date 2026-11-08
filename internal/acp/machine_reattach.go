@@ -83,7 +83,7 @@ func (s *Server) reattach(now time.Time) {
 			continue
 		}
 		tried[r.Name] = true
-		b, pruned, ok := endedBinding(r, tombs)
+		b, pruned, ok := s.endedBinding(r, tombs)
 		if !ok {
 			continue
 		}
@@ -105,10 +105,10 @@ func (s *Server) reattach(now time.Time) {
 // endedBinding is the binding r served, as read, when it is proven ended: a
 // binding of r's name and identity that is ended, else that name's tombstone
 // of the identity that records an end (pruned).
-func endedBinding(r channelRecord, tombs []binding.Binding) (b binding.Binding, pruned, ok bool) {
+func (s *Server) endedBinding(r channelRecord, tombs []binding.Binding) (b binding.Binding, pruned, ok bool) {
 	b, err := binding.ReadNamed(r.Name)
 	if err == nil {
-		state, _ := b.Liveness()
+		state, _ := s.liveness(b)
 		return b, false, b.SessionIdentity() == r.Identity && state == binding.Ended
 	}
 	if !errors.Is(err, binding.ErrNone) {
