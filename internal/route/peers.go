@@ -117,18 +117,21 @@ func (w Walker) Peers(sourceRoot string, depth int) (PeerGraph, error) {
 				})
 				continue
 			}
+			// Every edge is reported, an edge back to a visited project
+			// included, since its reply_back is a fact of its own; visited
+			// only stops a project from being expanded twice.
 			key := canonicalPath(peerRoot)
-			if visited[key] {
-				continue
+			seen := visited[key]
+			if !seen {
+				if len(visited) > MaxPeerProjects {
+					graph.Truncated = true
+					return graph, nil
+				}
+				visited[key] = true
 			}
-			if len(visited) > MaxPeerProjects {
-				graph.Truncated = true
-				return graph, nil
-			}
-			visited[key] = true
 			edge, peerConfig := w.inspectPeer(node, name, peerRoot)
 			graph.Peers = append(graph.Peers, edge)
-			if edge.Status == PeerOK && edge.Depth < depth {
+			if !seen && edge.Status == PeerOK && edge.Depth < depth {
 				queue = append(queue, peerNode{project: edge.Project, baseRoot: peerRoot, config: peerConfig, depth: edge.Depth})
 			}
 		}

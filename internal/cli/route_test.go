@@ -320,3 +320,34 @@ func TestResolveReplyRouteCrossProjectMissingSessionIsRetryable(t *testing.T) {
 		t.Fatalf("unknown project = %v, want a permanent error", err)
 	}
 }
+
+// Review of route peers: an edge to an already visited project was dropped,
+// so with A->{B,C}, B->C and C->A at depth 2 the B->C edge and its missing
+// reply route (C lists only A) never showed.
+func TestRoutePeersKeepsEdgesToVisitedProjects(t *testing.T) {
+	tmp := t.TempDir()
+	root := func(s string) string { return filepath.Join(tmp, s, ".agent-mail") }
+	for _, s := range []string{"a", "b", "c"} {
+		ensureRouteAgents(t, root(s), "alice")
+	}
+	writeRouteAmqrc(t, filepath.Join(tmp, "a"), map[string]any{"root": ".agent-mail", "project": "a", "peers": map[string]string{"b": root("b"), "c": root("c")}})
+	writeRouteAmqrc(t, filepath.Join(tmp, "b"), map[string]any{"root": ".agent-mail", "project": "b", "peers": map[string]string{"c": root("c")}})
+	writeRouteAmqrc(t, filepath.Join(tmp, "c"), map[string]any{"root": ".agent-mail", "project": "c", "peers": map[string]string{"a": root("a")}})
+	out, err := captureEnvStdout(t, func() error { return runRoutePeers([]string{"--root", root("a"), "--depth", "2", "--json"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var graph routePeersResult
+	if err := json.Unmarshal([]byte(out), &graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range graph.Peers {
+		if e.Via == "b" && e.Name == "c" {
+			if e.ReplyBack != "no" {
+				t.Fatalf("B->C edge = %+v; want reply_back no", e)
+			}
+			return
+		}
+	}
+	t.Fatalf("the B->C edge and its missing reply route were omitted: %s", out)
+}
