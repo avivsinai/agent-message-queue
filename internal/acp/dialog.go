@@ -496,7 +496,7 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 	if p.Event == "" {
 		return
 	}
-	if _, answered, err := dialog.ReadAnswer(dir, req.ID); err != nil || answered {
+	if phase, _, _, _, err := dialog.Lookup(dir, req.ID); err != nil || phase != dialog.PhaseOpen {
 		return
 	}
 	if s.dialogs.polled == nil {
@@ -611,6 +611,19 @@ func (s *Server) dialogEditBackOff(id string, now time.Time) {
 	bo.step = min(max(bo.step*2, dialogEditBackoffMin), dialogEditBackoffMax)
 	bo.until = now.Add(bo.step)
 	s.dialogs.edits[id] = bo
+}
+
+// DialogPosted reports whether the Buzz agent of binding name posted dialog
+// id and knows the posted message, so the owner can answer it in Buzz. It is
+// false while the dialog is unposted, while its post is in flight, and when
+// the post's outcome is unknown.
+func DialogPosted(name, id string) bool {
+	stateDir, err := BindingStateDir()
+	if err != nil {
+		return false
+	}
+	p, found := readDialogPost(filepath.Join(stateDir, "dialogs", name, id+".json"))
+	return found && p.Event != ""
 }
 
 func readDialogPost(path string) (dialogPost, bool) {
