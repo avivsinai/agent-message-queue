@@ -105,6 +105,63 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	}
 }
 
+// Regression (idle profile of a machine agent): every open dialog, hours
+// old or new, read its reactions every 3 s, oldest first, so stale dialogs
+// spawned a process each and delayed a new one. An old dialog backs off; a
+// fresh one is read at 3 s, and first.
+func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	withBuzzSelf(t)
+	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
+	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
+	buzzOwner = strings.Repeat("0b", 32)
+	events := map[string]string{} // posted event -> dialog text
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		id := fmt.Sprintf("%064x", len(events)+1)
+		events[id] = content
+		return id, nil
+	}
+	var reads []string
+	readReactions = func(event string, _ time.Duration) ([]reaction, error) {
+		reads = append(reads, strings.Fields(strings.SplitN(events[event], "\n", 2)[1])[1])
+		return nil, nil
+	}
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	options := []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}
+	for _, d := range []struct {
+		text string
+		age  time.Duration
+	}{{"$ old", 30 * time.Minute}, {"$ new", 0}} {
+		if err := dialog.Open(dir, dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: d.text, Options: options, OpenedAt: now.Add(-d.age)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.dialogTick(now) // posts both
+	s.dialogTick(now)
+	if strings.Join(reads, ",") != "new,old" {
+		t.Fatalf("first reads = %v; want both, the newest first", reads)
+	}
+	reads = nil
+	s.dialogTick(now.Add(reactionPollInterval))
+	if strings.Join(reads, ",") != "new" {
+		t.Fatalf("reads after %v = %v; want only the fresh dialog", reactionPollInterval, reads)
+	}
+	reads = nil
+	s.dialogTick(now.Add(reactionPollMax))
+	if strings.Join(reads, ",") != "new,old" {
+		t.Fatalf("reads after %v = %v; want the old dialog read again at its cap", reactionPollMax, reads)
+	}
+}
+
 // buzzPrompt is a buzz-acp DM prompt in dm whose event from sender (a hex
 // pubkey, or "" for no From line) carries content.
 func buzzPrompt(dm, sender, content string) string {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -38,8 +39,28 @@ import (
 const dialogTextMax = 3500
 
 // reactionPollInterval is the gap between reads of the owner's reactions on
-// one posted dialog.
+// one posted dialog while it is fresh.
 var reactionPollInterval = 3 * time.Second
+
+const (
+	// reactionPollFresh is how long a dialog is fresh; each further span of
+	// that length doubles its gap between reaction reads.
+	reactionPollFresh = 2 * time.Minute
+	// reactionPollMax caps the gap between reaction reads.
+	reactionPollMax = time.Minute
+)
+
+// reactionPollGap is the gap between reaction reads of a dialog open for
+// age: reactionPollInterval while it is fresh, then doubling every
+// reactionPollFresh up to reactionPollMax. Each read starts a process, and
+// a dialog left open for long is seldom answered from Buzz.
+func reactionPollGap(age time.Duration) time.Duration {
+	gap := reactionPollInterval
+	for n := age / reactionPollFresh; n > 0 && gap < reactionPollMax; n-- {
+		gap *= 2
+	}
+	return min(gap, reactionPollMax)
+}
 
 // buzzOwner is the managed agent's owner pubkey (64 lowercase hex), or ""
 // when it cannot be established. Only its reactions and messages answer a
@@ -173,11 +194,23 @@ type dialogState struct {
 const dialogKeep = time.Hour
 
 // dialogTick posts the open dialogs of every live binding this worker
-// serves, reads the owner's reactions on them, and edits the posts of
-// dialogs that were resolved. A dialog whose seam process is gone expires.
-// Resolved dialogs are dropped after dialogKeep, and the dialogs of a
-// binding that is gone expire and are removed.
+// serves, newest first, reads the owner's reactions on them, and edits the
+// posts of dialogs that were resolved. A dialog whose seam process is gone
+// expires. Resolved dialogs are dropped after dialogKeep, and the dialogs of
+// a binding that is gone expire and are removed.
 func (s *Server) dialogTick(now time.Time) {
+	type scope struct {
+		t    dialogTarget
+		dir  string
+		open map[string]bool
+	}
+	type step struct {
+		t   dialogTarget
+		dir string
+		req dialog.Request
+	}
+	var scopes []scope
+	var steps []step
 	for _, t := range s.dialogTargets() {
 		if s.dialogStopped() {
 			return
@@ -197,10 +230,25 @@ func (s *Server) dialogTick(now time.Time) {
 				continue
 			}
 			open[req.ID] = true
-			s.dialogStep(t, dir, req, now)
+			steps = append(steps, step{t, dir, req})
 		}
-		s.dialogClose(t.name, dir, open)
-		s.pruneDialogs(t.name, dir, now)
+		scopes = append(scopes, scope{t, dir, open})
+	}
+	// Each step may wait on the relay, so a dialog left open never delays
+	// the post or the reactions of a newer one.
+	sort.SliceStable(steps, func(i, j int) bool { return steps[i].req.OpenedAt.After(steps[j].req.OpenedAt) })
+	for _, st := range steps {
+		if s.dialogStopped() {
+			return
+		}
+		s.dialogStep(st.t, st.dir, st.req, now)
+	}
+	for _, sc := range scopes {
+		if s.dialogStopped() {
+			return
+		}
+		s.dialogClose(sc.t.name, sc.dir, sc.open)
+		s.pruneDialogs(sc.t.name, sc.dir, now)
 	}
 	if !s.dialogStopped() {
 		s.dropGoneDialogs(now)
@@ -396,8 +444,8 @@ func (s *Server) dialogPostDir(name string) string {
 }
 
 // dialogStep posts req once, then reads the owner's reactions on the post
-// every reactionPollInterval until it is answered: ❌ picks the deny option
-// and beats ✅, which picks option 1.
+// every reactionPollGap until it is answered: ❌ picks the deny option and
+// beats ✅, which picks option 1.
 func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now time.Time) {
 	path := filepath.Join(s.dialogPostDir(t.name), req.ID+".json")
 	p, found := readDialogPost(path)
@@ -414,7 +462,7 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 	if s.dialogs.polled == nil {
 		s.dialogs.polled = map[string]time.Time{}
 	}
-	if last, ok := s.dialogs.polled[req.ID]; ok && now.Sub(last) < reactionPollInterval {
+	if last, ok := s.dialogs.polled[req.ID]; ok && now.Sub(last) < reactionPollGap(now.Sub(req.OpenedAt)) {
 		return
 	}
 	s.dialogs.polled[req.ID] = now
