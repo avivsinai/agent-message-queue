@@ -1332,3 +1332,41 @@ func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
 		t.Fatalf("bindings = %+v, %v; want one bound through the machine root %s", all, err, root)
 	}
 }
+
+// Review of the implicit native root: a symlinked machine root was accepted,
+// because the default used the path without EnsureMachineRoot's checks.
+func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
+	home, err := os.MkdirTemp("", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	elsewhere := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".amq", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, ".amq", "remote", "root")); err != nil {
+		t.Fatal(err)
+	}
+	savedFind := findSelf
+	t.Cleanup(func() { findSelf = savedFind })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	_, err = attach([]string{"--self", "--native", "--json"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "is not a plain directory") {
+		t.Fatalf("attach through a symlinked machine root: err=%v; want the symlink refusal", err)
+	}
+}
