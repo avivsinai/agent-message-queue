@@ -64,6 +64,14 @@ Only the agent's owner answers. The agent reads the owner's reactions on an
 open dialog every 3 seconds. A typed reply answers the dialog whose message
 it replies to in a thread, or else the one dialog open in the channel.
 
+A typed answer counts only as its signed event. The agent fetches the
+reply's event from the relay as itself, and the answer is the event's signed
+content and thread tags, signed by the owner's key; the prompt text buzz-acp
+wrote never decides. When the event cannot be verified (the relay does not
+serve it, it is not a message in this channel, or the relay is unreachable),
+the dialog stays open and the channel gets one line saying why, at most once
+every 10 minutes for the same open dialogs.
+
 | Owner's answer | Picks |
 | --- | --- |
 | ✅ reaction | option 1 |

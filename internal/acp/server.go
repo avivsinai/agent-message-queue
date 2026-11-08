@@ -191,6 +191,9 @@ type Server struct {
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
+	// notices limits the lines that say why an owner decision was not
+	// taken.
+	notices noticeLimit
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState
@@ -782,12 +785,12 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.Machine {
 			channel = hostContext(parsed.Prompt)
 		}
-		if name, on, ok := s.mirrorSwitch(channel, text); ok {
+		if name, on, ok := s.mirrorSwitch(channel, eventID, text); ok {
 			return func(emit func(any) error) (any, *rpcError) {
 				return s.answerMirrorSwitch(parsed.SessionID, channel, name, on, emit)
 			}, nil, nil
 		}
-		if dir, answer, ok := s.dialogReply(channel, text); ok {
+		if dir, answer, ok := s.dialogReply(channel, eventID, text); ok {
 			return func(emit func(any) error) (any, *rpcError) {
 				return s.answerDialog(parsed.SessionID, channel, dir, answer, emit)
 			}, nil, nil
@@ -1288,11 +1291,13 @@ func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
 		}
 	}
 	s.mu.Unlock()
-	if name, on, ok := s.mirrorSwitch(channel, text); ok {
+	// A steer whose event id is unreadable verifies nothing.
+	eventID, _ := resolveEventID(parsed.Meta)
+	if name, on, ok := s.mirrorSwitch(channel, eventID, text); ok {
 		go s.publish(channel, setMirror(name, on))
 		return steeringResult{Outcome: SteeringAnswered}, true
 	}
-	dir, answer, ok := s.dialogReply(channel, text)
+	dir, answer, ok := s.dialogReply(channel, eventID, text)
 	if !ok {
 		return nil, false
 	}

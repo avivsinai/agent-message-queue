@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -29,7 +31,9 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	withBuzzSelf(t)
-	owner := strings.Repeat("0b", 32)
+	lr := agentRelayForTest(t)
+	ownerKey := nostr.Generate()
+	owner := ownerKey.Public().Hex()
 	savedOwner, savedRead, savedEdit := buzzOwner, readReactions, editMessage
 	t.Cleanup(func() { buzzOwner, readReactions, editMessage = savedOwner, savedRead, savedEdit })
 	buzzOwner = owner
@@ -84,9 +88,9 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	}
 	readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
 	s.dialogTick(now)
-	prompt := "<context>\nScope: dm\nChannel: DM (#" + dm + ")\n</context>\n<buzz-event type=\"@mention\">\nEvent ID: " + strings.Repeat("a", 64) +
-		"\nFrom: Owner (npub: npub1x, hex: " + owner + ")\nContent: 3\nTags: [[\"h\",\"" + dm + "\"]]\n</buzz-event>"
-	params, _ := json.Marshal(promptParams{SessionID: "s", Prompt: []contentBlock{{Type: "text", Text: prompt}}})
+	answer := signedBy(t, ownerKey, "3", dm)
+	lr.Inject(answer)
+	params, _ := json.Marshal(promptParams{SessionID: "s", Prompt: []contentBlock{{Type: "text", Text: buzzPrompt(dm, owner, "3")}}, Meta: eventMeta(answer)})
 	run, _, rpcErr := s.beginPrompt(params)
 	if rpcErr != nil || run == nil {
 		t.Fatalf("beginPrompt = %v", rpcErr)
@@ -103,6 +107,22 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	if last := posts[len(posts)-1]; last != dm+": Answered." {
 		t.Fatalf("posts = %q; want the answer acknowledged", posts)
 	}
+}
+
+// signedBy is a plaintext message with content in channel, signed by key.
+func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: content, Tags: append(nostr.Tags{{"h", channel}}, tags...)}
+	if err := evt.Sign(key); err != nil {
+		t.Fatal(err)
+	}
+	return evt
+}
+
+// eventMeta is the ACP _meta with which buzz-acp names a prompt's event.
+func eventMeta(evt nostr.Event) json.RawMessage {
+	raw, _ := json.Marshal(map[string]any{"nostr": map[string]string{"eventId": evt.ID.Hex()}})
+	return raw
 }
 
 // buzzPrompt is a buzz-acp DM prompt in dm whose event from sender (a hex
@@ -127,7 +147,9 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	withBuzzSelf(t)
-	owner := strings.Repeat("0b", 32)
+	lr := agentRelayForTest(t)
+	ownerKey := nostr.Generate()
+	owner := ownerKey.Public().Hex()
 	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
 	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
 	buzzOwner = owner
@@ -150,14 +172,74 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	if a, ok, _ := dialog.ReadAnswer(dir, req.ID); ok {
 		t.Fatalf("a reaction answered a free-text dialog: %+v", a)
 	}
-	for _, sender := range []string{"", strings.Repeat("0c", 32)} {
-		if _, a, ok := s.dialogReply(dm, buzzPrompt(dm, sender, "1")); ok {
-			t.Fatalf("sender %q answered: %+v", sender, a)
-		}
+	other := signedBy(t, nostr.Generate(), "1", dm)
+	lr.Inject(other)
+	if _, a, ok := s.dialogReply(dm, other.ID.Hex(), buzzPrompt(dm, owner, "1")); ok {
+		t.Fatalf("another signer answered: %+v", a)
 	}
-	_, a, ok := s.dialogReply(dm, buzzPrompt(dm, owner, "postgres\nyes"))
+	answer := signedBy(t, ownerKey, "postgres\nyes", dm)
+	lr.Inject(answer)
+	_, a, ok := s.dialogReply(dm, answer.ID.Hex(), buzzPrompt(dm, owner, "postgres\nyes"))
 	if !ok || a.Text != "postgres\nyes" {
 		t.Fatalf("owner answer = %+v, %v; want the two lines", a, ok)
+	}
+}
+
+// Review of the owner checks: a dialog took its answer and its sender from
+// the prompt text buzz-acp wrote. Only the signed event decides: with no
+// verified event the dialog stays pending, and its signed content wins over
+// the text.
+func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
+	const dm = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	cases := []struct {
+		name     string
+		body     string // what the prompt text says the owner wrote
+		signed   string // the signed content; "" for no event on the relay
+		wantOK   bool
+		wantDeny bool
+	}{
+		{name: "no verified event", body: "1"},
+		{name: "signed deny, text allow", body: "1", signed: "no", wantOK: true, wantDeny: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+			if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+				t.Fatal(err)
+			}
+			withBuzzSelf(t)
+			lr := agentRelayForTest(t)
+			ownerKey := nostr.Generate()
+			owner := ownerKey.Public().Hex()
+			savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
+			t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
+			buzzOwner = owner
+			postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
+			readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
+			s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+			s.lastChannel = dm
+			dir, err := dialog.DirFor("alpha")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
+				Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
+			if err := dialog.Open(dir, req); err != nil {
+				t.Fatal(err)
+			}
+			s.dialogTick(time.Now()) // posts
+
+			id := strings.Repeat("d", 64)
+			if tc.signed != "" {
+				evt := signedBy(t, ownerKey, tc.signed, dm)
+				lr.Inject(evt)
+				id = evt.ID.Hex()
+			}
+			_, a, ok := s.dialogReply(dm, id, buzzPrompt(dm, owner, tc.body))
+			if ok != tc.wantOK || (ok && (a.Option == 2) != tc.wantDeny) {
+				t.Fatalf("dialogReply = %+v, %v; want ok=%v deny=%v", a, ok, tc.wantOK, tc.wantDeny)
+			}
+		})
 	}
 }
 

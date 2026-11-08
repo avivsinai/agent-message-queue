@@ -884,18 +884,28 @@ const (
 	mirrorOnReply  = "Mirror on."
 )
 
-// mirrorSwitch reads an owner's message in a machine agent's channel that
-// is exactly "mirror off" or "mirror on" (case ignored). It returns the
-// channel's binding and the switch.
-func (s *Server) mirrorSwitch(channel, prompt string) (name string, on bool, ok bool) {
-	if !s.cfg.Machine || channel == "" || buzzOwner == "" || eventSender(prompt) != buzzOwner {
+// mirrorWord reads text that is exactly "mirror off" or "mirror on" (case
+// ignored).
+func mirrorWord(text string) (on bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "mirror off":
+		return false, true
+	case "mirror on":
+		return true, true
+	}
+	return false, false
+}
+
+// mirrorSwitch reads the owner's message eventID in a machine agent's
+// channel whose verified content (ownerEvent) is exactly "mirror off" or
+// "mirror on". It returns the channel's binding and the switch. The prompt
+// text only selects which prompts are fetched; without a verified owner
+// event the switch does not apply and the channel is told why.
+func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on bool, ok bool) {
+	if !s.cfg.Machine || channel == "" || buzzOwner == "" {
 		return "", false, false
 	}
-	switch strings.ToLower(strings.TrimSpace(ownerWords(prompt))) {
-	case "mirror off":
-	case "mirror on":
-		on = true
-	default:
+	if _, ok := mirrorWord(ownerWords(prompt)); !ok {
 		return "", false, false
 	}
 	// Only a channel the mirror serves takes the switch: a live Claude
@@ -905,6 +915,14 @@ func (s *Server) mirrorSwitch(channel, prompt string) (name string, on bool, ok 
 		return "", false, false
 	}
 	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
+		return "", false, false
+	}
+	evt, err := ownerEvent(eventID, prompt, channel)
+	if err != nil {
+		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
+		return "", false, false
+	}
+	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok {
 		return "", false, false
 	}
 	return r.Name, on, true
