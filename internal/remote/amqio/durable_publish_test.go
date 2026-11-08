@@ -27,9 +27,10 @@ import (
 //	    message is published (re-delivery after consumption is never
 //	    idempotent), so the fsync is repaired in place instead.
 //	(b) Exactly one file for the terminal revision is visible.
-//	(d) No amplification: Reconcile ticks with the fault still on leave one
-//	    file, because the publish id is deterministic per (request, revision)
-//	    and a byte-identical collision is a no-op.
+//	(d) No amplification: a republish of the same revision, as a restart
+//	    before MarkPublished makes, leaves one file, because the publish id is
+//	    deterministic per (request, revision) and a byte-identical collision
+//	    is a no-op.
 //	(e) The publish id starts with a timestamp, so it sorts chronologically
 //	    against ordinary AMQ ids and drain --limit does not starve it.
 //
@@ -63,15 +64,17 @@ func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("carrier: %v", err)
 	}
+	warned := false
+	carrier.Warn = func(error) { warned = true }
 	// The fault fires only on the post-rename "new" dir sync (not the
 	// pre-rename tmp sync), so the rename commits and the error is a
 	// CommittedDurabilityError.
-	carrier.syncDirFaultForTest = func(dir string) error {
+	t.Cleanup(fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if faultActive && strings.HasSuffix(dir, "new") {
 			return errors.New("simulated fsync failure")
 		}
 		return nil
-	}
+	}))
 	rt := fake.New("fake", "e_1")
 	ep.Register(rt)
 	t.Cleanup(func() { _ = ep.Close() })
@@ -118,6 +121,10 @@ func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 	if rec == nil {
 		t.Fatal("record not found after complete")
 	}
+	// The fault hit the committed delivery's sync and every retry failed.
+	if !warned {
+		t.Fatal("the publish never hit the injected post-rename fsync fault")
+	}
 	// PublishedRevision advances even with the fault active — the
 	// message is visible, durability is repaired in place.
 	if rec.PublishedRevision < rec.Revision {
@@ -131,16 +138,16 @@ func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 		t.Fatalf("(b) expected 1 visible file for %s, got %d (the rename must have committed)", revLabel, count)
 	}
 
-	// (d) No amplification: run Reconcile 5 more times with the fault still
-	// on. Each republish resolves to the same deterministic filename and
-	// resolvePublishCollision returns nil. Exactly ONE file for the terminal
-	// revision must exist — no flooding.
-	for i := 0; i < 5; i++ {
-		_ = ep.Reconcile()
+	// (d) No amplification: republish the same revision with the fault still
+	// on, as a restart before MarkPublished does. It resolves to the same
+	// deterministic filename and resolvePublishCollision returns nil, so
+	// exactly ONE file for the terminal revision exists.
+	if err := carrier.Publish(rec.Snapshot, rec.Origin); err != nil {
+		t.Fatalf("(d) republish: %v", err)
 	}
 	count = countFilesWithLabel(root, "codex", revLabel)
 	if count != 1 {
-		t.Fatalf("(d) after 6 Reconcile ticks with fault on, expected 1 file for %s, got %d (deterministic id + resolvePublishCollision must make retries no-ops, no amplification)", revLabel, count)
+		t.Fatalf("(d) after a republish with the fault on, expected 1 file for %s, got %d (deterministic id + resolvePublishCollision must make retries no-ops, no amplification)", revLabel, count)
 	}
 
 	// (e) The deterministic id must sort chronologically against ordinary AMQ

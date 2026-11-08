@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp/acpwire"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -58,7 +59,7 @@ const (
 	codeInternalError  = -32603
 )
 
-const jsonRPCVersion = "2.0"
+const jsonRPCVersion = acpwire.JSONRPCVersion
 
 type request struct {
 	JSONRPC string           `json:"jsonrpc"`
@@ -197,6 +198,9 @@ type Server struct {
 	// view is the bindings and channel records the machine, dialog and
 	// mirror workers share.
 	view sessionView
+	// targets caches a machine agent's dialog targets for the dialog and
+	// mirror workers.
+	targets targetCache
 	// appServers judges Codex app-server threads for the current machine
 	// tick, or is nil before the first one and in a worker that runs none.
 	appServers atomic.Pointer[appServerJudge]
@@ -1090,58 +1094,11 @@ func (s *Server) cancelAll() {
 	}
 }
 
-type sessionUpdateNotification struct {
-	JSONRPC string              `json:"jsonrpc"`
-	Method  string              `json:"method"`
-	Params  sessionUpdateParams `json:"params"`
-}
-
-type sessionUpdateParams struct {
-	SessionID string            `json:"sessionId"`
-	Update    sessionUpdate     `json:"update"`
-	Meta      map[string]string `json:"_meta,omitempty"`
-}
-
-type sessionUpdate struct {
-	SessionUpdate string      `json:"sessionUpdate"`
-	Content       textContent `json:"content"`
-	ToolCallID    string      `json:"toolCallId,omitempty"`
-}
-
-type textContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
 func emitText(emit func(any) error, sessionID, updateType, text string) error {
 	if emit == nil {
 		return nil
 	}
-	return emit(textSessionUpdate(sessionID, updateType, text))
-}
-
-func textSessionUpdate(sessionID, updateType, text string) sessionUpdateNotification {
-	return sessionUpdateNotification{
-		JSONRPC: jsonRPCVersion,
-		Method:  "session/update",
-		Params: sessionUpdateParams{
-			SessionID: sessionID,
-			Update: sessionUpdate{
-				SessionUpdate: updateType,
-				Content:       textContent{Type: "text", Text: text},
-			},
-		},
-	}
-}
-
-// MarshalTextSessionUpdate encodes the session/update notification emitText
-// sends. meta is ACP extension metadata and is omitted when empty. toolCallID
-// is omitted when empty.
-func MarshalTextSessionUpdate(sessionID, updateType, text string, meta map[string]string, toolCallID string) (json.RawMessage, error) {
-	note := textSessionUpdate(sessionID, updateType, text)
-	note.Params.Meta = meta
-	note.Params.Update.ToolCallID = toolCallID
-	return json.Marshal(note)
+	return emit(acpwire.TextSessionUpdate(sessionID, updateType, text))
 }
 
 // decodeParams decodes request params. When strict, unrecognized top-level

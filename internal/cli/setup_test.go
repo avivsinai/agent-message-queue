@@ -15,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 type setupFixtureAdapter struct{ name string }
@@ -202,7 +203,7 @@ func TestSetupNamesAgentApartFromItsAdapter(t *testing.T) {
 		t.Fatalf("agent = %#v, want handle reviewer through adapter claude", agent)
 	}
 	root := filepath.Join(project, defaultCoopRoot)
-	if got := readAgentRoster(root).Agents; !slices.Equal(got, []string{"reviewer"}) {
+	if got := roster.Read(root).Agents; !slices.Equal(got, []string{"reviewer"}) {
 		t.Fatalf("roster = %v, want [reviewer]", got)
 	}
 	for _, base := range []string{root, filepath.Join(root, "work")} {

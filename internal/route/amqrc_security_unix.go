@@ -1,6 +1,6 @@
 //go:build !windows
 
-package cli
+package route
 
 import (
 	"fmt"
@@ -8,10 +8,10 @@ import (
 	"syscall"
 )
 
-// validateAmqrcFile enforces that project configuration is owned by the
+// ValidateAmqrcFile enforces that project configuration is owned by the
 // invoking user. Permission bits are intentionally not enforced here: older
 // configs commonly use 0644 and the file contains no secrets.
-func validateAmqrcFile(path string) error {
+func ValidateAmqrcFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

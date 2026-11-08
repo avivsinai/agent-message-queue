@@ -1,14 +1,14 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 type routeExplainResult struct {
@@ -157,7 +157,7 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 		return result
 	}
 
-	plan, err := planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
+	plan, err := routeWalker().PlanDelivery(sourceRoot, targetProject, targetSession, route.DeliveryOptions{
 		MirrorPeerSession: true,
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 	if targetProject == "" {
 		deliveryBase = classifyRoot(plan.DeliveryRoot)
 	}
-	registration := classifyAgentAt(declarationsFor(plan.DeliveryRoot, deliveryBase), plan.DeliveryRoot, target).json()
+	registration := roster.ClassifyAt(roster.For(plan.DeliveryRoot, deliveryBase), plan.DeliveryRoot, target).JSON()
 	result.Registration = registration.RegistrationStatus
 	result.RegistrationDiagnostics = registration.RegistrationDiagnostics
 	if plan.SourceProject != "" {
@@ -223,162 +223,7 @@ func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err err
 	return sourceRoot, resolvedMe, nil
 }
 
-type deliveryRoutePlan struct {
-	DeliveryRoot     string
-	PeerBaseRoot     string
-	SourceConfigPath string
-	SourceProject    string
-	TargetProject    string
-	TargetSession    string
-}
-
-type deliveryRouteOptions struct {
-	MirrorPeerSession bool
-}
-
-func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts deliveryRouteOptions) (deliveryRoutePlan, error) {
-	plan := deliveryRoutePlan{
-		DeliveryRoot:  sourceRoot,
-		TargetProject: strings.TrimSpace(targetProject),
-		TargetSession: strings.TrimSpace(targetSession),
-	}
-
-	if plan.TargetProject != "" {
-		routeConfig, err := findAmqrcForRoot(sourceRoot)
-		if err != nil {
-			return plan, federationSourceProjectError(sourceRoot)
-		}
-		plan.SourceConfigPath = routeConfig.Path
-		sourceProject, err := requireFederationSourceProject(routeConfig, sourceRoot)
-		if err != nil {
-			return plan, err
-		}
-		plan.SourceProject = sourceProject
-
-		peerBaseRoot, err := resolvePeerFromAmqrcResult(routeConfig, targetProject)
-		if err != nil {
-			return plan, err
-		}
-		plan.PeerBaseRoot = peerBaseRoot
-
-		if plan.TargetSession != "" {
-			normalized, err := normalizeHandle(plan.TargetSession)
-			if err != nil {
-				return plan, fmt.Errorf("--session: %v", err)
-			}
-			plan.TargetSession = normalized
-			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
-			if err != nil {
-				if !dirExists(peerBaseRoot) {
-					return plan, peerDeliveryRootError(plan, peerBaseRoot, err)
-				}
-				return plan, err
-			}
-		} else if opts.MirrorPeerSession && classifyRoot(sourceRoot) != "" {
-			plan.TargetSession = sessionName(sourceRoot)
-			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
-			if err != nil {
-				if !dirExists(peerBaseRoot) {
-					return plan, peerDeliveryRootError(plan, peerBaseRoot, err)
-				}
-				return plan, err
-			}
-		} else {
-			plan.DeliveryRoot = peerBaseRoot
-		}
-		return plan, nil
-	}
-
-	if plan.TargetSession != "" {
-		normalized, err := normalizeHandle(plan.TargetSession)
-		if err != nil {
-			return plan, fmt.Errorf("--session: %v", err)
-		}
-		plan.TargetSession = normalized
-		baseRoot := classifyRoot(sourceRoot)
-		if baseRoot == "" {
-			return plan, fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
-		}
-		plan.DeliveryRoot, err = resolveSessionRoot(baseRoot, plan.TargetSession)
-		if err != nil {
-			return plan, err
-		}
-	}
-
-	return plan, nil
-}
-
-// ErrPeerRootUnreachable is the sentinel that marks a routing failure as
-// TRANSIENT: the peer root does not exist YET, or is not accessible YET.
-// ResolveReplyRoute wraps these errors in amqio.TransientRouteError so the
-// carrier leaves the message in new for the next tick instead of DLQ'ing it.
-// Unknown-project and malformed-handle errors are NOT wrapped — they are
-// poison.
-var ErrPeerRootUnreachable = errors.New("peer delivery root is not reachable")
-
-func peerDeliveryRootError(plan deliveryRoutePlan, deliveryRoot string, cause error) error {
-	configPath := plan.SourceConfigPath
-	if configPath == "" {
-		configPath = "the selected source .amqrc"
-	}
-	return fmt.Errorf(
-		"%w: cannot access selected peer %q delivery root %s: %v; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
-		ErrPeerRootUnreachable,
-		plan.TargetProject,
-		deliveryRoot,
-		cause,
-		plan.TargetProject,
-		configPath,
-	)
-}
-
-func requireFederationSourceProject(result amqrcResult, sourceRoot string) (string, error) {
-	project := strings.TrimSpace(projectFromAmqrcResult(result))
-	if project == "" {
-		return "", federationSourceProjectError(sourceRoot)
-	}
-	configuredRoot := strings.TrimSpace(result.Config.Root)
-	if configuredRoot == "" {
-		return "", federationSourceOwnershipError(result, sourceRoot, "")
-	}
-	configuredBase, err := resolvePeerPath(result, configuredRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve configured source root: %w", err)
-	}
-	sourceRoot = absPath(resolveRoot(sourceRoot))
-	configuredBase = absPath(resolveRoot(configuredBase))
-	if sourceRoot != configuredBase {
-		if filepath.Dir(sourceRoot) != configuredBase {
-			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
-		}
-		ownedSession, err := resolveSessionRoot(configuredBase, filepath.Base(sourceRoot))
-		if err != nil || ownedSession != sourceRoot {
-			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
-		}
-	}
-	return project, nil
-}
-
-func federationSourceProjectError(sourceRoot string) error {
-	return fmt.Errorf(
-		"cross-project routing requires a non-empty source project identity; set \"project\" in the .amqrc that owns source root %s",
-		sourceRoot,
-	)
-}
-
-func federationSourceOwnershipError(result amqrcResult, sourceRoot, configuredRoot string) error {
-	if configuredRoot == "" {
-		configuredRoot = "<empty>"
-	}
-	return fmt.Errorf(
-		"configured .amqrc at %s does not own source root %s (configured root: %s)",
-		result.Path,
-		sourceRoot,
-		configuredRoot,
-	)
-}
-
-func validatePlannedMailbox(plan deliveryRoutePlan, target string) error {
+func validatePlannedMailbox(plan route.DeliveryPlan, target string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(plan.DeliveryRoot)
 	if err != nil {
 		return err
@@ -458,71 +303,4 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
-}
-
-// retryableRouteError marks a destination that does not exist YET as
-// ErrPeerRootUnreachable, so the carrier retries instead of dead-lettering.
-// resolveSessionRoot and the peer planner report absence as ExitNotFound;
-// malformed names and unknown projects are other error kinds and stay
-// permanent.
-func retryableRouteError(err error) error {
-	if errors.Is(err, ErrPeerRootUnreachable) {
-		return err
-	}
-	var ecerr *ExitCodeError
-	if errors.As(err, &ecerr) && ecerr.Code == ExitNotFound {
-		return fmt.Errorf("%w: %v", ErrPeerRootUnreachable, err)
-	}
-	return err
-}
-
-// ResolveReplyRoute resolves where a cross-project reply must be delivered.
-// It is the one exported seam over this package's route planning: the remote
-// endpoint's AMQ carrier must answer a caller in the CALLER's root, but it
-// has no business knowing about .amqrc discovery, peer maps or session
-// layout. cmd/amq-remote injects this function into the carrier, so the
-// carrier depends on a resolution contract rather than on configuration.
-//
-// sourceRoot is the endpoint's own root (where the command arrived).
-// replyProject and replyTo come from the command message's reply_project and
-// reply_to headers, which amq send stamps on every cross-project send.
-// The returned root is where the reply must be written and handle is the
-// mailbox inside it.
-func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle string, err error) {
-	project := strings.TrimSpace(replyProject)
-	recipient, session, err := parseReplyToRoute(replyTo, true)
-	if err != nil {
-		return "", "", fmt.Errorf("malformed reply metadata: %w", err)
-	}
-	if project == "" {
-		// Empty reply_project does NOT mean the caller is in our own root.
-		// The caller may be in a DIFFERENT SESSION of the same project. If
-		// reply_to carries a session component (handle@session), route to
-		// that session's root under our base root.
-		if session == "" {
-			return "", "", fmt.Errorf("reply_project is empty and reply_to has no session; not a cross-session reply")
-		}
-		// classifyRoot returns "" for a BASE root (common.go:110-139). A
-		// non-session source IS the base. Use it directly so an endpoint at
-		// the base root can route to a session root.
-		base := classifyRoot(sourceRoot)
-		if base == "" {
-			base = sourceRoot
-		}
-		sessionRoot, err := resolveSessionRoot(base, session)
-		if err != nil {
-			return "", "", retryableRouteError(err)
-		}
-		return sessionRoot, recipient, nil
-	}
-	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
-	if err != nil {
-		// The router declares whether a failure is transient; the adapter in
-		// cmd/amq-remote/serve.go turns ErrPeerRootUnreachable into
-		// amqio.TransientRouteError. A peer session that does not exist YET is
-		// as retryable as a peer base root that does not exist yet; the planner
-		// marks only the latter.
-		return "", "", retryableRouteError(err)
-	}
-	return plan.DeliveryRoot, recipient, nil
 }

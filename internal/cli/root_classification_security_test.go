@@ -22,11 +22,8 @@ func TestRootLocalAmqrcCanDeclareLegitimateCustomBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := configuredBaseRoot(baseRoot); got != baseRoot {
-		t.Errorf("configuredBaseRoot(%q) = %q, want self-declared base %q", baseRoot, got, baseRoot)
-	}
-	if got := classifyRoot(baseRoot); got != "" {
-		t.Errorf("classifyRoot(%q) = %q, want empty for configured base", baseRoot, got)
+	if got, known := classifyRootWithEvidence(baseRoot); got != "" || !known {
+		t.Errorf("classifyRootWithEvidence(%q) = %q, %v, want the self-declared base known", baseRoot, got, known)
 	}
 	if got := classifyRoot(sessionRoot); got != baseRoot {
 		t.Errorf("classifyRoot(%q) = %q, want configured base %q", sessionRoot, got, baseRoot)
