@@ -763,8 +763,11 @@ detach --name <name>` for the unknown ones. It names, once, each per-session
 Buzz agent whose binding is removed, in one line: "Delete these in Buzz
 Desktop (Agents, the agent, Delete): ...". Archiving does not remove an agent
 from Desktop's list. The text output records them as named; `--json` lists
-them without recording. `--json` reports `bindings` (with `channel` and
-`channel_name`), `pruned`, `helper`, `machine` and `legacy_agents`.
+them without recording. `--json` reports `bindings` (with `channel`,
+`channel_name`, and `dialogs`: each permission dialog not yet resolved, with
+its `id`, `tool`, `phase` (`open` or `answered`), `posted` (the Buzz agent
+posted it) and `opened_at`), `pruned`, `helper`, `machine` and
+`legacy_agents`.
 
 `amq-remote detach` needs one scope: `--self` removes the binding that names
 this session, `--name <name>` removes the binding of that name, and `--all`

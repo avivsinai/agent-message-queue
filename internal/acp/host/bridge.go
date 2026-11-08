@@ -562,8 +562,10 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, o
 			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
 			return 0, false, false
 		case <-poll.C:
-			ans, found, err := dialog.ReadAnswer(dir, r.ID)
-			if err != nil || !found {
+			// Only an answered dialog acts here; one resolved elsewhere
+			// waits for the timer like an open one.
+			phase, _, ans, _, err := dialog.Lookup(dir, r.ID)
+			if err != nil || phase != dialog.PhaseAnswered {
 				continue
 			}
 			if ans.Option < 1 || ans.Option > len(options) {

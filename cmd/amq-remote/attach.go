@@ -28,6 +28,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -826,6 +827,38 @@ type bindingRow struct {
 	Channel            string `json:"channel,omitempty"`
 	ChannelName        string `json:"channel_name,omitempty"`
 	TerminalOnlyReason string `json:"terminal_only_reason,omitempty"`
+	// Dialogs are the session's permission dialogs not yet resolved.
+	Dialogs []dialogRow `json:"dialogs,omitempty"`
+}
+
+// dialogRow is one unresolved dialog: open, or answered and waiting for the
+// session to apply the answer. Posted is true once the Buzz agent posted it.
+type dialogRow struct {
+	ID       string       `json:"id"`
+	Tool     string       `json:"tool"`
+	Phase    dialog.Phase `json:"phase"`
+	Posted   bool         `json:"posted"`
+	OpenedAt time.Time    `json:"opened_at"`
+}
+
+// openDialogs lists the unresolved dialogs of binding name, oldest first,
+// without creating its dialogs directory.
+func openDialogs(name string) []dialogRow {
+	root, err := dialog.Root()
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(root, name)
+	reqs, _ := dialog.Requests(dir)
+	var rows []dialogRow
+	for _, r := range reqs {
+		phase, _, _, _, err := dialog.Lookup(dir, r.ID)
+		if err != nil || phase == dialog.PhaseResolved {
+			continue
+		}
+		rows = append(rows, dialogRow{ID: r.ID, Tool: r.Tool, Phase: phase, Posted: acp.DialogPosted(name, r.ID), OpenedAt: r.OpenedAt})
+	}
+	return rows
 }
 
 // bindings lists the bound sessions with their liveness and their Buzz
@@ -857,7 +890,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	for _, b := range all {
 		state, evidence := inspect(b)
 		row := bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
-			Agent: agentOf(b.Name, now).State}
+			Agent: agentOf(b.Name, now).State, Dialogs: openDialogs(b.Name)}
 		if ch, ok := acp.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
 		}
