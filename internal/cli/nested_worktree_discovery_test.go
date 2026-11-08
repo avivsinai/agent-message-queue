@@ -123,7 +123,7 @@ func TestNestedWorktreeDoesNotAdoptParentLiveBaseRoot(t *testing.T) {
 		if got := resolveRoot(defaultCoopRoot); sameTreeIdentity(got, parentMail) {
 			t.Fatalf("resolveRoot(%q) from symlinked cwd adopted parent live queue %s", defaultCoopRoot, parentMail)
 		}
-		if found, ok := findRootInParents(cwd, defaultCoopRoot); ok && sameTreeIdentity(found, parentMail) {
+		if found, ok := routeWalker().FindRootInParents(cwd, defaultCoopRoot); ok && sameTreeIdentity(found, parentMail) {
 			t.Fatalf("findRootInParents via symlinked path escaped the ceiling: %s", found)
 		}
 		root, _, _, err := resolveEnvConfigWithSource("", "")
@@ -149,7 +149,7 @@ func TestNestedWorktreeDoesNotAdoptParentLiveBaseRoot(t *testing.T) {
 		if got := resolveRoot(defaultCoopRoot); sameTreeIdentity(got, parentMail) {
 			t.Fatalf("resolveRoot(%q) adopted parent live queue %s", defaultCoopRoot, parentMail)
 		}
-		if found, ok := findRootInParents(nested, defaultCoopRoot); ok {
+		if found, ok := routeWalker().FindRootInParents(nested, defaultCoopRoot); ok {
 			t.Fatalf("findRootInParents crossed nested worktree ceiling to %s", found)
 		}
 

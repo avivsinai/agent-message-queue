@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 func TestRouteExplainSameSession(t *testing.T) {
@@ -146,7 +147,7 @@ func TestResolveReplyRouteSessionRootSource(t *testing.T) {
 	ensureRouteAgents(t, destRoot, "bob")
 
 	// replyTo: bob@qa, no project (same project, different session)
-	root, handle, err := ResolveReplyRoute(sourceRoot, "", "bob@qa")
+	root, handle, err := routeWalker().ResolveReplyRoute(sourceRoot, "", "bob@qa")
 	if err != nil {
 		t.Fatalf("ResolveReplyRoute: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestResolveReplyRouteBaseRootSource(t *testing.T) {
 	ensureRouteAgents(t, destRoot, "bob")
 
 	// replyTo: bob@qa, no project. sourceRoot is the BASE root.
-	root, handle, err := ResolveReplyRoute(baseRoot, "", "bob@qa")
+	root, handle, err := routeWalker().ResolveReplyRoute(baseRoot, "", "bob@qa")
 	if err != nil {
 		t.Fatalf("ResolveReplyRoute (base root): %v", err)
 	}
@@ -180,19 +181,19 @@ func TestResolveReplyRouteBaseRootSource(t *testing.T) {
 }
 
 // TestResolveReplyRouteSessionNotFoundIsRetryable verifies that a missing
-// session returns a retryable error (ErrPeerRootUnreachable), not a poison.
+// session returns a retryable error (route.ErrPeerRootUnreachable), not a poison.
 func TestResolveReplyRouteSessionNotFoundIsRetryable(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	sourceRoot := filepath.Join(baseRoot, "s1")
 	ensureRouteAgents(t, sourceRoot, "alice")
 	// qa session does NOT exist
 
-	_, _, err := ResolveReplyRoute(sourceRoot, "", "bob@qa")
+	_, _, err := routeWalker().ResolveReplyRoute(sourceRoot, "", "bob@qa")
 	if err == nil {
 		t.Fatal("expected error for missing session, got nil")
 	}
-	if !errors.Is(err, ErrPeerRootUnreachable) {
-		t.Fatalf("missing session error = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
+	if !errors.Is(err, route.ErrPeerRootUnreachable) {
+		t.Fatalf("missing session error = %v, want route.ErrPeerRootUnreachable (retryable, not poison)", err)
 	}
 }
 
@@ -219,16 +220,16 @@ func TestResolveReplyRouteCrossProjectMissingSessionIsRetryable(t *testing.T) {
 	resetAmqrcCache()
 	t.Cleanup(resetAmqrcCache)
 
-	_, _, err := ResolveReplyRoute(sourceRoot, "caller", "codex@qa")
+	_, _, err := routeWalker().ResolveReplyRoute(sourceRoot, "caller", "codex@qa")
 	if err == nil {
 		t.Fatal("expected an error for the missing peer session")
 	}
-	if !errors.Is(err, ErrPeerRootUnreachable) {
-		t.Fatalf("missing peer session = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
+	if !errors.Is(err, route.ErrPeerRootUnreachable) {
+		t.Fatalf("missing peer session = %v, want route.ErrPeerRootUnreachable (retryable, not poison)", err)
 	}
 	// An unknown project is not a destination that can appear later.
-	_, _, err = ResolveReplyRoute(sourceRoot, "nobody", "codex@qa")
-	if err == nil || errors.Is(err, ErrPeerRootUnreachable) {
+	_, _, err = routeWalker().ResolveReplyRoute(sourceRoot, "nobody", "codex@qa")
+	if err == nil || errors.Is(err, route.ErrPeerRootUnreachable) {
 		t.Fatalf("unknown project = %v, want a permanent error", err)
 	}
 }

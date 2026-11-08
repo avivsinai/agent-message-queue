@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
-	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 // The machine pass of doctor checks every link that does not need the
@@ -461,7 +462,7 @@ func doctorMailboxes(all []binding.Binding, fail, note reportFunc) []mailboxRow 
 		}
 		row := mailboxRow{Name: b.Name, Root: b.Root, Handle: b.Handle}
 		subject := nonEmpty(b.Label, b.Name)
-		row.Registration, _ = amqcli.AgentRegistration(b.Root, b.Handle)
+		row.Registration, _ = roster.AgentRegistration(route.Walker{}, b.Root, b.Handle)
 		if row.Registration == "unregistered" {
 			fail("mailbox", subject, fmt.Sprintf("handle %q is not registered in %s, so senders are warned and --strict sends refuse", b.Handle, b.Root),
 				"start the session with `amq launch` or `amq coop exec`, which register its handle")

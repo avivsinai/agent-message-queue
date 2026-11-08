@@ -1,12 +1,14 @@
 package cli
 
+import "github.com/avivsinai/agent-message-queue/internal/route"
+
 // cli.go defines the top-level command dispatcher and usage text.
 
 const (
 	envRoot       = "AM_ROOT"
 	envRootID     = "AM_ROOT_ID"
 	envMe         = "AM_ME"
-	envBaseRoot   = "AM_BASE_ROOT"
+	envBaseRoot   = route.EnvBaseRoot
 	envBaseRootID = "AM_BASE_ROOT_ID"
 	envSession    = "AM_SESSION"
 	envGlobalRoot = "AMQ_GLOBAL_ROOT"

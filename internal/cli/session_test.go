@@ -14,6 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/execidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
 func TestSessionCreateProvisionsRosterMailboxes(t *testing.T) {
@@ -69,7 +70,7 @@ func TestSessionCreatePrefersLaunchRoster(t *testing.T) {
 	}
 	// agent-message-queue-t97.5: a launch.json handle missing from the base
 	// roster was provisioned but classified unregistered in the new session.
-	if status, diags := AgentRegistration(result.Path, "claude"); status != string(registrationDeclared) {
+	if status, diags := roster.AgentRegistration(routeWalker(), result.Path, "claude"); status != string(registrationDeclared) {
 		t.Fatalf("claude registration = %s %v, want declared from launch.json", status, diags)
 	}
 }

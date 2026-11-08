@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -290,9 +289,9 @@ func envProjectAndPeers(root string) (string, map[string]string) {
 		return "", peers
 	}
 
-	project := projectFromAmqrcResult(rcResult)
+	project := rcResult.Project()
 	for name, path := range rcResult.Config.Peers {
-		resolved, err := resolvePeerPath(rcResult, path)
+		resolved, err := rcResult.PeerPath(path)
 		if err != nil {
 			peers[name] = path
 			continue
@@ -439,35 +438,7 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	return root, source, me, nil
 }
 
-// loadGlobalAmqrc loads ~/.amqrc if it exists.
-func loadGlobalAmqrc() (amqrcResult, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return amqrcResult{}, errAmqrcNotFound
-	}
-	path := filepath.Join(home, ".amqrc")
-	if err := validateAmqrcProvenance(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return amqrcResult{}, errAmqrcNotFound
-		}
-		return amqrcResult{}, err
-	}
-	data, err := globalAmqrcReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return amqrcResult{}, errAmqrcNotFound
-		}
-		return amqrcResult{}, fmt.Errorf("cannot read ~/.amqrc at %s: %w", path, err)
-	}
-	if err := route.ValidateAmqrcFile(path); err != nil {
-		return amqrcResult{}, err
-	}
-	var cfg amqrc
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return amqrcResult{}, fmt.Errorf("invalid ~/.amqrc: %w", err)
-	}
-	return amqrcResult{Config: cfg, Dir: home, Path: path}, nil
-}
+func loadGlobalAmqrc() (amqrcResult, error) { return routeWalker().LoadGlobalAmqrc() }
 
 // resolveDiscoveredBaseRoot returns the first configured or detected base root.
 // The boolean is false only when no project, repo-local, or global source exists.
@@ -617,14 +588,6 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	return routeWalker().FindAmqrc(cwd)
 }
 
-func validateAmqrcProvenance(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	return route.ValidateAmqrcInfo(path, info)
-}
-
 // detectAgentMailDir searches for .agent-mail/ in current and parent directories.
 func detectAgentMailDir() string {
 	cwd, err := os.Getwd()
@@ -674,13 +637,13 @@ func detectAgentMailDir() string {
 // sets it. routeWalker is its only production reader.
 var walkCeilingForTests string
 
-// routeWalker reads walkCeilingForTests on every call, so every resolution
-// walk (findAndLoadAmqrc, detectAgentMailDir, findAmqrcForRoot,
-// findRootInParents, findProjectLaunchJSONPath, gitWorktreeRootFrom) sees the
-// boundary the test currently sets.
-func routeWalker() route.Walker { return route.Walker{Stop: walkCeilingForTests} }
-
-func atWalkBoundary(dir string) bool { return routeWalker().StopsAt(dir) }
+// routeWalker reads walkCeilingForTests and globalAmqrcReadFile on every
+// call, so every resolution walk (findAndLoadAmqrc, detectAgentMailDir,
+// findAmqrcForRoot, findRootInParents, findProjectLaunchJSONPath,
+// gitWorktreeRootFrom) sees the boundary the test currently sets.
+func routeWalker() route.Walker {
+	return route.Walker{Stop: walkCeilingForTests, ReadGlobal: globalAmqrcReadFile}
+}
 
 func walkInspectsDir(dir, gitCeiling string) bool { return routeWalker().Inspects(dir, gitCeiling) }
 
@@ -858,111 +821,9 @@ func isSimpleString(s string) bool {
 	return true
 }
 
-// findAmqrcForRoot locates the .amqrc for the given root.
-// When root is provided (non-empty), project lookup is scoped to root's
-// ancestors. The global ~/.amqrc is eligible only when it configured that exact
-// base root or one of its direct sessions.
-func findAmqrcForRoot(root string) (amqrcResult, error) {
-	if root != "" {
-		absRoot, absErr := filepath.Abs(root)
-		if absErr != nil {
-			return amqrcResult{}, absErr
-		}
-		ceiling := ""
-		if top, insideGit := gitWorktreeRootFrom(absRoot); insideGit {
-			ceiling = top
-			if resolved, resolveErr := filepath.EvalSymlinks(absRoot); resolveErr == nil {
-				absRoot = resolved
-			}
-		}
-		dir := absRoot
-		for walkInspectsDir(dir, ceiling) {
-			rcPath := filepath.Join(dir, ".amqrc")
-			if info, statErr := os.Lstat(rcPath); statErr == nil {
-				if err := route.ValidateAmqrcInfo(rcPath, info); err != nil {
-					return amqrcResult{}, err
-				}
-				if validateErr := route.ValidateAmqrcFile(rcPath); validateErr != nil {
-					return amqrcResult{}, validateErr
-				}
-			} else if !os.IsNotExist(statErr) {
-				// Do not walk past an unreadable or otherwise unverifiable config.
-				return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
-			}
-			data, readErr := os.ReadFile(rcPath)
-			if readErr == nil {
-				var rc amqrc
-				if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
-					return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
-				}
-				return amqrcResult{Config: rc, Dir: dir, Path: rcPath}, nil
-			}
-			if !os.IsNotExist(readErr) {
-				// Permission or I/O error — report it, don't mask it.
-				return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
-			}
-			if ceiling != "" && sameCleanPath(dir, ceiling) {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-		globalResult, globalErr := loadGlobalAmqrc()
-		if globalErr == nil && strings.TrimSpace(globalResult.Config.Root) != "" {
-			globalRoot := globalResult.Config.Root
-			if !filepath.IsAbs(globalRoot) {
-				globalRoot = filepath.Join(globalResult.Dir, globalRoot)
-			}
-			if isBaseOrSessionRoot(absRoot, globalRoot) {
-				return globalResult, nil
-			}
-		}
-		return amqrcResult{}, errAmqrcNotFound
-	}
-	return findAndLoadAmqrc()
-}
-
-func resolvePeerFromAmqrcResult(result amqrcResult, project string) (string, error) {
-	if len(result.Config.Peers) == 0 {
-		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)
-	}
-	peerPath, ok := result.Config.Peers[project]
-	if !ok {
-		known := make([]string, 0, len(result.Config.Peers))
-		for k := range result.Config.Peers {
-			known = append(known, k)
-		}
-		return "", fmt.Errorf("peer %q not found in .amqrc (known: %v)", project, known)
-	}
-	abs, err := resolvePeerPath(result, peerPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve peer path for %q: %w", project, err)
-	}
-	return abs, nil
-}
-
-func resolvePeerPath(result amqrcResult, peerPath string) (string, error) {
-	if !filepath.IsAbs(peerPath) {
-		peerPath = filepath.Join(result.Dir, peerPath)
-	}
-	return filepath.Abs(peerPath)
-}
-
-func projectFromAmqrcResult(result amqrcResult) string {
-	if result.Config.Project != "" {
-		return result.Config.Project
-	}
-	// Only infer project from directory basename for project-local .amqrc,
-	// not global ~/.amqrc (which is a queue locator, not a project identity).
-	home, _ := os.UserHomeDir()
-	if home != "" && result.Dir == home {
-		return ""
-	}
-	return filepath.Base(result.Dir)
-}
+// findAmqrcForRoot is route.Walker.FindAmqrcForRoot under the test walk
+// ceiling.
+func findAmqrcForRoot(root string) (amqrcResult, error) { return routeWalker().FindAmqrcForRoot(root) }
 
 // resolveProject returns the project name for the current .amqrc.
 // Uses the explicit "project" field if set, otherwise falls back to the
@@ -972,5 +833,5 @@ func resolveProject(root string) string {
 	if err != nil {
 		return ""
 	}
-	return projectFromAmqrcResult(result)
+	return result.Project()
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 func runReply(args []string) error {
@@ -143,7 +144,7 @@ func runReply(args []string) error {
 		if targetProject == "" {
 			return fmt.Errorf("invalid empty reply_project in original message")
 		}
-		recipientNorm, sessionNorm, err := parseReplyToRoute(originalMsg.Header.ReplyTo, true)
+		recipientNorm, sessionNorm, err := route.ParseReplyTo(originalMsg.Header.ReplyTo, true)
 		if err != nil {
 			return fmt.Errorf("malformed cross-project reply metadata for project %q: %w", targetProject, err)
 		}
@@ -154,7 +155,7 @@ func runReply(args []string) error {
 		// A same-project routing hint must include a session. Bare handles are
 		// meaningful only alongside reply_project, where they identify a peer's
 		// base root.
-		recipientNorm, sessionNorm, err := parseReplyToRoute(originalMsg.Header.ReplyTo, false)
+		recipientNorm, sessionNorm, err := route.ParseReplyTo(originalMsg.Header.ReplyTo, false)
 		if err != nil {
 			return err
 		}
@@ -181,7 +182,7 @@ func runReply(args []string) error {
 
 	}
 
-	routePlan, err := planDeliveryRoute(root, targetProject, targetSession, deliveryRouteOptions{})
+	routePlan, err := routeWalker().PlanDelivery(root, targetProject, targetSession, route.DeliveryOptions{})
 	if err != nil {
 		return err
 	}
@@ -363,38 +364,4 @@ func runReply(args []string) error {
 			"original_box": originalBox,
 		},
 	})
-}
-
-// parseReplyToRoute accepts exactly one reply routing shape: handle@session,
-// or a bare handle when a cross-project reply may target the peer's base root.
-func parseReplyToRoute(raw string, allowBase bool) (handle, session string, err error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return "", "", fmt.Errorf("malformed reply_to %q: value is empty", raw)
-	}
-	if value != raw || strings.Count(value, "@") > 1 {
-		return "", "", fmt.Errorf("malformed reply_to %q: expected handle or handle@session", raw)
-	}
-
-	parts := strings.Split(value, "@")
-	if len(parts) == 1 {
-		if !allowBase {
-			return "", "", fmt.Errorf("malformed reply_to %q: expected handle@session", raw)
-		}
-	} else if parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("malformed reply_to %q: expected non-empty handle@session", raw)
-	}
-
-	handle, err = normalizeHandle(parts[0])
-	if err != nil {
-		return "", "", fmt.Errorf("invalid handle in reply_to %q: %w", raw, err)
-	}
-	if len(parts) == 1 {
-		return handle, "", nil
-	}
-	session, err = normalizeHandle(parts[1])
-	if err != nil {
-		return "", "", fmt.Errorf("invalid session in reply_to %q: %w", raw, err)
-	}
-	return handle, session, nil
 }
