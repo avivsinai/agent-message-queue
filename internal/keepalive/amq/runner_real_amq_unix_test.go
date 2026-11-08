@@ -32,14 +32,35 @@ const (
 	realAMQBinaryStaleAge       = time.Hour
 )
 
-var realAMQBinaryBuildDir string
+var (
+	realAMQBinaryBuildDir string
+	// realAMQBuildHome is the HOME go build keeps, for its module cache.
+	realAMQBuildHome string
+)
 
 func TestMain(m *testing.M) {
 	sweepStaleRealAMQBinaryBuildDirs(os.TempDir(), time.Now(), os.Stderr)
+	// A real amq wake writes per-user state (its version store) below HOME;
+	// give the package a private HOME below the real one so the ancestor
+	// walk of --inject-via still sees only private directories.
+	realHome, err := os.UserHomeDir()
+	home := ""
+	if err == nil {
+		realAMQBuildHome = realHome
+		home, err = os.MkdirTemp(realHome, ".amq-keepalive-test-home-")
+	}
+	if err == nil {
+		err = os.Setenv("HOME", home)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "isolate amq keepalive test home: %v\n", err)
+		os.Exit(1)
+	}
 	code, err := withRealAMQBinaryBuildDir("", func(dir string) int {
 		realAMQBinaryBuildDir = dir
 		return m.Run()
 	})
+	_ = os.RemoveAll(home)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "amq keepalive test binary cleanup: %v\n", err)
 		os.Exit(1)
@@ -100,7 +121,7 @@ var buildRealAMQBinaryOnce = sync.OnceValues(func() (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/amq")
 	cmd.Dir = repoRoot
-	cmd.Env = realAMQCleanEnv()
+	cmd.Env = append(realAMQCleanEnv(), "HOME="+realAMQBuildHome)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("build real amq binary timed out: %w\n%s", ctx.Err(), output)

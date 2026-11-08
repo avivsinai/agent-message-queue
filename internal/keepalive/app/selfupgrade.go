@@ -44,6 +44,7 @@ var (
 	selfUpgradeCaptureImage     = selfupgrade.CaptureImageEvidence
 	selfUpgradeCaptureCandidate = selfupgrade.CaptureImageEvidenceWithEmbeddedVersion
 	selfUpgradeExecImage        = selfupgrade.ExecImage
+	superviseRunFromStore       = selfupgrade.RunFromStore
 	selfUpgradeGeneration       = newSelfUpgradeGeneration
 	selfUpgradeStateFileInfo    = os.Lstat
 	selfUpgradeStateReadFile    = os.ReadFile
@@ -161,6 +162,11 @@ func newSelfUpgradeController(registryPath, locator, version string, enabled boo
 	if err != nil {
 		controller.reason = fmt.Sprintf("capture self-upgrade locator: %v", err)
 		return controller
+	}
+	if selfupgrade.InStore(runningPath) && sameSelfUpgradeContent(incumbent, locatorImage) {
+		// A keepalive runs from its version-store copy of the installed
+		// image; the installed file is the identity replacement attempts name.
+		incumbent = locatorImage
 	}
 	if !sameSelfUpgradeFileIdentity(incumbent, locatorImage) {
 		controller.reason = "self-upgrade locator does not name the running image"

@@ -12,12 +12,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"golang.org/x/sys/unix"
 )
-
-var linkDarwinWakeRestartStage = os.Link
 
 func bindWakeRestartCandidateForRecordPlatform(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
 	return bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
@@ -98,14 +96,11 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 			}
 		}
 	}()
-	linked := true
-	if err := linkDarwinWakeRestartStage(candidate.ExecutionPath, stagePath); errors.Is(err, syscall.EXDEV) {
-		linked = false
-		if err := copyDarwinWakeRestartStage(source, stagePath); err != nil {
-			return nil, fmt.Errorf("copy cross-device wake restart candidate into stage: %w", err)
-		}
-	} else if err != nil {
-		return nil, fmt.Errorf("hardlink wake restart candidate into stage: %w", err)
+	// The stage is a private copy, never a hardlink of the candidate: when the
+	// package manager deletes the candidate's name, a hardlinked image loses
+	// its path for every name and macOS can no longer attribute the process.
+	if err := copyDarwinWakeRestartStage(source, stagePath); err != nil {
+		return nil, fmt.Errorf("copy wake restart candidate into stage: %w", err)
 	}
 	stageCreated = true
 	stageLstat, err := os.Lstat(stagePath)
@@ -143,15 +138,14 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, fmt.Errorf("stat opened staged wake restart image: %w", err)
 	}
-	postLinkSource, err := source.Stat()
+	postCopySource, err := source.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("re-stat linked wake restart source: %w", err)
+		return nil, fmt.Errorf("re-stat copied wake restart source: %w", err)
 	}
-	if !os.SameFile(sourceOpened, postLinkSource) || !os.SameFile(stageLstat, stageOpened) ||
-		(linked && !os.SameFile(postLinkSource, stageLstat)) {
+	if !os.SameFile(sourceOpened, postCopySource) || !os.SameFile(stageLstat, stageOpened) {
 		return nil, fmt.Errorf("darwin wake restart source and stage identities do not match")
 	}
-	postLinkSourceEvidence, err := captureWakeImageEvidenceFromOpenFile(
+	postCopySourceEvidence, err := captureWakeImageEvidenceFromOpenFile(
 		source,
 		candidate.ExecutionPath,
 		candidate.EmbeddedVersion,
@@ -169,10 +163,7 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, err
 	}
-	if linked && !sameDarwinStagedWakeImageEvidence(postLinkSourceEvidence, bound.evidence) {
-		return nil, fmt.Errorf("darwin wake restart source and staged image changed while hashing")
-	}
-	if !linked && !sameWakeImageContent(postLinkSourceEvidence, bound.evidence) {
+	if !sameWakeImageContent(postCopySourceEvidence, bound.evidence) {
 		return nil, fmt.Errorf("copied Darwin wake restart stage content differs from source")
 	}
 	if !sameRequestedAndBoundWakeImageEvidence(candidate, bound.evidence) {
@@ -268,36 +259,10 @@ func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
 }
 
 // prepareDarwinWakeRestartAMQHomeState makes sure ~/.amq and ~/.amq/state
-// exist, creating a missing level with mode 0700. Each level is refused,
-// before anything is created below it, when it is a symlink, a
-// non-directory, another user's directory, or a directory that group or
-// other can write.
+// exist and are private, as the version store requires.
 func prepareDarwinWakeRestartAMQHomeState() error {
-	home, err := amqhome.EnsureDir()
-	if err != nil {
-		return fmt.Errorf("prepare Darwin wake restart state directory: %w", err)
-	}
-	if err := checkDarwinWakeRestartAMQHomeLevel(home); err != nil {
-		return err
-	}
-	state := filepath.Join(home, "state")
-	if err := os.Mkdir(state, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("create Darwin wake restart state directory: %w", err)
-	}
-	return checkDarwinWakeRestartAMQHomeLevel(state)
-}
-
-func checkDarwinWakeRestartAMQHomeLevel(dir string) error {
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("inspect Darwin wake restart state directory: %w", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 ||
-		stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("refuse unsafe Darwin wake restart state directory %s", dir)
-	}
-	return nil
+	_, err := selfupgrade.PrepareAMQHomeState()
+	return err
 }
 
 // stableDarwinWakeRestartStageParts returns the stage root that contains
@@ -427,7 +392,12 @@ func validPreviousWakeRestartBoundImagePlatform(bound wakeImageEvidenceV1) bool 
 	if bound.Platform != "darwin" || !wakeImageMethodIsDarwinExecObserved(bound.Method) {
 		return false
 	}
-	stagePath := bound.ExecutionPath
+	return darwinWakeRestartStagePath(bound.ExecutionPath)
+}
+
+// darwinWakeRestartStagePath reports whether stagePath is a wake restart
+// stage: below a stage root, or the legacy stage beside the candidate.
+func darwinWakeRestartStagePath(stagePath string) bool {
 	stageBase := filepath.Base(stagePath)
 	stageDirBase := filepath.Base(filepath.Dir(stagePath))
 	prefix := "." + stageBase + ".amq-restart-"

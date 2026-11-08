@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 var version = "dev"
@@ -64,6 +65,7 @@ func run(args []string) int {
 		return exitUsage
 	}
 
+	runFromVersionStore()
 	if err := acp.PrepareWorkerEnv(); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp:", err)
 		return exitUsage
@@ -138,4 +140,14 @@ A session pin that cannot be authenticated is refused with exit code 5.
 
 func isVersionArgument(args []string) bool {
 	return len(args) == 1 && (args[0] == "-v" || args[0] == "--version" || args[0] == "version")
+}
+
+// runFromVersionStore moves a long-running amq-acp onto its copy in the
+// version store before it reads any state, so a package manager that deletes
+// the installed image leaves the process a named image. Any failure leaves it
+// on the installed image.
+func runFromVersionStore() {
+	if err := selfupgrade.RunFromStore(version); err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp: keeps running from the installed image:", err)
+	}
 }

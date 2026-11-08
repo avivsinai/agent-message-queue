@@ -15,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/avivsinai/agent-message-queue/internal/bridge/xferv3"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 func runUp(args []string) error {
@@ -44,6 +45,13 @@ func runUp(args []string) error {
 		}
 		fmt.Print(xferv3.LaunchdPlist(bin, *root))
 		return nil
+	}
+	if !*once {
+		// The courier runs from the version store, so a package manager that
+		// deletes the installed image leaves it a named image.
+		if err := selfupgrade.RunFromStore(version); err != nil {
+			fmt.Fprintln(os.Stderr, "amq-bridge: keeps running from the installed image:", err)
+		}
 	}
 	return xferv3.HoldPID(*root, func() error {
 		if *once {

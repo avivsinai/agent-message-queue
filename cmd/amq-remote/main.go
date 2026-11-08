@@ -18,6 +18,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 var version = "dev"
@@ -90,8 +91,19 @@ uncertain) · 130 interrupted
 `
 
 func main() {
+	if len(os.Args) > 1 && longRunning[os.Args[1]] {
+		// A long-running mode runs from the version store, so a package
+		// manager that deletes the installed image leaves it a named image.
+		if err := selfupgrade.RunFromStore(version); err != nil {
+			say(os.Stderr, "amq-remote: keeps running from the installed image: %v", err)
+		}
+	}
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
+
+// longRunning are the subcommands that run for hours: the endpoint, its
+// supervisor and the MCP server a harness keeps for its whole session.
+var longRunning = map[string]bool{"serve": true, "up": true, "mcp": true}
 
 type common struct {
 	root string

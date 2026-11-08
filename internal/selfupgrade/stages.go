@@ -1,8 +1,9 @@
 package selfupgrade
 
-// CleanupStages removes only the private Darwin stage directories created by
-// ExecImage. A successful Darwin exec cannot run cleanup in the old image, so
-// the replacement performs this bounded cleanup after capturing its image.
+// CleanupStages removes only the private Darwin stage directories that
+// releases before the version store created beside the candidate. A
+// successful Darwin exec cannot run cleanup in the old image, so the
+// replacement performs this bounded cleanup after capturing its image.
 func CleanupStages(locator string) error {
 	return cleanupImageStagesPlatform(locator)
 }

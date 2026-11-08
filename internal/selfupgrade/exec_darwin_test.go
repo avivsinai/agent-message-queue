@@ -12,6 +12,7 @@ import (
 )
 
 func TestExecImagePlatformRejectsModifiedDarwinCodeSignature(t *testing.T) {
+	t.Setenv("HOME", realTempDir(t))
 	candidatePath := signedDarwinCandidate(t)
 	corruptDarwinCandidate(t, candidatePath)
 	candidate, err := CaptureImageEvidence(candidatePath, "1.1.0")
@@ -40,6 +41,7 @@ func TestExecImagePlatformRejectsModifiedDarwinCodeSignature(t *testing.T) {
 }
 
 func TestExecImagePlatformAcceptsIntactDarwinCodeSignature(t *testing.T) {
+	t.Setenv("HOME", realTempDir(t))
 	candidatePath := signedDarwinCandidate(t)
 	candidate, err := CaptureImageEvidence(candidatePath, "1.1.0")
 	if err != nil {
@@ -68,6 +70,7 @@ func TestExecImagePlatformAcceptsIntactDarwinCodeSignature(t *testing.T) {
 }
 
 func TestExecImagePlatformReportsMissingDarwinCodeSignatureTool(t *testing.T) {
+	t.Setenv("HOME", realTempDir(t))
 	dir := t.TempDir()
 	candidatePath := filepath.Join(dir, "amq-keepalive")
 	if err := os.WriteFile(candidatePath, []byte("candidate"), 0o700); err != nil {

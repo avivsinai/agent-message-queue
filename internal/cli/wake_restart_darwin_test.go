@@ -4,7 +4,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,65 +124,6 @@ func TestDarwinWakeRestartBindingSurvivesPublicPathSwapAndCleansStage(t *testing
 	}
 	if _, err := os.Lstat(stageDir); !os.IsNotExist(err) {
 		t.Fatalf("staged directory survived exact cleanup: %v", err)
-	}
-}
-
-// TestDarwinWakeRestartTwoBindersShareOneCandidateInode is the M1 regression:
-// two binders staging the SAME brew candidate inode on nearby ticks must both
-// succeed. Binder A links its stage; during A's link (before A's cleanup),
-// binder B runs a full bind that links and removes a THIRD hardlink on the same
-// candidate inode, mutating the shared inode ctime. Before the fix, A's
-// post-link ctime-sensitive compare failed and the bind was refused. Now a
-// ctime-only difference on the same inode is not an image change, so both binds
-// succeed and both bound evidences pass sameRequestedAndBoundWakeImageEvidence.
-func TestDarwinWakeRestartTwoBindersShareOneCandidateInode(t *testing.T) {
-	dir := t.TempDir()
-	candidatePath := filepath.Join(dir, "amq")
-	copyTestAMQ(t, candidatePath)
-	candidate, err := captureWakeImageEvidence(candidatePath, "two-binder-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Cross a timestamp boundary so the ctime mutation is observable.
-	time.Sleep(1100 * time.Millisecond)
-
-	originalLink := linkDarwinWakeRestartStage
-	binderBRan := false
-	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
-	// Interpose binder B inside A's link: when A links its stage, run a full
-	// independent bind of the same candidate (which links and removes its own
-	// stage hardlink on the shared inode, mutating ctime) before A continues.
-	linkDarwinWakeRestartStage = func(oldName, newName string) error {
-		if err := originalLink(oldName, newName); err != nil {
-			return err
-		}
-		if !binderBRan {
-			binderBRan = true
-			boundB, err := bindWakeRestartCandidate(candidate)
-			if err != nil {
-				return fmt.Errorf("concurrent binder B failed: %w", err)
-			}
-			if !sameRequestedAndBoundWakeImageEvidence(candidate, boundB.evidence) {
-				_ = boundB.close()
-				return fmt.Errorf("concurrent binder B bound evidence does not match candidate")
-			}
-			if err := boundB.close(); err != nil {
-				return fmt.Errorf("concurrent binder B cleanup: %w", err)
-			}
-		}
-		return nil
-	}
-
-	boundA, err := bindWakeRestartCandidate(candidate)
-	if err != nil {
-		t.Fatalf("binder A failed under concurrent ctime mutation: %v", err)
-	}
-	defer func() { _ = boundA.close() }()
-	if !binderBRan {
-		t.Fatal("interposed binder B never ran; test does not exercise the race")
-	}
-	if !sameRequestedAndBoundWakeImageEvidence(candidate, boundA.evidence) {
-		t.Fatalf("binder A bound evidence does not match candidate after concurrent ctime mutation:\ncandidate=%#v\nboundA=%#v", candidate, boundA.evidence)
 	}
 }
 
