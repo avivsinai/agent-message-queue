@@ -388,10 +388,11 @@ func (c *traceCollector) scanDLQ() {
 func (c *traceCollector) scanReceipts() {
 	for _, agent := range c.agents {
 		dir := filepath.Join("agents", agent, "receipts")
+		// An unreadable receipts/ is reported, and the owed receipts are
+		// still read: a failed receipt write is exactly when one is owed.
 		entries, err := c.readDir(dir)
 		if err != nil {
 			c.addError("receipts", fmt.Sprintf("scan %s: %v", c.relative(dir), err))
-			continue
 		}
 		written := map[string]bool{}
 		for _, entry := range entries {
