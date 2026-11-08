@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,14 +71,14 @@ func TestRemotePackagesDoNotLinkACP(t *testing.T) {
 
 func loadImportGraph(t *testing.T) importGraph {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate the archtest source file")
+	// go test runs in the package directory, internal/archtest.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve the module root: %v", err)
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 	graph := importGraph{deps: map[string][]string{}, tests: map[string][]string{}}
 	fset := token.NewFileSet()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
