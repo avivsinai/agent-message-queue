@@ -183,8 +183,7 @@ func (h *Host) writeLiveness(root *fsq.DeliveryRoot, live bool) error {
 	if err != nil {
 		return err
 	}
-	_, err = root.WriteFileAtomic(bridgePath(h.cfg.Me), "bridge.liveness", append(data, '\n'), 0o600)
-	return err
+	return root.WriteHeartbeatFile(bridgePath(h.cfg.Me), "bridge.liveness", append(data, '\n'), 0o600)
 }
 
 // recoverBridge appends uncertain to every receipt an earlier host left

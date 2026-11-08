@@ -231,9 +231,13 @@ type agentMarker struct {
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs.
-// A running agent rewrites it on every tick, but a tick waits behind a
-// sweep whose posts can take minutes on a slow relay.
+// A running agent rewrites it at least every agentMarkerRefresh, but a tick
+// waits behind a sweep whose posts can take minutes on a slow relay.
 const agentMarkerFresh = 10 * time.Minute
+
+// agentMarkerRefresh is how old an unchanged marker gets before a tick
+// rewrites it; a changed marker is written on the tick that changes it.
+const agentMarkerRefresh = 2 * time.Minute
 
 // Agent states a marker reports. amq-remote reads the same markers.
 const (
@@ -446,9 +450,12 @@ func (s *Server) recordDM(channel string) {
 
 // writeAgentMarker stamps m as this process's and writes it under dir. Only
 // the worker that leads the identity writes (lead), and it never overwrites
-// the marker of a worker that started after it.
+// the marker of a worker that started after it. A marker that already says
+// the same, younger than agentMarkerRefresh, is left as it is.
 func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
-	if old, ok := readAgentMarker(filepath.Join(dir, buzzSelf+".json")); ok && newerWorker(old.Worker, workerIdentity.self) {
+	path := filepath.Join(dir, buzzSelf+".json")
+	old, ok := readAgentMarker(path)
+	if ok && newerWorker(old.Worker, workerIdentity.self) {
 		// Holding the lead is the authority to write: a newer worker that
 		// left is replaced, and only a newer one still running is kept.
 		if state, _ := launch.InspectHolder(old.Worker); state == launch.LeaseValid {
@@ -462,7 +469,13 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	if err != nil {
 		return
 	}
-	_ = s.writeState(filepath.Join(dir, buzzSelf+".json"), append(raw, '\n'))
+	if at, err := time.Parse(time.RFC3339, old.Updated); ok && err == nil && !at.After(now) && now.Sub(at) < agentMarkerRefresh {
+		old.Updated = m.Updated
+		if prev, err := json.MarshalIndent(old, "", "  "); err == nil && string(prev) == string(raw) {
+			return
+		}
+	}
+	_ = s.writeState(path, append(raw, '\n'))
 }
 
 // The per-machine helper ("AMQ Remote helper" in its system prompt) creates
