@@ -137,6 +137,12 @@ func writeAllAndSync(file writeSyncer, data []byte) error {
 	if n != len(data) {
 		return io.ErrShortWrite
 	}
+	return syncFile(file)
+}
+
+// syncFile fsyncs file's contents. Every file sync in this package goes
+// through it, so the package file-sync fault reaches all of them.
+func syncFile(file interface{ Sync() error }) error {
 	if packageFileSyncFaultForTest != nil {
 		return packageFileSyncFaultForTest()
 	}

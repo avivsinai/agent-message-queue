@@ -108,16 +108,6 @@ func SetPackageFileSyncFaultForTest(fn func() error) {
 	packageFileSyncFaultForTest = fn
 }
 
-// FileSyncFaultForTest reports the package file-sync fault (nil = none) so
-// out-of-package durability barriers can route their own file syncs through
-// the same fault under test.
-func FileSyncFaultForTest() error {
-	if packageFileSyncFaultForTest == nil {
-		return nil
-	}
-	return packageFileSyncFaultForTest()
-}
-
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
 // Mkdir so tests can inject a racing creator.
 var beforeCreateDirectChildExclusiveForTest func(r *DeliveryRoot, name string)
@@ -1178,4 +1168,19 @@ func (r *DeliveryRoot) OpenRegularNoFollow(name string) (*os.File, os.FileInfo, 
 		return nil, nil, fmt.Errorf("queue artifact changed while opening: %s", r.displayPath(name))
 	}
 	return file, after, nil
+}
+
+// SyncRegularNoFollow fsyncs the contents of the root-relative regular file
+// name, opened without following a symlink.
+func (r *DeliveryRoot) SyncRegularNoFollow(name string) error {
+	file, _, err := r.OpenRegularNoFollow(name)
+	if err != nil {
+		return err
+	}
+	syncErr := syncFile(file)
+	closeErr := file.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
