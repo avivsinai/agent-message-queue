@@ -33,6 +33,8 @@ func runCleanup(args []string) error {
 		false,
 		"Remove one exact stuck managed-launch recovery journal",
 	)
+	launchExecutionFlag := fs.String("launch-execution", "", "Abandon one exact incomplete native Codex execution")
+	ignorePinFlag := fs.Bool("ignore-session-pin", false, "With --launch-execution and explicit --root, ignore a conflicting session pin")
 	mailboxFlag := fs.String(
 		"mailbox",
 		"",
@@ -52,7 +54,7 @@ func runCleanup(args []string) error {
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
 	usage := usageWithFlags(
 		fs,
-		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
+		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--history-older-than <duration>] [--history-max-size <size>] [--launch-journal --root <session-root>] [--launch-execution <handle> --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
 		"--history-older-than and --history-max-size remove history from every agent",
 		"mailbox under the root: read messages (inbox/cur), sent copies (outbox/sent),",
 		"receipts, and fetched remote files such as images (remote-files), oldest",
@@ -90,10 +92,26 @@ func runCleanup(args []string) error {
 	} else if handled {
 		return nil
 	}
+	executionSelected := flagWasVisited(fs, "launch-execution")
+	if executionSelected {
+		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || *historyOlderFlag != "" || *historyMaxFlag != "" || *launchJournalFlag || flagWasVisited(fs, "mailbox") {
+			return UsageError("--launch-execution cannot be combined with other cleanup selectors")
+		}
+		if !common.rootExplicit() {
+			return UsageError("--launch-execution requires an explicit --root <session-root>")
+		}
+		if err := fsq.ValidateHandle(*launchExecutionFlag); err != nil {
+			return UsageError("--launch-execution: %v", err)
+		}
+		return cleanupLaunchExecution(common.Root, *launchExecutionFlag, common.JSON, *dryRunFlag, *yesFlag, *ignorePinFlag)
+	}
+	if *ignorePinFlag {
+		return UsageError("--ignore-session-pin requires --launch-execution")
+	}
 	mailboxSelected := flagWasVisited(fs, "mailbox")
 	historySelected := *historyOlderFlag != "" || *historyMaxFlag != ""
 	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !historySelected && !*launchJournalFlag && !mailboxSelected {
-		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, --history-older-than, --history-max-size, --launch-journal, or --mailbox is required")
+		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, --history-older-than, --history-max-size, --launch-journal, --launch-execution, or --mailbox is required")
 	}
 	if mailboxSelected {
 		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || historySelected || *launchJournalFlag {

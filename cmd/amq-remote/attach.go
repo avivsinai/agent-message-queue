@@ -823,8 +823,9 @@ type bindingRow struct {
 	Agent    string        `json:"agent"`
 	// Channel and ChannelName are the machine agent's channel for the
 	// session, when it has a record of one.
-	Channel     string `json:"channel,omitempty"`
-	ChannelName string `json:"channel_name,omitempty"`
+	Channel            string `json:"channel,omitempty"`
+	ChannelName        string `json:"channel_name,omitempty"`
+	TerminalOnlyReason string `json:"terminal_only_reason,omitempty"`
 }
 
 // bindings lists the bound sessions with their liveness and their Buzz
@@ -859,6 +860,13 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 			Agent: agentOf(b.Name, now).State}
 		if ch, ok := acp.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
+		}
+		if b.Harness == "codex" && b.Carrier == binding.CarrierMailbox && b.AppServer.Thread == "" {
+			reason, err := launch.CodexTerminalOnlyReason(b.Root, b.Handle)
+			if err != nil {
+				reason = "AMQ cannot read this seat's approval capability"
+			}
+			row.TerminalOnlyReason = reason
 		}
 		rows = append(rows, row)
 		if state == binding.Unknown {
@@ -896,6 +904,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		if r.Channel != "" {
 			line += fmt.Sprintf("  channel %s %q", r.Channel, r.ChannelName)
+		}
+		if r.TerminalOnlyReason != "" {
+			line += ": Buzz approvals: terminal only: " + r.TerminalOnlyReason
 		}
 		say(stdout, "%s", line)
 	}

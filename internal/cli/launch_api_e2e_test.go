@@ -596,14 +596,19 @@ exec "$@"
 		}
 		cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
 		cmd.Dir = command.Cwd
+		// Pre-merge review: a headless runner's TERM=dumb stops the fake
+		// interactive provider at the terminal guard before the routing proof.
 		cmd.Env = append(cleanLaunchE2EEnv(), "HOME="+t.TempDir(), "XDG_STATE_HOME="+t.TempDir(),
-			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "AMQ_NO_UPDATE_CHECK=1")
+			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "AMQ_NO_UPDATE_CHECK=1", "TERM=xterm-256color")
 		for key, value := range command.EnvOverlay {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("run %s emitted command: %v\n%s", handle, err, output)
+		}
+		if handle == "codex" && !strings.Contains(string(output), "Buzz approvals: terminal only: no Codex app-server daemon is running (start one with codex app-server daemon start)") {
+			t.Fatalf("embedded Codex launch did not explain its approval capability:\n%s", output)
 		}
 		if handle == "codex" && !strings.Contains(string(output), "exact-root-message") {
 			t.Fatalf("sibling command did not drain the real message:\n%s", output)

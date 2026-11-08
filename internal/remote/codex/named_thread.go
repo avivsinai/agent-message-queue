@@ -6,8 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// ErrThreadNotStarted proves that thread/start was never sent. Once the
+// request begins, a failed reply cannot establish whether a thread exists.
+var ErrThreadNotStarted = errors.New("thread/start was not sent")
+
+// ThreadStartTimeout covers the observed 30-second contention while the daemon
+// loads other seats, including protocol initialization and persistence.
+const ThreadStartTimeout = 60 * time.Second
 
 // ControlSocket is the managed app-server daemon's control socket under
 // codexHome, checked the way discovery checks it. An error wrapping
@@ -17,24 +26,24 @@ func ControlSocket(codexHome string) (string, error) {
 	return sock, checkControlSocket(sock)
 }
 
-// StartNamedThread creates a thread in cwd on the daemon at sock, names it,
-// and persists it with no turn, so `codex resume <id>` opens it with the name
-// already set (4ip). It returns the thread id. The daemon does not tell which
-// process owns a thread, so the caller creates the thread and starts the TUI
-// on it: the binding is exact by construction.
+// StartThread creates a native thread in cwd and persists it without a turn.
+// A nonempty name sets its display name; a nonempty expectedVersion requires
+// that exact app-server version before creating anything. The caller owns
+// binding the returned identity to the TUI it starts.
 //
-// Codex persists a thread only at its first turn or history write. The
-// thread gets one developer message that names the session; it is part of
-// the model-visible history. thread/goal/set also persists, but an active
-// goal drives the model.
-func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, error) {
+// The persistence write adds one developer message to model-visible history.
+func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (string, error) {
 	client, err := Dial(sock, Handlers{})
 	if err != nil {
-		return "", err
+		return "", errors.Join(ErrThreadNotStarted, err)
 	}
 	defer func() { _ = client.Close() }()
-	if err := initializeAMQ(ctx, client); err != nil {
-		return "", err
+	version, err := initializeAMQ(ctx, client)
+	if err != nil {
+		return "", errors.Join(ErrThreadNotStarted, err)
+	}
+	if expectedVersion != "" && version != expectedVersion {
+		return "", fmt.Errorf("%w: codex daemon version %q does not match %q", ErrThreadNotStarted, version, expectedVersion)
 	}
 	var started struct {
 		Thread struct {
@@ -59,12 +68,18 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 			_ = client.Call(actx, "thread/archive", map[string]any{"threadId": id}, nil)
 		}
 	}()
-	if err := client.Call(ctx, "thread/name/set", map[string]any{"threadId": id, "name": name}, nil); err != nil {
-		return "", fmt.Errorf("name thread %s: %w", id, err)
+	if name != "" {
+		if err := client.Call(ctx, "thread/name/set", map[string]any{"threadId": id, "name": name}, nil); err != nil {
+			return "", fmt.Errorf("name thread %s: %w", id, err)
+		}
+	}
+	description := "AMQ started this Codex session."
+	if name != "" {
+		description = "AMQ named this Codex session " + name + "."
 	}
 	item := map[string]any{
 		"type": "message", "role": "developer",
-		"content": []map[string]any{{"type": "input_text", "text": "AMQ named this Codex session " + name + "."}},
+		"content": []map[string]any{{"type": "input_text", "text": description}},
 	}
 	if err := client.Call(ctx, "thread/inject_items", map[string]any{"threadId": id, "items": []any{item}}, nil); err != nil {
 		return "", fmt.Errorf("persist thread %s: %w", id, err)
@@ -83,15 +98,22 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 
 // initializeAMQ opens an app-server session as AMQ, with the experimental
 // API on (historyMode is an experimental thread/start field).
-func initializeAMQ(ctx context.Context, client *Client) error {
+func initializeAMQ(ctx context.Context, client *Client) (string, error) {
 	initParams := map[string]any{
 		"clientInfo":   map[string]string{"name": "amq", "version": Version},
 		"capabilities": map[string]any{"experimentalApi": true},
 	}
-	if err := client.Call(ctx, "initialize", initParams, nil); err != nil {
-		return fmt.Errorf("initialize: %w", err)
+	var initialized struct {
+		UserAgent string `json:"userAgent"`
 	}
-	return nil
+	if err := client.Call(ctx, "initialize", initParams, &initialized); err != nil {
+		return "", fmt.Errorf("initialize: %w", err)
+	}
+	_, version, _ := strings.Cut(initialized.UserAgent, "/")
+	if fields := strings.Fields(version); len(fields) > 0 {
+		return fields[0], nil
+	}
+	return "", nil
 }
 
 // StartupState holds the raw results of the app-server requests that show
@@ -102,6 +124,7 @@ func initializeAMQ(ctx context.Context, client *Client) error {
 // nil when the app-server answered its request with an error.
 type StartupState struct {
 	Hooks, Requirements, Config json.RawMessage
+	Version                     string
 }
 
 // ReadStartupState reads the StartupState for cwd from one session on the
@@ -112,7 +135,8 @@ func ReadStartupState(ctx context.Context, sock, cwd string) (StartupState, erro
 		return StartupState{}, err
 	}
 	defer func() { _ = client.Close() }()
-	if err := initializeAMQ(ctx, client); err != nil {
+	version, err := initializeAMQ(ctx, client)
+	if err != nil {
 		return StartupState{}, err
 	}
 	call := func(method string, params any) (json.RawMessage, error) {
@@ -127,7 +151,7 @@ func ReadStartupState(ctx context.Context, sock, cwd string) (StartupState, erro
 		}
 		return result, nil
 	}
-	var state StartupState
+	state := StartupState{Version: version}
 	if state.Hooks, err = call("hooks/list", map[string]any{"cwds": []string{cwd}}); err != nil {
 		return StartupState{}, err
 	}
@@ -138,4 +162,22 @@ func ReadStartupState(ctx context.Context, sock, cwd string) (StartupState, erro
 		return StartupState{}, err
 	}
 	return state, nil
+}
+
+// ReadHooks reads only the hook-trust state needed before a recovered TUI
+// resumes on its already bound endpoint.
+func ReadHooks(ctx context.Context, sock, cwd string) (json.RawMessage, error) {
+	client, err := Dial(sock, Handlers{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := initializeAMQ(ctx, client); err != nil {
+		return nil, err
+	}
+	var result json.RawMessage
+	if err := client.Call(ctx, "hooks/list", map[string]any{"cwds": []string{cwd}}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

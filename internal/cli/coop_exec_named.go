@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
@@ -147,7 +148,7 @@ func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 // codexDaemonNamingTimeout bounds the daemon calls made before exec. They
 // take about 2 s, and up to 30 s while the daemon starts other sessions
 // (measured on codex-cli 0.160.1).
-const codexDaemonNamingTimeout = 60 * time.Second
+const codexDaemonNamingTimeout = codex.ThreadStartTimeout
 
 // codexDaemonNamingNotice is how long naming runs before coop exec says why
 // the launch waits.
@@ -316,12 +317,7 @@ func codexLaunchArgs(args []string) (embedded, unknown, tui bool) {
 // daemon_auto_start feature predates the daemon and runs embedded; a
 // failed feature probe establishes nothing.
 func codexLaunchBackend(ctx context.Context, cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
-	envEmbedded := false
-	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
-		if _, set := os.LookupEnv(key); set {
-			envEmbedded = true
-		}
-	}
+	envEmbedded := codexlaunch.EmbeddedEnvironment()
 	embedded, unknown, _ := codexLaunchArgs(args)
 	if unknown {
 		return codexBackendUnknown, nil
@@ -420,7 +416,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	// thread/start records trust for a directory Codex has no decision for,
 	// before the TUI asks the user. Only an already trusted directory is
 	// started on the daemon.
-	if !codexTrustsDir(codexHome, cwd) {
+	if !codexlaunch.TrustsDir(codexHome, cwd) {
 		return report("Codex does not trust " + cwd + " yet")
 	}
 	// With terminal_visualization_instructions off the TUI's thread/resume
@@ -453,7 +449,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	notice := time.AfterFunc(codexDaemonNamingNotice, func() {
 		_ = writeStderr("naming %s on the Codex daemon; it is busy, this can take up to a minute\n", name)
 	})
-	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
+	id, err := codex.StartThread(ctx, sock, cwd, name, "")
 	notice.Stop()
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
