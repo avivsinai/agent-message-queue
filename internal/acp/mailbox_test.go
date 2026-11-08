@@ -1509,6 +1509,55 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 	}
 }
 
+// Review of the final-post states: a retry that crashed while it posted left
+// a lone sending marker that no reader named; it is in doubt, never posted
+// again.
+func TestFinalPostThatCrashedWhileSendingIsInDoubt(t *testing.T) {
+	s, root := mailboxServer(t)
+	var posts []string
+	broken := true
+	event := strings.Repeat("5", 64)
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		if broken {
+			_, err := buzzCLIFrom("/nonexistent", "relative")
+			return "", err
+		}
+		posts = append(posts, content)
+		return "id", nil
+	}
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	replied := false
+	if _, rpcErr := s.runRemote("s", prompt, event, turn, func(any) error {
+		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
+			replied = true
+			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "the answer")
+		}
+		return nil
+	}); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := s.finalPostState(event); got != finalPostUnsent {
+		t.Fatalf("state after a post that never started: %q; want unsent", got)
+	}
+	if err := os.Rename(s.finalStatePath(event, finalPostUnsent), s.finalStatePath(event, finalPostSending)); err != nil {
+		t.Fatal(err)
+	}
+	broken = false
+	for range 2 {
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if got := s.finalPostState(event); got != finalPostSending {
+		t.Fatalf("state after a crash while sending: %q; want sending", got)
+	}
+	if len(posts) != 0 {
+		t.Fatalf("an in-doubt final answer was posted again: %q", posts)
+	}
+}
+
 // The reply poll skips listing an inbox whose mtime has not moved; a reply
 // that lands after the inbox sat idle still ends the turn.
 func TestReplyAfterAnIdleInboxEndsTheTurn(t *testing.T) {

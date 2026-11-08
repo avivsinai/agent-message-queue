@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,9 @@ type lateReplySweep struct {
 	cursor    *os.File
 	cursorDir int
 	scans     map[string][2]*inboxScan
+	// inDoubt holds the events whose final post crashed while sending,
+	// already logged. Such events are rare and the set is not pruned.
+	inDoubt map[string]struct{}
 }
 
 // add records a mailbox event this process claimed.
@@ -376,6 +380,16 @@ type lateClaim struct {
 func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool) {
 	c := lateClaim{eventID: eventID}
 	if out, ok := s.mailboxAnswered(eventID); ok {
+		if s.finalPostState(eventID) == finalPostSending {
+			if _, logged := s.late.inDoubt[eventID]; !logged {
+				if s.late.inDoubt == nil {
+					s.late.inDoubt = map[string]struct{}{}
+				}
+				s.late.inDoubt[eventID] = struct{}{}
+				fmt.Fprintf(os.Stderr, "amq-acp: final post of event %s is in doubt (crashed while sending); not retried\n", eventID)
+			}
+			return nil, false
+		}
 		if !s.finalUnsent(eventID, out) {
 			return nil, false
 		}
@@ -430,7 +444,7 @@ func (s *Server) resendFinal(c *lateClaim) {
 		if out, ok := s.mailboxAnswered(c.eventID); !ok || !s.finalUnsent(c.eventID, out) {
 			return nil
 		}
-		unsent, sending := s.finalStatePath(c.eventID, finalUnsent), s.finalStatePath(c.eventID, finalSending)
+		unsent, sending := s.finalStatePath(c.eventID, finalPostUnsent), s.finalStatePath(c.eventID, finalPostSending)
 		if err := os.Rename(unsent, sending); err != nil {
 			return err
 		}
