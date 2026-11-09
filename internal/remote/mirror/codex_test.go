@@ -67,7 +67,7 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 		name:   "Buzz prompt",
 		lines:  turn(codexPrompt(0, "run the tests", map[string]any{"client_id": clientID})),
 		events: []string{Ended},
-		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
+		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
 	}, {
 		// agent-message-queue-7fz review: reasoning and subagent items after
 		// the end edited the post with no new work.

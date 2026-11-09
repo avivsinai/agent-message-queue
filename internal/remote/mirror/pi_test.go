@@ -48,7 +48,7 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	}
 	want := []string{
 		"▶ run the tests\n✓ 1 tool (bash) · 3s\nAll pass.",
-		"▶ Buzz\n✓ 2s\nTwo files.",
+		"▶ Buzz\n✓ 2s",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("posts = %q, want %q", got, want)
