@@ -115,6 +115,36 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 - **`amq-acp host`:** every `session/request_permission` shows all the
   options the agent offered, and the agent receives the chosen one.
 
+## Slash commands
+
+In Buzz, the owner's message that is one line starting with `/` is typed
+into a Claude Code session in mailbox mode like Remote Control: the session's
+wake types exactly that line and Enter, by the same injection as its
+doorbell, and Buzz gets "Typed /compact into the terminal." Any command is
+typed, `/clear` and `/exit` too; the Buzz link survives `/clear`, and
+`/exit` ends the session. The line counts only as the
+owner's signed event, at most 5 minutes old; a `/` line that is not verified
+as the owner's goes to the session as an ordinary message, and only in the
+channel made for that session. The queued request carries the signed
+message, and the wake verifies it again before it types: the session it was
+taken for, the owner key and channel that the Buzz agent recorded for the
+share, and the exact command line. While a dialog is open the command
+waits, oldest first, and Buzz gets "Queued"; it is typed when the dialog
+closes, and Buzz is told again. A command still waiting 10 minutes after
+the owner sent it is not typed: Buzz gets "Not typed: expired while a
+dialog was open." At most 16 commands (16 KiB) wait at once. The wake types
+each signed message once. If a dialog opens between the text and its
+Enter, the text waits in the composer, and the Enter follows when the
+dialog closes only if the command still verifies; otherwise Buzz gets "Not
+typed" with the reason. After each command the wake waits
+one full tick with no dialog; after `/model`, `/config`, `/permissions` or
+`/resume`, which open a picker, it waits for the owner's next message or 60
+seconds. Buzz
+says "typed", never "ran": the wake cannot see what the command did. A
+session with no live wake, a wake with inject mode `none` or native
+delivery, a native share, another harness, or a line with a control
+character or more than 512 bytes gets one line saying why it was not typed.
+
 ## Limits
 
 - Buzz shows commands as they are. The relay can read every dialog, so a

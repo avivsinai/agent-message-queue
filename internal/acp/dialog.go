@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
@@ -1005,18 +1004,9 @@ func ownerWords(prompt string) string {
 	return dropMentions(text)
 }
 
-// dropMentions trims text and drops its leading mentions. Line breaks stay:
-// one line can answer each question of a dialog.
-func dropMentions(text string) string {
-	text = strings.TrimSpace(text)
-	for {
-		end := strings.IndexFunc(text, unicode.IsSpace)
-		if end < 0 || (!strings.HasPrefix(text, "@") && !strings.HasPrefix(text, "nostr:")) {
-			return text
-		}
-		text = strings.TrimSpace(text[end:])
-	}
-}
+// dropMentions trims text and drops its leading mentions
+// (buzzevent.DropMentions).
+func dropMentions(text string) string { return buzzevent.DropMentions(text) }
 
 // errNotOwner is a verified event that someone other than the owner signed.
 var errNotOwner = errors.New("the event is not the owner's")

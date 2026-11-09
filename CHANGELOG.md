@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.137.4](https://github.com/avivsinai/agent-message-queue/compare/v0.137.3...v0.137.4) (2026-11-09)
+
+
+### Features
+
+* **remote:** a slash command typed in Buzz runs in the session ([#1418](https://github.com/avivsinai/agent-message-queue/issues/1418)) ([7a313ac](https://github.com/avivsinai/agent-message-queue/commit/7a313acb39670c6a28d576e2a0b8072fa0b0fd5d))
+
 ## [0.137.3](https://github.com/avivsinai/agent-message-queue/compare/v0.137.2...v0.137.3) (2026-11-09)
 
 
