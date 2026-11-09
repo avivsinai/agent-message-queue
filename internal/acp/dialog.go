@@ -804,7 +804,7 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 	if !ok {
 		return "", dialog.Answer{}, false
 	}
-	a, ok := dialog.ParseAnswer(req, buzzevent.DropMentions(evt.Content))
+	a, ok := dialog.ParseAnswer(req, dropMentions(evt.Content))
 	a.Event = evt.ID.Hex()
 	return dir, a, ok
 }
@@ -900,8 +900,12 @@ func ownerWords(prompt string) string {
 	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
 		text = after
 	}
-	return buzzevent.DropMentions(text)
+	return dropMentions(text)
 }
+
+// dropMentions trims text and drops its leading mentions
+// (buzzevent.DropMentions).
+func dropMentions(text string) string { return buzzevent.DropMentions(text) }
 
 // errNotOwner is a verified event that someone other than the owner signed.
 var errNotOwner = errors.New("the event is not the owner's")

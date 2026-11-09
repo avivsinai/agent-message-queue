@@ -12,7 +12,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/wakecmd"
 )
@@ -76,7 +75,7 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 	if err != nil {
 		return cmd, false
 	}
-	cmd.text = buzzevent.DropMentions(evt.Content)
+	cmd.text = dropMentions(evt.Content)
 	if !strings.HasPrefix(cmd.text, "/") {
 		return cmd, false
 	}

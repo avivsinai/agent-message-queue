@@ -24,8 +24,9 @@ import (
 // that may open a picker.
 const wakeCommandPickerPause = 60 * time.Second
 
-// maxWakeCommandEntries bounds one listing of the queue directory.
-const maxWakeCommandEntries = 256
+// maxWakeCommandEntries bounds one listing of the queue directory, which
+// also keeps an hour of outcomes and event keys.
+const maxWakeCommandEntries = 4096
 
 // wakeCommands is the wake's side of its seat's owner command queue
 // (wakecmd). The queue is read only through the wake's retained agent
