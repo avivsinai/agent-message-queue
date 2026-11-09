@@ -52,16 +52,44 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 	return plan, err
 }
 
+// PlanResume keeps each conversation on the backend that created it. A
+// daemon thread resumes on the daemon only while the daemon still proves it;
+// otherwise the seat resumes embedded and names the cause.
 func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, error) {
+	reason := resumeReason(a.executable, request)
+	if reason == "" {
+		return a.PlanResumeDaemon(request)
+	}
 	plan, err := a.CodexAdapter.PlanResume(request)
 	if err != nil {
 		return launch.AgentPlan{}, err
 	}
-	_, _, plan.TerminalOnlyReason = daemonEndpoint()
-	if plan.TerminalOnlyReason == "" {
-		plan.TerminalOnlyReason = "resumed launch settings require verified TUI resume equivalence"
-	}
+	plan.TerminalOnlyReason = reason
 	return plan, nil
+}
+
+func resumeReason(executable string, request launch.ResumeRequest) string {
+	if request.CaptureSource != launch.CodexDaemonThreadV1 {
+		return "this conversation runs on an embedded app-server"
+	}
+	if reason := launch.CodexDaemonOptionsReason(request.PlanRequest); reason != "" {
+		return reason
+	}
+	if reason := eligibility(executable, request.Cwd); reason != "" {
+		return reason
+	}
+	_, sock, _ := daemonEndpoint()
+	return threadReason(sock, request.Conversation.ID, request.Cwd)
+}
+
+// threadReason requires the live daemon to read the thread in its launch
+// directory. A restarted daemon proves itself a successor this way; one that
+// cannot read the thread does not.
+func threadReason(sock, thread, cwd string) string {
+	if got, _, err := codex.ThreadCwd(sock, thread); err != nil || got != cwd {
+		return "the running Codex daemon does not know this conversation's thread"
+	}
+	return ""
 }
 
 func codexHome() (string, error) {
@@ -144,13 +172,15 @@ func eligibility(executable, cwd string) string {
 		return "Codex terminal instructions require verified TUI resume equivalence"
 	}
 	if !ConfigUpdateCheckOff(state.Config) || !RequirementsAllowNoUpdateCheck(state.Requirements) {
-		return "Codex startup update prompt is not ruled out"
+		return "the Codex update prompt is not ruled out; set check_for_update_on_startup = false in your Codex config to let this seat use the shared daemon"
 	}
 	return ""
 }
 
 // Acquire creates a native thread only after launch has persisted its attempt
-// barrier under the exact generation's lease. An uncertain attempt is not retried.
+// barrier under the exact generation's lease. An uncertain attempt is not
+// retried. A resume ticket creates nothing: it binds its existing thread once
+// the live daemon reads it.
 func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if ticket.Provider != launch.CodexProvider || !ticket.PreSpawnAcquire {
 		return launch.CaptureEvidence{}, fmt.Errorf("not a Codex daemon acquisition ticket")
@@ -174,14 +204,21 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if err != nil {
 		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
-	defer cancel()
-	thread, err := codex.StartThread(ctx, sock, ticket.Cwd, "", launch.CodexDaemonVersion)
-	if err != nil {
-		if errors.Is(err, codex.ErrThreadNotStarted) {
-			return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+	thread := ticket.ConversationID
+	if launch.CodexDaemonResume(ticket) {
+		if reason := threadReason(sock, thread, ticket.Cwd); reason != "" {
+			return launch.CaptureEvidence{}, fmt.Errorf("%w: Buzz approvals: terminal only: %s; replan this launch", launch.ErrIdentityNotRequested, reason)
 		}
-		return launch.CaptureEvidence{}, err
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
+		defer cancel()
+		thread, err = codex.StartThread(ctx, sock, ticket.Cwd, "", launch.CodexDaemonVersion)
+		if err != nil {
+			if errors.Is(err, codex.ErrThreadNotStarted) {
+				return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+			}
+			return launch.CaptureEvidence{}, err
+		}
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {

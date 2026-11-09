@@ -18,6 +18,28 @@ const CodexDaemonThreadV1 CaptureEvidenceSource = "codex_daemon_thread_v1"
 // PlanFreshDaemon resumes a thread acquired under the execution ticket's
 // lease. Eligibility and startup checks must succeed again at acquisition.
 func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest) (AgentPlan, error) {
+	return adapter.planDaemon(request, "")
+}
+
+// PlanResumeDaemon resumes a daemon-acquired thread on the daemon. The thread
+// stays in argv; acquisition verifies it on the live daemon instead of
+// starting one.
+func (adapter *CodexAdapter) PlanResumeDaemon(request ResumeRequest) (AgentPlan, error) {
+	if request.ResumePolicy != ResumeEnabled {
+		return AgentPlan{}, fmt.Errorf("resume plan requires resume policy %q", ResumeEnabled)
+	}
+	if request.CaptureSource != CodexDaemonThreadV1 {
+		return AgentPlan{}, fmt.Errorf("codex daemon resume requires a daemon-acquired conversation")
+	}
+	if err := validateConversation(request.Conversation, CodexProvider); err != nil {
+		return AgentPlan{}, err
+	}
+	return adapter.planDaemon(request.PlanRequest, request.Conversation.ID)
+}
+
+// planDaemon builds the one daemon template. An empty thread leaves the
+// conversation slot for acquisition to fill.
+func (adapter *CodexAdapter) planDaemon(request PlanRequest, thread string) (AgentPlan, error) {
 	executable, err := validatePlanRequest(request, adapter.executable, CodexProvider, codexEnvRules(), codexArgRules(), codexBypassArgs())
 	if err != nil {
 		return AgentPlan{}, err
@@ -25,18 +47,35 @@ func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest) (AgentPlan, er
 	if reason := CodexDaemonOptionsReason(request); reason != "" {
 		return AgentPlan{}, fmt.Errorf("%s", reason)
 	}
+	slot := preSpawnConversationPlaceholder
+	if thread != "" {
+		slot = thread
+	}
 	argv := append([]string{executable, "resume", "-C", request.Cwd}, request.CommittedArgs...)
 	identityIndex := len(argv)
-	argv = append(argv, preSpawnConversationPlaceholder)
+	argv = append(argv, slot)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, Cwd: request.Cwd,
-		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
+		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce, ConversationID: thread,
 		PreSpawnAcquire: true, DynamicArgv: []DynamicArg{{Index: identityIndex, Kind: DynamicArgConversationID}},
 	}
-	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
-		return AgentPlan{}, err
+	if thread == "" {
+		if err := appendInitialInput(&plan, request.InitialInput); err != nil {
+			return AgentPlan{}, err
+		}
 	}
 	return plan, ValidateAdapterPlan(adapter, plan)
+}
+
+// CodexDaemonResume reports a daemon ticket whose argv names the existing
+// thread it resumes. Such a ticket holds its thread from creation and never
+// asks the daemon to create one.
+func CodexDaemonResume(ticket ExecutionTicket) bool {
+	if ticket.Provider != CodexProvider || !ticket.PreSpawnAcquire || len(ticket.DynamicArgv) != 1 {
+		return false
+	}
+	index := ticket.DynamicArgv[0].Index
+	return index > 0 && index < len(ticket.TargetArgv) && ticket.TargetArgv[index] != preSpawnConversationPlaceholder
 }
 
 type codexDaemonPayload struct {
@@ -104,7 +143,10 @@ func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 		return fmt.Errorf("codex daemon execution template is invalid")
 	}
 	identityIndex := ticket.DynamicArgv[0].Index
-	if identityIndex < 4 || identityIndex >= len(ticket.TargetArgv) || ticket.TargetArgv[identityIndex] != preSpawnConversationPlaceholder {
+	if identityIndex < 4 || identityIndex >= len(ticket.TargetArgv) {
+		return fmt.Errorf("codex daemon conversation slot is invalid")
+	}
+	if slot := ticket.TargetArgv[identityIndex]; slot != preSpawnConversationPlaceholder && (!validUUIDv7(slot) || slot != ticket.ConversationID) {
 		return fmt.Errorf("codex daemon conversation slot is invalid")
 	}
 	if reason := codexDaemonArgumentsReason(ticket.TargetArgv[4:identityIndex]); reason != "" {

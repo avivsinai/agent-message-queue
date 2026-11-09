@@ -139,8 +139,8 @@ func (a AgentPlan) validate() error {
 			return fmt.Errorf("invalid environment key %q", key)
 		}
 	}
-	if a.PreSpawnAcquire && (a.AdapterMode != AdapterModeCapture || a.ConversationID != "") {
-		return fmt.Errorf("pre-spawn acquisition requires capture mode without a planned identity")
+	if a.PreSpawnAcquire && a.AdapterMode != AdapterModeCapture {
+		return fmt.Errorf("pre-spawn acquisition requires capture mode")
 	}
 	seenDynamic := make(map[int]struct{}, len(a.DynamicArgv))
 	// The digest names only a slot's kind, so each identity slot must name

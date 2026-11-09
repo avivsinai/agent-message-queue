@@ -84,6 +84,11 @@ contract. AMQ never starts the daemon or edits saved Codex settings. Otherwise
 the existing embedded launch is retained, and launch output, remote bindings,
 and `doctor --ops` share its `Buzz approvals: terminal only: <reason>` line.
 
+A clear startup state includes an effective `check_for_update_on_startup =
+false`, read from the daemon. AMQ cannot pass `-c` for it, because any
+configuration override makes Codex select the embedded app-server. Set it in
+your Codex config to let managed seats use the shared daemon.
+
 The native execution ticket owns a pre-spawn `thread/start` observation. Its
 `codex_daemon_thread_v1` evidence binds the handle, launch nonce, provider
 version, working directory, physical session identity, socket, and daemon
@@ -130,6 +135,21 @@ the retry or cleanup command.
 Every execution attempt, including recovery, checks inherited native-backend
 exclusions and rechecks hook trust on the bound daemon before publishing routing.
 The other full startup admission probes run during planning and new acquisition.
+
+A conversation resumes on the backend that created it; launch never moves it
+implicitly. A conversation captured by notify resumes embedded. One whose
+capture is `codex_daemon_thread_v1` resumes on the daemon when the daemon is
+eligible, the launch options are admitted, and the running daemon reads the
+thread in the launch directory. A restarted daemon that reads the thread is its
+successor. Otherwise the seat resumes embedded and its terminal-only line names
+the cause. A daemon resume ticket names its thread from creation and asks the
+daemon to create nothing: it skips `identity_requested`, a failed verification
+leaves it `pending`, and the TUI starts only after `codex_daemon_thread_v1`
+evidence for the new generation binds the same thread and routing is published
+again. The conversation record keeps its original evidence. Cleanup and retry of
+an incomplete resume follow the rules above. When the thread is loaded
+and another client is subscribed to it or a turn runs, Codex keeps its running
+settings and warns that the resume settings are ignored.
 
 Prepare authorizes the selected native or embedded identity contract. A daemon
 or sign-in change that changes that selection before Apply requires a new

@@ -442,3 +442,144 @@ func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 		})
 	}
 }
+
+// A conversation acquired on the daemon resumes there under a new launch
+// generation: same thread, admitted settings, routing published again.
+func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
+	root, project, executable, amq := nativeSeat(t)
+	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"
+	fresh, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+		SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+	if err != nil || !fresh.PreSpawnAcquire {
+		t.Fatalf("fresh plan = %#v, %v", fresh, err)
+	}
+	executeNative(t, root, fresh, true)
+	conversation, err := launch.LoadConversation(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := launch.ConversationCaptureSource(root, conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
+	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled, CommittedArgs: settings},
+		Conversation: conversation.Identity, CaptureSource: source})
+	if err != nil || !resumed.PreSpawnAcquire || resumed.TerminalOnlyReason != "" {
+		t.Fatalf("daemon-bound conversation resumed embedded: %#v, %v", resumed, err)
+	}
+	prepared, argv := executeNative(t, root, resumed, false)
+	expected := append(append([]string{executable, "resume", "-C", project}, settings...), thread)
+	if prepared.ConversationID != thread || !slices.Equal(argv, expected) {
+		t.Fatalf("resume argv = %q (thread %s), want %q", argv, prepared.ConversationID, expected)
+	}
+	if after, err := launch.LoadConversation(root, "codex"); err != nil || after.LaunchNonce != conversation.LaunchNonce || !slices.Equal(after.EvidenceRefs, conversation.EvidenceRefs) {
+		t.Fatalf("resume rewrote the daemon binding: %#v, %v", after, err)
+	}
+	if record, err := codexidentity.Lookup(thread, os.Getenv("CODEX_HOME")); err != nil || record.Me != "codex" {
+		t.Fatalf("resumed routing = %#v, %v", record, err)
+	}
+}
+
+// Each conversation keeps its backend unless the daemon proves the thread.
+func TestUnprovenCodexDaemonResumeStaysEmbedded(t *testing.T) {
+	for _, row := range []struct {
+		name, thread, reason string
+		source               launch.CaptureEvidenceSource
+	}{
+		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1"},
+		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "the running Codex daemon does not know this conversation's thread", launch.CodexDaemonThreadV1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root, project, executable, amq := nativeSeat(t)
+			plan, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled},
+				Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: row.thread}, CaptureSource: row.source})
+			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != row.reason || plan.Argv[len(plan.Argv)-1] != row.thread {
+				t.Fatalf("resume plan = %#v, %v", plan, err)
+			}
+		})
+	}
+}
+
+func nativeSeat(t *testing.T) (*fsq.DeliveryRoot, string, string, string) {
+	t.Helper()
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("HOME", t.TempDir())
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(project, "queue")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root, project, nativeProvider(t), amq
+}
+
+// executeNative writes plan's ticket, as reconcile does, and runs the managed
+// execution boundary to its resolved provider argv.
+func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, fresh bool) (launch.ExecutionTicket, []string) {
+	t.Helper()
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: plan.LaunchNonce,
+		Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion, ConversationID: plan.ConversationID,
+		PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
+		ProjectRoot: plan.Cwd, SessionRoot: root.Base(), Cwd: plan.Cwd, ProviderExecutable: plan.Argv[0], AMQExecutable: amq,
+		TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := launch.AcquireLease(root, plan.LaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles(plan.Handle); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		if err := launch.WriteConversation(root, lease, launch.ConversationRecord{Version: launch.ConversationVersion,
+			Handle: plan.Handle, State: launch.CapturePending, ProviderVersion: launch.CodexDaemonVersion, LaunchNonce: plan.LaunchNonce}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"AM_ROOT=" + root.Base(), "AM_BASE_ROOT=" + root.Base(), "AM_ME=" + plan.Handle, "AM_ROOT_ID=" + ticket.SessionIdentity, "AM_BASE_ROOT_ID=" + ticket.SessionIdentity}
+	prepared, err := launch.PrepareExecution(root, plan.Handle, plan.LaunchNonce, launch.ExecutionEnvelope{Cwd: plan.Cwd, AMQExecutable: amq,
+		ProviderExecutable: plan.Argv[0], TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
+		RecordIdentity: func(acquired launch.ExecutionTicket) error { return RecordIdentity(root, acquired, env) }})
+	if err != nil || prepared.State != launch.ExecutionAcknowledged {
+		t.Fatalf("prepare = %#v, %v", prepared, err)
+	}
+	argv, err := launch.ResolveExecutionArgv(prepared, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared, argv
+}

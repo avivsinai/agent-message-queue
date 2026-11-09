@@ -1101,6 +1101,6 @@ with `■ ended (mirror off)`, and that message is not updated again.
 
 Codex needs no hook: Codex approvals reach Buzz only for a session on the
 Codex app-server (`codex app-server daemon start`, then `codex --remote
-unix://`), and a plain `codex` TUI session answers them in the terminal. A hook
+unix://`), and a plain `codex` TUI session answers them in the terminal. Managed Codex seats use the shared daemon when check_for_update_on_startup = false is set in your Codex config. A hook
 never blocks a dialog it cannot show: the terminal decides. [Approvals from Buzz](../../docs/amq-remote-approvals.md)
 describes the request, answer and resolution files.

@@ -206,6 +206,36 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 	return nil
 }
 
+// ConversationCaptureSource names the provider capture that made record
+// resumable. A legacy record without evidence has none.
+func ConversationCaptureSource(root *fsq.DeliveryRoot, record ConversationRecord) (CaptureEvidenceSource, error) {
+	for _, id := range record.EvidenceRefs {
+		evidence, _, err := ReadEvidence(root, id)
+		if err != nil {
+			return "", err
+		}
+		if evidence.Kind != EvidenceProviderCapture {
+			continue
+		}
+		var envelope struct {
+			Source CaptureEvidenceSource `json:"source"`
+		}
+		if err := json.Unmarshal(evidence.Payload, &envelope); err != nil {
+			return "", fmt.Errorf("decode conversation capture source: %w", err)
+		}
+		return envelope.Source, nil
+	}
+	return "", nil
+}
+
+func planResume(adapter HarnessAdapter, root *fsq.DeliveryRoot, base PlanRequest, conversation ConversationRecord) (AgentPlan, error) {
+	source, err := ConversationCaptureSource(root, conversation)
+	if err != nil {
+		return AgentPlan{}, err
+	}
+	return adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity, CaptureSource: source})
+}
+
 func ConversationPath(sessionRoot, handle string) string {
 	return filepath.Join(sessionRoot, conversationDir, handle+".json")
 }

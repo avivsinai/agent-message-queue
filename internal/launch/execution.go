@@ -322,7 +322,7 @@ func (ticket ExecutionTicket) Validate() error {
 		case DynamicArgConversationID:
 			conversationSlots++
 			expected := ticket.ConversationID
-			if ticket.PreSpawnAcquire {
+			if ticket.PreSpawnAcquire && !CodexDaemonResume(ticket) {
 				expected = preSpawnConversationPlaceholder
 			}
 			if expected == "" || ticket.TargetArgv[dynamic.Index] != expected {
@@ -359,7 +359,7 @@ func (ticket ExecutionTicket) Validate() error {
 	}
 	switch ticket.State {
 	case ExecutionPending:
-		if ticket.PreSpawnAcquire && (ticket.ConversationID != "" || len(ticket.EvidenceRefs) != 0) {
+		if ticket.PreSpawnAcquire && (ticket.ConversationID != "" && !CodexDaemonResume(ticket) || len(ticket.EvidenceRefs) != 0) {
 			return fmt.Errorf("pending pre-spawn ticket must not contain acquired identity")
 		}
 	case ExecutionIdentityRequested:
@@ -491,7 +491,10 @@ func writeExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, ticket Execution
 			template := current
 			template.State, template.Reason = ExecutionPending, ""
 			template.TargetEnv = cloneExecutionEnv(template.TargetEnv)
-			template.ConversationID, template.EvidenceRefs = "", nil
+			template.EvidenceRefs = nil
+			if !CodexDaemonResume(template) {
+				template.ConversationID = ""
+			}
 			if !reflect.DeepEqual(template, ticket) {
 				return fmt.Errorf("codex daemon execution template changed during recovery")
 			}
@@ -649,11 +652,14 @@ func CompareAndSwapExecutionIdentity(root *fsq.DeliveryRoot, lease *Lease, handl
 		return ticket, fmt.Errorf("execution ticket nonce does not match launch lease")
 	}
 	expected := ExecutionPending
-	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire && !CodexDaemonResume(ticket) {
 		expected = ExecutionIdentityRequested
 	}
 	if ticket.State != expected {
 		return ticket, fmt.Errorf("execution ticket state is %q, want %q", ticket.State, expected)
+	}
+	if CodexDaemonResume(ticket) && conversationID != ticket.ConversationID {
+		return ticket, fmt.Errorf("codex daemon resume observed thread %s, want %s", conversationID, ticket.ConversationID)
 	}
 	ticket.ConversationID = conversationID
 	ticket.EvidenceRefs = []string{evidenceRef}
@@ -814,7 +820,9 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 			if ticket.State == ExecutionIdentityRequested {
 				return ticket, uncertainCodexAcquisition(ticket)
 			}
-			if ticket.Provider == CodexProvider {
+			// A resume asks the daemon to create nothing, so its attempt has
+			// no uncertain window and stays pending until the thread is verified.
+			if ticket.Provider == CodexProvider && !CodexDaemonResume(ticket) {
 				ticket, err = CompareAndSwapExecutionTicket(root, lease, ticket.Handle, ExecutionPending, ExecutionIdentityRequested, "identity_requested")
 				if err != nil {
 					return ticket, err
@@ -901,6 +909,14 @@ func promotePreSpawnConversation(root *fsq.DeliveryRoot, lease *Lease, ticket Ex
 	record, err := LoadConversation(root, ticket.Handle)
 	if err != nil {
 		return err
+	}
+	if CodexDaemonResume(ticket) {
+		// A resumed seat runs the captured thread under a new launch nonce;
+		// the record keeps the evidence that binds the thread to the daemon.
+		if record.State != CaptureReady || record.Identity != (ConversationIdentity{Provider: ticket.Provider, ID: ticket.ConversationID}) {
+			return fmt.Errorf("ready conversation does not match the resumed daemon thread")
+		}
+		return nil
 	}
 	if record.State == CaptureReady {
 		if record.Identity.Provider != ticket.Provider || record.Identity.ID != ticket.ConversationID ||

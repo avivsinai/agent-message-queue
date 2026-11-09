@@ -214,6 +214,9 @@ func validateInitialInputText(value string) error {
 type ResumeRequest struct {
 	PlanRequest
 	Conversation ConversationIdentity
+	// CaptureSource names the evidence that made the conversation resumable,
+	// which fixes the backend the conversation runs on.
+	CaptureSource CaptureEvidenceSource
 }
 
 type ConversationIdentity struct {
