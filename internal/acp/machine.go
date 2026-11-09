@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -171,6 +172,25 @@ func (s *Server) retiredDir() string { return filepath.Join(s.channelDir(), "ret
 // loadChannelRecord reads one record. found is false only when there is no
 // file; a file that cannot be read or parsed is an error, never first use.
 func loadChannelRecord(path string) (r channelRecord, found bool, err error) {
+	c, err := recordCache.Load(path, func() (cachedRecord, error) {
+		r, found, err := decodeChannelRecord(path)
+		return cachedRecord{r, found}, err
+	})
+	r = c.r
+	r.Orphans = slices.Clone(r.Orphans)
+	return r, c.found || err != nil, err
+}
+
+type cachedRecord struct {
+	r     channelRecord
+	found bool
+}
+
+// recordCache keeps each decoded channel record while its file is
+// unchanged: the machine worker reads every session's record on each tick.
+var recordCache = fsq.NewVersionCache[cachedRecord](1024)
+
+func decodeChannelRecord(path string) (r channelRecord, found bool, err error) {
 	raw, err := readSmallRegular(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return channelRecord{}, false, nil

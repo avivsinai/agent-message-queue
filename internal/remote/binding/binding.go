@@ -477,6 +477,14 @@ func read(path string) (Binding, error) {
 	if !noFollowSupported {
 		return Binding{}, errors.New("the binding needs a no-follow file open, which this platform lacks")
 	}
+	return readCache.Load(path, func() (Binding, error) { return decode(path) })
+}
+
+// readCache keeps each decoded binding file while it is unchanged: the
+// Buzz agent and serve read every binding on each sweep.
+var readCache = fsq.NewVersionCache[Binding](256)
+
+func decode(path string) (Binding, error) {
 	raw, err := fsq.ReadRegularNoFollowBounded(path, maxBindingBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return Binding{}, ErrNone

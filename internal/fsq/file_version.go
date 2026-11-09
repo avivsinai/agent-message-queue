@@ -1,6 +1,9 @@
 package fsq
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // FileVersionSettle is how old a file's last change must be before its
 // version may stand for its content. A write lands in a timestamp tick that
@@ -22,4 +25,51 @@ type FileVersion struct {
 	mode         uint32
 	size         int64
 	mtime, ctime int64
+}
+
+// VersionCache holds values decoded from files, each reused while its file
+// keeps the stable version it had before it was read. Only successful reads
+// are kept, and a path whose version is not stable is always read again. A
+// cache that reaches its bound starts over, so it never grows past it.
+type VersionCache[T any] struct {
+	mu  sync.Mutex
+	max int
+	m   map[string]versioned[T]
+}
+
+type versioned[T any] struct {
+	v   FileVersion
+	val T
+}
+
+// NewVersionCache returns a cache of at most max paths.
+func NewVersionCache[T any](max int) *VersionCache[T] {
+	return &VersionCache[T]{max: max, m: map[string]versioned[T]{}}
+}
+
+// Load returns path's cached value while its version is stable and
+// unchanged, else the result of read, kept when read succeeds. The version is
+// taken before read, so a write during read leaves a version that differs
+// next time.
+func (c *VersionCache[T]) Load(path string, read func() (T, error)) (T, error) {
+	v, stable, err := LstatVersion(path, time.Now())
+	stable = stable && err == nil
+	c.mu.Lock()
+	hit, ok := c.m[path]
+	c.mu.Unlock()
+	if stable && ok && hit.v == v {
+		return hit.val, nil
+	}
+	val, err := read()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil || !stable {
+		delete(c.m, path)
+		return val, err
+	}
+	if len(c.m) >= c.max {
+		clear(c.m)
+	}
+	c.m[path] = versioned[T]{v: v, val: val}
+	return val, nil
 }

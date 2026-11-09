@@ -1330,3 +1330,105 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 		t.Fatalf("record = %+v err=%v stderr=%q, want harness pi", rec, err, stderr.String())
 	}
 }
+
+// Live check of a Codex --remote seat (2026-11-08): a session that is no AMQ
+// participant ran attach --self --native and was refused with "--root or
+// AM_ROOT is required". With no root, a native attach uses the machine root.
+func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
+	home := shortHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	root, err := binding.EnsureMachineRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("pi:s1", "e_1"))
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
+	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	var stderr bytes.Buffer
+	if code, err := attach([]string{"--self", "--native", "--json"}, io.Discard, &stderr); code != 0 || err != nil {
+		t.Fatalf("attach --native with no root: code=%d err=%v stderr=%q", code, err, stderr.String())
+	}
+	all, err := binding.List()
+	if err != nil || len(all) != 1 || !sameRoot(all[0].Root, root) {
+		t.Fatalf("bindings = %+v, %v; want one bound through the machine root %s", all, err, root)
+	}
+}
+
+// Review of the implicit native root: a symlinked machine root was accepted,
+// because the default used the path without EnsureMachineRoot's checks.
+func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
+	home := shortHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	elsewhere := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".amq", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, ".amq", "remote", "root")); err != nil {
+		t.Fatal(err)
+	}
+	savedFind := findSelf
+	t.Cleanup(func() { findSelf = savedFind })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+	}
+	_, err := attach([]string{"--self", "--native", "--json"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "is not a plain directory") {
+		t.Fatalf("attach through a symlinked machine root: err=%v; want the symlink refusal", err)
+	}
+}
+
+// shortHome is a HOME short enough that the machine root's endpoint socket
+// fits the Unix sun_path limit. The default temp directory on a macOS CI
+// runner is too deep (macOS CI on PR #1415: a 117-byte socket path).
+func shortHome(t *testing.T) string {
+	t.Helper()
+	base := ""
+	if runtime.GOOS != "windows" {
+		base = "/tmp"
+	}
+	home, err := os.MkdirTemp(base, "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}

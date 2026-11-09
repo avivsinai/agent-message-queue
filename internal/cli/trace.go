@@ -41,6 +41,7 @@ type traceResult struct {
 	Root         string              `json:"root"`
 	RootIdentity string              `json:"root_identity,omitempty"`
 	Legs         map[string]traceLeg `json:"legs"`
+	Follow       *traceFollow        `json:"follow,omitempty"`
 }
 
 type traceLeg struct {
@@ -120,13 +121,27 @@ func runTrace(args []string) error {
 	common := &commonFlags{flagSet: fs}
 	registerImplicitRootFlag(fs, &common.Root, "Root directory for the queue")
 	fs.BoolVar(&common.JSON, "json", false, "Emit JSON output")
-	usage := usageWithFlags(fs, "amq trace <message-id> [options]",
+	follow := fs.Bool("follow", false, "Also find each recipient's copy and receipt in the roots the header routes to")
+	from := fs.String("from", "", "With --follow: read only this sender's outbox copy instead of scanning the root")
+	usage := usageWithFlags(fs, "amq trace <message-id> [--follow [--from <sender>]] [options]",
 		"Join current on-disk evidence for one message without mutating the queue.",
 		"",
 		"It reports message copies, route fields, visible delivery artifacts, DLQ entries,",
 		"delivery receipts, owed receipts (consumed, receipt not written yet; stage \"owed\"),",
 		"thread references, and durable agent-owned notification write attempts.",
 		"Notification evidence never proves that a TUI or person saw, displayed, or submitted it.",
+		"",
+		"--follow reads the sender's outbox copy and searches the roots its header routes to:",
+		"the sender's root, the sessions of its project (reply_to), or the peer projects of",
+		"its .amqrc and their sessions (reply_project). For each recipient it reports the",
+		"root and session, the delivery (new, cur, dlq) and the receipt (drained, dlq, owed,",
+		"or unknown when a receipt file cannot be read as a receipt).",
+		"The session is the one whose root holds the receipt. A root that cannot be read is",
+		"reported, and a recipient it might hold is unknown. --from <sender> reads",
+		"agents/<sender>/outbox/sent/<id>.md directly and skips the scan of the root.",
+		"For a request (review_request, question, todo) --follow also finds the replies whose",
+		"refs name it, in the recipient's outbox or the requester's inbox, and reports whether",
+		"each reply was delivered to the requester and drained.",
 	)
 
 	messageID := ""
@@ -151,13 +166,30 @@ func runTrace(args []string) error {
 	if messageID == "" {
 		return UsageError("message id must not be blank")
 	}
+	if *from != "" && !*follow {
+		return UsageError("--from requires --follow")
+	}
+	if *from != "" {
+		if err := fsq.ValidateHandle(*from); err != nil {
+			return UsageError("--from: %v", err)
+		}
+	}
 	if strings.ContainsAny(messageID, `/\`) || messageID == "." || messageID == ".." {
 		return UsageError("invalid message id %q", messageID)
 	}
 
 	root := resolveRoot(common.Root)
 	common.warnRootOverride()
-	result := collectTrace(root, messageID)
+	var result traceResult
+	var targets []traceLocatedHeader
+	if *from != "" {
+		result, targets = collectTraceFrom(root, messageID, *from)
+	} else {
+		result, targets = collectTrace(root, messageID)
+	}
+	if *follow {
+		result.Follow = followTraceTargets(root, messageID, targets)
+	}
 	if identity, err := resolveTreeIdentityToken(root); err == nil {
 		result.RootIdentity = identity
 	}
@@ -175,16 +207,43 @@ func runTrace(args []string) error {
 	return nil
 }
 
-func collectTrace(root, messageID string) traceResult {
+func collectTrace(root, messageID string) (traceResult, []traceLocatedHeader) {
+	return runTraceCollector(root, messageID, traceLegOrder, func(c *traceCollector) {
+		c.agents = c.listAgents()
+		c.scanMessages()
+		c.scanDLQ()
+		c.scanReceipts()
+		c.scanNotificationAttempts()
+		c.joinHeaders()
+	})
+}
+
+// collectTraceFrom reads only sender's outbox copy. Its legs are message and
+// route: the legs a root scan would fill are absent, never no_evidence.
+func collectTraceFrom(root, messageID, sender string) (traceResult, []traceLocatedHeader) {
+	return runTraceCollector(root, messageID, []string{"message", "route"}, func(c *traceCollector) {
+		path := filepath.Join("agents", sender, "outbox", "sent", messageID+".md")
+		header, err := c.readHeader(path)
+		switch {
+		case os.IsNotExist(err):
+		case err != nil:
+			c.addError("message", fmt.Sprintf("read %s: %v", c.relative(path), err))
+		case header.ID == messageID:
+			c.addTarget(traceLocatedHeader{header: header, path: c.relative(path), agent: sender, area: "outbox", box: "sent"}, "message_file")
+		}
+	})
+}
+
+func runTraceCollector(root, messageID string, legs []string, scan func(*traceCollector)) (traceResult, []traceLocatedHeader) {
 	collector := &traceCollector{
 		root:       root,
 		messageID:  messageID,
-		legs:       make(map[string]traceLeg, len(traceLegOrder)),
+		legs:       make(map[string]traceLeg, len(legs)),
 		legErrors:  make(map[string][]string),
 		seenRoutes: map[string]bool{},
 		seenThread: map[string]bool{},
 	}
-	for _, name := range traceLegOrder {
+	for _, name := range legs {
 		collector.legs[name] = traceLeg{Evidence: []traceEvidence{}}
 	}
 
@@ -192,25 +251,44 @@ func collectTrace(root, messageID string) traceResult {
 	if err != nil {
 		collector.addRootError(err)
 		collector.finishLegs()
-		return collector.result()
+		return collector.result(), nil
 	}
 	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
 	if err != nil {
 		collector.addRootError(err)
 		collector.finishLegs()
-		return collector.result()
+		return collector.result(), nil
 	}
 	collector.deliveryRoot = deliveryRoot
 	defer func() { _ = deliveryRoot.Close() }()
 
-	collector.agents = collector.listAgents()
-	collector.scanMessages()
-	collector.scanDLQ()
-	collector.scanReceipts()
-	collector.scanNotificationAttempts()
-	collector.joinHeaders()
+	scan(collector)
 	collector.finishLegs()
-	return collector.result()
+	return collector.result(), collector.targets
+}
+
+// followTraceTargets follows the message from its sender's outbox copy; the
+// root that holds that copy is the root the header's route starts from.
+func followTraceTargets(root, messageID string, targets []traceLocatedHeader) *traceFollow {
+	for _, target := range targets {
+		if target.area != "outbox" || target.agent != target.header.From {
+			continue
+		}
+		h := target.header
+		f := newFollower()
+		defer f.Close()
+		follow := f.follow(followedMessage{
+			ID: h.ID, From: h.From, Kind: h.Kind, To: h.To, ReplyTo: h.ReplyTo, ReplyProject: h.ReplyProject, Root: root,
+		})
+		return &follow
+	}
+	return &traceFollow{
+		MessageID:  messageID,
+		Status:     "unknown",
+		Detail:     "no sender outbox copy in this root; rerun in the sender's root with --from <sender>",
+		Searched:   []followRoot{},
+		Recipients: []followRecipient{},
+	}
 }
 
 func (c *traceCollector) result() traceResult {
@@ -676,7 +754,10 @@ func (c *traceCollector) finishLegs() {
 		},
 	}
 	for _, name := range traceLegOrder {
-		leg := c.legs[name]
+		leg, ok := c.legs[name]
+		if !ok {
+			continue
+		}
 		if errorsForLeg := c.legErrors[name]; len(errorsForLeg) > 0 {
 			leg.Status = "error"
 			leg.Detail = strings.Join(errorsForLeg, "; ")
@@ -743,7 +824,9 @@ func (c *traceCollector) addError(legName, detail string) {
 
 func (c *traceCollector) addRootError(err error) {
 	for _, name := range []string{"message", "dlq", "receipts", "thread", "notification"} {
-		c.addError(name, fmt.Sprintf("open root: %v", err))
+		if _, ok := c.legs[name]; ok {
+			c.addError(name, fmt.Sprintf("open root: %v", err))
+		}
 	}
 }
 
@@ -778,7 +861,10 @@ func writeTraceText(result traceResult) error {
 		return err
 	}
 	for _, name := range traceLegOrder {
-		leg := result.Legs[name]
+		leg, ok := result.Legs[name]
+		if !ok {
+			continue
+		}
 		line := fmt.Sprintf("  %-12s %s", name, leg.Status)
 		if leg.State != "" {
 			line += " [" + leg.State + "]"
@@ -804,6 +890,9 @@ func writeTraceText(result traceResult) error {
 				return err
 			}
 		}
+	}
+	if result.Follow != nil {
+		return writeFollowText(*result.Follow)
 	}
 	return nil
 }

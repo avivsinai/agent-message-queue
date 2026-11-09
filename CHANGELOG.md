@@ -8,6 +8,35 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.137.4](https://github.com/avivsinai/agent-message-queue/compare/v0.137.3...v0.137.4) (2026-11-09)
+
+
+### Features
+
+* **remote:** a slash command typed in Buzz runs in the session ([#1418](https://github.com/avivsinai/agent-message-queue/issues/1418)) ([7a313ac](https://github.com/avivsinai/agent-message-queue/commit/7a313acb39670c6a28d576e2a0b8072fa0b0fd5d))
+
+## [0.137.3](https://github.com/avivsinai/agent-message-queue/compare/v0.137.2...v0.137.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **remote:** a Buzz turn's answer shows once in its channel ([#1420](https://github.com/avivsinai/agent-message-queue/issues/1420)) ([c22ec87](https://github.com/avivsinai/agent-message-queue/commit/c22ec872373f6d30a406557cdd10e94d1b6e25df))
+
+## [0.137.2](https://github.com/avivsinai/agent-message-queue/compare/v0.137.1...v0.137.2) (2026-11-09)
+
+
+### Features
+
+* **receipt:** trace and receipts show an owed receipt ([#1413](https://github.com/avivsinai/agent-message-queue/issues/1413)) ([c12a097](https://github.com/avivsinai/agent-message-queue/commit/c12a0972e0595cbed3fc7ac39a617b8140ba8c3d))
+* **route:** route explain names its source; route peers shows reply-back ([#1414](https://github.com/avivsinai/agent-message-queue/issues/1414)) ([d932411](https://github.com/avivsinai/agent-message-queue/commit/d9324115f87bcb3a3ccadc7f09bc927f21f9314d))
+* **trace:** trace and thread open follow a message across projects ([#1417](https://github.com/avivsinai/agent-message-queue/issues/1417)) ([f782b8a](https://github.com/avivsinai/agent-message-queue/commit/f782b8a980c7d98d45a665fdff1cdd507756148b))
+
+
+### Bug Fixes
+
+* **acp:** the in-doubt final-post line does not claim a crash ([#1416](https://github.com/avivsinai/agent-message-queue/issues/1416)) ([f2ae8ea](https://github.com/avivsinai/agent-message-queue/commit/f2ae8eab756a3c941b7d8bf10e1ea26269f7246c))
+* **remote:** attach --self --native with no root uses the machine root ([#1415](https://github.com/avivsinai/agent-message-queue/issues/1415)) ([7535a1a](https://github.com/avivsinai/agent-message-queue/commit/7535a1a620381d7d9693b30dd90b11b3b42e43c6))
+
 ## [0.137.1](https://github.com/avivsinai/agent-message-queue/compare/v0.137.0...v0.137.1) (2026-11-08)
 
 

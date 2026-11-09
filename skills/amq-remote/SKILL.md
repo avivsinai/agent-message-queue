@@ -1,6 +1,6 @@
 ---
 name: amq-remote
-version: 0.137.1 # x-release-please-version
+version: 0.137.4 # x-release-please-version
 description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
 metadata:
   short-description: Reach this agent from Buzz
@@ -134,6 +134,8 @@ command's own message. Do not work around a refusal.
 5. Add one line for the carrier:
    - Default: "Buzz messages arrive in this agent's AMQ inbox. Stop in Buzz
      stops waiting; a delivered message may still be acted on."
+   - Claude in mailbox mode: "In Buzz, a line starting with / is typed into
+     the session like Remote Control; it waits while a dialog is open."
    - `--native`: "A message sent while this session is busy waits. Buzz Stop
      cannot interrupt a Claude turn."
    - Claude with the hook installed: "Every approval dialog of this session

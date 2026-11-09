@@ -1064,8 +1064,8 @@ the turn ended (`✓`; `✗ interrupted`, `unfinished`, `error` or `refused`;
 `■ ended` when the session ended or was cleared), the tools it used by name
 and count, and how long it ran. Tool input never leaves the machine. The
 answer is all the text of the turn's last message; one longer than 3,500
-bytes is cut and says so. A turn that answered Buzz keeps its answer too,
-although the reply is also a thread reply under the Buzz message. A shell
+bytes is cut and says so. A turn that answered Buzz shows the first two
+lines only: the answer is the carrier's own post in the same channel. A shell
 command typed with `!` shows only
 when the model answers it, and never with the command itself; local slash
 commands and a subagent's own steps are not shown. A background task's

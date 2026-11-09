@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
@@ -37,6 +38,9 @@ type threadOpenResult struct {
 	Sessions    []string               `json:"sessions"`
 	Obligations []threadOpenObligation `json:"obligations"`
 	Coverage    threadOpenCoverage     `json:"coverage"`
+	// Follow is set by --follow: one entry per listed opener and per
+	// outbound routed opener, as trace --follow reports it.
+	Follow []traceFollow `json:"follow,omitempty"`
 }
 
 type threadOpenObligation struct {
@@ -147,11 +151,16 @@ func runThreadOpen(args []string) error {
 	maxAgeFlag := fs.String("max-age", "14d", "Ignore openers older than this (e.g. 14d, 36h; 0 = read every file)")
 	limitFlag := fs.Int("limit", 0, "List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)")
 	schemaFlag := fs.Int("json-schema", 1, "JSON schema version: 1 (requires --json)")
+	followFlag := fs.Bool("follow", false, "Follow each listed request and each request routed outside the scan, as trace --follow does")
 
-	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [options]",
+	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [--follow] [options]",
 		"List open review requests, questions, and todos per thread.",
 		"An obligation closes when its owner replies with the expected kind or a closing label.",
-		"Read-only: it never moves a message, writes a receipt, or reads a body.")
+		"Read-only: it never moves a message, writes a receipt, or reads a body.",
+		"",
+		"--follow adds, for each listed request and each request sent to a root outside",
+		"the scan (outbound_routed_openers), where it was delivered and drained and whether",
+		"a reply came back and was drained, with the result of 'amq trace <id> --follow'.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -274,11 +283,65 @@ func runThreadOpen(args []string) error {
 	for _, ob := range open {
 		result.Obligations = append(result.Obligations, obligationJSON(ob, now))
 	}
+	if *followFlag {
+		result.Follow = followOpeners(scanRoots, scan.Entries, open, red.OutboundOpeners)
+	}
 
 	if common.JSON {
 		return writeJSON(os.Stdout, result)
 	}
 	return writeThreadOpenText(result)
+}
+
+// followOpeners follows each listed opener, then each routed opener, once,
+// from the scan root that holds its sender's outbox copy.
+func followOpeners(scanRoots []thread.ScanRoot, entries []thread.Entry, open []*thread.Obligation, routed []thread.RoutedOpener) []traceFollow {
+	rootOf := map[string]string{}
+	for _, r := range scanRoots {
+		rootOf[r.Session] = r.Root
+	}
+	byID := map[string]*thread.Entry{}
+	for i := range entries {
+		byID[entries[i].ID] = &entries[i]
+	}
+	ids := []string{}
+	for _, ob := range open {
+		ids = append(ids, ob.Opener.ID)
+	}
+	for _, r := range routed {
+		ids = append(ids, r.ID)
+	}
+	f := newFollower()
+	defer f.Close()
+	out := []traceFollow{}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, followOpener(f, byID[id], id, rootOf))
+	}
+	return out
+}
+
+func followOpener(f *follower, entry *thread.Entry, id string, rootOf map[string]string) traceFollow {
+	if entry != nil {
+		for _, occ := range entry.Occurrences {
+			root, ok := rootOf[occ.Session]
+			if !ok || occ.Dir != fsq.MailboxOutboxSent || occ.Agent != entry.From {
+				continue
+			}
+			return f.follow(followedMessage{
+				ID: entry.ID, From: entry.From, Kind: entry.Kind, To: entry.To,
+				ReplyTo: entry.ReplyTo, ReplyProject: entry.ReplyProject, Root: root,
+			})
+		}
+	}
+	return traceFollow{
+		MessageID: id, Status: "unknown", Detail: "no sender outbox copy in the scanned roots",
+		Searched: []followRoot{}, Recipients: []followRecipient{},
+	}
 }
 
 // threadOpenScanRoot is the root thread open scans without --all-sessions.
@@ -481,6 +544,14 @@ func writeThreadOpenText(result threadOpenResult) error {
 		}
 		age := (time.Duration(ob.AgeSeconds) * time.Second).Round(time.Minute)
 		if err := writeStdout("%s  %s owes %s  %s  %s  %s\n", age, participantLabel(ob.OwedBy), participantLabel(ob.OwedTo), ob.Opener.Kind, ob.State, subject); err != nil {
+			return err
+		}
+	}
+	for _, follow := range result.Follow {
+		if err := writeStdout("request %s:\n", follow.MessageID); err != nil {
+			return err
+		}
+		if err := writeFollowText(follow); err != nil {
 			return err
 		}
 	}
