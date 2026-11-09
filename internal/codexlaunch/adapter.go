@@ -16,7 +16,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -136,20 +135,30 @@ func provenanceRefusal(reason string) error {
 		launch.ErrCodexConversationProvenance, reason)
 }
 
-func codexHome() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+// codexHome reads CODEX_HOME once, the way Codex 0.167 reads it (codex-rs
+// utils/home-dir find_codex_home): a nonempty value taken literally and
+// canonicalized, otherwise $HOME/.codex as written. canonical binds evidence
+// and probes; spelled is the home Codex derives its default control socket
+// from, which the seat's --remote must equal.
+func codexHome() (canonical, spelled string, err error) {
+	if set := os.Getenv("CODEX_HOME"); set != "" {
+		absolute, err := filepath.Abs(set)
+		if err != nil {
+			return "", "", err
+		}
+		canonical, err := filepath.EvalSymlinks(absolute)
+		return canonical, canonical, err
 	}
-	absolute, err := filepath.Abs(harness.CodexHome(home))
+	user, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	canonical, err := filepath.EvalSymlinks(absolute)
+	spelled = filepath.Join(user, ".codex")
+	canonical, err = filepath.EvalSymlinks(spelled)
 	if errors.Is(err, os.ErrNotExist) {
-		return absolute, nil
+		return spelled, spelled, nil
 	}
-	return canonical, err
+	return canonical, spelled, err
 }
 
 // EmbeddedEnvironment reports provider exclusions shared by ordinary TUI
@@ -175,7 +184,7 @@ func daemonEndpoint() endpoint {
 	if EmbeddedEnvironment() {
 		return endpoint{reason: "the configured executor requires an embedded app-server"}
 	}
-	home, err := codexHome()
+	home, spelled, err := codexHome()
 	if err != nil {
 		return endpoint{reason: "Codex home cannot be verified"}
 	}
@@ -186,36 +195,18 @@ func daemonEndpoint() endpoint {
 	if err != nil {
 		return endpoint{reason: "Codex app-server daemon cannot be verified"}
 	}
-	remote, err := codexRemoteSocket()
-	if err != nil || !verifiedDaemonLink(remote) {
+	remote := filepath.Join(spelled, "app-server-control", "app-server-control.sock")
+	if !sameDirectory(filepath.Dir(remote), filepath.Dir(socket)) || !verifiedDaemonLink(remote) {
 		return endpoint{reason: "the Codex daemon socket is not the verified local daemon link"}
 	}
 	return endpoint{home: home, socket: socket, remote: remote}
 }
 
-// codexRemoteSocket spells the control socket as Codex 0.167 does: a set
-// CODEX_HOME canonicalized, otherwise $HOME/.codex as written (codex-rs
-// utils/home-dir find_codex_home). Codex attaches an explicit --remote to its
-// local daemon only when the path equals this one; any other path makes it a
-// remote app-server.
-func codexRemoteSocket() (string, error) {
-	home := os.Getenv("CODEX_HOME")
-	if home != "" {
-		absolute, err := filepath.Abs(home)
-		if err != nil {
-			return "", err
-		}
-		if home, err = filepath.EvalSymlinks(absolute); err != nil {
-			return "", err
-		}
-	} else {
-		user, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		home = filepath.Join(user, ".codex")
-	}
-	return filepath.Join(home, "app-server-control", "app-server-control.sock"), nil
+// sameDirectory reports whether a and b resolve to one directory.
+func sameDirectory(a, b string) bool {
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
 }
 
 // sharedDaemonSocketDirectory is the fixed directory that holds Codex's

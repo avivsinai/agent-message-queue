@@ -26,8 +26,10 @@ import (
 
 // Pro S1 finding 5: recovery could publish routing under a different
 // CODEX_HOME containing the same thread ID and cwd as the acquired thread.
+// Codex review of e56adade (spaced_home): a CODEX_HOME ending in whitespace
+// named one home for probes and evidence and another for --remote.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory"} {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory", "spaced_home"} {
 		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
@@ -63,7 +65,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 					return "0.168.0"
 				}
 				return "0.167.0"
-			}, hooksTrusted: hooksTrusted.Load})
+			}, hooksTrusted: hooksTrusted.Load, spacedHome: scenario == "spaced_home"})
 			t.Setenv("CODEX_HOME", home)
 			executable := nativeProvider(t)
 			amq, err := os.Executable()
@@ -295,6 +297,8 @@ func nativeProvider(t *testing.T) string {
 type nativeDaemonOptions struct {
 	initializeVersion func(int32) string
 	hooksTrusted      func() bool
+	// spacedHome ends the Codex home's name in a space, which Codex keeps.
+	spacedHome bool
 }
 
 // sharedDaemonDir gives the test its own private daemon socket directory,
@@ -327,7 +331,11 @@ var sharedDaemonDirs = map[*testing.T]string{}
 func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) string {
 	var initializes atomic.Int32
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "amq-native-")
+	pattern := "amq-native-"
+	if len(options) != 0 && options[0].spacedHome {
+		pattern = "amq-native-* "
+	}
+	home, err := os.MkdirTemp("/tmp", pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
