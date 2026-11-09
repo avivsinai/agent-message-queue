@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
@@ -188,5 +189,44 @@ func TestResumeByIDTakesTheLaunchingSession(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", thread)
 	if err := adoptCodexThreadIdentity(); err != nil || os.Getenv(envSession) != "s2" {
 		t.Fatalf("err=%v session=%q, want s2", err, os.Getenv(envSession))
+	}
+}
+
+// Field regression (2026-11-09): a macOS update reboot gave the roots
+// another st_dev, so a Codex thread resumed after it could not use the
+// identity coop exec recorded before it.
+func TestCodexThreadIdentitySurvivesReboot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	base := secureTempDirForTest(t)
+	root := filepath.Join(base, "s1")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := buildCoopExecEnvironment(nil, root, "codex", "s1")
+	live := map[string]string{}
+	for i, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		if key == envRootID || key == envBaseRootID {
+			live[key] = value
+			parts := strings.Split(value, ":")
+			parts[2] = "fffe"
+			env[i] = key + "=" + strings.Join(parts, ":")
+		}
+	}
+	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91b1"
+	if err := codexThreadIdentityRecorder(env)(thread); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range identityEnvKeys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if err := adoptCodexThreadIdentity(); err != nil {
+		t.Fatalf("thread recorded before the reboot: %v", err)
+	}
+	if os.Getenv(envRootID) != live[envRootID] || os.Getenv(envBaseRootID) != live[envBaseRootID] {
+		t.Fatalf("adopted pins %q/%q, want the current tokens", os.Getenv(envRootID), os.Getenv(envBaseRootID))
 	}
 }

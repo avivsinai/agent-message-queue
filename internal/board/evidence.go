@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
@@ -58,7 +59,7 @@ func (s Store) stageEvidence(ctx context.Context, blobs [][]byte, messages []Mes
 		if err = json.Unmarshal(data, &identity); err != nil {
 			return err
 		}
-		if (identity.Schema != SnapshotSchema && identity.Schema != v2SnapshotSchema && identity.Schema != legacySnapshotSchema) || identity.BaseRoot != s.BaseRoot || identity.BaseRootID != s.BaseRootID || identity.HostID != s.HostID || identity.ProjectID == "" || identity.Generation == 0 {
+		if (identity.Schema != SnapshotSchema && identity.Schema != v2SnapshotSchema && identity.Schema != legacySnapshotSchema) || identity.BaseRoot != s.BaseRoot || !fsq.SamePersistedTreeIdentity(identity.BaseRootID, s.BaseRootID) || identity.HostID != s.HostID || identity.ProjectID == "" || identity.Generation == 0 {
 			return errors.New("evidence staging identity invalid; recovery required")
 		}
 

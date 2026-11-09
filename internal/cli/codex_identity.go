@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -53,7 +54,8 @@ func adoptCodexThreadIdentity() error {
 	if err != nil {
 		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; start the session again with amq coop exec, or set AM_ROOT and AM_ME explicitly", err)
 	}
-	if err := validateRecordedIdentity(rec); err != nil {
+	rec, err = validateRecordedIdentity(rec)
+	if err != nil {
 		return err
 	}
 	values := map[string]string{
@@ -74,25 +76,38 @@ func adoptCodexThreadIdentity() error {
 // validateRecordedIdentity applies the checks an inherited pin gets, before
 // the identity is published: a valid handle and session, absolute roots in
 // the right relation, well-formed tokens, and trees that are still the ones
-// coop exec pinned.
-func validateRecordedIdentity(rec codexidentity.Record) error {
+// coop exec pinned. The record outlives a reboot, so it returns rec with the
+// current tokens of those same trees for the pins it exports.
+func validateRecordedIdentity(rec codexidentity.Record) (codexidentity.Record, error) {
 	if handle, err := normalizeHandle(rec.Me); err != nil || handle != rec.Me {
-		return ContextMismatchError("this Codex thread's recorded AMQ handle %q is invalid", rec.Me)
+		return rec, ContextMismatchError("this Codex thread's recorded AMQ handle %q is invalid", rec.Me)
 	}
 	want := rec.BaseRoot
 	if rec.Session != "" {
 		if err := validateSessionName(rec.Session); err != nil {
-			return ContextMismatchError("this Codex thread's recorded AMQ session %q is invalid", rec.Session)
+			return rec, ContextMismatchError("this Codex thread's recorded AMQ session %q is invalid", rec.Session)
 		}
 		want = filepath.Join(rec.BaseRoot, rec.Session)
 	}
 	if filepath.Clean(rec.Root) != filepath.Clean(want) {
-		return ContextMismatchError("this Codex thread's recorded AMQ root %s is not %s", rec.Root, want)
+		return rec, ContextMismatchError("this Codex thread's recorded AMQ root %s is not %s", rec.Root, want)
 	}
 	if !validTreeIdentityToken(rec.RootID) || !validTreeIdentityToken(rec.BaseRootID) {
-		return ContextMismatchError("this Codex thread's recorded AMQ identity tokens are malformed")
+		return rec, ContextMismatchError("this Codex thread's recorded AMQ identity tokens are malformed")
 	}
-	return verifyRootUnderBase(rec.BaseRoot, rec.BaseRootID, rec.Session, rec.Root, rec.RootID)
+	rec.BaseRootID = currentPersistedToken(rec.BaseRoot, rec.BaseRootID)
+	rec.RootID = currentPersistedToken(rec.Root, rec.RootID)
+	return rec, verifyRootUnderBase(rec.BaseRoot, rec.BaseRootID, rec.Session, rec.Root, rec.RootID)
+}
+
+// currentPersistedToken returns the current token of path when stored, a
+// token written before a reboot, still names the same tree; otherwise stored,
+// which the exact pin check then refuses.
+func currentPersistedToken(path, stored string) string {
+	if current, err := resolveTreeIdentityToken(path); err == nil && fsq.SamePersistedTreeIdentity(stored, current) {
+		return current
+	}
+	return stored
 }
 
 // codexThreadIdentityRecorder returns the function coop exec calls once, for

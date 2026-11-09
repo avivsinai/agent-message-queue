@@ -1175,3 +1175,56 @@ func TestRequestRowCarriesFirstSentenceAfterPublish(t *testing.T) {
 		t.Fatalf("requests after publish and read = %+v", rows)
 	}
 }
+
+// Field regression (2026-11-09): after a macOS update reboot the base root
+// kept its path and inode but got another st_dev, and every board read failed
+// with "board identity or state invalid; recovery required".
+func TestBoardAcceptsBaseRootRenumberedByReboot(t *testing.T) {
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(identity, ":")
+	parts[2] = "fffe"
+	beforeReboot := strings.Join(parts, ":")
+	if err = lock.WithExclusiveFileLock(filepath.Join(store.Dir, "writer.lock"), func() error {
+		state, _, err := store.readUnlocked(ctx)
+		if err != nil {
+			return err
+		}
+		state.BaseRootID = beforeReboot
+		return store.publish(&state, document{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.Read()
+	if err != nil {
+		t.Fatalf("read after reboot: %v", err)
+	}
+	if err = store.Commit(ctx, Acquisition{ProjectID: state.ProjectID, Input: Input{Dir: base}}); err != nil {
+		t.Fatalf("sync after reboot: %v", err)
+	}
+	doc, err := store.readDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published struct {
+		BaseRootID string `json:"base_root_id"`
+	}
+	if err = json.Unmarshal(doc.data, &published); err != nil || published.BaseRootID != identity {
+		t.Fatalf("published base_root_id = %q, want %q (%v)", published.BaseRootID, identity, err)
+	}
+}

@@ -297,8 +297,8 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if err != nil {
 		return fmt.Errorf("resolve session root physical identity: %w", err)
 	}
-	if (record.ProjectPhysical != "" && record.ProjectPhysical != projectPhysical) ||
-		(record.RootPhysical != "" && record.RootPhysical != rootPhysical) {
+	if (record.ProjectPhysical != "" && !fsq.SamePersistedTreeIdentity(record.ProjectPhysical, projectPhysical)) ||
+		(record.RootPhysical != "" && !fsq.SamePersistedTreeIdentity(record.RootPhysical, rootPhysical)) {
 		return fmt.Errorf("launch journal physical project or session root changed")
 	}
 	if record.RosterDigest != rosterDigest {
