@@ -498,7 +498,8 @@ func TestMirrorRunningPostEndsAfterABacklog(t *testing.T) {
 }
 
 // A doorbell turn whose reply to a Buzz message reached the buzz inbox
-// during the turn shows Buzz as its cause.
+// during the turn shows Buzz as its cause and omits the answer the carrier
+// posts itself.
 func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {
 	f := newMirrorFixture(t)
 	write := func(dir string, m format.Message) {
@@ -517,7 +518,7 @@ func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {
 	write(fsq.AgentInboxCur(f.b.Root, "agent"), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "prompt-1", From: mailboxSender, To: []string{"agent"}, Thread: "buzz-1", Created: f.ts(-5)}, Body: "deploy"})
 	write(fsq.AgentInboxNew(f.b.Root, mailboxSender), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "reply-1", From: "agent", To: []string{mailboxSender}, Thread: "buzz-1", Created: f.ts(1.5), Refs: []string{"prompt-1"}}, Body: "Deployed."})
 	f.add(f.userLine("o1", "p1", 0, harness.Doorbell, nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")), f.assistantLine("m2", 2, "end_turn", textBlock("Replied.")))
-	if got, want := f.tick(2), []string{"post: ▶ Buzz\n✓ 1 tool (Bash) · 2s\nReplied."}; !slices.Equal(got, want) {
+	if got, want := f.tick(2), []string{"post: ▶ Buzz\n✓ 1 tool (Bash) · 2s"}; !slices.Equal(got, want) {
 		t.Fatalf("sent %q; want %q", got, want)
 	}
 }

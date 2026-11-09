@@ -662,6 +662,7 @@ type mirrorClaim struct {
 	Edits    int    `json:"edits,omitempty"`
 	EditedAt int64  `json:"edited_at,omitempty"`
 	Buzz     bool   `json:"buzz,omitempty"`
+	Answered bool   `json:"answered,omitempty"`
 	Checked  bool   `json:"checked,omitempty"`
 	Earlier  int    `json:"earlier,omitempty"`
 }
@@ -806,23 +807,28 @@ func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, ev 
 }
 
 // mirrorFacts applies to turn the facts its post keeps (claim c) and keeps
-// the new ones in c: the dropped backlog turns, and whether the turn
-// answered Buzz. Once a post shows Buzz it keeps it, whatever a later edit's
-// turn or the inbox then hold. Buzz is decided once, at the turn's first
-// end: a turn the fold names Buzz, or a mailbox binding's (named name)
-// doorbell or task turn that replied to a Buzz message. The caller keeps c
-// with the post or edit that shows the decision.
+// the new ones in c: the dropped backlog turns, whether the turn shows Buzz
+// as its cause, and whether it answered Buzz. Once a post shows either fact
+// it keeps it, whatever a later edit's turn or the inbox then hold. Buzz is
+// decided once, at the turn's first end: a turn the fold names Buzz, or a
+// mailbox binding's (named name) doorbell or task turn that replied to a
+// Buzz message, which also answered Buzz. The caller keeps c with the post
+// or edit that shows the decision.
 func (s *Server) mirrorFacts(c *mirrorClaim, name string, b binding.Binding, turn *mirror.Turn) {
 	c.Earlier = max(c.Earlier, turn.Earlier)
 	turn.Earlier = c.Earlier
 	c.Buzz = c.Buzz || turn.Cause == mirror.CauseBuzz
+	c.Answered = c.Answered || turn.Answered
 	if !c.Checked && turn.End != "" {
 		c.Checked = true
-		c.Buzz = c.Buzz || mirror.BuzzReplaces(turn.Cause) && s.mirrorRepliedToBuzz(name, b, *turn)
+		if mirror.BuzzReplaces(turn.Cause) && s.mirrorRepliedToBuzz(name, b, *turn) {
+			c.Buzz, c.Answered = true, true
+		}
 	}
 	if c.Buzz {
 		turn.Cause = mirror.CauseBuzz
 	}
+	turn.Answered = c.Answered
 }
 
 // mirrorRepliedToBuzz reports whether the buzz inbox of a mailbox binding's
