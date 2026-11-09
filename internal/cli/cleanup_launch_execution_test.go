@@ -51,7 +51,7 @@ func TestCleanupIncompleteNativeExecution(t *testing.T) {
 			}
 			nonce := "abababab-abab-4bab-8bab-abababababab"
 			plan, err := launch.NewCodexAdapter(provider).PlanFreshDaemon(launch.PlanRequest{Handle: "codex", LaunchNonce: nonce,
-				ProjectRoot: project, SessionRoot: session, Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+				ProjectRoot: project, SessionRoot: session, Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled}, filepath.Join(project, "daemon.sock"))
 			if err != nil {
 				t.Fatal(err)
 			}

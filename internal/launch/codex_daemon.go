@@ -27,27 +27,43 @@ var ErrCodexConversationProvenance = errors.New("codex conversation provenance i
 const CodexDaemonThreadV1 CaptureEvidenceSource = "codex_daemon_thread_v1"
 
 // PlanFreshDaemon resumes a thread acquired under the execution ticket's
-// lease. Eligibility and startup checks must succeed again at acquisition.
-func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest) (AgentPlan, error) {
-	return adapter.planDaemon(request, "")
+// lease on the daemon at socket. Eligibility and startup checks must succeed
+// again at acquisition.
+func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest, socket string) (AgentPlan, error) {
+	return adapter.planDaemon(request, "", socket)
 }
 
 // PlanResumeDaemon resumes a daemon-acquired thread on the daemon. The thread
 // stays in argv; acquisition verifies it on the live daemon instead of
 // starting one.
-func (adapter *CodexAdapter) PlanResumeDaemon(request ResumeRequest) (AgentPlan, error) {
+func (adapter *CodexAdapter) PlanResumeDaemon(request ResumeRequest, socket string) (AgentPlan, error) {
 	if err := adapter.ValidateResumeRequest(request); err != nil {
 		return AgentPlan{}, err
 	}
 	if request.Capture.Source != CodexDaemonThreadV1 {
 		return AgentPlan{}, fmt.Errorf("codex daemon resume requires a daemon-acquired conversation")
 	}
-	return adapter.planDaemon(request.PlanRequest, request.Conversation.ID)
+	return adapter.planDaemon(request.PlanRequest, request.Conversation.ID, socket)
 }
 
-// planDaemon builds the one daemon template. An empty thread leaves the
+// codexDaemonTemplateStart is the index of the first committed argument in
+// the daemon template: codex --remote unix://<socket> -c <no update prompt>
+// resume -C <cwd>. An explicit --remote equal to Codex's own control socket
+// attaches the TUI to that local daemon with no embedded fallback, and the -c
+// suppresses the startup update prompt without a user configuration change
+// (codex-rs tui/src/lib.rs app_server_target_for_launch and
+// startup_orchestration.rs at rust-v0.167.0).
+const codexDaemonTemplateStart = 8
+
+// codexDaemonLegacyTemplateStart is the template earlier releases planned,
+// codex resume -C <cwd>. Its tickets stay readable for inspection and cleanup
+// and never run again.
+const codexDaemonLegacyTemplateStart = 4
+
+// planDaemon builds the one daemon template on the daemon at socket, spelled
+// as Codex computes its control socket. An empty thread leaves the
 // conversation slot for acquisition to fill.
-func (adapter *CodexAdapter) planDaemon(request PlanRequest, thread string) (AgentPlan, error) {
+func (adapter *CodexAdapter) planDaemon(request PlanRequest, thread, socket string) (AgentPlan, error) {
 	executable, err := validatePlanRequest(request, adapter.executable, CodexProvider, codexEnvRules(), codexArgRules(), codexBypassArgs())
 	if err != nil {
 		return AgentPlan{}, err
@@ -59,7 +75,10 @@ func (adapter *CodexAdapter) planDaemon(request PlanRequest, thread string) (Age
 	if thread != "" {
 		slot = thread
 	}
-	argv := append([]string{executable, "resume", "-C", request.Cwd}, request.CommittedArgs...)
+	if !filepath.IsAbs(socket) {
+		return AgentPlan{}, fmt.Errorf("codex daemon socket must be absolute")
+	}
+	argv := append([]string{executable, "--remote", "unix://" + socket, "-c", CodexNoUpdatePromptOverride, "resume", "-C", request.Cwd}, request.CommittedArgs...)
 	identityIndex := len(argv)
 	argv = append(argv, slot)
 	plan := AgentPlan{
@@ -143,21 +162,43 @@ func decodeCodexDaemonPayload(raw []byte) (codexDaemonPayload, error) {
 	return payload, nil
 }
 
+// CodexDaemonSocket returns the control socket a daemon ticket's argv names
+// with --remote, or "" for a ticket an earlier release planned without one.
+func CodexDaemonSocket(ticket ExecutionTicket) string {
+	argv := ticket.TargetArgv
+	if len(argv) < codexDaemonTemplateStart || argv[1] != "--remote" {
+		return ""
+	}
+	socket, ok := strings.CutPrefix(argv[2], "unix://")
+	if !ok || !filepath.IsAbs(socket) {
+		return ""
+	}
+	return socket
+}
+
 func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
+	argv := ticket.TargetArgv
+	start := codexDaemonLegacyTemplateStart
+	if CodexDaemonSocket(ticket) != "" {
+		start = codexDaemonTemplateStart
+		if argv[3] != "-c" || argv[4] != CodexNoUpdatePromptOverride {
+			return fmt.Errorf("codex daemon execution template is invalid")
+		}
+	}
 	if !codexDaemonVersionReadable(ticket.ProviderVersion) || len(ticket.TargetEnv) != 0 || ticket.Wrapper != nil ||
-		len(ticket.TargetArgv) < 5 ||
-		ticket.TargetArgv[1] != "resume" || ticket.TargetArgv[2] != "-C" || ticket.TargetArgv[3] != ticket.Cwd ||
+		len(argv) < start+1 ||
+		argv[start-3] != "resume" || argv[start-2] != "-C" || argv[start-1] != ticket.Cwd ||
 		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0].Kind != DynamicArgConversationID {
 		return fmt.Errorf("codex daemon execution template is invalid")
 	}
 	identityIndex := ticket.DynamicArgv[0].Index
-	if identityIndex < 4 || identityIndex >= len(ticket.TargetArgv) {
+	if identityIndex < start || identityIndex >= len(argv) {
 		return fmt.Errorf("codex daemon conversation slot is invalid")
 	}
 	if slot := ticket.TargetArgv[identityIndex]; slot != preSpawnConversationPlaceholder && (!validUUIDv7(slot) || slot != ticket.ConversationID) {
 		return fmt.Errorf("codex daemon conversation slot is invalid")
 	}
-	if reason := codexDaemonArgumentsReason(ticket.TargetArgv[4:identityIndex]); reason != "" {
+	if reason := codexDaemonArgumentsReason(argv[start:identityIndex]); reason != "" {
 		return fmt.Errorf("%s", reason)
 	}
 	if len(ticket.TargetArgv) != identityIndex+1 && (len(ticket.TargetArgv) != identityIndex+2 || ticket.InitialInput == nil || ticket.InitialInput.ArgvIndex != identityIndex+1) {
@@ -167,8 +208,8 @@ func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 }
 
 // CodexDaemonOptionsReason admits only invocation settings that Codex 0.167
-// forwards to a local-daemon TUI resume. Configuration overrides select the
-// embedded backend in Codex itself and must retain that path.
+// forwards to a local-daemon TUI resume. A caller's configuration or search
+// override is not shown to take effect there, so it keeps the embedded path.
 func CodexDaemonOptionsReason(request PlanRequest) string {
 	if request.Wrapper != nil || len(request.EnvOverlay) != 0 || len(request.BypassArgs) != 0 {
 		return "wrapper, environment, or bypass options require verified TUI resume equivalence"
@@ -202,7 +243,7 @@ func codexDaemonArgumentsReason(args []string) string {
 				return "approval option requires verified TUI resume equivalence"
 			}
 		case "-c", "--search":
-			return fmt.Sprintf("Codex %s selects an embedded app-server for command-line configuration or search overrides", CodexDaemonVersion)
+			return "command-line configuration or search overrides require verified TUI resume equivalence"
 		default:
 			return "launch option requires verified TUI resume equivalence"
 		}

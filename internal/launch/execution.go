@@ -1335,6 +1335,9 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		if ticket.ProviderVersion != CodexDaemonVersion {
 			return fmt.Errorf("codex daemon execution was planned for Codex %s; this AMQ runs native seats only on Codex %s", ticket.ProviderVersion, CodexDaemonVersion)
 		}
+		if CodexDaemonSocket(ticket) == "" {
+			return fmt.Errorf("codex daemon execution was planned without an explicit daemon endpoint; launch again")
+		}
 		return validateCodexDaemonExecutable(ticket)
 	}
 	return nil

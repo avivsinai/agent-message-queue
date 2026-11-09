@@ -538,7 +538,7 @@ func (a changingCodexPlanAdapter) Capabilities(context.Context) AdapterCapabilit
 
 func (a changingCodexPlanAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	if *a.native {
-		return a.PlanFreshDaemon(request)
+		return a.PlanFreshDaemon(request, filepath.Join(request.Cwd, "daemon.sock"))
 	}
 	plan, err := a.CodexAdapter.PlanFresh(request)
 	if err == nil && a.onPlan != nil {

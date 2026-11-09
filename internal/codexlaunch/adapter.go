@@ -3,6 +3,8 @@ package codexlaunch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,15 +44,15 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 		return launch.AgentPlan{}, err
 	}
 	reason := launch.CodexDaemonOptionsReason(request)
-	if reason != "" {
-		if _, _, endpointReason := daemonEndpoint(); endpointReason != "" {
-			reason = endpointReason
-		}
-	} else {
-		reason = eligibility(a.executable, request.Cwd)
+	endpoint := daemonEndpoint()
+	if reason == "" || endpoint.reason != "" {
+		reason = endpoint.reason
 	}
 	if reason == "" {
-		return a.PlanFreshDaemon(request)
+		reason = admission(a.executable, endpoint, request.Cwd)
+	}
+	if reason == "" {
+		return a.PlanFreshDaemon(request, endpoint.remote)
 	}
 	plan, err := a.CodexAdapter.PlanFresh(request)
 	plan.TerminalOnlyReason = reason
@@ -67,10 +69,11 @@ func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, er
 		return launch.AgentPlan{}, err
 	}
 	if request.Capture.Source == launch.CodexDaemonThreadV1 {
-		if err := daemonResumeRefusal(a.executable, request); err != nil {
+		remote, err := daemonResumeEndpoint(a.executable, request)
+		if err != nil {
 			return launch.AgentPlan{}, err
 		}
-		return a.PlanResumeDaemon(request)
+		return a.PlanResumeDaemon(request, remote)
 	}
 	plan, err := a.CodexAdapter.PlanResume(request)
 	if err != nil {
@@ -80,23 +83,25 @@ func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, er
 	return plan, nil
 }
 
-// daemonResumeRefusal checks the captured endpoint before any probe that runs
-// the provider, then the options, the seat's admission, and the thread.
-func daemonResumeRefusal(executable string, request launch.ResumeRequest) error {
-	_, sock, reason := daemonEndpoint()
+// daemonResumeEndpoint returns the socket a daemon conversation resumes on.
+// It checks the captured endpoint before any probe that runs the provider,
+// then the options, the seat's admission, and the thread.
+func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (string, error) {
+	endpoint := daemonEndpoint()
+	reason := endpoint.reason
 	if reason == "" {
-		reason = endpointReason(request.Capture, sock)
+		reason = endpointReason(request.Capture, endpoint.socket)
 	}
 	if reason == "" {
 		reason = launch.CodexDaemonOptionsReason(request.PlanRequest)
 	}
 	if reason == "" {
-		reason = eligibility(executable, request.Cwd)
+		reason = admission(executable, endpoint, request.Cwd)
 	}
 	if reason == "" {
-		reason = threadReason(sock, request.Conversation.ID, request.Cwd)
+		reason = threadReason(endpoint.socket, request.Conversation.ID, request.Cwd)
 	}
-	return provenanceRefusal(reason)
+	return endpoint.remote, provenanceRefusal(reason)
 }
 
 // endpointReason requires the endpoint that captured the thread. A restarted
@@ -158,36 +163,105 @@ func EmbeddedEnvironment() bool {
 	return false
 }
 
-func daemonEndpoint() (home, socket, reason string) {
+// endpoint is the local Codex daemon a seat attaches to. home and socket are
+// canonical and bind evidence; remote is the same socket spelled as Codex
+// computes it, which the seat's --remote names. reason is set when no
+// verified local daemon is there.
+type endpoint struct {
+	home, socket, remote, reason string
+}
+
+func daemonEndpoint() endpoint {
 	if EmbeddedEnvironment() {
-		return "", "", "the configured executor requires an embedded app-server"
+		return endpoint{reason: "the configured executor requires an embedded app-server"}
 	}
 	home, err := codexHome()
 	if err != nil {
-		return "", "", "Codex home cannot be verified"
+		return endpoint{reason: "Codex home cannot be verified"}
 	}
-	socket, err = codex.ControlSocket(home)
+	socket, err := codex.ControlSocket(home)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", "", "no Codex app-server daemon is running (start one with codex app-server daemon start)"
+		return endpoint{reason: "no Codex app-server daemon is running (start one with codex app-server daemon start)"}
 	}
 	if err != nil {
-		return "", "", "Codex app-server daemon cannot be verified"
+		return endpoint{reason: "Codex app-server daemon cannot be verified"}
 	}
-	return home, socket, ""
+	remote, err := codexRemoteSocket()
+	if err != nil || !verifiedDaemonLink(remote) {
+		return endpoint{reason: "the Codex daemon socket is not the verified local daemon link"}
+	}
+	return endpoint{home: home, socket: socket, remote: remote}
 }
 
-func eligibility(executable, cwd string) string {
-	home, sock, reason := daemonEndpoint()
-	if reason != "" {
-		return reason
+// codexRemoteSocket spells the control socket as Codex 0.167 does: a set
+// CODEX_HOME canonicalized, otherwise $HOME/.codex as written (codex-rs
+// utils/home-dir find_codex_home). Codex attaches an explicit --remote to its
+// local daemon only when the path equals this one; any other path makes it a
+// remote app-server.
+func codexRemoteSocket() (string, error) {
+	home := os.Getenv("CODEX_HOME")
+	if home != "" {
+		absolute, err := filepath.Abs(home)
+		if err != nil {
+			return "", err
+		}
+		if home, err = filepath.EvalSymlinks(absolute); err != nil {
+			return "", err
+		}
+	} else {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(user, ".codex")
 	}
-	return admission(executable, home, sock, cwd)
+	return filepath.Join(home, "app-server-control", "app-server-control.sock"), nil
 }
 
-// admission checks the startup facts a seat meets on the daemon at sock:
-// provider version, sign-in, directory trust, daemon version, hook review,
-// terminal instructions, and the update prompt.
-func admission(executable, home, sock, cwd string) string {
+// sharedDaemonSocketDirectory is the fixed directory that holds Codex's
+// private daemon sockets (codex-rs uds daemon_directory.rs).
+var sharedDaemonSocketDirectory = func() (string, error) {
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(tmp, fmt.Sprintf("codex-daemon-%d", os.Geteuid())), nil
+}
+
+// daemonLinkTarget is the private socket a local daemon links socket to: the
+// SHA-256 of the canonical socket path under the shared directory (codex-rs
+// app-server-transport unix_socket.rs protected_socket_path).
+func daemonLinkTarget(socket string) (string, error) {
+	shared, err := sharedDaemonSocketDirectory()
+	if err != nil {
+		return "", err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(socket))
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(filepath.Join(parent, filepath.Base(socket))))
+	return filepath.Join(shared, hex.EncodeToString(sum[:])), nil
+}
+
+// verifiedDaemonLink is Codex's verified_local_daemon_socket: socket links to
+// its private target in a user-owned 0700 shared directory. Only then does an
+// explicit --remote attach to the local daemon.
+func verifiedDaemonLink(socket string) bool {
+	target, err := daemonLinkTarget(socket)
+	if err != nil {
+		return false
+	}
+	link, err := os.Readlink(socket)
+	return err == nil && link == target && sharedDirectoryPrivate(filepath.Dir(target))
+}
+
+// admission checks the startup facts a seat meets on the daemon at the
+// endpoint: provider version, sign-in, directory trust, daemon version, hook
+// review, terminal instructions, and managed update requirements. The seat's
+// own -c turns the update check off, so no user setting is needed.
+func admission(executable string, endpoint endpoint, cwd string) string {
+	home, sock := endpoint.home, endpoint.socket
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	capabilities := launch.NewCodexAdapter(executable).Capabilities(ctx)
@@ -217,8 +291,8 @@ func admission(executable, home, sock, cwd string) string {
 	if json.Unmarshal(state.Config, &config) != nil || config.Config.Features["terminal_visualization_instructions"] {
 		return "Codex terminal instructions require verified TUI resume equivalence"
 	}
-	if !ConfigUpdateCheckOff(state.Config) || !RequirementsAllowNoUpdateCheck(state.Requirements) {
-		return "the Codex update prompt is not ruled out; set check_for_update_on_startup = false in your Codex config to let this seat use the shared daemon"
+	if !RequirementsAllowNoUpdateCheck(state.Requirements) {
+		return "a managed Codex requirement turns the startup update check on"
 	}
 	return ""
 }
@@ -231,17 +305,18 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 	if ticket.Provider != launch.CodexProvider || !ticket.PreSpawnAcquire {
 		return launch.CaptureEvidence{}, fmt.Errorf("not a Codex daemon acquisition ticket")
 	}
-	if reason := eligibility(ticket.ProviderExecutable, ticket.Cwd); reason != "" {
+	endpoint := daemonEndpoint()
+	reason := endpoint.reason
+	if reason == "" {
+		reason = plannedEndpointReason(ticket, endpoint)
+	}
+	if reason == "" {
+		reason = admission(ticket.ProviderExecutable, endpoint, ticket.Cwd)
+	}
+	if reason != "" {
 		return launch.CaptureEvidence{}, fmt.Errorf("%w: Buzz approvals: terminal only: %s; replan this launch", launch.ErrIdentityNotRequested, reason)
 	}
-	home, err := codexHome()
-	if err != nil {
-		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
-	}
-	sock, err := codex.ControlSocket(home)
-	if err != nil {
-		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
-	}
+	sock := endpoint.socket
 	pid, err := codex.DaemonPID(sock)
 	if err != nil {
 		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
@@ -285,6 +360,15 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 	return launch.ObserveCodexDaemonThread(ticket, thread, sock, holder)
 }
 
+// plannedEndpointReason requires the seat's --remote to name the verified
+// local daemon in this environment, so the TUI attaches where AMQ checked.
+func plannedEndpointReason(ticket launch.ExecutionTicket, endpoint endpoint) string {
+	if launch.CodexDaemonSocket(ticket) != endpoint.remote {
+		return "the Codex daemon endpoint differs from the one this launch planned"
+	}
+	return ""
+}
+
 // resumedCapture reads the capture of the conversation a resume ticket names.
 func resumedCapture(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.ConversationCapture, error) {
 	record, err := launch.LoadConversation(root, ticket.Handle)
@@ -306,14 +390,14 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	if EmbeddedEnvironment() {
 		return fmt.Errorf("the current executor environment requires an embedded app-server; restore the original environment before retrying this native execution")
 	}
-	home, err := codexHome()
-	if err != nil {
-		return err
+	endpoint := daemonEndpoint()
+	if endpoint.reason != "" {
+		return fmt.Errorf("%s", endpoint.reason)
 	}
-	sock, err := codex.ControlSocket(home)
-	if err != nil {
-		return err
+	if reason := plannedEndpointReason(ticket, endpoint); reason != "" {
+		return fmt.Errorf("%s", reason)
 	}
+	home, sock := endpoint.home, endpoint.socket
 	pid, err := codex.DaemonPID(sock)
 	if err != nil {
 		return err
@@ -325,7 +409,7 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	if err := launch.ValidateCodexDaemonEndpoint(root, ticket, sock, holder); err != nil {
 		return err
 	}
-	if reason := admission(ticket.ProviderExecutable, home, sock, ticket.Cwd); reason != "" {
+	if reason := admission(ticket.ProviderExecutable, endpoint, ticket.Cwd); reason != "" {
 		return fmt.Errorf("%s; resolve it and retry the original emitted command", reason)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
