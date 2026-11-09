@@ -102,6 +102,11 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	// IDs came through CodexGoal's UUID shape check. No payload field, path,
 	// or free text is interpolated into SQL.
 	query := "PRAGMA query_only=ON; BEGIN; SELECT thread_id, goal_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (" + strings.Join(ids, ",") + ") ORDER BY thread_id; COMMIT;"
+	// Decide the open mode and stamp the main file again just before the
+	// query, so a checkpoint during the session walk is not a failed read.
+	if _, checkpointed, err = codexGoalsReadable(db); err != nil {
+		return fail(err)
+	}
 	mode := "mode=ro"
 	if checkpointed != nil {
 		mode += "&immutable=1"
