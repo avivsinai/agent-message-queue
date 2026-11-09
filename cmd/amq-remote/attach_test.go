@@ -1335,14 +1335,7 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 // participant ran attach --self --native and was refused with "--root or
 // AM_ROOT is required". With no root, a native attach uses the machine root.
 func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
-	home, err := os.MkdirTemp("", "h") // short: the endpoint socket path is bounded
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
-	if home, err = filepath.EvalSymlinks(home); err != nil {
-		t.Fatal(err)
-	}
+	home := shortHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
@@ -1392,14 +1385,7 @@ func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
 // Review of the implicit native root: a symlinked machine root was accepted,
 // because the default used the path without EnsureMachineRoot's checks.
 func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
-	home, err := os.MkdirTemp("", "h")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
-	if home, err = filepath.EvalSymlinks(home); err != nil {
-		t.Fatal(err)
-	}
+	home := shortHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
@@ -1425,4 +1411,24 @@ func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is not a plain directory") {
 		t.Fatalf("attach through a symlinked machine root: err=%v; want the symlink refusal", err)
 	}
+}
+
+// shortHome is a HOME short enough that the machine root's endpoint socket
+// fits the Unix sun_path limit. The default temp directory on a macOS CI
+// runner is too deep (macOS CI on PR #1415: a 117-byte socket path).
+func shortHome(t *testing.T) string {
+	t.Helper()
+	base := ""
+	if runtime.GOOS != "windows" {
+		base = "/tmp"
+	}
+	home, err := os.MkdirTemp(base, "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	return home
 }
