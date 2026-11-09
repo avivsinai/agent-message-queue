@@ -111,7 +111,7 @@ A failure proven to occur before `thread/start` returns the ticket to `pending`;
 thread creation and later protocol failures preserve uncertain progress. Native
 thread startup uses the same 60-second contention budget as session naming.
 Sibling seats of one launch wait for its lease in turn; each live holder gets
-90 seconds, which covers that budget and its checks, and the wait starts again
+120 seconds, which covers that budget and its checks, and the wait starts again
 when the lease passes to the next holder.
 An incomplete acquired ticket refuses a replacement generation: retry the
 original emitted command to reuse its thread.

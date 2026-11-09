@@ -576,8 +576,8 @@ func TestDaemonResumeReadsItsThreadAtTheVerifiedVersion(t *testing.T) {
 		ProviderExecutable: executable, TargetArgv: resumed.Argv, Environment: env,
 		AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
 		RecordIdentity:  func(acquired launch.ExecutionTicket) error { return RecordIdentity(root, acquired, env) }})
-	if err == nil {
-		t.Fatal("resume bound a thread read at an unverified daemon version")
+	if err == nil || !strings.Contains(err.Error(), `does not match "0.167.0"`) {
+		t.Fatalf("resume bound a thread read at an unverified daemon version: %v", err)
 	}
 	if stored, loadErr := launch.LoadExecutionTicket(root, "codex"); loadErr != nil || stored.State != launch.ExecutionPending || len(stored.EvidenceRefs) != 0 {
 		t.Fatalf("resume acquired its thread before the version check: %#v, %v (%v)", stored, loadErr, err)

@@ -24,13 +24,14 @@ const ExecutionTicketVersion = 1
 const executionDirectory = "meta/launch/executions"
 
 // A sibling execution of the same launch holds the lease through its bounded
-// identity acquisition (a 60-second Codex thread start plus its admission and
-// routing checks). The wait allows each live holder that whole budget and
+// identity acquisition: about 85 seconds for a Codex seat (a 60-second thread
+// start, two 5-second admissions, a 10-second thread read, and daemon process
+// checks). The wait allows each live holder that budget with margin and
 // starts again when the lease passes to another holder, so a batch of seats
 // queues behind one another instead of timing out behind the first.
 const (
 	executionLeaseRetryInterval = 50 * time.Millisecond
-	executionLeaseHolderBudget  = 90 * time.Second
+	executionLeaseHolderBudget  = 120 * time.Second
 )
 
 type ExecutionState string
