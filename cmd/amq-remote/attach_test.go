@@ -1407,7 +1407,7 @@ func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
 	findSelf = func(string, string) (registry.Candidate, error) {
 		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
 	}
-	_, err = attach([]string{"--self", "--native", "--json"}, io.Discard, io.Discard)
+	_, err := attach([]string{"--self", "--native", "--json"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "is not a plain directory") {
 		t.Fatalf("attach through a symlinked machine root: err=%v; want the symlink refusal", err)
 	}
