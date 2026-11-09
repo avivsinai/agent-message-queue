@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -363,6 +364,24 @@ var newAppServerView = func() *codex.View {
 type appServerJudge struct {
 	view *codex.View
 	gone map[string]launch.HolderIdentity
+	// judged is each binding's liveness as this tick judged it, so the
+	// workers ask the process table once per binding per tick. A judgement
+	// older than machineScanInterval is made again, so a slow tick never
+	// keeps an ended session live for longer.
+	judged sync.Map // livenessKey -> judgement
+}
+
+// livenessKey is every binding field its liveness reads.
+type livenessKey struct {
+	root, target, carrier string
+	holder                launch.HolderIdentity
+	appServer             binding.AppServerThread
+}
+
+type judgement struct {
+	state    binding.State
+	evidence string
+	at       time.Time
 }
 
 // judgeAppServers makes this tick's judge from view and the daemons the
@@ -411,7 +430,16 @@ func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 	if j == nil {
 		return b.Liveness()
 	}
-	state, evidence := j.view.Liveness(b)
+	key := livenessKey{root: b.Root, target: b.Target, carrier: b.Carrier, holder: b.Holder, appServer: b.AppServer}
+	now := time.Now()
+	var state binding.State
+	var evidence string
+	if v, ok := j.judged.Load(key); ok && now.Sub(v.(judgement).at) < machineScanInterval {
+		state, evidence = v.(judgement).state, v.(judgement).evidence
+	} else {
+		state, evidence = j.view.Liveness(b)
+		j.judged.Store(key, judgement{state, evidence, now})
+	}
 	if d, ok := j.gone[b.Name]; ok && state == binding.Unknown && b.AppServer.Thread != "" && d == b.AppServer.Daemon {
 		return binding.Ended, "the app-server process the thread was bound in is not running, and no app-server has it loaded"
 	}
