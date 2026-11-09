@@ -101,7 +101,7 @@ func Publish(r Record) error {
 		// thread and the thread's current handle, so both stay listed as
 		// revoked at this publication's time.
 		var prior currentRecord
-		if readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &prior) == nil && ValidThread(prior.Thread) {
+		if readCurrent(dir, r, &prior) == nil && ValidThread(prior.Thread) {
 			if err := captureLegacyBinding(dir, prior.Thread); err != nil {
 				return err
 			}
@@ -156,7 +156,7 @@ func Lookup(thread, codexHome string) (Record, error) {
 		return Record{}, fmt.Errorf("the Codex thread %s was recorded for CODEX_HOME %s, not %s", thread, r.CodexHome, codexHome)
 	}
 	var cur currentRecord
-	if err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err != nil {
+	if err := readCurrent(dir, r, &cur); err != nil {
 		if errors.Is(err, ErrNone) {
 			return Record{}, fmt.Errorf("the Codex thread %s has an identity record but no current-thread record for %s", thread, r.Me)
 		}
@@ -236,7 +236,7 @@ func Bindings() ([]Binding, error) {
 		events = append(events, event{bindingEvent: e, at: at})
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
-	key := func(rootID, me string) string { return rootID + "\x00" + me }
+	key := func(rootID, me string) string { return fsq.PersistedTreeKey("", rootID) + "\x00" + me }
 	var out []Binding
 	open := map[string]int{}     // handle key -> index of its open binding
 	owner := map[string]string{} // thread -> handle key of its open binding
@@ -335,11 +335,11 @@ func historyNames(bindings []Binding, thread string) bool {
 func confirmed(dir, thread, rootID, me string) bool {
 	var r Record
 	if readStrict(filepath.Join(dir, "threads", thread+".json"), &r) != nil || r.check() != nil ||
-		r.Thread != thread || r.RootID != rootID || r.Me != me {
+		r.Thread != thread || !fsq.SamePersistedTreeIdentity(r.RootID, rootID) || r.Me != me {
 		return false
 	}
 	var cur currentRecord
-	return readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur) == nil && cur.Thread == thread
+	return readCurrent(dir, r, &cur) == nil && cur.Thread == thread
 }
 
 type currentRecord struct {
@@ -361,11 +361,23 @@ func (r Record) check() error {
 	return nil
 }
 
-// currentKey names the current-thread record of one handle in one root,
-// by the root's identity token so a recreated root starts a new lineage.
+// currentKey names the current-thread record of one handle in one root, by
+// the root's persisted key so a recreated root starts a new lineage and a
+// reboot does not.
 func currentKey(r Record) string {
-	sum := sha256.Sum256([]byte(r.RootID + "\x00" + r.Me))
+	sum := sha256.Sum256([]byte(fsq.PersistedTreeKey(r.Root, r.RootID) + "\x00" + r.Me))
 	return hex.EncodeToString(sum[:16])
+}
+
+// readCurrent reads the current-thread record of r's handle, or the one an
+// earlier AMQ named by the raw root token while no record has the new name.
+func readCurrent(dir string, r Record, cur *currentRecord) error {
+	err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), cur)
+	if !errors.Is(err, ErrNone) {
+		return err
+	}
+	sum := sha256.Sum256([]byte(r.RootID + "\x00" + r.Me))
+	return readStrict(filepath.Join(dir, "current", hex.EncodeToString(sum[:16])+".json"), cur)
 }
 
 // CurrentDir is the current/ directory of the store below home's AMQ home.

@@ -209,9 +209,7 @@ func TestCodexThreadIdentitySurvivesReboot(t *testing.T) {
 		key, value, _ := strings.Cut(entry, "=")
 		if key == envRootID || key == envBaseRootID {
 			live[key] = value
-			parts := strings.Split(value, ":")
-			parts[2] = "fffe"
-			env[i] = key + "=" + strings.Join(parts, ":")
+			env[i] = key + "=" + renumberedDevice(value)
 		}
 	}
 	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91b1"
@@ -229,4 +227,12 @@ func TestCodexThreadIdentitySurvivesReboot(t *testing.T) {
 	if os.Getenv(envRootID) != live[envRootID] || os.Getenv(envBaseRootID) != live[envBaseRootID] {
 		t.Fatalf("adopted pins %q/%q, want the current tokens", os.Getenv(envRootID), os.Getenv(envBaseRootID))
 	}
+}
+
+// renumberedDevice is token as a reboot leaves it: the same file ID on a
+// device with another st_dev.
+func renumberedDevice(token string) string {
+	parts := strings.Split(token, ":")
+	parts[2] = "fffe"
+	return strings.Join(parts, ":")
 }

@@ -142,7 +142,7 @@ func bindingState(revoked time.Time, uncertain bool, now time.Time) (string, boo
 func (sources conversationSources) codexConversations(rootID string) []sessionConversation {
 	var out []sessionConversation
 	for _, b := range sources.codex {
-		if b.RootID != rootID {
+		if !fsq.SamePersistedTreeIdentity(b.RootID, rootID) {
 			continue
 		}
 		state, ok := bindingState(b.Revoked, b.Uncertain, sources.now)
@@ -177,7 +177,7 @@ func execRevocations(entries []execidentity.Entry) []time.Time {
 func (sources conversationSources) execConversations(rootID string) []sessionConversation {
 	var entries []execidentity.Entry
 	for _, entry := range sources.execs {
-		if entry.Record.RootID == rootID {
+		if fsq.SamePersistedTreeIdentity(entry.Record.RootID, rootID) {
 			entries = append(entries, entry)
 		}
 	}

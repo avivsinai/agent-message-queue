@@ -158,9 +158,10 @@ func processKey(r Record) string {
 }
 
 // currentKey names the current-process record of one handle in one root, by
-// the root's identity token so a recreated root starts a new lineage.
+// the root's persisted key so a recreated root starts a new lineage and a
+// reboot does not.
 func currentKey(r Record) string {
-	sum := sha256.Sum256([]byte(r.RootID + "\x00" + r.Me))
+	sum := sha256.Sum256([]byte(fsq.PersistedTreeKey(r.Root, r.RootID) + "\x00" + r.Me))
 	return hex.EncodeToString(sum[:16])
 }
 

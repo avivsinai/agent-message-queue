@@ -248,3 +248,33 @@ func TestReplaceInLegacyStoreIgnoresUnusableHome(t *testing.T) {
 		t.Fatalf("Replace in a legacy store with HOME a file: %v", err)
 	}
 }
+
+// rebootDevices makes every physical identity launch persists read as it
+// does after a macOS reboot: the same file IDs on renumbered devices.
+func rebootDevices(t *testing.T) {
+	t.Helper()
+	tree, info, file := stableTreeIdentity, stableTreeIdentityInfo, stableFileIdentityInfo
+	t.Cleanup(func() { stableTreeIdentity, stableTreeIdentityInfo, stableFileIdentityInfo = tree, info, file })
+	stableTreeIdentity = func(path string) (string, error) { token, err := tree(path); return renumberedDevice(token), err }
+	stableTreeIdentityInfo = func(i os.FileInfo) (string, error) { token, err := info(i); return renumberedDevice(token), err }
+	stableFileIdentityInfo = func(i os.FileInfo) (string, error) { token, err := file(i); return renumberedDevice(token), err }
+}
+
+// Field regression (2026-11-09): after a macOS update reboot the project
+// kept its path and inode but got another st_dev, and launch asked for trust
+// again because the trust folder is named by the project identity.
+func TestTrustRecordSurvivesReboot(t *testing.T) {
+	store, project := trustFixture(t)
+	record := TrustRecord{SemanticDigest: testDigest('a')}
+	if err := store.Replace(record); err != nil {
+		t.Fatal(err)
+	}
+	rebootDevices(t)
+	rebooted, err := OpenTrustStore(store.stateDir, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, trusted, err := rebooted.LoadForDigest(record.SemanticDigest); err != nil || !trusted {
+		t.Fatalf("trust after reboot: trusted %t, err %v", trusted, err)
+	}
+}

@@ -104,7 +104,7 @@ func openExplicitBaseAuthority(projectRoot *fsq.DeliveryRoot, target PrepareTarg
 		}
 		return nil, nil, fmt.Errorf("%s: base_root changed after canonicalization", baseRootRelationInvalid)
 	}
-	parentIdentity, err := fsq.StableTreeIdentityInfo(parentRoot.FileInfo())
+	parentIdentity, err := stableTreeIdentityInfo(parentRoot.FileInfo())
 	if err != nil {
 		if baseRoot != nil {
 			_ = baseRoot.Close()
@@ -118,7 +118,8 @@ func openExplicitBaseAuthority(projectRoot *fsq.DeliveryRoot, target PrepareTarg
 		ConfiguredRoot string `json:"configured_root"`
 		BaseRoot       string `json:"base_root"`
 		ParentIdentity string `json:"parent_identity"`
-	}{configIdentity, configSHA256, configuredRoot, target.BaseRoot, parentIdentity})
+	}{fsq.PersistedTreeKey(filepath.Join(projectRoot.Base(), ".amqrc"), configIdentity), configSHA256, configuredRoot, target.BaseRoot,
+		fsq.PersistedTreeKey(parentRoot.Base(), parentIdentity)})
 	if err != nil {
 		if baseRoot != nil {
 			_ = baseRoot.Close()
@@ -146,7 +147,7 @@ func readExactProjectAMQRC(projectRoot *fsq.DeliveryRoot) (projectAMQRC, []byte,
 	if err != nil {
 		return projectAMQRC{}, nil, "", "", err
 	}
-	identity, err := fsq.StableFileIdentityInfo(info)
+	identity, err := stableFileIdentityInfo(info)
 	if err != nil {
 		return projectAMQRC{}, nil, "", "", err
 	}
@@ -251,7 +252,7 @@ func (authority *explicitBaseAuthority) verify(projectRoot *fsq.DeliveryRoot, ba
 	if err := authority.parentRoot.VerifyBase(); err != nil {
 		return fmt.Errorf("base parent changed: %w", err)
 	}
-	parentIdentity, err := fsq.StableTreeIdentityInfo(authority.parentRoot.FileInfo())
+	parentIdentity, err := stableTreeIdentityInfo(authority.parentRoot.FileInfo())
 	if err != nil || parentIdentity != authority.parentIdentity {
 		return fmt.Errorf("base parent identity changed")
 	}

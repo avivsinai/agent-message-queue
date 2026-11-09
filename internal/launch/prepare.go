@@ -889,7 +889,7 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 			projectIdentity: projectIdentity, projectRoot: projectRoot, baseRoot: baseRoot, baseAuthority: authority,
 		}
 		if baseRoot == nil {
-			state.sessionIdentity = "intended-base-child:" + authority.parentIdentity + ":" + authority.baseName + ":" + target.Session
+			state.sessionIdentity = "intended-base-child:" + fsq.PersistedTreeKey(authority.parentRoot.Base(), authority.parentIdentity) + ":" + authority.baseName + ":" + target.Session
 			return state, nil
 		}
 		sessionRoot, openErr := baseRoot.OpenDirectChild(target.Session)
@@ -904,7 +904,7 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 				return nil, fmt.Errorf("%s: session uses an alternate direct-child spelling", baseRootRelationInvalid)
 			}
 			state.sessionRoot = sessionRoot
-			state.sessionIdentity, openErr = fsq.StableTreeIdentityInfo(sessionRoot.FileInfo())
+			state.sessionIdentity, openErr = stableTreeIdentityInfo(sessionRoot.FileInfo())
 			if openErr != nil {
 				state.close()
 				return nil, openErr
@@ -915,12 +915,12 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 			state.close()
 			return nil, openErr
 		}
-		baseIdentity, identityErr := fsq.StableTreeIdentityInfo(baseRoot.FileInfo())
+		baseIdentity, identityErr := stableTreeIdentityInfo(baseRoot.FileInfo())
 		if identityErr != nil {
 			state.close()
 			return nil, identityErr
 		}
-		state.sessionIdentity = "intended-child:" + baseIdentity + ":" + target.Session
+		state.sessionIdentity = "intended-child:" + fsq.PersistedTreeKey(baseRoot.Base(), baseIdentity) + ":" + target.Session
 		return state, nil
 	}
 
@@ -952,7 +952,7 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 	sessionRoot, err := baseRoot.OpenDirectChild(target.Session)
 	if err == nil {
 		state.sessionRoot = sessionRoot
-		state.sessionIdentity, err = fsq.StableTreeIdentityInfo(sessionRoot.FileInfo())
+		state.sessionIdentity, err = stableTreeIdentityInfo(sessionRoot.FileInfo())
 		if err != nil {
 			state.close()
 			return nil, err
@@ -963,12 +963,12 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 		state.close()
 		return nil, err
 	}
-	baseIdentity, identityErr := fsq.StableTreeIdentityInfo(baseRoot.FileInfo())
+	baseIdentity, identityErr := stableTreeIdentityInfo(baseRoot.FileInfo())
 	if identityErr != nil {
 		state.close()
 		return nil, identityErr
 	}
-	state.sessionIdentity = "intended-child:" + baseIdentity + ":" + target.Session
+	state.sessionIdentity = "intended-child:" + fsq.PersistedTreeKey(baseRoot.Base(), baseIdentity) + ":" + target.Session
 	return state, nil
 }
 

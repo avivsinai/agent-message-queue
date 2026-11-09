@@ -82,6 +82,22 @@ func SamePersistedTreeIdentity(stored, live string) bool {
 	return sok && lok && s[1] == l[1] && s[3] == l[3]
 }
 
+// PersistedTreeKey is a reboot-stable key for token, the identity of the
+// file at canonical path, to name or hash persisted state by: the platform,
+// the file ID and the path, without the device number a mount reassigns. An
+// empty path keys by file ID alone, which can match across volumes. A string
+// that is not an identity token is returned unchanged.
+func PersistedTreeKey(path, token string) string {
+	parts, ok := splitIdentityToken(token)
+	if !ok {
+		return token
+	}
+	if path != "" {
+		path = filepath.Clean(path)
+	}
+	return "key1:" + parts[1] + ":" + parts[3] + ":" + path
+}
+
 func splitIdentityToken(token string) ([]string, bool) {
 	parts := strings.Split(token, ":")
 	if len(parts) != 4 || parts[0] != "v1" || parts[1] == "" {

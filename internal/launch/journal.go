@@ -23,8 +23,11 @@ const (
 	journalFilename = "journal.json"
 )
 
+// Physical identities that persisted launch state records are read through
+// these, so a test can stand in for the device renumbering of a reboot.
 var stableTreeIdentity = fsq.StableTreeIdentity
 var stableTreeIdentityInfo = fsq.StableTreeIdentityInfo
+var stableFileIdentityInfo = fsq.StableFileIdentityInfo
 
 type JournalPhase string
 
