@@ -153,11 +153,12 @@ the verified version on the same session. The socket path is fixed by the
 canonical `CODEX_HOME`. A restarted daemon at that socket is a successor; a
 daemon at another socket is not, even when it answers with the same thread.
 Static admission, including executable containment, completes before any probe
-runs the provider or reads the daemon. When the options are not admitted or no
-eligible daemon runs, the seat resumes embedded and its terminal-only line names
-the cause. When the endpoint changed or its daemon does not prove the thread,
-resume refuses with exit 6 and names the cause; it does not move the
-conversation to another backend. A daemon resume ticket names its thread from creation and asks the
+runs the provider or reads the daemon. Any other outcome (a changed endpoint,
+no daemon, an option, sign-in, trust, or version that is not admitted, or a
+thread the daemon does not prove) refuses with exit 6 and names the cause and
+the fix, because another backend or rollout store may hold a different thread
+under the same ID; `--allow-fresh-fallback` starts a new conversation instead.
+A daemon resume ticket names its thread from creation and asks the
 daemon to create nothing: it skips `identity_requested`, a failed verification
 leaves it `pending`, and the TUI starts only after `codex_daemon_thread_v1`
 evidence for the new generation binds the same thread and routing is published

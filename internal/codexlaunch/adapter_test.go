@@ -584,25 +584,34 @@ func TestDaemonResumeReadsItsThreadAtTheVerifiedVersion(t *testing.T) {
 	}
 }
 
-// Each conversation keeps its backend. A daemon conversation that its
-// capturing endpoint does not prove is refused, never moved to embedded.
+// Each conversation keeps its backend. A daemon conversation that cannot
+// resume on its capturing daemon is refused, never moved to embedded.
 func TestCodexResumeKeepsItsBackend(t *testing.T) {
 	for _, row := range []struct {
 		name, thread, reason string
 		source               launch.CaptureEvidenceSource
-		elsewhere            bool
+		elsewhere, untrusted bool
 	}{
-		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1", false},
+		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1", false, false},
 		// Review of daemon resume: an unproven daemon thread resumed embedded.
-		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "cannot prove its thread", launch.CodexDaemonThreadV1, false},
-		// Review of daemon resume: another endpoint answering with the same thread was accepted.
-		{"another endpoint", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "the Codex daemon endpoint changed since this conversation was captured", launch.CodexDaemonThreadV1, true},
+		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "cannot prove its thread", launch.CodexDaemonThreadV1, false, false},
+		// Review of daemon resume: another endpoint answering with the same
+		// thread was accepted, and an ineligible seat skipped the endpoint check.
+		{"another endpoint", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "the Codex daemon endpoint changed since this conversation was captured", launch.CodexDaemonThreadV1, true, true},
+		// Codex review of 0725fd2c: an ineligible daemon conversation resumed
+		// embedded, where another rollout store may serve the same thread id.
+		{"ineligible daemon conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "directory trust", launch.CodexDaemonThreadV1, false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			root, project, executable, amq := nativeSeat(t)
 			home, err := filepath.EvalSymlinks(os.Getenv("CODEX_HOME"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if row.untrusted {
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if row.elsewhere {
 				home = filepath.Join(t.TempDir(), "codex-home")

@@ -58,67 +58,77 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 }
 
 // PlanResume keeps each conversation on the backend that created it. A
-// daemon thread resumes on the daemon when its capturing endpoint proves it.
-// Ineligible options or an unavailable daemon resume it embedded and name the
-// cause; an endpoint that does not prove the thread refuses the resume.
+// conversation captured by notify resumes embedded. A daemon thread resumes
+// only on the daemon at its captured endpoint; any failure to do that refuses
+// the resume, because no other backend is proven to read its rollout store.
 // Static admission precedes every probe.
 func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, error) {
 	if err := a.ValidateResumeRequest(request); err != nil {
 		return launch.AgentPlan{}, err
 	}
-	reason, err := resumeReason(a.executable, request)
-	if err != nil {
-		return launch.AgentPlan{}, err
-	}
-	if reason == "" {
+	if request.Capture.Source == launch.CodexDaemonThreadV1 {
+		if err := daemonResumeRefusal(a.executable, request); err != nil {
+			return launch.AgentPlan{}, err
+		}
 		return a.PlanResumeDaemon(request)
 	}
 	plan, err := a.CodexAdapter.PlanResume(request)
 	if err != nil {
 		return launch.AgentPlan{}, err
 	}
-	plan.TerminalOnlyReason = reason
+	plan.TerminalOnlyReason = "this conversation runs on an embedded app-server"
 	return plan, nil
 }
 
-// resumeReason names why a conversation resumes embedded. Its error refuses
-// a daemon conversation whose provenance the current endpoint does not prove.
-func resumeReason(executable string, request launch.ResumeRequest) (string, error) {
-	if request.Capture.Source != launch.CodexDaemonThreadV1 {
-		return "this conversation runs on an embedded app-server", nil
+// daemonResumeRefusal checks the captured endpoint before any probe that runs
+// the provider, then the options, the seat's admission, and the thread.
+func daemonResumeRefusal(executable string, request launch.ResumeRequest) error {
+	_, sock, reason := daemonEndpoint()
+	if reason == "" {
+		reason = endpointReason(request.Capture, sock)
 	}
-	if reason := launch.CodexDaemonOptionsReason(request.PlanRequest); reason != "" {
-		return reason, nil
+	if reason == "" {
+		reason = launch.CodexDaemonOptionsReason(request.PlanRequest)
 	}
-	if reason := eligibility(executable, request.Cwd); reason != "" {
-		return reason, nil
+	if reason == "" {
+		reason = eligibility(executable, request.Cwd)
 	}
-	_, sock, _ := daemonEndpoint()
-	return "", threadProvenance(request.Capture, sock, request.Conversation.ID, request.Cwd)
+	if reason == "" {
+		reason = threadReason(sock, request.Conversation.ID, request.Cwd)
+	}
+	return provenanceRefusal(reason)
 }
 
-// threadProvenance requires the endpoint that captured the thread and a
-// daemon there, at the verified version, that reads the thread in its launch
-// directory. A restarted daemon at that endpoint is its successor; another
-// endpoint is not, whatever it answers.
-func threadProvenance(capture launch.ConversationCapture, sock, thread, cwd string) error {
-	reason := ""
+// endpointReason requires the endpoint that captured the thread. A restarted
+// daemon there is its successor; another endpoint is not, whatever it answers.
+func endpointReason(capture launch.ConversationCapture, sock string) string {
 	if sock != capture.Socket {
-		reason = "the Codex daemon endpoint changed since this conversation was captured"
-	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		got, err := codex.ReadThread(ctx, sock, thread, launch.CodexDaemonVersion)
-		if err != nil {
-			reason = "the Codex daemon that captured this conversation cannot prove its thread: " + err.Error()
-		} else if got != cwd {
-			reason = "the Codex daemon that captured this conversation reads its thread in another directory"
-		}
+		return "the Codex daemon endpoint changed since this conversation was captured"
 	}
+	return ""
+}
+
+// threadReason requires the daemon at sock, at the verified version on the
+// same session, to read the thread in its launch directory.
+func threadReason(sock, thread, cwd string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got, err := codex.ReadThread(ctx, sock, thread, launch.CodexDaemonVersion)
+	if err != nil {
+		return "the Codex daemon that captured this conversation cannot prove its thread: " + err.Error()
+	}
+	if got != cwd {
+		return "the Codex daemon that captured this conversation reads its thread in another directory"
+	}
+	return ""
+}
+
+func provenanceRefusal(reason string) error {
 	if reason == "" {
 		return nil
 	}
-	return fmt.Errorf("%w: %s; restore that daemon or launch fresh", launch.ErrCodexConversationProvenance, reason)
+	return fmt.Errorf("%w: %s; this conversation lives in the Codex app-server daemon that captured it: fix that and resume, or pass --allow-fresh-fallback for a new conversation",
+		launch.ErrCodexConversationProvenance, reason)
 }
 
 func codexHome() (string, error) {
@@ -246,7 +256,11 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 		if err != nil {
 			return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 		}
-		if err := threadProvenance(capture, sock, thread, ticket.Cwd); err != nil {
+		reason := endpointReason(capture, sock)
+		if reason == "" {
+			reason = threadReason(sock, thread, ticket.Cwd)
+		}
+		if err := provenanceRefusal(reason); err != nil {
 			return launch.CaptureEvidence{}, fmt.Errorf("%w: %w", launch.ErrIdentityNotRequested, err)
 		}
 	} else {
