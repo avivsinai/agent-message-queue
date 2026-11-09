@@ -207,8 +207,8 @@ func TestHTMLCardShowsSummaryAndPrefixChip(t *testing.T) {
 	}
 }
 
-// Every view names its coverage gaps in one line, with the source's own
-// words and a link to Sources, instead of a closed box with a count.
+// Every view names its coverage gaps in one plain line that says what the
+// owner can do and links to Sources, where the source's own words are.
 func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	beads := Result{Status: StatusOK, ObservedAt: now, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}}
@@ -217,7 +217,7 @@ func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
 		t.Fatal(err)
 	}
-	want := `<span class="gap"><span class="gap-name">beads</span>: 238 mentioned bead ids over the lookup cap</span></span> <span class="gaps-count">1 source.</span> <a href="#view-sources">See Sources</a></p>`
+	want := `<span class="gap"><span class="gap-name">beads</span> partly read</span>.</span> <span class="gaps-count">1 source.</span> Nothing for you to do; <a href="#view-sources">Sources</a> says why.</p>`
 	if !strings.Contains(page.String(), want) {
 		t.Error("the coverage line does not name the beads gap with its Sources link")
 	}

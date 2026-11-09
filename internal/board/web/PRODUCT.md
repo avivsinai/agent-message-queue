@@ -66,9 +66,11 @@ the owner adopts them.
   body. Each recipient carries an observation (direct
   reply or none, with later thread messages as secondary context, or not
   assessed); a classifier's opinion is shown apart, with its name, an exact
-  quote, and the quoted sender and age. The one count is recent requests with
-  no direct reply observed, never unfinished work. Older requests are a
-  separate, searchable view of the newest 200.
+  quote, and the quoted sender and age. The owner's count is recent requests
+  to the owner with no direct reply observed; the count for requests to
+  agents stays in the Requests view as the agents' bookkeeping. Neither is
+  unfinished work. Older requests are a separate, searchable view of the
+  newest 200.
 - Work categories distinguish needs-you items, declared in-progress work, blocked work, and backlog. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept

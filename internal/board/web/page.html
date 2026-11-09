@@ -304,7 +304,7 @@
 {{end}}
 {{define "title"}}{{if .Prefix}}<span class="cc">{{.Prefix}}</span> {{end}}{{.Title}}{{end}}
 {{define "owners"}}{{range $i, $o := .}}{{if $i}}, {{end}}{{if $o.Unmapped}}<span class="sr-only">not mapped: </span>{{end}}{{$o.Name}}{{end}}{{end}}
-{{define "coverage"}}{{if .}}<p class="coverage-line"><span class="coverage-word">Incomplete coverage:</span> <span class="gaps" title="{{range $i, $g := .}}{{if $i}} · {{end}}{{$g.Name}}{{if $g.Status}} {{$g.Status}}{{end}}{{if $g.Gap}}: {{$g.Gap}}{{end}}{{end}}">{{range $i, $g := .}}{{if $i}} · {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span>{{if $g.Status}} {{$g.Status}}{{end}}{{if $g.Gap}}: {{$g.Gap}}{{end}}</span>{{end}}</span> <span class="gaps-count">{{len .}} {{if eq (len .) 1}}source{{else}}sources{{end}}.</span> <a href="#view-sources">See Sources</a></p>{{end}}{{end}}
+{{define "coverage"}}{{if .}}<p class="coverage-line"><span class="coverage-word">Incomplete coverage:</span> <span class="gaps">{{range $i, $g := .}}{{if $i}}, {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span> {{$g.Status}}</span>{{end}}.</span> <span class="gaps-count">{{len .}} {{if eq (len .) 1}}source{{else}}sources{{end}}.</span> Nothing for you to do; <a href="#view-sources">Sources</a> says why.</p>{{end}}{{end}}
 {{define "cmd"}}
 <div class="cmd"><label class="cmd-label">{{.Label}}<textarea readonly rows="2" spellcheck="false">{{.Command}}</textarea></label><code class="sr-only">{{.Command}}</code><button type="button" class="copy" data-command="{{.Command}}" aria-label="Copy: {{.Label}}">Copy command</button></div>
 {{end}}

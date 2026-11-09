@@ -82,7 +82,8 @@ type pageFlow struct {
 	// Gates are the unread messages for the owner, one line per session
 	// with its oldest age, kept apart from the cards.
 	Gates []string
-	// Requests is the request headline, linked to the Requests view.
+	// Requests is the count of requests to the owner without a direct
+	// reply, linked to the Requests view; empty when there is none.
 	Requests string
 }
 
@@ -124,9 +125,8 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 		}
 		f.Stages = append(f.Stages, st)
 	}
-	if len(m.Requests.Recent) > 0 {
-		head, notes := requestHeadline(m.Requests)
-		f.Requests = strings.Join(append([]string{head}, notes...), "; ")
+	if owner, _ := requestCounts(m.Requests); owner > 0 {
+		f.Requests = requestHeadline(m.Requests)
 	}
 	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f

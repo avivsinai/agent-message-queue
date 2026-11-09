@@ -582,18 +582,51 @@ func participantLabel(p Participant) string {
 	return s
 }
 
-// requestHeadline is the only request count the board states, with its
-// qualifications. It is never a count of unfinished work.
-func requestHeadline(v RequestView) (string, []string) {
-	head := pluralize(v.NoDirectReply, "recent request") + " with no direct reply observed"
-	var notes []string
+// requestHeadline is the request count the owner can act on: Recent
+// requests addressed to the owner handle with no direct reply from the
+// owner observed. It is never a count of unfinished work.
+func requestHeadline(v RequestView) string {
+	owner, _ := requestCounts(v)
+	if owner == 0 {
+		return "No recent request to you without a direct reply"
+	}
+	return pluralize(owner, "recent request") + " to you with no direct reply observed"
+}
+
+// requestBookkeeping is the Requests section's account of requests to
+// agents, with its coverage notes. Agents often answer with a new message
+// instead of a reply, so the count is their bookkeeping, not owner work.
+func requestBookkeeping(v RequestView) []string {
+	_, agents := requestCounts(v)
+	notes := []string{pluralize(agents, "recent request") + " to agents " + map[bool]string{true: "has", false: "have"}[agents == 1] + " no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."}
 	if !v.Coverage.Complete {
 		notes = append(notes, "History coverage incomplete; see Sources")
 	}
 	if v.UnknownScope > 0 {
 		notes = append(notes, pluralize(v.UnknownScope, "recent request")+" with unknown recipient scope not assessed")
 	}
-	return head, notes
+	return notes
+}
+
+// requestCounts splits the Recent requests without a direct reply: those
+// addressed to the owner handle that the owner has not answered directly,
+// and the rest, which some agent recipient has not answered directly. The
+// owner is one person in every root, so an owner recipient counts whether
+// or not its session scope is known.
+func requestCounts(v RequestView) (owner, agents int) {
+	for _, r := range v.Recent {
+		toOwner := false
+		for _, rec := range r.Recipients {
+			toOwner = toOwner || rec.Handle == reservedHuman && len(rec.DirectReplies) == 0
+		}
+		switch {
+		case toOwner:
+			owner++
+		case r.NoDirectReply:
+			agents++
+		}
+	}
+	return owner, agents
 }
 
 // requestFact is one recipient's observations in words. State is unreplied

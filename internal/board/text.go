@@ -42,10 +42,8 @@ func WriteText(w io.Writer, m Model) error {
 	fmt.Fprintf(&b, "sources: %s\n", strings.Join(strip, " · "))
 	for _, s := range m.Sources {
 		switch {
-		case s.Status == StatusDegraded:
-			fmt.Fprintf(&b, "  %s degraded: %s\n", s.Name, clean(s.Detail))
-		case s.Status == StatusUnavailable:
-			fmt.Fprintf(&b, "  %s unavailable: %s\n", s.Name, clean(s.Detail))
+		case s.Status == StatusDegraded || s.Status == StatusUnavailable:
+			fmt.Fprintf(&b, "  %s %s: %s\n", s.Name, s.Status, sourceGap(s).Gap)
 		case s.Partial && s.Coverage.Detail != "":
 			fmt.Fprintf(&b, "  %s not assessed: %s\n", s.Name, clean(s.Coverage.Detail))
 		}
@@ -89,6 +87,9 @@ func WriteText(w io.Writer, m Model) error {
 		if c.ID == ColumnWaiting {
 			for _, g := range m.Gates {
 				fmt.Fprintf(&b, "  %s: %d unread for user (oldest %s)\n", g.Session, g.OpenCount, age(seconds(g.OldestAgeSeconds)))
+			}
+			if owner, _ := requestCounts(m.Requests); owner > 0 {
+				fmt.Fprintf(&b, "  %s; see Requests\n", requestHeadline(m.Requests))
 			}
 		}
 		if len(c.Cards) == 0 {
@@ -348,9 +349,8 @@ func newestCards(cards []Card) []Card {
 func writeRequests(b *strings.Builder, m Model, now time.Time) {
 	v := m.Requests
 	fmt.Fprintf(b, "\n== Requests (outside task counts) ==\n")
-	head, notes := requestHeadline(v)
-	fmt.Fprintf(b, "  %s\n", head)
-	for _, note := range notes {
+	fmt.Fprintf(b, "  %s\n", requestHeadline(v))
+	for _, note := range requestBookkeeping(v) {
 		fmt.Fprintf(b, "    %s\n", clean(note))
 	}
 	fmt.Fprintf(b, "  recent (%d days) %d · older %d · undated %d\n", int(RequestWindow/(24*time.Hour)), len(v.Recent), len(v.Older), len(v.Undated))

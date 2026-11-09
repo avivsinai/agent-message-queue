@@ -153,3 +153,47 @@ func TestCodexGoalsReadVersionedStore(t *testing.T) {
 		})
 	}
 }
+
+// amq-board showed codex-goals degraded on the owner's Mac (2026-11-09):
+// goals_1.sqlite is in WAL mode and Codex had checkpointed and removed its
+// -wal. That state is consistent; the read must open the main file
+// immutable and create no sidecar.
+func TestCodexGoalsReadCheckpointedWALDatabase(t *testing.T) {
+	db, err := os.ReadFile("testdata/codex-goals_1.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db[18], db[19] = 2, 2
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "goals_1.sqlite"), db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	thread := "019f0000-0000-7000-8000-000000000002"
+	listing, _ := json.Marshal(map[string]any{"sessions": []any{map[string]any{"name": "s1", "conversations": []any{map[string]string{"handle": "codex", "provider": "codex", "id": thread, "state": "ready"}}}}})
+	runner := codexGoalsRunner(func(_ context.Context, argv []string) ([]byte, error) {
+		switch argv[0] {
+		case "amq":
+			if argv[1] == "session" {
+				return listing, nil
+			}
+			return []byte(`[{"name":"s1","agents":[{"handle":"codex","active":true}]}]`), nil
+		case "git":
+			return []byte("worktree " + project + "\x00\x00"), nil
+		case "sqlite3":
+			if !strings.Contains(strings.Join(argv, " "), "mode=ro&immutable=1") {
+				t.Fatalf("checkpointed WAL read must be immutable: %v", argv)
+			}
+			return []byte(`[{"thread_id":"` + thread + `","goal_id":"119f0000-0000-4000-8000-000000000002","objective":"Ship it","status":"active","updated_at_ms":1}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command %v", argv)
+	})
+	env := board.Env{Dir: project, Now: time.Now, Run: runner}
+	got := (CodexGoals{}).Read(context.Background(), env)
+	if got.Status != board.StatusOK || len(got.Items) != 1 {
+		t.Fatalf("checkpointed WAL read: %+v", got)
+	}
+	if sidecars, _ := filepath.Glob(filepath.Join(home, "goals_1.sqlite-*")); len(sidecars) != 0 {
+		t.Fatalf("read created %v", sidecars)
+	}
+}
