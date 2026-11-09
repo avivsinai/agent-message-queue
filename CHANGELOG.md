@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.137.9](https://github.com/avivsinai/agent-message-queue/compare/v0.137.8...v0.137.9) (2026-11-09)
+
+
+### Bug Fixes
+
+* **board:** the board's headline names only what needs the owner ([#1432](https://github.com/avivsinai/agent-message-queue/issues/1432)) ([1e67e8c](https://github.com/avivsinai/agent-message-queue/commit/1e67e8c8ffdb56e9ff87df90fd8ece6b05da84cb))
+* **launch:** say when Codex's automatic reviewer keeps approvals off Buzz ([#1433](https://github.com/avivsinai/agent-message-queue/issues/1433)) ([ca56c48](https://github.com/avivsinai/agent-message-queue/commit/ca56c48a31a6f8dd7e0a82da1e54017120d93448))
+
 ## [0.137.8](https://github.com/avivsinai/agent-message-queue/compare/v0.137.7...v0.137.8) (2026-11-09)
 
 
