@@ -561,15 +561,15 @@ func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	s.dropGoneDialogs(now)
+	s.dropGoneDialogs(nil, now)
 	if res, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || res.Outcome != dialog.OutcomeExpired {
 		t.Fatalf("resolution = %+v, %v; want expired", res, ok)
 	}
-	s.dropGoneDialogs(now)
+	s.dropGoneDialogs(nil, now)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the dialogs went while the seam runs: %v", err)
 	}
-	s.dropGoneDialogs(now.Add(seamGrace + time.Second))
+	s.dropGoneDialogs(nil, now.Add(seamGrace+time.Second))
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("the dialogs stayed after seamGrace: %v", err)
 	}
@@ -625,7 +625,7 @@ func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) 
 		}
 		return nil
 	}
-	s.dropGoneDialogs(time.Now())
+	s.dropGoneDialogs(nil, time.Now())
 	if res, ok, _ := dialog.ReadResolved(bDir, bReq.ID); ok {
 		t.Fatalf("the open dialog of live session bbb was resolved: %+v", res)
 	}

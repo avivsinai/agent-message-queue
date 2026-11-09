@@ -26,10 +26,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -291,6 +293,20 @@ func registryDir(dir string) string {
 // mutex.
 func readSessionRegistry(dir string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(registryDir(dir), strconv.Itoa(pid)+".json")
+	reg, err := registryCache.Load(path, func() (*sessionRegistry, error) { return decodeSessionRegistry(path) })
+	if reg == nil || err != nil {
+		return nil, err
+	}
+	c := *reg
+	c.PeerFeatures = slices.Clone(c.PeerFeatures)
+	return &c, nil
+}
+
+// registryCache keeps each decoded registry file while it is unchanged:
+// serve and the Buzz agent read every session's entry on each sweep.
+var registryCache = fsq.NewVersionCache[*sessionRegistry](256)
+
+func decodeSessionRegistry(path string) (*sessionRegistry, error) {
 	raw, err := readRegularBounded(path, maxRegistryBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
