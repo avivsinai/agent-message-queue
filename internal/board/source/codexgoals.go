@@ -65,7 +65,7 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 		}
 	}
 	db := filepath.Join(home, "goals_1.sqlite")
-	fresh, checkpointed, err := codexGoalsReadable(db)
+	fresh, _, err := codexGoalsReadable(db)
 	if os.IsNotExist(err) {
 		res.Status, res.Detail = board.StatusUnavailable, "goals_1.sqlite not found"
 		res.Coverage.Unresolved++
@@ -104,7 +104,8 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	query := "PRAGMA query_only=ON; BEGIN; SELECT thread_id, goal_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (" + strings.Join(ids, ",") + ") ORDER BY thread_id; COMMIT;"
 	// Decide the open mode and stamp the main file again just before the
 	// query, so a checkpoint during the session walk is not a failed read.
-	if _, checkpointed, err = codexGoalsReadable(db); err != nil {
+	_, checkpointed, err := codexGoalsReadable(db)
+	if err != nil {
 		return fail(err)
 	}
 	mode := "mode=ro"
