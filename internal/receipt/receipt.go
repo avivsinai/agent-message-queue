@@ -43,8 +43,13 @@ func New(msgID, thread, sender, consumer, stage, detail string) Receipt {
 	}
 }
 
+// Filename is the name of the receipt that consumer writes for msgID at stage.
+func Filename(msgID, consumer, stage string) string {
+	return fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
+}
+
 func (r Receipt) filename() string {
-	return fmt.Sprintf("%s__%s__%s.json", r.MsgID, r.Consumer, r.Stage)
+	return Filename(r.MsgID, r.Consumer, r.Stage)
 }
 
 func (r Receipt) Marshal() ([]byte, error) {
@@ -241,7 +246,7 @@ func PendingPath(r Receipt) string {
 // WaitFor polls for a specific consumer-local receipt by deterministic filename.
 // Returns the receipt on match, or an error on timeout.
 func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
-	name := fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
+	name := Filename(msgID, consumer, stage)
 	path := filepath.Join(fsq.AgentReceipts(root, consumer), name)
 
 	deadline := time.Time{}
@@ -267,7 +272,7 @@ func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Dur
 // WaitForDeliveryRoot polls through the same capability used for delivery so a
 // renamed root cannot redirect receipt observation to another tree.
 func WaitForDeliveryRoot(root *fsq.DeliveryRoot, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
-	name := fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
+	name := Filename(msgID, consumer, stage)
 	path := filepath.Join("agents", consumer, "receipts", name)
 	deadline := time.Time{}
 	if timeout > 0 {
