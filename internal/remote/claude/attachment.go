@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -297,6 +298,7 @@ func readSessionRegistry(dir string, pid int) (*sessionRegistry, error) {
 		return nil, err
 	}
 	c := *reg
+	c.PeerFeatures = slices.Clone(c.PeerFeatures)
 	return &c, nil
 }
 

@@ -157,11 +157,10 @@ func (rs *relaySet) start(ctx context.Context, r *manifest.Relay) {
 // wait returns once every client and the status writer ended.
 func (rs *relaySet) wait() { rs.wg.Wait() }
 
-// manifestBytes follows a manifest by its bytes, not its mtime: a
-// same-second edit or a rename that keeps the mtime still counts, and a
-// deleted manifest reads as empty, a change to no links and no shares.
-// A stable version equal to the one taken before the last read skips the
-// read.
+// manifestBytes follows a manifest by its stable version and, when that
+// changed or is not stable, by its bytes: a same-second edit or a rename
+// that keeps the mtime still counts, and a deleted manifest reads as empty,
+// a change to no links and no shares.
 type manifestBytes struct {
 	raw []byte // nil until the first read
 	v   fsq.FileVersion
