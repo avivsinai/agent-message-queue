@@ -33,7 +33,8 @@ func TestVersionCacheReadsAnUnchangedFileOnce(t *testing.T) {
 		return v
 	}
 	write("a")
-	if load() != "a" || load() != "a" || reads != 1 {
+	first, second := load(), load()
+	if first != "a" || second != "a" || reads != 1 {
 		t.Fatalf("an unchanged file was read %d times", reads)
 	}
 	write("b")
