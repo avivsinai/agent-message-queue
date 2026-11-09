@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -63,4 +64,49 @@ func StableFileIdentity(path string) (string, error) {
 		return "", fmt.Errorf("file identity requires a regular file: %s", abs)
 	}
 	return platformStableTreeIdentity(abs, info)
+}
+
+// SamePersistedTreeIdentity reports whether stored, a token a consumer wrote
+// to disk, names the same file as live, the token computed now for the same
+// canonical path. macOS assigns st_dev when it mounts a volume, so a token
+// stored before a reboot or OS update can carry another device number for
+// the same file; the platform and file ID must still match. Process-lifetime
+// pins compare tokens exactly instead. The caller must already have matched
+// the canonical path: across devices a file ID alone names no file.
+func SamePersistedTreeIdentity(stored, live string) bool {
+	if stored == live {
+		return stored != ""
+	}
+	s, sok := splitIdentityToken(stored)
+	l, lok := splitIdentityToken(live)
+	return sok && lok && s[1] == l[1] && s[3] == l[3]
+}
+
+// PersistedTreeKey is a reboot-stable key for token, the identity of the
+// file at canonical path, to name or hash persisted state by: the platform,
+// the file ID and the path, without the device number a mount reassigns. An
+// empty path keys by file ID alone, which can match across volumes. A string
+// that is not an identity token is returned unchanged.
+func PersistedTreeKey(path, token string) string {
+	parts, ok := splitIdentityToken(token)
+	if !ok {
+		return token
+	}
+	if path != "" {
+		path = filepath.Clean(path)
+	}
+	return "key1:" + parts[1] + ":" + parts[3] + ":" + path
+}
+
+func splitIdentityToken(token string) ([]string, bool) {
+	parts := strings.Split(token, ":")
+	if len(parts) != 4 || parts[0] != "v1" || parts[1] == "" {
+		return nil, false
+	}
+	for _, field := range parts[2:] {
+		if _, err := strconv.ParseUint(field, 16, 64); err != nil {
+			return nil, false
+		}
+	}
+	return parts, true
 }

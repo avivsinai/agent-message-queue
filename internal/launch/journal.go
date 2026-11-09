@@ -23,8 +23,11 @@ const (
 	journalFilename = "journal.json"
 )
 
+// Physical identities that persisted launch state records are read through
+// these, so a test can stand in for the device renumbering of a reboot.
 var stableTreeIdentity = fsq.StableTreeIdentity
 var stableTreeIdentityInfo = fsq.StableTreeIdentityInfo
+var stableFileIdentityInfo = fsq.StableFileIdentityInfo
 
 type JournalPhase string
 
@@ -297,8 +300,8 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if err != nil {
 		return fmt.Errorf("resolve session root physical identity: %w", err)
 	}
-	if (record.ProjectPhysical != "" && record.ProjectPhysical != projectPhysical) ||
-		(record.RootPhysical != "" && record.RootPhysical != rootPhysical) {
+	if (record.ProjectPhysical != "" && !fsq.SamePersistedTreeIdentity(record.ProjectPhysical, projectPhysical)) ||
+		(record.RootPhysical != "" && !fsq.SamePersistedTreeIdentity(record.RootPhysical, rootPhysical)) {
 		return fmt.Errorf("launch journal physical project or session root changed")
 	}
 	if record.RosterDigest != rosterDigest {

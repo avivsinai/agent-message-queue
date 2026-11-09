@@ -328,7 +328,7 @@ func validateCodexConversationCapture(root *fsq.DeliveryRoot, raw []byte, record
 			return err
 		}
 		_, identity, err := canonicalDirectory(root.Base())
-		if err != nil || payload.SessionIdentity != identity {
+		if err != nil || !fsq.SamePersistedTreeIdentity(payload.SessionIdentity, identity) {
 			return fmt.Errorf("codex conversation evidence belongs to another physical session root")
 		}
 		handle, nonce, provider, version, thread = payload.Handle, payload.LaunchNonce, payload.Provider, payload.ProviderVersion, payload.ConversationID

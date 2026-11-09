@@ -186,10 +186,18 @@ func TestSessionListShowsRecordedHarnessSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Field regression (2026-11-09): records written before a macOS reboot
+	// carry another st_dev for the same root; they stay listed, and a later
+	// coop exec still replaces the thread of the same handle.
+	beforeReboot := renumberedDevice(rootID)
 	for _, thread := range []string{firstThread, secondThread} {
+		threadRootID := rootID
+		if thread == firstThread {
+			threadRootID = beforeReboot
+		}
 		if err := codexidentity.Publish(codexidentity.Record{
 			Thread: thread, CodexHome: filepath.Join(home, ".codex"), Root: session, BaseRoot: base, Session: "collab",
-			Me: "beta", RootID: rootID, BaseRootID: baseID,
+			Me: "beta", RootID: threadRootID, BaseRootID: baseID,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -203,7 +211,7 @@ func TestSessionListShowsRecordedHarnessSessions(t *testing.T) {
 	start := time.Date(2026, 10, 9, 10, 10, 50, 0, time.UTC)
 	if err := execidentity.Publish(execidentity.Record{
 		Harness: launch.ClaudeProvider, Holder: launch.HolderIdentity{PID: 4242, ProcessStart: "start", BootID: "boot"},
-		StartUnix: start.Unix(), Root: session, BaseRoot: base, Session: "collab", Me: "alpha", RootID: rootID, BaseRootID: baseID,
+		StartUnix: start.Unix(), Root: session, BaseRoot: base, Session: "collab", Me: "alpha", RootID: beforeReboot, BaseRootID: baseID,
 	}); err != nil {
 		t.Fatal(err)
 	}

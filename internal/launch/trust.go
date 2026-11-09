@@ -57,10 +57,11 @@ func OpenTrustStoreForBase(userStateDir, projectRoot, baseRoot string) (*TrustSt
 	if err != nil {
 		return nil, err
 	}
-	identity, err := fsq.StableTreeIdentity(projectAbs)
+	token, err := stableTreeIdentity(projectAbs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve project identity: %w", err)
 	}
+	identity := fsq.PersistedTreeKey(projectAbs, token)
 	stateAbs, err := resolvedPath(userStateDir)
 	if err != nil {
 		return nil, err

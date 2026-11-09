@@ -106,6 +106,13 @@ func TestLaunchJournalRejectsPlanRosterAndBindingDrift(t *testing.T) {
 	if err := drifted.Validate(); err == nil {
 		t.Fatal("journal accepted a binding from a different launch generation")
 	}
+	// Field regression (2026-11-09): a macOS update reboot renumbered st_dev
+	// of the same directories, and recovery refused the journal.
+	rebooted := record
+	rebooted.ProjectPhysical, rebooted.RootPhysical = renumberedDevice(record.ProjectPhysical), renumberedDevice(record.RootPhysical)
+	if err := rebooted.ValidateRequest(request); err != nil {
+		t.Fatalf("journal written before a reboot: %v", err)
+	}
 	originalProject := request.ProjectRoot + "-original"
 	if err := os.Rename(request.ProjectRoot, originalProject); err != nil {
 		t.Fatal(err)
@@ -141,4 +148,12 @@ func journalFixturePlan(nonce string) (Plan, []AgentReconcileResult, []Conversat
 		ProviderVersion: "test", LaunchNonce: nonce,
 	}}
 	return plan, agents, conversations
+}
+
+// renumberedDevice is token as a reboot leaves it: the same file ID on a
+// device with another st_dev.
+func renumberedDevice(token string) string {
+	parts := strings.Split(token, ":")
+	parts[2] = "fffe"
+	return strings.Join(parts, ":")
 }

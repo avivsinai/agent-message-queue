@@ -82,6 +82,10 @@ Launch trust state lives in `~/.amq/state/launch`. The legacy platform state
 directory (`<legacy>` below) is `$XDG_STATE_HOME/amq`, else the user config
 directory on macOS and Windows, else `~/.local/state/amq`.
 
+- A trust record is keyed by the canonical path and file ID of the project
+  and session root, not by the device number that a reboot reassigns. Records
+  that an older AMQ keyed by device number are neither read nor deleted, so
+  the first launch after that upgrade asks for trust once.
 - When `<legacy>/launch` exists, launch trust stays in the legacy directory,
   so every `amq` binary reads and writes the same trust records.
 - `XDG_STATE_HOME` only locates the legacy directory. It does not move

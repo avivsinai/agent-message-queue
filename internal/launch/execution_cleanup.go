@@ -46,7 +46,7 @@ func InspectExecutionCleanup(root *fsq.DeliveryRoot, handle string) (ExecutionCl
 		return ExecutionCleanupTarget{}, err
 	}
 	_, sessionIdentity, err := canonicalDirectory(root.Base())
-	if err != nil || sessionIdentity != ticket.SessionIdentity {
+	if err != nil || !fsq.SamePersistedTreeIdentity(ticket.SessionIdentity, sessionIdentity) {
 		return ExecutionCleanupTarget{}, fmt.Errorf("execution ticket belongs to another physical session root")
 	}
 	if ticket.Provider != CodexProvider || !ticket.PreSpawnAcquire {

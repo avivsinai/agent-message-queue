@@ -40,7 +40,7 @@ func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.Deli
 	if err != nil {
 		return "", fmt.Errorf("resolve trust session root: %w", err)
 	}
-	rootIdentity, err := fsq.StableTreeIdentityInfo(root.FileInfo())
+	rootIdentity, err := stableTreeIdentityInfo(root.FileInfo())
 	if err != nil {
 		return "", fmt.Errorf("resolve trust session-root identity: %w", err)
 	}
@@ -97,7 +97,7 @@ func executionTrustDigest(planDigest, session, rootPath, rootIdentity string, on
 		OnLiveKeep   []string `json:"on_live_keep,omitempty"`
 	}{
 		Version: executionTrustDigestVersion, PlanDigest: planDigest,
-		Session: session, RootPath: filepath.Clean(rootPath), RootIdentity: rootIdentity,
+		Session: session, RootPath: filepath.Clean(rootPath), RootIdentity: fsq.PersistedTreeKey(rootPath, rootIdentity),
 		OnLiveKeep: keep,
 	})
 	if err != nil {

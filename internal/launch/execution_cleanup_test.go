@@ -3,6 +3,7 @@ package launch
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -95,5 +96,50 @@ func TestAcquiredExecutionCleanupAllowsAReplacementGeneration(t *testing.T) {
 				t.Fatalf("later generation remains wedged: %v", err)
 			}
 		})
+	}
+}
+
+// Field regression (2026-11-09): a macOS update reboot renumbered st_dev of
+// the session root, and cleanup refused the ticket a crash left behind as
+// belonging to another physical session root.
+func TestExecutionCleanupAcceptsTicketFromBeforeReboot(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "94949494-9494-4949-8949-949494949494"
+	ticket, _ := seedPendingCodexDaemonExecution(t, fixture, nonce)
+	ticket.State, ticket.Reason = ExecutionIdentityRequested, "crashed before the reboot"
+	ticket.SessionIdentity = renumberedDevice(ticket.SessionIdentity)
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectExecutionCleanup(fixture.root, "codex"); err != nil {
+		t.Fatalf("cleanup of a ticket written before a reboot: %v", err)
+	}
+}
+
+// Field regression (2026-11-09): a Codex conversation captured on the daemon
+// before a macOS update reboot could not resume after it: its evidence
+// "belongs to another physical session root".
+func TestCodexDaemonCaptureFromBeforeRebootStillBinds(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "95959595-9595-4959-8959-959595959595"
+	ticket, _ := seedPendingCodexDaemonExecution(t, fixture, nonce)
+	ticket.SessionIdentity = renumberedDevice(ticket.SessionIdentity)
+	capture, err := ObserveCodexDaemonThread(ticket, testConversationID, filepath.Join(fixture.session, "codex.sock"), HolderIdentity{PID: 1, ProcessStart: "start", BootID: "boot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ConversationRecord{Handle: "codex", LaunchNonce: nonce, ProviderVersion: CodexDaemonVersion, Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}}
+	if err := validateCodexConversationCapture(fixture.root, capture.payload, record); err != nil {
+		t.Fatalf("capture from before the reboot: %v", err)
 	}
 }

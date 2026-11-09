@@ -371,9 +371,12 @@ func (s Store) readUnlocked(ctx context.Context) (Snapshot, document, error) {
 	if state.Schema == v2SnapshotSchema {
 		state.Schema = SnapshotSchema
 	}
-	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || state.BaseRootID != s.BaseRootID || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil || state.Facts == nil {
+	if state.Schema != SnapshotSchema || state.BaseRoot != s.BaseRoot || !fsq.SamePersistedTreeIdentity(state.BaseRootID, s.BaseRootID) || state.ProjectID == "" || state.HostID != s.HostID || state.Generation == 0 || state.Tasks == nil || state.Anchors == nil || state.Aliases == nil || state.Messages == nil || state.Dismissed == nil || state.ActionCancelled == nil || state.Withdrawals == nil || state.Facts == nil {
 		return Snapshot{}, document{}, errors.New("board identity or state invalid; recovery required")
 	}
+	// A reboot can renumber the base root's device; the next publish records
+	// the current token.
+	state.BaseRootID = s.BaseRootID
 	if s.ProjectID != "" && state.ProjectID != s.ProjectID {
 		return Snapshot{}, document{}, ErrProjectChanged
 	}
