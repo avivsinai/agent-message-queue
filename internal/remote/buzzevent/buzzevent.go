@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"fiatjaf.com/nostr"
 
@@ -37,6 +39,8 @@ var (
 	// ErrWrongChannel means the event does not carry exactly one channel
 	// tag equal to the requested channel.
 	ErrWrongChannel = errors.New("buzz event is not in the requested channel")
+	// ErrBadSignature means the event's signature is not its author's.
+	ErrBadSignature = errors.New("buzz event signature does not verify")
 )
 
 // Fetch returns the event id from the relay cfg names, authenticated as cfg's
@@ -80,6 +84,33 @@ func Fetch(ctx context.Context, cfg relay.Config, id, channel string) (nostr.Eve
 		return nostr.Event{}, ErrNotFound
 	case <-ctx.Done():
 		return nostr.Event{}, ctx.Err()
+	}
+}
+
+// Verify accepts evt offline as Fetch accepts it from the relay: its id
+// is the hash of its content, its author signed it, and it is the
+// plaintext message in channel.
+func Verify(evt nostr.Event, channel string) error {
+	if !evt.CheckID() {
+		return ErrWrongID
+	}
+	if !evt.VerifySignature() {
+		return ErrBadSignature
+	}
+	_, err := accept(evt, evt.ID.Hex(), channel)
+	return err
+}
+
+// DropMentions trims a message's text and drops its leading mentions. Line
+// breaks stay: one line can answer each question of a dialog.
+func DropMentions(text string) string {
+	text = strings.TrimSpace(text)
+	for {
+		end := strings.IndexFunc(text, unicode.IsSpace)
+		if end < 0 || (!strings.HasPrefix(text, "@") && !strings.HasPrefix(text, "nostr:")) {
+			return text
+		}
+		text = strings.TrimSpace(text[end:])
 	}
 }
 
