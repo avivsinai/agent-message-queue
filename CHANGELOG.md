@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.137.7](https://github.com/avivsinai/agent-message-queue/compare/v0.137.6...v0.137.7) (2026-11-09)
+
+
+### Bug Fixes
+
+* **fsq:** saved AMQ state survives a reboot that renumbers the disk ([7cde5aa](https://github.com/avivsinai/agent-message-queue/commit/7cde5aa278b6056b48074f91227bb2a925931895))
+* **launch:** launch trust is confirmed once more after this upgrade ([7cde5aa](https://github.com/avivsinai/agent-message-queue/commit/7cde5aa278b6056b48074f91227bb2a925931895))
+
 ## [0.137.6](https://github.com/avivsinai/agent-message-queue/compare/v0.137.5...v0.137.6) (2026-11-09)
 
 
