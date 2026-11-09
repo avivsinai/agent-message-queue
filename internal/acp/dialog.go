@@ -18,6 +18,7 @@ import (
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip19"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -190,6 +191,10 @@ type dialogState struct {
 	polled map[string]time.Time // dialog id -> last reaction read
 	// edits holds the backoff of each dialog whose post edit failed.
 	edits map[string]mirrorBackoff
+	// quiet holds each binding whose last full pass left nothing to do;
+	// its directories are not read again until one of them changes or the
+	// entry is due.
+	quiet map[string]dialogQuiet
 	// quit closes when the dialog worker stops; nil outside it.
 	quit <-chan struct{}
 	// release drops a pinned agent's dialog lead; nil when not held.
@@ -213,9 +218,11 @@ const (
 // a binding that is gone expire and are removed.
 func (s *Server) dialogTick(now time.Time) {
 	type scope struct {
-		t    dialogTarget
-		dir  string
-		open map[string]bool
+		t     dialogTarget
+		dir   string
+		open  map[string]bool
+		key   [3]fsq.FileVersion // as of before the pass; keyed false when unusable
+		keyed bool
 	}
 	type step struct {
 		t   dialogTarget
@@ -224,14 +231,20 @@ func (s *Server) dialogTick(now time.Time) {
 	}
 	var scopes []scope
 	var steps []step
+	served := map[string]bool{}
 	for _, t := range s.dialogTargets() {
 		if s.dialogStopped() {
 			return
+		}
+		served[t.name] = true
+		if s.dialogsQuiet(t.name, now) {
+			continue
 		}
 		dir, err := dialog.DirFor(t.name)
 		if err != nil {
 			continue
 		}
+		key, keyed := s.dialogQuietKey(t.name, dir, now)
 		reqs, err := dialog.Requests(dir)
 		if err != nil {
 			continue
@@ -245,7 +258,7 @@ func (s *Server) dialogTick(now time.Time) {
 			open[req.ID] = true
 			steps = append(steps, step{t, dir, req})
 		}
-		scopes = append(scopes, scope{t, dir, open})
+		scopes = append(scopes, scope{t, dir, open, key, keyed})
 	}
 	// Each step may wait on the relay, so a dialog left open never delays
 	// the post or the reactions of a newer one.
@@ -260,12 +273,68 @@ func (s *Server) dialogTick(now time.Time) {
 		if s.dialogStopped() {
 			return
 		}
-		s.dialogClose(sc.t.name, sc.dir, sc.open, now)
-		s.pruneDialogs(sc.t.name, sc.dir, now)
+		closed := s.dialogClose(sc.t.name, sc.dir, sc.open, now)
+		due := s.pruneDialogs(sc.t.name, sc.dir, now)
+		if len(sc.open) == 0 && closed && sc.keyed {
+			s.markDialogsQuiet(sc.t.name, sc.dir, sc.key, earliest(due, now.Add(sessionViewReconcile)))
+		}
 	}
 	if !s.dialogStopped() {
-		s.dropGoneDialogs(now)
+		s.dropGoneDialogs(served, now)
 	}
+}
+
+// dialogQuiet is a binding whose dialogs need nothing until key changes or
+// until: no dialog is open, every post was edited, and no resolved dialog
+// is due to be pruned before until.
+type dialogQuiet struct {
+	key   [3]fsq.FileVersion
+	until time.Time
+}
+
+// dialogQuietKey is the version of the directories a seam or a post
+// changes: requests, resolved and the post directory. ok is false when one
+// could not be read or changed too recently to stand for its content.
+func (s *Server) dialogQuietKey(name, dir string, now time.Time) (key [3]fsq.FileVersion, ok bool) {
+	ok = true
+	for i, p := range []string{filepath.Join(dir, "requests"), filepath.Join(dir, "resolved"), s.dialogPostDir(name)} {
+		v, settled, err := fsq.LstatVersion(p, now)
+		key[i] = v
+		ok = ok && settled && err == nil
+	}
+	return key, ok
+}
+
+// markDialogsQuiet records that name's dialogs need nothing before until,
+// when its directories still have the version read before the pass: a pass
+// that changed them, or a seam that wrote meanwhile, leaves it unmarked.
+func (s *Server) markDialogsQuiet(name, dir string, before [3]fsq.FileVersion, until time.Time) {
+	key, ok := s.dialogQuietKey(name, dir, time.Now())
+	if !ok || key != before {
+		delete(s.dialogs.quiet, name)
+		return
+	}
+	if s.dialogs.quiet == nil {
+		s.dialogs.quiet = map[string]dialogQuiet{}
+	}
+	s.dialogs.quiet[name] = dialogQuiet{key: key, until: until}
+}
+
+// dialogsQuiet reports whether name's dialogs still need nothing: none of
+// its directories changed since its last full pass, and nothing is due.
+func (s *Server) dialogsQuiet(name string, now time.Time) bool {
+	q, ok := s.dialogs.quiet[name]
+	if !ok {
+		return false
+	}
+	root, err := dialog.Root()
+	if err == nil && now.Before(q.until) {
+		if key, ok := s.dialogQuietKey(name, filepath.Join(root, name), now); ok && key == q.key {
+			return true
+		}
+	}
+	delete(s.dialogs.quiet, name)
+	return false
 }
 
 // dialogStopped reports whether the dialog worker is stopping.
@@ -367,10 +436,11 @@ func (s *Server) live(b binding.Binding) bool {
 }
 
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
-// ended, edits their posts, and removes the binding's dialogs once their
+// ended, except the bindings this tick served, edits their posts, and
+// removes the binding's dialogs once their
 // seams left (seamsLeft). A machine
 // agent does this for every binding, a pinned agent for its own.
-func (s *Server) dropGoneDialogs(now time.Time) {
+func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) {
 	root, err := dialog.Root()
 	if err != nil {
 		return
@@ -388,6 +458,10 @@ func (s *Server) dropGoneDialogs(now time.Time) {
 	}
 	snap := s.snapshot()
 	for _, name := range names {
+		if served[name] {
+			continue
+		}
+		delete(s.dialogs.quiet, name)
 		dir := filepath.Join(root, name)
 		if _, err := os.Lstat(dir); err != nil {
 			continue
@@ -450,8 +524,11 @@ func seamsLeft(dir string, now time.Time) bool {
 }
 
 // pruneDialogs removes the files of each dialog resolved more than
-// dialogKeep ago, the request first, so it never reads as open again.
-func (s *Server) pruneDialogs(name, dir string, now time.Time) {
+// dialogKeep ago, the request first, so it never reads as open again. due
+// is when the next kept dialog is to be removed; it is now when one could
+// not be read or removed.
+func (s *Server) pruneDialogs(name, dir string, now time.Time) (due time.Time) {
+	due = now.Add(dialogKeep)
 	entries, _ := os.ReadDir(filepath.Join(dir, "resolved"))
 	for _, e := range entries {
 		id, ok := strings.CutSuffix(e.Name(), ".json")
@@ -459,10 +536,16 @@ func (s *Server) pruneDialogs(name, dir string, now time.Time) {
 			continue
 		}
 		res, found, err := dialog.ReadResolved(dir, id)
-		if err != nil || !found || now.Sub(res.At) <= dialogKeep {
+		if err != nil || !found {
+			due = now
+			continue
+		}
+		if now.Sub(res.At) <= dialogKeep {
+			due = earliest(due, res.At.Add(dialogKeep))
 			continue
 		}
 		if os.Remove(filepath.Join(dir, "requests", e.Name())) != nil && !notExist(filepath.Join(dir, "requests", e.Name())) {
+			due = now
 			continue
 		}
 		_ = os.Remove(filepath.Join(dir, "answers", e.Name()))
@@ -472,6 +555,14 @@ func (s *Server) pruneDialogs(name, dir string, now time.Time) {
 		delete(s.dialogs.polled, id)
 		delete(s.dialogs.edits, id)
 	}
+	return due
+}
+
+func earliest(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 func notExist(path string) bool {
@@ -569,12 +660,18 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 // dialogClose edits the post of each dialog that is no longer open and has
 // a resolution with its outcome, and moves its record to done/. A failed
 // edit is tried again after a backoff (dialogEditBackoffMin, doubling).
-func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Time) {
+// closed reports whether no post is left to edit.
+func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Time) (closed bool) {
 	postDir := s.dialogPostDir(name)
 	entries, _ := os.ReadDir(postDir)
+	left := 0
 	for _, e := range entries {
 		id, ok := strings.CutSuffix(e.Name(), ".json")
-		if !ok || !e.Type().IsRegular() || open[id] {
+		if !ok || !e.Type().IsRegular() {
+			continue
+		}
+		left++
+		if open[id] {
 			continue
 		}
 		res, resolved, err := dialog.ReadResolved(dir, id)
@@ -596,10 +693,11 @@ func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Ti
 		delete(s.dialogs.polled, id)
 		delete(s.dialogs.edits, id)
 		done := filepath.Join(postDir, "done")
-		if os.MkdirAll(done, 0o700) == nil {
-			_ = os.Rename(path, filepath.Join(done, e.Name()))
+		if os.MkdirAll(done, 0o700) == nil && os.Rename(path, filepath.Join(done, e.Name())) == nil {
+			left--
 		}
 	}
+	return left == 0
 }
 
 // dialogEditBackOff delays the next edit of dialog id's post.
