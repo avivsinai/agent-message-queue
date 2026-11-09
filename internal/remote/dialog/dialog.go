@@ -134,6 +134,50 @@ func DirFor(bindingName string) (string, error) {
 	return dir, nil
 }
 
+// Owner is whose Buzz messages act on a binding's session: the owner's key
+// and the channel its commands come from. The Buzz agent writes it when it
+// takes an owner command; the seat that types the command verifies the
+// signed message against it, as a seam trusts an answer this agent wrote.
+type Owner struct {
+	PubKey  string `json:"pubkey"`
+	Channel string `json:"channel"`
+}
+
+const ownerFile = "owner.json"
+
+// WriteOwner replaces the owner record of the dialogs directory dir.
+func WriteOwner(dir string, o Owner) error {
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), ownerFile), raw, 0o600)
+	return err
+}
+
+// ReadOwner reads the owner record of the binding bindingName. It creates
+// nothing; a binding that never took a command has none (os.ErrNotExist).
+func ReadOwner(bindingName string) (Owner, error) {
+	if bindingName != binding.LegacyName {
+		if err := binding.ValidName(bindingName); err != nil {
+			return Owner{}, err
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		return Owner{}, err
+	}
+	var o Owner
+	found, err := readJSON(filepath.Join(root, bindingName, ownerFile), &o)
+	switch {
+	case err != nil:
+		return Owner{}, err
+	case !found:
+		return Owner{}, os.ErrNotExist
+	}
+	return o, nil
+}
+
 // Open writes requests/<id>.json.
 func Open(dir string, r Request) error {
 	if !idRe.MatchString(r.ID) {

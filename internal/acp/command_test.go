@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -34,16 +36,71 @@ func TestOwnerSlashCommandIsQueuedForTheWake(t *testing.T) {
 		t.Fatalf("ownerCommandFor = %+v, %v; want a queued command", cmd, ok)
 	}
 	agentDir := fsq.AgentBase(b.Root, b.Handle)
-	reqs, err := wakecmd.Pending(agentDir)
-	if err != nil || len(reqs) != 1 || reqs[0].Text != "/compact" {
-		t.Fatalf("queued = %+v (err %v), want exactly /compact", reqs, err)
+	reqs := queuedCommands(t, agentDir)
+	if len(reqs) != 1 || reqs[0].Text != "/compact" || reqs[0].Target != b.SessionIdentity() {
+		t.Fatalf("queued = %+v, want exactly /compact for the seat", reqs)
 	}
 	// The wake takes it and types it.
-	if !wakecmd.Claim(agentDir, reqs[0].ID) {
-		t.Fatal("the wake could not claim the command")
+	if err := os.WriteFile(filepath.Join(wakecmd.Dir(agentDir), reqs[0].ID+wakecmd.OutSuffix), wakecmd.OutcomeLine(wakecmd.Typed, ""), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	wakecmd.Finish(agentDir, reqs[0].ID, wakecmd.Typed, "")
 	if got, want := s.commandReply(dmChannel, cmd), "Typed /compact into the terminal."; got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
+}
+
+// Review of Buzz slash commands: a channel made for one session never
+// queues a command for a later binding of the same name.
+func TestOldChannelCannotQueueCommandForReplacementSeat(t *testing.T) {
+	s, _ := machineServer(t)
+	old := liveSession(t, "alpha")
+	old.Harness = "claude"
+	if err := binding.WriteNamed(old); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, s, old, dmChannel)
+	replacement := liveSession(t, "alpha")
+	replacement.Harness = "claude"
+	if err := binding.WriteNamed(replacement); err != nil {
+		t.Fatal(err)
+	}
+	lr := agentRelayForTest(t)
+	owner := nostr.Generate()
+	buzzOwner = owner.Public().Hex()
+	evt := signedBy(t, owner, "/compact", dmChannel)
+	lr.Inject(evt)
+
+	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "/compact"))
+	if queued := queuedCommands(t, fsq.AgentBase(replacement.Root, replacement.Handle)); len(queued) != 0 {
+		t.Fatalf("the old channel queued for the replacement seat: ok=%v refusal=%q queue=%+v", ok, cmd.refusal, queued)
+	}
+}
+
+// queuedCommands are the requests in agentDir's command queue.
+func queuedCommands(t *testing.T, agentDir string) []wakecmd.Request {
+	t.Helper()
+	entries, err := os.ReadDir(wakecmd.Dir(agentDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs []wakecmd.Request
+	for _, e := range entries {
+		id, ok := wakecmd.RequestID(e.Name())
+		if !ok {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(wakecmd.Dir(agentDir), e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := wakecmd.Parse(id, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs
 }

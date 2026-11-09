@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
@@ -805,7 +804,7 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 	if !ok {
 		return "", dialog.Answer{}, false
 	}
-	a, ok := dialog.ParseAnswer(req, dropMentions(evt.Content))
+	a, ok := dialog.ParseAnswer(req, buzzevent.DropMentions(evt.Content))
 	a.Event = evt.ID.Hex()
 	return dir, a, ok
 }
@@ -901,20 +900,7 @@ func ownerWords(prompt string) string {
 	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
 		text = after
 	}
-	return dropMentions(text)
-}
-
-// dropMentions trims text and drops its leading mentions. Line breaks stay:
-// one line can answer each question of a dialog.
-func dropMentions(text string) string {
-	text = strings.TrimSpace(text)
-	for {
-		end := strings.IndexFunc(text, unicode.IsSpace)
-		if end < 0 || (!strings.HasPrefix(text, "@") && !strings.HasPrefix(text, "nostr:")) {
-			return text
-		}
-		text = strings.TrimSpace(text[end:])
-	}
+	return buzzevent.DropMentions(text)
 }
 
 // errNotOwner is a verified event that someone other than the owner signed.

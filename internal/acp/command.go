@@ -1,14 +1,19 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/wakecmd"
 )
 
@@ -46,24 +51,32 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 		return cmd, false
 	}
 	name := s.cfg.Pin
-	if s.cfg.Machine {
+	var b binding.Binding
+	var err error
+	switch {
+	case s.cfg.Machine:
 		r, found := s.channelRoute(channel)
 		if !found {
 			return cmd, false
 		}
+		// The channel commands only the session it was made for, never a
+		// later binding of the same name.
 		name = r.Name
-	} else if s.cfg.Helper || name == "" || s.cfg.PinErr != nil {
+		if b, err = binding.ReadNamed(name); err != nil || !s.serves(r, b) {
+			return cmd, false
+		}
+	case s.cfg.Helper || name == "" || s.cfg.PinErr != nil:
 		return cmd, false
-	}
-	b, err := binding.ReadNamed(name)
-	if err != nil || !s.live(b) {
-		return cmd, false
+	default:
+		if b, err = binding.ReadNamed(name); err != nil || !s.live(b) {
+			return cmd, false
+		}
 	}
 	evt, err := ownerEvent(eventID, prompt, channel)
 	if err != nil {
 		return cmd, false
 	}
-	cmd.text = dropMentions(evt.Content)
+	cmd.text = buzzevent.DropMentions(evt.Content)
 	if !strings.HasPrefix(cmd.text, "/") {
 		return cmd, false
 	}
@@ -85,7 +98,7 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 			break
 		}
 		cmd.handle, cmd.agentDir = b.Handle, fsq.AgentBase(b.Root, b.Handle)
-		cmd.id, err = wakecmd.Enqueue(cmd.agentDir, evt.ID.Hex(), cmd.text, now)
+		cmd.id, err = enqueueCommand(name, channel, cmd, b, evt, now)
 		switch {
 		case errors.Is(err, wakecmd.ErrDuplicate):
 			cmd.refusal = "Already taken."
@@ -94,6 +107,24 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 		}
 	}
 	return cmd, true
+}
+
+// enqueueCommand queues cmd for the wake of b's seat with the signed event
+// evt, after it records the owner and channel that the wake verifies evt
+// against.
+func enqueueCommand(name, channel string, cmd ownerCommand, b binding.Binding, evt nostr.Event, now time.Time) (string, error) {
+	raw, err := json.Marshal(evt)
+	if err != nil {
+		return "", err
+	}
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		return "", err
+	}
+	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: buzzOwner, Channel: channel}); err != nil {
+		return "", err
+	}
+	return wakecmd.Enqueue(cmd.agentDir, evt.ID.Hex(), wakecmd.Request{Target: b.SessionIdentity(), Text: cmd.text, Event: raw}, now)
 }
 
 // commandReply waits for the wake's first answer to cmd and returns the

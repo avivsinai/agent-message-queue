@@ -4,25 +4,34 @@
 // by Enter, only while no harness dialog is open, oldest first.
 //
 // The queue is a directory under the agent directory. A request is
-// <id>.req; the wake claims it by renaming it to <id>.typing, and every
-// state the owner is told about is <id>.out. An id is a fixed-width
-// enqueue time and the event key, so names sort in arrival order and one
-// event enqueues at most once while its outcome is kept.
+// <id>.req, which carries the owner's signed message itself: a file in the
+// queue is never proof on its own, and the wake verifies the message again
+// (Verify) before it types. The wake claims a request by renaming it to
+// <id>.typing, and every state the owner is told about is <id>.out. An id
+// is a fixed-width enqueue time and the event key, so names sort in arrival
+// order. <key>.key, created exclusively before the request, takes each
+// event at most once.
 package wakecmd
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"fiatjaf.com/nostr"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 )
 
 // DirName is the queue directory inside the agent directory.
@@ -31,9 +40,24 @@ const DirName = ".wake.command"
 // MaxBytes bounds one command line.
 const MaxBytes = 512
 
-// KeepOutcomes is how long an outcome stays after its request is gone. It
-// outlives any event an owner gate still accepts, so a redelivered event
-// finds its earlier request and is not typed twice.
+// MaxRequestBytes bounds one request file: the command and its signed
+// message.
+const MaxRequestBytes = 4 << 10
+
+// The queue holds at most MaxPending requests and MaxPendingBytes in all.
+const (
+	MaxPending      = 16
+	MaxPendingBytes = 16 << 10
+)
+
+// Expiry is how long after the owner signed a command it may still be
+// typed. A command held behind a dialog for longer is refused: the
+// terminal is no longer the context the owner typed it for.
+const Expiry = 10 * time.Minute
+
+// KeepOutcomes is how long an outcome and an event key stay after their
+// request is gone. It outlives any event an owner gate still accepts, so a
+// redelivered event finds its key and is not typed twice.
 const KeepOutcomes = time.Hour
 
 // Outcome states written in <id>.out.
@@ -43,14 +67,22 @@ const (
 	Refused = "refused"
 )
 
+// File suffixes of the queue.
 const (
-	reqSuffix    = ".req"
-	typingSuffix = ".typing"
-	outSuffix    = ".out"
+	ReqSuffix    = ".req"
+	TypingSuffix = ".typing"
+	OutSuffix    = ".out"
+	keySuffix    = ".key"
 )
 
-// ErrDuplicate is an event that already has a request or an outcome.
-var ErrDuplicate = errors.New("this message was already taken as a command")
+var (
+	// ErrDuplicate is an event that was already taken as a command.
+	ErrDuplicate = errors.New("this message was already taken as a command")
+	// ErrFull is a queue that holds MaxPending requests or MaxPendingBytes.
+	ErrFull = fmt.Errorf("%d commands already wait for the terminal", MaxPending)
+	// ErrExpired is a command signed more than Expiry ago.
+	ErrExpired = errors.New("expired while a dialog was open")
+)
 
 var keyRe = regexp.MustCompile(`^[0-9a-z]{1,64}$`)
 
@@ -82,22 +114,108 @@ func Check(text string) error {
 
 // Request is one queued command.
 type Request struct {
-	ID   string
-	Text string
+	// ID is the request's file name without its suffix.
+	ID string `json:"-"`
+	// Target is the session identity of the binding the command was taken
+	// for; only the seat of that session types it.
+	Target string `json:"target"`
+	// Text is the command line: the signed message's content without its
+	// leading mentions.
+	Text string `json:"text"`
+	// Event is the owner's signed message as the Buzz agent verified it.
+	Event json.RawMessage `json:"event"`
+}
+
+// Parse reads the request that file id holds.
+func Parse(id string, raw []byte) (Request, error) {
+	req := Request{ID: id}
+	if len(raw) > MaxRequestBytes {
+		return req, errors.New("the request is too large")
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return req, errors.New("the request is not a command request")
+	}
+	return req, nil
+}
+
+// Verify is the rule a wake applies before it types req in the seat of
+// session target: req was taken for target, and its event is a plaintext
+// message in channel that owner signed, whose command line is req.Text,
+// signed no more than Expiry before now. Authenticity is checked first, so
+// ErrExpired is only ever said of the owner's own command.
+func Verify(req Request, target, owner, channel string, now time.Time) error {
+	if target == "" || req.Target != target {
+		return errors.New("the command was taken for another session")
+	}
+	var evt nostr.Event
+	if err := json.Unmarshal(req.Event, &evt); err != nil {
+		return errors.New("the command carries no signed message")
+	}
+	if err := buzzevent.Verify(evt, channel); err != nil {
+		return fmt.Errorf("the command's message does not verify: %w", err)
+	}
+	if owner == "" || evt.PubKey.Hex() != owner {
+		return errors.New("the command's message is not the owner's")
+	}
+	if buzzevent.DropMentions(evt.Content) != req.Text {
+		return errors.New("the command differs from the owner's message")
+	}
+	if err := Check(req.Text); err != nil {
+		return err
+	}
+	if now.Sub(evt.CreatedAt.Time()) > Expiry {
+		return ErrExpired
+	}
+	return nil
+}
+
+// RequestID is the id of a request file name; ok is false for any other
+// name.
+func RequestID(name string) (id string, ok bool) {
+	id, ok = strings.CutSuffix(name, ReqSuffix)
+	return id, ok && idRe.MatchString(id)
+}
+
+// EnqueuedAt is when request id was enqueued.
+func EnqueuedAt(id string) time.Time {
+	if !idRe.MatchString(id) {
+		return time.Time{}
+	}
+	nanos, err := strconv.ParseInt(id[:20], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// OutcomeLine is the content of an <id>.out file.
+func OutcomeLine(state, reason string) []byte {
+	if reason != "" {
+		state += ": " + reason
+	}
+	return []byte(state + "\n")
 }
 
 // Dir is the queue directory of the agent directory agentDir.
 func Dir(agentDir string) string { return filepath.Join(agentDir, DirName) }
 
-// Enqueue adds text as the newest request of agentDir for the event key and
+// Enqueue adds req as the newest request of agentDir for the event key and
 // returns its id. The agent directory must exist; the queue directory is
-// created mode 0700.
-func Enqueue(agentDir, key, text string, now time.Time) (string, error) {
-	if err := Check(text); err != nil {
+// created mode 0700. The key is reserved before the request is written, so
+// two processes never enqueue one event twice.
+func Enqueue(agentDir, key string, req Request, now time.Time) (string, error) {
+	if err := Check(req.Text); err != nil {
 		return "", err
 	}
 	if !keyRe.MatchString(key) {
 		return "", fmt.Errorf("invalid command key %q", key)
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > MaxRequestBytes {
+		return "", errors.New("the command's message is too large")
 	}
 	dir, err := openDir(agentDir, true)
 	if err != nil {
@@ -108,13 +226,31 @@ func Enqueue(agentDir, key, text string, now time.Time) (string, error) {
 		return "", err
 	}
 	prune(dir, names, now)
+	count, total := 0, len(raw)
 	for _, name := range names {
-		if _, k, ok := splitName(name); ok && k == key {
-			return "", ErrDuplicate
+		if _, ok := RequestID(name); !ok {
+			continue
+		}
+		count++
+		if info, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			total += int(info.Size())
 		}
 	}
+	if count >= MaxPending || total > MaxPendingBytes {
+		return "", ErrFull
+	}
+	f, err := os.OpenFile(filepath.Join(dir, key+keySuffix), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return "", ErrDuplicate
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
 	id := fmt.Sprintf("%020d-%s", now.UnixNano(), key)
-	if err := writeAtomic(dir, id+reqSuffix, []byte(text)); err != nil {
+	if err := writeAtomic(dir, id+ReqSuffix, raw); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -126,7 +262,7 @@ func Outcome(agentDir, id string) (state, reason string, ok bool) {
 	if !idRe.MatchString(id) {
 		return "", "", false
 	}
-	raw, err := readSmall(filepath.Join(Dir(agentDir), id+outSuffix))
+	raw, err := readSmall(filepath.Join(Dir(agentDir), id+OutSuffix))
 	if err != nil {
 		return "", "", false
 	}
@@ -140,90 +276,27 @@ func Withdraw(agentDir, id string) bool {
 	if !idRe.MatchString(id) {
 		return false
 	}
-	return os.Remove(filepath.Join(Dir(agentDir), id+reqSuffix)) == nil
+	return os.Remove(filepath.Join(Dir(agentDir), id+ReqSuffix)) == nil
 }
 
-// Pending returns the unclaimed requests of agentDir, oldest first. A
-// request whose text fails Check is answered Refused and dropped.
-func Pending(agentDir string) ([]Request, error) {
-	dir, err := openDir(agentDir, false)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	names, err := listNames(dir)
-	if err != nil {
-		return nil, err
-	}
-	var reqs []Request
-	for _, name := range names {
-		id, ok := strings.CutSuffix(name, reqSuffix)
-		if !ok || !idRe.MatchString(id) {
-			continue
-		}
-		raw, err := readSmall(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		text := string(raw)
-		if err := Check(text); err != nil {
-			if Claim(agentDir, id) {
-				Finish(agentDir, id, Refused, err.Error())
-			}
-			continue
-		}
-		reqs = append(reqs, Request{ID: id, Text: text})
-	}
-	return reqs, nil
-}
-
-// Claim takes request id for typing; false means it was withdrawn.
-func Claim(agentDir, id string) bool {
-	dir := Dir(agentDir)
-	return os.Rename(filepath.Join(dir, id+reqSuffix), filepath.Join(dir, id+typingSuffix)) == nil
-}
-
-// Release returns a claimed request to the queue in its place.
-func Release(agentDir, id string) {
-	dir := Dir(agentDir)
-	_ = os.Rename(filepath.Join(dir, id+typingSuffix), filepath.Join(dir, id+reqSuffix))
-}
-
-// Mark records state for request id, unless that is already its outcome.
-func Mark(agentDir, id, state, reason string) {
-	line := state
-	if reason != "" {
-		line += ": " + reason
-	}
-	if s, r, ok := Outcome(agentDir, id); ok && s == state && r == reason {
-		return
-	}
-	_ = writeAtomic(Dir(agentDir), id+outSuffix, []byte(line+"\n"))
-}
-
-// Finish records the final state of a claimed request and removes it.
-func Finish(agentDir, id, state, reason string) {
-	Mark(agentDir, id, state, reason)
-	_ = os.Remove(filepath.Join(Dir(agentDir), id+typingSuffix))
-}
-
-// splitName parses <id>.<suffix> into its id and event key.
-func splitName(name string) (id, key string, ok bool) {
-	dot := strings.LastIndexByte(name, '.')
-	if dot < 0 || !idRe.MatchString(name[:dot]) {
-		return "", "", false
-	}
-	id = name[:dot]
-	return id, id[21:], true
-}
-
-// prune removes outcomes older than KeepOutcomes whose request is gone.
+// prune removes outcomes and event keys older than KeepOutcomes whose
+// request, claimed or not, is gone.
 func prune(dir string, names []string, now time.Time) {
+	held := make(map[string]bool)
 	for _, name := range names {
-		id, ok := strings.CutSuffix(name, outSuffix)
-		if !ok || slices.Contains(names, id+reqSuffix) || slices.Contains(names, id+typingSuffix) {
+		for _, suffix := range []string{ReqSuffix, TypingSuffix} {
+			if id, ok := strings.CutSuffix(name, suffix); ok && idRe.MatchString(id) {
+				held[id] = true
+				held[id[21:]+keySuffix] = true
+			}
+		}
+	}
+	for _, name := range names {
+		id, isOut := strings.CutSuffix(name, OutSuffix)
+		switch {
+		case isOut && held[id], strings.HasSuffix(name, keySuffix) && held[name]:
+			continue
+		case !isOut && !strings.HasSuffix(name, keySuffix):
 			continue
 		}
 		if info, err := os.Lstat(filepath.Join(dir, name)); err == nil && now.Sub(info.ModTime()) > KeepOutcomes {

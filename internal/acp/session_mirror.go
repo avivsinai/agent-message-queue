@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -975,7 +976,7 @@ func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on 
 		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
 		return "", false, time.Time{}, false
 	}
-	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
+	if on, ok = mirrorWord(buzzevent.DropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
 		return "", false, time.Time{}, false
 	}
 	return r.Name, on, evt.CreatedAt.Time(), true

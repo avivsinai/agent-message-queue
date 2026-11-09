@@ -73,7 +73,7 @@ type wakeConfig struct {
 	settingsTicks                 <-chan time.Time
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
-	commandDir                    string                                       // the agent directory whose owner command queue the wake types (wakecmd); "" = none
+	commands                      *wakeCommands                                // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	dialogHoldBusy                bool                                         // the last hold was a busy harness turn, so a change of cause logs once
 	dialogHoldGeneration          string                                       // the marker version the held notice ladder belongs to
@@ -2111,11 +2111,6 @@ func (err *wakeTerminalAuthorityError) Unwrap() error {
 }
 
 func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
-	// A dialog that opened after the doorbell was planned parks the
-	// next byte, even mid-doorbell.
-	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
-		return false, nil
-	}
 	if cfg.controlStop != nil {
 		select {
 		case <-cfg.controlStop:
@@ -2143,6 +2138,12 @@ func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
 			}
 			return false, &wakeTerminalAuthorityError{err: err}
 		}
+	}
+	// A dialog that opened after the doorbell was planned parks the next
+	// byte, even mid-doorbell. It is read last, right before the write, so
+	// a dialog that opens during the checks above still parks it.
+	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
+		return false, nil
 	}
 	return true, nil
 }
