@@ -59,7 +59,7 @@ func TestTraceJoinsWrittenAndIndeterminateNotificationAttempts(t *testing.T) {
 		},
 	)
 
-	result := collectTrace(root, "msg-notification")
+	result, _ := collectTrace(root, "msg-notification")
 	leg := result.Legs["notification"]
 	if leg.Status != "evidence" || leg.State != traceNotificationRecordPresent || len(leg.Evidence) != 2 {
 		t.Fatalf("notification leg = %+v", leg)
@@ -241,7 +241,7 @@ func TestTraceDoesNotFollowAgentsSymlinkOutsidePinnedRoot(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	result := collectTrace(root, messageID)
+	result, _ := collectTrace(root, messageID)
 	if result.Status != "not_found" {
 		t.Fatalf("status = %q, want not_found", result.Status)
 	}
