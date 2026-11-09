@@ -9,6 +9,8 @@
 //	  answers/<id>.json   the Buzz agent: the owner's answer
 //	  resolved/<id>.json  whoever closed the dialog first
 //	  events/<event>      the Buzz agent: the one dialog an owner message answers
+//	  owner.json          the Buzz agent: whose messages command the session
+//	  commands/<event>    the seat's wake: an owner command it took, once
 //
 // Directories are 0700 and files 0600. A request is written whole by
 // rename; an answer, a resolution and an event binding are written whole and
@@ -134,13 +136,15 @@ func DirFor(bindingName string) (string, error) {
 	return dir, nil
 }
 
-// Owner is whose Buzz messages act on a binding's session: the owner's key
-// and the channel its commands come from. The Buzz agent writes it when it
-// takes an owner command; the seat that types the command verifies the
+// Owner is whose Buzz messages act on a binding's session: the owner's key,
+// the channel its commands come from, and the session identity the binding
+// had when the Buzz agent wrote the record. The Buzz agent writes it when
+// it takes an owner command; the seat that types the command verifies the
 // signed message against it, as a seam trusts an answer this agent wrote.
 type Owner struct {
 	PubKey  string `json:"pubkey"`
 	Channel string `json:"channel"`
+	Target  string `json:"target"`
 }
 
 const ownerFile = "owner.json"
@@ -176,6 +180,59 @@ func ReadOwner(bindingName string) (Owner, error) {
 		return Owner{}, os.ErrNotExist
 	}
 	return o, nil
+}
+
+// TakeCommand records, once, that the seat of binding bindingName took the
+// owner command of event, and reports whether this call did; false means it
+// was taken before. Records older than keep are removed first: keep must
+// outlast every event the seat still accepts.
+func TakeCommand(bindingName, event string, now time.Time, keep time.Duration) (bool, error) {
+	if !eventRe.MatchString(event) {
+		return false, fmt.Errorf("invalid event id %q", event)
+	}
+	dir, err := DirFor(bindingName)
+	if err != nil {
+		return false, err
+	}
+	taken := filepath.Join(dir, "commands")
+	if err := os.MkdirAll(taken, 0o700); err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir(taken)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.Mode().IsRegular() && now.Sub(info.ModTime()) > keep {
+			_ = os.Remove(filepath.Join(taken, e.Name()))
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(taken, event), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		return true, err
+	}
+	// The record is dated by the caller's clock, the clock that prunes it.
+	return true, os.Chtimes(filepath.Join(taken, event), now, now)
+}
+
+// ForgetCommand removes the record that the seat of binding bindingName
+// took event. Only a seat that wrote nothing of the command forgets it, so
+// the command can be typed later.
+func ForgetCommand(bindingName, event string) error {
+	if !eventRe.MatchString(event) {
+		return fmt.Errorf("invalid event id %q", event)
+	}
+	root, err := Root()
+	if err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(root, bindingName, "commands", event))
 }
 
 // Open writes requests/<id>.json.

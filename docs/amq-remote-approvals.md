@@ -132,9 +132,11 @@ share, and the exact command line. While a dialog is open the command
 waits, oldest first, and Buzz gets "Queued"; it is typed when the dialog
 closes, and Buzz is told again. A command still waiting 10 minutes after
 the owner sent it is not typed: Buzz gets "Not typed: expired while a
-dialog was open." At most 16 commands (16 KiB) wait at once. If a dialog
-opens between the text and its Enter, the text waits in the composer and
-the Enter follows when the dialog closes. After each command the wake waits
+dialog was open." At most 16 commands (16 KiB) wait at once. The wake types
+each signed message once. If a dialog opens between the text and its
+Enter, the text waits in the composer, and the Enter follows when the
+dialog closes only if the command still verifies; otherwise Buzz gets "Not
+typed" with the reason. After each command the wake waits
 one full tick with no dialog; after `/model`, `/config`, `/permissions` or
 `/resume`, which open a picker, it waits for the owner's next message or 60
 seconds. Buzz

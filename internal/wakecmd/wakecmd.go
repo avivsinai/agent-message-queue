@@ -31,6 +31,7 @@ import (
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 )
 
@@ -55,6 +56,13 @@ const (
 // terminal is no longer the context the owner typed it for.
 const Expiry = 10 * time.Minute
 
+// MaxSkew is how far ahead of the wake's clock a command may be dated.
+const MaxSkew = time.Minute
+
+// TakenKeep is how long a wake keeps the record that it took an event: past
+// it, Verify refuses the event anyway.
+const TakenKeep = Expiry + MaxSkew
+
 // KeepOutcomes is how long an outcome and an event key stay after their
 // request is gone. It outlives any event an owner gate still accepts, so a
 // redelivered event finds its key and is not typed twice.
@@ -73,6 +81,7 @@ const (
 	TypingSuffix = ".typing"
 	OutSuffix    = ".out"
 	keySuffix    = ".key"
+	lockName     = ".lock"
 )
 
 var (
@@ -138,35 +147,49 @@ func Parse(id string, raw []byte) (Request, error) {
 	return req, nil
 }
 
-// Verify is the rule a wake applies before it types req in the seat of
-// session target: req was taken for target, and its event is a plaintext
-// message in channel that owner signed, whose command line is req.Text,
-// signed no more than Expiry before now. Authenticity is checked first, so
-// ErrExpired is only ever said of the owner's own command.
-func Verify(req Request, target, owner, channel string, now time.Time) error {
-	if target == "" || req.Target != target {
-		return errors.New("the command was taken for another session")
+// Seat is what a wake trusts about its own session, from outside the
+// queue: the session identity, and the owner and channel that the Buzz
+// agent recorded for it.
+type Seat struct {
+	Target  string
+	Owner   string
+	Channel string
+}
+
+// Verify is the rule a wake applies before it types req in seat: req was
+// taken for the seat's session, and its event is a plaintext message in
+// the seat's channel that the seat's owner signed, whose command line is
+// req.Text, signed no more than Expiry before now and at most MaxSkew
+// after. It returns the event id, which the wake types at most once.
+// Authenticity is checked first, so ErrExpired is only ever said of the
+// owner's own command.
+func Verify(req Request, seat Seat, now time.Time) (string, error) {
+	if seat.Target == "" || req.Target != seat.Target {
+		return "", errors.New("the command was taken for another session")
 	}
 	var evt nostr.Event
 	if err := json.Unmarshal(req.Event, &evt); err != nil {
-		return errors.New("the command carries no signed message")
+		return "", errors.New("the command carries no signed message")
 	}
-	if err := buzzevent.Verify(evt, channel); err != nil {
-		return fmt.Errorf("the command's message does not verify: %w", err)
+	if err := buzzevent.Verify(evt, seat.Channel); err != nil {
+		return "", fmt.Errorf("the command's message does not verify: %w", err)
 	}
-	if owner == "" || evt.PubKey.Hex() != owner {
-		return errors.New("the command's message is not the owner's")
+	if seat.Owner == "" || evt.PubKey.Hex() != seat.Owner {
+		return "", errors.New("the command's message is not the owner's")
 	}
 	if buzzevent.DropMentions(evt.Content) != req.Text {
-		return errors.New("the command differs from the owner's message")
+		return "", errors.New("the command differs from the owner's message")
 	}
 	if err := Check(req.Text); err != nil {
-		return err
+		return "", err
 	}
-	if now.Sub(evt.CreatedAt.Time()) > Expiry {
-		return ErrExpired
+	switch at := evt.CreatedAt.Time(); {
+	case now.Sub(at) > Expiry:
+		return "", ErrExpired
+	case at.Sub(now) > MaxSkew:
+		return "", errors.New("the command is dated in the future")
 	}
-	return nil
+	return evt.ID.Hex(), nil
 }
 
 // RequestID is the id of a request file name; ok is false for any other
@@ -201,9 +224,11 @@ func Dir(agentDir string) string { return filepath.Join(agentDir, DirName) }
 
 // Enqueue adds req as the newest request of agentDir for the event key and
 // returns its id. The agent directory must exist; the queue directory is
-// created mode 0700. The key is reserved before the request is written, so
-// two processes never enqueue one event twice.
-func Enqueue(agentDir, key string, req Request, now time.Time) (string, error) {
+// created mode 0700. Admission is serialized by the queue's lock: the
+// bounds count every request not yet answered, claimed or not, and the key
+// is reserved before the request is written, so two processes never
+// enqueue one event twice.
+func Enqueue(agentDir, key string, req Request, now time.Time) (id string, err error) {
 	if err := Check(req.Text); err != nil {
 		return "", err
 	}
@@ -221,6 +246,15 @@ func Enqueue(agentDir, key string, req Request, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	err = lock.WithExclusiveFileLock(filepath.Join(dir, lockName), func() error {
+		id, err = admit(dir, key, raw, now)
+		return err
+	})
+	return id, err
+}
+
+// admit is Enqueue under the queue's lock.
+func admit(dir, key string, raw []byte, now time.Time) (string, error) {
 	names, err := listNames(dir)
 	if err != nil {
 		return "", err
@@ -228,7 +262,7 @@ func Enqueue(agentDir, key string, req Request, now time.Time) (string, error) {
 	prune(dir, names, now)
 	count, total := 0, len(raw)
 	for _, name := range names {
-		if _, ok := RequestID(name); !ok {
+		if !strings.HasSuffix(name, ReqSuffix) && !strings.HasSuffix(name, TypingSuffix) {
 			continue
 		}
 		count++

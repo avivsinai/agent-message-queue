@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,7 +40,7 @@ func commandSeat(t *testing.T, h *wakeHoldHarness) (owner nostr.SecretKey, targe
 		t.Fatal(err)
 	}
 	owner = nostr.Generate()
-	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: owner.Public().Hex(), Channel: commandChannel}); err != nil {
+	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: owner.Public().Hex(), Channel: commandChannel, Target: b.SessionIdentity()}); err != nil {
 		t.Fatal(err)
 	}
 	agentDir, err := openWakeAgentDir(h.root, "codex")
@@ -164,5 +165,114 @@ func TestWakeTypesOnlyAVerifiedFreshOwnerCommand(t *testing.T) {
 			}
 			t.Fatal("the request was not answered")
 		})
+	}
+}
+
+// Review of Buzz slash commands: a copy of a typed request under a new
+// queue name carries the same signed message, and the wake types each
+// signed message once.
+func TestWakeTypesOneSignedCommandOnce(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	owner, target := commandSeat(t, h)
+	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) { return wakeDialogClosed, nil }
+	id := queueCommand(t, h, owner, target, "/clear", h.now)
+	q := wakecmd.Dir(fsq.AgentBase(h.root, "codex"))
+	raw, err := os.ReadFile(filepath.Join(q, id+wakecmd.ReqSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveWakeCommands(h.cfg)
+	if len(h.injected) != 2 {
+		t.Fatalf("first delivery typed %q", h.injected)
+	}
+	h.injected = nil
+	replay := fmt.Sprintf("%020d-%s", h.now.Add(time.Second).UnixNano(), id[21:])
+	if err := os.WriteFile(filepath.Join(q, replay+wakecmd.ReqSuffix), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serveWakeCommands(h.cfg) // the tick with no dialog after a command
+	serveWakeCommands(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("the same signed message was typed again: %q", h.injected)
+	}
+}
+
+// Review of Buzz slash commands: a command whose Enter was held by a
+// dialog gets its Enter only while it still verifies. Expired, or no
+// longer the owner's, it gets no Enter and is answered Refused.
+func TestWakeHeldCommandGetsNoEnterOnceItNoLongerVerifies(t *testing.T) {
+	for _, change := range []string{"expired", "owner replaced"} {
+		t.Run(change, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			owner, target := commandSeat(t, h)
+			open := false
+			h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) {
+				if open {
+					return wakeDialogOpen, nil
+				}
+				return wakeDialogClosed, nil
+			}
+			writes := 0
+			h.cfg.beforeTerminalWrite = func() error {
+				writes++
+				if writes == 2 {
+					open = true // the dialog opens between the text and its Enter
+				}
+				return nil
+			}
+			agentDir := fsq.AgentBase(h.root, "codex")
+			id := queueCommand(t, h, owner, target, "/compact", h.now)
+			serveWakeCommands(h.cfg)
+			if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Queued || !slices.Equal(h.injected, []string{"/compact"}) {
+				t.Fatalf("held: typed %q, outcome %q; want the text alone, queued", h.injected, state)
+			}
+			if change == "expired" {
+				h.now = h.now.Add(wakecmd.Expiry + time.Minute)
+			} else {
+				dir, err := dialog.DirFor("seat")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: nostr.Generate().Public().Hex(), Channel: commandChannel, Target: target}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			open = false
+			serveWakeCommands(h.cfg)
+			serveWakeCommands(h.cfg)
+			if !slices.Equal(h.injected, []string{"/compact"}) {
+				t.Fatalf("typed %q; want no Enter", h.injected)
+			}
+			if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Refused {
+				t.Fatalf("outcome = %q, want refused", state)
+			}
+		})
+	}
+}
+
+// Review of Buzz slash commands: a dialog that opens before the first byte
+// of a command keeps it queued, and it is typed once the dialog closes.
+func TestWakeCommandBlockedBeforeItsFirstByteStaysQueued(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	owner, target := commandSeat(t, h)
+	open := false
+	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) {
+		if open {
+			return wakeDialogOpen, nil
+		}
+		return wakeDialogClosed, nil
+	}
+	h.cfg.beforeTerminalWrite = func() error { open = true; return nil }
+	agentDir := fsq.AgentBase(h.root, "codex")
+	id := queueCommand(t, h, owner, target, "/compact", h.now)
+	serveWakeCommands(h.cfg)
+	if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Queued || len(h.injected) != 0 {
+		t.Fatalf("blocked: typed %q, outcome %q; want nothing typed, queued", h.injected, state)
+	}
+	open = false
+	h.cfg.beforeTerminalWrite = nil
+	serveWakeCommands(h.cfg)
+	if want := []string{"/compact", "\r"}; !slices.Equal(h.injected, want) {
+		t.Fatalf("after the dialog closed: typed %q, want %q", h.injected, want)
 	}
 }

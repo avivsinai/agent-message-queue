@@ -33,9 +33,10 @@ const maxWakeCommandEntries = 4096
 // directory.
 type wakeCommands struct {
 	dir *wakeAgentDir
-	// inComposer is the claimed command whose text is typed and whose
-	// Enter is still owed; zero when there is none.
-	inComposer wakecmd.Request
+	// typing is the claimed command being typed: its event is taken, and
+	// its text may be in the composer with its Enter still owed. Zero when
+	// there is none.
+	typing wakecmd.Request
 	// settle counts the ticks with no dialog still owed before the next
 	// command is typed.
 	settle int
@@ -47,13 +48,15 @@ type wakeCommands struct {
 // serveWakeCommands types the owner's oldest queued slash command into the
 // terminal, as its own line followed by Enter, by the doorbell's injection
 // mechanism and mode. A command is typed only when the owner's signed
-// message it carries verifies for this seat (wakecmd.Verify). It waits,
-// queued, while a dialog may be open, while the terminal still owes earlier
-// input, for one full tick with no dialog after the previous command, and
-// after a command that may open a picker; it expires wakecmd.Expiry after
-// the owner signed it. The harness's composer queues typed input during a
-// turn, so a turn in progress does not hold it. A seat that cannot take
-// commands answers each one Refused.
+// message it carries verifies for this seat (wakecmd.Verify), and each
+// signed message at most once (dialog.TakeCommand); its Enter is sent only
+// while it still verifies. It waits, queued, while a dialog may be open,
+// while the terminal still owes earlier input, for one full tick with no
+// dialog after the previous command, and after a command that may open a
+// picker; it expires wakecmd.Expiry after the owner signed it. The
+// harness's composer queues typed input during a turn, so a turn in
+// progress does not hold it. A seat that cannot take commands answers each
+// one Refused.
 func serveWakeCommands(cfg *wakeConfig) {
 	c := cfg.commands
 	if c == nil {
@@ -74,7 +77,7 @@ func serveWakeCommands(cfg *wakeConfig) {
 		_ = writeWakeDiagnostic(cfg, "amq wake: read the command queue: %v\n", err)
 		return
 	}
-	if len(entries) == 0 && c.inComposer.ID == "" {
+	if len(entries) == 0 && c.typing.ID == "" {
 		return
 	}
 	if why := wakeCommandRefusal(cfg); why != "" {
@@ -84,21 +87,22 @@ func serveWakeCommands(cfg *wakeConfig) {
 		return
 	}
 	now := cfg.wakeDoorbellNow()
-	target, owner, seatErr := wakeCommandSeat(cfg.root, cfg.me)
+	name, seat, seatErr := wakeCommandSeat(cfg.root, cfg.me)
 	var reqs []wakecmd.Request
+	var events []string
 	for _, e := range entries {
-		err := errors.Join(e.err, seatErr)
+		event, err := "", errors.Join(e.err, seatErr)
 		if err == nil {
-			err = wakecmd.Verify(e.req, target, owner.PubKey, owner.Channel, now)
+			event, err = wakecmd.Verify(e.req, seat, now)
 		}
 		if err != nil {
 			refuseWakeCommand(cfg, qfd, e.req.ID, err.Error())
 			continue
 		}
-		reqs = append(reqs, e.req)
+		reqs, events = append(reqs, e.req), append(events, event)
 	}
-	if c.inComposer.ID != "" {
-		c.submitInComposer(cfg, qfd, now)
+	if c.typing.ID != "" {
+		c.submitHeld(cfg, qfd, now)
 		markWakeCommandsQueued(qfd, reqs, "an earlier command is being typed")
 		return
 	}
@@ -109,40 +113,58 @@ func serveWakeCommands(cfg *wakeConfig) {
 		markWakeCommandsQueued(qfd, reqs, why)
 		return
 	}
-	req := reqs[0]
+	req, event := reqs[0], events[0]
+	defer markWakeCommandsQueued(qfd, reqs[1:], "an earlier command is being typed")
 	if wakeRenameNoReplaceAt(qfd, req.ID+wakecmd.ReqSuffix, qfd, req.ID+wakecmd.TypingSuffix) != nil {
 		return
 	}
+	switch taken, err := dialog.TakeCommand(name, event, now, wakecmd.TakenKeep); {
+	case err != nil:
+		finishWakeCommand(cfg, qfd, req.ID, wakecmd.Refused, "the wake could not record the command: "+err.Error())
+		return
+	case !taken:
+		finishWakeCommand(cfg, qfd, req.ID, wakecmd.Refused, "this message was already typed")
+		return
+	}
+	c.typing = req
 	notice := wakeNotification{
 		input:  wakePayload{text: req.Text, provenance: wakePayloadOwnerCommand},
 		output: wakePayload{text: "AMQ: the owner's command " + req.Text, provenance: wakePayloadSystemFixed},
 	}
 	deliveryErr := deliverWakeNotification(cfg, notice, true)
 	switch {
+	case c.typing.ID != req.ID:
+		// It no longer verified before its Enter and was answered.
 	case wakeInputAttemptConfirmed(cfg, deliveryErr):
+		c.typing = wakecmd.Request{}
 		c.typed(cfg, qfd, req, now)
-	case cfg.inputDelivery.confirmedInput():
-		// The text is in the composer and its Enter was held: a dialog
-		// opened in between. The Enter follows once no dialog is open.
-		c.inComposer = req
+	case cfg.inputDelivery.blocksDemotion():
+		// Some of it may be in the composer, and its Enter was held: a
+		// dialog opened in between. The Enter follows once no dialog is
+		// open and the command still verifies.
 		_ = markWakeCommand(qfd, req.ID, wakecmd.Queued, "a dialog opened before its Enter, so the text waits in the composer")
-	case deliveryErr == nil && cfg.lastAttemptTransientAttention,
-		cfg.lastInjectorOutcome == wakeInjectorOutcomeDeferred:
-		// Nothing was written, so nothing is owed.
-		clearWakeInputState(cfg)
-		_ = wakeRenameNoReplaceAt(qfd, req.ID+wakecmd.TypingSuffix, qfd, req.ID+wakecmd.ReqSuffix)
-		_ = markWakeCommand(qfd, req.ID, wakecmd.Queued, "the terminal is in use")
-		return
 	default:
-		why := "the wake could not type into the terminal"
-		if deliveryErr != nil {
-			why += " (" + deliveryErr.Error() + ")"
+		// Nothing was written, so nothing is owed and the command can be
+		// typed later.
+		c.typing = wakecmd.Request{}
+		clearWakeInputState(cfg)
+		if deliveryErr != nil && cfg.lastInjectorOutcome != wakeInjectorOutcomeDeferred {
+			why := "the wake could not type into the terminal (" + deliveryErr.Error() + ")"
+			_ = writeWakeDiagnostic(cfg, "amq wake: owner command not typed: %s\n", why)
+			finishWakeCommand(cfg, qfd, req.ID, wakecmd.Refused, why)
+			return
 		}
-		_ = writeWakeDiagnostic(cfg, "amq wake: owner command not typed: %s\n", why)
-		finishWakeCommand(cfg, qfd, req.ID, wakecmd.Refused, why)
-		return
+		if err := dialog.ForgetCommand(name, event); err != nil {
+			finishWakeCommand(cfg, qfd, req.ID, wakecmd.Refused, "the wake could not type it and could not release it: "+err.Error())
+			return
+		}
+		why := "the terminal is in use"
+		if state, _ := cfg.dialogState(); state != wakeDialogClosed {
+			why = "a dialog is open in the terminal"
+		}
+		_ = wakeRenameNoReplaceAt(qfd, req.ID+wakecmd.TypingSuffix, qfd, req.ID+wakecmd.ReqSuffix)
+		_ = markWakeCommand(qfd, req.ID, wakecmd.Queued, why)
 	}
-	markWakeCommandsQueued(qfd, reqs[1:], "an earlier command is being typed")
 }
 
 // wait says why the next command must wait, or "".
@@ -179,9 +201,10 @@ func (c *wakeCommands) typed(cfg *wakeConfig, qfd int, req wakecmd.Request, now 
 	}
 }
 
-// submitInComposer sends the owed Enter of the command in the composer
-// once no dialog is open.
-func (c *wakeCommands) submitInComposer(cfg *wakeConfig, qfd int, now time.Time) {
+// submitHeld sends the owed Enter of the command being typed once no
+// dialog is open; the delivery verifies it again first
+// (ownerCommandMaySubmit).
+func (c *wakeCommands) submitHeld(cfg *wakeConfig, qfd int, now time.Time) {
 	if cfg.inputDelivery.pending() {
 		if state, _ := cfg.dialogState(); state != wakeDialogClosed {
 			return
@@ -190,15 +213,43 @@ func (c *wakeCommands) submitInComposer(cfg *wakeConfig, qfd int, now time.Time)
 			_ = writeWakeDiagnostic(cfg, "amq wake: owner command Enter not typed: %v\n", err)
 			return
 		}
-		if cfg.inputDelivery.pending() {
+		if c.typing.ID == "" || cfg.inputDelivery.pending() {
 			return
 		}
 	}
 	// The Enter was written, here or by the doorbell that resumed the same
 	// input.
-	req := c.inComposer
-	c.inComposer = wakecmd.Request{}
+	req := c.typing
+	c.typing = wakecmd.Request{}
 	c.typed(cfg, qfd, req, now)
+}
+
+// ownerCommandMaySubmit reports whether the command being typed may get
+// its Enter: it still verifies for this seat now. A command that does not
+// is answered Refused and is no longer being typed; its text may stay in
+// the composer, but no Enter follows it.
+func ownerCommandMaySubmit(cfg *wakeConfig) bool {
+	c := cfg.commands
+	if c == nil || c.typing.ID == "" {
+		return false
+	}
+	_, seat, err := wakeCommandSeat(cfg.root, cfg.me)
+	if err == nil {
+		_, err = wakecmd.Verify(c.typing, seat, cfg.wakeDoorbellNow())
+	}
+	if err == nil {
+		return true
+	}
+	req := c.typing
+	c.typing = wakecmd.Request{}
+	q, ok, qerr := openWakeCommandQueue(c.dir)
+	if qerr != nil || !ok {
+		_ = writeWakeDiagnostic(cfg, "amq wake: owner command %s dropped before its Enter: %v\n", req.ID, err)
+		return false
+	}
+	defer func() { _ = q.Close() }()
+	finishWakeCommand(cfg, int(q.Fd()), req.ID, wakecmd.Refused, err.Error())
+	return false
 }
 
 // wakeCommandMayOpenPicker reports whether text is a command that opens a
@@ -223,14 +274,15 @@ func wakeCommandRefusal(cfg *wakeConfig) string {
 	return ""
 }
 
-// wakeCommandSeat is the session identity of the binding that shares this
-// seat (root, me) and the owner its Buzz agent recorded for it. The owner
-// record is trusted as the binding's dialog answers are: a file the Buzz
-// agent writes in the user's binding store, outside the queue.
-func wakeCommandSeat(root, me string) (string, dialog.Owner, error) {
+// wakeCommandSeat is the binding that shares this seat (root, me): its
+// name and what the wake trusts about it, the owner record its Buzz agent
+// wrote. The record is trusted as the binding's dialog answers are: a file
+// the Buzz agent writes in the user's binding store, outside the queue. It
+// must name the binding's current session.
+func wakeCommandSeat(root, me string) (string, wakecmd.Seat, error) {
 	bindings, err := binding.List()
 	if err != nil {
-		return "", dialog.Owner{}, fmt.Errorf("read the Buzz shares: %w", err)
+		return "", wakecmd.Seat{}, fmt.Errorf("read the Buzz shares: %w", err)
 	}
 	seat := mailboxSeat(root, me)
 	for _, b := range bindings {
@@ -239,11 +291,14 @@ func wakeCommandSeat(root, me string) (string, dialog.Owner, error) {
 		}
 		owner, err := dialog.ReadOwner(b.Name)
 		if err != nil {
-			return "", dialog.Owner{}, fmt.Errorf("read the owner of share %s: %w", b.Name, err)
+			return "", wakecmd.Seat{}, fmt.Errorf("read the owner of share %s: %w", b.Name, err)
 		}
-		return b.SessionIdentity(), owner, nil
+		if owner.Target != b.SessionIdentity() {
+			return "", wakecmd.Seat{}, fmt.Errorf("the owner of share %s was recorded for another session", b.Name)
+		}
+		return b.Name, wakecmd.Seat{Target: owner.Target, Owner: owner.PubKey, Channel: owner.Channel}, nil
 	}
-	return "", dialog.Owner{}, errors.New("no Buzz share serves this session")
+	return "", wakecmd.Seat{}, errors.New("no Buzz share serves this session")
 }
 
 // mailboxSeat names the mailbox destination (root, handle), symlinks in

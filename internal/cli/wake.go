@@ -172,8 +172,9 @@ type wakeInputDeliveryState struct {
 	phase   wakeInputDeliveryPhase
 	mode    string
 	payload string
-	// oneSubmit sends no rescue Enter: an owner command can open a picker,
-	// and a second Enter would choose in it.
+	// oneSubmit marks the owner's command: it sends no rescue Enter (the
+	// command can open a picker, and a second Enter would choose in it),
+	// and its Enter is sent only while the command still verifies.
 	oneSubmit           bool
 	acceptedBytes       int
 	acceptanceUncertain bool
@@ -2492,6 +2493,12 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			} else {
 				// Hold the submit CR past the TUI's paste-burst window.
 				rawInjectSleep(rawInjectSettleDelay)
+			}
+			if state.oneSubmit && !ownerCommandMaySubmit(cfg) {
+				// The owner's command no longer verifies: its Enter is never
+				// sent, by this delivery or by any later resume of it.
+				state.reset()
+				return false, nil
 			}
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {

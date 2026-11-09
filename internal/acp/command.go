@@ -120,7 +120,7 @@ func enqueueCommand(name, channel string, cmd ownerCommand, b binding.Binding, e
 	if err != nil {
 		return "", err
 	}
-	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: buzzOwner, Channel: channel}); err != nil {
+	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: buzzOwner, Channel: channel, Target: b.SessionIdentity()}); err != nil {
 		return "", err
 	}
 	return wakecmd.Enqueue(cmd.agentDir, evt.ID.Hex(), wakecmd.Request{Target: b.SessionIdentity(), Text: cmd.text, Event: raw}, now)
