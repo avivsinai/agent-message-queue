@@ -207,19 +207,35 @@ func TestHTMLCardShowsSummaryAndPrefixChip(t *testing.T) {
 	}
 }
 
-// Every view names its coverage gaps in one line, with the source's own
-// words and a link to Sources, instead of a closed box with a count.
+// Every view names its coverage gaps in one plain line that links to
+// Sources. It says "Nothing for you to do" only when the board knows no
+// owner step exists, names a step it detects, and otherwise says neither.
 func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	beads := Result{Status: StatusOK, ObservedAt: now, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}}
-	m := Build(Input{Results: []NamedResult{{Name: "beads", Result: beads}}, Config: DefaultConfig(), Now: now})
-	var page strings.Builder
-	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
-		t.Fatal(err)
+	rows := []struct {
+		name   string
+		result Result
+		want   string
+	}{
+		{"beads", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}},
+			`<span class="gap"><span class="gap-name">beads</span> partly read</span>.</span> <span class="gaps-count">1 source.</span> Nothing for you to do. <a href="#view-sources">Sources</a> says why.</p>`},
+		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "team-a")}},
+			`<span class="gaps-count">1 source.</span> Run amq-board bind-claude-list --home /h/.claude --list team-a. <a href="#view-sources">Sources</a> says why.</p>`},
+		{"codex-goals", Result{Status: StatusUnavailable, Detail: SQLite3Missing},
+			`<span class="gaps-count">1 source.</span> Install sqlite3. <a href="#view-sources">Sources</a> says why.</p>`},
+		{"github", Result{Status: StatusDegraded, Detail: "gh api graphql failed: HTTP 401"},
+			`<span class="gaps-count">1 source.</span> <a href="#view-sources">Sources</a> says why.</p>`},
 	}
-	want := `<span class="gap"><span class="gap-name">beads</span>: 238 mentioned bead ids over the lookup cap</span></span> <span class="gaps-count">1 source.</span> <a href="#view-sources">See Sources</a></p>`
-	if !strings.Contains(page.String(), want) {
-		t.Error("the coverage line does not name the beads gap with its Sources link")
+	for _, row := range rows {
+		row.result.ObservedAt = now
+		m := Build(Input{Results: []NamedResult{{Name: row.name, Result: row.result}}, Config: DefaultConfig(), Now: now})
+		var page strings.Builder
+		if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(page.String(), row.want) {
+			t.Errorf("%s: the coverage line lacks %s", row.name, row.want)
+		}
 	}
 }
 

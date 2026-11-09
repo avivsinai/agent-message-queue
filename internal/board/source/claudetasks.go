@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,9 +29,18 @@ func (ClaudeTasks) Name() string                      { return "claude-tasks" }
 func (ClaudeTasks) Discover(board.Env) (bool, string) { return true, "" }
 
 func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *claudeReadBudget) board.Result {
-	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Version: "Claude filesystem tasks", Feeds: []board.Column{board.ColumnUnclaimed, board.ColumnInFlight, board.ColumnBlocked}, NativeScopes: map[string]board.NativeScope{}}
-	gap := func(text string) {
+	// The producer can use an injected storageV5 backend. This adapter reads
+	// filesystem records only and cannot certify that other backends are
+	// empty; that is its scope, not a failed read.
+	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Version: "Claude filesystem tasks", Feeds: []board.Column{board.ColumnUnclaimed, board.ColumnInFlight, board.ColumnBlocked}, NativeScopes: map[string]board.NativeScope{}, Coverage: board.Coverage{Scope: claudeTasksScope}}
+	// fail is a read that could not run: the source is degraded and Detail
+	// says why. gap is a record or list the read could not assess.
+	fail := func(text string) {
 		result.Status = board.StatusDegraded
+		result.Detail = text
+		result.Coverage.Unresolved++
+	}
+	gap := func(text string) {
 		result.Coverage.Unresolved++
 		if result.Coverage.Detail != "" {
 			result.Coverage.Detail += "; "
@@ -43,19 +53,19 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	if home == "" {
 		dir, err := harness.UserClaudeConfigDir()
 		if err != nil {
-			gap(err.Error())
+			fail("Claude home unknown: " + err.Error())
 			return result
 		}
 		home = dir
 	}
 	absolute, err := filepath.Abs(home)
 	if err != nil {
-		gap("Claude home path invalid")
+		fail("Claude home path invalid")
 		return result
 	}
 	real, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
-		gap("Claude home unavailable")
+		fail("Claude home " + absolute + " unavailable")
 		return result
 	}
 	home = real
@@ -68,12 +78,15 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	worktrees, err := projectWorktrees(ctx, env)
 	if err != nil {
-		gap("project scope unavailable: " + err.Error())
+		fail("project worktrees unknown: " + err.Error())
 		return result
 	}
 	entries, err := os.ReadDir(filepath.Join(home, "tasks"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return result // no task list: Claude recorded no filesystem task
+	}
 	if err != nil {
-		gap("filesystem task lists unavailable; storageV5 coverage unknown")
+		fail("Claude task lists unreadable: " + err.Error())
 		return result
 	}
 	hosts, hostErr := claudeTaskHosts(ctx, env)
@@ -104,7 +117,7 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 			continue // no task to attribute: nothing is missing
 		}
 		if !bound && !claudeDefaultList(ctx, home, list, worktrees, budget) {
-			gap("unbound native task list " + list)
+			gap(board.UnboundClaudeListGap(home, list))
 			continue
 		}
 		revision := ""
@@ -218,16 +231,13 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 		if binding.Home == home {
 			if _, ok := result.NativeScopes[key]; !ok {
 				result.NativeScopes[key] = board.NativeScope{Complete: false, BindingRevision: binding.Revision}
-				gap("bound native list missing or unsupported: " + binding.List)
+				gap(board.BoundClaudeListMissingGap + binding.List)
 			}
 		}
 	}
 	if budget.stopped {
 		gap("aggregate native acquisition byte budget reached")
 	}
-	// The producer can use an injected storageV5 backend. This adapter supports
-	// filesystem records only and cannot certify that other backends are empty.
-	gap("filesystem tasks only; storageV5 scopes are not inspected")
 	sort.Slice(result.Items, func(i, j int) bool {
 		return result.Items[i].Namespace+result.Items[i].Ref.ID < result.Items[j].Namespace+result.Items[j].Ref.ID
 	})
@@ -309,15 +319,13 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 	sort.Strings(homes)
 	for i, home := range homes {
 		if budget.stopped {
-			result.Status = board.StatusDegraded
 			result.Coverage.Truncated += len(homes) - i
-			result.Coverage.Detail += "; aggregate native acquisition byte budget reached"
+			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; aggregate native acquisition byte budget reached", "; ")
 			break
 		}
 		if i >= 16 {
-			result.Status = board.StatusDegraded
 			result.Coverage.Truncated += len(homes) - i
-			result.Coverage.Detail += "; native home bound reached"
+			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; native home bound reached", "; ")
 			break
 		}
 		next := (ClaudeTasks{Home: home, Bindings: source.Bindings}).readHome(ctx, env, budget)
@@ -330,9 +338,10 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 		result.Coverage.Truncated += next.Coverage.Truncated
 		if next.Status != board.StatusOK {
 			result.Status = board.StatusDegraded
+			result.Detail = strings.TrimPrefix(result.Detail+"; "+next.Detail, "; ")
 		}
 		if next.Coverage.Detail != "" {
-			result.Coverage.Detail += "; " + next.Coverage.Detail
+			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Coverage.Detail, "; ")
 		}
 	}
 	return result
@@ -367,6 +376,8 @@ func claudeTaskHosts(ctx context.Context, env board.Env) (map[string]board.Owner
 	}
 	return owners, nil
 }
+
+const claudeTasksScope = "filesystem task lists; storageV5 is not read"
 
 const claudeAcquisitionByteLimit = 16 << 20
 

@@ -33,8 +33,9 @@ The Requests section lists questions, review requests, and todos. Each
 recipient has an observation: a direct reply (a message whose last ref is
 the request), then later messages in the same thread as secondary context,
 or "not assessed" when the recipient's session is unknown. The headline
-counts recent requests with no direct reply observed. It is never a count of
-unfinished work; preserve its coverage notes when you report it.
+counts only recent requests to the owner with no direct reply observed. The
+Requests section counts requests to agents with no direct reply as the
+agents' bookkeeping, with its coverage notes.
 
 ## Classify recent requests
 
@@ -97,5 +98,6 @@ Do not schedule retries or loops unless the caller asks for them.
 ## Report
 
 Describe labels as one model's opinions, with the classifier name and its
-quote. Keep observations and opinions apart, keep the coverage notes, and
-never present the headline as unfinished work.
+quote. Keep observations and opinions apart. Lead with the requests to the
+owner; report the agents' count as their bookkeeping, with its coverage
+notes. Never present either count as unfinished work.

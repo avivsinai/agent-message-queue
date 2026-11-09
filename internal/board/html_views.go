@@ -63,8 +63,8 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 }
 
 // coverageGaps lists the sources a view rests on that were not fully read.
-func coverageGaps(sources []SourceView, relevant func(SourceView) bool) []pageGap {
-	var gaps []pageGap
+func coverageGaps(sources []SourceView, relevant func(SourceView) bool) pageGaps {
+	var gaps pageGaps
 	for _, source := range sources {
 		if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial || !relevant(source) {
 			continue
@@ -76,13 +76,14 @@ func coverageGaps(sources []SourceView, relevant func(SourceView) bool) []pageGa
 
 type pageFlow struct {
 	Legend   string
-	Coverage []pageGap
+	Coverage pageGaps
 	Stages   []pageStage
 	NeedsYou []pageStrip
 	// Gates are the unread messages for the owner, one line per session
 	// with its oldest age, kept apart from the cards.
 	Gates []string
-	// Requests is the request headline, linked to the Requests view.
+	// Requests is the count of requests to the owner without a direct
+	// reply, linked to the Requests view; empty when there is none.
 	Requests string
 }
 
@@ -124,9 +125,8 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 		}
 		f.Stages = append(f.Stages, st)
 	}
-	if len(m.Requests.Recent) > 0 {
-		head, notes := requestHeadline(m.Requests)
-		f.Requests = strings.Join(append([]string{head}, notes...), "; ")
+	if owner, _ := requestCounts(m.Requests); owner > 0 {
+		f.Requests = requestHeadline(m.Requests)
 	}
 	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f
@@ -167,7 +167,7 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 type pageFloor struct {
 	Counts           []pageCount
 	Summary, Dormant string
-	Coverage         []pageGap
+	Coverage         pageGaps
 	DormantBy        []string
 	Sessions         []pageFloorSession
 }

@@ -932,6 +932,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 					binding, ok := state.ClaudeLists[it.Namespace]
 					if !ok || binding.Revision != it.BindingRevision {
 						nr.Result.Status = StatusDegraded
+						nr.Result.Detail = "a Claude task list binding changed during the read; the next sync reads it again"
 						nr.Result.Coverage.Unresolved++
 						nr.Result.Coverage.Detail = "Claude list binding changed during acquisition"
 						scope := nr.Result.NativeScopes[it.Namespace]
@@ -1040,6 +1041,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				_, scoped := scopes[it.Namespace]
 				if !ok || !scoped {
 					a.Input.Results[sourceIndex].Result.Status = StatusDegraded
+					a.Input.Results[sourceIndex].Result.Detail = "a task record had no valid identity or scope and was skipped"
 					a.Input.Results[sourceIndex].Result.Coverage.Skipped++
 					a.Input.Results[sourceIndex].Result.Coverage.Detail = "native fact identity or scope rejected"
 					scope := scopes[it.Namespace]

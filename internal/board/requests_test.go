@@ -105,9 +105,8 @@ func TestRequestScopeComesFromRoutingAndUnknownIsNotCounted(t *testing.T) {
 	if r := byID["routed"].Recipients[0]; r.Session != "s2" || !reflect.DeepEqual(r.DirectReplies, []string{"/base#answer"}) || !reflect.DeepEqual(r.LaterMessages, []string{"/base#answer"}) {
 		t.Fatalf("cross-session recipient = %+v, want s2 with its answer", r)
 	}
-	head, notes := requestHeadline(v)
-	if v.NoDirectReply != 1 || v.UnknownScope != 1 || head != "1 recent request with no direct reply observed" || len(notes) != 1 {
-		t.Fatalf("headline %q %v, counts %+v", head, notes, v)
+	if v.NoDirectReply != 1 || v.UnknownScope != 1 {
+		t.Fatalf("counts %+v", v)
 	}
 }
 
@@ -285,7 +284,7 @@ func TestRequestsRenderFactsAndOpinionsSeparately(t *testing.T) {
 		t.Fatalf("bound task = %+v", tasks)
 	}
 	text, page := renderFaces(t, m)
-	for _, want := range []string{"1 recent request with no direct reply observed", "worker in s1: no direct reply observed; no later message in this thread", "from lead, 1h ago"} {
+	for _, want := range []string{"1 recent request to agents has no direct reply observed", "worker in s1: no direct reply observed; no later message in this thread", "from lead, 1h ago"} {
 		if !strings.Contains(text, want) || !strings.Contains(page, want) {
 			t.Errorf("text or html lacks %q", want)
 		}
@@ -344,5 +343,24 @@ func TestDigestCoversReplySenderScope(t *testing.T) {
 	b := requestSnapshot(ask, reply).RequestView(requestNow).Recent[0]
 	if len(a.Recipients[0].DirectReplies) != 1 || len(b.Recipients[0].DirectReplies) != 0 || a.EvidenceDigest == b.EvidenceDigest {
 		t.Fatalf("replies %v -> %v, digest changed %v", a.Recipients[0].DirectReplies, b.Recipients[0].DirectReplies, a.EvidenceDigest != b.EvidenceDigest)
+	}
+}
+
+// The owner asked what to do with "220 recent requests with no direct reply
+// observed" at the top of the board (2026-11-09): nearly all were requests
+// between agents. The headline counts only requests to the owner; the
+// agents' count stays in the Requests section.
+func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
+	toOwner := requestMessage("ask-owner", "question", "", "lead", []string{reservedHuman}, "s1", requestNow.Add(-time.Hour))
+	toAgent := requestMessage("ask-agent", "review_request", "", "lead", []string{"worker"}, "s1", requestNow.Add(-time.Hour))
+	m := requestSnapshot(toOwner, toAgent).Project(DefaultConfig(), requestNow, "test")
+	text, page := renderFaces(t, m)
+	strip := `<a class="attention-requests" href="#view-requests">1 recent request to you with no direct reply observed</a>`
+	if !strings.Contains(page, strip) {
+		t.Errorf("the Needs you strip does not count the one request to the owner alone")
+	}
+	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
+	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 recent request to you with no direct reply observed\n    "+agents+"\n") {
+		t.Errorf("the Requests section does not keep the agents' count apart from the owner's")
 	}
 }

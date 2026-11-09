@@ -55,8 +55,8 @@ func TestClaudeNativeTasksUseHomeListAndTaskIdentity(t *testing.T) {
 	key := board.ClaudeListKey(home, "custom-team")
 	binding := board.ClaudeListBinding{Home: home, List: "custom-team", Revision: "owner-grant"}
 	result = (ClaudeTasks{Home: home, Bindings: map[string]board.ClaudeListBinding{key: binding}}).Read(context.Background(), env)
-	if len(result.Items) != 2 || !result.NativeScopes[key].Complete || !result.Coverage.Partial() {
-		t.Fatalf("custom binding or backend coverage: %+v", result)
+	if len(result.Items) != 2 || !result.NativeScopes[key].Complete || result.Coverage.Scope != claudeTasksScope {
+		t.Fatalf("custom binding or backend scope: %+v", result)
 	}
 	for _, item := range result.Items {
 		if item.Namespace == key && (item.BindingRevision != "owner-grant" || item.HostAttribution != nil) {
@@ -82,6 +82,12 @@ func TestClaudeNativeTasksSkipAnEmptyUnboundList(t *testing.T) {
 	result := (ClaudeTasks{Home: home}).Read(context.Background(), env)
 	if strings.Contains(result.Coverage.Detail, "unbound native task list") {
 		t.Fatalf("coverage = %q; an empty list is not a gap", result.Coverage.Detail)
+	}
+	// The board still showed "claude-tasks degraded" with an empty reason
+	// (2026-11-09): the storageV5 scope note degraded every read and was
+	// written where no degraded line reads. Empty lists are no tasks.
+	if result.Status != board.StatusOK || result.Coverage.Partial() {
+		t.Fatalf("empty lists: status %s, coverage %+v; want ok and complete", result.Status, result.Coverage)
 	}
 }
 

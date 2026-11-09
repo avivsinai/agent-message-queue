@@ -167,31 +167,65 @@ func buildPageModel(m Model) pageModel {
 
 type pageView struct {
 	ID, Title, Description, Empty string
-	Coverage                      []pageGap
+	Coverage                      pageGaps
 	Strips                        []pageStrip
 }
 
-// pageGap is one source the view rests on that is not fully read, with what
-// is missing in the source's own words.
-type pageGap struct{ Name, Status, Gap string }
+// pageGap is one source the view rests on that is not fully read: its name,
+// a plain status (read failed, unavailable, or partly read), and its reason
+// in the source's own words, which the Sources view and text show.
+// Steps are the owner steps the board detects in the source's reasons.
+// NoStep is set only when the board knows no owner step exists: the read
+// ran, its gaps are records the source could not assess, and none of them
+// is a condition the owner can act on.
+type pageGap struct {
+	Name, Status, Gap string
+	Steps             []string
+	NoStep            bool
+}
 
-// sourceGap names what a source did not read, in its own words: the status
-// of a failed read, its error, and its coverage gap.
+// pageGaps are the sources a view rests on that were not fully read.
+type pageGaps []pageGap
+
+// Steps are the owner steps of every gap, in order.
+func (gs pageGaps) Steps() []string {
+	var out []string
+	for _, g := range gs {
+		out = append(out, g.Steps...)
+	}
+	return out
+}
+
+// NothingToDo reports that the board knows no gap has an owner step.
+func (gs pageGaps) NothingToDo() bool {
+	for _, g := range gs {
+		if !g.NoStep {
+			return false
+		}
+	}
+	return len(gs) > 0
+}
+
+// sourceGap names what a source did not read. Its reason is never empty: a
+// failed read gives its error, a partial read its coverage gap.
 func sourceGap(s SourceView) pageGap {
-	g := pageGap{Name: clean(s.Name)}
+	g := pageGap{Name: clean(s.Name), Status: "partly read"}
+	g.Steps, g.NoStep = ownerSteps(s)
 	var parts []string
 	if s.Status == StatusDegraded || s.Status == StatusUnavailable {
-		g.Status = string(s.Status)
+		g.Status = "read failed"
+		if s.Status == StatusUnavailable {
+			g.Status = "unavailable"
+		}
 		if s.Detail != "" {
 			parts = append(parts, s.Detail)
 		}
 	}
-	if s.Partial {
-		gap := s.Coverage.Detail
-		if gap == "" {
-			gap = "not every record assessed"
-		}
-		parts = append(parts, gap)
+	if s.Partial && s.Coverage.Detail != "" {
+		parts = append(parts, s.Coverage.Detail)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "not every record assessed")
 	}
 	g.Gap = clean(strings.Join(parts, "; "))
 	return g
@@ -329,6 +363,9 @@ func buildPage(m Model, regenerate string) pageData {
 		}
 		if s.Status == StatusDegraded || s.Status == StatusUnavailable {
 			ps.Detail = clean(s.Detail)
+			if ps.Detail == "" && !s.Partial {
+				ps.Detail = sourceGap(s).Gap
+			}
 		}
 		if s.Partial {
 			ps.Gap = clean(s.Coverage.Detail)

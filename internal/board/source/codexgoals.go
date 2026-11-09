@@ -3,8 +3,10 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,7 +26,7 @@ func (CodexGoals) Name() string { return "codex-goals" }
 
 func (CodexGoals) Discover(env board.Env) (bool, string) {
 	if _, err := env.LookPath("sqlite3"); err != nil {
-		return false, "sqlite3 not found"
+		return false, board.SQLite3Missing
 	}
 	return true, ""
 }
@@ -63,7 +65,7 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 		}
 	}
 	db := filepath.Join(home, "goals_1.sqlite")
-	fresh, err := codexGoalsReadable(db)
+	fresh, _, err := codexGoalsReadable(db)
 	if os.IsNotExist(err) {
 		res.Status, res.Detail = board.StatusUnavailable, "goals_1.sqlite not found"
 		res.Coverage.Unresolved++
@@ -100,12 +102,25 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	// IDs came through CodexGoal's UUID shape check. No payload field, path,
 	// or free text is interpolated into SQL.
 	query := "PRAGMA query_only=ON; BEGIN; SELECT thread_id, goal_id, objective, status, updated_at_ms FROM thread_goals WHERE thread_id IN (" + strings.Join(ids, ",") + ") ORDER BY thread_id; COMMIT;"
-	uri := (&url.URL{Scheme: "file", Path: db, RawQuery: "mode=ro"}).String()
+	// Decide the open mode and stamp the main file again just before the
+	// query, so a checkpoint during the session walk is not a failed read.
+	_, checkpointed, err := codexGoalsReadable(db)
+	if err != nil {
+		return fail(err)
+	}
+	mode := "mode=ro"
+	if checkpointed != nil {
+		mode += "&immutable=1"
+	}
+	uri := (&url.URL{Scheme: "file", Path: db, RawQuery: mode}).String()
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	out, err := env.Run.Run(qctx, env.Dir, []string{"sqlite3", "-batch", "-init", os.DevNull, "-readonly", "-json", "-cmd", ".timeout 500", uri, query})
 	if err != nil {
-		return fail(fmt.Errorf("read Codex goals: %w", err))
+		return fail(fmt.Errorf("could not read the Codex goals database (%s); the next sync reads it again", errLine(err)))
+	}
+	if checkpointed != nil && !checkpointed.unchanged(db) {
+		return fail(fmt.Errorf("the goals database changed during the read; the next sync reads it again"))
 	}
 	items, err := parseCodexGoals(out, eligible)
 	if err != nil {
@@ -119,51 +134,76 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	return res
 }
 
-// codexGoalsReadable checks the file header before any SQLite connection.
-// Read-only WAL connections can create sidecars; require both to exist and
-// be readable before opening a WAL database. Never use immutable on live data.
-func codexGoalsReadable(path string) (time.Time, error) {
+// codexGoalsReadable checks the file header before any SQLite connection
+// and returns the database freshness. A read-only connection to a WAL
+// database creates the -wal and -shm sidecars when they are missing, so a
+// live read requires both to exist. A WAL database whose -wal is absent is
+// fully checkpointed: Codex closed it, and every committed page is in the
+// main file. It is read with immutable, which takes no lock and creates no
+// sidecar; the returned stamp lets the caller prove after the query that
+// no checkpoint or write touched the main file during the unlocked read.
+func codexGoalsReadable(path string) (time.Time, *codexGoalsStamp, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return time.Time{}, fmt.Errorf("goals database is not a regular file")
+		return time.Time{}, nil, fmt.Errorf("the Codex goals database is not a regular file")
 	}
 	var header [100]byte
 	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return time.Time{}, fmt.Errorf("read goals database header: %w", err)
+		return time.Time{}, nil, fmt.Errorf("could not read the Codex goals database header: %w", err)
 	}
 	if string(header[:16]) != "SQLite format 3\x00" {
-		return time.Time{}, fmt.Errorf("goals database has an unsupported format")
+		return time.Time{}, nil, fmt.Errorf("the Codex goals database has an unsupported format")
 	}
 	fresh := info.ModTime()
 	if header[18] != 2 && header[19] != 2 {
-		return fresh, nil
+		return fresh, nil, nil
+	}
+	if _, err := os.Lstat(path + "-wal"); errors.Is(err, fs.ErrNotExist) {
+		return fresh, &codexGoalsStamp{size: info.Size(), mod: info.ModTime()}, nil
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		sidecar, err := os.Open(path + suffix)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("WAL database requires readable existing %s: %w", suffix, err)
+			return time.Time{}, nil, fmt.Errorf("could not open the Codex goals database %s file: %w", suffix, err)
 		}
 		stat, statErr := sidecar.Stat()
 		_ = sidecar.Close()
 		if statErr != nil {
-			return time.Time{}, statErr
+			return time.Time{}, nil, statErr
 		}
 		if !stat.Mode().IsRegular() {
-			return time.Time{}, fmt.Errorf("goals database %s is not a regular file", suffix)
+			return time.Time{}, nil, fmt.Errorf("the Codex goals database %s file is not a regular file", suffix)
 		}
 		if suffix == "-wal" && stat.ModTime().After(fresh) {
 			fresh = stat.ModTime()
 		}
 	}
-	return fresh, nil
+	return fresh, nil, nil
+}
+
+// codexGoalsStamp is the main file of a checkpointed WAL database before an
+// immutable read.
+type codexGoalsStamp struct {
+	size int64
+	mod  time.Time
+}
+
+// unchanged reports that the main file kept its size and time through the
+// read. A WAL writer appends to -wal and leaves the main file alone, so a
+// -wal that appeared during the read leaves the read a consistent earlier
+// state; only a checkpoint writes the main file, and then the unlocked read
+// may have seen part of it.
+func (s codexGoalsStamp) unchanged(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() == s.size && info.ModTime().Equal(s.mod)
 }
 
 type codexGoalSession struct {

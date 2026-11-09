@@ -97,14 +97,19 @@ handle.
 Requests from the last 14 days, by recorded message time, are Recent; the
 rest are Older, or Undated when the time is missing, unreadable, or in the
 future. Age never completes a request. Recent requests are grouped by scoped
-addressee, with requests that have no direct reply first. The only request
-count is the headline "N recent requests with no direct reply observed". A
-request counts once when any scoped recipient sent no direct reply; later
+addressee, with requests that have no direct reply first. The owner-facing
+headline is "N recent requests to you with no direct reply observed": a
+request addressed to the owner handle `user`, in any root, with no direct
+reply from it. The Requests section states the rest in one sentence, "N
+recent requests to agents have no direct reply observed", and calls it the
+agents' bookkeeping: agents often answer with a new message instead of a
+reply. A request counts once, as the owner's when the owner has not replied
+directly, otherwise when any scoped recipient sent no direct reply; later
 thread activity is a secondary observation on the row. In a `p2p/` thread
 every message between the pair shares the thread, so later activity there is
 weak evidence. Requests with an unknown recipient scope are listed and
-counted separately, and incomplete history coverage is stated. The headline
-is never a count of unfinished work.
+counted separately in the Requests section, which also states incomplete
+history coverage. Neither count is a count of unfinished work.
 
 Owner dismissal and action cancellation remove a request from the view. An
 attachment or an adopted suggestion binds a task to the request; the request
@@ -284,8 +289,13 @@ Its namespace is the canonical `database_path` returned by `bd --readonly
 Closed task identities remain known. The board never changes source records.
 
 Roster, usage, GitHub, and configured provider coverage remain secondary facts.
-Codex goal aliases use canonical `CODEX_HOME` plus the native goal UUID; the
-thread UUID is container context. A replacement goal keeps a distinct permanent
+Codex goals are read with `sqlite3` read-only, without writing to the Codex
+home. A live WAL database needs its `-wal` and `-shm` files. When Codex has
+checkpointed and removed `-wal`, the main file holds every commit and is read
+immutable, which creates no sidecar; if the main file changes during that
+read, the source degrades and the next sync reads again. Codex goal aliases
+use canonical `CODEX_HOME` plus the native goal UUID; the thread UUID is
+container context. A replacement goal keeps a distinct permanent
 task. Explicit AMQ bindings can attribute a container; cwd alone does not name
 an owner. Active status records source progress, never observed execution.
 
@@ -304,8 +314,12 @@ amq-board unbind-claude-list --binding-key '["/absolute/claude-home","native-lis
 Binding changes share the serialized owner path. Revocation accepts the exact
 stored key even when the native home or its path alias has disappeared. Acquisition with a removed
 or replaced binding cannot admit tasks at commit. Native task owners remain
-separate from AMQ container attribution. Unbound lists, unreadable files and
-storageV5 scopes are reported as incomplete coverage.
+separate from AMQ container attribution. The source reads filesystem task
+lists and states that storageV5 is not read as its scope. A list with no task
+file is no tasks. Unbound lists and unreadable or unsupported files are
+incomplete coverage; only a read that cannot run (the Claude home or its
+task directory unreadable, or the project worktrees unknown) degrades the
+source, and a degraded source always states its reason.
 A single 16 MiB acquisition byte budget covers task payloads and session scope
 reads across all homes. A stopped or incomplete scope preserves prior facts.
 The filesystem adapter cannot certify other backends are empty. Native file
@@ -340,7 +354,8 @@ pull request that only names a bead stays its own card and shows the name.
 Forge cards are never tasks: they have no task ID, cannot take attachments,
 and stay outside task counts. Needs you (a structured field waits on you) is a
 flag on the card, not a stage; the strip above the board lists the cards that
-need you, the unread messages for you, and the request headline. A pull request card shows its checks as CI green, CI red,
+need you, the unread messages for you, and the requests to you that have no
+direct reply. A pull request card shows its checks as CI green, CI red,
 CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
 omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 `flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and
@@ -391,7 +406,12 @@ Static HTML is self-contained and escapes source content. The live server binds
 protect against DNS rebinding. The page never runs source commands.
 
 The live page reloads the snapshot once per minute or when Refresh is pressed.
-It shows publication freshness and source coverage. A failed reload retains the
+It shows publication freshness and source coverage. Every view names the
+sources not fully read in one plain line (read failed, unavailable, or
+partly read). The line names an owner step the board detects (bind an
+unbound Claude task list, install `sqlite3`). It says there is nothing for
+the owner to do only when every source read ran and none of its gaps is an
+owner step; otherwise it points to Sources, which gives each reason. A failed reload retains the
 last rendered snapshot with a visible source error. `~/.amq/board/serve.json`
 (mode 0600) lets local clients find the view; shutdown removes its own record.
 

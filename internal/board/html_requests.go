@@ -13,7 +13,7 @@ import (
 type pageRequests struct {
 	Headline, Partition     string
 	Notes                   []string
-	Coverage                []pageGap
+	Coverage                pageGaps
 	RecentCount, OlderCount int
 	Groups                  []pageRequestGroup
 	Undated                 []pageRequest
@@ -55,9 +55,9 @@ type pageOpinion struct{ Value, Classifier, Quote, Source string }
 func buildRequestsPage(m Model, now time.Time) pageRequests {
 	v := m.Requests
 	p := pageRequests{RecentCount: len(v.Recent), OlderCount: len(v.Older)}
-	p.Headline, p.Notes = requestHeadline(v)
-	for i := range p.Notes {
-		p.Notes[i] = clean(p.Notes[i])
+	p.Headline = requestHeadline(v)
+	for _, note := range requestBookkeeping(v) {
+		p.Notes = append(p.Notes, clean(note))
 	}
 	p.Partition = "Recent is the last " + strconv.Itoa(int(RequestWindow/(24*time.Hour))) + " days by message time: " + strconv.Itoa(len(v.Recent)) + " recent, " + strconv.Itoa(len(v.Older)) + " older"
 	if n := len(v.Undated); n > 0 {
@@ -69,7 +69,7 @@ func buildRequestsPage(m Model, now time.Time) pageRequests {
 		if v.Coverage.Detail != "" {
 			gap = clean(v.Coverage.Detail) + "; " + gap
 		}
-		p.Coverage = []pageGap{{Name: "amq-history", Gap: gap}}
+		p.Coverage = pageGaps{{Name: "amq-history", Status: "partly read", Gap: gap}}
 	}
 	named := askTasks(m.Columns)
 	for i, g := range recentGroups(v) {
