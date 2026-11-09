@@ -84,6 +84,11 @@ contract. AMQ never starts the daemon or edits saved Codex settings. Otherwise
 the existing embedded launch is retained, and launch output, remote bindings,
 and `doctor --ops` share its `Buzz approvals: terminal only: <reason>` line.
 
+A clear startup state includes an effective `check_for_update_on_startup =
+false`, read from the daemon. AMQ cannot pass `-c` for it, because any
+configuration override makes Codex select the embedded app-server. Set it in
+your Codex config to let managed seats use the shared daemon.
+
 The native execution ticket owns a pre-spawn `thread/start` observation. Its
 `codex_daemon_thread_v1` evidence binds the handle, launch nonce, provider
 version, working directory, physical session identity, socket, and daemon
@@ -105,6 +110,9 @@ endpoint change requires explicit recovery rather than silent re-adoption.
 A failure proven to occur before `thread/start` returns the ticket to `pending`;
 thread creation and later protocol failures preserve uncertain progress. Native
 thread startup uses the same 60-second contention budget as session naming.
+Sibling seats of one launch wait for its lease in turn; each live holder gets
+120 seconds, which covers that budget and its checks, and the wait starts again
+when the lease passes to the next holder.
 An incomplete acquired ticket refuses a replacement generation: retry the
 original emitted command to reuse its thread.
 
@@ -124,12 +132,43 @@ the ticket's identity update, cleanup validates that capture and displays its
 thread too. Removal compares ticket bytes, file identity, and evidence references
 again under the lease. It leaves all Codex threads, evidence, routing records,
 conversations, and launch journals untouched. Cleanup does not require the old
-executable or daemon to remain available. Recovery refusals use exit 6 and name
-the retry or cleanup command.
+executable or daemon to remain available. Tickets and evidence from an earlier
+supported Codex release stay readable after an upgrade, so inspection and
+cleanup still work; only the current release runs a new or recovered
+execution. Recovery refusals use exit 6 and name the retry or cleanup command.
 
 Every execution attempt, including recovery, checks inherited native-backend
-exclusions and rechecks hook trust on the bound daemon before publishing routing.
-The other full startup admission probes run during planning and new acquisition.
+exclusions and runs the full startup admission (provider version, sign-in,
+directory trust, daemon version, hook trust, terminal instructions, and the
+update prompt) on the bound daemon before publishing routing. A recovered
+execution that fails admission keeps its acquired thread; it never creates a
+replacement.
+
+A conversation resumes on the backend that created it; launch never moves it
+implicitly. A conversation captured by notify resumes embedded. One whose
+capture is `codex_daemon_thread_v1` resumes on the daemon when the launch
+options are admitted, the daemon is eligible, the daemon listens at the socket
+that captured the thread, and it reads the thread in the launch directory at
+the verified version on the same session. The socket path is fixed by the
+canonical `CODEX_HOME`. A restarted daemon at that socket is a successor; a
+daemon at another socket is not, even when it answers with the same thread.
+Static admission, including executable containment, completes before any probe
+runs the provider or reads the daemon. Any other outcome (a changed endpoint,
+no daemon, an option, sign-in, trust, or version that is not admitted, or a
+thread the daemon does not prove) refuses with exit 6 and names the cause and
+the fix, because another backend or rollout store may hold a different thread
+under the same ID; `--allow-fresh-fallback` starts a new conversation instead.
+Codex 0.167.0 exposes no stable persistence-store identity, so AMQ cannot
+distinguish a same-socket successor that uses a different SQLite store when it
+returns the same thread ID and working directory.
+A daemon resume ticket names its thread from creation and asks the
+daemon to create nothing: it skips `identity_requested`, a failed verification
+leaves it `pending`, and the TUI starts only after `codex_daemon_thread_v1`
+evidence for the new generation binds the same thread and routing is published
+again. The conversation record keeps its original evidence. Cleanup and retry of
+an incomplete resume follow the rules above. When the thread is loaded
+and another client is subscribed to it or a turn runs, Codex keeps its running
+settings and warns that the resume settings are ignored.
 
 Prepare authorizes the selected native or embedded identity contract. A daemon
 or sign-in change that changes that selection before Apply requires a new

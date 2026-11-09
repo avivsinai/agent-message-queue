@@ -300,7 +300,8 @@ func outputLaunchResult(jsonOutput bool, result launch.ReconcileResult) error {
 // launchCLIError keeps uncertain native acquisition actionable at every
 // public launch entry point rather than converting it into a generic failure.
 func launchCLIError(err error) error {
-	if errors.Is(err, launch.ErrCodexAcquisitionUncertain) || errors.Is(err, launch.ErrCodexExecutionRecoveryRequired) {
+	if errors.Is(err, launch.ErrCodexAcquisitionUncertain) || errors.Is(err, launch.ErrCodexExecutionRecoveryRequired) ||
+		errors.Is(err, launch.ErrCodexConversationProvenance) {
 		return ActionRequiredError("%s", err)
 	}
 	return err

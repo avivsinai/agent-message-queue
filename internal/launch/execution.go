@@ -23,9 +23,15 @@ const ExecutionTicketVersion = 1
 
 const executionDirectory = "meta/launch/executions"
 
+// A sibling execution of the same launch holds the lease through its bounded
+// identity acquisition: about 85 seconds for a Codex seat (a 60-second thread
+// start, two 5-second admissions, a 10-second thread read, and daemon process
+// checks). The wait allows each live holder that budget with margin and
+// starts again when the lease passes to another holder, so a batch of seats
+// queues behind one another instead of timing out behind the first.
 const (
 	executionLeaseRetryInterval = 50 * time.Millisecond
-	executionLeaseWaitTimeout   = 10 * time.Second
+	executionLeaseHolderBudget  = 120 * time.Second
 )
 
 type ExecutionState string
@@ -240,7 +246,7 @@ func (ticket ExecutionTicket) Validate() error {
 	if ticket.PreSpawnAcquire {
 		if ticket.Mode != AdapterModeCapture ||
 			(ticket.Provider != CursorProvider || ticket.ProviderVersion != cursorCaptureVersion) &&
-				(ticket.Provider != CodexProvider || ticket.ProviderVersion != CodexDaemonVersion) ||
+				(ticket.Provider != CodexProvider || !codexDaemonVersionReadable(ticket.ProviderVersion)) ||
 			strings.TrimSpace(ticket.Backend) == "" || strings.TrimSpace(ticket.Profile) == "" {
 			return fmt.Errorf("pre-spawn identity acquisition requires a versioned provider capture ticket")
 		}
@@ -322,7 +328,7 @@ func (ticket ExecutionTicket) Validate() error {
 		case DynamicArgConversationID:
 			conversationSlots++
 			expected := ticket.ConversationID
-			if ticket.PreSpawnAcquire {
+			if ticket.PreSpawnAcquire && !CodexDaemonResume(ticket) {
 				expected = preSpawnConversationPlaceholder
 			}
 			if expected == "" || ticket.TargetArgv[dynamic.Index] != expected {
@@ -359,7 +365,7 @@ func (ticket ExecutionTicket) Validate() error {
 	}
 	switch ticket.State {
 	case ExecutionPending:
-		if ticket.PreSpawnAcquire && (ticket.ConversationID != "" || len(ticket.EvidenceRefs) != 0) {
+		if ticket.PreSpawnAcquire && (ticket.ConversationID != "" && !CodexDaemonResume(ticket) || len(ticket.EvidenceRefs) != 0) {
 			return fmt.Errorf("pending pre-spawn ticket must not contain acquired identity")
 		}
 	case ExecutionIdentityRequested:
@@ -491,7 +497,10 @@ func writeExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, ticket Execution
 			template := current
 			template.State, template.Reason = ExecutionPending, ""
 			template.TargetEnv = cloneExecutionEnv(template.TargetEnv)
-			template.ConversationID, template.EvidenceRefs = "", nil
+			template.EvidenceRefs = nil
+			if !CodexDaemonResume(template) {
+				template.ConversationID = ""
+			}
 			if !reflect.DeepEqual(template, ticket) {
 				return fmt.Errorf("codex daemon execution template changed during recovery")
 			}
@@ -649,11 +658,14 @@ func CompareAndSwapExecutionIdentity(root *fsq.DeliveryRoot, lease *Lease, handl
 		return ticket, fmt.Errorf("execution ticket nonce does not match launch lease")
 	}
 	expected := ExecutionPending
-	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire && !CodexDaemonResume(ticket) {
 		expected = ExecutionIdentityRequested
 	}
 	if ticket.State != expected {
 		return ticket, fmt.Errorf("execution ticket state is %q, want %q", ticket.State, expected)
+	}
+	if CodexDaemonResume(ticket) && conversationID != ticket.ConversationID {
+		return ticket, fmt.Errorf("codex daemon resume observed thread %s, want %s", conversationID, ticket.ConversationID)
 	}
 	ticket.ConversationID = conversationID
 	ticket.EvidenceRefs = []string{evidenceRef}
@@ -814,7 +826,9 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 			if ticket.State == ExecutionIdentityRequested {
 				return ticket, uncertainCodexAcquisition(ticket)
 			}
-			if ticket.Provider == CodexProvider {
+			// A resume asks the daemon to create nothing, so its attempt has
+			// no uncertain window and stays pending until the thread is verified.
+			if ticket.Provider == CodexProvider && !CodexDaemonResume(ticket) {
 				ticket, err = CompareAndSwapExecutionTicket(root, lease, ticket.Handle, ExecutionPending, ExecutionIdentityRequested, "identity_requested")
 				if err != nil {
 					return ticket, err
@@ -901,6 +915,14 @@ func promotePreSpawnConversation(root *fsq.DeliveryRoot, lease *Lease, ticket Ex
 	record, err := LoadConversation(root, ticket.Handle)
 	if err != nil {
 		return err
+	}
+	if CodexDaemonResume(ticket) {
+		// A resumed seat runs the captured thread under a new launch nonce;
+		// the record keeps the evidence that binds the thread to the daemon.
+		if record.State != CaptureReady || record.Identity != (ConversationIdentity{Provider: ticket.Provider, ID: ticket.ConversationID}) {
+			return fmt.Errorf("ready conversation does not match the resumed daemon thread")
+		}
+		return nil
 	}
 	if record.State == CaptureReady {
 		if record.Identity.Provider != ticket.Provider || record.Identity.ID != ticket.ConversationID ||
@@ -1145,7 +1167,8 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 }
 
 func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
-	deadline := time.Now().Add(executionLeaseWaitTimeout)
+	var holder HolderIdentity
+	var deadline time.Time
 	for {
 		lease, err := AcquireLease(root, nonce)
 		if err == nil {
@@ -1154,6 +1177,9 @@ func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error)
 		var held *LeaseHeldError
 		if !errors.As(err, &held) || held.Nonce != nonce {
 			return nil, err
+		}
+		if deadline.IsZero() || held.Holder != holder {
+			holder, deadline = held.Holder, time.Now().Add(executionLeaseHolderBudget)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -1305,6 +1331,9 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
 		if err := ticket.Validate(); err != nil {
 			return err
+		}
+		if ticket.ProviderVersion != CodexDaemonVersion {
+			return fmt.Errorf("codex daemon execution was planned for Codex %s; this AMQ runs native seats only on Codex %s", ticket.ProviderVersion, CodexDaemonVersion)
 		}
 		return validateCodexDaemonExecutable(ticket)
 	}

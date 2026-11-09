@@ -27,7 +27,7 @@ import (
 // Pro S1 finding 5: recovery could publish routing under a different
 // CODEX_HOME containing the same thread ID and cwd as the acquired thread.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment"} {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory"} {
 		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
@@ -118,9 +118,9 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			routingHome := home
 			firstRegistration := true
 			envelope := launch.ExecutionEnvelope{Cwd: project, AMQExecutable: amq, ProviderExecutable: executable,
-				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
+				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
 				RecordIdentity: func(acquired launch.ExecutionTicket) error {
-					if scenario == "recovered_embedded_environment" && firstRegistration {
+					if (scenario == "recovered_embedded_environment" || scenario == "recovered_untrusted_directory") && firstRegistration {
 						firstRegistration = false
 						return errors.New("interrupted before routing publication")
 					}
@@ -140,6 +140,24 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				}
 				t.Setenv("CODEX_EXEC_SERVER_URL", "")
 				prepared, err = launch.PrepareExecution(root, "codex", nonce, envelope)
+			}
+			// Review of daemon resume: a recovered execution skipped the
+			// startup admission that a new acquisition runs.
+			if scenario == "recovered_untrusted_directory" {
+				if err == nil {
+					t.Fatal("expected interrupted first execution")
+				}
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				prepared, err = launch.PrepareExecution(root, "codex", nonce, envelope)
+				if err == nil || !strings.Contains(err.Error(), "directory trust") {
+					t.Fatalf("recovered untrusted directory = %#v, %v", prepared, err)
+				}
+				if _, lookupErr := codexidentity.Lookup("01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", home); !errors.Is(lookupErr, codexidentity.ErrNone) {
+					t.Fatalf("untrusted recovered routing published: %v", lookupErr)
+				}
+				return
 			}
 			if scenario == "pre_start_version_failure" {
 				if !errors.Is(err, launch.ErrIdentityNotRequested) {
@@ -338,28 +356,43 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 
 // Pro S1 review R1: resume planning probed an executable after static
 // containment validation had already rejected it as repository-controlled.
-func TestRejectedResumeProviderIsNeverExecuted(t *testing.T) {
+// Review of daemon resume: fresh planning and a daemon-captured conversation
+// probed it too.
+func TestRejectedProviderIsNeverExecuted(t *testing.T) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
-	project := t.TempDir()
-	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
-	executable := filepath.Join(project, "codex")
-	sentinel := filepath.Join(project, "executed")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch '"+sentinel+"'\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, err := New(executable).PlanResume(launch.ResumeRequest{
-		PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "98989898-9898-4989-8989-989898989898",
-			ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled},
-		Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "inside the project") {
-		t.Fatalf("resume refusal = %v", err)
-	}
-	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rejected provider was executed: %v", err)
+	for _, row := range []struct {
+		name   string
+		fresh  bool
+		source launch.CaptureEvidenceSource
+	}{{"fresh", true, ""}, {"embedded resume", false, ""}, {"daemon resume", false, launch.CodexDaemonThreadV1}} {
+		t.Run(row.name, func(t *testing.T) {
+			project := t.TempDir()
+			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+			executable := filepath.Join(project, "codex")
+			sentinel := filepath.Join(project, "executed")
+			if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch '"+sentinel+"'\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			request := launch.PlanRequest{Handle: "codex", LaunchNonce: "98989898-9898-4989-8989-989898989898",
+				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled}
+			var err error
+			if row.fresh {
+				_, err = New(executable).PlanFresh(request)
+			} else {
+				_, err = New(executable).PlanResume(launch.ResumeRequest{PlanRequest: request,
+					Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"},
+					Capture:      launch.ConversationCapture{Source: row.source}})
+			}
+			if err == nil || !strings.Contains(err.Error(), "inside the project") {
+				t.Fatalf("refusal = %v", err)
+			}
+			if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected provider was executed: %v", err)
+			}
+		})
 	}
 }
 
@@ -441,4 +474,245 @@ func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A conversation acquired on the daemon resumes there under a new launch
+// generation: same thread, admitted settings, routing published again.
+func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
+	root, project, executable, amq := nativeSeat(t)
+	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"
+	fresh, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+		SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+	if err != nil || !fresh.PreSpawnAcquire {
+		t.Fatalf("fresh plan = %#v, %v", fresh, err)
+	}
+	executeNative(t, root, fresh, true)
+	conversation, err := launch.LoadConversation(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := launch.ReadConversationCapture(root, conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
+	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled, CommittedArgs: settings},
+		Conversation: conversation.Identity, Capture: capture})
+	if err != nil || !resumed.PreSpawnAcquire || resumed.TerminalOnlyReason != "" {
+		t.Fatalf("daemon-bound conversation resumed embedded: %#v, %v", resumed, err)
+	}
+	prepared, argv := executeNative(t, root, resumed, false)
+	expected := append(append([]string{executable, "resume", "-C", project}, settings...), thread)
+	if prepared.ConversationID != thread || !slices.Equal(argv, expected) {
+		t.Fatalf("resume argv = %q (thread %s), want %q", argv, prepared.ConversationID, expected)
+	}
+	if after, err := launch.LoadConversation(root, "codex"); err != nil || after.LaunchNonce != conversation.LaunchNonce || !slices.Equal(after.EvidenceRefs, conversation.EvidenceRefs) {
+		t.Fatalf("resume rewrote the daemon binding: %#v, %v", after, err)
+	}
+	if record, err := codexidentity.Lookup(thread, os.Getenv("CODEX_HOME")); err != nil || record.Me != "codex" {
+		t.Fatalf("resumed routing = %#v, %v", record, err)
+	}
+}
+
+// Review of daemon resume: resume checked the daemon version on one connection
+// and read the thread on another, so a daemon that answered the thread read at
+// another version was bound.
+func TestDaemonResumeReadsItsThreadAtTheVerifiedVersion(t *testing.T) {
+	var last, replacedFrom atomic.Int32
+	root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{initializeVersion: func(sequence int32) string {
+		if from := replacedFrom.Load(); from != 0 && sequence >= from {
+			return "0.168.0"
+		}
+		last.Store(sequence)
+		return "0.167.0"
+	}})
+	fresh, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+		SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executeNative(t, root, fresh, true)
+	conversation, err := launch.LoadConversation(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := launch.ReadConversationCapture(root, conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled},
+		Conversation: conversation.Identity, Capture: capture})
+	if err != nil || !resumed.PreSpawnAcquire {
+		t.Fatalf("resume plan = %#v, %v", resumed, err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: "codex", LaunchNonce: resumed.LaunchNonce,
+		Mode: resumed.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion, ConversationID: resumed.ConversationID,
+		PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
+		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, ProviderExecutable: executable, AMQExecutable: amq,
+		TargetArgv: resumed.Argv, DynamicArgv: resumed.DynamicArgv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := launch.AcquireLease(root, resumed.LaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	// Acquisition checks startup admission on the next session; the daemon
+	// answers every later session, including the thread read, as 0.168.0.
+	replacedFrom.Store(last.Load() + 2)
+	env := []string{"AM_ROOT=" + root.Base(), "AM_BASE_ROOT=" + root.Base(), "AM_ME=codex", "AM_ROOT_ID=" + ticket.SessionIdentity, "AM_BASE_ROOT_ID=" + ticket.SessionIdentity}
+	_, err = launch.PrepareExecution(root, "codex", resumed.LaunchNonce, launch.ExecutionEnvelope{Cwd: project, AMQExecutable: amq,
+		ProviderExecutable: executable, TargetArgv: resumed.Argv, Environment: env,
+		AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
+		RecordIdentity:  func(acquired launch.ExecutionTicket) error { return RecordIdentity(root, acquired, env) }})
+	if err == nil || !strings.Contains(err.Error(), `does not match "0.167.0"`) {
+		t.Fatalf("resume bound a thread read at an unverified daemon version: %v", err)
+	}
+	if stored, loadErr := launch.LoadExecutionTicket(root, "codex"); loadErr != nil || stored.State != launch.ExecutionPending || len(stored.EvidenceRefs) != 0 {
+		t.Fatalf("resume acquired its thread before the version check: %#v, %v (%v)", stored, loadErr, err)
+	}
+}
+
+// Each conversation keeps its backend. A daemon conversation that cannot
+// resume on its capturing daemon is refused, never moved to embedded.
+func TestCodexResumeKeepsItsBackend(t *testing.T) {
+	for _, row := range []struct {
+		name, thread, reason string
+		source               launch.CaptureEvidenceSource
+		elsewhere, untrusted bool
+	}{
+		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1", false, false},
+		// Review of daemon resume: an unproven daemon thread resumed embedded.
+		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "cannot prove its thread", launch.CodexDaemonThreadV1, false, false},
+		// Review of daemon resume: another endpoint answering with the same
+		// thread was accepted, and an ineligible seat skipped the endpoint check.
+		{"another endpoint", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "the Codex daemon endpoint changed since this conversation was captured", launch.CodexDaemonThreadV1, true, true},
+		// Codex review of 0725fd2c: an ineligible daemon conversation resumed
+		// embedded, where another rollout store may serve the same thread id.
+		{"ineligible daemon conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "directory trust", launch.CodexDaemonThreadV1, false, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root, project, executable, amq := nativeSeat(t)
+			home, err := filepath.EvalSymlinks(os.Getenv("CODEX_HOME"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.untrusted {
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if row.elsewhere {
+				home = filepath.Join(t.TempDir(), "codex-home")
+			}
+			capture := launch.ConversationCapture{Source: row.source}
+			if row.source == launch.CodexDaemonThreadV1 {
+				capture.Socket = filepath.Join(home, "app-server-control", "app-server-control.sock")
+			}
+			plan, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled},
+				Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: row.thread}, Capture: capture})
+			if row.source == launch.CodexDaemonThreadV1 {
+				if !errors.Is(err, launch.ErrCodexConversationProvenance) || !strings.Contains(err.Error(), row.reason) {
+					t.Fatalf("unproven daemon conversation = %#v, %v", plan, err)
+				}
+				return
+			}
+			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != row.reason || plan.Argv[len(plan.Argv)-1] != row.thread {
+				t.Fatalf("resume plan = %#v, %v", plan, err)
+			}
+		})
+	}
+}
+
+func nativeSeat(t *testing.T, options ...nativeDaemonOptions) (*fsq.DeliveryRoot, string, string, string) {
+	t.Helper()
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("HOME", t.TempDir())
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(project, "queue")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	t.Setenv("CODEX_HOME", nativeDaemon(t, project, options...))
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root, project, nativeProvider(t), amq
+}
+
+// executeNative writes plan's ticket, as reconcile does, and runs the managed
+// execution boundary to its resolved provider argv.
+func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, fresh bool) (launch.ExecutionTicket, []string) {
+	t.Helper()
+	amq, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: plan.LaunchNonce,
+		Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion, ConversationID: plan.ConversationID,
+		PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
+		ProjectRoot: plan.Cwd, SessionRoot: root.Base(), Cwd: plan.Cwd, ProviderExecutable: plan.Argv[0], AMQExecutable: amq,
+		TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := launch.AcquireLease(root, plan.LaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles(plan.Handle); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		if err := launch.WriteConversation(root, lease, launch.ConversationRecord{Version: launch.ConversationVersion,
+			Handle: plan.Handle, State: launch.CapturePending, ProviderVersion: launch.CodexDaemonVersion, LaunchNonce: plan.LaunchNonce}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"AM_ROOT=" + root.Base(), "AM_BASE_ROOT=" + root.Base(), "AM_ME=" + plan.Handle, "AM_ROOT_ID=" + ticket.SessionIdentity, "AM_BASE_ROOT_ID=" + ticket.SessionIdentity}
+	prepared, err := launch.PrepareExecution(root, plan.Handle, plan.LaunchNonce, launch.ExecutionEnvelope{Cwd: plan.Cwd, AMQExecutable: amq,
+		ProviderExecutable: plan.Argv[0], TargetArgv: plan.Argv, Environment: env, AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
+		RecordIdentity: func(acquired launch.ExecutionTicket) error { return RecordIdentity(root, acquired, env) }})
+	if err != nil || prepared.State != launch.ExecutionAcknowledged {
+		t.Fatalf("prepare = %#v, %v", prepared, err)
+	}
+	argv, err := launch.ResolveExecutionArgv(prepared, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared, argv
 }

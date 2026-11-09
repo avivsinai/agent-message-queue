@@ -35,7 +35,12 @@ func (a *adapter) Capabilities(ctx context.Context) launch.AdapterCapabilities {
 	return capabilities
 }
 
+// PlanFresh admits the request statically before any probe runs the provider
+// executable or reads the daemon.
 func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error) {
+	if err := a.ValidatePlanRequest(request); err != nil {
+		return launch.AgentPlan{}, err
+	}
 	reason := launch.CodexDaemonOptionsReason(request)
 	if reason != "" {
 		if _, _, endpointReason := daemonEndpoint(); endpointReason != "" {
@@ -52,16 +57,78 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 	return plan, err
 }
 
+// PlanResume keeps each conversation on the backend that created it. A
+// conversation captured by notify resumes embedded. A daemon thread resumes
+// only on the daemon at its captured endpoint; any failure to do that refuses
+// the resume, because no other backend is proven to read its rollout store.
+// Static admission precedes every probe.
 func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, error) {
+	if err := a.ValidateResumeRequest(request); err != nil {
+		return launch.AgentPlan{}, err
+	}
+	if request.Capture.Source == launch.CodexDaemonThreadV1 {
+		if err := daemonResumeRefusal(a.executable, request); err != nil {
+			return launch.AgentPlan{}, err
+		}
+		return a.PlanResumeDaemon(request)
+	}
 	plan, err := a.CodexAdapter.PlanResume(request)
 	if err != nil {
 		return launch.AgentPlan{}, err
 	}
-	_, _, plan.TerminalOnlyReason = daemonEndpoint()
-	if plan.TerminalOnlyReason == "" {
-		plan.TerminalOnlyReason = "resumed launch settings require verified TUI resume equivalence"
-	}
+	plan.TerminalOnlyReason = "this conversation runs on an embedded app-server"
 	return plan, nil
+}
+
+// daemonResumeRefusal checks the captured endpoint before any probe that runs
+// the provider, then the options, the seat's admission, and the thread.
+func daemonResumeRefusal(executable string, request launch.ResumeRequest) error {
+	_, sock, reason := daemonEndpoint()
+	if reason == "" {
+		reason = endpointReason(request.Capture, sock)
+	}
+	if reason == "" {
+		reason = launch.CodexDaemonOptionsReason(request.PlanRequest)
+	}
+	if reason == "" {
+		reason = eligibility(executable, request.Cwd)
+	}
+	if reason == "" {
+		reason = threadReason(sock, request.Conversation.ID, request.Cwd)
+	}
+	return provenanceRefusal(reason)
+}
+
+// endpointReason requires the endpoint that captured the thread. A restarted
+// daemon there is its successor; another endpoint is not, whatever it answers.
+func endpointReason(capture launch.ConversationCapture, sock string) string {
+	if sock != capture.Socket {
+		return "the Codex daemon endpoint changed since this conversation was captured"
+	}
+	return ""
+}
+
+// threadReason requires the daemon at sock, at the verified version on the
+// same session, to read the thread in its launch directory.
+func threadReason(sock, thread, cwd string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got, err := codex.ReadThread(ctx, sock, thread, launch.CodexDaemonVersion)
+	if err != nil {
+		return "the Codex daemon that captured this conversation cannot prove its thread: " + err.Error()
+	}
+	if got != cwd {
+		return "the Codex daemon that captured this conversation reads its thread in another directory"
+	}
+	return ""
+}
+
+func provenanceRefusal(reason string) error {
+	if reason == "" {
+		return nil
+	}
+	return fmt.Errorf("%w: %s; this conversation lives in the Codex app-server daemon that captured it: fix that and resume, or pass --allow-fresh-fallback for a new conversation",
+		launch.ErrCodexConversationProvenance, reason)
 }
 
 func codexHome() (string, error) {
@@ -114,6 +181,13 @@ func eligibility(executable, cwd string) string {
 	if reason != "" {
 		return reason
 	}
+	return admission(executable, home, sock, cwd)
+}
+
+// admission checks the startup facts a seat meets on the daemon at sock:
+// provider version, sign-in, directory trust, daemon version, hook review,
+// terminal instructions, and the update prompt.
+func admission(executable, home, sock, cwd string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	capabilities := launch.NewCodexAdapter(executable).Capabilities(ctx)
@@ -144,14 +218,16 @@ func eligibility(executable, cwd string) string {
 		return "Codex terminal instructions require verified TUI resume equivalence"
 	}
 	if !ConfigUpdateCheckOff(state.Config) || !RequirementsAllowNoUpdateCheck(state.Requirements) {
-		return "Codex startup update prompt is not ruled out"
+		return "the Codex update prompt is not ruled out; set check_for_update_on_startup = false in your Codex config to let this seat use the shared daemon"
 	}
 	return ""
 }
 
 // Acquire creates a native thread only after launch has persisted its attempt
-// barrier under the exact generation's lease. An uncertain attempt is not retried.
-func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
+// barrier under the exact generation's lease. An uncertain attempt is not
+// retried. A resume ticket creates nothing: it binds its existing thread once
+// the endpoint that captured it reads it.
+func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if ticket.Provider != launch.CodexProvider || !ticket.PreSpawnAcquire {
 		return launch.CaptureEvidence{}, fmt.Errorf("not a Codex daemon acquisition ticket")
 	}
@@ -174,14 +250,29 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if err != nil {
 		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
-	defer cancel()
-	thread, err := codex.StartThread(ctx, sock, ticket.Cwd, "", launch.CodexDaemonVersion)
-	if err != nil {
-		if errors.Is(err, codex.ErrThreadNotStarted) {
+	thread := ticket.ConversationID
+	if launch.CodexDaemonResume(ticket) {
+		capture, err := resumedCapture(root, ticket)
+		if err != nil {
 			return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 		}
-		return launch.CaptureEvidence{}, err
+		reason := endpointReason(capture, sock)
+		if reason == "" {
+			reason = threadReason(sock, thread, ticket.Cwd)
+		}
+		if err := provenanceRefusal(reason); err != nil {
+			return launch.CaptureEvidence{}, fmt.Errorf("%w: %w", launch.ErrIdentityNotRequested, err)
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
+		defer cancel()
+		thread, err = codex.StartThread(ctx, sock, ticket.Cwd, "", launch.CodexDaemonVersion)
+		if err != nil {
+			if errors.Is(err, codex.ErrThreadNotStarted) {
+				return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+			}
+			return launch.CaptureEvidence{}, err
+		}
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {
@@ -194,8 +285,23 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	return launch.ObserveCodexDaemonThread(ticket, thread, sock, holder)
 }
 
-// RecordIdentity publishes routing only after the acquired thread and current
-// daemon have been checked, while the ticket's generation still holds its lease.
+// resumedCapture reads the capture of the conversation a resume ticket names.
+func resumedCapture(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.ConversationCapture, error) {
+	record, err := launch.LoadConversation(root, ticket.Handle)
+	if err != nil {
+		return launch.ConversationCapture{}, err
+	}
+	if record.State != launch.CaptureReady || record.Identity != (launch.ConversationIdentity{Provider: launch.CodexProvider, ID: ticket.ConversationID}) {
+		return launch.ConversationCapture{}, fmt.Errorf("ready conversation does not match the resumed daemon thread")
+	}
+	return launch.ReadConversationCapture(root, record)
+}
+
+// RecordIdentity publishes routing only after the acquired thread, the current
+// daemon, and the seat's startup admission have been checked again on the
+// bound endpoint, while the ticket's generation still holds its lease. A
+// recovered execution therefore meets the same admission as a new one without
+// replacing its thread.
 func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env []string) error {
 	if EmbeddedEnvironment() {
 		return fmt.Errorf("the current executor environment requires an embedded app-server; restore the original environment before retrying this native execution")
@@ -219,7 +325,12 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	if err := launch.ValidateCodexDaemonEndpoint(root, ticket, sock, holder); err != nil {
 		return err
 	}
-	cwd, _, err := codex.ThreadCwd(sock, ticket.ConversationID)
+	if reason := admission(ticket.ProviderExecutable, home, sock, ticket.Cwd); reason != "" {
+		return fmt.Errorf("%s; resolve it and retry the original emitted command", reason)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cwd, err := codex.ReadThread(ctx, sock, ticket.ConversationID, launch.CodexDaemonVersion)
 	if err != nil || cwd != ticket.Cwd {
 		return fmt.Errorf("codex daemon thread does not match the launch directory")
 	}
@@ -244,12 +355,6 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	baseIdentity, err := fsq.StableTreeIdentity(base)
 	if err != nil || get("AM_BASE_ROOT") != base || get("AM_BASE_ROOT_ID") != baseIdentity {
 		return fmt.Errorf("codex daemon routing base does not match the execution ticket")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	hooks, err := codex.ReadHooks(ctx, sock, ticket.Cwd)
-	if err != nil || !HooksListClear(hooks, ticket.Cwd) {
-		return fmt.Errorf("codex hook review is unresolved; resolve it and retry the original emitted command")
 	}
 	currentPID, err := codex.DaemonPID(sock)
 	if err != nil || currentPID != pid {

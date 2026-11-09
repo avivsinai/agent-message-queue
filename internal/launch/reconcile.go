@@ -1130,7 +1130,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 				if !capabilities.Resume {
 					err, capabilityRefusal = errors.New(resumeReason), resumeReason
 				} else {
-					agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+					agentPlan, err = planResume(adapter, request.Root, base, conversation)
 					if err == nil {
 						disposition = DispositionResumed
 					}
@@ -1142,7 +1142,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			if !capabilities.Resume {
 				err, capabilityRefusal = errors.New(resumeReason), resumeReason
 			} else {
-				agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+				agentPlan, err = planResume(adapter, request.Root, base, conversation)
 				if err == nil {
 					disposition = DispositionResumed
 				}
@@ -1156,6 +1156,9 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			}
 		} else if !forceFresh && hasConversation {
 			err = fmt.Errorf("conversation identity is %s", conversation.State)
+		}
+		if errors.Is(err, ErrCodexConversationProvenance) {
+			capabilityRefusal = err.Error()
 		}
 		if err != nil && !forceFresh {
 			if !request.AllowFreshFallback {

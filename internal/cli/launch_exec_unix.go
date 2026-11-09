@@ -64,7 +64,9 @@ func runLaunchExec(args []string) error {
 		return ActionRequiredError("read managed launch execution: %v", err)
 	}
 	if ticket.Provider == launch.CodexProvider && ticket.PreSpawnAcquire {
-		envelope.AcquireIdentity = codexlaunch.Acquire
+		envelope.AcquireIdentity = func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
+			return codexlaunch.Acquire(root, ticket)
+		}
 		envelope.RecordIdentity = func(acquired launch.ExecutionTicket) error {
 			return codexlaunch.RecordIdentity(root, acquired, environment)
 		}

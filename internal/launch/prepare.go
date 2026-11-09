@@ -1236,7 +1236,7 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		}
 	}
 	if useResume {
-		plan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+		plan, err = planResume(adapter, state.sessionRoot, base, conversation)
 		prepared.PlannedOutcome = "resume"
 	} else {
 		if participant.ResumePolicy == ResumeEnabled && hasConversation {
