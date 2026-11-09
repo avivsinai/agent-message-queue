@@ -895,6 +895,9 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 			}
 
 		case <-settingsTicks:
+			// The owner's command queue sits in the agent directory too, so
+			// this tick also serves it.
+			serveWakeCommands(&l.cfg)
 			// Only a hold-policy change needs a scan now: it re-times held
 			// cohorts. A scan for any other key could resend an interrupt
 			// key for mail that is still unread; those keys apply at next use.

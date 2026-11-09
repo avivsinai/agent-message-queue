@@ -134,6 +134,9 @@ command's own message. Do not work around a refusal.
 5. Add one line for the carrier:
    - Default: "Buzz messages arrive in this agent's AMQ inbox. Stop in Buzz
      stops waiting; a delivered message may still be acted on."
+   - Claude in mailbox mode: "In Buzz, a line starting with / is typed into
+     the session like Remote Control; it waits while a dialog is open.
+     /clear starts a new session id, so run /amq-remote again after it."
    - `--native`: "A message sent while this session is busy waits. Buzz Stop
      cannot interrupt a Claude turn."
    - Claude with the hook installed: "Every approval dialog of this session

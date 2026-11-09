@@ -810,6 +810,13 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 				return s.answerMirrorSwitch(parsed.SessionID, channel, name, on, at, emit)
 			}, nil, nil
 		}
+		// The owner's slash command is typed into the terminal; while a
+		// dialog is open it waits, so it is never taken as an answer.
+		if cmd, ok := s.ownerCommandFor(channel, eventID, text); ok {
+			return func(emit func(any) error) (any, *rpcError) {
+				return s.answerCommand(parsed.SessionID, channel, cmd, emit)
+			}, nil, nil
+		}
 		if dir, answer, ok := s.dialogReply(channel, eventID, text); ok {
 			return func(emit func(any) error) (any, *rpcError) {
 				return s.answerDialog(parsed.SessionID, channel, dir, answer, emit)
@@ -1268,6 +1275,10 @@ func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
 	eventID, _ := resolveEventID(parsed.Meta)
 	if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
 		go s.publish(channel, setMirror(name, on, at))
+		return steeringResult{Outcome: SteeringAnswered}, true
+	}
+	if cmd, ok := s.ownerCommandFor(channel, eventID, text); ok {
+		go s.publish(channel, s.commandReply(channel, cmd))
 		return steeringResult{Outcome: SteeringAnswered}, true
 	}
 	dir, answer, ok := s.dialogReply(channel, eventID, text)

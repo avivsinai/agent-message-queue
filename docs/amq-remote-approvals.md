@@ -115,6 +115,23 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
 - **`amq-acp host`:** every `session/request_permission` shows all the
   options the agent offered, and the agent receives the chosen one.
 
+## Slash commands
+
+In Buzz, the owner's message that is one line starting with `/` is typed
+into a Claude Code session in mailbox mode like Remote Control: the session's
+wake types exactly that line and Enter, by the same injection as its
+doorbell, and Buzz gets "Typed /compact into the terminal." Any command is
+typed, `/clear` and `/exit` too; `/clear` starts a new session id, so run
+`/amq-remote` again to keep the Buzz link. The line counts only as the
+owner's signed event, at most 5 minutes old; a `/` line that is not verified
+as the owner's goes to the session as an ordinary message. While a dialog is
+open the command waits, oldest first and never dropped, and Buzz gets
+"Queued"; it is typed when the dialog closes, and Buzz is told again. Buzz
+says "typed", never "ran": the wake cannot see what the command did. A
+session with no live wake, a wake with inject mode `none` or native
+delivery, a native share, another harness, or a line with a control
+character or more than 512 bytes gets one line saying why it was not typed.
+
 ## Limits
 
 - Buzz shows commands as they are. The relay can read every dialog, so a

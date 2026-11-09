@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
+	"github.com/avivsinai/agent-message-queue/internal/wakecmd"
 )
 
 type wakeConfig struct {
@@ -72,6 +73,7 @@ type wakeConfig struct {
 	settingsTicks                 <-chan time.Time
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
+	commandDir                    string                                       // the agent directory whose owner command queue the wake types (wakecmd); "" = none
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	dialogHoldBusy                bool                                         // the last hold was a busy harness turn, so a change of cause logs once
 	dialogHoldGeneration          string                                       // the marker version the held notice ladder belongs to
@@ -167,9 +169,12 @@ const (
 )
 
 type wakeInputDeliveryState struct {
-	phase               wakeInputDeliveryPhase
-	mode                string
-	payload             string
+	phase   wakeInputDeliveryPhase
+	mode    string
+	payload string
+	// oneSubmit sends no rescue Enter: an owner command can open a picker,
+	// and a second Enter would choose in it.
+	oneSubmit           bool
 	acceptedBytes       int
 	acceptanceUncertain bool
 }
@@ -467,6 +472,9 @@ const (
 	wakePayloadSystemFixed  wakePayloadProvenance = "system_fixed"
 	wakePayloadPeerHeaders  wakePayloadProvenance = "peer_headers"
 	wakePayloadOperatorFlag wakePayloadProvenance = "operator_flag"
+	// wakePayloadOwnerCommand is a slash command from the owner's command
+	// queue; only serveWakeCommands builds it.
+	wakePayloadOwnerCommand wakePayloadProvenance = "owner_command"
 )
 
 type wakePayload struct {
@@ -1740,6 +1748,9 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			// no payload text to validate or replace.
 		} else if validCoopWakeDoorbell(notice.input.text) {
 			// The fixed doorbell is system-created before delivery.
+		} else if notice.input.provenance == wakePayloadOwnerCommand && wakecmd.Check(notice.input.text) == nil {
+			// The owner's queued command is typed as it is: it passed the
+			// command rule, so it is one printable line.
 		} else {
 			notice.input = wakePayload{
 				text:       coopWakeDoorbell,
@@ -1759,7 +1770,9 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if notice.submitOnly {
 		plainText = "\r"
 	}
-	if cfg.settings.bell && !ownerBound {
+	// A bell before a command would make it text, not a command.
+	bell := cfg.settings.bell && !ownerBound && notice.input.provenance != wakePayloadOwnerCommand
+	if bell {
 		plainText = "\a" + plainText
 	}
 
@@ -1791,13 +1804,14 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
 		injectedText := inputText
-		if cfg.settings.bell && !ownerBound {
+		if bell {
 			injectedText = "\a" + injectedText
 		}
 		if notice.submitOnly {
 			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw)
 		} else {
-			inputAccepted, injectErr = injectRawNotification(cfg, injectedText)
+			inputAccepted, injectErr = injectTerminalNotification(cfg, wakeInjectModeRaw, injectedText,
+				notice.input.provenance == wakePayloadOwnerCommand)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
@@ -1809,7 +1823,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if !ownerBound {
 			pasteText = "\x1b[200~" + inputText + "\x1b[201~"
 		}
-		if cfg.settings.bell && !ownerBound {
+		if bell {
 			pasteText = "\a" + pasteText
 		}
 		if notice.submitOnly {
@@ -1819,6 +1833,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
+				false,
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
@@ -1841,7 +1856,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 		} else {
 			injectedText := inputText + "\r"
-			if cfg.settings.bell {
+			if bell {
 				injectedText = "\a" + injectedText
 			}
 			inputAccepted, injectErr = writeTerminalChunk(cfg, injectedText)
@@ -2328,14 +2343,11 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 	return err
 }
 
-func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
-	return injectTerminalNotification(cfg, wakeInjectModeRaw, injectedText)
-}
-
 func injectTerminalNotification(
 	cfg *wakeConfig,
 	mode string,
 	payload string,
+	oneSubmit bool,
 ) (bool, error) {
 	state := &cfg.inputDelivery
 	if state.acceptanceUncertain {
@@ -2356,9 +2368,10 @@ func injectTerminalNotification(
 	}
 	if !state.pending() {
 		*state = wakeInputDeliveryState{
-			phase:   wakeInputPayloadPending,
-			mode:    mode,
-			payload: payload,
+			phase:     wakeInputPayloadPending,
+			mode:      mode,
+			payload:   payload,
+			oneSubmit: oneSubmit,
 		}
 	}
 	return resumeWakeInputDelivery(cfg)
@@ -2489,7 +2502,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			if !wrote {
 				return false, nil
 			}
-			if state.mode == wakeInjectModePaste {
+			if state.mode == wakeInjectModePaste || state.oneSubmit {
 				state.reset()
 				return true, nil
 			}
