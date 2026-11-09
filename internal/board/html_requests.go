@@ -13,7 +13,7 @@ import (
 type pageRequests struct {
 	Headline, Partition     string
 	Notes                   []string
-	Coverage                []pageGap
+	Coverage                pageGaps
 	RecentCount, OlderCount int
 	Groups                  []pageRequestGroup
 	Undated                 []pageRequest
@@ -69,7 +69,7 @@ func buildRequestsPage(m Model, now time.Time) pageRequests {
 		if v.Coverage.Detail != "" {
 			gap = clean(v.Coverage.Detail) + "; " + gap
 		}
-		p.Coverage = []pageGap{{Name: "amq-history", Status: "partly read", Gap: gap}}
+		p.Coverage = pageGaps{{Name: "amq-history", Status: "partly read", Gap: gap}}
 	}
 	named := askTasks(m.Columns)
 	for i, g := range recentGroups(v) {

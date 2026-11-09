@@ -63,8 +63,8 @@ func buildViews(m Model, now time.Time, live map[[2]string]string) []pageView {
 }
 
 // coverageGaps lists the sources a view rests on that were not fully read.
-func coverageGaps(sources []SourceView, relevant func(SourceView) bool) []pageGap {
-	var gaps []pageGap
+func coverageGaps(sources []SourceView, relevant func(SourceView) bool) pageGaps {
+	var gaps pageGaps
 	for _, source := range sources {
 		if source.Status == StatusDisabled || source.Status == StatusOK && !source.Partial || !relevant(source) {
 			continue
@@ -76,7 +76,7 @@ func coverageGaps(sources []SourceView, relevant func(SourceView) bool) []pageGa
 
 type pageFlow struct {
 	Legend   string
-	Coverage []pageGap
+	Coverage pageGaps
 	Stages   []pageStage
 	NeedsYou []pageStrip
 	// Gates are the unread messages for the owner, one line per session
@@ -167,7 +167,7 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 type pageFloor struct {
 	Counts           []pageCount
 	Summary, Dormant string
-	Coverage         []pageGap
+	Coverage         pageGaps
 	DormantBy        []string
 	Sessions         []pageFloorSession
 }

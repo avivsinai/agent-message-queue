@@ -117,7 +117,7 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 			continue // no task to attribute: nothing is missing
 		}
 		if !bound && !claudeDefaultList(ctx, home, list, worktrees, budget) {
-			gap("unbound native task list " + list)
+			gap(board.UnboundClaudeListGap(home, list))
 			continue
 		}
 		revision := ""
@@ -231,7 +231,7 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 		if binding.Home == home {
 			if _, ok := result.NativeScopes[key]; !ok {
 				result.NativeScopes[key] = board.NativeScope{Complete: false, BindingRevision: binding.Revision}
-				gap("bound native list missing or unsupported: " + binding.List)
+				gap(board.BoundClaudeListMissingGap + binding.List)
 			}
 		}
 	}

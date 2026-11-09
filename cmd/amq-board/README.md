@@ -408,8 +408,10 @@ protect against DNS rebinding. The page never runs source commands.
 The live page reloads the snapshot once per minute or when Refresh is pressed.
 It shows publication freshness and source coverage. Every view names the
 sources not fully read in one plain line (read failed, unavailable, or
-partly read) and says there is nothing for the owner to do; each reason is
-in Sources. A failed reload retains the
+partly read). The line names an owner step the board detects (bind an
+unbound Claude task list, install `sqlite3`). It says there is nothing for
+the owner to do only when every source read ran and none of its gaps is an
+owner step; otherwise it points to Sources, which gives each reason. A failed reload retains the
 last rendered snapshot with a visible source error. `~/.amq/board/serve.json`
 (mode 0600) lets local clients find the view; shutdown removes its own record.
 

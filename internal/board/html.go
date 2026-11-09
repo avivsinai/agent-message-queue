@@ -167,19 +167,50 @@ func buildPageModel(m Model) pageModel {
 
 type pageView struct {
 	ID, Title, Description, Empty string
-	Coverage                      []pageGap
+	Coverage                      pageGaps
 	Strips                        []pageStrip
 }
 
 // pageGap is one source the view rests on that is not fully read: its name,
 // a plain status (read failed, unavailable, or partly read), and its reason
 // in the source's own words, which the Sources view and text show.
-type pageGap struct{ Name, Status, Gap string }
+// Steps are the owner steps the board detects in the source's reasons.
+// NoStep is set only when the board knows no owner step exists: the read
+// ran, its gaps are records the source could not assess, and none of them
+// is a condition the owner can act on.
+type pageGap struct {
+	Name, Status, Gap string
+	Steps             []string
+	NoStep            bool
+}
+
+// pageGaps are the sources a view rests on that were not fully read.
+type pageGaps []pageGap
+
+// Steps are the owner steps of every gap, in order.
+func (gs pageGaps) Steps() []string {
+	var out []string
+	for _, g := range gs {
+		out = append(out, g.Steps...)
+	}
+	return out
+}
+
+// NothingToDo reports that the board knows no gap has an owner step.
+func (gs pageGaps) NothingToDo() bool {
+	for _, g := range gs {
+		if !g.NoStep {
+			return false
+		}
+	}
+	return len(gs) > 0
+}
 
 // sourceGap names what a source did not read. Its reason is never empty: a
 // failed read gives its error, a partial read its coverage gap.
 func sourceGap(s SourceView) pageGap {
 	g := pageGap{Name: clean(s.Name), Status: "partly read"}
+	g.Steps, g.NoStep = ownerSteps(s)
 	var parts []string
 	if s.Status == StatusDegraded || s.Status == StatusUnavailable {
 		g.Status = "read failed"

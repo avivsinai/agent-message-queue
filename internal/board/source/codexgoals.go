@@ -26,7 +26,7 @@ func (CodexGoals) Name() string { return "codex-goals" }
 
 func (CodexGoals) Discover(env board.Env) (bool, string) {
 	if _, err := env.LookPath("sqlite3"); err != nil {
-		return false, "sqlite3 not found"
+		return false, board.SQLite3Missing
 	}
 	return true, ""
 }
