@@ -158,6 +158,9 @@ no daemon, an option, sign-in, trust, or version that is not admitted, or a
 thread the daemon does not prove) refuses with exit 6 and names the cause and
 the fix, because another backend or rollout store may hold a different thread
 under the same ID; `--allow-fresh-fallback` starts a new conversation instead.
+Codex 0.167.0 exposes no stable persistence-store identity, so AMQ cannot
+distinguish a same-socket successor that uses a different SQLite store when it
+returns the same thread ID and working directory.
 A daemon resume ticket names its thread from creation and asks the
 daemon to create nothing: it skips `identity_requested`, a failed verification
 leaves it `pending`, and the TUI starts only after `codex_daemon_thread_v1`
