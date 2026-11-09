@@ -9,3 +9,8 @@ import "time"
 func LstatVersion(string, time.Time) (FileVersion, bool, error) {
 	return FileVersion{}, false, nil
 }
+
+// StatVersion is never stable on this platform, like LstatVersion.
+func StatVersion(string, time.Time) (FileVersion, bool, error) {
+	return FileVersion{}, false, nil
+}

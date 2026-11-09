@@ -446,8 +446,15 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 }
 
 // Tick tells the server when the shared bindings changed. serve calls it on
-// every sweep.
+// every sweep. With no session there is no one to tell: the handshake of the
+// next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
+	c.mu.Lock()
+	connected := c.sess != nil
+	c.mu.Unlock()
+	if !connected {
+		return
+	}
 	bindings := c.cfg.Bindings()
 	canon, err := jcs.Marshal(bindings)
 	if err != nil {

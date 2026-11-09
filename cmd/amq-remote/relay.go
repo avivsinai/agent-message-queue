@@ -160,17 +160,28 @@ func (rs *relaySet) wait() { rs.wg.Wait() }
 // manifestBytes follows a manifest by its bytes, not its mtime: a
 // same-second edit or a rename that keeps the mtime still counts, and a
 // deleted manifest reads as empty, a change to no links and no shares.
+// A stable version equal to the one taken before the last read skips the
+// read.
 type manifestBytes struct {
 	raw []byte // nil until the first read
+	v   fsq.FileVersion
+	vOK bool // v was stable when taken
 }
 
 // changed reads path and reports whether its bytes differ from the last
 // read, and whether this was the first read.
 func (m *manifestBytes) changed(path string) (changed, first bool, err error) {
+	v, stable, verr := fsq.StatVersion(path, time.Now())
+	stable = stable && verr == nil
+	if m.raw != nil && stable && m.vOK && v == m.v {
+		return false, false, nil
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
+		m.vOK = false
 		return false, false, err
 	}
+	m.v, m.vOK = v, stable
 	if m.raw != nil && bytes.Equal(raw, m.raw) {
 		return false, false, nil
 	}

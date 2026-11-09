@@ -54,3 +54,16 @@ func versionOf(st *unix.Stat_t, now time.Time) (FileVersion, bool, error) {
 	}
 	return v, settled(v.mtime, v.ctime, now), nil
 }
+
+// StatVersion is LstatVersion of the entry path resolves to, following
+// symlinks, for a reader that follows them too.
+func StatVersion(path string, now time.Time) (v FileVersion, stable bool, err error) {
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		if err == unix.ENOENT {
+			return FileVersion{}, true, nil
+		}
+		return FileVersion{}, false, err
+	}
+	return versionOf(&st, now)
+}
