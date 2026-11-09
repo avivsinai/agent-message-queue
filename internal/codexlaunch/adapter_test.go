@@ -26,8 +26,10 @@ import (
 
 // Pro S1 finding 5: recovery could publish routing under a different
 // CODEX_HOME containing the same thread ID and cwd as the acquired thread.
+// Codex review of e56adade (spaced_home): a CODEX_HOME ending in whitespace
+// named one home for probes and evidence and another for --remote.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory"} {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory", "spaced_home"} {
 		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
@@ -63,7 +65,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 					return "0.168.0"
 				}
 				return "0.167.0"
-			}, hooksTrusted: hooksTrusted.Load})
+			}, hooksTrusted: hooksTrusted.Load, spacedHome: scenario == "spaced_home"})
 			t.Setenv("CODEX_HOME", home)
 			executable := nativeProvider(t)
 			amq, err := os.Executable()
@@ -211,7 +213,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				return
 			}
 			if scenario == "switch_home" {
-				if err == nil || !strings.Contains(err.Error(), "endpoint changed") {
+				if err == nil || !strings.Contains(err.Error(), "endpoint differs from the one this launch planned") {
 					t.Fatalf("substituted endpoint = %v", err)
 				}
 				if _, lookupErr := codexidentity.Lookup(thread, routingHome); !errors.Is(lookupErr, codexidentity.ErrNone) {
@@ -229,7 +231,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				if resolveErr != nil {
 					t.Fatal(resolveErr)
 				}
-				expected := append([]string{executable, "resume", "-C", project}, settings...)
+				expected := append(daemonTemplate(t, executable, home, project), settings...)
 				expected = append(expected, thread, initial.Value)
 				if !slices.Equal(argv, expected) {
 					t.Fatalf("native settings changed at resume: got %q want %q", argv, expected)
@@ -267,6 +269,19 @@ func TestInheritedExecutorExclusionsRetainEmbeddedPlan(t *testing.T) {
 	}
 }
 
+// daemonTemplate is the daemon seat's argv before its settings: an explicit
+// --remote at the control socket of the set CODEX_HOME, canonicalized as
+// Codex does, and the update override.
+func daemonTemplate(t *testing.T, executable, home, project string) []string {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{executable, "--remote", "unix://" + filepath.Join(home, "app-server-control", "app-server-control.sock"),
+		"-c", "check_for_update_on_startup=false", "resume", "-C", project}
+}
+
 func nativeProvider(t *testing.T) string {
 	t.Helper()
 	executable := filepath.Join(t.TempDir(), "codex")
@@ -282,12 +297,45 @@ func nativeProvider(t *testing.T) string {
 type nativeDaemonOptions struct {
 	initializeVersion func(int32) string
 	hooksTrusted      func() bool
+	// spacedHome ends the Codex home's name in a space, which Codex keeps.
+	spacedHome bool
 }
+
+// sharedDaemonDir gives the test its own private daemon socket directory,
+// shared by every daemon the test starts.
+func sharedDaemonDir(t *testing.T) {
+	t.Helper()
+	if dir, ok := sharedDaemonDirs[t]; ok {
+		sharedDaemonSocketDirectory = func() (string, error) { return dir, nil }
+		return
+	}
+	dir, err := os.MkdirTemp("/tmp", "amq-sd-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		t.Fatal(err)
+	}
+	previous := sharedDaemonSocketDirectory
+	sharedDaemonDirs[t] = dir
+	sharedDaemonSocketDirectory = func() (string, error) { return dir, nil }
+	t.Cleanup(func() {
+		sharedDaemonSocketDirectory = previous
+		delete(sharedDaemonDirs, t)
+		_ = os.RemoveAll(dir)
+	})
+}
+
+var sharedDaemonDirs = map[*testing.T]string{}
 
 func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) string {
 	var initializes atomic.Int32
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "amq-native-")
+	pattern := "amq-native-"
+	if len(options) != 0 && options[0].spacedHome {
+		pattern = "amq-native-* "
+	}
+	home, err := os.MkdirTemp("/tmp", pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,11 +344,21 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 	if err := os.Mkdir(control, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A real daemon listens on a private socket and links the control path
+	// to it; Codex attaches an explicit --remote to it only in that shape.
+	sharedDaemonDir(t)
+	private, err := daemonLinkTarget(filepath.Join(control, "app-server-control.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(fmt.Sprintf("[projects.%q]\ntrust_level = \"trusted\"\n", cwd)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("unix", filepath.Join(control, "app-server-control.sock"))
+	listener, err := net.Listen("unix", private)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(private, filepath.Join(control, "app-server-control.sock")); err != nil {
 		t.Fatal(err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +397,7 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 			case "configRequirements/read":
 				result = map[string]any{"requirements": nil}
 			case "config/read":
-				result = map[string]any{"config": map[string]any{"check_for_update_on_startup": false, "features": map[string]bool{}}}
+				result = map[string]any{"config": map[string]any{"features": map[string]bool{}}}
 			case "thread/start", "thread/read":
 				result = map[string]any{"thread": map[string]any{"id": "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "cwd": cwd}}
 			}
@@ -466,7 +524,7 @@ func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
 			plan, err := New(nativeProvider(t)).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
 				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: args})
-			if err != nil || plan.PreSpawnAcquire || !strings.Contains(plan.TerminalOnlyReason, "Codex "+launch.CodexDaemonVersion+" selects an embedded") {
+			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != "command-line configuration or search overrides require verified TUI resume equivalence" {
 				t.Fatalf("unverified native settings=%#v, %v", plan, err)
 			}
 			if !slices.Equal(plan.Argv[1:1+len(args)], args) {
@@ -503,7 +561,7 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 		t.Fatalf("daemon-bound conversation resumed embedded: %#v, %v", resumed, err)
 	}
 	prepared, argv := executeNative(t, root, resumed, false)
-	expected := append(append([]string{executable, "resume", "-C", project}, settings...), thread)
+	expected := append(append(daemonTemplate(t, executable, os.Getenv("CODEX_HOME"), project), settings...), thread)
 	if prepared.ConversationID != thread || !slices.Equal(argv, expected) {
 		t.Fatalf("resume argv = %q (thread %s), want %q", argv, prepared.ConversationID, expected)
 	}

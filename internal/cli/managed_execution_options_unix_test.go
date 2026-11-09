@@ -62,7 +62,7 @@ func TestManagedCoopExecDoesNotForwardPrivateLaunchNonce(t *testing.T) {
 				plan, err := launch.NewCodexAdapter(executable).PlanFreshDaemon(launch.PlanRequest{
 					Handle: provider, LaunchNonce: nonce, ProjectRoot: project, SessionRoot: session,
 					Cwd: project, AMQExecutable: amqExecutable, ResumePolicy: launch.ResumeEnabled,
-				})
+				}, filepath.Join(project, "daemon.sock"))
 				if err != nil {
 					t.Fatal(err)
 				}

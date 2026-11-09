@@ -421,7 +421,7 @@ func seedPendingCodexDaemonExecution(t *testing.T, fixture executionFixture, non
 	if err := os.Rename(fixture.provider, provider); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := NewCodexAdapter(provider).PlanFreshDaemon(PlanRequest{Handle: "codex", LaunchNonce: nonce, ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd, AMQExecutable: fixture.amq, ResumePolicy: ResumeEnabled})
+	plan, err := NewCodexAdapter(provider).PlanFreshDaemon(PlanRequest{Handle: "codex", LaunchNonce: nonce, ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd, AMQExecutable: fixture.amq, ResumePolicy: ResumeEnabled}, filepath.Join(fixture.cwd, "daemon.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}

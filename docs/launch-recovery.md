@@ -84,10 +84,17 @@ contract. AMQ never starts the daemon or edits saved Codex settings. Otherwise
 the existing embedded launch is retained, and launch output, remote bindings,
 and `doctor --ops` share its `Buzz approvals: terminal only: <reason>` line.
 
-A clear startup state includes an effective `check_for_update_on_startup =
-false`, read from the daemon. AMQ cannot pass `-c` for it, because any
-configuration override makes Codex select the embedded app-server. Set it in
-your Codex config to let managed seats use the shared daemon.
+The seat needs no Codex setting. Its command is `codex --remote
+unix://<socket> -c check_for_update_on_startup=false resume -C <dir>
+<thread>`. AMQ builds `<socket>` from the validated binding and spells it as
+Codex computes its control socket: a set `CODEX_HOME` canonicalized, otherwise
+`$HOME/.codex`. An explicit `--remote` equal to that socket attaches the TUI
+to the local daemon with no embedded fallback, so the `-c` that turns the
+update prompt off does not move the seat off the daemon. Codex treats the
+socket as its local daemon only when it is the daemon's private link (a
+symlink into the user-owned 0700 shared socket directory); AMQ checks that
+shape and otherwise keeps the embedded launch. A managed requirement that turns
+the update check on also keeps it embedded.
 
 The native execution ticket owns a pre-spawn `thread/start` observation. Its
 `codex_daemon_thread_v1` evidence binds the handle, launch nonce, provider
@@ -139,8 +146,9 @@ execution. Recovery refusals use exit 6 and name the retry or cleanup command.
 
 Every execution attempt, including recovery, checks inherited native-backend
 exclusions and runs the full startup admission (provider version, sign-in,
-directory trust, daemon version, hook trust, terminal instructions, and the
-update prompt) on the bound daemon before publishing routing. A recovered
+directory trust, daemon version, hook trust, terminal instructions, managed
+update requirements, and the seat's `--remote` matching the verified local
+socket) on the bound daemon before publishing routing. A recovered
 execution that fails admission keeps its acquired thread; it never creates a
 replacement.
 
@@ -184,10 +192,11 @@ these sandbox and approval values independently of the embedded argument grammar
 their order in the execution ticket, followed by its acquired thread ID and any
 initial prompt.
 
-Codex selects embedded execution for command-line configuration overrides such
-as `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and for
-`--search`. Those launches retain the original arguments and explain the
-terminal-only approval capability. Wrappers, environment overlays, bypass
+A caller's command-line configuration overrides, such as
+`-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and `--search`
+keep the embedded path, because their effect on a daemon TUI is not verified.
+Those launches retain the original arguments and explain the terminal-only
+approval capability. Wrappers, environment overlays, bypass
 options, and unverified or duplicate options also retain the embedded path.
 AMQ does not translate reviewer choices into protocol settings or alter saved
 Codex configuration.

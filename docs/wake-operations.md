@@ -470,7 +470,10 @@ supports it.
   `latest_version` is not newer than the installed version, or is the
   dismissed version. Otherwise the seat gets an update prompt marker, and
   anything missing or unreadable keeps the hold until the dialog hook runs
-  at the first turn. A seat on the managed daemon carries no `-c` override,
+  at the first turn. An `amq launch` daemon seat names the daemon with an
+  explicit `--remote`, carries the `-c` too, and gets no marker: launch
+  admits it on its daemon before Codex starts. A coop exec seat on the
+  managed daemon carries no `-c` override,
   so there the effective value comes from the configuration files: setting
   `check_for_update_on_startup = false` in `$CODEX_HOME/config.toml`
   (default `~/.codex/config.toml`) releases a daemon seat too, when no

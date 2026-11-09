@@ -416,8 +416,8 @@ func (c *coopExecRun) validateFlags() error {
 		c.agentArgs = append(remaining[1:], c.agentArgs...)
 	}
 	// Before any root, wake or naming work. A managed plan's arguments
-	// passed the launch grammar, which admits no --remote and no identity
-	// override.
+	// passed the launch grammar, which admits no caller --remote and no
+	// identity override; only a daemon seat's own template names --remote.
 	if c.managedLaunchNonce == "" {
 		if err := refuseCodexSeatArgs(c.cmdName, c.agentArgs); err != nil {
 			return err
@@ -1001,6 +1001,14 @@ func (c *coopExecRun) execAgent() error {
 				return publishStartupDialogMarker(c.root, c.agentHandle, marker, true, launch.ClaudeProvider)
 			case codexDecided:
 				return publishStartupDialogMarker(c.root, c.agentHandle, codexMarker, codexHold, launchDecision.guard)
+			case c.managedCodexDaemon:
+				// No hook releases a daemon seat's marker, and no startup
+				// screen can show: launch exec admits the seat on its bound
+				// daemon (directory trust, hook review, terminal
+				// instructions, update requirements) before Codex starts,
+				// -C pins its directory, and its own -c turns the update
+				// prompt off. Clear any marker an earlier launch left.
+				return publishStartupDialogMarker(c.root, c.agentHandle, wakeDialogMarker{}, false, launchDialogGuard(c.binaryPath))
 			case agyRelay:
 				return publishStartupDialogMarker(c.root, c.agentHandle, wakeDialogMarker{}, false, harness.Agy)
 			}
