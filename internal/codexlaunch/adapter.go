@@ -35,7 +35,12 @@ func (a *adapter) Capabilities(ctx context.Context) launch.AdapterCapabilities {
 	return capabilities
 }
 
+// PlanFresh admits the request statically before any probe runs the provider
+// executable or reads the daemon.
 func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error) {
+	if err := a.ValidatePlanRequest(request); err != nil {
+		return launch.AgentPlan{}, err
+	}
 	reason := launch.CodexDaemonOptionsReason(request)
 	if reason != "" {
 		if _, _, endpointReason := daemonEndpoint(); endpointReason != "" {
@@ -54,8 +59,12 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 
 // PlanResume keeps each conversation on the backend that created it. A
 // daemon thread resumes on the daemon only while the daemon still proves it;
-// otherwise the seat resumes embedded and names the cause.
+// otherwise the seat resumes embedded and names the cause. Static admission
+// precedes every probe.
 func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, error) {
+	if err := a.ValidateResumeRequest(request); err != nil {
+		return launch.AgentPlan{}, err
+	}
 	reason := resumeReason(a.executable, request)
 	if reason == "" {
 		return a.PlanResumeDaemon(request)
@@ -69,7 +78,7 @@ func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, er
 }
 
 func resumeReason(executable string, request launch.ResumeRequest) string {
-	if request.CaptureSource != launch.CodexDaemonThreadV1 {
+	if request.Capture.Source != launch.CodexDaemonThreadV1 {
 		return "this conversation runs on an embedded app-server"
 	}
 	if reason := launch.CodexDaemonOptionsReason(request.PlanRequest); reason != "" {
@@ -79,13 +88,16 @@ func resumeReason(executable string, request launch.ResumeRequest) string {
 		return reason
 	}
 	_, sock, _ := daemonEndpoint()
-	return threadReason(sock, request.Conversation.ID, request.Cwd)
+	return threadReason(request.Capture, sock, request.Conversation.ID, request.Cwd)
 }
 
-// threadReason requires the live daemon to read the thread in its launch
-// directory. A restarted daemon proves itself a successor this way; one that
-// cannot read the thread does not.
-func threadReason(sock, thread, cwd string) string {
+// threadReason requires the endpoint that captured the thread and a daemon
+// there that reads the thread in its launch directory. A restarted daemon at
+// that endpoint is its successor; another endpoint is not, whatever it answers.
+func threadReason(capture launch.ConversationCapture, sock, thread, cwd string) string {
+	if sock != capture.Socket {
+		return "the Codex daemon endpoint changed since this conversation was captured"
+	}
 	if got, _, err := codex.ThreadCwd(sock, thread); err != nil || got != cwd {
 		return "the running Codex daemon does not know this conversation's thread"
 	}
@@ -180,8 +192,8 @@ func eligibility(executable, cwd string) string {
 // Acquire creates a native thread only after launch has persisted its attempt
 // barrier under the exact generation's lease. An uncertain attempt is not
 // retried. A resume ticket creates nothing: it binds its existing thread once
-// the live daemon reads it.
-func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
+// the endpoint that captured it reads it.
+func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	if ticket.Provider != launch.CodexProvider || !ticket.PreSpawnAcquire {
 		return launch.CaptureEvidence{}, fmt.Errorf("not a Codex daemon acquisition ticket")
 	}
@@ -206,7 +218,11 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 	}
 	thread := ticket.ConversationID
 	if launch.CodexDaemonResume(ticket) {
-		if reason := threadReason(sock, thread, ticket.Cwd); reason != "" {
+		capture, err := resumedCapture(root, ticket)
+		if err != nil {
+			return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+		}
+		if reason := threadReason(capture, sock, thread, ticket.Cwd); reason != "" {
 			return launch.CaptureEvidence{}, fmt.Errorf("%w: Buzz approvals: terminal only: %s; replan this launch", launch.ErrIdentityNotRequested, reason)
 		}
 	} else {
@@ -229,6 +245,18 @@ func Acquire(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) {
 		return launch.CaptureEvidence{}, fmt.Errorf("codex daemon identity changed after acquiring thread %s; preserve this attempt for operator inspection", thread)
 	}
 	return launch.ObserveCodexDaemonThread(ticket, thread, sock, holder)
+}
+
+// resumedCapture reads the capture of the conversation a resume ticket names.
+func resumedCapture(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.ConversationCapture, error) {
+	record, err := launch.LoadConversation(root, ticket.Handle)
+	if err != nil {
+		return launch.ConversationCapture{}, err
+	}
+	if record.State != launch.CaptureReady || record.Identity != (launch.ConversationIdentity{Provider: launch.CodexProvider, ID: ticket.ConversationID}) {
+		return launch.ConversationCapture{}, fmt.Errorf("ready conversation does not match the resumed daemon thread")
+	}
+	return launch.ReadConversationCapture(root, record)
 }
 
 // RecordIdentity publishes routing only after the acquired thread and current

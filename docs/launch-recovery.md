@@ -138,10 +138,13 @@ The other full startup admission probes run during planning and new acquisition.
 
 A conversation resumes on the backend that created it; launch never moves it
 implicitly. A conversation captured by notify resumes embedded. One whose
-capture is `codex_daemon_thread_v1` resumes on the daemon when the daemon is
-eligible, the launch options are admitted, and the running daemon reads the
-thread in the launch directory. A restarted daemon that reads the thread is its
-successor. Otherwise the seat resumes embedded and its terminal-only line names
+capture is `codex_daemon_thread_v1` resumes on the daemon when the launch
+options are admitted, the daemon is eligible, the daemon listens at the socket
+that captured the thread, and it reads the thread in the launch directory. The
+socket path is fixed by the canonical `CODEX_HOME`. A restarted daemon at that
+socket is a successor; a daemon at another socket is not, even when it answers
+with the same thread. Static admission, including executable containment,
+completes before any probe runs the provider or reads the daemon. Otherwise the seat resumes embedded and its terminal-only line names
 the cause. A daemon resume ticket names its thread from creation and asks the
 daemon to create nothing: it skips `identity_requested`, a failed verification
 leaves it `pending`, and the TUI starts only after `codex_daemon_thread_v1`

@@ -151,14 +151,32 @@ func (adapter *CodexAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	return plan, nil
 }
 
-func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error) {
+// ValidatePlanRequest is the static admission of a Codex plan: containment,
+// arguments, environment, and directory. It runs nothing, so it precedes every
+// provider or daemon probe.
+func (adapter *CodexAdapter) ValidatePlanRequest(request PlanRequest) error {
+	_, err := validatePlanRequest(request, adapter.executable, CodexProvider, codexEnvRules(), codexArgRules(), codexBypassArgs())
+	return err
+}
+
+// ValidateResumeRequest is ValidatePlanRequest for a resume of one conversation.
+func (adapter *CodexAdapter) ValidateResumeRequest(request ResumeRequest) error {
+	_, err := adapter.admitResume(request)
+	return err
+}
+
+func (adapter *CodexAdapter) admitResume(request ResumeRequest) (string, error) {
 	if request.ResumePolicy != ResumeEnabled {
-		return AgentPlan{}, fmt.Errorf("resume plan requires resume policy %q", ResumeEnabled)
+		return "", fmt.Errorf("resume plan requires resume policy %q", ResumeEnabled)
 	}
 	if err := validateConversation(request.Conversation, CodexProvider); err != nil {
-		return AgentPlan{}, err
+		return "", err
 	}
-	executable, err := validatePlanRequest(request.PlanRequest, adapter.executable, CodexProvider, codexEnvRules(), codexArgRules(), codexBypassArgs())
+	return validatePlanRequest(request.PlanRequest, adapter.executable, CodexProvider, codexEnvRules(), codexArgRules(), codexBypassArgs())
+}
+
+func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error) {
+	executable, err := adapter.admitResume(request)
 	if err != nil {
 		return AgentPlan{}, err
 	}

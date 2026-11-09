@@ -118,7 +118,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			routingHome := home
 			firstRegistration := true
 			envelope := launch.ExecutionEnvelope{Cwd: project, AMQExecutable: amq, ProviderExecutable: executable,
-				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
+				TargetArgv: plan.Argv, Environment: env, AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
 				RecordIdentity: func(acquired launch.ExecutionTicket) error {
 					if scenario == "recovered_embedded_environment" && firstRegistration {
 						firstRegistration = false
@@ -338,28 +338,34 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 
 // Pro S1 review R1: resume planning probed an executable after static
 // containment validation had already rejected it as repository-controlled.
+// Review of daemon resume: a daemon-captured conversation probed it too.
 func TestRejectedResumeProviderIsNeverExecuted(t *testing.T) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
-	project := t.TempDir()
-	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
-	executable := filepath.Join(project, "codex")
-	sentinel := filepath.Join(project, "executed")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch '"+sentinel+"'\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, err := New(executable).PlanResume(launch.ResumeRequest{
-		PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "98989898-9898-4989-8989-989898989898",
-			ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled},
-		Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "inside the project") {
-		t.Fatalf("resume refusal = %v", err)
-	}
-	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rejected provider was executed: %v", err)
+	for _, source := range []launch.CaptureEvidenceSource{"", launch.CodexDaemonThreadV1} {
+		t.Run(string(source), func(t *testing.T) {
+			project := t.TempDir()
+			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+			executable := filepath.Join(project, "codex")
+			sentinel := filepath.Join(project, "executed")
+			if err := os.WriteFile(executable, []byte("#!/bin/sh\ntouch '"+sentinel+"'\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, err := New(executable).PlanResume(launch.ResumeRequest{
+				PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "98989898-9898-4989-8989-989898989898",
+					ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled},
+				Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6"},
+				Capture:      launch.ConversationCapture{Source: source},
+			})
+			if err == nil || !strings.Contains(err.Error(), "inside the project") {
+				t.Fatalf("resume refusal = %v", err)
+			}
+			if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected provider was executed: %v", err)
+			}
+		})
 	}
 }
 
@@ -458,14 +464,14 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := launch.ConversationCaptureSource(root, conversation)
+	capture, err := launch.ReadConversationCapture(root, conversation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settings := []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
 	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled, CommittedArgs: settings},
-		Conversation: conversation.Identity, CaptureSource: source})
+		Conversation: conversation.Identity, Capture: capture})
 	if err != nil || !resumed.PreSpawnAcquire || resumed.TerminalOnlyReason != "" {
 		t.Fatalf("daemon-bound conversation resumed embedded: %#v, %v", resumed, err)
 	}
@@ -482,20 +488,35 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 	}
 }
 
-// Each conversation keeps its backend unless the daemon proves the thread.
+// Each conversation keeps its backend unless the endpoint that captured it
+// proves the thread.
 func TestUnprovenCodexDaemonResumeStaysEmbedded(t *testing.T) {
 	for _, row := range []struct {
 		name, thread, reason string
 		source               launch.CaptureEvidenceSource
+		elsewhere            bool
 	}{
-		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1"},
-		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "the running Codex daemon does not know this conversation's thread", launch.CodexDaemonThreadV1},
+		{"embedded conversation", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "this conversation runs on an embedded app-server", "codex_notify_v1", false},
+		{"thread unknown to the daemon", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a7", "the running Codex daemon does not know this conversation's thread", launch.CodexDaemonThreadV1, false},
+		// Review of daemon resume: another endpoint answering with the same thread was accepted.
+		{"another endpoint", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "the Codex daemon endpoint changed since this conversation was captured", launch.CodexDaemonThreadV1, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			root, project, executable, amq := nativeSeat(t)
+			home, err := filepath.EvalSymlinks(os.Getenv("CODEX_HOME"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.elsewhere {
+				home = filepath.Join(t.TempDir(), "codex-home")
+			}
+			capture := launch.ConversationCapture{Source: row.source}
+			if row.source == launch.CodexDaemonThreadV1 {
+				capture.Socket = filepath.Join(home, "app-server-control", "app-server-control.sock")
+			}
 			plan, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 				ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled},
-				Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: row.thread}, CaptureSource: row.source})
+				Conversation: launch.ConversationIdentity{Provider: launch.CodexProvider, ID: row.thread}, Capture: capture})
 			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != row.reason || plan.Argv[len(plan.Argv)-1] != row.thread {
 				t.Fatalf("resume plan = %#v, %v", plan, err)
 			}
@@ -572,7 +593,7 @@ func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, 
 	}
 	env := []string{"AM_ROOT=" + root.Base(), "AM_BASE_ROOT=" + root.Base(), "AM_ME=" + plan.Handle, "AM_ROOT_ID=" + ticket.SessionIdentity, "AM_BASE_ROOT_ID=" + ticket.SessionIdentity}
 	prepared, err := launch.PrepareExecution(root, plan.Handle, plan.LaunchNonce, launch.ExecutionEnvelope{Cwd: plan.Cwd, AMQExecutable: amq,
-		ProviderExecutable: plan.Argv[0], TargetArgv: plan.Argv, Environment: env, AcquireIdentity: Acquire,
+		ProviderExecutable: plan.Argv[0], TargetArgv: plan.Argv, Environment: env, AcquireIdentity: func(ticket launch.ExecutionTicket) (launch.CaptureEvidence, error) { return Acquire(root, ticket) },
 		RecordIdentity: func(acquired launch.ExecutionTicket) error { return RecordIdentity(root, acquired, env) }})
 	if err != nil || prepared.State != launch.ExecutionAcknowledged {
 		t.Fatalf("prepare = %#v, %v", prepared, err)

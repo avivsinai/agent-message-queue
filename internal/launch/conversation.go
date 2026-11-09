@@ -206,13 +206,22 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 	return nil
 }
 
-// ConversationCaptureSource names the provider capture that made record
-// resumable. A legacy record without evidence has none.
-func ConversationCaptureSource(root *fsq.DeliveryRoot, record ConversationRecord) (CaptureEvidenceSource, error) {
+// ConversationCapture is the provider capture that made a conversation
+// resumable. Socket is the daemon endpoint that acquired a daemon thread; its
+// path is fixed by the canonical CODEX_HOME, so it names that home too.
+type ConversationCapture struct {
+	Source CaptureEvidenceSource
+	Socket string
+}
+
+// ReadConversationCapture reads the capture that made record resumable. The
+// record keeps that evidence across resumed generations. A legacy record
+// without evidence has none.
+func ReadConversationCapture(root *fsq.DeliveryRoot, record ConversationRecord) (ConversationCapture, error) {
 	for _, id := range record.EvidenceRefs {
 		evidence, _, err := ReadEvidence(root, id)
 		if err != nil {
-			return "", err
+			return ConversationCapture{}, err
 		}
 		if evidence.Kind != EvidenceProviderCapture {
 			continue
@@ -221,19 +230,26 @@ func ConversationCaptureSource(root *fsq.DeliveryRoot, record ConversationRecord
 			Source CaptureEvidenceSource `json:"source"`
 		}
 		if err := json.Unmarshal(evidence.Payload, &envelope); err != nil {
-			return "", fmt.Errorf("decode conversation capture source: %w", err)
+			return ConversationCapture{}, fmt.Errorf("decode conversation capture source: %w", err)
 		}
-		return envelope.Source, nil
+		if envelope.Source != CodexDaemonThreadV1 {
+			return ConversationCapture{Source: envelope.Source}, nil
+		}
+		payload, err := decodeCodexDaemonPayload(evidence.Payload)
+		if err != nil {
+			return ConversationCapture{}, err
+		}
+		return ConversationCapture{Source: envelope.Source, Socket: payload.Socket}, nil
 	}
-	return "", nil
+	return ConversationCapture{}, nil
 }
 
 func planResume(adapter HarnessAdapter, root *fsq.DeliveryRoot, base PlanRequest, conversation ConversationRecord) (AgentPlan, error) {
-	source, err := ConversationCaptureSource(root, conversation)
+	capture, err := ReadConversationCapture(root, conversation)
 	if err != nil {
 		return AgentPlan{}, err
 	}
-	return adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity, CaptureSource: source})
+	return adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity, Capture: capture})
 }
 
 func ConversationPath(sessionRoot, handle string) string {

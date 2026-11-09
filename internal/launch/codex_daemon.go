@@ -25,14 +25,11 @@ func (adapter *CodexAdapter) PlanFreshDaemon(request PlanRequest) (AgentPlan, er
 // stays in argv; acquisition verifies it on the live daemon instead of
 // starting one.
 func (adapter *CodexAdapter) PlanResumeDaemon(request ResumeRequest) (AgentPlan, error) {
-	if request.ResumePolicy != ResumeEnabled {
-		return AgentPlan{}, fmt.Errorf("resume plan requires resume policy %q", ResumeEnabled)
-	}
-	if request.CaptureSource != CodexDaemonThreadV1 {
-		return AgentPlan{}, fmt.Errorf("codex daemon resume requires a daemon-acquired conversation")
-	}
-	if err := validateConversation(request.Conversation, CodexProvider); err != nil {
+	if err := adapter.ValidateResumeRequest(request); err != nil {
 		return AgentPlan{}, err
+	}
+	if request.Capture.Source != CodexDaemonThreadV1 {
+		return AgentPlan{}, fmt.Errorf("codex daemon resume requires a daemon-acquired conversation")
 	}
 	return adapter.planDaemon(request.PlanRequest, request.Conversation.ID)
 }
