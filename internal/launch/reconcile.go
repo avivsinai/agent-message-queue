@@ -109,6 +109,7 @@ type AgentReconcileResult struct {
 	ConversationDisposition ConversationDisposition `json:"conversation_disposition"`
 	Reason                  string                  `json:"reason"`
 	TerminalOnlyReason      string                  `json:"terminal_only_reason,omitempty"`
+	ApprovalReviewer        string                  `json:"approval_reviewer,omitempty"`
 }
 
 type ReconcileResult struct {
@@ -1214,7 +1215,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		execution.Named = named && disposition != DispositionResumed
 		agentPlan.Execution = clonePrepareExecutionOptions(&execution)
 		item.ConversationDisposition, item.Reason = disposition, planReason
-		item.TerminalOnlyReason = agentPlan.TerminalOnlyReason
+		item.TerminalOnlyReason, item.ApprovalReviewer = agentPlan.TerminalOnlyReason, agentPlan.ApprovalReviewer
 		result.Agents = append(result.Agents, item)
 		record := ConversationRecord{
 			Version: ConversationVersion, Handle: cfg.Handle, State: CapturePending,

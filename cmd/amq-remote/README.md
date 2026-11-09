@@ -733,6 +733,13 @@ first that applies:
 - there is no machine agent: `amq-acp setup --machine`, once per machine;
 - the machine agent is offline: start it in Buzz Desktop.
 
+A Codex thread is proven live while its app-server daemon has it loaded, as
+the machine agent judges it. When the thread runs Codex's automatic approvals
+reviewer, attach adds `Buzz gets no Codex approvals: Codex's automatic reviewer
+answers them (approvals_reviewer = <reviewer>).` and `--json` reports
+`approval_reviewer`; it is the owner's setting, and AMQ does not change it.
+`amq launch` prints the same line for a Codex daemon seat.
+
 `--json` reports `name`, `label`, `reused` (this session already held the
 name, as a binding or a tombstone, so its agent or channel comes back),
 `agent`, `helper` and `machine` (`running`, `idle`, `offline` or `missing`),

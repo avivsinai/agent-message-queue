@@ -7,6 +7,12 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// CodexReviewerLine says that Codex's automatic approvals reviewer answers a
+// seat's approvals, so Buzz gets none. The reviewer is the owner's choice.
+func CodexReviewerLine(reviewer string) string {
+	return "Buzz gets no Codex approvals: Codex's automatic reviewer answers them (approvals_reviewer = " + reviewer + ")"
+}
+
 // CodexTerminalOnlyReason reads the same durable explanation for launch,
 // remote status, and operational diagnosis. It does not create a root.
 func CodexTerminalOnlyReason(path, handle string) (string, error) {

@@ -47,11 +47,14 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 	if reason == "" || endpoint.reason != "" {
 		reason = endpoint.reason
 	}
+	reviewer := ""
 	if reason == "" {
-		reason = admission(a.executable, endpoint, request.Cwd)
+		reason, reviewer = admission(a.executable, endpoint, request.Cwd)
 	}
 	if reason == "" {
-		return a.PlanFreshDaemon(request, endpoint.remote)
+		plan, err := a.PlanFreshDaemon(request, endpoint.remote)
+		plan.ApprovalReviewer = reviewer
+		return plan, err
 	}
 	plan, err := a.CodexAdapter.PlanFresh(request)
 	plan.TerminalOnlyReason = reason
@@ -68,11 +71,13 @@ func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, er
 		return launch.AgentPlan{}, err
 	}
 	if request.Capture.Source == launch.CodexDaemonThreadV1 {
-		remote, err := daemonResumeEndpoint(a.executable, request)
+		remote, reviewer, err := daemonResumeEndpoint(a.executable, request)
 		if err != nil {
 			return launch.AgentPlan{}, err
 		}
-		return a.PlanResumeDaemon(request, remote)
+		plan, err := a.PlanResumeDaemon(request, remote)
+		plan.ApprovalReviewer = reviewer
+		return plan, err
 	}
 	plan, err := a.CodexAdapter.PlanResume(request)
 	if err != nil {
@@ -82,10 +87,11 @@ func (a *adapter) PlanResume(request launch.ResumeRequest) (launch.AgentPlan, er
 	return plan, nil
 }
 
-// daemonResumeEndpoint returns the socket a daemon conversation resumes on.
-// It checks the captured endpoint before any probe that runs the provider,
-// then the options, the seat's admission, and the thread.
-func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (string, error) {
+// daemonResumeEndpoint returns the socket a daemon conversation resumes on and
+// the automatic approvals reviewer it runs under. It checks the captured
+// endpoint before any probe that runs the provider, then the options, the
+// seat's admission, and the thread.
+func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (remote, reviewer string, err error) {
 	endpoint := daemonEndpoint()
 	reason := endpoint.reason
 	if reason == "" {
@@ -95,12 +101,12 @@ func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (stri
 		reason = launch.CodexDaemonOptionsReason(request.PlanRequest)
 	}
 	if reason == "" {
-		reason = admission(executable, endpoint, request.Cwd)
+		reason, reviewer = admission(executable, endpoint, request.Cwd)
 	}
 	if reason == "" {
 		reason = threadReason(endpoint.socket, request.Conversation.ID, request.Cwd)
 	}
-	return endpoint.remote, provenanceRefusal(reason)
+	return endpoint.remote, reviewer, provenanceRefusal(reason)
 }
 
 // endpointReason requires the endpoint that captured the thread. A restarted
@@ -250,42 +256,48 @@ func verifiedDaemonLink(socket string) bool {
 // admission checks the startup facts a seat meets on the daemon at the
 // endpoint: provider version, sign-in, directory trust, daemon version, hook
 // review, terminal instructions, and managed update requirements. The seat's
-// own -c turns the update check off, so no user setting is needed.
-func admission(executable string, endpoint endpoint, cwd string) string {
+// own -c turns the update check off, so no user setting is needed. reviewer
+// is the automatic approvals reviewer of the daemon's configuration for cwd,
+// which answers approvals before any client sees them; "" for the user.
+func admission(executable string, endpoint endpoint, cwd string) (reason, reviewer string) {
 	home, sock := endpoint.home, endpoint.socket
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	capabilities := launch.NewCodexAdapter(executable).Capabilities(ctx)
 	if !capabilities.Available || capabilities.ProviderVersion != launch.CodexDaemonVersion {
-		return "Codex daemon launch requires a verified provider version"
+		return "Codex daemon launch requires a verified provider version", ""
 	}
 	login := exec.CommandContext(ctx, executable, "login", "status")
 	login.Dir = cwd
 	if err := login.Run(); err != nil {
-		return "Codex sign-in status is not established"
+		return "Codex sign-in status is not established", ""
 	}
 	if !TrustsDir(home, cwd) {
-		return "Codex has not established directory trust"
+		return "Codex has not established directory trust", ""
 	}
 	state, err := codex.ReadStartupState(ctx, sock, cwd)
 	if err == nil && state.Version != launch.CodexDaemonVersion {
-		return "the running Codex daemon version is not verified"
+		return "the running Codex daemon version is not verified", ""
 	}
 	if err != nil || !HooksListClear(state.Hooks, cwd) {
-		return "Codex startup hook review is unresolved"
+		return "Codex startup hook review is unresolved", ""
 	}
 	var config struct {
 		Config struct {
-			Features map[string]bool `json:"features"`
+			Features          map[string]bool `json:"features"`
+			ApprovalsReviewer string          `json:"approvals_reviewer"`
 		} `json:"config"`
 	}
 	if json.Unmarshal(state.Config, &config) != nil || config.Config.Features["terminal_visualization_instructions"] {
-		return "Codex terminal instructions require verified TUI resume equivalence"
+		return "Codex terminal instructions require verified TUI resume equivalence", ""
 	}
 	if !RequirementsAllowNoUpdateCheck(state.Requirements) {
-		return "a managed Codex requirement turns the startup update check on"
+		return "a managed Codex requirement turns the startup update check on", ""
 	}
-	return ""
+	if reviewer = config.Config.ApprovalsReviewer; reviewer == "user" {
+		reviewer = ""
+	}
+	return "", reviewer
 }
 
 // Acquire creates a native thread only after launch has persisted its attempt
@@ -302,7 +314,7 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 		reason = plannedEndpointReason(ticket, endpoint)
 	}
 	if reason == "" {
-		reason = admission(ticket.ProviderExecutable, endpoint, ticket.Cwd)
+		reason, _ = admission(ticket.ProviderExecutable, endpoint, ticket.Cwd)
 	}
 	if reason != "" {
 		return launch.CaptureEvidence{}, fmt.Errorf("%w: Buzz approvals: terminal only: %s; replan this launch", launch.ErrIdentityNotRequested, reason)
@@ -400,7 +412,7 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	if err := launch.ValidateCodexDaemonEndpoint(root, ticket, sock, holder); err != nil {
 		return err
 	}
-	if reason := admission(ticket.ProviderExecutable, endpoint, ticket.Cwd); reason != "" {
+	if reason, _ := admission(ticket.ProviderExecutable, endpoint, ticket.Cwd); reason != "" {
 		return fmt.Errorf("%s; resolve it and retry the original emitted command", reason)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -288,6 +288,11 @@ func outputLaunchResult(jsonOutput bool, result launch.ReconcileResult) error {
 				return err
 			}
 		}
+		if agent.ApprovalReviewer != "" {
+			if err := writeStdout("  %s: %s\n", agent.Handle, launch.CodexReviewerLine(agent.ApprovalReviewer)); err != nil {
+				return err
+			}
+		}
 	}
 	for _, command := range result.Commands {
 		if err := writeStdout("  %s\n", command.Line); err != nil {
