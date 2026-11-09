@@ -26,17 +26,23 @@ const codexCaptureVerifiedVersion = "0.163.0"
 // form, including a "v" prefix, a pre-release or build suffix, or surrounding
 // whitespace, fails closed.
 func codexCaptureVersionSupported(version string) bool {
+	return releaseAtLeast(version, codexCaptureMinimumVersion)
+}
+
+// releaseAtLeast reports whether version is a strict MAJOR.MINOR.PATCH release
+// at or above floor.
+func releaseAtLeast(version, floor string) bool {
 	got, ok := parseReleaseVersion(version)
 	if !ok {
 		return false
 	}
-	floor, ok := parseReleaseVersion(codexCaptureMinimumVersion)
+	minimum, ok := parseReleaseVersion(floor)
 	if !ok {
 		return false
 	}
 	for i := range got {
-		if got[i] != floor[i] {
-			return got[i] > floor[i]
+		if got[i] != minimum[i] {
+			return got[i] > minimum[i]
 		}
 	}
 	return true

@@ -85,6 +85,7 @@ func (l *Lease) holdsHandle(handle string) bool {
 type LeaseHeldError struct {
 	Nonce    string
 	Evidence string
+	Holder   HolderIdentity
 }
 
 func (e *LeaseHeldError) Error() string {
@@ -149,7 +150,7 @@ func AcquireLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
 		}
 		switch inspection.State {
 		case LeaseValid:
-			return &LeaseHeldError{Nonce: inspection.Nonce, Evidence: inspection.Evidence}
+			return &LeaseHeldError{Nonce: inspection.Nonce, Evidence: inspection.Evidence, Holder: inspection.Holder}
 		case LeaseUnverified:
 			return &LeaseUnverifiedError{Evidence: inspection.Evidence}
 		case LeaseStale, LeaseMissing:

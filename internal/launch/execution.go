@@ -23,9 +23,14 @@ const ExecutionTicketVersion = 1
 
 const executionDirectory = "meta/launch/executions"
 
+// A sibling execution of the same launch holds the lease through its bounded
+// identity acquisition (a 60-second Codex thread start plus its admission and
+// routing checks). The wait allows each live holder that whole budget and
+// starts again when the lease passes to another holder, so a batch of seats
+// queues behind one another instead of timing out behind the first.
 const (
 	executionLeaseRetryInterval = 50 * time.Millisecond
-	executionLeaseWaitTimeout   = 10 * time.Second
+	executionLeaseHolderBudget  = 90 * time.Second
 )
 
 type ExecutionState string
@@ -240,7 +245,7 @@ func (ticket ExecutionTicket) Validate() error {
 	if ticket.PreSpawnAcquire {
 		if ticket.Mode != AdapterModeCapture ||
 			(ticket.Provider != CursorProvider || ticket.ProviderVersion != cursorCaptureVersion) &&
-				(ticket.Provider != CodexProvider || ticket.ProviderVersion != CodexDaemonVersion) ||
+				(ticket.Provider != CodexProvider || !codexDaemonVersionReadable(ticket.ProviderVersion)) ||
 			strings.TrimSpace(ticket.Backend) == "" || strings.TrimSpace(ticket.Profile) == "" {
 			return fmt.Errorf("pre-spawn identity acquisition requires a versioned provider capture ticket")
 		}
@@ -1161,7 +1166,8 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 }
 
 func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
-	deadline := time.Now().Add(executionLeaseWaitTimeout)
+	var holder HolderIdentity
+	var deadline time.Time
 	for {
 		lease, err := AcquireLease(root, nonce)
 		if err == nil {
@@ -1170,6 +1176,9 @@ func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error)
 		var held *LeaseHeldError
 		if !errors.As(err, &held) || held.Nonce != nonce {
 			return nil, err
+		}
+		if deadline.IsZero() || held.Holder != holder {
+			holder, deadline = held.Holder, time.Now().Add(executionLeaseHolderBudget)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -1321,6 +1330,9 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
 		if err := ticket.Validate(); err != nil {
 			return err
+		}
+		if ticket.ProviderVersion != CodexDaemonVersion {
+			return fmt.Errorf("codex daemon execution was planned for Codex %s; this AMQ runs native seats only on Codex %s", ticket.ProviderVersion, CodexDaemonVersion)
 		}
 		return validateCodexDaemonExecutable(ticket)
 	}

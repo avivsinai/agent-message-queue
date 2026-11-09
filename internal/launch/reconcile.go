@@ -1157,6 +1157,9 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		} else if !forceFresh && hasConversation {
 			err = fmt.Errorf("conversation identity is %s", conversation.State)
 		}
+		if errors.Is(err, ErrCodexConversationProvenance) {
+			capabilityRefusal = err.Error()
+		}
 		if err != nil && !forceFresh {
 			if !request.AllowFreshFallback {
 				if capabilityRefusal != "" {

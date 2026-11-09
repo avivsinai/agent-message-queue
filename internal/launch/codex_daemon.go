@@ -2,6 +2,7 @@ package launch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -11,7 +12,17 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// CodexDaemonVersion is the one Codex release a new native execution runs on.
 const CodexDaemonVersion = "0.167.0"
+
+// codexDaemonMinimumVersion is the oldest release whose native tickets and
+// evidence remain readable, so inspection and cleanup survive an upgrade.
+const codexDaemonMinimumVersion = "0.167.0"
+
+// ErrCodexConversationProvenance marks a daemon-captured conversation whose
+// capturing endpoint does not prove its thread. Resume refuses it rather than
+// move the conversation to another backend.
+var ErrCodexConversationProvenance = errors.New("codex conversation provenance is not established")
 
 const CodexDaemonThreadV1 CaptureEvidenceSource = "codex_daemon_thread_v1"
 
@@ -119,7 +130,7 @@ func decodeCodexDaemonPayload(raw []byte) (codexDaemonPayload, error) {
 		return payload, fmt.Errorf("decode Codex daemon evidence: %w", err)
 	}
 	if payload.Source != CodexDaemonThreadV1 || payload.Provider != CodexProvider ||
-		payload.ProviderVersion != CodexDaemonVersion || !validUUID(payload.LaunchNonce) || !validUUIDv7(payload.ConversationID) ||
+		!codexDaemonVersionReadable(payload.ProviderVersion) || !validUUID(payload.LaunchNonce) || !validUUIDv7(payload.ConversationID) ||
 		!filepath.IsAbs(payload.Cwd) || !filepath.IsAbs(payload.Socket) || strings.TrimSpace(payload.SessionIdentity) == "" {
 		return payload, fmt.Errorf("codex daemon evidence binding is invalid")
 	}
@@ -133,7 +144,7 @@ func decodeCodexDaemonPayload(raw []byte) (codexDaemonPayload, error) {
 }
 
 func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
-	if ticket.ProviderVersion != CodexDaemonVersion || len(ticket.TargetEnv) != 0 || ticket.Wrapper != nil ||
+	if !codexDaemonVersionReadable(ticket.ProviderVersion) || len(ticket.TargetEnv) != 0 || ticket.Wrapper != nil ||
 		len(ticket.TargetArgv) < 5 ||
 		ticket.TargetArgv[1] != "resume" || ticket.TargetArgv[2] != "-C" || ticket.TargetArgv[3] != ticket.Cwd ||
 		len(ticket.DynamicArgv) != 1 || ticket.DynamicArgv[0].Kind != DynamicArgConversationID {
@@ -197,6 +208,12 @@ func codexDaemonArgumentsReason(args []string) string {
 		}
 	}
 	return ""
+}
+
+// codexDaemonVersionReadable admits a strict release at or above
+// codexDaemonMinimumVersion. Only CodexDaemonVersion runs a new execution.
+func codexDaemonVersionReadable(version string) bool {
+	return releaseAtLeast(version, codexDaemonMinimumVersion)
 }
 
 func validateCodexDaemonExecutable(ticket ExecutionTicket) error {
