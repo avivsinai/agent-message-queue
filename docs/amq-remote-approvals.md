@@ -121,8 +121,8 @@ In Buzz, the owner's message that is one line starting with `/` is typed
 into a Claude Code session in mailbox mode like Remote Control: the session's
 wake types exactly that line and Enter, by the same injection as its
 doorbell, and Buzz gets "Typed /compact into the terminal." Any command is
-typed, `/clear` and `/exit` too; `/clear` starts a new session id, so run
-`/amq-remote` again to keep the Buzz link. The line counts only as the
+typed, `/clear` and `/exit` too; the Buzz link survives `/clear`, and
+`/exit` ends the session. The line counts only as the
 owner's signed event, at most 5 minutes old; a `/` line that is not verified
 as the owner's goes to the session as an ordinary message. While a dialog is
 open the command waits, oldest first and never dropped, and Buzz gets
