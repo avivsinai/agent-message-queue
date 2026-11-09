@@ -21,9 +21,13 @@ amq-board --json                   # complete model, every message body
 amq-board --html --out board.html  # one static page
 ```
 
-Run `amq-board sync` only when a fresh source read is requested and no
-`amq-board sync --watch` already runs for the project. Use
-`amq-board sync --init` only for first initialization.
+A view reads only the last published snapshot; the `sources:` line says
+how old each source read is. Someone who asks to see the board wants the
+current board: when the sources were read more than 10 minutes ago and no
+`amq-board sync --watch` runs for the project (`pgrep -f 'amq-board sync
+--watch'`), run `amq-board sync` before you show it. Also run it when a
+fresh read is asked for. Use `amq-board sync --init` only for first
+initialization.
 
 The Requests section lists questions, review requests, and todos. Each
 recipient has an observation: a direct reply (a message whose last ref is
