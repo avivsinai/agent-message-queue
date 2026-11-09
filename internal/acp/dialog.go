@@ -293,8 +293,10 @@ type dialogQuiet struct {
 }
 
 // dialogQuietKey is the version of the directories a seam or a post
-// changes: requests, resolved and the post directory. ok is false when one
-// could not be read or changed too recently to stand for its content.
+// changes: requests, resolved and the post directory. Answers and events
+// matter only to an open dialog, and a binding with one is never quiet. ok
+// is false when one could not be read or changed too recently to stand for
+// its content.
 func (s *Server) dialogQuietKey(name, dir string, now time.Time) (key [3]fsq.FileVersion, ok bool) {
 	ok = true
 	for i, p := range []string{filepath.Join(dir, "requests"), filepath.Join(dir, "resolved"), s.dialogPostDir(name)} {
@@ -436,8 +438,9 @@ func (s *Server) live(b binding.Binding) bool {
 }
 
 // dropGoneDialogs expires the open dialogs of each binding that is gone or
-// ended, except the bindings this tick served, edits their posts, and
-// removes the binding's dialogs once their
+// ended, except the bindings this tick served (judged live at most
+// machineScanInterval ago, so one that just ended is dropped a tick later),
+// edits their posts, and removes the binding's dialogs once their
 // seams left (seamsLeft). A machine
 // agent does this for every binding, a pinned agent for its own.
 func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) {
