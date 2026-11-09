@@ -202,6 +202,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return 0, nil
 	}
 	v := viewOf(nb, nb.Name, reused)
+	v.reviewer = session.ApprovalReviewer
 	if c.json {
 		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
 		if cand.Kind == harness.Claude {

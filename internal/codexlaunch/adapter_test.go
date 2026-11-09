@@ -29,7 +29,7 @@ import (
 // Codex review of e56adade (spaced_home): a CODEX_HOME ending in whitespace
 // named one home for probes and evidence and another for --remote.
 func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
-	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory", "spaced_home"} {
+	for _, scenario := range []string{"publish", "switch_home", "pre_start_version_failure", "wrong_base_root", "hook_review", "recovered_embedded_environment", "recovered_untrusted_directory", "spaced_home", "automatic_reviewer"} {
 		t.Run(scenario, func(t *testing.T) {
 			for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 				t.Setenv(key, "")
@@ -65,7 +65,8 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 					return "0.168.0"
 				}
 				return "0.167.0"
-			}, hooksTrusted: hooksTrusted.Load, spacedHome: scenario == "spaced_home"})
+			}, hooksTrusted: hooksTrusted.Load, spacedHome: scenario == "spaced_home",
+				automaticReviewer: scenario == "automatic_reviewer"})
 			t.Setenv("CODEX_HOME", home)
 			executable := nativeProvider(t)
 			amq, err := os.Executable()
@@ -85,6 +86,15 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				SessionRoot: session, Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
 			if err != nil || !plan.PreSpawnAcquire {
 				t.Fatalf("native plan = %#v, %v", plan, err)
+			}
+			// Live run 2026-11-09: launch said nothing of the daemon's
+			// automatic reviewer, which answers every approval before Buzz.
+			want := ""
+			if scenario == "automatic_reviewer" {
+				want = "guardian_subagent"
+			}
+			if plan.ApprovalReviewer != want {
+				t.Fatalf("plan approval reviewer = %q, want %q", plan.ApprovalReviewer, want)
 			}
 			ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: nonce,
 				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion,
@@ -299,6 +309,8 @@ type nativeDaemonOptions struct {
 	hooksTrusted      func() bool
 	// spacedHome ends the Codex home's name in a space, which Codex keeps.
 	spacedHome bool
+	// automaticReviewer configures Codex's automatic approvals reviewer.
+	automaticReviewer bool
 }
 
 // sharedDaemonDir gives the test its own private daemon socket directory,
@@ -397,7 +409,11 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 			case "configRequirements/read":
 				result = map[string]any{"requirements": nil}
 			case "config/read":
-				result = map[string]any{"config": map[string]any{"features": map[string]bool{}}}
+				config := map[string]any{"features": map[string]bool{}}
+				if len(options) != 0 && options[0].automaticReviewer {
+					config["approvals_reviewer"] = "guardian_subagent"
+				}
+				result = map[string]any{"config": config}
 			case "thread/start", "thread/read":
 				result = map[string]any{"thread": map[string]any{"id": "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "cwd": cwd}}
 			}

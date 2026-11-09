@@ -79,6 +79,9 @@ type AgentPlan struct {
 	DynamicArgv        []DynamicArg      `json:"dynamic_argv,omitempty"`
 	PreSpawnAcquire    bool              `json:"pre_spawn_acquire,omitempty"`
 	TerminalOnlyReason string            `json:"terminal_only_reason,omitempty"`
+	// ApprovalReviewer is the automatic Codex approvals reviewer a daemon
+	// seat runs under. It answers approvals itself, so none reach Buzz.
+	ApprovalReviewer string `json:"approval_reviewer,omitempty"`
 	// Execution is the normalized coop-exec wrapper policy. Keeping it in the
 	// plan makes journal recovery lossless before the wrapper consumes it.
 	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`

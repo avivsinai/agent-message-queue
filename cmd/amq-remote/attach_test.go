@@ -1432,3 +1432,31 @@ func shortHome(t *testing.T) string {
 	}
 	return home
 }
+
+// Live run 2026-11-09 (codex-live evidence 03-attach-transcript): attach said
+// a Codex daemon thread was not proven live ("unknown: no holder recorded")
+// while its app-server had it loaded, and said nothing of the thread's
+// automatic approvals reviewer, which answers every approval before Buzz.
+func TestAttachReportsADaemonThreadLiveAndItsReviewer(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	savedLoaded := codexLoadedThreads
+	t.Cleanup(func() { codexLoadedThreads = savedLoaded })
+	codexLoadedThreads = func(string) ([]string, error) { return []string{"t1"}, nil }
+	b := binding.Binding{Root: dir, Target: "codex:t1", NativeSession: "t1", Name: "codex-t1", Harness: "codex",
+		AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: "t1"}}
+	v := viewOf(b, b.Name, false)
+	v.reviewer = "auto_review"
+	if v.unproven != "" {
+		t.Fatalf("a thread its app-server has loaded is not proven live: %s", v.unproven)
+	}
+	var out bytes.Buffer
+	connected(&out, v)
+	if !strings.Contains(out.String(), "Buzz gets no Codex approvals: Codex's automatic reviewer answers them (approvals_reviewer = auto_review).") {
+		t.Fatalf("attach printed %q; want the reviewer line", out.String())
+	}
+	if got := connectedJSON(map[string]any{}, v)["approval_reviewer"]; got != "auto_review" {
+		t.Fatalf("approval_reviewer = %v", got)
+	}
+}

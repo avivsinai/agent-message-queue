@@ -147,6 +147,9 @@ type attachView struct {
 	// channel is the machine agent's record of the session's channel; nil
 	// when it has none.
 	channel *acp.MachineChannel
+	// reviewer is the automatic approvals reviewer of a Codex thread, which
+	// answers its approvals so none reach Buzz; "" for the user.
+	reviewer string
 }
 
 // viewOf reads what attach reports for the binding called name. While the
@@ -164,7 +167,9 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 	if bound, err := binding.ReadNamed(name); err == nil {
 		b = bound
 	}
-	if state, evidence := b.Liveness(); state != binding.Live {
+	// The machine agent's own judgement: a Codex thread is live while its
+	// app-server daemon has it loaded, with no session process to hold.
+	if state, evidence := newCodexView().Liveness(b); state != binding.Live {
 		v.unproven = string(state) + ": " + evidence
 	}
 	deadline := now.Add(channelWait)
@@ -229,6 +234,9 @@ func connected(w io.Writer, v attachView) {
 	default:
 		say(w, "Start %q in Buzz Desktop (Agents, the agent, Start); it then makes this session's channel.", machine)
 	}
+	if v.reviewer != "" {
+		say(w, "%s.", launch.CodexReviewerLine(v.reviewer))
+	}
 }
 
 // connectedJSON adds the agent and channel fields to an attach result.
@@ -243,6 +251,9 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 	}
 	if v.served && v.channel == nil && v.unproven != "" {
 		out["unproven"] = v.unproven
+	}
+	if v.reviewer != "" {
+		out["approval_reviewer"] = v.reviewer
 	}
 	if state := v.channelState(); state != "" {
 		out["channel"] = state

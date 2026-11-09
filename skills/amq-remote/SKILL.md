@@ -63,7 +63,9 @@ command's own message. Do not work around a refusal.
    when the session has its own agent, `machine_name` when there is a
    machine agent, and, when the machine agent serves the session, `channel`,
    `channel_name`, and `channel_error` and `channel_retry` when the channel
-   is uncertain or failed. Attach already waited up to 15 s for the channel.
+   is uncertain or failed, and `approval_reviewer` when a Codex thread runs
+   Codex's automatic approvals reviewer. Attach already waited up to 15 s
+   for the channel.
    Say "Connected: <label>." and then exactly one of, the first that applies:
    - `agent` is `running`: "DM **<agent_name>** in Buzz." Nothing else is
      needed.
@@ -97,7 +99,10 @@ command's own message. Do not work around a refusal.
    - `machine` is `offline` or `idle`: "Start **<machine_name>** in Buzz
      Desktop (Agents, the agent, Start); it then makes this session's
      channel."
-   If the JSON has `warning`, show it too.
+   If the JSON has `warning`, show it too. If it has `approval_reviewer`,
+   say: "Buzz gets no Codex approvals: Codex's automatic reviewer answers
+   them (approvals_reviewer = <approval_reviewer>)." It is the owner's
+   setting; do not change it.
 4. **Claude Code only: the approval hook** (default and `--native`, after
    a successful attach). Read `approval_hook` from the attach JSON: `ok`,
    `missing`, `stale`, `disabled` or `unreadable`. An older amq-remote
@@ -145,8 +150,9 @@ command's own message. Do not work around a refusal.
    - Claude in a machine agent channel: "The channel also shows each turn this
      session finishes; type `mirror off` there, or run `/amq-remote mirror
      off`, to stop it."
-   - Codex on the app-server: the same line. A plain `codex` TUI session:
-     "Approvals stay in the terminal."
+   - Codex on the app-server: the same line, unless the JSON has
+     `approval_reviewer` (then the reviewer line above replaces it). A plain
+     `codex` TUI session: "Approvals stay in the terminal."
 
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
