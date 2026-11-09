@@ -78,6 +78,7 @@ options not repeated here.
 - [amq session resume](#amq-session-resume)
 - [amq peer pair](#amq-peer-pair)
 - [amq route explain](#amq-route-explain)
+- [amq route peers](#amq-route-peers)
 - [amq integration symphony init](#amq-integration-symphony-init)
 - [amq integration symphony emit](#amq-integration-symphony-emit)
 - [amq integration kanban bridge](#amq-integration-kanban-bridge)
@@ -414,7 +415,8 @@ Usage:
 Join current on-disk evidence for one message without mutating the queue.
 
 It reports message copies, route fields, visible delivery artifacts, DLQ entries,
-delivery receipts, thread references, and durable agent-owned notification write attempts.
+delivery receipts, owed receipts (consumed, receipt not written yet; stage "owed"),
+thread references, and durable agent-owned notification write attempts.
 Notification evidence never proves that a TUI or person saw, displayed, or submitted it.
 
 Options:
@@ -1055,14 +1057,16 @@ Options:
 
 ```text
 $ amq route --help
-amq route - Explain AMQ route resolution without sending a message
+amq route - Explain AMQ route resolution and peer reachability without sending a message
 
 Subcommands:
   explain  Explain a send route as canonical JSON
+  peers    List peers and whether replies come back
 
 Examples:
   amq route explain --to codex --json
   amq route explain --to qa --project project-b --session qa --json
+  amq route peers --depth 2
 
 Use "amq route <subcommand> --help" for details.
 ```
@@ -2121,6 +2125,11 @@ $ amq receipts list --help
 Usage:
   amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [options]
 
+List the receipts this consumer wrote, plus the receipts it owes: a message it
+already consumed whose receipt write failed and was parked. Owed rows carry
+"owed": true in JSON and are marked owed in text; the next drain, read, or
+monitor writes them.
+
 Options:
   -json
         Emit JSON output
@@ -2142,6 +2151,10 @@ Options:
 $ amq receipts wait --help
 Usage:
   amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [options]
+
+Wait for this consumer's receipt for one message. A timeout exits 4. When the
+message was already consumed and its receipt is owed (parked, not written yet),
+the timeout says so, and JSON adds "owed": true.
 
 Options:
   -json
@@ -2283,6 +2296,9 @@ Usage:
   amq route explain --to <handle> [--project <project>] [--session <session>] --json
 
 Explains canonical AMQ routing without sending a message.
+root_source names where the source root came from (as in 'amq env --json'),
+source_config names the .amqrc that decided the route, and peer_key names
+the peers-map key a cross-project route went through.
 
 Examples:
   amq route explain --to codex --json
@@ -2305,6 +2321,33 @@ Options:
         Target session
   -to string
         Receiver handle
+```
+
+## amq route peers
+
+```text
+$ amq route peers --help
+Usage:
+  amq route peers [--depth N] [--json]
+
+Lists each peer in this project's .amqrc peers map and whether it can answer.
+status is ok, unreadable, missing_root, or no_amqrc. reply_back is yes only
+when the peer's .amqrc lists this project under its exact project name and
+that entry is this project's base root; with no, replies from that peer fail.
+--depth follows the peers' own .amqrc, visiting each project once (at most 64).
+Reads only .amqrc files and base roots, never message files.
+
+Examples:
+  amq route peers
+  amq route peers --depth 2 --json
+
+Options:
+  -depth int
+        Follow peers' own .amqrc this many hops (1-4) (default 1)
+  -json
+        Emit JSON output
+  -root string
+        Source AMQ root (default: resolved like other commands)
 ```
 
 ## amq integration symphony init

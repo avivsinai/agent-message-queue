@@ -138,6 +138,37 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	}
 }
 
+// Review of the dialog lifecycle: an answer that fits no option stayed in
+// answers/, so the Buzz agent never read the owner's reactions again and
+// the dialog waited out its whole timeout.
+func TestPermissionHookRejectsAnAnswerThatFitsNoOption(t *testing.T) {
+	dir := boundHookEnv(t)
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "hook_event_name": "PermissionRequest",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"},
+	})
+	wait := runHook(t, string(stdin))
+	req := openRequest(t, dir)
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 9, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		won, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if won {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the answer that fits no option was never removed, so no later answer could be written")
+		}
+	}
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v, want the owner's later allow", d)
+	}
+}
+
 // After /clear the Claude process that attach bound has a new session id: the
 // hook finds the binding by that process's whole identity and opens the
 // dialog there, leaving the binding as attach wrote it.

@@ -73,8 +73,8 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	if len(posts) != 1 || posts[0] != want {
 		t.Fatalf("posts = %q; want the dialog once", posts)
 	}
-	if a, ok, _ := dialog.ReadAnswer(dir, first.ID); !ok || a.Option != 1 {
-		t.Fatalf("answer = %+v, %v; want option 1", a, ok)
+	if _, _, a, _, _ := dialog.Lookup(dir, first.ID); a == nil || a.Option != 1 {
+		t.Fatalf("answer = %+v; want option 1", a)
 	}
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: first.ID, Outcome: dialog.OutcomeAllowed, Label: "Allow once", By: dialog.ByBuzz, At: now}); err != nil {
 		t.Fatal(err)
@@ -101,8 +101,8 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	if _, rpcErr := run(func(any) error { return nil }); rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if a, ok, _ := dialog.ReadAnswer(dir, second.ID); !ok || a.Option != 3 {
-		t.Fatalf("answer = %+v, %v; want option 3", a, ok)
+	if _, _, a, _, _ := dialog.Lookup(dir, second.ID); a == nil || a.Option != 3 {
+		t.Fatalf("answer = %+v; want option 3", a)
 	}
 	if got := inboxPrompts(t, root); len(got) != 0 {
 		t.Fatalf("the answer reached the session: %v", got)
@@ -273,7 +273,7 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	}
 	s.dialogTick(time.Now()) // posts
 	s.dialogTick(time.Now()) // reads the reactions
-	if a, ok, _ := dialog.ReadAnswer(dir, req.ID); ok {
+	if _, _, a, _, _ := dialog.Lookup(dir, req.ID); a != nil {
 		t.Fatalf("a reaction answered a free-text dialog: %+v", a)
 	}
 	other := signedBy(t, nostr.Generate(), "1", dm)
@@ -363,7 +363,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 	if run, _, rpcErr := s.beginPrompt(params); rpcErr == nil && run != nil {
 		_, _ = run(func(any) error { return nil })
 	}
-	if a, ok, _ := dialog.ReadAnswer(dir, first.ID); ok {
+	if _, _, a, _, _ := dialog.Lookup(dir, first.ID); a != nil {
 		t.Fatalf("an owner event signed an hour before the dialog opened answered it: %+v", a)
 	}
 
@@ -467,7 +467,7 @@ func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
 	if _, err := run(func(any) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if a, ok, err := dialog.ReadAnswer(dir, second.ID); err != nil || ok {
+	if _, _, a, _, err := dialog.Lookup(dir, second.ID); err != nil || a != nil {
 		t.Fatalf("the event chosen for the first dialog answered the second: %+v (err %v)", a, err)
 	}
 }
