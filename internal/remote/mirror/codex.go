@@ -180,7 +180,7 @@ func (st *State) codexItem(l codex.RolloutLine, carried Carried) []Event {
 		switch {
 		case it.ClientID != "" && carried.has(CodexCarriedID(it.ClientID)):
 			if first {
-				t.Cause = CauseBuzz
+				t.Cause, t.Answered = CauseBuzz, true
 			} else {
 				t.AnsweredBuzz()
 			}

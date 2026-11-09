@@ -114,6 +114,10 @@ type Turn struct {
 	// once its Text is a final answer, which commentary never replaces.
 	Prompted bool `json:"prompted,omitempty"`
 	Final    bool `json:"final,omitempty"`
+
+	// Answered is set once the turn answered a Buzz message. The carrier
+	// posts that answer in the channel itself, so the turn's post omits it.
+	Answered bool `json:"answered,omitempty"`
 }
 
 func (t Turn) clone() Turn {
@@ -389,7 +393,7 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	t := st.open(l, "")
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
-		t.Cause = CauseBuzz
+		t.Cause, t.Answered = CauseBuzz, true
 	case promptCause(text) == harness.Doorbell:
 		// Typed into the terminal, or sent as a peer frame by a native wake.
 		t.Cause = CauseMail
@@ -463,6 +467,7 @@ func BuzzReplaces(cause string) bool { return cause == CauseMail || cause == Cau
 // sent reached it, or it replied to a Buzz message. Its cause becomes Buzz
 // where BuzzReplaces it, so the owner finds the answer by that label.
 func (t *Turn) AnsweredBuzz() {
+	t.Answered = true
 	if BuzzReplaces(t.Cause) {
 		t.Cause = CauseBuzz
 	}
@@ -534,9 +539,9 @@ const cutNote = "… (cut; the full answer is in the session)"
 //	<final assistant text>
 //
 // A turn that still runs (no End) shows the first two lines only; a running
-// turn the user interrupted shows as interrupted. A turn the carrier also
-// answered keeps its text: the carrier's reply is a thread reply under the
-// prompt, and the channel shows the turn post.
+// turn the user interrupted shows as interrupted. A turn that answered Buzz
+// (Answered) also shows the first two lines only: the carrier posts that
+// answer as its own top-level post in the same channel.
 func Render(t Turn) string {
 	var b strings.Builder
 	b.WriteString("▶ " + t.Cause + "\n")
@@ -571,7 +576,7 @@ func Render(t Turn) string {
 		}
 		b.WriteString(" · " + p)
 	}
-	if text := t.Text; text != "" && t.End != "" {
+	if text := t.Text; text != "" && t.End != "" && !t.Answered {
 		b.WriteString("\n" + cut(text))
 	}
 	if t.Earlier > 0 {
