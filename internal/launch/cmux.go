@@ -198,7 +198,7 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 			return CreateResult{}, err
 		}
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", cmuxSplitDirection(preview.Effective.Layout), "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
+		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", paneSplitDirection(preview.Effective.Layout), "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))

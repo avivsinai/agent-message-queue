@@ -145,7 +145,7 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 			return CreateResult{}, b.reconcileCreateFailure(before, windowID, false, fmt.Errorf("snapshot ghostty windows before split: %w", snapErr))
 		}
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot, cmuxSplitDirection(preview.Effective.Layout))
+		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot, paneSplitDirection(preview.Effective.Layout))
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(splitBefore, windowID, false, fmt.Errorf("create ghostty split for %s: %w", agent.Handle, splitErr))
