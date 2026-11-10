@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 func TestPollForChanges_NewTask(t *testing.T) {
@@ -301,5 +303,25 @@ func TestPollForChanges_FailedAndBlockedEmitReason(t *testing.T) {
 				t.Fatalf("delivered reason = context:%v body:%q, want %q in both", msg.Header.Context["reason"], msg.Body, test.reason)
 			}
 		})
+	}
+}
+
+// Swarm bridge delivery wrote into any root while the shell was pinned to
+// another session; it now refuses as the send path does (audit 2026-11-10).
+func TestDeliverBridgeEventRefusesARootOutsideTheSessionPin(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(sessionguard.EnvBaseRoot, t.TempDir())
+	t.Setenv(sessionguard.EnvSession, "s1")
+	cfg := BridgeConfig{TeamName: "pinned-team", AgentHandle: "codex", AgentID: "ext_codex_1", AMQRoot: root}
+	err := deliverBridgeEvent(cfg, BridgeEvent{Type: "task_assigned", TaskID: "t1", Title: "x", Status: TaskStatusInProgress})
+	var refusal *sessionguard.ContextError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err = %v; want a session context refusal", err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex")); len(entries) != 0 {
+		t.Fatalf("inbox holds %d messages; want none", len(entries))
 	}
 }

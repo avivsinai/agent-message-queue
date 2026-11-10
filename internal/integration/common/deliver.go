@@ -6,11 +6,13 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 // DeliverIntegrationMessage builds and delivers a standard integration message
 // to the specified recipient's inbox. It uses the same Maildir atomic delivery
-// as the rest of AMQ.
+// as the rest of AMQ, and refuses a root the inherited session pin does not
+// name (sessionguard.ContextError).
 //
 // Parameters:
 //   - root: AMQ root directory
@@ -62,6 +64,9 @@ func DeliverIntegrationMessage(root, from, to, subject, body string, ctx map[str
 		return "", fmt.Errorf("open delivery root: %w", err)
 	}
 	defer func() { _ = deliveryRoot.Close() }()
+	if err := sessionguard.VerifyEnvPinOn(deliveryRoot); err != nil {
+		return "", err
+	}
 	paths, err := fsq.DeliverToInboxes(deliveryRoot, msg.Header.To, filename, data)
 	if err != nil {
 		return "", fmt.Errorf("deliver message: %w", err)
