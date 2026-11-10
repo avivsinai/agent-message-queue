@@ -218,7 +218,7 @@ func TestMigrateHomeKeepaliveResidueAcceptsStreamLogs(t *testing.T) {
 		}
 	}
 	paths, why := migrateHomeKeepaliveResidue(old, false)
-	if why != "" || len(paths) != 4 {
+	if why != "" || len(paths) != 5 {
 		t.Fatalf("residue = %v, %q; want 2 files, session dir, claude-print dir, old (why empty)", paths, why)
 	}
 }
