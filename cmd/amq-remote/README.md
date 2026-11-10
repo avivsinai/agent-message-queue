@@ -1030,25 +1030,18 @@ removal.
 
 The machine agent watches the settings file of each Claude session it
 serves (the `config_dir` its binding records); a file that did not change
-costs one stat per tick. When a changed file has lost the approval hook (or,
-for a native session, the Stop hook) and the opt-in for that file exists,
-the agent puts the hook back through the same locked writer, running the
-`amq-remote` installed now (never a recorded path an upgrade removed; with
-no installed `amq-remote` it only warns), and posts once
-in the session's channel: "The AMQ approval hook was missing from <path>
-(changed <mtime>); restored." With no opt-in it changes nothing and posts
-once per version of the file, across restarts of the agent: "Approvals of
-this session stay in the terminal: the AMQ approval hook left <path> at
-<mtime>. Run `amq-remote doctor --fix`." After `uninstall-approval-hook` (or
-`uninstall-stop-hook`) it never warns about that hook in that file. A hook
-removed any other way while the opt-in exists, Claude Code's `/hooks` menu
-included, comes back; the uninstall command is the way to stop it.
-A hook that is present in an older form (for example the approval hook with
-the 10-minute timeout) the agent upgrades as `doctor --fix` does while the
-opt-in for that file exists, and posts: "The AMQ approval hook in <path> was
-an older form (changed <mtime>); upgraded." With no opt-in it changes
-nothing and posts once per version of the file: "The AMQ approval hook in
-<path> is an older form (changed <mtime>). Run `amq-remote doctor --fix`."
+costs one stat per tick. It never writes the file: only the install
+commands and `doctor --fix` change it. When a changed file has lost the
+approval hook, the agent posts once per version of the file, across
+restarts of the agent, in the session's channel: "Approvals of this session
+stay in the terminal: the AMQ approval hook left <path> at <mtime>. Run
+`amq-remote doctor --fix`." A native session that lost the Stop hook gets
+the same kind of line for its turns. A hook that is present in an older
+form (for example the approval hook with the 10-minute timeout) gets one
+post per version of the file: "The AMQ approval hook in <path> is an older
+form (changed <mtime>). Run `amq-remote doctor --fix`." After
+`uninstall-approval-hook` (or `uninstall-stop-hook`) it never posts about
+that hook in that file.
 
 ### Turns in the session's channel
 
