@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
 )
 
 // wakeConfigMachineRefused is the machine status a wake reports for a machine
