@@ -113,7 +113,7 @@ func TestDetachOutsideAMQUsesTheBoundRoot(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
 	t.Setenv("AM_ROOT", "")
 	t.Setenv("AM_ME", "")
-	if err := binding.Write(binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
 		t.Fatal(err)
 	}
 	// A fixed invoking session, not this machine's ambient one (codex #895
@@ -1157,7 +1157,7 @@ func TestDetachSelfRemovesABindingMadeThroughALinkRoot(t *testing.T) {
 			}
 			t.Setenv("AM_ROOT", sessionRoot)
 			t.Setenv("AM_ME", me)
-			if err := binding.Write(binding.Binding{Root: linkRoot, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
+			if err := binding.WriteNamed(binding.Binding{Root: linkRoot, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
 				t.Fatal(err)
 			}
 			saved := selfIdentity

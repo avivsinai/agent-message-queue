@@ -37,7 +37,7 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
 
 	s.lifecycleTick(time.Now()) // bound: nothing to change
-	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	s.lifecycleTick(time.Now())
@@ -85,7 +85,7 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 		b.lifecycleTick(time.Now())
 	}
 
-	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
@@ -138,7 +138,7 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 		return nil, nil
 	}
 
-	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
 	a.lifecycleTick(time.Now())

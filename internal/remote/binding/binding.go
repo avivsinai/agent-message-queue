@@ -353,23 +353,6 @@ func Read() (Binding, error) {
 	return read(path)
 }
 
-// Write replaces the binding atomically with mode 0600.
-func Write(b Binding) error {
-	if err := b.Valid(); err != nil {
-		return err
-	}
-	if b.BoundAt == "" {
-		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	raw, err := json.MarshalIndent(b, "", "  ")
-	if err != nil {
-		return err
-	}
-	return transact(func(path string) error {
-		return writeStore(filepath.Dir(path), filepath.Base(path), raw)
-	})
-}
-
 // writeStore atomically replaces rel below remote, the directory that holds
 // the binding file. The directory above it (the AMQ home by default) anchors
 // the write, so no directory from remote down is followed as a link.
@@ -1121,46 +1104,4 @@ func scanNamed(dir string) ([]Binding, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
-}
-
-// RemoveMatching removes every binding match accepts, named and legacy,
-// under the binding lock, and returns the names removed.
-func RemoveMatching(match func(Binding) bool) ([]string, error) {
-	var removed []string
-	err := transact(func(path string) error {
-		dir, err := namedDir(false)
-		if err != nil {
-			return err
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		for _, e := range entries {
-			name := strings.TrimSuffix(e.Name(), ".json")
-			if e.IsDir() || IsTombstone(e.Name()) || name == e.Name() || ValidName(name) != nil {
-				continue
-			}
-			b, err := read(filepath.Join(dir, e.Name()))
-			if err != nil {
-				continue
-			}
-			b.Name = name
-			if !match(b) {
-				continue
-			}
-			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			removed = append(removed, name)
-		}
-		if b, err := read(path); err == nil && func() bool { b.Name = LegacyName; return match(b) }() {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			removed = append(removed, LegacyName)
-		}
-		return nil
-	})
-	return removed, err
 }

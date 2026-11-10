@@ -489,7 +489,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 		t.Fatalf("unbound: result=%+v said=%q err=%v", result, said, rpcErr)
 	}
 
-	if err := binding.Write(binding.Binding{Root: bound.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Root: bound.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
 		t.Fatal(err)
 	}
 	eventID := strings.Repeat("9", 64)
@@ -530,11 +530,11 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 		}
 		return out
 	}
-	if err := binding.Write(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
 		t.Fatal(err)
 	}
 	first := run(a, "A")
-	if err := binding.Write(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
 		t.Fatal(err)
 	}
 	if second := run(b, "B"); first != "result from A" || second != first {
@@ -602,7 +602,7 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	if won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: won=%v err=%v", won, err)
 	}
-	if err := binding.Write(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.turnBinding("s", eventID)

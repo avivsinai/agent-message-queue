@@ -27,7 +27,7 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	withBuzzSelf(t)
@@ -346,7 +346,7 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 	s, _ := mailboxServer(t)
 	root := canonicalTempDir(t)
-	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	eventID := strings.Repeat("5", 64)
@@ -830,7 +830,7 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 func TestOneEventReachesEachAgentsSession(t *testing.T) {
 	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	alpha, alphaRoot := mailboxServer(t)
-	alpha.cfg.Pin = binding.LegacyName
+	alpha.cfg.Pin = "agent"
 	betaRoot := canonicalTempDir(t)
 	if err := fsq.EnsureAgentDirs(betaRoot, "agent"); err != nil {
 		t.Fatal(err)
@@ -1307,7 +1307,7 @@ func TestAdvertisedModelPinsSessionWithoutSetModel(t *testing.T) {
 	live.read()
 	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
-	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "a" }); err != nil {
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "a" }); err != nil {
 		t.Fatal(err)
 	}
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"}); err != nil {

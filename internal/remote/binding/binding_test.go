@@ -12,14 +12,14 @@ import (
 func TestRemoveLeavesAnotherSessionsBinding(t *testing.T) {
 	t.Setenv(EnvPath, filepath.Join(canonicalTempDir(t), "remote", "binding.json"))
 	a := Binding{Root: "/r", Target: "claude:1", NativeSession: "s-a"}
-	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s-b"}
-	if err := Write(b); err != nil {
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s-b", Name: "claude-1"}
+	if err := WriteNamed(b); err != nil {
 		t.Fatal(err)
 	}
 	if removed, err := Retire(RemovedDetached, a.Same); err != nil || len(removed) != 0 {
 		t.Fatalf("removed=%v err=%v; A's off removed B's binding", removed, err)
 	}
-	if got, err := Read(); err != nil || !got.Same(b) {
+	if got, err := ReadNamed(b.Name); err != nil || !got.Same(b) {
 		t.Fatalf("binding = %+v %v", got, err)
 	}
 }
@@ -35,7 +35,7 @@ func TestSymlinkedBindingDirectoryIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvPath, filepath.Join(base, "remote", "binding.json"))
-	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}); err == nil {
+	if err := WriteNamed(Binding{Root: "/r", Target: "claude:1", NativeSession: "s", Name: "claude-1"}); err == nil {
 		t.Fatal("wrote through a symlinked binding directory")
 	}
 	if _, err := Read(); err == nil {
@@ -64,7 +64,7 @@ func TestOverrideWithSymlinkedAncestorIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvPath, filepath.Join(base, "link", "remote", "binding.json"))
-	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}); err == nil {
+	if err := WriteNamed(Binding{Root: "/r", Target: "claude:1", NativeSession: "s", Name: "claude-1"}); err == nil {
 		t.Fatal("wrote through a symlinked ancestor")
 	}
 }
@@ -94,7 +94,7 @@ func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
 	if err := os.Chmod(amq, 0o775); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}); err != nil {
+	if err := WriteNamed(Binding{Root: "/r", Target: "claude:1", NativeSession: "s", Name: "claude-1"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -106,11 +106,11 @@ func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
 func TestBindingOverrideCreatesMissingDirectories(t *testing.T) {
 	base := canonicalTempDir(t)
 	t.Setenv(EnvPath, filepath.Join(base, "home", ".amq", "remote", "binding.json"))
-	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}
-	if err := Write(b); err != nil {
-		t.Fatalf("Write = %v, want the missing directories created", err)
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s", Name: "claude-1"}
+	if err := WriteNamed(b); err != nil {
+		t.Fatalf("WriteNamed = %v, want the missing directories created", err)
 	}
-	if got, err := Read(); err != nil || !got.Same(b) {
+	if got, err := ReadNamed(b.Name); err != nil || !got.Same(b) {
 		t.Fatalf("binding = %+v %v", got, err)
 	}
 }
@@ -128,9 +128,9 @@ func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { overrideCheckedHook = nil })
-	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}
-	if err := Write(b); err == nil {
-		t.Fatal("Write followed a symlink swapped in after the check")
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s", Name: "claude-1"}
+	if err := WriteNamed(b); err == nil {
+		t.Fatal("WriteNamed followed a symlink swapped in after the check")
 	}
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Fatalf("created %v under the link's target", entries)
@@ -141,8 +141,8 @@ func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvPath, filepath.Join(shared, "remote", "binding.json"))
-	if err := Write(b); err == nil {
-		t.Fatal("Write created the binding below a world-writable directory")
+	if err := WriteNamed(b); err == nil {
+		t.Fatal("WriteNamed created the binding below a world-writable directory")
 	}
 }
 
@@ -175,7 +175,15 @@ func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {
 // (audit 2026-11-10).
 func TestWriteSessionNeverTakesTheLegacyName(t *testing.T) {
 	t.Setenv(EnvPath, filepath.Join(canonicalTempDir(t), "remote", "binding.json"))
-	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s-legacy"}); err != nil {
+	// The single legacy binding, as an older binary wrote it.
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"root":"/r","target":"claude:1","native_session":"s-legacy"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	b := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude"}
