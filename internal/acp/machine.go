@@ -300,13 +300,15 @@ func (s *Server) call(args ...string) ([]byte, error) {
 	return machineCall(ctx, s.cfg.PostTimeout, args...)
 }
 
-// machineTick runs every machineScanInterval in the worker that leads the
-// machine identity, until ctx ends. It writes the marker first, before any
-// relay call, then applies reset requests, retires the records of bindings
-// that are gone, provisions the live sessions, checks the hooks in their
-// Claude settings files, and every lateReplyInterval works through the
-// retired store.
-func (s *Server) machineTick(ctx context.Context, now time.Time) {
+// machineTick runs in the worker that leads the machine identity, until
+// ctx ends. It writes the marker first, before any relay call, then applies
+// reset requests, retires the records of bindings that are gone, provisions
+// the live sessions, checks the hooks in their Claude settings files, and
+// every lateReplyInterval works through the retired store. Its pace asks
+// for the next tick in machineScanInterval while a record is set up or a
+// reset waits, at a record's retry time, and else on a change to the
+// bindings, the records or a watched settings file.
+func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 	s.machine.ctx.Store(&ctx)
 	// A daemon seen gone counts only on consecutive ticks that judge it,
 	// and no daemon answer outlives the tick that asked it.
@@ -314,7 +316,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 	s.machine.goneDaemons = nil
 	s.appServers.Store(nil)
 	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
-		return
+		return pace{next: now.Add(machineScanInterval)}
 	}
 	if due(s.machine.marked, lateReplyInterval, now) {
 		dir := s.agentMarkerDir(machineName)
@@ -324,30 +326,76 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
 	if buzzRelayKey == "" || buzzOwner == "" {
-		return
+		return pace{}
 	}
+	p.watch = s.sessionWatch()
 	s.appServers.Store(s.judgeAppServers(newAppServerView(), gone))
-	s.applyResets(now)
+	if s.applyResets(now) {
+		p.due(now.Add(machineScanInterval))
+	}
 	s.retireGone(now)
 	s.reattach(now)
 	all, err := s.snapshot().list()
 	if err == nil {
 		for _, b := range all {
 			if s.stopped() {
-				return
+				return p
 			}
 			if s.provisionable(b) {
 				s.provision(b, now)
+			} else if s.awaitsThread(b) {
+				p.due(now.Add(machineScanInterval))
 			}
 		}
 	}
 	if err == nil && !s.stopped() {
 		s.watchHooks(all)
+		for path := range s.machine.settings {
+			p.watch = append(p.watch, path)
+		}
 	}
 	if !s.stopped() && due(s.machine.swept, lateReplyInterval, now) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
+	for _, r := range s.snapshot().records {
+		if at, ok := recordDue(r, now); ok {
+			p.due(at)
+		}
+	}
+	return p
+}
+
+// recordDue is when the slot record r needs its next step: at once while
+// it is set up or retired, at its retry time while it waits on one; ok is
+// false for an active record and one that is never tried again.
+func recordDue(r channelRecord, now time.Time) (at time.Time, ok bool) {
+	switch {
+	case r.Pending:
+	case r.State == channelActive:
+		return time.Time{}, false
+	case r.State == channelFailed && (r.Doubted || r.Creates >= channelCreateTries):
+		return time.Time{}, false
+	case r.State == channelFailed, r.State == channelUncertain:
+		if last, err := time.Parse(time.RFC3339, r.LastTry); err == nil {
+			return last.Add(channelRetryGap), true
+		}
+	}
+	return now.Add(machineScanInterval), true
+}
+
+// awaitsThread reports whether b is a Codex app-server session that may
+// become live with no change on disk: its thread is not judged loaded or
+// ended yet, and no record of this agent serves it.
+func (s *Server) awaitsThread(b binding.Binding) bool {
+	if b.AppServer.Thread == "" || binding.ValidName(b.Name) != nil {
+		return false
+	}
+	if state, _ := s.liveness(b); state != binding.Unknown {
+		return false
+	}
+	r, ok := s.snapshot().slot(b.Name)
+	return !ok || r.State != channelActive
 }
 
 // machineState is the machine worker's own state: its context, pacing,
@@ -1127,31 +1175,37 @@ type resetRequest struct {
 }
 
 // applyResets retires each record named by a reset request whose reg still
-// matches it. The next provisioning makes a new record with a new reg; the
+// matches it, and reports whether a request stays. The next provisioning makes a new record with a new reg; the
 // retired one keeps being reconciled and archived, so a late channel of an
 // uncertain create is archived as an orphan. A request is dropped once it is
 // applied or names no current record; one whose request or record cannot be
 // read, or whose retirement failed, stays for the next scan.
-func (s *Server) applyResets(now time.Time) {
+func (s *Server) applyResets(now time.Time) (left bool) {
 	matches, _ := filepath.Glob(filepath.Join(s.channelDir(), "*.reset"))
 	for _, path := range matches {
 		name := strings.TrimSuffix(filepath.Base(path), ".reset")
 		var req resetRequest
 		raw, err := readSmallRegular(path)
 		if err != nil || json.Unmarshal(raw, &req) != nil {
+			left = true
 			continue
 		}
 		r, found, err := loadChannelRecord(s.slotPath(name))
 		switch {
 		case err != nil:
+			left = true
 			continue
 		case found && r.Reg == req.Reg && r.State != channelRetired:
 			if !s.retire(r, retiredReset, now) {
+				left = true
 				continue
 			}
 		}
-		_ = os.Remove(path)
+		if os.Remove(path) != nil {
+			left = true
+		}
 	}
+	return left
 }
 
 // channelRoute returns the active record of channel under this agent's own

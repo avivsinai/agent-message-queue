@@ -96,51 +96,37 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	s.late.kick = kick
 	s.mu.Unlock()
 	done, quit := make(chan struct{}), make(chan struct{})
-	// A machine agent's leader reads the bindings every machineScanInterval
-	// in its own worker, so a new session gets its channel without waiting
-	// behind the sweep's posts. That one worker makes every relay call of
-	// the machine lifecycle, one at a time. Stop cancels its context: a call
-	// in flight is cut off (an unknown outcome), and no new step starts.
+	// A machine agent's leader reads the bindings in its own worker, so a
+	// new session gets its channel without waiting behind the sweep's posts.
+	// That one worker makes every relay call of the machine lifecycle, one
+	// at a time. Stop cancels its context: a call in flight is cut off (an
+	// unknown outcome), and no new step starts.
 	machineDone := make(chan struct{})
 	machineCtx, cancelMachine := context.WithCancel(context.Background())
 	if s.cfg.Machine {
-		go func() {
-			defer close(machineDone)
-			tick := time.NewTicker(machineScanInterval)
-			defer tick.Stop()
-			for {
-				s.machineTick(machineCtx, time.Now())
-				select {
-				case <-quit:
-					return
-				case <-tick.C:
-				}
-			}
-		}()
+		go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval), func(now time.Time) pace {
+			return s.machineTick(machineCtx, now)
+		})
 	} else {
 		close(machineDone)
 	}
-	// The dialogs of a machine agent or a pinned agent are posted at the
-	// same pace in a worker of their own, so a dialog never waits behind the
-	// sweep or the machine lifecycle, and neither waits behind a dialog.
+	// The dialogs of a machine agent or a pinned agent are posted in a
+	// worker of their own, so a dialog never waits behind the sweep or the
+	// machine lifecycle, and neither waits behind a dialog. A pinned agent's
+	// worker passes every machineScanInterval.
 	dialogDone := make(chan struct{})
 	if s.dialogPin() != "" {
 		s.dialogs.quit = quit
-		go func() {
-			defer close(dialogDone)
-			tick := time.NewTicker(machineScanInterval)
-			defer tick.Stop()
-			for {
-				if s.dialogLead() {
-					s.dialogTick(time.Now())
-				}
-				select {
-				case <-quit:
-					return
-				case <-tick.C:
-				}
+		wake := polling("dialog", machineScanInterval)
+		if s.cfg.Machine {
+			wake = newWakeup("dialog", machineScanInterval)
+		}
+		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
+			if !s.dialogLead() {
+				return pace{next: now.Add(machineScanInterval)}
 			}
-		}()
+			return s.dialogTick(now)
+		})
 	} else {
 		close(dialogDone)
 	}
@@ -149,21 +135,12 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	mirrorDone := make(chan struct{})
 	if s.cfg.Machine {
 		s.mirrors.quit = quit
-		go func() {
-			defer close(mirrorDone)
-			tick := time.NewTicker(mirrorInterval)
-			defer tick.Stop()
-			for {
-				if s.mirrorLead() {
-					s.mirrorTick(time.Now())
-				}
-				select {
-				case <-quit:
-					return
-				case <-tick.C:
-				}
+		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval), func(now time.Time) pace {
+			if !s.mirrorLead() {
+				return pace{next: now.Add(mirrorInterval)}
 			}
-		}()
+			return s.mirrorTick(now)
+		})
 	} else {
 		close(mirrorDone)
 	}
@@ -207,6 +184,19 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		if s.late.cursor != nil {
 			_ = s.late.cursor.Close()
 			s.late.cursor = nil
+		}
+	}
+}
+
+// paced runs pass until quit closes, each pass when wake lets it, then
+// closes done.
+func (s *Server) paced(quit <-chan struct{}, done chan<- struct{}, wake *wakeup, pass func(time.Time) pace) {
+	defer close(done)
+	defer wake.close()
+	for {
+		started := time.Now()
+		if !wake.wait(quit, started, pass(started)) {
+			return
 		}
 	}
 }

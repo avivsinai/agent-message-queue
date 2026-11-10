@@ -214,8 +214,12 @@ const (
 // serves, newest first, reads the owner's reactions on them, and edits the
 // posts of dialogs that were resolved. A dialog whose seam process is gone
 // expires. Resolved dialogs are dropped after dialogKeep, and the dialogs of
-// a binding that is gone expire and are removed.
-func (s *Server) dialogTick(now time.Time) {
+// a binding that is gone expire and are removed. Its pace asks for the next
+// tick in machineScanInterval while a binding is not quiet (an open dialog,
+// a post to edit) or a gone binding's seam may still read, at the earliest
+// quiet binding's due time, and else on a change to the bindings, the
+// records or a served binding's dialogs.
+func (s *Server) dialogTick(now time.Time) (p pace) {
 	type scope struct {
 		t     dialogTarget
 		dir   string
@@ -231,9 +235,10 @@ func (s *Server) dialogTick(now time.Time) {
 	var scopes []scope
 	var steps []step
 	served := map[string]bool{}
-	for _, t := range s.dialogTargets() {
+	targets := s.dialogTargets()
+	for _, t := range targets {
 		if s.dialogStopped() {
-			return
+			return p
 		}
 		served[t.name] = true
 		if s.dialogsQuiet(t.name, now) {
@@ -264,13 +269,13 @@ func (s *Server) dialogTick(now time.Time) {
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].req.OpenedAt.After(steps[j].req.OpenedAt) })
 	for _, st := range steps {
 		if s.dialogStopped() {
-			return
+			return p
 		}
 		s.dialogStep(st.t, st.dir, st.req, now)
 	}
 	for _, sc := range scopes {
 		if s.dialogStopped() {
-			return
+			return p
 		}
 		closed := s.dialogClose(sc.t.name, sc.dir, sc.open, now)
 		due := s.pruneDialogs(sc.t.name, sc.dir, now)
@@ -278,9 +283,29 @@ func (s *Server) dialogTick(now time.Time) {
 			s.markDialogsQuiet(sc.t.name, sc.dir, sc.key, earliest(due, now.Add(sessionViewReconcile)))
 		}
 	}
-	if !s.dialogStopped() {
-		s.dropGoneDialogs(served, now)
+	if s.dialogStopped() {
+		return p
 	}
+	if s.dropGoneDialogs(served, now) {
+		p.due(now.Add(machineScanInterval))
+	}
+	p.watch = s.sessionWatch()
+	root, err := dialog.Root()
+	if err == nil {
+		p.watch = append(p.watch, root)
+	}
+	for _, t := range targets {
+		if q, ok := s.dialogs.quiet[t.name]; ok {
+			p.due(q.until)
+		} else {
+			p.due(now.Add(machineScanInterval))
+		}
+		if err == nil {
+			p.watch = append(p.watch, filepath.Join(root, t.name, "requests"), filepath.Join(root, t.name, "resolved"))
+		}
+		p.watch = append(p.watch, s.dialogPostDir(t.name))
+	}
+	return p
 }
 
 // dialogQuiet is a binding whose dialogs need nothing until key changes or
@@ -441,11 +466,13 @@ func (s *Server) live(b binding.Binding) bool {
 // machineScanInterval ago, so one that just ended is dropped a tick later),
 // edits their posts, and removes the binding's dialogs once their
 // seams left (seamsLeft). A machine
-// agent does this for every binding, a pinned agent for its own.
-func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) {
+// agent does this for every binding, a pinned agent for its own. waiting
+// reports whether a gone binding's dialogs stay for a seam that may still
+// read them.
+func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting bool) {
 	root, err := dialog.Root()
 	if err != nil {
-		return
+		return false
 	}
 	var names []string
 	if s.cfg.Machine {
@@ -487,11 +514,14 @@ func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) {
 			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
 		}
 		s.dialogClose(name, dir, nil, now)
-		if seamsLeft(dir, now) {
-			_ = os.RemoveAll(dir)
-			_ = os.RemoveAll(s.dialogPostDir(name))
+		if !seamsLeft(dir, now) {
+			waiting = true
+			continue
 		}
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(s.dialogPostDir(name))
 	}
+	return waiting
 }
 
 // seamGrace is how long a resolved dialog's directory stays while its seam
