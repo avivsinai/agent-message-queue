@@ -231,7 +231,9 @@ promotes `committed` over a torn tail, a bare newline first terminates the
 fragment and the record lands on its own line.
 
 **Courier batching.** A refused transfer (`uncertain` history, terminal
-rejection, or conflict) is skipped, not batch-fatal. Envelopes behind it still
+rejection, conflict, or an envelope that fails verification, such as one
+signed by a generation a trust rotation retired) is skipped, not
+batch-fatal. Envelopes behind it still
 apply and ACK. The refusal appears in `PollResult.Refused`, which the CLI
 serializes to the operator on every run with the ledger's unresolved-transfer
 diagnostics.

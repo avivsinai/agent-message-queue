@@ -505,7 +505,14 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 			return result, fmt.Errorf("authenticate source host %q: %w", env.SourceHost, err)
 		}
 		if err := bridge.VerifyEnvelope(env, pub, generation); err != nil {
-			return result, fmt.Errorf("authenticate transfer %s: %w", env.TransferID, err)
+			// An envelope that does not verify (a generation retired by a
+			// trust rotation, or a forged signature) is never applied or
+			// ACKed, and it does not stop the envelopes behind it.
+			result.Refused = append(result.Refused, RefusedTransfer{
+				TransferID: env.TransferID,
+				Reason:     fmt.Sprintf("authenticate transfer: %v", err),
+			})
+			continue
 		}
 		applyOutcome, err := bridge.ApplyWithLedger(ledger, root, c.localHost, c.localAgent, env)
 		if err != nil {
