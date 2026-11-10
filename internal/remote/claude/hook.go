@@ -37,61 +37,14 @@ const stopHookMarker = "AMQ_STOP_HOOK=1 "
 // stopHookType is the hook event name in settings.json.
 const stopHookType = "Stop"
 
-// InstallStopHook adds the fail-open receiver to the Stop hook chain in
-// the user settings.json in the Claude config directory. Idempotent: the same entry is left untouched,
-// and a marked entry with another command (an older binary) is replaced.
-// The settings leaf must be a
-// regular file (lstat rule — a directory or symlink is refused); the write
-// is fsq atomic-replace.
-//
-// Claude Code's durable hook scopes are the user, project, local, and
-// managed settings files. None of them is a single session: session hooks
-// exist only in memory inside that process
-// (https://code.claude.com/docs/en/hooks). The bound session can live in
-// any project, so the installer keeps this user-level hook. The receiver
-// returns before any write unless that session is attached or the binding
-// names it. That limits who writes, not how many bytes a session's marker
-// may hold: the file is one appended line per turn, and it is removed when
-// the attachment unsubscribes. User off removes only the Buzz binding.
-//
-// The command starts amq-remote only when a state the receiver reads
-// exists: AMQ_REMOTE_BINDING, a binding file, a binding in the bindings
-// directory (its tombstones are none), or the attachment sentinels.
-// Everywhere else the hook costs one sh.
-func InstallStopHook(home, bin string) error {
-	_, err := InstallStopHookAt(home, SettingsPath(home), bin)
-	return err
-}
-
-// InstallStopHookAt is InstallStopHook for the settings file settings, and
-// reports whether it changed the file.
-func InstallStopHookAt(home, settings, bin string) (bool, error) {
-	return hookfile.Replace(settings, stopHook, stopHookEntry(home, bin))
-}
-
-// UninstallStopHook removes marked entries from the Stop chain. When no
-// marked entry exists the file is untouched (no rewrite, no mtime churn).
-func UninstallStopHook(home string) error {
-	return hookfile.Remove(SettingsPath(home), stopHook)
-}
-
 var (
 	stopHook       = hookfile.Spec{Event: stopHookType, Marker: stopHookMarker}
 	permissionSpec = hookfile.Spec{Event: permissionHookType, Marker: permissionHookMarker}
 )
 
-// InstallPermissionHook adds the PermissionRequest hook that carries tool
-// dialogs to Buzz: one entry with no matcher (every tool), marked
-// AMQ_APPROVAL_HOOK=1, with the timeout permissionHookTimeout. bin must be
-// absolute: an app-launched session's PATH may not hold it. A marked entry
-// with another command is replaced; the same one is kept.
-func InstallPermissionHook(home, bin string) error {
-	_, err := InstallPermissionHookAt(home, SettingsPath(home), bin)
-	return err
-}
-
-// InstallPermissionHookAt is InstallPermissionHook for the settings file
-// settings, and reports whether it changed the file.
+// InstallPermissionHookAt adds the PermissionRequest hook to the settings
+// file settings with no opt-in record, as a binary before the opt-in did,
+// and reports whether it changed the file. bin must be absolute.
 func InstallPermissionHookAt(home, settings, bin string) (bool, error) {
 	if !filepath.IsAbs(bin) {
 		return false, fmt.Errorf("the hook binary %q must be an absolute path", bin)
@@ -116,11 +69,6 @@ func UninstallCommandHooks(home, marker string, events []string) error {
 // chain of the user settings file. A missing file lists none.
 func MarkedHookCommands(home, event, marker string) ([]string, error) {
 	return hookfile.MarkedHookCommandsAt(SettingsPath(home), event, marker)
-}
-
-// UninstallPermissionHook removes only the marked PermissionRequest entry.
-func UninstallPermissionHook(home string) error {
-	return hookfile.Remove(SettingsPath(home), permissionSpec)
 }
 
 // PermissionHookState is StopHookState for the PermissionRequest entry in

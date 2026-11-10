@@ -26,7 +26,7 @@ func TestStopHookStateIsBoundedAndHonorsDisable(t *testing.T) {
 	if err := os.Remove(SettingsPath(home)); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallStopHook(home, "/usr/local/bin/amq-remote"); err != nil {
+	if _, err := OptInStopHook(home, SettingsPath(home), "/usr/local/bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(SettingsPath(home))
