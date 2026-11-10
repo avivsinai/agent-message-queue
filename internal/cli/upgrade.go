@@ -251,7 +251,7 @@ func runManagedUpgradeWithManager(kind update.InstallKind, managerPath string, y
 				return err
 			}
 		}
-		return nil
+		return reportStaleWakesAfterUpgrade()
 	}
 	return fmt.Errorf("%s", remedy)
 }

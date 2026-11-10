@@ -184,6 +184,11 @@ func TestRunUpgradeHomebrewDelegatesWithYes(t *testing.T) {
 	if !strings.Contains(stdout, "Running:") {
 		t.Fatalf("output missing 'Running:' line:\n%s", stdout)
 	}
+	// A delegated upgrade reports live wakes of the previous binary too
+	// (audit 2026-11-10).
+	if !strings.Contains(stdout, upgradeLiveWakePreviousBinaryNote) {
+		t.Fatalf("output missing the previous-binary wake note:\n%s", stdout)
+	}
 	// The Homebrew binary is never overwritten by amq.
 	got, _ := os.ReadFile(bin)
 	if string(got) != "homebrew" {
