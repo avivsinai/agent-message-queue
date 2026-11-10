@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check
+.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check mod-tidy-check check-board-page
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -30,7 +30,8 @@ fmt:
 	$(GOFMT) -w $(GO_FILES)
 
 fmt-check:
-	@test -z "$(shell $(GOFMT) -l $(GO_FILES))"
+	@out="$$($(GOFMT) -l $(GO_FILES))" || exit 1; \
+		if [ -n "$$out" ]; then echo "gofmt needed:" >&2; echo "$$out" >&2; exit 1; fi
 
 vet:
 	go vet ./...

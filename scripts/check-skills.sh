@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical skills/ must match the .claude, .agents, and .grok skill trees.
+# The .claude, .agents, and .grok skills must be symlinks to the canonical skills/.
 set -euo pipefail
 
 fail() {
@@ -13,9 +13,5 @@ for dest in .claude .agents .grok; do
 		[[ -L "$dest/skills/$skill" ]] || fail "$dest/skills/$skill is not a symlink"
 		[[ "$(readlink "$dest/skills/$skill")" == "../../skills/$skill" ]] || fail "$dest/skills/$skill target wrong"
 	done
-	diff -rq skills/amq-cli "$dest/skills/amq-cli" || fail "amq-cli content mismatch in $dest"
-	diff -rq skills/amq-spec "$dest/skills/amq-spec" || fail "amq-spec content mismatch in $dest"
-	diff -rq skills/amq-remote "$dest/skills/amq-remote" || fail "amq-remote content mismatch in $dest"
-	diff -rq skills/amq-board "$dest/skills/amq-board" || fail "amq-board content mismatch in $dest"
 done
 echo "✓ Skill symlinks valid"

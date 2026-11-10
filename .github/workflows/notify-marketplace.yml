@@ -2,6 +2,7 @@ name: Notify Skills Marketplace
 
 on:
   push:
+    branches: [main]
 
 concurrency:
   group: notify-marketplace-${{ github.sha }}

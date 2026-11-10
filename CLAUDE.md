@@ -27,17 +27,21 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
   Please alone updates the changelog and version metadata from conventional
   squash commits. Push and publication events only reconcile release labels.
   Do not create release branches, tags, or GitHub releases manually.
-- A push to `main` updates the AvivSinai marketplace for `amq-cli` and
-  `amq-spec`.
+- A push to `main` updates this repository's entry in the AvivSinai
+  marketplace.
 - Keep one version across `CHANGELOG.md`, `.release-please-manifest.json`, and
   skill/plugin metadata. After the release PR merges, `release-tag.yml` verifies the exact merged
   release PR, metadata, tests, and embedded versions. A repository-scoped GitHub
-  App creates the immutable tag; `release.yml` publishes GitHub and Homebrew
-  artifacts from that tag. Existing tags can be dispatched again for recovery.
+  App creates the immutable tag; `release.yml` publishes GitHub, Homebrew, and
+  Scoop artifacts from that tag. Existing tags can be dispatched again for
+  recovery.
 - Configure `RELEASE_APP_CLIENT_ID` as a repository variable and
   `RELEASE_APP_PRIVATE_KEY` as a repository secret. The App needs repository
   contents and pull-request write permissions. PR and tag creation fail
-  closed without an App token; the publisher uses the default workflow token.
+  closed without an App token. The publisher uses the default workflow token
+  for the GitHub release and, when `RELEASE_APP_CLIENT_ID` is set, mints an App
+  token for the tap and Scoop repositories, falling back to
+  `HOMEBREW_TAP_GITHUB_TOKEN`. The `skill-publish` job needs `SKILD_AUTH_JSON`.
   Keep App-only tag protection disabled until an App-created release has been
   verified; then permit App tag creation and prohibit updates and deletion.
 - `scripts/codesign-macos.sh` signs every macOS binary with a Developer ID,
@@ -89,8 +93,8 @@ make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
 make lint           # golangci-lint
-make check          # static gates the pre-push hook runs (fmt, vet, lint, docs, skills)
-make ci             # check plus the full test suite and smoke checks (CI runs this)
+make check          # static gates the pre-push hook runs (skills, CLI docs, board page, go.mod tidy, fmt, vet, lint)
+make ci             # check plus tests, smoke, and the contract and hook-env checks (CI runs this)
 make check-skills   # validate canonical and symlinked skill content
 ```
 
@@ -220,14 +224,14 @@ exact flags. This table defines the owning workflow for each surface.
 | Onboarding | `setup`, `launch` | Configure once, then reconcile and print or run the declared launch plan. The [README Getting started](README.md#getting-started) is canonical. |
 | Sessions | `session create`, `session list`, `session resume` | Create explicitly, inspect available sessions, or resume stored conversations. |
 | Shell context | `env`, `who`, `shell-setup`, `completion` | Set or inspect a complete context and configure shell integration. |
-| Messaging | `send`, `reply`, `list`, `read`, `drain`, `thread`, `thread open`, `trace` | Deliver, ingest, inspect, and follow conversations. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. Prefer `drain --include-body` for handoffs. |
+| Messaging | `send`, `reply`, `list`, `read`, `drain`, `thread`, `thread open`, `thread list`, `trace` | Deliver, ingest, inspect, and follow conversations. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. Prefer `drain --include-body` for handoffs. |
 | Delivery proof | `receipts list`, `receipts wait` | Inspect consumer-local `drained` and `dlq` outcomes. |
 | Live waits | `watch`, `monitor` | Wait for arrivals; `monitor` also drains and emits receipts. |
-| Routing | `route explain`, `presence set`, `presence list` | Explain a route and publish or inspect advisory presence. |
+| Routing | `route explain`, `route peers`, `peer pair`, `presence set`, `presence list` | Explain a route, list the project's peers, pair with a peer, and publish or inspect advisory presence. |
 | Health | `doctor`, `cleanup`, `upgrade` | Diagnose, perform explicit safe cleanup (including exact stuck launch journals and one empty agent mailbox), or update the binary. |
-| Wake | `wake`, `wake check`, `wake config`, `wake repair`, `wake recover-owner`, `wake retire` | Notify, inspect capability, change live settings, and make identity-safe lifecycle changes. |
+| Wake | `wake`, `wake check`, `wake config`, `wake repair`, `wake restart`, `wake recover-owner`, `wake retire`, `wake dialog`, `wake install-dialog-hook`, `wake uninstall-dialog-hook` | Notify, inspect capability, change live settings, and make identity-safe lifecycle changes; the dialog commands run and install the wake dialog guard hooks. |
 | DLQ | `dlq list`, `dlq read`, `dlq retry`, `dlq purge` | Inspect and explicitly recover or purge corrupt messages. |
-| Low-level provisioning | `init`, `coop init`, `coop exec` | Create raw queues or enter an agent process. See [COOP.md](COOP.md). |
+| Low-level provisioning | `init`, `coop init`, `coop exec`, `coop install-hooks`, `coop uninstall-hooks`, `coop hook` | Create raw queues, enter an agent process, or install and run the Claude Code co-op hooks. See [COOP.md](COOP.md). |
 | Swarm bridge | `swarm list`, `join`, `leave`, `tasks`, `claim`, `complete`, `fail`, `block`, `bridge` | Interoperate with Claude Code Agent Teams. |
 | Integrations | `integration symphony`, `integration kanban` | Convert external lifecycle events into AMQ messages. See [the adapter contract](docs/adapter-contract.md). |
 
@@ -314,7 +318,7 @@ make check-skills
 ```
 
 Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
-`AMQ_CODEX_LIVE`, `AMQ_TMUX_LIVE`, `AMQ_AGY_LIVE`) skip unless the env is `1`. They are not
+`AMQ_CODEX_LIVE`, `AMQ_TMUX_LIVE`, `AMQ_AGY_LIVE`, `AMQ_WAKE_SELF_UPGRADE_PTY_LIVE`) skip unless the env is `1`. They are not
 part of `make ci`. Commands are in
 [Contributing: live proofs](CONTRIBUTING.md#live-proofs-opt-in).
 
@@ -388,7 +392,8 @@ ships.
 
 ## Skill Development
 
-Canonical skills live in `skills/amq-cli/` and `skills/amq-spec/`.
+Canonical skills live in `skills/amq-board/`, `skills/amq-cli/`,
+`skills/amq-remote/`, and `skills/amq-spec/`.
 `.claude/skills/`, `.agents/skills/`, and `.grok/skills/` are symlinks to those
 directories so local runs use repository changes. Project skills take
 precedence over user installations.

@@ -68,7 +68,7 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race tests (activity)
-        # TestR2NativeEnqueueAndConsumer is a data-race regression: it can
+        # TestNativeEnqueueAndConsumerRunConcurrently is a data-race regression: it can
         # only fail under -race.
         run: go test -race -count=1 ./internal/remote/activity/
       - name: Hook script and wake process tests (serial)
