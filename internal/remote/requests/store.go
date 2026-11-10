@@ -194,9 +194,12 @@ type Store struct {
 	// sweep is the records Record.NeedsSweep selects. compactable is the
 	// records Record.compactCandidate selects, with their UpdatedAt;
 	// compaction reads its candidates from it, so neither set grows with
-	// the tombstones nothing deletes.
+	// the tombstones nothing deletes. indexed is the file name
+	// (<host>/<name>) of every record read or written here, so a listing
+	// can tell the files this store has not read without reading them.
 	sweep       map[Key]struct{}
 	compactable map[Key]string
+	indexed     map[string]struct{}
 	// syncedHosts is the creator hosts whose directory ancestry this process
 	// has synced. The first write to a host syncs it even when the directory
 	// exists, because an earlier process may have created it and died before
@@ -266,7 +269,7 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 // in used, reported by ListWithPoison, skipped. Nothing indexes a poison record that
 // an operator repairs while the companion runs; the next Open does.
 func (s *Store) loadRecords() error {
-	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
+	s.sweep, s.compactable, s.indexed = map[Key]struct{}{}, map[Key]string{}, map[string]struct{}{}
 	var used int64
 	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -316,6 +319,7 @@ func (s *Store) loadRecords() error {
 // The caller holds s.mu, or is Open before the store is shared.
 func (s *Store) indexLocked(rec *Record) {
 	k := keyOf(rec)
+	s.indexed[k.CreatorHost+"/"+k.TargetID+"__"+k.RequestID+recordSuffix] = struct{}{}
 	if rec.NeedsSweep() {
 		s.sweep[k] = struct{}{}
 	} else {
@@ -639,6 +643,80 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 		}
 	}
 	sortRecords(out)
+	return out, poison, nil
+}
+
+// ListReserving returns the records a reservation check needs: the records
+// of the sweep index that match selects, read from disk (every record that
+// is not terminal is among them), and every record file the store has not
+// indexed, read from disk whatever its key: one that did not decode at
+// Open, or one something other than this store wrote after Open. The other
+// records were terminal when this store last read or wrote them, so they
+// are not read. A record that does not read is poison, as in
+// ListWithPoison; a host directory that cannot be listed is an error.
+func (s *Store) ListReserving(match func(Key) bool) ([]*Record, []Poison, error) {
+	base := filepath.Join(s.dir, requestsDir)
+	hosts, err := os.ReadDir(base)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list hosts: %w", err)
+	}
+	var names []string
+	for _, h := range hosts {
+		if !h.IsDir() || !safeSegment(h.Name()) {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(base, h.Name()))
+		if err != nil {
+			return nil, nil, fmt.Errorf("list %s: %w", h.Name(), err)
+		}
+		for _, f := range files {
+			if !f.IsDir() && strings.HasSuffix(f.Name(), recordSuffix) {
+				names = append(names, h.Name()+"/"+f.Name())
+			}
+		}
+	}
+	// persist writes a file and indexes it under mu, so a file the listing
+	// saw is indexed by the time mu is taken here, or was not written here.
+	s.mu.Lock()
+	var keys []Key
+	for k := range s.sweep {
+		if match(k) {
+			keys = append(keys, k)
+		}
+	}
+	unread := names[:0]
+	for _, n := range names {
+		if _, ok := s.indexed[n]; !ok {
+			unread = append(unread, n)
+		}
+	}
+	s.mu.Unlock()
+
+	var out []*Record
+	var poison []Poison
+	for _, k := range keys {
+		rec, exists, err := s.Get(k)
+		if err != nil {
+			p, _ := s.path(k)
+			poison = append(poison, Poison{Key: k, Path: p, Error: err.Error()})
+			continue
+		}
+		if exists {
+			out = append(out, rec)
+		}
+	}
+	for _, n := range unread {
+		host, name, _ := strings.Cut(n, "/")
+		path := filepath.Join(base, host, name)
+		rec, exists, err := s.readRecord(path)
+		if err != nil {
+			poison = append(poison, Poison{Key: keyFromPath(host, name), Path: path, Error: err.Error()})
+			continue
+		}
+		if exists {
+			out = append(out, rec)
+		}
+	}
 	return out, poison, nil
 }
 

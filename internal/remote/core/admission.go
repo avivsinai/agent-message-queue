@@ -486,7 +486,7 @@ func sessionBound(origin map[string]string) bool {
 // included, so all of them count. An unreadable record of this link makes
 // the count undeterminable and fails closed. The caller holds e.mu.
 func (e *Endpoint) linkFullLocked(host string) (bool, error) {
-	recs, poison, err := e.store.ListWithPoison()
+	recs, poison, err := e.store.ListReserving(func(k requests.Key) bool { return k.CreatorHost == host })
 	if err != nil {
 		return false, err
 	}
@@ -520,7 +520,7 @@ func (e *Endpoint) linkFullLocked(host string) (bool, error) {
 // block this target. A ConcurrentSubmitter target holds no reservation:
 // its requests share no native turn. The caller holds e.mu.
 func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
-	recs, poison, err := e.store.ListWithPoison()
+	recs, poison, err := e.store.ListReserving(func(k requests.Key) bool { return k.TargetID == targetID })
 	if err != nil {
 		return false, err
 	}
