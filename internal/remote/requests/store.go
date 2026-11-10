@@ -315,11 +315,16 @@ func (s *Store) loadRecords() error {
 	return nil
 }
 
+// indexName is a record's <host>/<file name> in the indexed set.
+func indexName(k Key) string {
+	return k.CreatorHost + "/" + k.TargetID + "__" + k.RequestID + recordSuffix
+}
+
 // indexLocked reclassifies one record after it was read or durably written.
 // The caller holds s.mu, or is Open before the store is shared.
 func (s *Store) indexLocked(rec *Record) {
 	k := keyOf(rec)
-	s.indexed[k.CreatorHost+"/"+k.TargetID+"__"+k.RequestID+recordSuffix] = struct{}{}
+	s.indexed[indexName(k)] = struct{}{}
 	if rec.NeedsSweep() {
 		s.sweep[k] = struct{}{}
 	} else {
@@ -1013,6 +1018,11 @@ func (s *Store) settleLocked(key Key, delta int64, rec *Record) {
 	if rec == nil {
 		cur, ok, err := s.Get(key)
 		if err != nil {
+			// The file's record is unknown: the sweep reads it, and a
+			// reservation check reads it as a file this store has not
+			// indexed, until a later write or Open classifies it.
+			s.sweep[key] = struct{}{}
+			delete(s.indexed, indexName(key))
 			return
 		}
 		if !ok {
