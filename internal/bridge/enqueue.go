@@ -143,6 +143,14 @@ func claimDestSidecar(target, destAlias string) error {
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("stat spool message: %w", statErr)
 	}
+	// The courier archives a sent message before it removes the sidecar, so
+	// a sidecar beside an archived copy is a sent message, not a retry.
+	sent := filepath.Join(filepath.Dir(filepath.Dir(target)), "sent", filepath.Base(target))
+	if _, statErr := os.Lstat(sent); statErr == nil {
+		return fmt.Errorf("spool message %q was already sent", target)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat sent archive: %w", statErr)
+	}
 	return nil
 }
 
