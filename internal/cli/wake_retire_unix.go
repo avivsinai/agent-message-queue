@@ -860,12 +860,12 @@ func validateWakeLockStaleRemovalAt(
 	if wakeLockHasOwnerMarkers(inspection) {
 		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
-	if err := validateWakeLockRepairable(inspection); err == nil {
+	// A stale lock is removable whatever its stale reason (acquisition and
+	// doctor fix depend on it); any other status must pass the repair rule.
+	if inspection.Status == wakeLockStale {
 		return nil
-	} else if inspection.Status != wakeLockStale {
-		return err
 	}
-	return nil
+	return validateWakeLockRepairable(inspection)
 }
 
 func wakeRetireLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {

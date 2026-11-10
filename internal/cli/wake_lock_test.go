@@ -157,3 +157,22 @@ func TestInspectWakeLockAcceptsLegacyDarwinBootIDForProvenWake(t *testing.T) {
 		t.Fatalf("inspection = status %q reason %q confirmed %v", inspection.Status, inspection.Reason, inspection.IdentityConfirmed)
 	}
 }
+
+// A dead wake whose PID was reused is repairable; a lock naming another queue is not (audit 2026-11-10).
+func TestValidateWakeLockRepairableStaleReasons(t *testing.T) {
+	for _, tc := range []struct {
+		reason  string
+		wantErr bool
+	}{
+		{"pid not running", false},
+		{"process start time mismatch", false},
+		{"boot id mismatch", false},
+		{wakeLockReasonRootMismatch, true},
+		{wakeLockReasonAgentMismatch, true},
+	} {
+		err := validateWakeLockRepairable(wakeLockInspection{Status: wakeLockStale, Reason: tc.reason})
+		if (err != nil) != tc.wantErr {
+			t.Errorf("reason %q: err=%v wantErr=%v", tc.reason, err, tc.wantErr)
+		}
+	}
+}
