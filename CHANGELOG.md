@@ -8,6 +8,72 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.139.0](https://github.com/avivsinai/agent-message-queue/compare/v0.138.0...v0.139.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **launchapi:** remove the Inspect, Focus and Close API
+
+### refactor
+
+* **launchapi:** remove the Inspect, Focus and Close API ([fe726c1](https://github.com/avivsinai/agent-message-queue/commit/fe726c149522fffae4ea7933e05ba47ddc431a67))
+
+
+### Features
+
+* **pi:** the reference bridge applies an exact cancel (revision 5) ([#1439](https://github.com/avivsinai/agent-message-queue/issues/1439)) ([19766f4](https://github.com/avivsinai/agent-message-queue/commit/19766f4000fb0286146844d45f9c8a4b25243f30))
+* **remote:** the owner can release a stuck uncertain Claude request ([#1452](https://github.com/avivsinai/agent-message-queue/issues/1452)) ([7ee2aaf](https://github.com/avivsinai/agent-message-queue/commit/7ee2aaf5b0faf749fd58e3222c3a607a1baf63a8))
+
+
+### Bug Fixes
+
+* **acp:** a steered command no longer blocks the reader; races closed ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **ci:** release-tag parses again, and CI checks workflow syntax ([#1453](https://github.com/avivsinai/agent-message-queue/issues/1453)) ([5b73090](https://github.com/avivsinai/agent-message-queue/commit/5b7309018541ed1496f9e55d7bf0d3490b9c52c1))
+* **acp:** the machine agent never rewrites Claude settings ([#1446](https://github.com/avivsinai/agent-message-queue/issues/1446)) ([631cce1](https://github.com/avivsinai/agent-message-queue/commit/631cce13baba1f291dc17f3a7acabe4a41db3eda))
+* **board:** a removed worktree or too many repos no longer hides work ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **board:** every thread, less re-reading, serves stay discoverable ([#1443](https://github.com/avivsinai/agent-message-queue/issues/1443)) ([fa5d448](https://github.com/avivsinai/agent-message-queue/commit/fa5d448f3353073711d71252c8f8580f9af20c1f))
+* **bridge:** a crashed v3 transfer no longer blocks its peer ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **bridge:** crash-safe enqueue, one identifier grammar, no wake wait ([#1444](https://github.com/avivsinai/agent-message-queue/issues/1444)) ([f9207c4](https://github.com/avivsinai/agent-message-queue/commit/f9207c4a304199fe76842a12f4eeae7ea9ecd8be))
+* **cli:** --strict applies to receipts and thread ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **cleanup:** remaining safe audit items, cleanup, wake, trace, upgrade, launch ([#1449](https://github.com/avivsinai/agent-message-queue/issues/1449)) ([cd86612](https://github.com/avivsinai/agent-message-queue/commit/cd86612d030f131ba24150410f83e3dff6bfe4ec))
+* **cli:** a prompt nobody answered is never taken as yes ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **cli:** commands return the documented exit codes ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **cli:** doctor names a malformed .amqrc and reads the base config ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **cli:** list --session with an unknown session is refused ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **dlq:** a missing id leaves no lock file; purge removes the lock ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **doctor:** --fix-wake-locks reads the base config for a session ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **fsq:** DLQ directories are durable before the source is removed ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **fsq:** mailbox repair flushes directories on Windows ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **integration:** symphony init keeps other hook keys ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **keepalive:** bounded stream logs, stable roots, no app start ([#1442](https://github.com/avivsinai/agent-message-queue/issues/1442)) ([3548162](https://github.com/avivsinai/agent-message-queue/commit/3548162a53d377194013348b17da2fe3795e77ec))
+* **launch:** a crashed tmux join recovers and keeps its kept seats ([fe726c1](https://github.com/avivsinai/agent-message-queue/commit/fe726c149522fffae4ea7933e05ba47ddc431a67))
+* **launch:** any Cursor build that passes the probe starts fresh ([fe726c1](https://github.com/avivsinai/agent-message-queue/commit/fe726c149522fffae4ea7933e05ba47ddc431a67))
+* **launch:** Apply keeps its result when the lease release fails ([fe726c1](https://github.com/avivsinai/agent-message-queue/commit/fe726c149522fffae4ea7933e05ba47ddc431a67))
+* **launch:** on_live keep relaunches a closed bound session ([fe726c1](https://github.com/avivsinai/agent-message-queue/commit/fe726c149522fffae4ea7933e05ba47ddc431a67))
+* **launch:** Reclaim survives a device renumbering ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **remote:** Claude dialogs close without guessing the call; cheaper admission ([#1450](https://github.com/avivsinai/agent-message-queue/issues/1450)) ([6f29cd2](https://github.com/avivsinai/agent-message-queue/commit/6f29cd2ffc0fc0bcbc54b8bed3d6590d6ced4ed9))
+* **remote:** pi adapter keeps unfinished runs after a restart ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **remote:** refusals reach the caller and link state survives a crash ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **remote:** share --dry-run makes the same decisions as the real run ([#1448](https://github.com/avivsinai/agent-message-queue/issues/1448)) ([71ef0f4](https://github.com/avivsinai/agent-message-queue/commit/71ef0f47540969a96cde708b16b4900abf46decc))
+* **remote:** up respawns a crashed serve, oversize replies, outbox prune ([#1445](https://github.com/avivsinai/agent-message-queue/issues/1445)) ([174f087](https://github.com/avivsinai/agent-message-queue/commit/174f08710987c2a06189a52dfe08acfaea7fad45))
+* **route:** source ownership compares directory identity ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **route:** the root walk stops before the home directory ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **update:** a started update check lands before the command exits ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+* **upgrade:** --all skips companions that are already current ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+
+
+### Performance Improvements
+
+* **acp:** the machine agent works on file changes, not every 2 s ([#1454](https://github.com/avivsinai/agent-message-queue/issues/1454)) ([01e9acb](https://github.com/avivsinai/agent-message-queue/commit/01e9acb8a013038da5a342a1c4a5efa2a202b0a4))
+* **wake:** a failed command write frees its event key ([54a7dcc](https://github.com/avivsinai/agent-message-queue/commit/54a7dcc5786d6469026fa4eb11de48409d5c8ea8))
+* **wake:** a failed interrupt-key injector runs once per cohort ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **wake:** a stale dialog temp file no longer keeps the hook gate ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **wake:** check schema 2 reports started_at and baseline_at ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **wake:** commands on an existing wake create no mailbox ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **wake:** repair accepts a dead wake whose pid was reused ([d11f576](https://github.com/avivsinai/agent-message-queue/commit/d11f576348b83ac6275c3752a0c0fcc0c1964530))
+* **wake:** the notification journal keeps rotating when it is full ([7ee9c46](https://github.com/avivsinai/agent-message-queue/commit/7ee9c46f7dbc9db8aa19da45a66a3ec6863e7ebf))
+
 ## [0.138.0](https://github.com/avivsinai/agent-message-queue/compare/v0.137.9...v0.138.0) (2026-11-10)
 
 
