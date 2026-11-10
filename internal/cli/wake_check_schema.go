@@ -220,6 +220,8 @@ type wakeCheckWakeV2 struct {
 	OwnerBound   bool    `json:"owner_bound"`
 	Generation   *string `json:"generation"`
 	TargetDigest *string `json:"target_digest"`
+	StartedAt    *string `json:"started_at"`
+	BaselineAt   *string `json:"baseline_at"`
 }
 
 type wakeCheckImageV2 struct {
@@ -303,6 +305,8 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			OwnerBound:   decision.Wake.OwnerBound,
 			Generation:   decision.Wake.Generation,
 			TargetDigest: decision.Wake.TargetDigest,
+			StartedAt:    decision.Wake.StartedAt,
+			BaselineAt:   decision.Wake.BaselineAt,
 		},
 		Image: wakeCheckImageV2{
 			Running: wakeCheckImageEvidenceV2(decision.Image.Running),

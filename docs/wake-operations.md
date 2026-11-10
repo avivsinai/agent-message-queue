@@ -38,7 +38,8 @@ its startup baseline snapshot) when they exist (omitted when empty). Schema 2
 is explicit with `--json-schema=2` (which requires `--json`). It gives a closed
 action kind, actor, reason code, and an argv command object for a directly
 executable action or a safe operator diagnostic. Missing evidence is JSON
-`null`, including `wake.generation` and `wake.target_digest`;
+`null`, including `wake.generation`, `wake.target_digest`, `wake.started_at`
+(the lock's start time), and `wake.baseline_at` (as in schema 1);
 `image.status="unknown"` is a real classification, not an error. In doctor
 schema 2, each wake-lock entry carries the same decision under `wake_check`.
 
