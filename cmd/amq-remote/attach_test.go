@@ -1073,9 +1073,9 @@ func TestDetectHarnessFindsCodexSession(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			codexLoadedThreads = func(string) ([]string, error) { return row.loaded, nil }
-			ancestorPIDs = func(pid int) ([]int, error) {
-				if row.daemon || pid != os.Getpid() {
-					t.Fatalf("ancestor lookup for pid %d with daemon=%v", pid, row.daemon)
+			ancestorPIDs = func() ([]int, error) {
+				if row.daemon {
+					t.Fatalf("ancestor lookup with daemon=%v", row.daemon)
 				}
 				return []int{parent.PID}, nil
 			}
