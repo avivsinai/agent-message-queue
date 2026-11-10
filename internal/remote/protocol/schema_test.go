@@ -147,6 +147,14 @@ func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 			"state": "failed", "code": "native_error", "native_run": "run_1",
 			"observed_at": "2026-09-01T00:00:00Z",
 		}},
+		// The schema refused the revision a release publishes to its Buzz or
+		// link origin (audit 2026-11-10).
+		{"failed-released", map[string]any{
+			"schema": SchemaRequest, "request_ref": ref, "request_id": "11111111-1111-4111-8111-111111111101",
+			"creator_host": "hostA", "target_id": "t_fake1", "epoch": "e_1", "revision": 5,
+			"state": "failed", "code": string(CodeReleasedByOwner),
+			"observed_at": "2026-09-01T00:00:00Z",
+		}},
 	}
 	// PR #919 review: the schema refused approval snapshots because the test
 	// built its own maps. Validate one encoded from the real type.

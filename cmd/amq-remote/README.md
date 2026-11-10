@@ -623,6 +623,8 @@ one whose target is not attached. Only the Claude Code adapter can forget a
 run, so only Claude Code targets support it; Codex, pi and every other
 adapter refuse it with `unsupported`. It acts on a request of any origin, a Buzz or link
 request included. Buzz has no release command; `/cancel` stays as it is. A
+released Buzz request's result row reads `failed (released_by_owner)` and
+says that the prompt may still run in the session with no reply. A
 successful release exits 0.
 
 ### `attach`, `detach`, `bindings`, `channel reset`

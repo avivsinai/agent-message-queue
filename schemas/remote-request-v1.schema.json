@@ -78,7 +78,8 @@
         "attachment_lost",
         "result_expired",
         "session_changed",
-        "consent_invalid"
+        "consent_invalid",
+        "released_by_owner"
       ]
     },
     "input_digest": {
