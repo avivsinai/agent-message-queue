@@ -206,7 +206,7 @@ func openImageEvidenceFile(path string) (*os.File, os.FileInfo, error) {
 	if before.Mode().Perm()&0o111 == 0 {
 		return nil, nil, fmt.Errorf("wake image is not executable")
 	}
-	if err := validateImagePathOwnership("wake image", path, before); err != nil {
+	if err := ValidatePathOwnership("wake image", path, before); err != nil {
 		return nil, nil, err
 	}
 	closeOnError = false

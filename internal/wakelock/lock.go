@@ -200,7 +200,7 @@ func ValidateFile(path string, info os.FileInfo) error {
 	if got := info.Mode().Perm(); got != 0o600 && got != OwnerFileMode {
 		return fmt.Errorf("wake lock %s mode is %o, want 0600 or 0400", path, got)
 	}
-	return ValidatePathOwnership("wake lock", path, info)
+	return selfupgrade.ValidatePathOwnership("wake lock", path, info)
 }
 
 // ValidateFormat checks the lock envelope against its file mode: mode 0400 is

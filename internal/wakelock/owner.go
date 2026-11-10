@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 const maxOwnerIdentityTokenBytes = 256
@@ -142,16 +144,15 @@ func validPositiveDecimal(value string) bool {
 // ValidatePathOwnership refuses a file that group or others can write or that
 // another user owns.
 func ValidatePathOwnership(label, path string, info os.FileInfo) error {
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s %s is group/world-writable", label, path)
-	}
-	ownerUID, ownerOK := FileOwnerUID(info)
-	currentUID, currentOK := CurrentUID()
-	if ownerOK && currentOK && ownerUID != currentUID {
-		return fmt.Errorf("%s %s is owned by uid %d, want current uid %d", label, path, ownerUID, currentUID)
-	}
-	return nil
+	return selfupgrade.ValidatePathOwnership(label, path, info)
 }
+
+// CurrentUID reports the effective uid; false means the platform cannot tell.
+func CurrentUID() (int, bool) { return selfupgrade.CurrentUID() }
+
+// FileOwnerUID reports the owner uid of info; false means the platform cannot
+// tell.
+func FileOwnerUID(info os.FileInfo) (int, bool) { return selfupgrade.FileOwnerUID(info) }
 
 // ValidStateDigest reports whether value is a lowercase sha256: digest.
 func ValidStateDigest(value string) bool {
