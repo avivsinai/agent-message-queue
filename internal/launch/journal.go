@@ -61,6 +61,9 @@ type LaunchJournal struct {
 	Binding          *BindingRecord         `json:"binding,omitempty"`
 	JoinBinding      *BindingRecord         `json:"join_binding,omitempty"`
 	JoinDeltas       []JoinDelta            `json:"join_deltas,omitempty"`
+	// JoinKept lists, sorted, the seats a join left untouched; a replay never
+	// rewrites their conversation record or execution ticket.
+	JoinKept         []string               `json:"join_kept,omitempty"`
 	Placement        PlacementPreview       `json:"placement,omitempty"`
 	CallerContext    map[string]string      `json:"caller_context,omitempty"`
 	// CandidateBinding is an immutable backend marker for an exact resource
@@ -116,6 +119,9 @@ func (record LaunchJournal) Validate() error {
 	}
 	if record.JoinBinding == nil && len(record.JoinDeltas) != 0 {
 		return fmt.Errorf("launch journal join deltas require a join binding")
+	}
+	if record.JoinBinding == nil && len(record.JoinKept) != 0 {
+		return fmt.Errorf("launch journal kept seats require a join binding")
 	}
 	if record.JoinBinding != nil {
 		if err := record.JoinBinding.Validate(); err != nil {
@@ -205,6 +211,21 @@ func (record LaunchJournal) Validate() error {
 			return fmt.Errorf("duplicate launch journal handle %q", plan.Handle)
 		}
 		seen[plan.Handle] = struct{}{}
+	}
+	seenKept := make(map[string]struct{}, len(record.JoinKept))
+	for _, handle := range record.JoinKept {
+		if _, planned := seen[handle]; !planned {
+			return fmt.Errorf("launch journal kept seat %q is not a planned handle", handle)
+		}
+		if _, dup := seenKept[handle]; dup {
+			return fmt.Errorf("duplicate launch journal kept seat %q", handle)
+		}
+		seenKept[handle] = struct{}{}
+		for _, delta := range record.JoinDeltas {
+			if delta.Handle == handle {
+				return fmt.Errorf("launch journal kept seat %q has a join delta", handle)
+			}
+		}
 	}
 	if record.Phase == JournalIntent {
 		if record.Binding != nil {

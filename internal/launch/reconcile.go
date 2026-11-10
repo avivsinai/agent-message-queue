@@ -295,6 +295,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	var detect DetectResult
 	var create CreateResult
 	var joinBinding *BindingRecord
+	var joinKept []string
 	recoveredCreate := false
 	journalActive := hasJournal
 	if hasJournal {
@@ -305,6 +306,16 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 		journal = current
 		if journal.JoinBinding != nil {
+			if hasBinding && journal.Phase == JournalCreated && journal.Binding != nil && reflect.DeepEqual(*journal.Binding, binding) {
+				// The join's binding is already published; only the journal
+				// is left to retire.
+				if err := commitRecoveredJournal(request, lease, journal); err != nil {
+					return result, err
+				}
+				result.Backend, result.Outcome = journal.Backend, OutcomeCreated
+				result.AggregateCode = aggregateReconcileCode(result.Agents)
+				return result, nil
+			}
 			if !hasBinding || !reflect.DeepEqual(*journal.JoinBinding, binding) {
 				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_binding_conflict"
 				return result, nil
@@ -372,8 +383,10 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				for _, seat := range seats {
 					if seat.Decision == SeatKept {
 						kept[seat.Handle] = true
+						joinKept = append(joinKept, seat.Handle)
 					}
 				}
+				slices.Sort(joinKept)
 				for i := range planned {
 					if kept[planned[i].plan.Handle] {
 						planned[i].write = false
@@ -449,6 +462,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			if tmuxJoinJournal {
 				copied := *joinBinding
 				journal.JoinBinding = &copied
+				journal.JoinKept = joinKept
 			}
 			if err := WriteJournal(request.Root, lease, journal); err != nil {
 				return result, err
@@ -667,7 +681,8 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if !capabilities.Available {
 			return nil, fmt.Errorf("launch journal adapter for %q is unavailable", plan.Handle)
 		}
-		write := journal.Agents[resultIndex].ConversationDisposition != DispositionResumed
+		write := journal.Agents[resultIndex].ConversationDisposition != DispositionResumed &&
+			!slices.Contains(journal.JoinKept, plan.Handle)
 		planned[i] = plannedAgent{
 			plan: plan, record: journal.Conversations[i], write: write, index: resultIndex,
 			adapter: adapter, providerVersion: journal.Conversations[i].ProviderVersion,
@@ -963,6 +978,9 @@ func keepPromotedCapture(root *fsq.DeliveryRoot, pending ConversationRecord) (Co
 
 func commitRecoveredJournal(request ReconcileRequest, lease *Lease, journal LaunchJournal) error {
 	for _, record := range journal.Conversations {
+		if slices.Contains(journal.JoinKept, record.Handle) {
+			continue
+		}
 		record, err := keepPromotedCapture(request.Root, record)
 		if err != nil {
 			return err

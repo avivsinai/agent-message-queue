@@ -16,7 +16,8 @@ binding and one identity-checked delta per added window. Each delta carries
 the session ID, name, nonce, epoch, window, and pane identity; AMQ revalidates
 that session before the next window mutation. A crash after a delta is written
 replays only the remaining deltas, so it cannot duplicate an added window or
-write to a replacement session.
+write to a replacement session. The journal also records the seats the join
+kept, and a replay leaves those seats untouched.
 
 On the next launch, AMQ holds the session lease and follows these rules:
 
