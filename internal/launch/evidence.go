@@ -20,6 +20,10 @@ import (
 const (
 	EvidenceVersion   = 1
 	evidenceDirectory = "meta/launch/evidence"
+	// evidenceHandleIndex holds one empty file per provider-capture evidence of
+	// a handle, named by the evidence digest, so a lookup reads only that
+	// handle's records.
+	evidenceHandleIndex = evidenceDirectory + "/by-handle"
 )
 
 type EvidenceKind string
@@ -262,26 +266,77 @@ func persistProviderCaptureEvidenceWithContext(root *fsq.DeliveryRoot, lease *Le
 		if err != nil {
 			return nil, err
 		}
+		// The index follows the evidence, so a crash between the two leaves
+		// evidence the retry re-indexes through the exists path above.
+		if err := indexProviderCaptureEvidence(root, handle, ref.ID); err != nil {
+			return nil, err
+		}
 		refs = append(refs, ref.ID)
 	}
 	return refs, nil
 }
 
-func findProviderCaptureEvidence(root *fsq.DeliveryRoot, provider, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
-	entries, err := root.ReadDir(evidenceDirectory)
-	if errors.Is(err, os.ErrNotExist) {
-		return CaptureEvidence{}, "", false, nil
+func indexProviderCaptureEvidence(root *fsq.DeliveryRoot, handle, id string) error {
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return err
 	}
+	_, err := root.WriteFileExclusive(evidenceHandleIndex+"/"+handle, strings.TrimPrefix(id, "sha256:"), nil, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	return err
+}
+
+// providerCaptureEvidenceIDs lists the evidence a handle may own. A session
+// written before the handle index existed has no index directory at all, and
+// is scanned in full; with an index, a handle absent from it owns nothing.
+func providerCaptureEvidenceIDs(root *fsq.DeliveryRoot, handle string) ([]string, error) {
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return nil, err
+	}
+	var dir string
+	if _, err := root.ReadDir(evidenceHandleIndex); err == nil {
+		dir = evidenceHandleIndex + "/" + handle
+	} else if errors.Is(err, os.ErrNotExist) {
+		dir = evidenceDirectory
+	} else {
+		return nil, err
+	}
+	entries, err := root.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		name := entry.Name()
+		if dir == evidenceDirectory {
+			if !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			name = strings.TrimSuffix(name, ".json")
+		}
+		if !validDigest("sha256:" + name) {
+			return nil, fmt.Errorf("evidence directory entry %q is not a digest", entry.Name())
+		}
+		ids = append(ids, "sha256:"+name)
+	}
+	return ids, nil
+}
+
+func findProviderCaptureEvidence(root *fsq.DeliveryRoot, provider, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
+	ids, err := providerCaptureEvidenceIDs(root, handle)
 	if err != nil {
 		return CaptureEvidence{}, "", false, err
 	}
 	var found CaptureEvidence
 	foundID := ""
-	for _, entry := range entries {
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		id := "sha256:" + strings.TrimSuffix(entry.Name(), ".json")
+	for _, id := range ids {
 		record, _, err := ReadEvidence(root, id)
 		if err != nil {
 			return CaptureEvidence{}, "", false, err

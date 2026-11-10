@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -155,5 +156,68 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 	}
 	if _, err := LoadConversation(restarted, "claude"); !errors.As(err, &corrupt) {
 		t.Fatalf("tampered continuity readback error = %v", err)
+	}
+}
+
+func persistCursorEvidenceForTest(t *testing.T, fixture executionFixture, lease *Lease, handle, nonce, id string) string {
+	t.Helper()
+	capture, err := ParseCursorCreateChatEvidence([]byte(id+"\n"), nonce, handle, cursorCaptureVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := persistProviderCaptureEvidenceWithContext(fixture.root, lease, handle, nil, []CaptureEvidence{capture})
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("persist refs=%v err=%v", refs, err)
+	}
+	return refs[0]
+}
+
+// One handle's unreadable evidence must not fail the capture lookup of another
+// handle (audit 2026-11-10).
+func TestProviderCaptureLookupReadsOnlyTheHandlesEvidence(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "71717171-7171-4171-8171-717171717171"
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor", "other"); err != nil {
+		t.Fatal(err)
+	}
+	refA := persistCursorEvidenceForTest(t, fixture, lease, "cursor", nonce, "019c8a2f-2b13-7000-8000-00000000000a")
+	refB := persistCursorEvidenceForTest(t, fixture, lease, "other", nonce, "019c8a2f-2b13-7000-8000-00000000000b")
+	if err := os.WriteFile(EvidencePath(fixture.session, refB), []byte("not evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, id, found, err := findProviderCaptureEvidence(fixture.root, CursorProvider, "cursor", nonce, cursorCaptureVersion)
+	if err != nil || !found || id != refA {
+		t.Fatalf("lookup for cursor = %q found=%v err=%v, want %q", id, found, err, refA)
+	}
+	if _, _, found, err := findProviderCaptureEvidence(fixture.root, CursorProvider, "other", nonce, cursorCaptureVersion); err == nil || found {
+		t.Fatalf("lookup for the corrupted handle found=%v err=%v, want its own error", found, err)
+	}
+	if _, _, found, err := findProviderCaptureEvidence(fixture.root, CursorProvider, "claude", nonce, cursorCaptureVersion); err != nil || found {
+		t.Fatalf("lookup for a handle with no evidence found=%v err=%v", found, err)
+	}
+}
+
+// A session written before the per-handle index still finds its evidence.
+func TestProviderCaptureLookupScansAnIndexlessSession(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "72727272-7272-4272-8272-727272727272"
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor"); err != nil {
+		t.Fatal(err)
+	}
+	ref := persistCursorEvidenceForTest(t, fixture, lease, "cursor", nonce, "019c8a2f-2b13-7000-8000-00000000000c")
+	if err := os.RemoveAll(filepath.Join(fixture.session, evidenceHandleIndex)); err != nil {
+		t.Fatal(err)
+	}
+	_, id, found, err := findProviderCaptureEvidence(fixture.root, CursorProvider, "cursor", nonce, cursorCaptureVersion)
+	if err != nil || !found || id != ref {
+		t.Fatalf("old-layout lookup = %q found=%v err=%v, want %q", id, found, err, ref)
 	}
 }
