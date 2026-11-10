@@ -245,7 +245,7 @@ func (ticket ExecutionTicket) Validate() error {
 	}
 	if ticket.PreSpawnAcquire {
 		if ticket.Mode != AdapterModeCapture ||
-			(ticket.Provider != CursorProvider || ticket.ProviderVersion != cursorCaptureVersion) &&
+			(ticket.Provider != CursorProvider || ticket.ProviderVersion == "") &&
 				(ticket.Provider != CodexProvider || !codexDaemonVersionReadable(ticket.ProviderVersion)) ||
 			strings.TrimSpace(ticket.Backend) == "" || strings.TrimSpace(ticket.Profile) == "" {
 			return fmt.Errorf("pre-spawn identity acquisition requires a versioned provider capture ticket")
@@ -698,7 +698,7 @@ func (acquire identityAcquireFunc) Acquire(ticket ExecutionTicket) (CaptureEvide
 type systemPreSpawnIdentityAcquirer struct{}
 
 func (systemPreSpawnIdentityAcquirer) Acquire(ticket ExecutionTicket) (CaptureEvidence, error) {
-	if ticket.Provider != CursorProvider || ticket.ProviderVersion != cursorCaptureVersion {
+	if ticket.Provider != CursorProvider || ticket.ProviderVersion == "" {
 		return CaptureEvidence{}, fmt.Errorf("pre-spawn identity acquisition is unsupported for provider %q", ticket.Provider)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

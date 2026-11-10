@@ -277,9 +277,9 @@ Each provider owns its conversation identity:
   payload to the operator's configured Codex notify command; a missing command
   is a no-op, and a forwarding failure cannot undo or fail the evidence path. An
   unused Codex launch stays pending and cannot be resumed.
-- Cursor CLI acquires its chat ID before process start through `create-chat`
-  at the exact version `cursorCaptureVersion`
-  (`internal/launch/adapter_cursor.go`). Its provider identity is
+- Cursor CLI acquires its chat ID before process start through `create-chat`.
+  Any build whose `--help` and `create-chat --help` carry the contract strings
+  (`internal/launch/adapter_cursor.go`) can start a fresh seat. Its provider identity is
   `cursor-agent`. The executable is `agent`, and `cursor-agent` is a supported
   alias, including `.exe` variants.
 

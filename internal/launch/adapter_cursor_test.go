@@ -15,7 +15,7 @@ func cursorProbe(version string) fakeCommandProbe {
 	}}
 }
 
-func TestCursorCapabilitiesRequireExactCaptureVersion(t *testing.T) {
+func TestCursorCapabilitiesFollowTheHelpContract(t *testing.T) {
 	adapter := NewCursorAdapter("cursor-agent")
 	adapter.probe = cursorProbe(cursorCaptureVersion)
 	got := adapter.Capabilities(context.Background())
@@ -26,10 +26,20 @@ func TestCursorCapabilitiesRequireExactCaptureVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Another build with the same help contract starts a fresh seat too.
 	adapter.probe = cursorProbe("2026.08.12-unknown")
 	got = adapter.Capabilities(context.Background())
-	if !got.Available || got.Fresh || !got.Resume || got.Capture || got.PreSpawnAcquire || got.Reason != "capture_version_unsupported" {
-		t.Fatalf("untested Cursor capabilities = %#v", got)
+	if !got.Available || !got.Fresh || !got.Resume || !got.Capture || !got.PreSpawnAcquire || got.ProviderVersion != "2026.08.12-unknown" {
+		t.Fatalf("other-build Cursor capabilities = %#v", got)
+	}
+
+	// A build whose help lacks the contract strings gets no fresh seat.
+	probe := cursorProbe("2026.08.12-unknown")
+	probe.outputs["create-chat --help"] = "Usage: create-chat"
+	adapter.probe = probe
+	got = adapter.Capabilities(context.Background())
+	if got.Available || got.Fresh || got.Capture || got.PreSpawnAcquire || got.Reason != "identity_contract_unsupported" {
+		t.Fatalf("contract-less Cursor capabilities = %#v", got)
 	}
 }
 

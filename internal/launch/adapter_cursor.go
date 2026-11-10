@@ -60,10 +60,6 @@ func (adapter *CursorAdapter) Capabilities(ctx context.Context) AdapterCapabilit
 		return result
 	}
 	result.Resume = true
-	if result.ProviderVersion != cursorCaptureVersion {
-		result.Reason = "capture_version_unsupported"
-		return result
-	}
 	result.Fresh = true
 	result.Capture = true
 	result.PreSpawnAcquire = true
