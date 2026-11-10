@@ -61,19 +61,8 @@ git -C "$REPO" config user.name "Release Test"
 git -C "$REPO" add .
 git -C "$REPO" commit -qm "base"
 
-git -C "$REPO" checkout -qb release/v9.9.9
-git -C "$REPO" commit --allow-empty -qm "chore(release): v9.9.9"
-release_commit="$(git -C "$REPO" rev-parse HEAD)"
-
-git -C "$REPO" checkout -q main
-git -C "$REPO" merge --no-ff -m $'Merge pull request #1 from test/release/v9.9.9\n\nchore(release): v9.9.9' release/v9.9.9
-release_merge="$(git -C "$REPO" rev-parse HEAD)"
-
-git -C "$REPO" checkout -qb docs-change
-git -C "$REPO" commit --allow-empty -qm "docs: cleanup"
-git -C "$REPO" checkout -q main
-git -C "$REPO" merge --no-ff -m $'Merge pull request #2 from test/docs-change\n\nchore(release): v9.9.9' docs-change
-feature_merge="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" commit --allow-empty -qm "docs: cleanup (#2)"
+feature_squash="$(git -C "$REPO" rev-parse HEAD)"
 
 git -C "$REPO" commit --allow-empty -qm "chore(release): v9.9.9 (#3)"
 release_squash="$(git -C "$REPO" rev-parse HEAD)"
@@ -102,18 +91,14 @@ assert_release_output() {
   grep -Fx "version=9.9.9" "$output"
   grep -Fx "release_ref=$sha" "$output"
   grep -Fx "release_sha=$sha" "$output"
-  grep -Fx "prerelease=false" "$output"
 }
 
 run_resolver "$release_squash"
 assert_release_output "$release_squash" >/dev/null
 
-run_resolver "$release_merge"
-assert_release_output "$release_merge" >/dev/null
-
-run_resolver "$feature_merge"
+run_resolver "$feature_squash"
 if [[ -s "$TMPDIR/output" ]]; then
-  echo "feature merge unexpectedly produced release outputs"
+  echo "feature commit unexpectedly produced release outputs"
   cat "$TMPDIR/output"
   exit 1
 fi

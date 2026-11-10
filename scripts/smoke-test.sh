@@ -151,7 +151,6 @@ if command -v python3 >/dev/null 2>&1; then
   bash scripts/test_release_metadata.sh
   bash scripts/test_release_please_state.sh
   bash scripts/test_reconcile_release_please_labels.sh
-  bash scripts/test_release_workflow_labels.sh
   bash scripts/test_publish_skild_skills.sh
   bash scripts/test_git_env_sanitization.sh
 fi
@@ -342,4 +341,6 @@ echo "integration: kanban needs a live websocket workspace, skipping invocation 
 bash scripts/test_install_checksum.sh
 bash scripts/test_version_embed.sh
 bash scripts/amq-bot-envelope-hop-probe_test.sh
+bash scripts/amq-bridge-bot-enqueue_test.sh
+bash scripts/amq-host-bootstrap_test.sh
 echo "smoke test ok"

@@ -39,7 +39,6 @@ jobs:
       version: ${{ steps.prepare.outputs.version }}
       release_ref: ${{ steps.prepare.outputs.release_ref }}
       release_sha: ${{ steps.prepare.outputs.release_sha }}
-      prerelease: ${{ steps.prepare.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -244,124 +243,17 @@ jobs:
         with:
           subject-path: ${{ steps.attestation_subjects.outputs.subjects }}
 
+      # The same reconciliation release-please.yml runs once this workflow
+      # completes; here it also gates skill publishing on the release PR. A
+      # dispatch re-releases an existing tag whose PR an earlier run
+      # reconciled.
       - name: Mark release pull request as tagged
-        if: always() && steps.publish_release.outcome == 'success'
-        shell: bash
+        if: always() && steps.publish_release.outcome == 'success' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-
-          pull_pages="$(
-            gh api --paginate --slurp \
-              --header "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls?per_page=100"
-          )"
-          pull_state="$(
-            jq -e --arg version "$VERSION" --arg release_sha "$RELEASE_SHA" '
-              if type == "array" and all(.[]; type == "array") and
-                  all(.[][]; type == "object")
-              then
-                [.[][]] as $associated |
-                [
-                  $associated[] |
-                  .number as $number |
-                  select(
-                    .merged_at != null and
-                    .base.ref == "main" and
-                    .title == ("chore(release): v" + $version) and
-                    .merge_commit_sha == $release_sha and
-                    ($number | type == "number" and . > 0 and floor == .)
-                  ) |
-                  $number
-                ] as $exact |
-                {associated_count: ($associated | length), exact: $exact}
-              else error("malformed commit pulls response")
-              end
-            ' <<<"$pull_pages"
-          )"
-          associated_count="$(jq -er '.associated_count' <<<"$pull_state")"
-          release_pr_count="$(jq -er '.exact | length' <<<"$pull_state")"
-
-          if [[ "$associated_count" == "0" && "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            echo "Historical dispatch has no associated release PR; label reconciliation is not applicable."
-            exit 0
-          fi
-          if [[ "$associated_count" != "1" || "$release_pr_count" != "1" ]]; then
-            echo "::error::Expected one unambiguous merged release PR for v${VERSION} at ${RELEASE_SHA}; found ${associated_count} associated and ${release_pr_count} exact."
-            exit 1
-          fi
-          release_pr="$(jq -er '.exact[0] | select(type == "number" and . > 0 and floor == .)' <<<"$pull_state")"
-
-          read_labels() {
-            local response
-            if ! response="$(
-              gh api \
-                --header "Accept: application/vnd.github+json" \
-                "repos/${GITHUB_REPOSITORY}/issues/${release_pr}"
-            )"; then
-              return 1
-            fi
-            jq -e '
-              if type == "object" and (.labels | type == "array") and
-                  all(.labels[]; type == "object" and (.name | type == "string"))
-              then [.labels[].name]
-              else error("malformed labels response")
-              end
-            ' <<<"$response"
-          }
-
-          labels="$(read_labels)"
-          jq -e '
-            ([.[] | select(. == "autorelease: tagged")] | length) <= 1 and
-            ([.[] | select(. == "autorelease: pending")] | length) <= 1
-          ' >/dev/null <<<"$labels" || {
-            echo "::error::Release PR has duplicate lifecycle labels."
-            exit 1
-          }
-          if ! jq -e 'index("autorelease: tagged") != null' >/dev/null <<<"$labels"; then
-            if ! printf '%s\n' '{"labels":["autorelease: tagged"]}' |
-              gh api \
-                --method POST \
-                --header "Accept: application/vnd.github+json" \
-                --input - \
-                "repos/${GITHUB_REPOSITORY}/issues/${release_pr}/labels" \
-                >/dev/null; then
-              echo "::warning::Tagged label mutation returned nonzero; checking authoritative state."
-            fi
-            labels="$(read_labels)"
-            jq -e '
-              ([.[] | select(. == "autorelease: tagged")] | length) == 1 and
-              ([.[] | select(. == "autorelease: pending")] | length) <= 1
-            ' >/dev/null <<<"$labels" || {
-              echo "::error::Tagged label was not confirmed; pending label remains untouched."
-              exit 1
-            }
-          fi
-
-          if jq -e 'index("autorelease: pending") != null' >/dev/null <<<"$labels"; then
-            if ! gh api \
-              --method DELETE \
-              --header "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/issues/${release_pr}/labels/autorelease%3A%20pending" \
-              >/dev/null; then
-              echo "::warning::Pending label mutation returned nonzero; checking authoritative state."
-            fi
-          else
-            echo "Release PR #${release_pr} is already tagged."
-          fi
-
-          labels="$(read_labels)"
-          jq -e '
-            ([.[] | select(. == "autorelease: tagged")] | length) == 1 and
-            ([.[] | select(. == "autorelease: pending")] | length) == 0
-          ' >/dev/null <<<"$labels" || {
-            echo "::error::Release PR lifecycle labels did not converge."
-            exit 1
-          }
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          EXPECTED_MAIN_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: ./scripts/reconcile-release-please-labels.sh
 
   skill-publish:
     needs: [prepare, release]
@@ -383,7 +275,7 @@ jobs:
           node-version: '24'
 
       - name: Install skild
-        run: npm install -g skild
+        run: npm install -g skild@0.13.1
 
       - name: Configure skild auth
         env:

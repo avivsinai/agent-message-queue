@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   # Publication failures and manual recovery runs also complete this workflow.
-  # Only a successful publisher job owns a Homebrew verification attempt.
+  # Only a successful publish step owns a Homebrew verification attempt.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -42,7 +42,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
@@ -50,14 +49,12 @@ jobs:
           set -euo pipefail
 
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            if [[ "$RUN_CONCLUSION" != "success" ]]; then
-              echo "::notice::Release workflow run (head_sha ${RUN_HEAD_SHA}) did not succeed (conclusion: ${RUN_CONCLUSION}); skipping Homebrew verification."
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            release_conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.name=="release") | .conclusion')"
+            # A later step or job (attestation, labels, skill publishing)
+            # can fail the run after GoReleaser published; the publish step
+            # alone decides.
+            release_conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.name=="release") | .steps[] | select(.name=="Release") | .conclusion')"
             if [[ "$release_conclusion" != "success" ]]; then
-              echo "::notice::Release workflow run (head_sha ${RUN_HEAD_SHA}) completed without publishing a release (release job: ${release_conclusion:-absent}); skipping Homebrew verification."
+              echo "::notice::Release workflow run (head_sha ${RUN_HEAD_SHA}) completed without publishing a release (publish step: ${release_conclusion:-absent}); skipping Homebrew verification."
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi

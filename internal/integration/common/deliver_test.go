@@ -1,11 +1,13 @@
 package common
 
 import (
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 func TestDeliverIntegrationMessage(t *testing.T) {
@@ -79,5 +81,24 @@ func TestDeliverIntegrationMessage_MissingInbox(t *testing.T) {
 	// DeliverToInboxes creates dirs via MkdirAll, so this should succeed
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Integration delivery wrote into any root while the shell was pinned to
+// another session; it now refuses as the send path does (audit 2026-11-10).
+func TestDeliverIntegrationMessageRefusesARootOutsideTheSessionPin(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(sessionguard.EnvBaseRoot, t.TempDir())
+	t.Setenv(sessionguard.EnvSession, "s1")
+	_, err := DeliverIntegrationMessage(root, "codex", "codex", "s", "b", nil, nil, "task/t", format.KindStatus, format.PriorityLow)
+	var refusal *sessionguard.ContextError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err = %v; want a session context refusal", err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex")); len(entries) != 0 {
+		t.Fatalf("inbox holds %d messages; want none", len(entries))
 	}
 }

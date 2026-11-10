@@ -53,6 +53,11 @@ jobs:
         run: make fmt-check
       - name: Vet
         run: go vet ./...
+      # Lint runs before the tests so a lint failure ends the job in minutes.
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
       - name: Cross-platform build
         run: |
           GOOS=windows GOARCH=amd64 go vet ./...
@@ -63,7 +68,7 @@ jobs:
           GOOS=windows go test -c ./internal/cli -o /dev/null
       - name: Govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
       - name: Test
         run: go test ./...
@@ -88,10 +93,6 @@ jobs:
         run: make smoke
       - name: Module, contract, and hook checks
         run: make mod-tidy-check contract-check hook-env-check
-      - name: Lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.13.1
 
   # Native Windows leg for the exclusive drain-claim contract (issue #485).
   # Cross-compilation cannot exercise the bug: os.Root.Rename on Windows is

@@ -66,10 +66,10 @@ The hooks run `amq` only in sessions with `AM_ME` set, which `amq coop exec`
 and `amq launch` do. A plain `claude` without `AM_ME` gets no preamble and no
 Stop guard, and other Claude Code sessions start no `amq`. Running the command
 again replaces the entries in place; `amq coop uninstall-hooks` removes them.
-AMQ no longer ships the old project hook scripts `scripts/claude-session-start.sh`,
-`scripts/amq-stop-hook.sh` and `scripts/claude-amq-user-prompt-submit.py`.
-Remove project hook entries that run them; the install command and
-`amq doctor` list such entries.
+Project hook entries that run `scripts/claude-session-start.sh`,
+`scripts/amq-stop-hook.sh` or `scripts/claude-amq-user-prompt-submit.py` name
+scripts AMQ does not ship; the install command and `amq doctor` list such
+entries so you can remove them.
 
 ### Multiple pairs (isolated sessions)
 

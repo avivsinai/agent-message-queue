@@ -132,20 +132,13 @@ def test_release_workflow_marks_published_release_pr_as_tagged() -> None:
     assert publish < attest < mark_tagged
 
     mark_step = release_job[mark_tagged:]
-    assert "if: always() && steps.publish_release.outcome == 'success'" in mark_step
-    assert "if: github.event_name == 'push'" not in mark_step
-    assert "RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}" in mark_step
-    assert "VERSION: ${{ needs.prepare.outputs.version }}" in mark_step
-    assert 'commits/${RELEASE_SHA}/pulls' in mark_step
-    assert '.title == ("chore(release): v" + $version)' in mark_step
-    assert "EVENT_NAME: ${{ github.event_name }}" in mark_step
-    assert '"$EVENT_NAME" == "workflow_dispatch"' in mark_step
-    assert "merge_commit_sha == $release_sha" in mark_step
-    assert '($number | type == "number" and . > 0' in mark_step
-    assert "jq -e --arg version" in mark_step
-    assert "Historical dispatch" in mark_step
-    assert "autorelease: pending" in mark_step
-    assert "autorelease: tagged" in mark_step
+    assert (
+        "if: always() && steps.publish_release.outcome == 'success' && github.event_name == 'push'"
+        in mark_step
+    )
+    assert "RELEASE_VERSION: ${{ needs.prepare.outputs.version }}" in mark_step
+    assert "EXPECTED_MAIN_SHA: ${{ needs.prepare.outputs.release_sha }}" in mark_step
+    assert "run: ./scripts/reconcile-release-please-labels.sh" in mark_step
 
 
 def test_version_files_and_replacement_gates() -> None:

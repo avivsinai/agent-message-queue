@@ -107,30 +107,55 @@ required by `make lint` and `make ci`.
 ## Architecture
 
 ```text
-cmd/amq/             CLI entry point
-cmd/amq-keepalive/   macOS wake supervisor companion
-cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
-cmd/amq-acp/         Preview ACP v2 stdio companion (not Core)
-cmd/amq-remote/      Remote-session companion (not Core)
-cmd/amq-owner-sign/  Owner signer for a strict relay share; the key stays in its process
-cmd/amq-board/       Read-only fleet board companion (not Core)
-internal/cli/        Command handlers and routing policy
-internal/fsq/        Maildir delivery, atomic operations, and scans
-internal/format/     JSON frontmatter plus Markdown message serialization
-internal/config/     Queue and project configuration
-internal/receipt/    Consumer-local drained and DLQ receipts
-internal/integration Shared adapter support for Symphony and Kanban
-internal/hookfile/   Byte-surgery hooks-file editor with a per-file lock
-internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
-internal/keepalive/  Companion registry, adapters, hooks, and supervision
-internal/bridge/     Envelope, auth, and crash-idempotent local apply
-internal/acp/        ACP v2 sessions, steering, and prompt delivery
-internal/remote/     Endpoint, adapters, and request store for amq-remote
-internal/sessionguard Shared fail-closed session decision table
-internal/swarm/      Claude Code Agent Teams interoperability
-internal/thread/     Cross-mailbox thread collection
-internal/presence/   Agent presence metadata
-internal/board/      Fleet board items, links, column table, and sources
+cmd/amq/                      CLI entry point
+cmd/amq-keepalive/            macOS wake supervisor companion
+cmd/amq-bridge/               Cross-host courier companion (apply-file + HTTPS, not Core)
+cmd/amq-acp/                  Preview ACP v2 stdio companion (not Core)
+cmd/amq-remote/               Remote-session companion (not Core)
+cmd/amq-owner-sign/           Owner signer for a strict relay share; the key stays in its process
+cmd/amq-board/                Read-only fleet board companion (not Core)
+internal/acp/                 ACP v2 sessions, steering, and prompt delivery
+internal/agentidentity/       Identity record an agent leaves in its mailbox
+internal/amqhome/             The per-user AMQ home, ~/.amq
+internal/archtest/            Package layering check on the import graph
+internal/board/               Fleet board items, links, column table, and sources
+internal/bridge/              Envelope, auth, and crash-idempotent local apply
+internal/claudepeer/          Claude Code cross-session socket framing
+internal/cli/                 Command handlers and routing policy
+internal/codexidentity/       AMQ identity of Codex threads on the shared app-server
+internal/codexlaunch/         Managed launch tickets on Codex's native daemon
+internal/config/              Queue and project configuration
+internal/dialogguard/         Wake dialog guard marker, hook command, and Claude guard
+internal/execidentity/        AMQ identity of each process coop exec became
+internal/exitcode/            Command exit codes and the errors that carry them
+internal/format/              JSON frontmatter plus Markdown message serialization
+internal/fsq/                 Maildir delivery, atomic operations, and scans
+internal/harness/             Per-harness facts: names, resume flags, wake typing
+internal/hookfile/            Byte-surgery hooks-file editor with a per-file lock
+internal/integration/         Shared adapter support for Symphony and Kanban
+internal/keepalive/           Companion registry, adapters, hooks, and supervision
+internal/launch/              Plans, adapters, trust, leases, bindings, and resume state
+internal/lock/                Advisory file locks
+internal/notificationattempt/ Durable log of wake notification attempts
+internal/presence/            Agent presence metadata
+internal/receipt/             Consumer-local drained and DLQ receipts
+internal/relay/               Nostr relay transport with NIP-42 AUTH
+internal/remote/              Endpoint, adapters, and request store for amq-remote
+internal/roster/              How a root knows a handle: roster, identity, or neither
+internal/route/               Project and Git boundaries a route starts from
+internal/selfupgrade/         Image evidence and attempts for in-place upgrades
+internal/sessionguard/        Shared fail-closed session decision table
+internal/swarm/               Claude Code Agent Teams interoperability
+internal/terminalrelay/       Terminal job control across a private PTY
+internal/thread/              Cross-mailbox thread collection
+internal/update/              Release update check and asset names
+internal/usagecache/          Usage collector lock, journal, and fact snapshot
+internal/usageformat/         Codex app-server wire format for plan limits
+internal/usagehold/           Pure pacing of usage collection
+internal/usagenormalize/      Meaning of Codex plan-limit replies
+internal/usagetransport/      Bounded child process for one usage command
+internal/wakecmd/             Owner slash commands a live wake types
+internal/wakelock/            Reads and validates the wake lock
 ```
 
 Mailbox layout:
