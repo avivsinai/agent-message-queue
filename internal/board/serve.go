@@ -12,9 +12,8 @@ import (
 	"time"
 )
 
-// ServeEvery is how often a live view rebuilds the model. Sources with a
-// longer cadence (the forge cache TTL, a provider's TTL) answer from their
-// cache between their own refreshes.
+// ServeEvery is how often a live view rebuilds the model from the published
+// snapshot. A view reads no source; `amq-board sync --watch` acquires them.
 const ServeEvery = 60 * time.Second
 
 // ManualEvery is the least time between two forced refreshes: a press of
@@ -23,8 +22,8 @@ const ManualEvery = 60 * time.Second
 
 // Live is the state of `amq-board serve`: the last built model, its JSON and
 // page bytes, and the configuration it was built from. At most one refresh
-// runs at a time, so each source has at most one read in flight; a tick or a
-// press that finds one running joins it instead of starting another.
+// runs at a time; a tick or a press that finds one running joins it instead of
+// starting another.
 //
 // Each refresh re-reads the configuration. A valid change applies to that
 // refresh. A refused edit (a warning that the last accepted load did not
@@ -32,13 +31,14 @@ const ManualEvery = 60 * time.Second
 type Live struct {
 	// Load reads the configuration, as LoadConfig does.
 	Load func() (FileConfig, []string)
-	// Build reads the sources the configuration enables and builds the
-	// model; force ignores the forge cache and provider TTLs.
+	// Build builds the model under the configuration. serve reloads the
+	// published snapshot here and reads no source. force is true for a
+	// press of refresh.
 	Build func(ctx context.Context, cfg FileConfig, force bool) Model
 	Now   func() time.Time
 	Logf  func(format string, args ...any)
 	// Ctx is the life of the view. A refresh that a press starts runs under
-	// it, so its source reads and their commands end when the view ends.
+	// it, so its reads end when the view ends.
 	Ctx context.Context
 
 	active    sync.WaitGroup // refreshes running
@@ -216,7 +216,8 @@ func set(xs []string) map[string]bool {
 // and /<token>/refresh (a press of refresh). A
 // path without the exact token is 404, a Host other than host (the address
 // the view listens on) is refused against DNS rebinding, and any method but
-// GET is 405. No request runs a source read except through Request.
+// GET is 405. No request reads a source; refresh only rebuilds the model
+// through Request.
 func (l *Live) Handler(token, host string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

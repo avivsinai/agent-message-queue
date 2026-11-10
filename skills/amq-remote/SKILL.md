@@ -186,8 +186,8 @@ channel or agent comes back.
 Run `amq-remote mirror <on|off|status> --self` and show its output. It is
 the same switch as typing `mirror on` or `mirror off` in the session's
 channel: while it is off, the machine agent posts no turn of this session,
-and turns that end while it is off are not posted later. Only a Claude
-session the machine agent serves has a mirror.
+and turns that end while it is off are not posted later. Only a Claude,
+Codex or pi session the machine agent serves has a mirror.
 
 ## `/amq-remote status`
 

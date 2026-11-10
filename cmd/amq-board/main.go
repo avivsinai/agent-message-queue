@@ -34,7 +34,7 @@ const (
 )
 
 const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
-       amq-board sync [--init] [--watch]
+       amq-board sync [--init] [--watch] [--suggestions]
        amq-board suggest --endpoint URL --model qwen3.5:4b --digest HEX [--message KEY]
        amq-board suggestions
        amq-board adopt-suggestion --suggestion ID --choice ID --generation N [--confirm-independent]
@@ -42,7 +42,7 @@ const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
        amq-board serve
        amq-board classify --classifier NAME [--next N] --json
        amq-board classify --file LABELS.json
-       amq-board admit --message KEY --title OUTCOME
+       amq-board admit --message KEY --title OUTCOME [--anchor ANCHOR]
        amq-board attach|detach --task ID --message KEY
        amq-board move --from-task ID --task ID --message KEY
        amq-board dismiss --message KEY
@@ -50,9 +50,11 @@ const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
        amq-board cancel|reopen --scope action --message KEY
        amq-board adopt --file FILE
        amq-board bind-claude-list|unbind-claude-list --home HOME --list LIST
+       amq-board unbind-claude-list --binding-key KEY
        amq-board catalogue [--task ID]
        amq-board consolidate --task ID --absorb ID --authority ALIAS|owner --generation N
        amq-board move-alias --alias ALIAS --task ID --donor-authority ALIAS|owner --generation N
+           [--destination-authority ALIAS|owner] [--attachment ATTACHMENT]...
 
 Views read the published project snapshot. Only sync reads sources.
 Suggestion workers examine one whole message per iteration (up to eight units),
@@ -207,10 +209,9 @@ func loadConfigFiles(dir, home string) (board.FileConfig, []string) {
 	return cfg, warnings
 }
 
-// sourceOptions are what differ between the one-shot faces and serve.
+// sourceOptions are what differ between a one-shot sync and sync --watch.
 type sourceOptions struct {
 	githubTimeout time.Duration // zero keeps the source parent deadline
-	refresh       bool          // ignore the forge cache
 	ghAccount     string        // the viewer a token read once belongs to; empty: the configured login
 	// provider wraps each enabled external provider; nil reads it on every
 	// refresh.
@@ -220,7 +221,7 @@ type sourceOptions struct {
 	claudeLists map[string]board.ClaudeListBinding
 }
 
-// boardModel reads every source cfg enables, under its own deadline, and
+// acquireBoard reads every source cfg enables, under its own deadline, and
 // builds the board model with the usage of each harness account.
 func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt sourceOptions) board.Acquisition {
 	gh := source.GitHub{
@@ -231,7 +232,6 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 		ShippedWindow:            cfg.Board.ShippedWindow,
 		TTL:                      cfg.GitHubTTL,
 		Timeout:                  opt.githubTimeout,
-		Refresh:                  opt.refresh,
 		Account:                  opt.ghAccount,
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}

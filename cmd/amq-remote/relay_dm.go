@@ -47,8 +47,6 @@ type dmEdges struct {
 	// identity is the endpoint's in-process native session accessor, bound
 	// with handle.
 	identity func(target string) string
-	// shared names every target a relay share serves.
-	shared map[string]bool
 	// dupBodies are the bodies startup found enrolled for two shares.
 	dupBodies map[string]bool
 	// setupRefused names each share session whose setup refused a surface.
@@ -62,14 +60,11 @@ type dmEdges struct {
 // during reconcile. A share whose enrolled credentials cannot load keeps its
 // commands surface closed and is reported, never silently attached.
 func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmEdges {
-	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, activity: map[string]*activityShare{}, shared: map[string]bool{}, dupBodies: map[string]bool{}, setupRefused: map[string]bool{}}
+	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, activity: map[string]*activityShare{}, dupBodies: map[string]bool{}, setupRefused: map[string]bool{}}
 	if r == nil {
 		return d
 	}
 	d.relay, d.self = r.URL, r.Self
-	for _, sh := range r.Shares {
-		d.shared[sh.Target] = true
-	}
 	for _, sh := range r.Shares {
 		d.addShare(root, stateDir, sh, true, warn)
 	}
@@ -89,7 +84,6 @@ func (d *dmEdges) setRelay(url, self string) {
 // path. Only the reconcile goroutine adds or removes shares.
 func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup bool, warn io.Writer) {
 	d.mu.Lock()
-	d.shared[sh.Target] = true
 	url := d.relay
 	d.mu.Unlock()
 	if sh.Activity {
@@ -173,8 +167,7 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 // removeShare drops a share removed from the manifest: its surfaces, its
 // body's startup duplicate mark (so the other share of the pair can recover
 // on its retry). Its owed Buzz records stay owed, as after a restart without
-// it. A target serves at most one running share, so its shared mark goes
-// with it.
+// it.
 func (d *dmEdges) removeShare(sh manifest.Share, body string) {
 	d.mu.Lock()
 	for b, ds := range d.byBody {
@@ -189,7 +182,6 @@ func (d *dmEdges) removeShare(sh manifest.Share, body string) {
 	delete(d.activity, sh.Session)
 	delete(d.state, sh.Session)
 	delete(d.setupRefused, sh.Session)
-	delete(d.shared, sh.Target)
 	d.mu.Unlock()
 }
 

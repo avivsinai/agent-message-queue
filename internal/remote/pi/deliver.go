@@ -2,15 +2,15 @@
 // pi-bridge protocol v1 paths:
 //
 //	bridgePath: <AM_ROOT>/agents/<handle>/extensions/pi-bridge/ (see wireNames)
-//	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
+//	requests/<ref>.json   publishRequest — hard-linked into place, create-new (protocol: requests)
 //	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
 //	cancels/<ref>.json    publishCancel — exact cancel, create-new (protocol: bridge revision 5)
 //	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
 // The adapter writes ONLY requests/ and cancels/ (protocol: ownership); every
-// other path is read-only. The file names use the sanitized ref, with ':'
-// and '/' replaced by '_' (protocol: identity and layout).
+// other path is read-only. The file names are the ref itself, which is
+// already filename-safe (refSanitize; protocol: identity and layout).
 package pi
 
 import (
@@ -209,9 +209,10 @@ func (b bridgeDir) publishCancel(ref string, now time.Time) error {
 	return writeAtomicNew(filepath.Join(b.dir, "cancels", refSanitize(ref)+".json"), payload)
 }
 
-// maxEventText bounds one event line's text to the contract's 256 KiB cap
-// (protocol: events; mirrors the doorbell trace cap). The adapter never trusts a longer
-// line than the contract allows.
+// maxEventText bounds one event line's text and error to the contract's
+// 256 KiB cap, cut on a UTF-8 boundary (protocol: events; mirrors the
+// doorbell trace cap). The adapter never trusts a longer line than the
+// contract allows.
 const maxEventText = 256 * 1024
 
 // livenessRecord is the bridge.liveness JSON shape (the doorbell shape plus
@@ -288,9 +289,9 @@ type livenessState struct {
 	activity  int    // the live bridge's activity version (0 = not published)
 }
 
-// publishRequest publishes one request: atomic write (unique temp name,
-// fsync file, rename, fsync dir), create-new via the rename over an
-// existing file being refused first. The rename is the publication
+// publishRequest publishes one request with create-new semantics: an
+// existing request file is refused first, and writeAtomicNew hard-links the
+// complete, fsynced payload into place. The link is the publication
 // boundary — nothing polls a partial file.
 func (b bridgeDir) publishRequest(req deliverRequest) error {
 	if b.publish != nil {
@@ -385,9 +386,8 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 			// line is never the terminal evidence.
 			continue
 		}
-		if len(ev.Text) > maxEventText {
-			ev.Text = ev.Text[:maxEventText]
-		}
+		ev.Text, _ = protocol.TruncateText(ev.Text, maxEventText)
+		ev.Error, _ = protocol.TruncateText(ev.Error, maxEventText)
 		if ev.Protocol != "" && ev.Protocol != b.names.protocol {
 			// Refuse an unknown protocol string rather than guessing.
 			// A v1 receipt + v2-only event stream must NOT read as "no
@@ -428,11 +428,11 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	if rec.Protocol != "" && rec.Protocol != b.names.protocol {
-		// A foreign-protocol bridge is not OUR bridge. Treating it as
+	if rec.Protocol != b.names.protocol {
+		// A record without this protocol is not OUR bridge. Treating it as
 		// live would let the adapter write requests into a seam owned by a
 		// different protocol — refuse the pre-gate.
-		return livenessState{age: age, reason: "foreign protocol " + rec.Protocol}
+		return livenessState{age: age, reason: fmt.Sprintf("foreign protocol %q", rec.Protocol)}
 	}
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}

@@ -35,6 +35,9 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if fs.NArg() > 0 {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "doctor takes no positional arguments (got %q)", fs.Arg(0))
+	}
 	if err := fsq.ValidateHandle(*me); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "invalid handle %q: %v", *me, err)
 	}

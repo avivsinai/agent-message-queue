@@ -83,6 +83,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if *poll <= 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--poll must be positive (got %s)", *poll)
+	}
 	stateDir, err := c.stateDir()
 	if err != nil {
 		return protocol.ExitUsage, err

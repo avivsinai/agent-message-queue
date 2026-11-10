@@ -61,8 +61,9 @@ func NewDrainer(spool *Spool, ep *core.Endpoint) *Drainer {
 
 // Drain replays every pending envelope once. It is safe to call on each tick:
 // a settled envelope is skipped, a pending one is dispatched or marked with a
-// transient/terminal failure. Returns the number of envelopes acted on
-// (dispatched, expired, or failed).
+// transient/terminal failure. Returns the number of pending envelopes it
+// replayed, whatever the outcome (dispatched, expired, failed, or left
+// pending for a transient code).
 //
 // A per-envelope error never aborts the sweep: one bad envelope must not stop
 // another's recovery (mirrors the carrier's ImportOnce contract).

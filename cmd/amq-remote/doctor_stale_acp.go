@@ -57,9 +57,10 @@ type staleInspection struct {
 }
 
 // staleACPSupported reports whether this platform can run the stale
-// harness inspection at all: process listing and stat identity are
-// unix-only. An unsupported platform is quiet on purpose — not a failed
-// inspection — so the caller skips the WHOLE pass before any lookup.
+// harness inspection at all: process listing and process identity exist
+// only on Linux and the BSDs (macOS included). An unsupported platform is
+// quiet on purpose — not a failed inspection — so the caller skips the
+// WHOLE pass before any lookup.
 var staleACPSupported = staleACPSupportedOS
 
 // probeTimeout is the ONE total deadline for the whole stale probe, ps

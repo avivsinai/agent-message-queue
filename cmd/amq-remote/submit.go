@@ -133,7 +133,7 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		if isDuplicateConflict(derr) {
 			// The receipt is NOT a Snapshot: it never mints a request ref
 			// or revision the endpoint did not assign.
-			return env.Receipt("duplicate_conflict"), exitForState(protocol.StateDispatching), nil
+			return env.Receipt("duplicate_conflict"), protocol.ExitSuccess, nil
 		}
 		if isEndpointUnreachable(derr) {
 			// The intent is persisted; the caller is told `submitted`, not
@@ -177,16 +177,4 @@ func newUUID() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
-}
-
-// exitForState maps a spool-side state to the exit code for a `submitted`
-// receipt. A pending/dispatching request is success for submit.
-func exitForState(s protocol.State) int {
-	switch s {
-	case protocol.StateRejected, protocol.StateUncertain:
-		return protocol.ExitActionRequired
-	case protocol.StateFailed, protocol.StateCancelled:
-		return protocol.ExitError
-	}
-	return protocol.ExitSuccess
 }

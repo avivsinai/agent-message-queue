@@ -211,12 +211,13 @@ func randomToken() (string, error) {
 
 // ghToken is forges.github.token_once: `gh auth token` is read once per
 // process, the viewer login it belongs to is resolved once with it, and
-// later gh calls get it as GH_TOKEN, so a serve session reads the keychain
-// once. The token stays in memory and reaches gh only. The GitHub cache is
-// keyed by that viewer, not by the login gh is configured with, which an
-// account switch changes while the token stays. When the viewer cannot be
-// resolved the token is dropped and each gh call reads its own. When
-// GH_TOKEN or GITHUB_TOKEN is already set, gh uses that and nothing is read.
+// later gh calls get it as GH_TOKEN, so a sync --watch session reads the
+// keychain once. The token stays in memory and reaches gh only. The GitHub
+// cache is keyed by that viewer, not by the login gh is configured with,
+// which an account switch changes while the token stays. When the viewer
+// cannot be resolved the token is dropped and each gh call reads its own.
+// When GH_TOKEN or GITHUB_TOKEN is already set, gh uses that and nothing is
+// read.
 type ghToken struct {
 	once          sync.Once
 	token, viewer string
@@ -256,18 +257,17 @@ type providerMemo struct {
 
 // memoProvider runs an external provider at most once per its TTL (minimum
 // 60 s, set by the configuration) and rebuilds the result from the kept
-// output in between, so no refresh shares items with another. force runs it
-// again; an edited exec or args runs it again.
+// output in between, so no refresh shares items with another. An edited exec
+// or args runs it again.
 type memoProvider struct {
 	source.External
-	memo  *providerMemo
-	force bool
+	memo *providerMemo
 }
 
 func (p memoProvider) Read(ctx context.Context, env board.Env) board.Result {
 	key := p.Provider.Exec + "\x00" + strings.Join(p.Provider.Args, "\x00")
 	now := env.Now()
-	if m := p.memo; !p.force && m.key == key && now.Sub(m.at) < p.Provider.TTL {
+	if m := p.memo; m.key == key && now.Sub(m.at) < p.Provider.TTL {
 		return p.Build(m.out, nil, m.at)
 	}
 	out, err := p.Fetch(ctx, env)

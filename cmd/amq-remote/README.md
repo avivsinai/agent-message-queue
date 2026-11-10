@@ -53,6 +53,8 @@ amq-remote share --session ID
 amq-remote attach --self [--native | --link NAME]
 amq-remote detach --self | --name NAME | --all
 amq-remote bindings
+amq-remote channel reset NAME
+amq-remote mirror on|off|status --self | --name NAME
 amq-remote link add NAME URL --code CODE
 amq-remote link keys add NAME --code CODE
 amq-remote link local-key NAME
@@ -505,9 +507,10 @@ answered in the session's terminal, and a task that needs one waits there;
 
 Flags may appear before or after the positional argument.
 `amq-remote COMMAND --help` prints the flags and exits 0 for the client
-commands, `requests`, `attach`, `detach`, `bindings`, the `link` commands,
-`mcp`, `service`, and `doctor`. `serve --help`, `up --help`, and
-`claude install-approval-hook --help` print the flags and exit 2.
+commands, `requests`, `attach`, `detach`, `bindings`, `channel reset`,
+`mirror`, the `link` commands, `mcp`, `service`, and `doctor`. `serve --help`,
+`up --help`, and `claude install-approval-hook --help` print the flags and
+exit 2.
 `share --help`, `version --help`, and the other `claude` commands print no
 flag list; the `share` flags are in the table below.
 
@@ -516,7 +519,7 @@ flag list; the `share` flags are in the table below.
 | Flag | Default | Commands |
 | --- | --- | --- |
 | `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
-| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `attach`, `detach`, `bindings`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
+| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `attach`, `detach`, `bindings`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
 
@@ -1044,14 +1047,14 @@ nothing and posts once per version of the file: "The AMQ approval hook in
 
 ### Turns in the session's channel
 
-The machine agent's channel of a Claude session also shows each turn of the
-session, wherever it started: the terminal, the desktop app, a Buzz message,
-a peer session or a background task. One message shows one turn. It appears
-when the model first answers and shows `… running` with the tools used so
-far. While the turn runs it is updated at most every 30 s while what it
-shows changes (new tools or an interrupt; elapsed time alone is no change),
-at most 10 times plus one to show an interrupt, and it shows the answer as
-soon as the turn ends:
+The machine agent's channel of a Claude, Codex or pi session also shows each
+turn of the session, wherever it started: the terminal, the desktop app, a
+Buzz message, a peer session or a background task. One message shows one
+turn. It appears when the model first answers and shows `… running` with the
+tools used so far. While the turn runs it is updated at most every 30 s
+while what it shows changes (new tools or an interrupt; elapsed time alone is
+no change), at most 10 times plus one to show an interrupt, and it shows the
+answer as soon as the turn ends:
 
 ```text
 ▶ run the tests and fix the failure

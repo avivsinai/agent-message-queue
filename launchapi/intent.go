@@ -238,7 +238,7 @@ func requireLaunchIntentFields(data []byte) error {
 			if err := requireObjectFields(fields["cwd"], fmt.Sprintf("participants[%d].cwd", i), "kind", "path"); err != nil {
 				return err
 			}
-			for _, optional := range []string{"args", "env_overlay", "on_live"} {
+			for _, optional := range []string{"args", "wrapper", "env_overlay", "on_live"} {
 				if err := rejectExplicitNull(fields, optional, fmt.Sprintf("participants[%d]", i)); err != nil {
 					return err
 				}

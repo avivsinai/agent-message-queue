@@ -15,7 +15,8 @@ const mirrorUsage = "usage: amq-remote mirror on|off|status --self|--name NAME"
 
 // mirrorCommand is `amq-remote mirror on|off|status`: the same switch as
 // typing `mirror on` or `mirror off` in the session's Buzz channel. The
-// machine agent mirrors only Claude sessions it serves a channel for.
+// machine agent mirrors only the Claude, Codex and pi sessions it serves a
+// channel for (mirror.SourceFor).
 func mirrorCommand(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("mirror", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

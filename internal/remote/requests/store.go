@@ -397,10 +397,11 @@ func safeSegment(seg string) bool {
 }
 
 // Get reads one record. The boolean is false when no record exists. It uses
-// the same read+normalize path as List so a live request and a recovery pass
-// never disagree about a record's state. A present-but-undecodable file is
-// returned as an error (poison), not as absent, so a caller does not create a
-// conflicting revision-1 over a corrupt file.
+// the same read+normalize path as ListWithPoison so a live request and a
+// recovery pass never disagree about a record's state. A
+// present-but-undecodable file is returned as an error (poison), not as
+// absent, so a caller does not create a conflicting revision-1 over a corrupt
+// file.
 //
 // Creator hosts and target ids are case-sensitive protocol values, but on a
 // case-insensitive filesystem two keys that differ only by case share one
@@ -584,21 +585,21 @@ func (s *Store) WriteMemo(rec *Record) error {
 	return s.persist(rec, settle)
 }
 
-// Poison is one undecodable record encountered during List. The key is
+// Poison is one undecodable record ListWithPoison found. The key is
 // recovered from the file path so the dedup identity survives even when the
 // JSON does not: a later submit for the same request is still blocked by the
-// on-disk file, and an operator can see which record to repair. List never
-// aborts on a poison record; it isolates it here and continues.
+// on-disk file, and an operator can see which record to repair. A listing
+// never aborts on a poison record; it isolates it here and continues.
 type Poison struct {
 	Key   Key
 	Path  string
 	Error string
 }
 
-// List returns every decodable record, oldest key first, for reconciliation.
-// A poison (undecodable or invalid) record is isolated and skipped, never
-// allowed to abort the whole pass: Reconcile must reach every healthy record
-// even when one is corrupt. Use ListWithPoison to also collect diagnostics.
+// List returns every decodable record, oldest write first: ListWithPoison
+// without the poison diagnostics. A poison (undecodable or invalid) record is
+// skipped, never allowed to abort the pass. Reconciliation reads through
+// ListWithPoison and ListSweep.
 func (s *Store) List() ([]*Record, error) {
 	recs, _, err := s.ListWithPoison()
 	return recs, err

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -245,6 +246,17 @@ func TestClaudeAncestorChooser(t *testing.T) {
 		if got := claudeAncestor(tc.procs, "s-1"); got.PID != tc.want {
 			t.Fatalf("%s: claudeAncestor = pid %d; want %d", tc.name, got.PID, tc.want)
 		}
+	}
+}
+
+// The dialog body is cut at maxDialogText bytes, not runes, as the approvals
+// doc says (audit 2026-11-10).
+func TestDialogTextCutsAtByteCap(t *testing.T) {
+	input, _ := json.Marshal(map[string]string{"command": strings.Repeat("é", maxDialogText)})
+	got := dialogText("Bash", input)
+	body, cut := strings.CutSuffix(got, "\n… full text in the terminal")
+	if !cut || len(body) > maxDialogText || !utf8.ValidString(body) {
+		t.Fatalf("body %d bytes, cut %v, valid UTF-8 %v; want a cut body of at most %d valid bytes", len(body), cut, utf8.ValidString(body), maxDialogText)
 	}
 }
 
