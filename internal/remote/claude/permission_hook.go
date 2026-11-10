@@ -3,8 +3,6 @@ package claude
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -172,10 +170,9 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		Text: dialogText(in.ToolName, in.ToolInput), Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
-	// Claude signals no terminal approve: the call's tool_result in the
-	// transcript that records the call is the proof, so the watch starts
-	// before the request is visible.
-	watch := newToolWatch(in.callTranscript, in.AgentID != "", in.ToolName, in.ToolInput)
+	// Claude signals no terminal approve: the transcript of the chain that
+	// asks is the proof, so the watch starts before the request is visible.
+	watch := newToolWatch(in.callTranscript, in.AgentID != "")
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
@@ -210,7 +207,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				return 0
 			}
 		}
-		if watch != nil && watch.answered() {
+		if watch.answered() {
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
 		}
@@ -613,20 +610,25 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 
 // toolWatch follows the transcript of the chain that asks (the main thread,
 // or a subagent in its own transcript) for proof that the dialog is gone:
-//   - the tool_result of the call: a tool_use with the same name and input
-//     that had no result when the hook started, or that appears later;
 //   - the chain moved on: an assistant message the chain had not written
 //     when the dialog opened. While a dialog blocks a call the chain writes
 //     none, because the model waits for the whole tool batch; a line Claude
 //     Code writes itself (syntheticModel, an API error) proves nothing;
 //   - an interrupt of the chain, which Esc and a reject write.
 //
-// It locates the transcript (locate) until it is found; a transcript first
-// found after the hook started holds only lines written since, so its first
-// read can answer a result, and the chain proofs start at the asking call.
+// Both prove that every dialog of the batch is gone. Nothing in the
+// transcript tells which call a dialog belongs to (the hook gets no
+// tool_use_id), so a call's own tool_result proves nothing: an identical
+// call of the same batch may still wait.
+//
+// The proofs hold only for lines written after the dialog opened, so the
+// watch arms only when it read the transcript as the dialog opened. A
+// transcript first found later may hold the asking call's own lines; such
+// a watch never answers, and the dialog ends by Buzz, a signal, the parent
+// or the timeout.
 type toolWatch struct {
-	locate           func() (string, error)
-	path, name, hash string
+	locate func() (string, error)
+	path   string
 	// ownChain: the transcript is the asking subagent's own, so its
 	// sidechain lines are the chain; otherwise sidechain lines are other
 	// chains'.
@@ -639,27 +641,18 @@ type toolWatch struct {
 	// read, which may start mid-line.
 	off  int64
 	skip bool
-	// primed: the first read is done, so a result read after it answers
-	// the dialog; one read by the first read settled an earlier call.
-	primed  bool
-	pending map[string]bool
 }
 
-// transcriptTail is how far back the first read reaches: the call's
-// tool_use is among the newest lines.
+// transcriptTail is how far back the first read reaches: the chain's
+// newest assistant message is among the newest lines.
 const transcriptTail = 4 << 20
 
-func newToolWatch(locate func() (string, error), ownChain bool, name string, input json.RawMessage) *toolWatch {
-	hash, ok := actionHash(name, input)
-	if !ok {
-		return nil
-	}
-	w := &toolWatch{locate: locate, ownChain: ownChain, name: name, hash: hash, pending: map[string]bool{}, seen: map[string]bool{}}
+func newToolWatch(locate func() (string, error), ownChain bool) *toolWatch {
+	w := &toolWatch{locate: locate, ownChain: ownChain, seen: map[string]bool{}}
 	if w.found() {
 		w.read()
 		w.armed = true
 	}
-	w.primed = true
 	return w
 }
 
@@ -680,7 +673,7 @@ func (w *toolWatch) found() bool {
 }
 
 // answered reads the lines written since the last read and reports whether
-// a pending call got its tool_result.
+// they prove the dialog gone.
 func (w *toolWatch) answered() bool { return w.found() && w.read() }
 
 func (w *toolWatch) read() bool {
@@ -705,28 +698,14 @@ func (w *toolWatch) read() bool {
 			continue
 		}
 		e, ok := parseTranscriptLine(strings.TrimSuffix(line, "\n"))
-		if !ok {
+		if !ok || e.Sidechain && !w.ownChain {
 			continue
 		}
-		if chain := !e.Sidechain || w.ownChain; chain {
-			if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
-				answered = answered || w.armed && !w.seen[e.MessageID]
-				w.seen[e.MessageID] = true
-			}
-			answered = answered || w.armed && e.Type == "user" && interrupted(e)
+		if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
+			answered = answered || w.armed && !w.seen[e.MessageID]
+			w.seen[e.MessageID] = true
 		}
-		for _, u := range e.ToolUses {
-			if u.Name == w.name && u.Hash == w.hash {
-				w.pending[u.ID] = true
-				w.armed = w.armed || w.primed
-			}
-		}
-		for _, id := range e.ToolResults {
-			if w.pending[id] {
-				delete(w.pending, id)
-				answered = answered || w.primed
-			}
-		}
+		answered = answered || w.armed && e.Type == "user" && interrupted(e)
 	}
 }
 
@@ -738,33 +717,4 @@ func interrupted(e transcriptEntry) bool {
 		}
 	}
 	return false
-}
-
-// actionHash identifies one exact tool call: SHA-256 over the tool name and
-// the canonical tool input. The hook hashes its stdin tool_input and the
-// transcript's tool_use input with this same function, so both agree byte
-// for byte.
-func actionHash(toolName string, input json.RawMessage) (string, bool) {
-	canon, ok := canonicalJSON(input)
-	if !ok {
-		return "", false
-	}
-	sum := sha256.Sum256([]byte("amq-remote/claude/action\x00" + toolName + "\x00" + string(canon)))
-	return "sha256:" + hex.EncodeToString(sum[:]), true
-}
-
-// canonicalJSON re-encodes a JSON value with sorted object keys and number
-// literals kept as written.
-func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		raw = json.RawMessage("null")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, false
-	}
-	out, err := json.Marshal(v)
-	return out, err == nil
 }

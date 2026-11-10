@@ -122,12 +122,13 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 		t.Fatalf("resolved = %+v, %v", r, ok)
 	}
 
-	// The terminal approves the next call: its tool_result alone closes the
-	// dialog, and the hook prints nothing.
+	// The terminal approves the next call: the turn moving on past it closes
+	// the dialog, and the hook prints nothing.
 	wait = runHook(t, string(stdin))
 	req = openRequest(t, dir)
 	lines := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"description":"Remove node_modules","command":"rm -rf node_modules"}}]}}` + "\n" +
-		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}}` + "\n"
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"removed"}]}}` + "\n"
 	if err := os.WriteFile(transcript, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -339,9 +340,8 @@ func TestPermissionHookEndsWhenItsClaudeProcessIsGone(t *testing.T) {
 // A dialog answered in the terminal ends the hook with no decision, by the
 // proof the terminal leaves in the transcript of the chain that asked. The
 // live finding: 14 hooks waited for their 24 h deadline (the oldest 19 h)
-// because the hook knew only the call's tool_result in the session
-// transcript. A subagent writes its calls to its own transcript; Esc writes
-// only an interrupt; and a call recorded with another input never matches.
+// because the hook read only the session transcript. A subagent writes its
+// calls to its own transcript, and Esc writes only an interrupt.
 func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 	call := func(id, command string, sidechain bool) string {
 		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"message":{"id":"msg_%s","content":[{"type":"tool_use","id":"toolu_%s","name":"Bash","input":{"command":%q}}]}}`+"\n", sidechain, id, id, command)
@@ -349,13 +349,16 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 	result := func(id string, sidechain bool) string {
 		return fmt.Sprintf(`{"type":"user","isSidechain":%t,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_%s","content":"ok"}]}}`+"\n", sidechain, id)
 	}
+	reply := func(id string, sidechain bool) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"message":{"id":"msg_%s","content":[{"type":"text","text":"done"}]}}`+"\n", sidechain, id)
+	}
 	for _, row := range []struct {
 		name, agent, agentDir, before, after string
 	}{
-		{name: "a subagent's call gets its result", agent: "a1", before: call("1", "make", true), after: result("1", true)},
-		{name: "a workflow subagent's call gets its result", agent: "a1", agentDir: "workflows/wf-1", before: call("1", "make", true), after: result("1", true)},
+		{name: "a subagent's turn moves on", agent: "a1", before: call("1", "make", true), after: result("1", true) + reply("2", true)},
+		{name: "a workflow subagent's turn moves on", agent: "a1", agentDir: "workflows/wf-1", before: call("1", "make", true), after: result("1", true) + reply("2", true)},
 		{name: "Esc interrupts the turn", before: call("1", "make", false), after: `{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"},
-		{name: "the turn moves on past a call recorded with another input", before: call("1", "make all", false), after: result("1", false) + `{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}]}}` + "\n"},
+		{name: "the turn moves on", before: call("1", "make", false), after: result("1", false) + reply("2", false)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			dir := boundHookEnv(t)
@@ -390,5 +393,44 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 				t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
 			}
 		})
+	}
+}
+
+// Two identical calls in one batch: the terminal approves the first, and its
+// result must not close the second call's dialog, which is still open. Only
+// the turn moving on past the whole batch proves both gone
+// (audit 2026-11-10).
+func TestPermissionHookKeepsTheDialogOfAnIdenticalCallOpen(t *testing.T) {
+	dir := boundHookEnv(t)
+	transcript := filepath.Join(t.TempDir(), "s-1.jsonl")
+	batch := `{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"make"}}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"make"}}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(batch), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "transcript_path": transcript, "hook_event_name": "PermissionRequest",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "make"},
+	})
+	wait := runHook(t, string(stdin))
+	req := openRequest(t, dir)
+	first := batch + `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // twenty polls
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); ok {
+		t.Fatalf("resolved %+v while the second call's dialog is open", r)
+	}
+	moved := first + `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(moved), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := wait(); out != "" {
+		t.Fatalf("a terminal answer printed %q", out)
+	}
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.By != dialog.ByTerminal {
+		t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
 	}
 }
