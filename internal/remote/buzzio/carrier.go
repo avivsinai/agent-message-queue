@@ -478,6 +478,19 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 			},
 		}
 		out, err := c.handle(cmd, src)
+		var refusal *protocol.Refusal
+		if err != nil && !errors.As(err, &refusal) {
+			// An untyped error leaves the core's decision unknown: it may
+			// hold the request. Read it back; only a request the core does
+			// not have is shown refused.
+			got, gerr := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}, src)
+			switch {
+			case gerr == nil:
+				out, err = got, nil
+			case protocol.RefusalCode(gerr) != protocol.CodeNotFound:
+				return gerr // unknown: stay unsettled and retry on the next delivery
+			}
+		}
 		if err != nil {
 			return c.settleAnswer(evt, Settlement{Op: claim.Op, RequestRef: ref, State: "refused"}, "submit refused: "+protocol.InertInline(err.Error()))
 		}
