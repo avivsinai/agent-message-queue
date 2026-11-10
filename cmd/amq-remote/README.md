@@ -75,7 +75,8 @@ amq-remote statusline [--session ID] [--plain]
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
 respawns a crashed child with backoff and stops when the child exits 0. A
-child exit 2 is a usage error and is not respawned. A second `up` for the
+child exit 6 (its manifest is refused, or another endpoint holds the root)
+is not respawned; any other exit, a crash included, is. A second `up` for the
 same root exits 6 (`endpoint_already_running`) while the first supervisor
 holds the lifetime lock.
 
@@ -134,8 +135,8 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | `mailbox` | `handle`: an AMQ handle in serve's own root whose `agents/<handle>/inbox` already exists; the adapter never creates it. Optional `reply_timeout` (default `10m`, at most `24h`). The handle must not be `buzz`, `amq-remote` or serve's `--me`, and `--me` must not be `buzz` or `amq-remote`. Unknown config fields are refused. | `Inspect`, `Submit` and `CancelRequest`. Each request is one AMQ message to the handle: from `buzz` on thread `cockpit/<channel>` with the label `nostr:<event>` for a Buzz DM, else from `amq-remote` on thread `remote/<creator host>`. The handle answers with `amq reply --id <id>`; when the endpoint next looks, the newest of its replies that is not `--kind status` and has a body is the request's result; later replies stay unread in the carrier inbox. With no such reply within `reply_timeout` the request fails, and the message stays in the inbox. A cancel after delivery ends the request as delivered and no longer waited for. Several requests can be open at once; each is its own message, answered by its own id, so a second message never waits for the first or comes back busy. The handle cannot ask the owner a question through the share: a mailbox has no interaction seam. Submit evidence is `submitted`. See [Strict share in one owner step](#strict-share-in-one-owner-step). |
 | `fake` | none | Test double, linked into test builds only; a release binary refuses it as an unknown kind. `epoch` is accepted only for this kind. |
 
-`epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
-exit 2. An unknown kind is refused at startup; `serve` continues with the
+`epoch` on any kind other than `fake` is exit 6. A duplicate `target` is
+exit 6. An unknown kind is refused at startup; `serve` continues with the
 adapters that attached, writes `refusals.json`, and prints the refusal.
 
 ```json
@@ -172,7 +173,7 @@ Two serve flags append to this file's adapter list instead of editing it.
 daemon's loaded threads, or only `--codex-thread ID` when that flag is set.
 Those sugar targets look like `codex:` plus the thread id with hyphens
 removed. A target id that appears both in the file and in the flags is
-exit 2.
+exit 6.
 
 `serve --discover` and `up --discover` list running sessions and exit. They
 attach nothing and write nothing, so they work while an endpoint already

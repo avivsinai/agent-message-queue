@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // TestUpWaitDelayKillsSigtermIgnoringChild (611.13.2 a, B4): a serve child
@@ -202,11 +203,12 @@ func TestUpMaxRestartsBoundsLifetimeAcrossHealthyResets(t *testing.T) {
 	}
 }
 
-// TestUpUsageErrorIsTerminal (611.13.2 c, B6): a child exiting 2 (usage
-// refusal) ends supervision with the same code — no respawn loop.
-func TestUpUsageErrorIsTerminal(t *testing.T) {
+// TestUpRefusedConfigIsTerminal (611.13.2 c, B6): a child exiting 6 (its
+// configuration refused) ends supervision with the same code — no respawn
+// loop.
+func TestUpRefusedConfigIsTerminal(t *testing.T) {
 	sp := &fakeSpawner{
-		procs: []fakeProc{{code: 2, delay: 5 * time.Millisecond}},
+		procs: []fakeProc{{code: protocol.ExitActionRequired, delay: 5 * time.Millisecond}},
 	}
 	cfg := upConfig{
 		maxRestarts: 5,
@@ -218,11 +220,21 @@ func TestUpUsageErrorIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runUpLoop: %v", err)
 	}
-	if code != 2 {
-		t.Fatalf("up exited %d, want 2 (usage error propagated)", code)
+	if code != protocol.ExitActionRequired {
+		t.Fatalf("up exited %d, want 6 (refusal propagated)", code)
 	}
 	if sp.spawns != 1 {
-		t.Fatalf("spawns=%d, want 1 (usage error must not respawn)", sp.spawns)
+		t.Fatalf("spawns=%d, want 1 (a refused configuration must not respawn)", sp.spawns)
+	}
+}
+
+// A serve that panicked (the Go runtime exits 2) is respawned (audit 2026-11-10).
+func TestUpRespawnsAPanickedServe(t *testing.T) {
+	sp := &fakeSpawner{procs: []fakeProc{{code: 2}, {code: 0}}}
+	cfg := upConfig{backoffBase: time.Millisecond, backoffMax: time.Millisecond, serveArgs: []string{"serve"}}
+	code, err := runUpLoop(context.Background(), cfg, sp, io.Discard)
+	if err != nil || code != 0 || sp.spawns != 2 {
+		t.Fatalf("code=%d err=%v spawns=%d, want a respawn after exit 2 and a clean end", code, err, sp.spawns)
 	}
 }
 

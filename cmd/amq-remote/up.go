@@ -143,6 +143,9 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	if len(fs.Args()) > 0 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "up takes no positional arguments (got %q)", fs.Args()[0])
 	}
+	if *sf.poll <= 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--poll must be positive (got %s)", *sf.poll)
+	}
 	if *sf.discover {
 		// Discovery never supervises: it returns before the registry dir,
 		// the lifetime lock and phantom reclaim, so it works while another
@@ -414,10 +417,12 @@ func lockFilePath(regPath, entryID string) string {
 // the delay only binds when it ignores SIGTERM.
 const upWaitDelay = 10 * time.Second
 
-// upUsageExitCode is the exit class that terminates supervision: serve
-// refused its own arguments. Respawning a usage error loops
-// forever - observed 'respawning in 1m0s' for a child exiting 2.
-const upUsageExitCode = 2
+// upStopExitCode is the exit class that terminates supervision: serve
+// refused its configuration (action required), and a respawn would replay
+// the same refusal. It is not 2: the Go runtime exits 2 on an unrecovered
+// panic, and a crashed serve is respawned. up parses serve's flags itself,
+// so a flag refusal never reaches the child.
+const upStopExitCode = protocol.ExitActionRequired
 
 // upHealthyUptime is the runtime after which a child counts as having run
 // healthily: the failure counter resets so the next crash
@@ -474,11 +479,10 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 				say(stderr, "amq-remote up: serve exited cleanly (0)")
 				return 0, nil
 			}
-			if code == upUsageExitCode {
-				// serve refused its arguments. Respawning
-				// replays the same refusal forever - observed 'respawning in
-				// 1m0s' for a child exiting 2. Propagate the code; up ends.
-				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning", code)
+			if code == upStopExitCode {
+				// serve refused its configuration. Respawning replays the
+				// same refusal forever. Propagate the code; up ends.
+				say(stderr, "amq-remote up: serve exited %d (action required); not respawning", code)
 				return code, nil
 			}
 			uptime := now().Sub(start)
