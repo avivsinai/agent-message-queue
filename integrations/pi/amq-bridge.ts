@@ -99,6 +99,21 @@ export type AmqBridgeOptions = {
 	upgrade?: string;
 };
 
+// AmqDialog is a prompt an extension shows in its own terminal UI and also
+// offers in Buzz. Option i is shown as number i+1; deny marks the option ❌
+// picks. signal aborts when the terminal answered first.
+export type AmqDialog = { title: string; body?: string; options: { label: string; deny?: boolean }[]; signal?: AbortSignal };
+
+// AmqDialogAnswer is the owner's verified choice from Buzz: an index into
+// the dialog's options.
+export type AmqDialogAnswer = { by: "buzz"; index: number };
+
+// AmqBridge is the handle registerAmqBridge returns. openDialog resolves the
+// owner's Buzz answer, or undefined when the terminal keeps the decision: no
+// Buzz binding serves this pi, the signal aborted, the dialog expired, or
+// Buzz failed. It never rejects.
+export type AmqBridge = { openDialog(d: AmqDialog): Promise<AmqDialogAnswer | undefined> };
+
 type Bridge = {
 	dir: string;
 	identity: AmqIdentity;
@@ -181,7 +196,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // registerAmqBridge registers the bridge on pi. A host application passes
 // its own identity, delivery, or upgrade remedy; without options this is
 // the plain extension.
-export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): void {
+export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): AmqBridge {
 	let bridge: Bridge | null = null;
 	// ownerNotice limits the notices about another bridge to once.
 	const ownerNotice = { shown: false };
@@ -202,7 +217,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		// doorbell for that prompt from now on.
 		if (openPrompts > 0 && !written && outerPrompt) {
 			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
-			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge.sessionId);
+			if (ownDialogs === 0) openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge.sessionId);
 		}
 		scanSafely(pi, bridge);
 	};
@@ -297,7 +312,11 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// The same prompt is shown in Buzz as a dialog with no options: pi
 	// exposes no way to answer a prompt from an extension (the prompt events
 	// carry only its kind and title), so the owner answers in the terminal and
-	// the dialog closes when the prompt ends.
+	// the dialog closes when the prompt ends. While an extension's own
+	// openDialog is open, that dialog stands for the prompt in Buzz, so no
+	// option-less copy is posted beside it: one open dialog takes the owner's
+	// typed reply.
+	let ownDialogs = 0;
 	pi.on("project_trust", () => {
 		if (serving()) {
 			openMarker(WAKE_DIALOG_TRUST, "select");
@@ -310,7 +329,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		outerPrompt = { kind: event.kind, title: (event as { title?: string }).title ?? "" };
 		if (serving()) {
 			openMarker(WAKE_DIALOG_PROMPT, outerPrompt.kind);
-			openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge?.sessionId ?? "");
+			if (ownDialogs === 0) openRemoteDialog(who(), outerPrompt.kind, outerPrompt.title, bridge?.sessionId ?? "");
 		}
 	});
 	pi.on("ui_prompt_end", () => {
@@ -436,6 +455,76 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		}
 		if (!b.inflight) scanSafely(pi, b);
 	});
+
+	// openDialog is a dialog seam for a prompt the extension owns, with the
+	// rules of the Claude permission hook: it writes the request, then waits
+	// for the first of the owner's answer (which the Buzz agent verified and
+	// wrote), the signal, or a resolution written elsewhere. The first create
+	// of resolved/<id>.json decides; an answer is returned only after this
+	// seam won that create.
+	const openDialog = (d: AmqDialog): Promise<AmqDialogAnswer | undefined> => {
+		let open: { dir: string; id: string; options: DialogOption[] } | null = null;
+		try {
+			if (d.signal?.aborted || d.options.length === 0 || !serving()) return Promise.resolve(undefined);
+			open = openOwnDialog(who(), d, bridge?.sessionId ?? "");
+		} catch (err) {
+			report(`amq-bridge: the Buzz dialog was not opened: ${String(err)}`);
+		}
+		if (!open) return Promise.resolve(undefined);
+		const { dir, id, options: opts } = open;
+		ownDialogs++;
+		closeRemoteDialog(); // an option-less copy opened before this dialog
+		return new Promise((resolve) => {
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | null = null;
+			let wait = POLL_MS;
+			const finish = (answer: AmqDialogAnswer | undefined) => {
+				if (settled) return;
+				settled = true;
+				if (timer) clearTimeout(timer);
+				d.signal?.removeEventListener("abort", onAbort);
+				ownDialogs--;
+				resolve(answer);
+			};
+			// claim writes the resolution; a lost claim follows the winner.
+			const claim = (rec: Record<string, string>, won: AmqDialogAnswer | undefined) => {
+				try {
+					finish(claimResolved(dir, id, { id, ...rec, at: new Date().toISOString() }) ? won : winnerOf(dir, id, opts));
+				} catch (err) {
+					report(`amq-bridge: the Buzz dialog was not closed: ${String(err)}`);
+					finish(undefined);
+				}
+			};
+			const onAbort = () => claim({ outcome: "terminal", by: "terminal" }, undefined);
+			const poll = () => {
+				timer = null;
+				if (settled) return;
+				const res = readDialogFile(dir, "resolved", id);
+				if (res) return finish(winnerOf(dir, id, opts));
+				const ans = readDialogFile(dir, "answers", id) as { option?: unknown } | null;
+				if (ans) {
+					const n = ans.option;
+					const opt = typeof n === "number" ? opts.find((o) => o.n === n) : undefined;
+					if (opt) return claim({ outcome: opt.deny ? "denied" : "allowed", label: opt.label, by: "buzz" }, { by: "buzz", index: opt.n - 1 });
+					// The answer fits no option: reject it, so the owner can
+					// answer again, and keep waiting.
+					try {
+						fs.unlinkSync(path.join(dir, "answers", `${id}.json`));
+					} catch {
+						// Already gone.
+					}
+				}
+				wait = Math.min(2 * wait, MAX_DIALOG_POLL_MS);
+				timer = setTimeout(poll, wait);
+				timer.unref();
+			};
+			d.signal?.addEventListener("abort", onAbort, { once: true });
+			timer = setTimeout(poll, wait);
+			timer.unref();
+		});
+	};
+	const report = (message: string) => (bridge ? notify(bridge.ctx, message) : console.error(message));
+	return { openDialog };
 }
 
 // settle records the in-flight request's terminal outcome and appends it.
@@ -1398,21 +1487,78 @@ function closeRemoteDialog(): void {
 	const open = remoteDialog;
 	remoteDialog = null;
 	if (!open) return;
-	const resolved = { id: open.id, outcome: "terminal", by: "terminal", at: new Date().toISOString() };
-	const sub = path.join(open.dir, "resolved");
-	const temp = path.join(sub, `.${open.id}.tmp-${randomUUID()}`);
 	try {
-		fs.writeFileSync(temp, JSON.stringify(resolved), { flag: "wx", mode: 0o600 });
-		fs.linkSync(temp, path.join(sub, `${open.id}.json`));
+		claimResolved(open.dir, open.id, { id: open.id, outcome: "terminal", by: "terminal", at: new Date().toISOString() });
 	} catch {
-		// Already resolved, or the store is gone.
-	} finally {
-		try {
-			fs.unlinkSync(temp);
-		} catch {
-			// No temp file left.
-		}
+		// The store is gone.
 	}
+}
+
+// claimResolved writes resolved/<id>.json whole by a hard link, so the first
+// writer wins. It returns false when the dialog was resolved first and
+// throws on any other failure.
+function claimResolved(dir: string, id: string, rec: Record<string, string>): boolean {
+	const sub = path.join(dir, "resolved");
+	const temp = writeTemp(sub, JSON.stringify(rec));
+	try {
+		fs.linkSync(temp, path.join(sub, `${id}.json`));
+		syncDir(sub);
+		return true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+		throw err;
+	} finally {
+		fs.rmSync(temp, { force: true });
+	}
+}
+
+// An extension's own dialog. Its option values are their numbers; the text
+// is bounded so the request stays readable by the Go reader's size bound.
+type DialogOption = { n: number; label: string; value: string; deny?: boolean };
+const MAX_DIALOG_POLL_MS = 2000;
+const MAX_DIALOG_TEXT = 64 * 1024;
+
+// openOwnDialog writes a request with d's options for the mailbox binding
+// that serves this pi. It returns null when no binding does.
+function openOwnDialog(identity: AmqIdentity | undefined, d: AmqDialog, session: string): { dir: string; id: string; options: DialogOption[] } | null {
+	const store = remoteStore();
+	const name = remoteBinding(store, identity);
+	if (!name) return null;
+	const dir = path.join(store, "dialogs", name);
+	const id = `d-${randomUUID().replace(/-/g, "")}`;
+	const options: DialogOption[] = d.options.map((o, i) => ({ n: i + 1, label: o.label, value: String(i + 1), ...(o.deny ? { deny: true } : {}) }));
+	const text = truncateUtf8(d.body ? `${d.title}\n${d.body}` : d.title, MAX_DIALOG_TEXT);
+	const request = { id, harness: "pi", session, tool: "", text, options, opened_at: new Date().toISOString(), pid: process.pid };
+	for (const sub of ["requests", "answers", "resolved"]) fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
+	const temp = writeTemp(path.join(dir, "requests"), JSON.stringify(request));
+	try {
+		fs.renameSync(temp, path.join(dir, "requests", `${id}.json`));
+	} catch (err) {
+		fs.rmSync(temp, { force: true });
+		throw err;
+	}
+	syncDir(path.join(dir, "requests"));
+	return { dir, id, options };
+}
+
+// readDialogFile reads <dir>/<sub>/<id>.json; null when it is absent or not
+// readable yet, so the next poll reads it again.
+function readDialogFile(dir: string, sub: string, id: string): Record<string, unknown> | null {
+	try {
+		const v = JSON.parse(fs.readFileSync(path.join(dir, sub, `${id}.json`), "utf8")) as unknown;
+		return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+// winnerOf is the answer of a dialog that is resolved: the owner's option
+// when Buzz resolved it, else undefined (the terminal, or expiry).
+function winnerOf(dir: string, id: string, options: DialogOption[]): AmqDialogAnswer | undefined {
+	if (readDialogFile(dir, "resolved", id)?.by !== "buzz") return undefined;
+	const n = readDialogFile(dir, "answers", id)?.option;
+	const opt = options.find((o) => o.n === n);
+	return opt ? { by: "buzz", index: opt.n - 1 } : undefined;
 }
 
 function notify(ctx: ExtensionContext, message: string): void {

@@ -58,6 +58,31 @@ the default export:
 
 The contract is [the protocol's Embedding section](../../docs/pi-bridge-protocol.md#embedding).
 
+## Answer an extension prompt from Buzz
+
+`registerAmqBridge(pi, options)` returns a handle. An extension that shows
+its own approval prompt offers the same choice in Buzz with `openDialog`:
+
+```ts
+openDialog(d: {
+  title: string;
+  body?: string;
+  options: { label: string; deny?: boolean }[];
+  signal?: AbortSignal;
+}): Promise<{ by: "buzz"; index: number } | undefined>
+```
+
+The extension owns the terminal prompt and races it with `openDialog`. It
+aborts `signal` when the terminal answers first, and it closes its terminal
+prompt when `openDialog` resolves an answer. Buzz shows option `index` as
+number `index + 1`; ✅ picks the first option and ❌ the one marked `deny`.
+The promise resolves the owner's choice only after the Buzz agent verified
+the owner's answer and this dialog was resolved for Buzz. It resolves
+`undefined`, and never rejects, when no `/amq-remote` binding serves this pi,
+when `signal` aborted, when the dialog expired, or when Buzz failed: the
+terminal then keeps the decision. While an `openDialog` is open, the bridge
+posts no option-less copy of a pi prompt beside it.
+
 ## Doorbell guard
 
 While pi asks "Trust project folder?" at startup, and while an extension

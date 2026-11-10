@@ -3,7 +3,8 @@
 Every dialog a Claude Code session raises in its terminal also appears in
 Buzz, and the owner answers it there or in the terminal. For Codex this holds
 for a session on the Codex app-server. pi shows its prompts in Buzz with
-"answer in the terminal". An `amq-acp host` agent shows each permission
+"answer in the terminal"; a pi extension's own prompt can take the owner's
+answer. An `amq-acp host` agent shows each permission
 request with every option the agent offered.
 
 ## One-time setup
@@ -109,9 +110,14 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
   owner's typed answer. Codex runs `PermissionRequest` hooks before it draws
   the TUI prompt, so AMQ installs no Codex hook, and a plain `codex` TUI
   session answers its approvals in the terminal.
-- **pi:** pi has no extension API that answers a prompt from outside. In a
-  session connected with `/amq-remote`, the bridge posts each prompt with
-  "Answer in the terminal", and the message closes when the prompt ends.
+- **pi:** pi has no extension API that answers pi's own prompts from
+  outside. In a session connected with `/amq-remote`, the bridge posts each
+  prompt with "Answer in the terminal", and the message closes when the
+  prompt ends. An extension that shows its own approval prompt can let the
+  owner answer it from Buzz with the bridge's `openDialog` (see
+  [the pi bridge README](../integrations/pi/README.md#answer-an-extension-prompt-from-buzz)):
+  Buzz shows its options, and the first answer, Buzz's or the terminal's,
+  decides.
 - **`amq-acp host`:** every `session/request_permission` shows all the
   options the agent offered, and the agent receives the chosen one.
 
