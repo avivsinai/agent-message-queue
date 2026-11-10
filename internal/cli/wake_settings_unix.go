@@ -190,7 +190,7 @@ func updateWakeSettingsFileInDir(
 // refused file refuses the upgrade while the old image still runs, instead
 // of a resumed image that starts on defaults.
 func checkWakeSettingsForResume(root, me string) error {
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		return err
 	}

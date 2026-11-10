@@ -321,7 +321,7 @@ func validateWakeReadyFileAgainstOwner(
 ) (bool, error) {
 	// A wake can still die immediately after this guarded validation; the local
 	// process notifier has no durable liveness lease beyond the lock generation.
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		return false, err
 	}
