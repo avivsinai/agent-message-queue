@@ -73,9 +73,10 @@ rejected unless a non-empty `--root` or `--session` explicitly repins it.
 `amq env --session` routes from a valid pinned base before it checks project
 configuration.
 
-Exported and persisted roots are physical canonical paths with symlinks
-resolved; for example, macOS `/var` becomes `/private/var`. Complete pins from
-`amq env` remain valid across this change.
+Exported and persisted roots are absolute and clean. A root that the
+discovery walk finds is a physical path (for example, macOS `/private/var`). An
+explicit `--root`, `AM_ROOT`, `.amqrc` root, or `AMQ_GLOBAL_ROOT` keeps its
+symlinks; pins compare tree identity, not path strings.
 
 ## Creation and backlog discovery
 
