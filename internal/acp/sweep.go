@@ -104,7 +104,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	machineDone := make(chan struct{})
 	machineCtx, cancelMachine := context.WithCancel(context.Background())
 	if s.cfg.Machine {
-		go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval), func(now time.Time) pace {
+		go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval, machineIdlePoll), func(now time.Time) pace {
 			return s.machineTick(machineCtx, now)
 		})
 	} else {
@@ -119,7 +119,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		s.dialogs.quit = quit
 		wake := polling("dialog", machineScanInterval)
 		if s.cfg.Machine {
-			wake = newWakeup("dialog", machineScanInterval)
+			wake = newWakeup("dialog", machineScanInterval, idlePoll)
 		}
 		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
 			if !s.dialogLead() {
@@ -135,7 +135,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	mirrorDone := make(chan struct{})
 	if s.cfg.Machine {
 		s.mirrors.quit = quit
-		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval), func(now time.Time) pace {
+		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
 			if !s.mirrorLead() {
 				return pace{next: now.Add(mirrorInterval)}
 			}

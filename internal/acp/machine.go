@@ -307,7 +307,7 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // every lateReplyInterval works through the retired store. Its pace asks
 // for the next tick in machineScanInterval while a record is set up or a
 // reset waits, at a record's retry time, and else on a change to the
-// bindings, the records or a watched settings file.
+// bindings, the records or a watched settings file, or machineIdlePoll.
 func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 	s.machine.ctx.Store(&ctx)
 	// A daemon seen gone counts only on consecutive ticks that judge it,

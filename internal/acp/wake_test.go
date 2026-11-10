@@ -18,13 +18,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
-// pacedPasses runs pass in a worker paced by wake, with an idle poll of an
-// hour, until the test ends; each pass's pace arrives on the result.
+// pacedPasses runs pass in a worker paced by wake until the test ends; each pass's pace arrives on the result.
 func pacedPasses(t *testing.T, s *Server, wake *wakeup, pass func(time.Time) pace) <-chan pace {
 	t.Helper()
-	saved := idlePoll
-	idlePoll = time.Hour
-	t.Cleanup(func() { idlePoll = saved })
 	passes := make(chan pace, 1024)
 	quit, done := make(chan struct{}), make(chan struct{})
 	go s.paced(quit, done, wake, func(now time.Time) pace {
@@ -88,7 +84,7 @@ func TestDialogWorkerWakesOnANewDialog(t *testing.T) {
 		return strings.Repeat("a", 64), nil
 	}
 	readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
-	passes := pacedPasses(t, s, newWakeup("dialog", 50*time.Millisecond), s.dialogTick)
+	passes := pacedPasses(t, s, newWakeup("dialog", 50*time.Millisecond, time.Hour), s.dialogTick)
 	settled(t, passes)
 
 	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ ls", OpenedAt: time.Now(), PID: os.Getpid(),
@@ -135,7 +131,7 @@ func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
 		posts = append(posts, content)
 		return strings.Repeat("a", 64), nil
 	}
-	passes := pacedPasses(t, s, newWakeup("mirror", 50*time.Millisecond), s.mirrorTick)
+	passes := pacedPasses(t, s, newWakeup("mirror", 50*time.Millisecond, time.Hour), s.mirrorTick)
 	settled(t, passes)
 
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
@@ -150,7 +146,7 @@ func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
 // once, with no tick to wait for (bead agent-message-queue-udg).
 func TestMachineWorkerWakesOnANewBinding(t *testing.T) {
 	s, rec := machineServer(t)
-	passes := pacedPasses(t, s, newWakeup("machine", 50*time.Millisecond), func(now time.Time) pace {
+	passes := pacedPasses(t, s, newWakeup("machine", 50*time.Millisecond, time.Hour), func(now time.Time) pace {
 		return s.machineTick(context.Background(), now)
 	})
 	settled(t, passes)
@@ -165,7 +161,7 @@ func TestWorkerWithoutAWatcherTicks(t *testing.T) {
 	saved := newWatcher
 	t.Cleanup(func() { newWatcher = saved })
 	newWatcher = func() (*fsnotify.Watcher, error) { return nil, errors.New("too many open files") }
-	wake := newWakeup("dialog", 20*time.Millisecond)
+	wake := newWakeup("dialog", 20*time.Millisecond, time.Hour)
 	if wake.watching() {
 		t.Fatal("a worker with no watcher reports watching")
 	}

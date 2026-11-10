@@ -21,15 +21,19 @@ import (
 // never passes more often than a fixed tick would. A pass that leaves work
 // in flight (an open dialog, a queued edit, a channel being set up, a
 // backoff) asks for the base interval. A settled pass waits for a change,
-// for the deadline it names, or for idlePoll, which also catches what no
+// for the deadline it names, or for its idle poll, which also catches what no
 // watch sees: a session that ended, a dropped event, a path that could not
 // be watched. Without a watcher, or while a path cannot be watched, the
 // worker passes every base interval, as with a tick.
 
-// idlePoll is the longest a settled worker waits for a change. It is at
-// most lateReplyInterval and channelStepGap, so the machine worker's
-// periodic steps stay on time.
-var idlePoll = 30 * time.Second
+// The longest a settled worker waits for a change. The machine worker's
+// is shorter: it sees a session whose process exited, and its archive, at
+// this pace. It is at most lateReplyInterval and channelStepGap, so the
+// machine worker's periodic steps stay on time.
+var (
+	idlePoll        = 30 * time.Second
+	machineIdlePoll = 10 * time.Second
+)
 
 // newWatcher makes a worker's file watcher; a variable so tests can fail
 // it.
@@ -38,7 +42,7 @@ var newWatcher = fsnotify.NewWatcher
 // pace is what a pass asks of its worker's wait.
 type pace struct {
 	// next is when the next pass is due at the latest; zero waits for a
-	// change or idlePoll.
+	// change or the idle poll.
 	next time.Time
 	// watch is every path whose change may need a pass.
 	watch []string
@@ -55,8 +59,10 @@ func (p *pace) due(at time.Time) {
 type wakeup struct {
 	name  string
 	every time.Duration
-	w     *fsnotify.Watcher
-	kick  chan struct{}
+	// idle is the longest a settled worker waits for a change.
+	idle time.Duration
+	w    *fsnotify.Watcher
+	kick chan struct{}
 	// lost closes when the watcher stops delivering events.
 	lost chan struct{}
 	// partial is set while a wanted path exists but could not be watched;
@@ -73,15 +79,15 @@ func polling(name string, every time.Duration) *wakeup {
 }
 
 // newWakeup starts the watcher of the worker name, whose base interval is
-// every. A watcher that cannot start leaves the worker polling every base
+// every and whose idle poll is idle. A watcher that cannot start leaves the worker polling every base
 // interval, and says why once.
-func newWakeup(name string, every time.Duration) *wakeup {
+func newWakeup(name string, every, idle time.Duration) *wakeup {
 	w, err := newWatcher()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "amq-acp: the %s worker cannot watch files (%v); it polls every %s\n", name, err, every)
 		return polling(name, every)
 	}
-	u := &wakeup{name: name, every: every, w: w, kick: make(chan struct{}, 1), lost: make(chan struct{})}
+	u := &wakeup{name: name, every: every, idle: idle, w: w, kick: make(chan struct{}, 1), lost: make(chan struct{})}
 	go u.forward()
 	return u
 }
@@ -183,7 +189,7 @@ func (u *wakeup) wait(quit <-chan struct{}, started time.Time, p pace) bool {
 	earliest := started.Add(u.every)
 	at := earliest
 	if u.watching() && !grew {
-		at = started.Add(idlePoll)
+		at = started.Add(u.idle)
 		if !p.next.IsZero() && p.next.Before(at) {
 			at = p.next
 		}
