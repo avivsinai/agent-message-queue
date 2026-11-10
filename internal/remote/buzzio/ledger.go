@@ -345,7 +345,7 @@ func (l *Ledger) PruneSettled(limit int) (int, error) {
 		if removed == limit {
 			break
 		}
-		if o.Seq == top {
+		if o.Seq == top && top > 0 {
 			continue
 		}
 		if done, err := l.obligationRecorded(o.Key); err != nil || !done {

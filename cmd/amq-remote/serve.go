@@ -276,8 +276,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 }
 
 // serveStartupError maps a failed manifest load or startup to serve's exit:
-// a validation error is exit 6 (fix the manifest), naming the sources of a
-// duplicate target; any other error is a runtime error.
+// a validation error or another invalid-configuration refusal is exit 6
+// (fix it), naming the sources of a duplicate target; any other error is a
+// runtime error.
 func serveStartupError(err error, sugar []manifest.Adapter, manifestFile string) (int, error) {
 	if manifest.IsValidation(err) {
 		if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
@@ -312,6 +313,11 @@ func serveStartupError(err error, sugar []manifest.Adapter, manifestFile string)
 			}
 		}
 		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	if protocol.RefusalCode(err) == protocol.CodeInvalid {
+		// A startup refusal of its configuration is 6 too: under up, exit 2
+		// means a crash.
+		return protocol.ExitActionRequired, err
 	}
 	return 0, err
 }

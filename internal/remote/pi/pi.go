@@ -613,7 +613,9 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		// error no longer blocks the evidence (a receiptless refusal has no
 		// receipt to clear it).
 		r.notFound = nil
-		r.noReceipt = o.refused
+		if o.refused {
+			r.noReceipt = true
+		}
 	}
 	if o.readEvts {
 		switch {
