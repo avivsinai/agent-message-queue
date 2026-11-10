@@ -203,7 +203,7 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	}
 	record.StagePath = stagePath
 
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		result.Reason = err.Error()
 		return result, err
@@ -886,7 +886,7 @@ func observeWakeRestartReadiness(
 	root, me string,
 	expected wakeLockInspection,
 ) (wakeRestartReadiness, error) {
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		return wakeRestartReadiness{}, err
 	}
@@ -1500,7 +1500,7 @@ func persistWakeRestartBoundImage(
 	if record.StagePath == "" {
 		return record, nil
 	}
-	agentDir, err := openWakeAgentDir(record.Root, record.Agent)
+	agentDir, err := openExistingWakeAgentDir(record.Root, record.Agent)
 	if err != nil {
 		return wakeRestartRecord{}, err
 	}

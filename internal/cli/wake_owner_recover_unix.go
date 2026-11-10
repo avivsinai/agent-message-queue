@@ -107,14 +107,15 @@ func recoverOwnerWakeWithStopPreparer(
 		Lock:   filepath.Join(fsq.AgentBase(root, me), wakeLockFileName),
 		Target: wakeTargetPath(root, me),
 	}
-	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
-		result.Status = "error"
-		err = withWakeDiagnostic(err, result.Root, result.Agent)
-		result.Reason = err.Error()
-		return result, err
-	}
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
+		if GetExitCode(err) == ExitNotFound {
+			// An unknown handle is refused with its own exit code; nothing was
+			// created.
+			result.Status = "refused"
+			result.Reason = err.Error()
+			return result, err
+		}
 		result.Status = "error"
 		err = withWakeDiagnostic(err, result.Root, result.Agent)
 		result.Reason = err.Error()
