@@ -291,10 +291,13 @@ func runCleanup(args []string) error {
 		removed++
 	}
 	for _, candidate := range wakeQuarantineCandidates {
-		if err := removeWakeQuarantineCandidate(root, candidate); err != nil {
+		done, err := removeWakeQuarantineCandidate(root, candidate)
+		if err != nil {
 			return err
 		}
-		removed++
+		if done {
+			removed++
+		}
 	}
 	for _, candidate := range historyCandidates {
 		if err := os.Remove(candidate.Path); err != nil && !os.IsNotExist(err) {

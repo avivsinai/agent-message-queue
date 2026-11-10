@@ -149,7 +149,7 @@ func TestCleanupWakeQuarantineRemovesOldReloadSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(short) })
-	socket := func(name string, mtime time.Time) string {
+	socketIn := func(agentDir, name string, mtime time.Time) string {
 		bound := filepath.Join(short, "s")
 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: bound, Net: "unix"})
 		if err != nil {
@@ -166,9 +166,23 @@ func TestCleanupWakeQuarantineRemovesOldReloadSockets(t *testing.T) {
 		}
 		return path
 	}
+	socket := func(name string, mtime time.Time) string { return socketIn(agentDir, name, mtime) }
 	oldSocket := socket(".wr.old", old)
 	oldStage := socket(".wr.stage.old", old)
 	recentSocket := socket(".wr.recent", time.Now())
+	// A wake with a live lock keeps its socket, and cleanup does not count it.
+	liveDir := filepath.Join(root, "agents", "live")
+	if err := os.MkdirAll(liveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "live", wakeLock{PID: 4242, TTY: "/dev/ttys005", Started: "2026-11-07T00:00:00Z",
+		ProcessStart: "12345", BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq",
+		WakeMode: wakeInjectModeRaw, Generation: "live-generation"})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "12345",
+			BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq"}
+	})
+	liveSocket := socketIn(liveDir, ".wr.live", old)
 	oldFile := filepath.Join(agentDir, ".wr.file")
 	if err := os.WriteFile(oldFile, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -177,17 +191,21 @@ func TestCleanupWakeQuarantineRemovesOldReloadSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := captureEnvStdout(t, func() error {
+	output, err := captureEnvStdout(t, func() error {
 		return runCleanup([]string{"--root", root, "--wake-quarantine-older-than", "1h", "--yes", "--json"})
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("cleanup: %v", err)
+	}
+	if !strings.Contains(output, `"removed": 2`) {
+		t.Fatalf("cleanup output = %s, want exactly the 2 stopped-wake sockets removed", output)
 	}
 	for _, path := range []string{oldSocket, oldStage} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("old reload socket %s was not removed: %v", path, err)
 		}
 	}
-	for _, path := range []string{recentSocket, oldFile} {
+	for _, path := range []string{recentSocket, oldFile, liveSocket} {
 		if _, err := os.Lstat(path); err != nil {
 			t.Fatalf("%s was removed: %v", path, err)
 		}
