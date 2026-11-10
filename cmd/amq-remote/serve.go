@@ -275,6 +275,18 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, err
 }
 
+// serveExitCode is serve's exit for an error it returned without one. Exit 6
+// stops up, so only another endpoint holding the root keeps it; every other
+// refusal the protocol maps to 6 (storage_full, store_closed, draining, ...)
+// may pass, so it exits 1 and up respawns serve.
+func serveExitCode(err error) int {
+	code := protocol.ExitCode(err)
+	if code == protocol.ExitActionRequired && protocol.RefusalCode(err) != protocol.CodeEndpointAlreadyRunning {
+		return protocol.ExitError
+	}
+	return code
+}
+
 // serveStartupError maps a failed manifest load or startup to serve's exit:
 // a validation error or another invalid-configuration refusal is exit 6
 // (fix it), naming the sources of a duplicate target; any other error is a

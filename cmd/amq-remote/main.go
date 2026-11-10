@@ -257,6 +257,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "serve":
 		code, err = serve(rest, stdout, stderr)
+		if code == 0 && err != nil {
+			code = serveExitCode(err)
+		}
 		return finish(stdout, stderr, nil, false, code, err)
 	case "up":
 		code, err = up(rest, stdout, stderr, newExecSpawner)

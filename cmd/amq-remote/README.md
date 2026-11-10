@@ -75,9 +75,10 @@ amq-remote statusline [--session ID] [--plain]
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
 respawns a crashed child with backoff and stops when the child exits 0. A
-child exit 6 (action required: its configuration is refused, another
-endpoint holds the root, or the store refuses to open) is not respawned; any
-other exit, a crash included, is. A second `up` for the
+child exit 6 (action required: its configuration is refused, or another
+endpoint holds the root) is not respawned; any other exit, a crash included,
+is. A refusal that may pass, such as `storage_full`, `store_closed` or
+`draining`, makes `serve` exit 1. A second `up` for the
 same root exits 6 (`endpoint_already_running`) while the first supervisor
 holds the lifetime lock.
 

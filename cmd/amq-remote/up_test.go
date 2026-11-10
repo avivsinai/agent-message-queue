@@ -577,3 +577,18 @@ func secureTestDir(t *testing.T) (string, error) {
 	}
 	return dir, nil
 }
+
+// Only a refused configuration or another endpoint stops up; a refusal that
+// may pass exits 1, so up respawns serve.
+func TestServeExitCodeKeepsTransientRefusalsRespawnable(t *testing.T) {
+	for code, want := range map[protocol.Code]int{
+		protocol.CodeEndpointAlreadyRunning: protocol.ExitActionRequired,
+		protocol.CodeStorageFull:            protocol.ExitError,
+		protocol.CodeStoreClosed:            protocol.ExitError,
+		protocol.CodeDraining:               protocol.ExitError,
+	} {
+		if got := serveExitCode(protocol.Refuse(code, "x")); got != want {
+			t.Errorf("%s: exit %d, want %d", code, got, want)
+		}
+	}
+}
