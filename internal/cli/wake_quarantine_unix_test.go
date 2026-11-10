@@ -200,3 +200,18 @@ func TestRecoverOwnerPreservesLiveOwnerBearingOrphanTarget(t *testing.T) {
 		t.Fatalf("live owner-bearing orphan target changed: info=%v err=%v", after, statErr)
 	}
 }
+
+// recover-owner for an unknown handle is a not-found refusal and creates no mailbox (audit 2026-11-10).
+func TestRecoverOwnerUnknownHandleCreatesNoMailbox(t *testing.T) {
+	root := secureTempDirForTest(t)
+	result, err := recoverOwnerWake(root, "typo")
+	if err == nil || GetExitCode(err) != ExitNotFound {
+		t.Fatalf("recoverOwnerWake err = %v (exit %d), want not found", err, GetExitCode(err))
+	}
+	if result.Status != "refused" {
+		t.Fatalf("status = %q, want refused", result.Status)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "agents", "typo")); !os.IsNotExist(statErr) {
+		t.Fatalf("agents/typo exists after refusal: %v", statErr)
+	}
+}

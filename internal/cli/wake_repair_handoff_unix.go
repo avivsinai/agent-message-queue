@@ -1071,6 +1071,18 @@ func wakeRepairChildHandoffFromEnv() (*wakeRepairChildHandoff, bool, error) {
 	if readRaw == "" && writeRaw == "" && agentRaw == "" && inboxRaw == "" {
 		return nil, false, nil
 	}
+	// The descriptors are close-on-exec once ingested, so a re-exec that
+	// inherits these variables would name closed or unrelated descriptors.
+	for _, name := range []string{
+		envWakeRepairHandoffReadFD,
+		envWakeRepairHandoffWriteFD,
+		envWakeRepairAgentDirFD,
+		envWakeRepairInboxDirFD,
+	} {
+		if err := os.Unsetenv(name); err != nil {
+			return nil, true, fmt.Errorf("clear %s after ingestion: %w", name, err)
+		}
+	}
 	if readRaw == "" || writeRaw == "" || agentRaw == "" || inboxRaw == "" {
 		return nil, true, fmt.Errorf("wake repair handoff descriptors are incomplete")
 	}

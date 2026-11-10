@@ -768,7 +768,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if cfg.injectMode == wakeInjectModeNone {
 			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 		}
-		if done, err := injectWakeInterruptKey(cfg, currentPending); done {
+		if done, err := injectWakeInterruptKey(cfg, wakeMessageIDs(interruptMessages), currentPending); done {
 			return err
 		}
 		return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
@@ -791,12 +791,21 @@ func notifyNewMessages(cfg *wakeConfig) error {
 // injectWakeInterruptKey sends the configured interrupt key ahead of an
 // interrupt notification when the interrupt window allows it. It reports
 // whether the scan must end here, and with what result.
-func injectWakeInterruptKey(cfg *wakeConfig, currentPending map[string]os.FileInfo) (bool, error) {
+func injectWakeInterruptKey(
+	cfg *wakeConfig,
+	messageIDs []string,
+	currentPending map[string]os.FileInfo,
+) (bool, error) {
 	now := time.Now()
 	if !usesCoopDoorbell(cfg) &&
 		cfg.interruptKey != "" &&
 		shouldInterruptNow(cfg, now) {
 		if cfg.injectVia != "" {
+			if terminalInjectorForCohort(cfg, messageIDs, currentPending) {
+				// A failed injector is terminal for this unchanged cohort; the
+				// notification step applies the same latch.
+				return false, nil
+			}
 			allowed, guardErr := authorizeTerminalWrite(cfg)
 			if guardErr != nil {
 				return true, guardErr
@@ -834,6 +843,13 @@ func injectWakeInterruptKey(cfg *wakeConfig, currentPending map[string]os.FileIn
 						currentPending,
 						&wakeInputDemotionBlockedError{err: err},
 					)
+				case wakeInjectorOutcomeFailed:
+					// Terminal for this cohort, exactly as a failed payload
+					// attempt: latch it so later scans do not rerun the injector,
+					// and let the notification step run under the latch.
+					cfg.terminalInjectorCohort = append([]string{}, messageIDs...)
+					cfg.terminalInjectorMode = notificationAttemptMode(cfg)
+					cfg.terminalInjectorPhysical = snapshotWakeFileIdentities(currentPending)
 				}
 			}
 		} else {

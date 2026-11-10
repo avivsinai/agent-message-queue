@@ -35,6 +35,25 @@ func openWakeAgentDir(root, me string) (*wakeAgentDir, error) {
 	return openWakeDirectory(path, "wake agent directory")
 }
 
+// openExistingWakeAgentDir opens agents/<me> without creating it, so a typo
+// handle is a not-found error and not a new mailbox directory.
+func openExistingWakeAgentDir(root, me string) (*wakeAgentDir, error) {
+	if err := fsq.ValidateHandle(me); err != nil {
+		return nil, UsageError("--me: %v", err)
+	}
+	path := fsq.AgentBase(root, me)
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, NotFoundError(
+				"mailbox for %q not found at %s; check the handle or run amq init",
+				me, path,
+			)
+		}
+		return nil, fmt.Errorf("stat wake agent directory %s: %w", path, err)
+	}
+	return openWakeDirectory(path, "wake agent directory")
+}
+
 func openWakeDirectory(path, label string) (*wakeAgentDir, error) {
 	before, err := os.Lstat(path)
 	if err != nil {

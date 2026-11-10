@@ -186,15 +186,53 @@ func removeWakeDialogEntriesAt(dirfd int, agentDir *wakeAgentDir, remove func(na
 	return removeEmptyWakeDialogEntriesAt(dirfd)
 }
 
-// removeEmptyWakeDialogEntriesAt removes the entries directory when it is
-// empty; a directory with entries stays.
+// removeEmptyWakeDialogEntriesAt removes the entries directory when it holds
+// no entry; a directory with entries stays. It runs under the marker lock,
+// which every writer holds from its temp create to its rename, so a temp file
+// that is still there belongs to a writer that died and is removed with the
+// directory.
 func removeEmptyWakeDialogEntriesAt(dirfd int) error {
 	err := wakeUnlinkAt(dirfd, wakeDialogFileName, unix.AT_REMOVEDIR)
+	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+		if err = removeStaleWakeDialogTempsAt(dirfd); err != nil {
+			return err
+		}
+		err = wakeUnlinkAt(dirfd, wakeDialogFileName, unix.AT_REMOVEDIR)
+	}
 	if err == nil || errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) ||
 		errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 		return nil
 	}
 	return err
+}
+
+// removeStaleWakeDialogTempsAt unlinks the writers' temp files from the
+// entries directory when it has no entry.
+func removeStaleWakeDialogTempsAt(dirfd int) error {
+	dir, ok, err := openWakeDialogEntriesAt(dirfd, "")
+	if err != nil || !ok {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return fmt.Errorf("list wake dialog entries: %w", err)
+	}
+	tempPrefix := "." + strings.TrimLeft(wakeDialogFileName, ".") + ".entry.tmp."
+	for _, name := range names {
+		if !strings.HasPrefix(name, ".") {
+			return nil
+		}
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name, tempPrefix) {
+			continue
+		}
+		if err := wakeUnlinkAt(int(dir.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeWakeDialogEntryVersion removes the marker the wake read as entry,

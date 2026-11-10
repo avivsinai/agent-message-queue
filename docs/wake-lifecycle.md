@@ -33,7 +33,7 @@ matrix for every publication point, are in
 | `.wake.repair-floor` | Private mode-0600 continuity state with device/inode suppression identities and successor lineage. Its lifetime and sensitivity differ from target and prepared state. It never records message IDs. |
 | Caller ready files | Caller-scoped admission receipts. Their replacement and cleanup MUST NOT mutate retained wake state. |
 | `.wake.lifecycle.lock` | Serializes mutations and compound reads; holds no lifecycle decision. |
-| Control and reload endpoints | Ephemeral, generation- or socket-identity-bound capabilities, not durable proof that a wake exists. |
+| Control endpoints | Ephemeral, generation- or socket-identity-bound capabilities, not durable proof that a wake exists. |
 
 `.wake.state` is not an ownership claim, a readiness receipt, or a repair
 floor. A target section without a lock does not imply ownership, and a
@@ -113,8 +113,7 @@ The installed bytes MUST be one canonical JSON stream: `json.Marshal` of the
 versioned Go struct (not `MarshalIndent`), with no maps, unordered extensions,
 alternate number forms, insignificant whitespace, or trailing newline. The
 writer re-opens the installed file and requires the bytes to equal what it
-wrote. The reload transport request in `wake_reload_transport.go` uses the same
-re-encode-equality rule.
+wrote.
 
 ### Closed schema
 

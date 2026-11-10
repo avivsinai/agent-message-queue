@@ -434,3 +434,28 @@ func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
 		t.Fatalf("count = %d (%q), want 1", count, errText)
 	}
 }
+
+// A session root without its own config reads the base roster under --fix-wake-locks, with no false config_error (audit 2026-11-10).
+func TestRunOpsChecksFixWakeLocksUsesBaseConfigForSessionRoot(t *testing.T) {
+	parent := t.TempDir()
+	baseRoot := filepath.Join(parent, ".agent-mail")
+	currentRoot := filepath.Join(baseRoot, "collab")
+	if err := fsq.EnsureAgentDirs(currentRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(baseRoot, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(baseRoot, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	result := runOpsChecks(currentRoot, "env", true)
+	for _, hint := range result.Hints {
+		if hint.Code == "config_error" {
+			t.Fatalf("false config_error under fix: %s", hint.Message)
+		}
+	}
+}

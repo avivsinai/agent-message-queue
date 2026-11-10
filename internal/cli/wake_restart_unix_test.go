@@ -441,3 +441,49 @@ func TestWakeCheckMakesAdvertisedSelfRestartActionable(t *testing.T) {
 		t.Fatalf("restart action args = %#v, want %#v", decision.Action.Command.Args, wantArgs)
 	}
 }
+
+// An operator restart refused in a transient boundary state says so; a refusal that is not transient does not (audit 2026-11-10).
+func TestOperatorWakeRestartRefusalNamesTransientState(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		scanRetry    bool
+		interruptKey string
+		wantHint     bool
+	}{
+		{"deferred by a scan retry", true, "", true},
+		{"refused for a destructive interrupt", false, "KEY", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newWakeRestartFixture(t)
+			cfg := wakeConfig{
+				me:                 fixture.agent,
+				root:               fixture.root,
+				injectMode:         wakeInjectModeNone,
+				interruptKey:       tc.interruptKey,
+				wakeOwner:          &fixture.owner,
+				terminalGeneration: fixture.lock.Lock.Generation,
+				retainedAgent:      fixture.agentDir,
+				retainedInbox:      fixture.inboxDir,
+				inspectTerminalGeneration: func() wakeLockInspection {
+					return inspectWakeLock(fixture.root, fixture.agent)
+				},
+				restartSignals: make(chan os.Signal, 1),
+			}
+			handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, tc.scanRetry)
+			var record wakeRestartRecord
+			var exists bool
+			err := fixture.agentDir.withFD(func(dirfd int) error {
+				var readErr error
+				record, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+				return readErr
+			})
+			if err != nil || !exists || record.Status != wakeRestartRefused {
+				t.Fatalf("record = %#v exists=%v err=%v; want refused", record, exists, err)
+			}
+			hint := "this state is transient, run the command again"
+			if got := strings.Contains(record.Reason, hint); got != tc.wantHint {
+				t.Fatalf("reason %q: transient hint present=%v, want %v", record.Reason, got, tc.wantHint)
+			}
+		})
+	}
+}

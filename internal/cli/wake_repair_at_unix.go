@@ -291,7 +291,7 @@ func quarantineWakeRepairFloorAt(dirfd int) (string, bool, error) {
 			os.Getpid(),
 			hex.EncodeToString(nonce[:]),
 		)
-		err := renameWakeRepairNoReplaceAt(
+		err := wakeRenameNoReplaceAt(
 			dirfd,
 			wakeRepairFloorFileName,
 			dirfd,
@@ -319,7 +319,7 @@ func quarantineWakeRepairFloorAt(dirfd int) (string, bool, error) {
 }
 
 func restoreWakeRepairFloorQuarantineAt(dirfd int, quarantine string) error {
-	err := renameWakeRepairNoReplaceAt(
+	err := wakeRenameNoReplaceAt(
 		dirfd,
 		quarantine,
 		dirfd,

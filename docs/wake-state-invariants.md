@@ -315,7 +315,7 @@ must acquire the same guard to finish publication or exact-generation cleanup.
 
 Source anchor: `wake_lifecycle_guard_unix.go`.
 
-## Control and reload endpoints: ephemeral authenticated transport
+## Control endpoints: ephemeral authenticated transport
 
 **Owns:** a live process endpoint for generation-bound control traffic. The
 socket listener and authenticated peer exchange are runtime capabilities, not
@@ -325,19 +325,17 @@ durable proof that a wake exists.
 canonical root, agent, and generation and the corresponding path is advertised
 by the lock only when the resume advertisement validates. Requests revalidate
 the live lock and generation. Cleanup is tied to the released claim's recorded
-socket path. On Linux, the current `.wr.*` reload endpoint is a separate,
-unadvertised, refusal-only seam; it authenticates the lock, process, owner,
-peer, and session and is retired by exact socket identity.
+socket path.
 
 **Independence invariant:** a pathname or socket inode does not own the durable
 claim. Persisting listener lifetime as owner state would let a stale endpoint
 stand in for a live generation, while treating lock cleanup as unconditional
-socket cleanup could unlink a successor endpoint. Control and reload endpoints
-therefore retain explicit generation or socket-identity fences and may be
-absent even when the ordinary notifier remains valid.
+socket cleanup could unlink a successor endpoint. Control endpoints therefore
+retain explicit generation or socket-identity fences and may be absent even
+when the ordinary notifier remains valid.
 
-Source anchors: `wake_control_darwin.go`, `wake_reload_transport_linux.go`,
-`wake_resume_protocol.go`, and `wake_owner_storage_unix.go`.
+Source anchors: `wake_control_darwin.go`, `wake_resume_protocol.go`, and
+`wake_owner_storage_unix.go`.
 
 ## Claim publication order
 
@@ -361,7 +359,7 @@ file can produce, and the observation the code guarantees for it.
 | Prepared marker generation | The marker is absent, names a stale generation, matches the current generation and digest, or names the current generation with a wrong digest. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
 | Ready file replacement during cleanup | Publish a caller ready file, replace its pathname, then run failure cleanup for the original publication. | Cleanup removes only the original unchanged snapshot. The replacement is preserved and is not reported as the original receipt. |
 | Guard release before waits | Pause immediately before a child, pidfd, or control wait and attempt lifecycle-guard acquisition from another participant. | The second participant can acquire the guard. Completion paths may reacquire it for final publication or cleanup; the wait itself never owns it. |
-| Endpoint generation mismatch | Address or request a Darwin control endpoint with the wrong generation, or replace a Linux reload socket before authorization or retirement. | The request is refused without lifecycle mutation. Cleanup removes only the endpoint authorized by the released generation or exact socket identity and preserves a successor. |
+| Endpoint generation mismatch | Address or request a Darwin control endpoint with the wrong generation. | The request is refused without lifecycle mutation. Cleanup removes only the endpoint authorized by the released generation or exact socket identity and preserves a successor. |
 | Crash at every publication point | Stop after target temporary-file creation, target rename/sync, state temporary-file creation, state rename/sync/re-read, lock link, lock-temp removal, and final directory sync. | Pre-lock target and state never claim ownership and are preserved; post-link states are committed even if later cleanup or sync reports an error. Recovery preserves ambiguous installed artifacts and never removes a different generation by pathname alone. |
 | Prepared marker before state refresh | Stop after `.wake.prepared` commits and before the `.wake.state` refresh. | An unbound claim falls back to the legacy marker. A bound claim is inconclusive and retry-only until an authorized mutating path refreshes the state; no reader rewrites it. |
 | Torn or mismatched state document | Read `.wake.state` while it is missing, torn, non-canonical, of a newer schema, or out of step with the legacy files. | An unbound claim falls back silently to the legacy files. A bound claim is inconclusive and retry-only, and no mutation is authorized from the observation. |

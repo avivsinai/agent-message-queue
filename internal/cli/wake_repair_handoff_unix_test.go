@@ -248,3 +248,44 @@ func TestWakeRepairFDInspectorHelperProcess(t *testing.T) {
 	_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
 	os.Exit(0)
 }
+
+// The four handoff descriptor variables are cleared once ingested, so a re-exec does not inherit stale numbers (audit 2026-11-10).
+func TestWakeRepairChildHandoffClearsDescriptorEnvAfterIngestion(t *testing.T) {
+	var pipe [2]int
+	if err := unix.Pipe(pipe[:]); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	agentFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboxFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]int{
+		envWakeRepairHandoffReadFD:  pipe[0],
+		envWakeRepairHandoffWriteFD: pipe[1],
+		envWakeRepairAgentDirFD:     agentFD,
+		envWakeRepairInboxDirFD:     inboxFD,
+	}
+	for name, fd := range vars {
+		t.Setenv(name, strconv.Itoa(fd))
+	}
+	handoff, present, err := wakeRepairChildHandoffFromEnv()
+	if err != nil || !present {
+		t.Fatalf("ingest handoff: present=%v err=%v", present, err)
+	}
+	defer func() {
+		_ = handoff.readFile.Close()
+		_ = handoff.writeFile.Close()
+		_ = handoff.agentFile.Close()
+		_ = handoff.inboxFile.Close()
+	}()
+	for name := range vars {
+		if value, set := os.LookupEnv(name); set {
+			t.Fatalf("%s still set to %q after ingestion", name, value)
+		}
+	}
+}
