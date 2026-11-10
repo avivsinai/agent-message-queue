@@ -147,17 +147,6 @@ func Touch(root, handle string) error {
 	return err
 }
 
-// SetNotifierStatus records notifier capability. Empty values clear a stale
-// notifier diagnosis when a later wake starts with a usable injector.
-func SetNotifierStatus(root, handle, status, mode, reason string) error {
-	_, err := Update(root, handle, func(p *Presence) {
-		p.NotifierStatus = status
-		p.NotifierMode = mode
-		p.NotifierReason = reason
-	})
-	return err
-}
-
 // TouchDeliveryRoot updates presence through a pinned root capability.
 func TouchDeliveryRoot(root *fsq.DeliveryRoot, handle string) error {
 	_, err := UpdateDeliveryRoot(root, handle, nil)

@@ -58,7 +58,7 @@ func TestDoctorExplicitRootRepairRequiresPinMatchOrOverride(t *testing.T) {
 	}, true); err != nil {
 		t.Fatal(err)
 	}
-	missing := fsq.AgentDLQCur(sessionRoot, "bob")
+	missing := fsq.AgentMailboxPath(sessionRoot, "bob", fsq.MailboxDLQCur)
 	if err := os.Remove(missing); err != nil {
 		t.Fatal(err)
 	}

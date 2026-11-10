@@ -27,7 +27,12 @@ func harnessRoot(t *testing.T) (string, *fsq.DeliveryRoot) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = root.Close() })
-	if repaired := fsq.RepairMailboxLayoutForAgents(root, []string{"claude", "codex"}); repaired.Status != "repaired" {
+	authorization, _, err := fsq.OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorization.Close() })
+	if repaired := fsq.RepairMailboxLayoutForAgentsWithAuthorization(root, authorization, []string{"claude", "codex"}); repaired.Status != "repaired" {
 		t.Fatalf("repair conformance root: %#v", repaired)
 	}
 	return dir, root

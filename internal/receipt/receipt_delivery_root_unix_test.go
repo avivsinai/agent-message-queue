@@ -42,7 +42,7 @@ func TestWaitForDeliveryRootRejectsReplacedRootAlias(t *testing.T) {
 		t.Fatalf("EnsureAgentDirs replacement: %v", err)
 	}
 	malicious := New("msg_replaced", "", "attacker", "codex", StageDrained, "")
-	if err := Emit(rootPath, malicious); err != nil {
+	if err := emitForTest(rootPath, malicious); err != nil {
 		t.Fatalf("emit replacement receipt: %v", err)
 	}
 

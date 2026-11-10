@@ -207,7 +207,7 @@ func TestSendRepairsBaseOnlyCoopMailboxAcrossSessionRoutes(t *testing.T) {
 			if err := fsq.EnsureAgentDirs(target, "bob"); err != nil {
 				t.Fatal(err)
 			}
-			missing := fsq.AgentDLQCur(target, "bob")
+			missing := fsq.AgentMailboxPath(target, "bob", fsq.MailboxDLQCur)
 			if err := os.Remove(missing); err != nil {
 				t.Fatal(err)
 			}

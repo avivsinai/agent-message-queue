@@ -134,7 +134,7 @@ func TestDLQPurgeRemovesDeliveredRetryTombstoneWithoutTouchingDelivery(t *testin
 	if err := fsq.RetryFromDLQ(deliveryRoot, "alice", filename, false); err != nil {
 		t.Fatalf("RetryFromDLQ: %v", err)
 	}
-	curPath := filepath.Join(fsq.AgentDLQCur(root, "alice"), filename)
+	curPath := filepath.Join(fsq.AgentMailboxPath(root, "alice", fsq.MailboxDLQCur), filename)
 	inboxPath := filepath.Join(fsq.AgentInboxNew(root, "alice"), originalID+".md")
 
 	stdout, _, err := captureEnvOutput(t, func() error {
