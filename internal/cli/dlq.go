@@ -311,7 +311,7 @@ func runDLQRead(args []string) error {
 	env, originalContent, box, inspectErr := fsq.InspectDLQEnvelope(deliveryRoot, me, filename)
 	if inspectErr != nil && env == nil {
 		if os.IsNotExist(inspectErr) {
-			return fmt.Errorf("DLQ message not found: %s", *idFlag)
+			return NotFoundError("DLQ message not found: %s", *idFlag)
 		}
 		return inspectErr
 	}
@@ -444,6 +444,9 @@ func runDLQRetry(args []string) error {
 	}
 
 	retryErr := fsq.RetryFromDLQ(deliveryRoot, me, filename, *forceFlag)
+	if os.IsNotExist(retryErr) {
+		return NotFoundError("DLQ message not found: %s", *idFlag)
+	}
 	alreadyDelivered := errors.Is(retryErr, fsq.ErrDLQRetryDelivered)
 	if retryErr != nil && !alreadyDelivered && !committedDLQRetry(deliveryRoot, me, retryErr) {
 		return retryErr

@@ -1467,8 +1467,8 @@ Each setting comes from the agent's file (.wake.settings), else the machine file
 built-in default. With no setting flag and no --unset, print each setting, its value,
 and which layer it comes from, then what the running wake did with the files.
 Otherwise validate the whole new set and store it. A running wake applies a change
-within a few seconds. Flags fixed for a running wake (--inject-via, --inject-mode,
---inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
+within a few seconds. Flags fixed for a running wake (--harness, --inject-via,
+--inject-mode, --inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
 An invalid file is shown as refused and cannot be changed with set or --unset;
 --reset replaces it with exactly the given setting flags. --reset with no setting
 flag means no overrides: the agent's file then falls through to the machine file and

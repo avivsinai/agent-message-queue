@@ -221,21 +221,6 @@ func TestSessionGuardDecisionRows(t *testing.T) {
 	}
 }
 
-func TestSessionGuardRevalidationUsesEntryRows(t *testing.T) {
-	for _, kind := range []Kind{KindMailbox} {
-		for _, relation := range []TargetRelation{TargetMatch, TargetMismatch} {
-			entry := Decide(Input{Kind: kind, Pin: PinIdentity, Relation: relation})
-			revalidated := Decide(Input{
-				Kind: kind, Pin: PinIdentity, Relation: relation,
-				Flags: Flags{Revalidation: true},
-			})
-			if revalidated != entry {
-				t.Errorf("revalidation relation %d decision %#v, want entry %#v", relation, revalidated, entry)
-			}
-		}
-	}
-}
-
 type sessionGuardSiteMapping struct {
 	site          string
 	kind          Kind
@@ -339,7 +324,6 @@ func TestSessionGuardWatchMonitorMidWaitRepinRefuses(t *testing.T) {
 			repinned := Decide(Input{
 				Kind: KindMailbox, Pin: PinIdentity,
 				Relation: TargetMismatch,
-				Flags:    Flags{Revalidation: true},
 			})
 			if repinned.Row != RowR08MismatchExit5 || repinned.Verdict != RefuseExit5 {
 				t.Fatalf("mid-wait repin decision = %#v, want mismatch exit-5 row", repinned)
@@ -350,7 +334,6 @@ func TestSessionGuardWatchMonitorMidWaitRepinRefuses(t *testing.T) {
 
 func sessionGuardSiteReplayCase(site sessionGuardSiteMapping, row string) (string, Input) {
 	input := Input{Kind: site.kind, Channel: site.channel, Pin: PinIdentity, Relation: TargetMatch}
-	input.Flags.Revalidation = site.phase == "revalidation"
 	switch row {
 	case RowR01UnboundAllow:
 		input.Pin, input.Relation = PinAbsent, TargetUnbound

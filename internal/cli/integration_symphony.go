@@ -10,9 +10,6 @@ import (
 )
 
 // runIntegration dispatches the "integration" subcommand group.
-// Task A owns the registry entry; this handler is temporary until Task A
-// provides internal/cli/integration.go. Once that exists, this function
-// should be removed and the dispatch logic consolidated there.
 func runIntegration(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		return printIntegrationUsage()
@@ -134,8 +131,11 @@ func runSymphonyInit(args []string) error {
 	}
 
 	if result.CheckOnly {
-		if result.HooksFound {
+		if result.AlreadyOK {
 			return writeStdoutLine("AMQ hooks are installed in", result.WorkflowPath)
+		}
+		if result.HooksFound {
+			return writeStdoutLine("AMQ hooks are present but out of date in", result.WorkflowPath, "(run without --check to update)")
 		}
 		return writeStdoutLine("AMQ hooks are NOT installed in", result.WorkflowPath)
 	}

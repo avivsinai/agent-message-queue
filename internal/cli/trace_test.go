@@ -77,6 +77,10 @@ func TestTraceJoinsWrittenAndIndeterminateNotificationAttempts(t *testing.T) {
 	if !states[notificationattempt.OutcomeWritten] || !states[notificationattempt.StateIndeterminate] {
 		t.Fatalf("notification states = %v", states)
 	}
+	// Notification-only evidence does not make the message found (audit 2026-11-10).
+	if result.Status != "not_found" {
+		t.Fatalf("status = %q, want not_found for notification-only evidence", result.Status)
+	}
 }
 
 type traceLegJSON struct {

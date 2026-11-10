@@ -297,6 +297,9 @@ func updateTaskRaw(teamName, taskID string, mutate func(map[string]any) error) e
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 		path := filepath.Join(tasksDir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {

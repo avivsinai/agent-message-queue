@@ -179,7 +179,6 @@ func runUpgrade(args []string, currentVersion string) error {
 				ctx,
 				client,
 				latestTag,
-				latest,
 				path,
 				destPath,
 				homebrewPrefixes,
@@ -203,7 +202,6 @@ func runUpgrade(args []string, currentVersion string) error {
 		client,
 		update.BinaryName,
 		latestTag,
-		latest,
 		destPath,
 		homebrewPrefixes,
 		scoopRoots,
@@ -223,7 +221,6 @@ func runUpgrade(args []string, currentVersion string) error {
 			ctx,
 			client,
 			latestTag,
-			latest,
 			path,
 			destPath,
 			homebrewPrefixes,
@@ -404,7 +401,7 @@ func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (direct
 func runDirectUpgradeWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	binaryName, latestTag, latest, destPath string,
+	binaryName, latestTag, destPath string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) (directUpgradeResult, error) {
@@ -433,7 +430,7 @@ func runDirectUpgradeWithScoopRoots(
 func upgradeCompanionsWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	latestTag, latest, rawAMQPath, amqDest string,
+	latestTag, rawAMQPath, amqDest string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) error {

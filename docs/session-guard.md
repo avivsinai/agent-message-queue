@@ -14,9 +14,9 @@ and the existing handlers feed their normalized evaluator facts through it.
 - Relation: `Unbound` (no pin/tree conflict), `Match`, `Mismatch` (pin or CWD
   conflict after evaluator normalization), or `OwnPinnedBase`.
 - Flags: routed mailbox target, ignore pin, explicit root/context,
-  cross-project source route, from-session source route, and revalidation
-  phase. Explicit root/cross-project only affect the pre-table CWD check; they
-  never waive a pin mismatch.
+  cross-project source route, and from-session source route. Explicit
+  root/cross-project only affect the pre-table CWD check; they never waive a
+  pin mismatch.
 
 The evaluator normalizes the target relation before this table runs. An absent
 pin with no established conflicting tree is `Unbound`; a valid pin with a
@@ -64,6 +64,10 @@ mismatch into an allow.
 | `internal/cli/monitor.go` (`runMonitor` and revalidation) | Mailbox entry/revalidation | R01, R02, R03, R04, R08, R09 |
 | `internal/cli/list.go` (`runList`) | CWD and warning inspection | R01, R02, R06, R10, R11 |
 | `internal/cli/dlq.go` (`runDLQ*`) | Mailbox entry | R01, R02, R03, R04, R08, R09 |
+| `internal/cli/launch.go` (`runLaunchEngine`) | Mailbox entry | R01, R02, R03, R08, R09 |
+| `internal/cli/launch_public_api.go` (`resolvePublicLaunchTarget`) | Mailbox entry | R01, R02, R03, R08, R09 |
+| `internal/cli/cleanup_launch_execution.go` (`cleanupLaunchExecution`) | Mailbox entry and recheck before removal | R01, R02, R04, R08, R09 |
+| `internal/cli/wake_dialog_unix.go` (`runWakeDialog`) | Mailbox entry; a refusal makes the hook do nothing | R01, R02, R08, R09 |
 | `internal/cli/send.go` (`runSendWithAfterBodyRead`) | Source branches | R01, R02, R04, R05, R08, R09 |
 | `internal/cli/reply.go` (`runReply`) | Source entry | R01, R02, R04, R08, R09 |
 | `internal/cli/route.go` (`explainRoute`) | Source JSON probe | R01, R02, R14, R15 |

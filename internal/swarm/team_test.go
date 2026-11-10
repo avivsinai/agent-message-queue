@@ -318,15 +318,7 @@ func TestFindMemberLookups(t *testing.T) {
 		},
 	}
 
-	m := cfg.FindMember("ext-1")
-	if m == nil || m.Name != "codex" {
-		t.Fatalf("FindMember(ext-1) = %#v, want codex", m)
-	}
-	if cfg.FindMember("nonexistent") != nil {
-		t.Fatal("FindMember should return nil for nonexistent")
-	}
-
-	m = cfg.FindMemberByName("codex")
+	m := cfg.FindMemberByName("codex")
 	if m == nil || m.AgentID != "ext-1" {
 		t.Fatalf("FindMemberByName(codex) = %#v, want ext-1", m)
 	}

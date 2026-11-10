@@ -1,8 +1,9 @@
 # Message trace
 
-`amq trace <message-id> [--root <path>] [--json]` performs a read-only join over
-evidence already present in one AMQ root. It does not run a daemon, repair a
-mailbox, retry delivery, or infer an event that has no durable artifact.
+`amq trace <message-id> [--follow [--from <sender>]] [--root <path>] [--json]`
+performs a read-only join over evidence already present in an AMQ root. It does
+not run a daemon, repair a mailbox, retry delivery, or infer an event that has
+no durable artifact.
 
 It inspects:
 
@@ -43,8 +44,9 @@ The top-level schema is `amq/trace/v1`:
 }
 ```
 
-`legs` always contains `message`, `route`, `delivery`, `dlq`, `receipts`,
-`thread`, and `notification`. Every leg has one of these statuses:
+Without `--from`, `legs` contains `message`, `route`, `delivery`, `dlq`,
+`receipts`, `thread`, and `notification`. With `--from`, `legs` contains only
+`message` and `route`. Every leg has one of these statuses:
 
 - `evidence` — one or more durable artifacts support the leg;
 - `no_evidence` — no supporting artifact was found;
@@ -63,6 +65,23 @@ The top-level status is:
 `not_found` still emits the complete text or JSON result, then exits with code
 3. This lets a human see the next steps while scripts receive the existing AMQ
 not-found signal.
+
+## Follow
+
+`--follow` adds a `follow` object. It starts from the sender's outbox copy in
+the trace root and searches the roots that the copy's header routes to: the
+sender's root, the sessions of its project (`reply_to`), or the peer projects
+of its `.amqrc` and their sessions (`reply_project`). `follow.searched` lists
+each root and whether it could be read. `follow.recipients` gives, for each
+recipient, the root and session that hold its copy, the delivery (`new`, `cur`,
+`dlq`, `not_found`, or `unknown`), and the receipt (`drained`, `dlq`, `owed`, `none`, or `unknown`).
+For a request (`review_request`, `question`, `todo`), each recipient also has a
+`reply` that says whether a reply came back to the requester and was drained.
+When the root has no sender outbox copy, `follow.status` is `unknown`.
+
+`--from <sender>` requires `--follow`. It reads
+`agents/<sender>/outbox/sent/<id>.md` directly and does not scan the root, so
+only the `message` and `route` legs are present.
 
 ## Evidence limits
 

@@ -295,8 +295,9 @@ func (c *traceCollector) result() traceResult {
 	status := "found"
 	hasEvidence := false
 	hasErrors := false
-	for _, leg := range c.legs {
-		if len(leg.Evidence) > 0 {
+	for name, leg := range c.legs {
+		// A notification attempt never proves the message exists.
+		if name != "notification" && len(leg.Evidence) > 0 {
 			hasEvidence = true
 		}
 		if leg.Status == "error" {

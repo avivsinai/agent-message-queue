@@ -1,19 +1,5 @@
 package common
 
-// OrchestratorContext builds the context.orchestrator JSON object used by all
-// integration messages. The returned map is meant to be nested under a
-// "orchestrator" key in the message context.
-//
-// Spec reference: "All integration metadata lives under context.orchestrator."
-type OrchestratorContext struct {
-	Version   int                    `json:"version"`
-	Name      string                 `json:"name"`
-	Transport string                 `json:"transport"`
-	Event     string                 `json:"event"`
-	Workspace *WorkspaceContext      `json:"workspace,omitempty"`
-	Task      map[string]interface{} `json:"task,omitempty"`
-}
-
 // WorkspaceContext describes the workspace portion of orchestrator context.
 type WorkspaceContext struct {
 	Path string `json:"path"`

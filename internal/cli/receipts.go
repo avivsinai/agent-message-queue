@@ -195,6 +195,9 @@ func runReceiptsWait(args []string) error {
 	if *msgID == "" {
 		return UsageError("--msg-id is required")
 	}
+	if _, err := ensureFilename(*msgID); err != nil {
+		return UsageError("--msg-id: %v", err)
+	}
 	if err := validateStage(*stage); err != nil {
 		return UsageError("--stage: %v", err)
 	}

@@ -153,7 +153,7 @@ func (w Walker) PlanDelivery(sourceRoot, targetProject, targetSession string, op
 		if plan.TargetSession != "" {
 			normalized, err := NormalizeHandle(plan.TargetSession)
 			if err != nil {
-				return plan, fmt.Errorf("--session: %v", err)
+				return plan, exitcode.UsageError("--session: %v", err)
 			}
 			plan.TargetSession = normalized
 			plan.DeliveryRoot, err = w.ResolveSessionRoot(peerBaseRoot, plan.TargetSession)
@@ -181,12 +181,12 @@ func (w Walker) PlanDelivery(sourceRoot, targetProject, targetSession string, op
 	if plan.TargetSession != "" {
 		normalized, err := NormalizeHandle(plan.TargetSession)
 		if err != nil {
-			return plan, fmt.Errorf("--session: %v", err)
+			return plan, exitcode.UsageError("--session: %v", err)
 		}
 		plan.TargetSession = normalized
 		baseRoot := w.ClassifyRoot(sourceRoot)
 		if baseRoot == "" {
-			return plan, fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
+			return plan, exitcode.UsageError("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
 		plan.DeliveryRoot, err = w.ResolveSessionRoot(baseRoot, plan.TargetSession)
 		if err != nil {

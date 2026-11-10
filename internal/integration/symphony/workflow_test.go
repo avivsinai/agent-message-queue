@@ -164,6 +164,18 @@ func TestSetHooks(t *testing.T) {
 	}
 }
 
+// SetHooks keeps other keys under hooks (audit 2026-11-10).
+func TestSetHooksKeepsOtherHookKeys(t *testing.T) {
+	wf := &Workflow{Config: map[string]interface{}{
+		"hooks": map[string]interface{}{"timeout_ms": 60000, "after_create": "echo old"},
+	}}
+	wf.SetHooks(HooksConfig{AfterCreate: "echo new"})
+	hooks := wf.Config["hooks"].(map[string]interface{})
+	if hooks["timeout_ms"] != 60000 || hooks["after_create"] != "echo new" {
+		t.Fatalf("hooks = %#v, want timeout_ms kept and after_create replaced", hooks)
+	}
+}
+
 func TestMarshalWorkflow(t *testing.T) {
 	wf := &Workflow{
 		Config: map[string]interface{}{

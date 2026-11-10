@@ -179,16 +179,6 @@ func LoadTeam(name string) (TeamConfig, error) {
 	return cfg, nil
 }
 
-// FindMember returns the member with the given agent ID, or nil if not found.
-func (tc *TeamConfig) FindMember(agentID string) *Member {
-	for i := range tc.Members {
-		if tc.Members[i].AgentID == agentID {
-			return &tc.Members[i]
-		}
-	}
-	return nil
-}
-
 // FindMemberByName returns the member with the given name, or nil if not found.
 func (tc *TeamConfig) FindMemberByName(name string) *Member {
 	for i := range tc.Members {

@@ -97,7 +97,6 @@ type Flags struct {
 	ExplicitContext bool // env --root/--session was visited
 	CrossProject    bool // source guard serves a --project route
 	FromSession     bool // send used --from-session source routing
-	Revalidation    bool // watch/monitor callback phase; policy is unchanged
 }
 
 type Input struct {
@@ -123,9 +122,9 @@ func decisionFor(row string, verdict Verdict) Decision {
 
 // Decide is the pure policy table. Filesystem resolution,
 // identity authentication, preflight validation, error construction, and
-// output channels remain at the current call sites until Step 3 rewiring.
+// output channels stay at the call sites.
 //
-// TargetRelationMismatch includes either a pin mismatch or a CWD conflict
+// TargetMismatch includes either a pin mismatch or a CWD conflict
 // after the caller's evaluator has normalized those facts. Explicit roots and
 // cross-project routing must not turn a pin mismatch into a match; they only
 // affect the pre-table CWD check.
