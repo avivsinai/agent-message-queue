@@ -348,47 +348,6 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	return err
 }
 
-// writeEffectiveAdapters writes the effective adapter set (attached + refused)
-// as generated state next to refusals.json. This is NOT the user's manifest —
-// it is rewritten each start and never touches the operator's file.
-func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.Attachment, refusals []registry.Outcome) error {
-	type effEntry struct {
-		Kind   string `json:"kind"`
-		Target string `json:"target"`
-		State  string `json:"state"`
-		Error  string `json:"error,omitempty"`
-	}
-	entries := make([]effEntry, 0, len(mf.Adapters))
-	// Kind per attached target comes from the manifest: it is the
-	// authority that published the attachment.
-	kinds := make(map[string]string, len(mf.Adapters))
-	for _, adapter := range mf.Adapters {
-		kinds[adapter.Target] = adapter.Kind
-	}
-	for _, att := range attached {
-		target := att.Inspect().TargetID
-		entries = append(entries, effEntry{
-			Kind:   kinds[target],
-			Target: target,
-			State:  "attached",
-		})
-	}
-	for _, r := range refusals {
-		entries = append(entries, effEntry{
-			Kind:   r.Manifest.Kind,
-			Target: r.Manifest.Target,
-			State:  "refused",
-			Error:  r.Refusal.Error(),
-		})
-	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	_, err = fsq.WriteStateFile(filepath.Dir(stateDir), filepath.Join(filepath.Base(stateDir), "adapters.json"), data, 0600)
-	return err
-}
-
 // loadRefusals reads persisted adapter refusals for doctor to print.
 func loadRefusals(stateDir string) ([]refusalEntry, error) {
 	data, err := os.ReadFile(filepath.Join(stateDir, "refusals.json"))
@@ -468,8 +427,8 @@ func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 // back typed so serve maps them to exit 6.
 //
 // Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
-// a typed outcome, not a lost start; generated diagnostics (refusals.json,
-// adapters.json) are published only AFTER startupSequence returns — the
+// a typed outcome, not a lost start; the generated refusals.json is
+// published only AFTER startupSequence returns — the
 // store open inside it creates the state directory and acquires the owner
 // lock, so a losing starter never overwrites the live owner's files and a
 // fresh directory cannot break the write. Publish failures are warnings on
@@ -502,9 +461,6 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 	}
 	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
 		say(warn, "warning: could not persist adapter refusals: %v", perr)
-	}
-	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil && warn != nil {
-		say(warn, "warning: could not write effective adapters: %v", werr)
 	}
 	return store, ep, carrier, refusals, nil
 }

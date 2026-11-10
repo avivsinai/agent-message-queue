@@ -1659,9 +1659,8 @@ func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []man
 // TestManifestBytesUnchangedAfterFlag (611.13 r3, r4/r5 rewrite) pins through
 // the production startup path that serve NEVER writes to the user's manifest
 // path. A codex-only manifest, started with --fake sugar, must have
-// byte-identical manifest.json after the flag append; the merged set lives in
-// adapters.json (generated state). RED if the production path ever calls
-// manifest.Write.
+// byte-identical manifest.json after the flag append. RED if the production
+// path ever calls manifest.Write.
 func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqrnowr")
 	if err != nil {
@@ -1705,25 +1704,6 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
-	}
-	// The merged set (file + flag sugar) is generated state: both targets in
-	// adapters.json, never in the user's file. An attached entry advertises
-	// its manifest kind (review-824-r1 P1-2: an empty "kind" was the
-	// review-b7 defect).
-	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
-	if err != nil {
-		t.Fatalf("adapters.json not published: %v", err)
-	}
-	var effective []struct{ Kind, Target, State string }
-	if err := json.Unmarshal(adaptersData, &effective); err != nil {
-		t.Fatalf("adapters.json: %v", err)
-	}
-	got := map[string]string{}
-	for _, e := range effective {
-		got[e.Target] = e.Kind + "/" + e.State
-	}
-	if got["fake"] != "fake/attached" || got["codex-abc123"] != "codex/refused" || len(got) != 2 {
-		t.Fatalf("adapters.json = %s, want fake attached (kind fake) and codex-abc123 refused", adaptersData)
 	}
 }
 
