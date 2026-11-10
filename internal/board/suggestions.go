@@ -967,8 +967,16 @@ func (s Store) publishSuggestions(ctx context.Context, expected Snapshot, cfg de
 			observation.AttemptFingerprint = fp
 			current.Observations[attempt.MessageKey] = observation
 		}
-		current.Suggestions = SuggestionState{UserConfigured: expected.Suggestions.UserConfigured, Candidates: candidateRecords(candidates(expected, units, limit)), Units: units, Expanded: expanded, Config: cfg, Fingerprint: fp, Proposals: proposals, Attempt: attempt}
-		for _, p := range proposals {
+		next := SuggestionState{UserConfigured: expected.Suggestions.UserConfigured, Candidates: candidateRecords(candidates(expected, units, limit)), Units: units, Expanded: expanded, Config: cfg, Fingerprint: fp, Proposals: proposals, Attempt: attempt}
+		if len(units) == 0 && current.Suggestions.Fingerprint == fp {
+			// Every message already had its attempt under this fingerprint: an
+			// idle cycle proposes nothing new and keeps the proposals the owner
+			// has not reviewed.
+			prior := current.Suggestions
+			next.Candidates, next.Units, next.Expanded, next.Proposals = prior.Candidates, prior.Units, prior.Expanded, prior.Proposals
+		}
+		current.Suggestions = next
+		for _, p := range next.Proposals {
 			if err := validateProposal(*current, p); err != nil {
 				return err
 			}
