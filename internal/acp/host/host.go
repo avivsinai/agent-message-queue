@@ -89,9 +89,9 @@ type Host struct {
 	// statement of who decides tool calls; refusedNote (with %d) tells a
 	// peer how many tool calls of the turn were refused.
 	label, notice, refusedNote string
-	// sessionID is written only by the loop, under mu (setSession); the
-	// loop reads it bare, and every other goroutine reads it under mu
-	// (session).
+	// sessionID is written only by the loop, under mu (setSession). The
+	// loop, and a callback the loop waits on, read it bare; every other
+	// goroutine reads it under mu (session).
 	sessionID string
 	// resumed is true when the session was loaded from session.json.
 	resumed   bool
