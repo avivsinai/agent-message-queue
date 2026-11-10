@@ -23,7 +23,9 @@ func TestWakeHealthDetectsClosedWatcherAndRecoveryDeliversMail(t *testing.T) {
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) { return attention.Write(data) },
 		},
-		inboxNew: fsq.AgentInboxNew(root, "codex"),
+		inboxNew:            fsq.AgentInboxNew(root, "codex"),
+		ordinaryRecoverable: true,
+		ordinaryAgentDir:    retainedWakeAgentDirForTest(t, root, "codex"),
 	}
 	defer l.closeWatchers()
 	defer l.stopTimers()

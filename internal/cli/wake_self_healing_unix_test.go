@@ -52,11 +52,13 @@ func TestRunWakeLoopRecoveryProgressStartsFreshDoorbell(t *testing.T) {
 	writes := make(chan string, 8)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:                  root,
 			me:                    "codex",
 			session:               "session1",
+			retainedAgent:         agentDir,
 			wakeOwner:             &wakeOwner{},
 			settings:              wakeSettings{debounce: 5 * time.Millisecond},
 			injectMode:            wakeInjectModeRaw,

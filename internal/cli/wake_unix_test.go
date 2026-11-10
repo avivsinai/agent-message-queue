@@ -47,6 +47,24 @@ func (reader wakeScriptedInboxReader) ReadHeader(name string) (format.Header, er
 	return reader.readHeader(name)
 }
 
+type idleWakeEventWatcher struct{}
+
+func (idleWakeEventWatcher) Events() <-chan fsnotify.Event { return nil }
+func (idleWakeEventWatcher) Errors() <-chan error          { return nil }
+func (idleWakeEventWatcher) Close() error                  { return nil }
+
+// retainedWakeAgentDirForTest opens the agent directory capability that wake
+// startup retains before it runs the loop.
+func retainedWakeAgentDirForTest(t *testing.T, root, me string) *wakeAgentDir {
+	t.Helper()
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	return agentDir
+}
+
 func awaitWakeScan(t *testing.T, scans <-chan time.Time, done <-chan error) time.Time {
 	t.Helper()
 	select {
@@ -968,11 +986,13 @@ func TestRunWakeLoopOwnerlessStartupScanAndQueuedEventEmitOnce(t *testing.T) {
 		return 0, true, nil
 	})
 	stubRawInjectSleep(t)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:               root,
 			me:                 "codex",
 			session:            "session1",
+			retainedAgent:      agentDir,
 			settings:           wakeSettings{debounce: 5 * time.Millisecond},
 			injectMode:         wakeInjectModeRaw,
 			controlStop:        stop,
@@ -1053,15 +1073,17 @@ func TestRunWakeLoopRearmsOrdinaryInboxWatcher(t *testing.T) {
 			attention := make(chan string, 8)
 			stop := make(chan struct{})
 			done := make(chan error, 1)
+			agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 			go func() {
 				done <- runWakeLoop(wakeConfig{
-					root:        root,
-					me:          "codex",
-					session:     "session1",
-					wakeOwner:   &wakeOwner{},
-					settings:    wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
-					injectMode:  wakeInjectModeNone,
-					controlStop: stop,
+					root:          root,
+					me:            "codex",
+					session:       "session1",
+					retainedAgent: agentDir,
+					wakeOwner:     &wakeOwner{},
+					settings:      wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
+					injectMode:    wakeInjectModeNone,
+					controlStop:   stop,
 					onPrepared: func(wakeAdmissionWatcher) error {
 						close(ready)
 						return nil
@@ -1202,16 +1224,18 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	doorbellPayloads := 0
 	submitKeys := 0
 	preludeLFs := 0
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 
 	go func() {
 		defer close(loopDone)
 		done <- runWakeLoop(wakeConfig{
-			root:        root,
-			me:          "codex",
-			session:     "session1",
-			wakeOwner:   &wakeOwner{},
-			injectMode:  wakeInjectModeRaw,
-			controlStop: stop,
+			root:          root,
+			me:            "codex",
+			session:       "session1",
+			retainedAgent: agentDir,
+			wakeOwner:     &wakeOwner{},
+			injectMode:    wakeInjectModeRaw,
+			controlStop:   stop,
 			preconditionCheck: func(*wakeConfig) error {
 				return nil
 			},
@@ -1374,15 +1398,17 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	baselineReady := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
-			root:        root,
-			me:          "codex",
-			session:     "session1",
-			wakeOwner:   &wakeOwner{},
-			injectMode:  wakeInjectModeRaw,
-			controlStop: stop,
-			settings:    wakeSettings{debounce: 10 * time.Millisecond},
+			root:          root,
+			me:            "codex",
+			session:       "session1",
+			retainedAgent: agentDir,
+			wakeOwner:     &wakeOwner{},
+			injectMode:    wakeInjectModeRaw,
+			controlStop:   stop,
+			settings:      wakeSettings{debounce: 10 * time.Millisecond},
 			doorbell: wakeDoorbellState{
 				phase:                wakeDoorbellRetrying,
 				cohort:               snapshotWakeFileIdentities(map[string]os.FileInfo{"a.md": aInfo}),
@@ -1478,7 +1504,7 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	}
 }
 
-func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
+func TestWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 
@@ -1506,8 +1532,8 @@ func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
-	go func() {
-		done <- runWakeLoop(wakeConfig{
+	l := &wakeLoop{
+		cfg: wakeConfig{
 			root:          root,
 			me:            "codex",
 			session:       "session1",
@@ -1522,9 +1548,19 @@ func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 				attempts:    1,
 				nextAttempt: now.Add(-time.Second),
 			},
-			preconditionCheck: func(*wakeConfig) error { return nil },
-			attentionIsTTY:    func() bool { return false },
-		})
+			attentionIsTTY: func() bool { return false },
+		},
+		inboxNew:          fsq.AgentInboxNew(root, "codex"),
+		watcher:           idleWakeEventWatcher{},
+		preconditionCheck: func(*wakeConfig) error { return nil },
+	}
+	t.Cleanup(l.stopTimers)
+	go func() {
+		err := l.attemptNotification()
+		if err == nil {
+			err = l.run(nil, nil)
+		}
+		done <- err
 	}()
 	t.Cleanup(func() {
 		close(stop)
@@ -1595,12 +1631,14 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 	}
 	defer stopLoop()
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:             root,
 			me:               "codex",
 			session:          "session1",
+			retainedAgent:    agentDir,
 			wakeOwner:        &wakeOwner{},
 			injectMode:       wakeInjectModePaste,
 			controlStop:      stop,
