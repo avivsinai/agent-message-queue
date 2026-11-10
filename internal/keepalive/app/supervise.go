@@ -103,21 +103,24 @@ func (a App) supervise(ctx context.Context, args []string) error {
 }
 
 func selfUpgradeHealthyPass(results []supervisor.Result) bool {
+	ensured := false
 	for _, result := range results {
-		if result.Error != nil {
+		// A row not yet due (deferred without error) and a row whose terminal is
+		// gone (detached) say nothing about this image, so they neither settle
+		// nor block. Any other failure blocks, and so does a pass that ensured
+		// no row at all while rows exist.
+		switch {
+		case result.Action == supervisor.ActionDetached:
+		case result.Error != nil:
 			return false
-		}
-		// Companion-supervised remote entries are EXCLUDED from results by
-		// superviseOnce below — they are out of scope for wake health, and a
-		// fabricated placeholder would let one silent entry swing settlement
-		// in either direction. Everything left in results is an
-		// entry keepalive owns: only a confirmed ensured pass settles the
-		// self-upgrade.
-		if result.Action != supervisor.ActionEnsured {
+		case result.Action == supervisor.ActionEnsured:
+			ensured = true
+		case result.Action == supervisor.ActionDeferred:
+		default:
 			return false
 		}
 	}
-	return true
+	return ensured || len(results) == 0
 }
 
 func (a App) superviseOnce(ctx context.Context, registryPath string, wake supervisor.WakeRunner, self string, wakeTimeout time.Duration) ([]supervisor.Result, error) {

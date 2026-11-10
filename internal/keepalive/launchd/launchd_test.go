@@ -414,3 +414,37 @@ func TestServiceTargetUsesLaunchdLabelTarget(t *testing.T) {
 		t.Fatalf("ServiceTarget() = %q, want %q", got, want)
 	}
 }
+
+// A job that is not loaded does not stop uninstall from removing its plist
+// (audit 2026-11-10).
+func TestUninstallRemovesPlistWhenJobIsNotLoaded(t *testing.T) {
+	dir := t.TempDir()
+	plistPath := filepath.Join(dir, "com.example.amq-keepalive.plist")
+	data := BuildPlist(Options{
+		Label:        "com.example.amq-keepalive",
+		BinaryPath:   "/bin/echo",
+		RegistryPath: "/tmp/registry.json",
+		AMQPath:      "/bin/echo",
+		Interval:     time.Second,
+		StdoutPath:   "/tmp/out.log",
+		StderrPath:   "/tmp/err.log",
+	})
+	if err := os.WriteFile(plistPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = print ]; then echo Could not find service >&2; exit 113; fi\necho bootout must not run >&2\nexit 3\n"
+	if err := os.WriteFile(filepath.Join(binDir, "launchctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := Uninstall(context.Background(), "com.example.amq-keepalive", plistPath, true); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Fatalf("Stat() error = %v, want plist removed", err)
+	}
+}

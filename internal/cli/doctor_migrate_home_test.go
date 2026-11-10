@@ -192,7 +192,12 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 
 	// A process that still held the legacy path created it again with only
 	// lock files and an empty registry. A rerun removes it and finishes.
-	if err := registry.New(filepath.Join(old, "registry.json")).Save(registry.File{}); err != nil {
+	legacyRegistry := registry.New(filepath.Join(old, "registry.json"))
+	row, err := legacyRegistry.Upsert(registry.Entry{Root: old, Agent: "codex", Adapter: "file", Target: filepath.Join(old, "target")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyRegistry.Forget(row.ID); err != nil {
 		t.Fatal(err)
 	}
 	migrate(migrateHomeFinished)
@@ -201,5 +206,24 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 	}
 	if file, err := registry.New(regPath).Load(); err != nil || len(file.Entries) != 1 {
 		t.Fatalf("registry after the rerun = %+v, %v", file.Entries, err)
+	}
+}
+
+// A claude-print stream log is residue, not state, so it does not block the
+// move (audit 2026-11-10).
+func TestMigrateHomeKeepaliveResidueAcceptsStreamLogs(t *testing.T) {
+	old := t.TempDir()
+	session := filepath.Join(old, "claude-print", "a616af69-92db-495e-9691-c512c80c4bd6")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"inject.lock", "20260101T000000.000Z.stream.jsonl"} {
+		if err := os.WriteFile(filepath.Join(session, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, why := migrateHomeKeepaliveResidue(old, false)
+	if why != "" || len(paths) != 5 {
+		t.Fatalf("residue = %v, %q; want 2 files, session dir, claude-print dir, old (why empty)", paths, why)
 	}
 }
