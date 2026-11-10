@@ -77,7 +77,7 @@ func runList(args []string) error {
 	common.Me = me
 	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
 	if err != nil {
-		if GetExitCode(err) != ExitContextMismatch {
+		if GetExitCode(err) != ExitContextMismatch || *sessionFlag != "" {
 			return err
 		}
 		pin, pinErr := loadSessionPin()
