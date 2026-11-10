@@ -87,14 +87,15 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 		sessionManager: { getSessionId: () => "pi-session-1" },
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
-	if (host) registerAmqBridge(pi as never, host(root));
-	else amqPiBridge(pi as never);
+	const bridge = host ? registerAmqBridge(pi as never, host(root)) : undefined;
+	if (!host) amqPiBridge(pi as never);
 	const emit = async (name: string, event: object = {}) => {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};
 	return {
 		root,
 		dir,
+		bridge,
 		sent,
 		state,
 		notices,
@@ -196,6 +197,69 @@ test("an open extension prompt is shown in Buzz as an option-less dialog until i
 		assert.equal(resolved.by, "terminal");
 	} finally {
 		delete process.env.AMQ_REMOTE_BINDING;
+	}
+	await h.done();
+});
+
+// remoteStore points the dialog store at a temporary directory with a
+// mailbox binding for root's pi-seat; done removes it.
+function remoteStore(root: string): { dialogs: string; done: () => void } {
+	const store = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-remote-"));
+	process.env.AMQ_REMOTE_BINDING = path.join(store, "binding.json");
+	fs.mkdirSync(path.join(store, "bindings"), { recursive: true });
+	fs.writeFileSync(path.join(store, "bindings", "pi-seat.json"), JSON.stringify({ carrier: "mailbox", root, handle: "pi-seat", bound_at: "2026-11-02T00:00:00Z" }));
+	return {
+		dialogs: path.join(store, "dialogs", "pi-seat"),
+		done: () => {
+			delete process.env.AMQ_REMOTE_BINDING;
+			fs.rmSync(store, { recursive: true, force: true });
+		},
+	};
+}
+
+const hostIdentity = (root: string): AmqBridgeOptions => ({ identity: () => ({ root, handle: "pi-seat" }) });
+
+test("an extension's own dialog takes the owner's Buzz answer", async () => {
+	const h = harness(hostIdentity);
+	const store = remoteStore(h.root);
+	try {
+		await h.start();
+		const answer = h.bridge!.openDialog({ title: "Deploy?", body: "to prod", options: [{ label: "Yes" }, { label: "No", deny: true }] });
+		const [file] = fs.readdirSync(path.join(store.dialogs, "requests")).filter((f) => f.endsWith(".json"));
+		const request = JSON.parse(fs.readFileSync(path.join(store.dialogs, "requests", file), "utf8"));
+		assert.equal(request.harness, "pi");
+		assert.equal(request.text, "Deploy?\nto prod");
+		assert.deepEqual(request.options, [
+			{ n: 1, label: "Yes", value: "1" },
+			{ n: 2, label: "No", value: "2", deny: true },
+		]);
+		fs.writeFileSync(path.join(store.dialogs, "answers", file), JSON.stringify({ id: request.id, option: 2, by: "buzz", at: new Date().toISOString() }), { flag: "wx" });
+		assert.deepEqual(await answer, { by: "buzz", index: 1 });
+		const resolved = JSON.parse(fs.readFileSync(path.join(store.dialogs, "resolved", file), "utf8"));
+		assert.equal(resolved.by, "buzz");
+		assert.equal(resolved.outcome, "denied");
+		assert.equal(resolved.label, "No");
+	} finally {
+		store.done();
+	}
+	await h.done();
+});
+
+test("an extension's own dialog answered in the terminal closes as terminal", async () => {
+	const h = harness(hostIdentity);
+	const store = remoteStore(h.root);
+	try {
+		await h.start();
+		const terminal = new AbortController();
+		const answer = h.bridge!.openDialog({ title: "Deploy?", options: [{ label: "Yes" }], signal: terminal.signal });
+		const [file] = fs.readdirSync(path.join(store.dialogs, "requests")).filter((f) => f.endsWith(".json"));
+		terminal.abort();
+		assert.equal(await answer, undefined);
+		const resolved = JSON.parse(fs.readFileSync(path.join(store.dialogs, "resolved", file), "utf8"));
+		assert.equal(resolved.by, "terminal");
+		assert.equal(resolved.outcome, "terminal");
+	} finally {
+		store.done();
 	}
 	await h.done();
 });
