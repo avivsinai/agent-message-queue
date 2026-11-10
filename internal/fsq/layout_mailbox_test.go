@@ -23,7 +23,7 @@ func TestMailboxLayoutRepairReportsExactPartialProgress(t *testing.T) {
 	root := openMailboxLayoutTestRoot(t, rootPath)
 	injected := errors.New("injected mkdir failure")
 
-	result := repairConfiguredRosterForTest(t, root, mailboxRepairHooks{
+	result := repairLegacyForTest(t, root, mailboxRepairHooks{
 		fail: func(stage, path string) error {
 			if stage == "mkdir" && filepath.ToSlash(path) == "agents/legacy/dlq/cur" {
 				return injected
@@ -65,7 +65,7 @@ func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.
 	configPath := filepath.Join(rootPath, "meta", "config.json")
 	originalPath := configPath + ".original"
 
-	result := repairConfiguredRosterForTest(t, root, mailboxRepairHooks{
+	result := repairLegacyForTest(t, root, mailboxRepairHooks{
 		afterPreflight: func() {
 			if err := os.Rename(configPath, originalPath); err != nil {
 				t.Fatalf("rename config: %v", err)
@@ -86,16 +86,16 @@ func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.
 	}
 }
 
-// repairConfiguredRosterForTest repairs the full configured roster with
-// fault hooks, entering through the authorized repair path production uses.
-func repairConfiguredRosterForTest(t *testing.T, root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
+// repairLegacyForTest repairs the legacy mailbox with fault hooks through the
+// authorized repair function the production entries call.
+func repairLegacyForTest(t *testing.T, root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
 	t.Helper()
 	authorization, _, err := OpenMailboxConfigAuthorization(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = authorization.Close() }()
-	return repairMailboxLayoutHandlesAuthorized(root, authorization, nil, true, hooks)
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, []string{"legacy"}, hooks)
 }
 
 func mailboxLayoutTestRoot(t *testing.T, agents ...string) string {
@@ -204,7 +204,12 @@ func TestRepairMailboxLayoutRepairsFullConfiguredRoster(t *testing.T) {
 	}
 	root := openMailboxLayoutTestRoot(t, rootPath)
 
-	result := repairConfiguredRosterForTest(t, root, mailboxRepairHooks{})
+	authorization, _, err := OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = authorization.Close() }()
+	result := RepairMailboxLayoutForConfiguredAgentsWithAuthorization(root, authorization, []string{"legacy"})
 	if result.Status != "repaired" {
 		t.Fatalf("repair result = %#v, want repaired", result)
 	}

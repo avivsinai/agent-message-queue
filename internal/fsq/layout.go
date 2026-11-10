@@ -962,7 +962,7 @@ func mergeCreatedPaths(inventory *MailboxInventory, created []string) {
 	}
 }
 
-func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
+func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, hooks mailboxRepairHooks) MailboxRepairResult {
 	if authorization == nil || authorization.pin == nil {
 		return MailboxRepairResult{
 			Status:  "failed",
@@ -973,13 +973,12 @@ func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *Mai
 		root,
 		authorization,
 		requestedHandles,
-		configuredSet,
 		authorization.pin.cfg,
 		hooks,
 	)
 }
 
-func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, inspectionConfig mailboxActiveConfig, hooks mailboxRepairHooks) MailboxRepairResult {
+func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, inspectionConfig mailboxActiveConfig, hooks mailboxRepairHooks) MailboxRepairResult {
 	if authorization == nil || authorization.pin == nil {
 		return MailboxRepairResult{
 			Status:  "failed",
@@ -1011,9 +1010,6 @@ func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authoriz
 		}
 	}
 	repairHandles := requestedHandles
-	if configuredSet {
-		repairHandles = plan.inventory.ConfiguredAgents
-	}
 	if issue, hazard := preflightHazard(plan, repairHandles); hazard {
 		return MailboxRepairResult{
 			Status:    "failed",
@@ -1201,7 +1197,7 @@ func RepairMailboxLayoutForAgentsWithAuthorization(root *DeliveryRoot, authoriza
 			handles = append(handles, handle)
 		}
 	}
-	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, false, mailboxRepairHooks{})
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, mailboxRepairHooks{})
 }
 
 // RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard is the
@@ -1225,7 +1221,6 @@ func RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard(root *DeliveryRo
 		root,
 		authorization,
 		agents,
-		false,
 		authorization.pin.cfg,
 		mailboxRepairHooks{fail: func(stage, _ string) error {
 			switch stage {
@@ -1259,7 +1254,6 @@ func RepairMailboxLayoutForConfiguredAgentsWithAuthorization(root *DeliveryRoot,
 		root,
 		authorization,
 		cfg.Agents,
-		false,
 		cfg,
 		mailboxRepairHooks{},
 	)
