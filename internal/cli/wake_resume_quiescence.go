@@ -10,13 +10,6 @@ const (
 	wakeResumeRefuse
 )
 
-type wakeResumeLifecycle uint8
-
-const (
-	wakeResumeLifecycleStarting wakeResumeLifecycle = iota
-	wakeResumeLifecycleAdmitted
-)
-
 type wakeResumeScan uint8
 
 const (
@@ -34,7 +27,6 @@ const (
 )
 
 const (
-	wakeResumeReasonNotAdmitted           = "wake_not_admitted"
 	wakeResumeReasonInputDelivery         = "input_delivery_in_progress"
 	wakeResumeReasonInputProgress         = "input_progress_confirmed"
 	wakeResumeReasonInputUncertain        = "input_acceptance_uncertain"
@@ -42,17 +34,10 @@ const (
 	wakeResumeReasonRepairState           = "repair_state_active"
 	wakeResumeReasonArbitraryInjector     = "arbitrary_inject_command"
 	wakeResumeReasonDestructiveInterrupt  = "destructive_interrupt"
-	wakeResumeReasonInjectorActive        = "external_injector_active"
-	wakeResumeReasonInjectorCleanup       = "injector_cleanup_pending"
 	wakeResumeReasonTerminalRetry         = "terminal_suffix_retry_pending"
 	wakeResumeReasonScanRetry             = "inbox_scan_retry_pending"
 	wakeResumeReasonWatcherUnarmed        = "watcher_unarmed"
 	wakeResumeReasonWatcherError          = "watcher_error"
-	wakeResumeReasonWatcherRebind         = "watcher_rebind_pending"
-	wakeResumeReasonGenerationRecovery    = "unreadable_generation_recovery"
-	wakeResumeReasonDebounceActive        = "debounce_callback_active"
-	wakeResumeReasonControlHandlers       = "control_handlers_active"
-	wakeResumeReasonControlListener       = "control_listener_unavailable"
 	wakeResumeReasonDirectoriesUnverified = "wake_directories_unverified"
 	wakeResumeReasonFinalScanIncomplete   = "final_inbox_scan_incomplete"
 )
@@ -64,40 +49,26 @@ const (
 	wakeResumeReasonTerminalIdentityLost         = "terminal_identity_lost"
 	wakeResumeReasonGenerationInconclusive       = "wake_generation_inconclusive"
 	wakeResumeReasonGenerationLost               = "wake_generation_lost"
-	wakeResumeReasonLockTargetInconclusive       = "wake_lock_target_inconclusive"
-	wakeResumeReasonLockTargetLost               = "wake_lock_target_lost"
 )
 
 type wakeResumeQuiescence struct {
-	Lifecycle wakeResumeLifecycle
-	Delivery  wakeInputDeliveryState
+	Delivery wakeInputDeliveryState
 
-	RecoveryRequired      bool
-	RepairLineage         bool
-	RepairHandoff         bool
-	RepairPrepared        bool
-	RepairFloorTransition bool
-	BaselineInherited     bool
+	RecoveryRequired  bool
+	RepairLineage     bool
+	BaselineInherited bool
 
-	InjectViaActive        bool
-	InjectorCleanupPending bool
-	ArbitraryInjectCmd     bool
-	DestructiveInterrupt   bool
+	ArbitraryInjectCmd   bool
+	DestructiveInterrupt bool
 
-	TerminalSuffixRetry          bool
-	ScanRetry                    bool
-	WatcherArmed                 bool
-	WatcherError                 bool
-	WatcherRebindRetry           bool
-	UnreadableGenerationRecovery bool
+	TerminalSuffixRetry bool
+	ScanRetry           bool
+	WatcherArmed        bool
+	WatcherError        bool
 
-	DebounceExecuting           bool
-	ControlHandlers             uint
-	ControlListenerReady        bool
 	OwnerObservation            wakeResumeAuthorityObservation
 	TerminalIdentityObservation wakeResumeAuthorityObservation
 	GenerationObservation       wakeResumeAuthorityObservation
-	LockTargetObservation       wakeResumeAuthorityObservation
 	CanonicalDirs               bool
 	FinalScan                   wakeResumeScan
 
@@ -121,12 +92,9 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 	}
 
 	switch {
-	case state.Lifecycle != wakeResumeLifecycleAdmitted:
-		return refuse(wakeResumeReasonNotAdmitted)
 	case state.RecoveryRequired:
 		return refuse(wakeResumeReasonInputRecovery)
-	case state.RepairLineage || state.RepairHandoff || state.RepairPrepared ||
-		state.RepairFloorTransition || state.BaselineInherited:
+	case state.RepairLineage || state.BaselineInherited:
 		return refuse(wakeResumeReasonRepairState)
 	case state.ArbitraryInjectCmd:
 		return refuse(wakeResumeReasonArbitraryInjector)
@@ -144,12 +112,6 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 		return refuse(wakeResumeReasonTerminalIdentityLost)
 	case state.GenerationObservation == wakeResumeAuthorityLost:
 		return refuse(wakeResumeReasonGenerationLost)
-	case state.LockTargetObservation == wakeResumeAuthorityLost:
-		return refuse(wakeResumeReasonLockTargetLost)
-	case state.InjectViaActive:
-		return deferReload(wakeResumeReasonInjectorActive)
-	case state.InjectorCleanupPending:
-		return deferReload(wakeResumeReasonInjectorCleanup)
 	case state.TerminalSuffixRetry:
 		return deferReload(wakeResumeReasonTerminalRetry)
 	case state.ScanRetry:
@@ -158,24 +120,12 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 		return deferReload(wakeResumeReasonWatcherUnarmed)
 	case state.WatcherError:
 		return deferReload(wakeResumeReasonWatcherError)
-	case state.WatcherRebindRetry:
-		return deferReload(wakeResumeReasonWatcherRebind)
-	case state.UnreadableGenerationRecovery:
-		return deferReload(wakeResumeReasonGenerationRecovery)
-	case state.DebounceExecuting:
-		return deferReload(wakeResumeReasonDebounceActive)
-	case state.ControlHandlers > 0:
-		return deferReload(wakeResumeReasonControlHandlers)
-	case !state.ControlListenerReady:
-		return deferReload(wakeResumeReasonControlListener)
 	case state.OwnerObservation != wakeResumeAuthorityExact:
 		return deferReload(wakeResumeReasonOwnerInconclusive)
 	case state.TerminalIdentityObservation != wakeResumeAuthorityExact:
 		return deferReload(wakeResumeReasonTerminalIdentityInconclusive)
 	case state.GenerationObservation != wakeResumeAuthorityExact:
 		return deferReload(wakeResumeReasonGenerationInconclusive)
-	case state.LockTargetObservation != wakeResumeAuthorityExact:
-		return deferReload(wakeResumeReasonLockTargetInconclusive)
 	case !state.CanonicalDirs:
 		return deferReload(wakeResumeReasonDirectoriesUnverified)
 	case state.FinalScan != wakeResumeScanComplete:
