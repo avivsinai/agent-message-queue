@@ -1589,3 +1589,22 @@ func TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError(t *testing.T) {
 		t.Fatal("pass without out-of-scope entries must settle")
 	}
 }
+
+// One detached or not-yet-due row must not keep a healthy pass from settling
+// the self-upgrade attempt (audit 2026-11-10).
+func TestSelfUpgradeHealthyPassIgnoresDetachedAndNotDueRows(t *testing.T) {
+	healthy := []supervisor.Result{
+		{Action: supervisor.ActionEnsured},
+		{Action: supervisor.ActionDeferred},
+		{Action: supervisor.ActionDetached, Error: errors.New("terminal gone")},
+	}
+	if !selfUpgradeHealthyPass(healthy) {
+		t.Fatal("pass with an ensured row plus detached and not-due rows must settle")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionDeferred}}) {
+		t.Fatal("a pass that ensured nothing must not settle")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}, {Action: supervisor.ActionStartFailed, Error: errors.New("boom")}}) {
+		t.Fatal("a failed wake start must not settle")
+	}
+}
