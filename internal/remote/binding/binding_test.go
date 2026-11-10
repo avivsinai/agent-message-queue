@@ -169,3 +169,25 @@ func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {
 		t.Fatalf("WriteSession wrote %q into an unsearchable bindings directory; want an error", name)
 	}
 }
+
+// A session whose name sanitizes to the legacy name gets its own name, so
+// List and ReadNamed never see two bindings called "default"
+// (audit 2026-11-10).
+func TestWriteSessionNeverTakesTheLegacyName(t *testing.T) {
+	t.Setenv(EnvPath, filepath.Join(canonicalTempDir(t), "remote", "binding.json"))
+	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s-legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	b := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude"}
+	name, _, err := WriteSession(b, SanitizeName("?"), Binding.Liveness)
+	if err != nil || name != LegacyName+"-2" {
+		t.Fatalf("WriteSession = %q, %v; want %q", name, err, LegacyName+"-2")
+	}
+	all, err := List()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("List = %+v, %v; want the legacy binding and %q", all, err, name)
+	}
+	if err := WriteNamed(Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/b", Handle: "claude", Name: LegacyName}); err == nil {
+		t.Fatal("WriteNamed wrote a named binding called default")
+	}
+}

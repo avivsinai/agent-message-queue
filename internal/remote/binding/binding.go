@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -747,6 +748,9 @@ func WriteSession(b Binding, base string, inspect Inspector) (name string, reuse
 				suffix := fmt.Sprintf("-%d", n)
 				candidate = strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
 			}
+			if candidate == LegacyName {
+				continue
+			}
 			// A file that does not read as a binding or a tombstone is
 			// taken, never overwritten.
 			o, taken := held[candidate]
@@ -835,6 +839,9 @@ func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
 	}
+	if b.Name == LegacyName {
+		return fmt.Errorf("binding name %q names the single legacy binding; choose another name", LegacyName)
+	}
 	if err := b.Valid(); err != nil {
 		return err
 	}
@@ -875,6 +882,8 @@ func List() ([]Binding, error) {
 		return nil, err
 	}
 	if b, err := Read(); err == nil {
+		// ReadNamed reads the legacy binding as the one called LegacyName.
+		out = slices.DeleteFunc(out, func(o Binding) bool { return o.Name == LegacyName })
 		b.Name = LegacyName
 		out = append(out, b)
 	}
