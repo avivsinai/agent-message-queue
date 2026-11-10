@@ -228,6 +228,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		reap := time.NewTicker(spoolReapPolls * *poll)
 		defer reap.Stop()
 		reapDue := false
+		// lastImport is the import error last logged: a command that stays
+		// unimportable in inbox/new logs once, not once per poll.
+		lastImport := ""
 		for {
 			select {
 			case <-ctx.Done():
@@ -235,8 +238,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			case <-reap.C:
 				reapDue = true
 			case <-t.C:
-				if _, err := carrier.ImportOnce(); err != nil {
-					say(stderr, "import: %v", err)
+				if _, err := carrier.ImportOnce(); err == nil {
+					lastImport = ""
+				} else if msg := err.Error(); msg != lastImport {
+					lastImport = msg
+					say(stderr, "import: %s", msg)
 				}
 				if err := ep.Tick(); err != nil {
 					say(stderr, "tick: %v", err)
