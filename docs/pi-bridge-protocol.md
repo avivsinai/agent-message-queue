@@ -557,6 +557,10 @@ is optional; without options the extension behaves as described above.
 | `deliver.send(ctx, request, report)` | `sendUserMessage(text, { deliverAs: "followUp" })` with the correlation above | Hands `{ref, text, notAfter, origin}` to the host. `origin` is present only when the request carries a valid one. |
 | `upgrade` | none | The liveness `upgrade` remedy. |
 
+`registerAmqBridge` returns a handle whose `openDialog` lets the owner answer
+an extension's own prompt from Buzz; see
+[the pi bridge README](../integrations/pi/README.md#answer-an-extension-prompt-from-buzz).
+
 The extension claims the receipt immediately before it calls `send`, in the
 same synchronous step, so delivery stays at-most-once. The host then owns the
 request's correlation: it reports `{event: "started"}` when it admits the
