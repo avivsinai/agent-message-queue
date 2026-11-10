@@ -203,3 +203,22 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 		t.Fatalf("registry after the rerun = %+v, %v", file.Entries, err)
 	}
 }
+
+// A claude-print stream log is residue, not state, so it does not block the
+// move (audit 2026-11-10).
+func TestMigrateHomeKeepaliveResidueAcceptsStreamLogs(t *testing.T) {
+	old := t.TempDir()
+	session := filepath.Join(old, "claude-print", "a616af69-92db-495e-9691-c512c80c4bd6")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"inject.lock", "20260101T000000.000Z.stream.jsonl"} {
+		if err := os.WriteFile(filepath.Join(session, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, why := migrateHomeKeepaliveResidue(old, false)
+	if why != "" || len(paths) != 4 {
+		t.Fatalf("residue = %v, %q; want 2 files, session dir, claude-print dir, old (why empty)", paths, why)
+	}
+}
