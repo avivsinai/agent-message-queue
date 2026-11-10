@@ -75,7 +75,10 @@ amq-remote statusline [--session ID] [--plain]
 
 `serve` runs the endpoint in the foreground. `up` supervises `serve`: it
 respawns a crashed child with backoff and stops when the child exits 0. A
-child exit 2 is a usage error and is not respawned. A second `up` for the
+child exit 6 (action required: its configuration is refused, or another
+endpoint holds the root) is not respawned; any other exit, a crash included,
+is. A refusal that may pass, such as `storage_full`, `store_closed` or
+`draining`, makes `serve` exit 1. A second `up` for the
 same root exits 6 (`endpoint_already_running`) while the first supervisor
 holds the lifetime lock.
 
@@ -134,8 +137,8 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | `mailbox` | `handle`: an AMQ handle in serve's own root whose `agents/<handle>/inbox` already exists; the adapter never creates it. Optional `reply_timeout` (default `10m`, at most `24h`). The handle must not be `buzz`, `amq-remote` or serve's `--me`, and `--me` must not be `buzz` or `amq-remote`. Unknown config fields are refused. | `Inspect`, `Submit` and `CancelRequest`. Each request is one AMQ message to the handle: from `buzz` on thread `cockpit/<channel>` with the label `nostr:<event>` for a Buzz DM, else from `amq-remote` on thread `remote/<creator host>`. The handle answers with `amq reply --id <id>`; when the endpoint next looks, the newest of its replies that is not `--kind status` and has a body is the request's result; later replies stay unread in the carrier inbox. With no such reply within `reply_timeout` the request fails, and the message stays in the inbox. A cancel after delivery ends the request as delivered and no longer waited for. Several requests can be open at once; each is its own message, answered by its own id, so a second message never waits for the first or comes back busy. The handle cannot ask the owner a question through the share: a mailbox has no interaction seam. Submit evidence is `submitted`. See [Strict share in one owner step](#strict-share-in-one-owner-step). |
 | `fake` | none | Test double, linked into test builds only; a release binary refuses it as an unknown kind. `epoch` is accepted only for this kind. |
 
-`epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
-exit 2. An unknown kind is refused at startup; `serve` continues with the
+`epoch` on any kind other than `fake` is exit 6. A duplicate `target` is
+exit 6. An unknown kind is refused at startup; `serve` continues with the
 adapters that attached, writes `refusals.json`, and prints the refusal.
 
 ```json
@@ -172,7 +175,7 @@ Two serve flags append to this file's adapter list instead of editing it.
 daemon's loaded threads, or only `--codex-thread ID` when that flag is set.
 Those sugar targets look like `codex:` plus the thread id with hyphens
 removed. A target id that appears both in the file and in the flags is
-exit 2.
+exit 6.
 
 `serve --discover` and `up --discover` list running sessions and exit. They
 attach nothing and write nothing, so they work while an endpoint already
@@ -443,7 +446,10 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    it runs in a terminal, or created later by `amq-remote link local-key NAME`
    while the endpoint runs. The endpoint serves both pages on one loopback
    port it records for the root, and the passkey is bound to that address: a
-   look-alike page on another port cannot confirm. A held
+   look-alike page on another port cannot confirm. When that record is lost,
+   the endpoint records a new port, and `link local-key NAME` creates the
+   passkey again for the new address; a record it cannot read stops local
+   confirmation until it can. A held
    task is dropped at its deadline (10 minutes) or on restart, never resent.
 7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks, and for each share whether the
@@ -1025,25 +1031,18 @@ removal.
 
 The machine agent watches the settings file of each Claude session it
 serves (the `config_dir` its binding records); a file that did not change
-costs one stat per tick. When a changed file has lost the approval hook (or,
-for a native session, the Stop hook) and the opt-in for that file exists,
-the agent puts the hook back through the same locked writer, running the
-`amq-remote` installed now (never a recorded path an upgrade removed; with
-no installed `amq-remote` it only warns), and posts once
-in the session's channel: "The AMQ approval hook was missing from <path>
-(changed <mtime>); restored." With no opt-in it changes nothing and posts
-once per version of the file, across restarts of the agent: "Approvals of
-this session stay in the terminal: the AMQ approval hook left <path> at
-<mtime>. Run `amq-remote doctor --fix`." After `uninstall-approval-hook` (or
-`uninstall-stop-hook`) it never warns about that hook in that file. A hook
-removed any other way while the opt-in exists, Claude Code's `/hooks` menu
-included, comes back; the uninstall command is the way to stop it.
-A hook that is present in an older form (for example the approval hook with
-the 10-minute timeout) the agent upgrades as `doctor --fix` does while the
-opt-in for that file exists, and posts: "The AMQ approval hook in <path> was
-an older form (changed <mtime>); upgraded." With no opt-in it changes
-nothing and posts once per version of the file: "The AMQ approval hook in
-<path> is an older form (changed <mtime>). Run `amq-remote doctor --fix`."
+costs one stat per tick. It never writes the file: only the install
+commands and `doctor --fix` change it. When a changed file has lost the
+approval hook, the agent posts once per version of the file, across
+restarts of the agent, in the session's channel: "Approvals of this session
+stay in the terminal: the AMQ approval hook left <path> at <mtime>. Run
+`amq-remote doctor --fix`." A native session that lost the Stop hook gets
+the same kind of line for its turns. A hook that is present in an older
+form (for example the approval hook with the 10-minute timeout) gets one
+post per version of the file: "The AMQ approval hook in <path> is an older
+form (changed <mtime>). Run `amq-remote doctor --fix`." After
+`uninstall-approval-hook` (or `uninstall-stop-hook`) it never posts about
+that hook in that file.
 
 ### Turns in the session's channel
 

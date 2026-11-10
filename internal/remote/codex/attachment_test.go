@@ -158,8 +158,6 @@ func startFakeAppServerAt(t *testing.T, sock string) (string, *fakeAppServer) {
 				}
 			case "turn/interrupt":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
-			case "thread/queue/add":
-				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
 			case "thread/read":
 				srv.threadReadHandlerMu.Lock()
 				handler := srv.threadReadHandler

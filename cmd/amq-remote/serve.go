@@ -138,8 +138,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// validation and owned startup are ONE production path, serveStartupFrom,
 	// shared verbatim by the focused regressions. Flag sugar is
 	// built here (it needs LoadedThreads/flags) and handed in as entries; a
-	// duplicate target is exit 2 via the typed validation error. serveStartupFrom
-	// returns Load/Validate failures classified: validation -> exit 2, I/O or
+	// duplicate target is exit 6 via the typed validation error. serveStartupFrom
+	// returns Load/Validate failures classified: validation -> exit 6, I/O or
 	// parse -> runtime error.
 	var sugar []manifest.Adapter
 	if *useFake {
@@ -228,6 +228,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		reap := time.NewTicker(spoolReapPolls * *poll)
 		defer reap.Stop()
 		reapDue := false
+		// lastImport is the import error last logged: a command that stays
+		// unimportable in inbox/new logs once, not once per poll.
+		lastImport := ""
 		for {
 			select {
 			case <-ctx.Done():
@@ -235,8 +238,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			case <-reap.C:
 				reapDue = true
 			case <-t.C:
-				if _, err := carrier.ImportOnce(); err != nil {
-					say(stderr, "import: %v", err)
+				if _, err := carrier.ImportOnce(); err == nil {
+					lastImport = ""
+				} else if msg := err.Error(); msg != lastImport {
+					lastImport = msg
+					say(stderr, "import: %s", msg)
 				}
 				if err := ep.Tick(); err != nil {
 					say(stderr, "tick: %v", err)
@@ -269,9 +275,22 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, err
 }
 
+// serveExitCode is serve's exit for an error it returned without one. Exit 6
+// stops up, so only another endpoint holding the root keeps it; every other
+// refusal the protocol maps to 6 (storage_full, store_closed, draining, ...)
+// may pass, so it exits 1 and up respawns serve.
+func serveExitCode(err error) int {
+	code := protocol.ExitCode(err)
+	if code == protocol.ExitActionRequired && protocol.RefusalCode(err) != protocol.CodeEndpointAlreadyRunning {
+		return protocol.ExitError
+	}
+	return code
+}
+
 // serveStartupError maps a failed manifest load or startup to serve's exit:
-// a validation error is exit 2, naming the sources of a duplicate target;
-// any other error is a runtime error.
+// a validation error or another invalid-configuration refusal is exit 6
+// (fix it), naming the sources of a duplicate target; any other error is a
+// runtime error.
 func serveStartupError(err error, sugar []manifest.Adapter, manifestFile string) (int, error) {
 	if manifest.IsValidation(err) {
 		if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
@@ -298,14 +317,19 @@ func serveStartupError(err error, sugar []manifest.Adapter, manifestFile string)
 			}
 			switch {
 			case inFlags && inManifest:
-				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+				return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
 			case inManifest:
-				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: manifest declares the same target id more than once", dup.Target)
+				return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: manifest declares the same target id more than once", dup.Target)
 			default:
-				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: the same target id was passed more than once", dup.Target)
+				return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: the same target id was passed more than once", dup.Target)
 			}
 		}
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	if protocol.RefusalCode(err) == protocol.CodeInvalid {
+		// A startup refusal of its configuration is 6 too: under up, exit 2
+		// means a crash.
+		return protocol.ExitActionRequired, err
 	}
 	return 0, err
 }
@@ -339,47 +363,6 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	// the refusal and exit 0. Same durability as every other
 	// generated-state file.
 	_, err = fsq.WriteStateFile(filepath.Dir(stateDir), filepath.Join(filepath.Base(stateDir), "refusals.json"), data, 0600)
-	return err
-}
-
-// writeEffectiveAdapters writes the effective adapter set (attached + refused)
-// as generated state next to refusals.json. This is NOT the user's manifest —
-// it is rewritten each start and never touches the operator's file.
-func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.Attachment, refusals []registry.Outcome) error {
-	type effEntry struct {
-		Kind   string `json:"kind"`
-		Target string `json:"target"`
-		State  string `json:"state"`
-		Error  string `json:"error,omitempty"`
-	}
-	entries := make([]effEntry, 0, len(mf.Adapters))
-	// Kind per attached target comes from the manifest: it is the
-	// authority that published the attachment.
-	kinds := make(map[string]string, len(mf.Adapters))
-	for _, adapter := range mf.Adapters {
-		kinds[adapter.Target] = adapter.Kind
-	}
-	for _, att := range attached {
-		target := att.Inspect().TargetID
-		entries = append(entries, effEntry{
-			Kind:   kinds[target],
-			Target: target,
-			State:  "attached",
-		})
-	}
-	for _, r := range refusals {
-		entries = append(entries, effEntry{
-			Kind:   r.Manifest.Kind,
-			Target: r.Manifest.Target,
-			State:  "refused",
-			Error:  r.Refusal.Error(),
-		})
-	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	_, err = fsq.WriteStateFile(filepath.Dir(stateDir), filepath.Join(filepath.Base(stateDir), "adapters.json"), data, 0600)
 	return err
 }
 
@@ -459,11 +442,11 @@ func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 // validates, and owns the
 // startup. serve loads the manifest once and hands the snapshot in, so target
 // attachment and the relay use one validated file. Validation failures come
-// back typed so serve maps them to exit 2.
+// back typed so serve maps them to exit 6.
 //
 // Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
-// a typed outcome, not a lost start; generated diagnostics (refusals.json,
-// adapters.json) are published only AFTER startupSequence returns — the
+// a typed outcome, not a lost start; the generated refusals.json is
+// published only AFTER startupSequence returns — the
 // store open inside it creates the state directory and acquires the owner
 // lock, so a losing starter never overwrites the live owner's files and a
 // fresh directory cannot break the write. Publish failures are warnings on
@@ -496,9 +479,6 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 	}
 	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
 		say(warn, "warning: could not persist adapter refusals: %v", perr)
-	}
-	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil && warn != nil {
-		say(warn, "warning: could not write effective adapters: %v", werr)
 	}
 	return store, ep, carrier, refusals, nil
 }
@@ -577,19 +557,19 @@ func printCandidates(w io.Writer, cands []registry.Candidate) {
 // startup write or ownership check: no EnsureAgent, no store, no socket, no
 // lifetime lock, so it also works while
 // an endpoint or supervisor for this root is running. The manifest classifies
-// exactly like the serve path: validation failures are usage errors (exit
-// 2), I/O and parse failures are not. An explicit --codex-socket replaces
+// exactly like the serve path: validation failures are action required
+// (exit 6), I/O and parse failures are not. An explicit --codex-socket replaces
 // the default daemon socket.
 func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, stderr io.Writer) (int, error) {
 	mf, lerr := manifest.Load(manifestFile)
 	if lerr != nil {
 		if manifest.IsValidation(lerr) {
-			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
+			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
 		}
 		return 0, lerr
 	}
 	if verr := manifest.Validate(mf); verr != nil {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
+		return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 	}
 	cands, diags := registry.Discover(context.Background(), registry.DiscoverRequest{
 		Root: root, StateDir: stateDir,

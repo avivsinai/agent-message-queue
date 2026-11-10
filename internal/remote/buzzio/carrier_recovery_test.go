@@ -467,3 +467,28 @@ func TestNativeRebindDoesNotAdoptPriorReceipt(t *testing.T) {
 		t.Fatalf("sent %d updates from prior native session under replacement sharing binding", sent)
 	}
 }
+
+// An untyped endpoint error on a fresh submit is never shown as a refusal
+// while the endpoint holds the request: the edge reads the decision back
+// (audit 2026-11-10).
+func TestSubmitErrorAfterAdmissionIsNotShownRefused(t *testing.T) {
+	r := newRig(t)
+	r.c.handle = func(cmd *protocol.Command, src core.Source) (any, error) {
+		out, err := r.ep.Handle(cmd, src)
+		if cmd.Op == protocol.OpRequestSubmit {
+			return nil, errors.New("store write failed after admission")
+		}
+		return out, err
+	}
+	dm := ownerEvent(t, r.owner, r.b.Channel, "run once", r.now)
+	_ = r.c.Ingest(dm)
+	if st, settled, err := r.l.Settled(dm.ID.Hex()); err != nil || (settled && st.State == "refused") {
+		t.Fatalf("settlement = %+v settled=%v err=%v; the admitted request was shown refused", st, settled, err)
+	}
+	pending, _ := r.l.Pending()
+	for _, o := range pending {
+		if strings.Contains(string(o.Event), "submit refused") {
+			t.Fatalf("owed answer %s tells the owner the admitted request was refused", o.Event)
+		}
+	}
+}

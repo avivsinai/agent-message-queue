@@ -597,10 +597,14 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		return err
 	}
 	gen := welcome.ConnectionGeneration
+	frameLimit := MaxFrameBytes
+	if l := int(welcome.Limits.FrameBytes); l > 0 && l < frameLimit {
+		frameLimit = l
+	}
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 	sess := &session{
-		ws: ws, gen: gen, prefix: newPrefix(),
+		ws: ws, gen: gen, prefix: newPrefix(), frameLimit: frameLimit,
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
 		dispatch: newDispatcher(connCtx),
 	}
@@ -615,10 +619,7 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	c.byFrame = map[string]*offer{}
 	c.offerBytes = 0
 	c.sentBind, c.bindFrame = sentBind, ""
-	c.frameLimit = MaxFrameBytes
-	if l := int(welcome.Limits.FrameBytes); l > 0 && l < c.frameLimit {
-		c.frameLimit = l
-	}
+	c.frameLimit = frameLimit
 	c.maxCalls = welcome.Limits.ToolCallsInFlight
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
@@ -1090,14 +1091,16 @@ func (c *Carrier) refuse(sess *session, re string, e ErrorBody) {
 
 // session is one live connection.
 type session struct {
-	ws       *websocket.Conn
-	gen      int64
-	prefix   string
-	seq      atomic.Int64
-	lastPing atomic.Int64
-	control  chan []byte // acknowledgements and refusals: never waits behind data
-	data     chan []byte
-	dispatch *dispatcher
+	ws     *websocket.Conn
+	gen    int64
+	prefix string
+	// frameLimit is the smaller of MaxFrameBytes and the server's limit.
+	frameLimit int
+	seq        atomic.Int64
+	lastPing   atomic.Int64
+	control    chan []byte // acknowledgements and refusals: never waits behind data
+	data       chan []byte
+	dispatch   *dispatcher
 }
 
 func (s *session) nextID() string {

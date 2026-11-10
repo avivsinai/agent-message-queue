@@ -742,6 +742,36 @@ func TestReceiptReadErrorClearsOnAbsence(t *testing.T) {
 	}
 }
 
+// A receiptless refusal stops re-reading its receipt once a read after the
+// refusal found none (audit 2026-11-10).
+func TestRefusedRunStopsReadingItsReceipt(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("refused-once")
+	ref := clientRef(key)
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"busy"}`, ProtocolV1, ref))
+	reads := 0
+	a.dir.receipt = func(r string) (*receipt, error) {
+		if r == ref {
+			reads++
+		}
+		return (bridgeDir{dir: dir, names: piWire}).readReceipt(r)
+	}
+	for range 2 {
+		if ev, err := a.Lookup(key, addressEpoch("gen-1")); err != nil || ev.RefusalCode != protocol.CodeBusy {
+			t.Fatalf("Lookup = %+v, %v; want the busy refusal", ev, err)
+		}
+	}
+	settled := reads
+	for range 3 {
+		if ev, err := a.Lookup(key, addressEpoch("gen-1")); err != nil || ev.RefusalCode != protocol.CodeBusy {
+			t.Fatalf("Lookup = %+v, %v; want the busy refusal", ev, err)
+		}
+	}
+	if reads != settled {
+		t.Fatalf("receipt reads grew from %d to %d after the refusal settled", settled, reads)
+	}
+}
+
 // TestSubmitRetryReturnsKnownRefusal reproduces
 // Pro review of #923, 2026-09-29, #5: the existing-run and duplicate-file
 // Submit paths answered "submission uncertain" while the adapter already

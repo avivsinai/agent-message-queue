@@ -100,6 +100,36 @@ func TestLocalKeyRegistrationOnTheEndpointPage(t *testing.T) {
 	}
 }
 
+// A local passkey bound to a page origin the endpoint no longer serves (its
+// pages.json was lost) can be created again, and an unreadable pages.json
+// stops the page server instead of moving its origin (audit 2026-11-10).
+func TestLocalKeyRecoversFromALostPageOrigin(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), stateDirName)
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.WriteLocalKey(stateDir, "example", linkio.ConsentKey{Origin: "http://localhost:1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	record := filepath.Join(linkio.Dir(stateDir), pagesFile)
+	if err := os.WriteFile(record, []byte(`{"port":1}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	ls := newLinkSet(filepath.Dir(stateDir), stateDir, manifest.DefaultPath(stateDir), "test", io.Discard)
+	ls.ctx = ctx
+	if _, err := ls.localPageRequest(nil, "example", ipc.LinkRequest{Op: "page", Page: "register"}); err == nil || !strings.Contains(err.Error(), "unreadable") {
+		t.Fatalf("unreadable pages.json: err = %v, want a refusal", err)
+	}
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ls.localPageRequest(nil, "example", ipc.LinkRequest{Op: "page", Page: "register"}); err != nil {
+		t.Fatalf("register over a key for a lost origin: %v", err)
+	}
+}
+
 func post(url, origin string, body []byte) int {
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	req.Header.Set("Origin", origin)

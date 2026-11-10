@@ -484,3 +484,29 @@ func TestLinkStatusOfflineWithoutEndpoint(t *testing.T) {
 		t.Fatalf("link status = %+v, %v; want offline with the stored last ping", out, err)
 	}
 }
+
+// A status.json left in a link dir without a device key never hides "not
+// linked" (audit 2026-11-10).
+func TestLinkStatusIgnoresStaleStatusOfAnUnlinkedLink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	stateDir := filepath.Join(root, stateDirName)
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	dir := linkio.LinkDir(stateDir, "example")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(linkio.Status{State: "online"})
+	if err := os.WriteFile(filepath.Join(dir, "status.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := linkStatus([]string{"--root", root}, &jsonProbe{})
+	st, _ := out.(linkStatusOut)
+	if err != nil || len(st.Links) != 1 || st.Links[0].Status.State != "not linked" {
+		t.Fatalf("link status = %+v, %v; want not linked", out, err)
+	}
+}

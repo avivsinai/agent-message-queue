@@ -99,8 +99,11 @@ type pageServer struct {
 }
 
 // ensure starts listening on the root's recorded port, recording a fresh one
-// the first time. A recorded port that another process holds is an error:
-// the endpoint never serves its pages from another origin.
+// the first time. A recorded port that another process holds, or a record
+// that cannot be read, is an error: the endpoint never serves its pages from
+// another origin while the recorded one may still be valid. A record that is
+// gone or does not decode is lost: a fresh port is recorded, and each link's
+// local passkey is created again with link local-key.
 func (ps *pageServer) ensure(ctx context.Context) error {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -111,8 +114,14 @@ func (ps *pageServer) ensure(ctx context.Context) error {
 	var rec struct {
 		Port int `json:"port"`
 	}
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &rec)
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if json.Unmarshal(data, &rec) != nil || rec.Port < 0 || rec.Port > 65535 {
+			rec.Port = 0
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("the local page port record is unreadable (%v); local confirmation is unavailable until it can be read", err)
 	}
 	l, err := net.Listen("tcp", "localhost:"+strconv.Itoa(rec.Port))
 	if err != nil {
@@ -263,7 +272,9 @@ func (ls *linkSet) localPageRequest(run *linkRun, name string, req ipc.LinkReque
 	var p *localPage
 	switch req.Page {
 	case "register":
-		if linkio.HasLocalKey(ls.stateDir, name) {
+		// Only a key that confirms on this page is kept: one bound to an
+		// origin the endpoint no longer serves can confirm nothing.
+		if key, err := linkio.LoadLocalKey(ls.stateDir, name); err == nil && key.Origin == origin {
 			return nil, protocol.Refuse(protocol.CodeInvalid, "link %s already has a local passkey", name)
 		}
 		challenge := make([]byte, 32)
@@ -450,7 +461,8 @@ func linkConfirm(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 }
 
 // linkLocalKey creates a link's local confirmation passkey on the endpoint's
-// page. It needs a terminal and a running endpoint, and never replaces a key.
+// page. It needs a terminal and a running endpoint, and replaces only a key
+// that cannot confirm on that page.
 func linkLocalKey(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("link local-key", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

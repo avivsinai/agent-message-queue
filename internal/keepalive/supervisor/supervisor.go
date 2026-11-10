@@ -194,7 +194,9 @@ func (r Reconciler) detachedBackoff(failureCount int) time.Duration {
 	return r.exponentialBackoff(failureCount, base, maxDelay)
 }
 
-func (r Reconciler) exponentialBackoff(failureCount int, base, maxDelay time.Duration) time.Duration {
+// BackoffStep is the failure backoff before jitter: base doubled per
+// failure after the first, capped at maxDelay.
+func BackoffStep(failureCount int, base, maxDelay time.Duration) time.Duration {
 	if failureCount < 1 {
 		failureCount = 1
 	}
@@ -205,8 +207,13 @@ func (r Reconciler) exponentialBackoff(failureCount int, base, maxDelay time.Dur
 			return maxDelay
 		}
 	}
-	if delay > maxDelay {
-		return maxDelay
+	return min(delay, maxDelay)
+}
+
+func (r Reconciler) exponentialBackoff(failureCount int, base, maxDelay time.Duration) time.Duration {
+	delay := BackoffStep(failureCount, base, maxDelay)
+	if delay < base || (failureCount > 1 && delay == maxDelay) {
+		return delay // capped: no jitter
 	}
 	return r.jitter(delay, maxDelay)
 }
