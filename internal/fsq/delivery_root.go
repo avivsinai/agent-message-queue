@@ -1064,10 +1064,27 @@ func (r *DeliveryRoot) SyncDir(name string) error {
 	return r.syncDir(name)
 }
 
+// RemoveDLQEnvelopeLock removes the lock file of one DLQ envelope that was just
+// purged. Call it only from inside WithDLQEnvelopeLock for that envelope: a
+// concurrent opener then locks a fresh file for an envelope that is gone.
+func (r *DeliveryRoot) RemoveDLQEnvelopeLock(agent, filename string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return err
+	}
+	err := r.Remove(filepath.Join("agents", agent, "dlq", "locks", filename+".lock"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // WithDLQEnvelopeLock runs fn while holding the durable, process-scoped lock
-// for one DLQ envelope. The lock file is retained deliberately: its advisory
+// for one DLQ envelope. The lock file is retained across calls: its advisory
 // handle lock is released by the kernel on close or process crash, so no stale
-// O_EXCL sentinel can block a later recovery.
+// O_EXCL sentinel can block a later recovery. Only a purge removes it.
 func (r *DeliveryRoot) WithDLQEnvelopeLock(agent, filename string, fn func(*DeliveryRoot) error) error {
 	if err := ValidateHandle(agent); err != nil {
 		return err

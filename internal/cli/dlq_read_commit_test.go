@@ -20,6 +20,33 @@ func TestDLQReadAndRetryMissingIDExitNotFound(t *testing.T) {
 			t.Fatalf("dlq %s missing id: exit=%d err=%v, want not found", name, GetExitCode(err), err)
 		}
 	}
+	// A missing id must not leave an envelope lock behind (audit 2026-11-10).
+	if _, err := os.Lstat(filepath.Join(root, "agents", "alice", "dlq", "locks")); !os.IsNotExist(err) {
+		t.Fatalf("missing-id dlq read/retry created dlq/locks: %v", err)
+	}
+}
+
+// Purging an envelope removes its lock file (audit 2026-11-10).
+func TestDLQPurgeRemovesEnvelopeLockFile(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	filename := filepath.Base(moveInvalidFixtureToDLQForRetryAll(t, root, "alice", "purge-lock"))
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runDLQRead([]string{"--root", root, "--me", "alice", "--id", filename})
+	}); err != nil {
+		t.Fatalf("dlq read: %v", err)
+	}
+	lockPath := filepath.Join(root, "agents", "alice", "dlq", "locks", filename+".lock")
+	if _, err := os.Lstat(lockPath); err != nil {
+		t.Fatalf("lock file missing after read: %v", err)
+	}
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runDLQPurge([]string{"--root", root, "--me", "alice", "--yes", "--json"})
+	}); err != nil {
+		t.Fatalf("dlq purge: %v", err)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock file remains after purge: %v", err)
+	}
 }
 
 func TestDLQListAndReadExposeTerminalRetryState(t *testing.T) {
