@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -87,16 +86,9 @@ func upgradeDiagnosticRoots(root string) []string {
 	}
 
 	add(base)
-	entries, err := os.ReadDir(base)
-	if err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() || validateSessionName(entry.Name()) != nil {
-				continue
-			}
-			candidate := filepath.Join(base, entry.Name())
-			if dirExists(filepath.Join(candidate, "agents")) {
-				add(candidate)
-			}
+	if sessions, err := canonicalSessionRoots(base); err == nil {
+		for _, session := range sessions {
+			add(session.Root)
 		}
 	}
 	add(root)
