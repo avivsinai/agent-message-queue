@@ -63,6 +63,8 @@ type Carrier struct {
 	// endpoint's in-process NativeSessionID), "" when unproven.
 	identity func(target string) string
 	now      func() time.Time
+	// prunedAt is when Flush last pruned settled outputs.
+	prunedAt time.Time
 
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
 }
@@ -706,6 +708,14 @@ const (
 	publishTimeout = 10 * time.Second
 )
 
+// Flush prunes settled outputs at most once per pruneEvery, at most
+// pruneBatch per pass, so the outbox it scans every second stays bounded by
+// what is still owed or recent.
+const (
+	pruneEvery = time.Minute
+	pruneBatch = 256
+)
+
 // Flush sends owed outputs in order and records acceptance on the relay's
 // matching OK. Before each send it re-checks that the output belongs to this
 // share (body and DM channel), that the enrolled generation still grants
@@ -726,6 +736,12 @@ const (
 // while a send waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, has EventLookup, gate func() error) error {
 	c.mu.Lock()
+	if now := c.now(); now.Sub(c.prunedAt) >= pruneEvery {
+		// Pruning only bounds the outbox scan: a failure leaves the
+		// records for the next pass and never holds a send.
+		c.prunedAt = now
+		_, _ = c.ledger.PruneSettled(pruneBatch)
+	}
 	pending, err := c.ledger.Pending()
 	c.mu.Unlock()
 	if err != nil {

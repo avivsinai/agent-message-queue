@@ -46,6 +46,47 @@ func TestLedgerReplaysClaimsAndPreparedOutputVerbatim(t *testing.T) {
 	}
 }
 
+// Accepted outputs whose obligation is recorded elsewhere are pruned; owed
+// ones, unsettled answers, and the newest record stay.
+func TestLedgerPrunesSettledOutputs(t *testing.T) {
+	l, err := OpenLedger(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, open := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	if _, err := l.Settle(settled, Settlement{Op: "inspect"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.PutReceipt(Receipt{RequestRef: "ref-1", RootEventID: "root", Revision: 4}); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"direct/" + settled, "direct/" + open, "row/ref-1/00000000", "row/ref-1/00000002", "row/ref-1/00000003", "row/ref-1/00000004"}
+	for _, k := range keys {
+		if _, err := l.Prepare(k, json.RawMessage(`{"id":"x"}`), ShareBinding{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range keys[:len(keys)-2] {
+		if err := l.MarkAccepted(k, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The newest record is recorded in the receipt too, but keeps the top
+	// sequence; revision 3 is still owed.
+	if err := l.MarkAccepted(keys[len(keys)-1], time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.PruneSettled(10); err != nil || n != 3 {
+		t.Fatalf("pruned %d, %v; want the settled answer, the root and revision 2", n, err)
+	}
+	for i, k := range keys {
+		_, ok, _ := l.Prepared(k)
+		if want := i == 1 || i >= 4; ok != want {
+			t.Fatalf("%s kept=%v, want %v", k, ok, want)
+		}
+	}
+}
+
 // Regression: #971, an earlier build
 // stored a refusal as a bare reason string, and one such record failed the
 // whole outbox scan. It reads as one refused attempt, due now.

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -320,6 +321,68 @@ func (l *Ledger) updateOwed(key string, set func(*Outbound)) error {
 func (l *Ledger) Pending() ([]Outbound, error) {
 	out, _, err := scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted })
 	return out, err
+}
+
+// PruneSettled removes at most limit accepted outputs whose key can never be
+// prepared again, and returns how many it removed. That is a direct answer
+// whose ingress event is settled (a settled event is never answered again),
+// and a row event whose request receipt already records it: the root once
+// the receipt names its event, an edit once the receipt's revision reached
+// it. The record with the highest sequence stays, so nextSeq never hands out
+// a number below a live record's. Owed, damaged and unknown records stay.
+func (l *Ledger) PruneSettled(limit int) (int, error) {
+	dir := filepath.Join(l.dir, "outbox")
+	all, _, err := scanOutbox(dir, func(o Outbound) bool { return o.Accepted })
+	if err != nil {
+		return 0, err
+	}
+	var top int64
+	for _, o := range all {
+		top = max(top, o.Seq)
+	}
+	removed := 0
+	for _, o := range all {
+		if removed == limit {
+			break
+		}
+		if o.Seq == top {
+			continue
+		}
+		if done, err := l.obligationRecorded(o.Key); err != nil || !done {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, keyFile(o.Key))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// obligationRecorded reports whether key's output is recorded outside the
+// outbox, so no path prepares it again.
+func (l *Ledger) obligationRecorded(key string) (bool, error) {
+	if id, ok := strings.CutPrefix(key, "direct/"); ok {
+		_, settled, err := l.Settled(id)
+		return settled, err
+	}
+	rest, ok := strings.CutPrefix(key, "row/")
+	i := strings.LastIndexByte(rest, '/')
+	if !ok || i < 0 {
+		return false, nil
+	}
+	rev, err := strconv.Atoi(rest[i+1:])
+	if err != nil {
+		return false, nil
+	}
+	rc, found, err := l.ReceiptFor(rest[:i])
+	if err != nil || !found {
+		return false, err
+	}
+	if rev == 0 {
+		return rc.RootEventID != "", nil
+	}
+	return rc.Revision >= rev, nil
 }
 
 // RefusedOutputs lists the owed outputs the relay refused on their last
