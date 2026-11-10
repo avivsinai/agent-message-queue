@@ -162,15 +162,8 @@ func coopHookPeers(root, me string, now time.Time) []string {
 
 // coopHookUnread counts messages in inbox/new the way amq list --new does.
 func coopHookUnread(root, me string) int {
-	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, me))
-	n := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.Type().IsRegular() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".md") {
-			n++
-		}
-	}
-	return n
+	pending, _ := coopStopPending(root, me)
+	return len(pending)
 }
 
 // coopHookWakeRings reports whether a live wake for (root, me) writes a

@@ -417,3 +417,20 @@ func TestRunOpsChecks_CompanionRegistryAbsentCreatesNothingAndUnreadableWarns(t 
 		t.Fatalf("corrupt companion registry produced no companion_registry_unreadable hint; hints=%#v", result.Hints)
 	}
 }
+
+// A .DS_Store, a non-.md file, or a directory in inbox/new is not unread mail
+// (audit 2026-11-10).
+func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{".DS_Store", "notes.txt", "msg.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if count, _, errText := opsMailboxCount(dir, true, time.Now()); count != 1 || errText != "" {
+		t.Fatalf("count = %d (%q), want 1", count, errText)
+	}
+}

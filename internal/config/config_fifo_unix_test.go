@@ -39,3 +39,21 @@ func TestWriteConfigRefusesAFIFOWithoutBlocking(t *testing.T) {
 		t.Fatal("WriteConfig blocked on a FIFO at config.json")
 	}
 }
+
+// EnsureAgent refuses a symlinked config.json instead of reading through it
+// (audit 2026-11-10).
+func TestEnsureAgentRefusesASymlinkedConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootDir, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, "meta", "real.json"), []byte(`{"version":1,"agents":["a"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.json", filepath.Join(rootDir, "meta", "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureAgent(rootDir, "b"); err == nil {
+		t.Fatal("EnsureAgent read config.json through a symlink")
+	}
+}

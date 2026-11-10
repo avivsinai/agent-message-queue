@@ -235,7 +235,7 @@ func runUpgrade(args []string, currentVersion string) error {
 func runManagedUpgradeWithManager(kind update.InstallKind, managerPath string, yes, all bool) error {
 	argvs, remedy := delegateUpgradeCommandWithManager(kind, managerPath)
 	if all {
-		if err := writeStdoutLine("--all: companions are direct-installed; upgrade them with 'amq upgrade --all' from a direct amq install."); err != nil {
+		if err := writeStdoutLine("--all: the package manager upgrades the companions it installed with amq; upgrade a direct-installed companion (always amq-keepalive) with 'amq upgrade --all' from a direct amq install."); err != nil {
 			return err
 		}
 	}

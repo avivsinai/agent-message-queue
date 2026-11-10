@@ -163,3 +163,31 @@ func runTraceFollowJSON(t *testing.T, id string, args ...string) traceResult {
 	}
 	return result
 }
+
+// One recipient's unreadable inbox copy leaves the root readable for the
+// next recipient (audit 2026-11-10).
+func TestTraceFollowKeepsARecipientFailureToThatRecipient(t *testing.T) {
+	root := setupReceiptsTestRoot(t)
+	if err := fsq.EnsureAgentDirs(root, "carol"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, root, "alice", "bob", "carol")
+	sent := runSendJSONForTest(t, "--root", root, "--me", "alice", "--to", "bob,carol", "--thread", "review/multi", "--body", "hello", "--json")
+	id := sent["id"].(string)
+	copyPath := filepath.Join(fsq.AgentInboxNew(root, "bob"), id+".md")
+	if err := os.Remove(copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(copyPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runTraceFollowJSON(t, id, "--root", root, "--from", "alice")
+	got := map[string]followRecipient{}
+	for _, r := range result.Follow.Recipients {
+		got[r.Handle] = r
+	}
+	if got["bob"].Delivery != "unknown" || got["bob"].Detail == "" || got["carol"].Delivery != "new" {
+		t.Fatalf("recipients = %+v, want bob unknown with detail and carol new", result.Follow.Recipients)
+	}
+}

@@ -143,7 +143,7 @@ func runDoctor(args []string) error {
 	}
 
 	// Check 2: .amqrc
-	amqrcCheck, root := checkAmqrc()
+	amqrcCheck, root, amqrcSource := checkAmqrc()
 	if rootExplicit {
 		root = resolveRoot(*rootFlag)
 		amqrcCheck = doctorCheck{
@@ -229,10 +229,9 @@ func runDoctor(args []string) error {
 
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
-		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
 		source := rootSourceFlag
 		if !rootExplicit {
-			_, source, _, _ = resolveEnvConfigWithSource("", "")
+			source = amqrcSource
 		}
 		fixWakeLocks := *fixWakeLocksFlag
 		if fixWakeLocks {
@@ -596,7 +595,7 @@ func checkBinary() doctorCheck {
 	return check
 }
 
-func checkAmqrc() (doctorCheck, string) {
+func checkAmqrc() (doctorCheck, string, rootSource) {
 	check := doctorCheck{Name: "Root config"}
 
 	// Use the full resolution chain including global fallback
@@ -606,16 +605,16 @@ func checkAmqrc() (doctorCheck, string) {
 		if envVal := os.Getenv(envRoot); envVal != "" {
 			check.Status = "ok"
 			check.Message = fmt.Sprintf("queue root=%s (from AM_ROOT)", envVal)
-			return check, envVal
+			return check, envVal, ""
 		}
-		check.Status = "warn"
-		check.Message = "no root found (run 'amq coop init' or create ~/.amqrc)"
-		return check, ""
+		check.Status = "error"
+		check.Message = err.Error()
+		return check, "", ""
 	}
 
 	check.Status = "ok"
 	check.Message = fmt.Sprintf("queue root=%s (source: %s)", root, source)
-	return check, root
+	return check, root, source
 }
 
 func checkRootDir(root string) doctorCheck {
@@ -656,10 +655,23 @@ func checkConfig(root string) doctorCheck {
 
 	cfgPath := filepath.Join(root, "meta", "config.json")
 	cfg, err := config.LoadConfig(cfgPath)
+	source := ""
 	if os.IsNotExist(err) {
-		check.Status = "warn"
-		check.Message = "config.json not found"
-		return check
+		// A session root without its own config uses its base's config, as
+		// the mailbox check does.
+		base := classifyRoot(root)
+		if base == "" {
+			check.Status = "warn"
+			check.Message = "config.json not found"
+			return check
+		}
+		cfg, err = config.LoadConfig(filepath.Join(base, "meta", "config.json"))
+		if os.IsNotExist(err) {
+			check.Status = "warn"
+			check.Message = fmt.Sprintf("config.json not found in the root or its base %s", base)
+			return check
+		}
+		source = fmt.Sprintf(" (from base %s)", base)
 	}
 	if err != nil {
 		check.Status = "error"
@@ -668,7 +680,7 @@ func checkConfig(root string) doctorCheck {
 	}
 
 	check.Status = "ok"
-	check.Message = fmt.Sprintf("agents: %v", cfg.Agents)
+	check.Message = fmt.Sprintf("agents: %v%s", cfg.Agents, source)
 	return check
 }
 

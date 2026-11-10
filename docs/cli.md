@@ -228,7 +228,7 @@ Options:
   -plan string
         Public LaunchIntentV1 file, or - for stdin
   -prepare
-        Prepare the public launch intent without mutation (requires --plan and --json)
+        Prepare the public launch intent without mutation (requires --plan or --request, and --json)
   -rebind
         Confirm a deliberate launcher binding change
   -request string
@@ -2268,7 +2268,7 @@ Options:
   -plan string
         Public LaunchIntentV1 file, or - for stdin
   -prepare
-        Prepare the public launch intent without mutation (requires --plan and --json)
+        Prepare the public launch intent without mutation (requires --plan or --request, and --json)
   -rebind
         Confirm a deliberate launcher binding change
   -request string

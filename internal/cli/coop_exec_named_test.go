@@ -31,3 +31,10 @@ func TestCoopNamedUnknownCLIIsQuietByDefault(t *testing.T) {
 		}
 	}
 }
+
+// codex migrate-nfs-db is a subcommand, not a TUI prompt (audit 2026-11-10).
+func TestCodexLaunchArgsTreatsMigrateNFSDBAsSubcommand(t *testing.T) {
+	if _, unknown, tui := codexLaunchArgs([]string{"migrate-nfs-db"}); !unknown || tui {
+		t.Fatalf("codexLaunchArgs(migrate-nfs-db) unknown=%v tui=%v, want unknown and no TUI", unknown, tui)
+	}
+}

@@ -290,3 +290,21 @@ func writeTraceNotificationJournalNamed(t testing.TB, root, agent, filename stri
 		t.Fatalf("write notification attempt journal: %v", err)
 	}
 }
+
+// trace takes its message id after the flags too (audit 2026-11-10).
+func TestTraceAcceptsMessageIDAfterFlags(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ := captureOutput(t, func() error {
+		if err := runTrace([]string{"--root", root, "--json", "missing-message"}); GetExitCode(err) != ExitNotFound {
+			t.Fatalf("trace error = %v, exit = %d, want not found", err, GetExitCode(err))
+		}
+		return nil
+	})
+	var result traceResultJSON
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil || result.Status != "not_found" {
+		t.Fatalf("trace JSON = %s (%v), want status not_found", stdout, err)
+	}
+}

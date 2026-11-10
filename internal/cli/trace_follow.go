@@ -179,7 +179,7 @@ func (f *follower) follow(msg followedMessage) traceFollow {
 			continue
 		}
 		seen[handle] = true
-		hits, unreadable := f.locateAll(out.Searched, handle, msg.ID)
+		hits, unreadable, detail := f.locateAll(out.Searched, handle, msg.ID)
 		switch {
 		case len(hits) > 0:
 			if slices.Contains(thread.OpenerKinds, msg.Kind) {
@@ -192,7 +192,7 @@ func (f *follower) follow(msg followedMessage) traceFollow {
 			out.Recipients = append(out.Recipients, hits...)
 		case unreadable:
 			unknown++
-			out.Recipients = append(out.Recipients, followRecipient{Handle: handle, Delivery: "unknown", Receipt: "none"})
+			out.Recipients = append(out.Recipients, followRecipient{Handle: handle, Delivery: "unknown", Receipt: "none", Detail: detail})
 		default:
 			out.Recipients = append(out.Recipients, followRecipient{Handle: handle, Delivery: "not_found", Receipt: "none"})
 		}
@@ -213,9 +213,12 @@ func (f *follower) follow(msg followedMessage) traceFollow {
 }
 
 // locateAll finds handle's copy of id in each readable root. A root that
-// cannot be opened or read is marked in place.
-func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRecipient, bool) {
+// cannot be opened is marked in place; a failure to read handle's mailbox in
+// an open root leaves the root readable for other recipients and is
+// returned as detail.
+func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRecipient, bool, string) {
 	var hits []followRecipient
+	var details []string
 	unreadable := false
 	for i := range roots {
 		if roots[i].Status == followRootMissing {
@@ -225,8 +228,7 @@ func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRec
 			unreadable = true
 			continue
 		}
-		found, err := f.locateCopy(roots[i].Root, handle, id)
-		if err != nil {
+		if _, err := f.open(roots[i].Root); err != nil {
 			roots[i].Status, roots[i].Detail = followRootUnreadable, err.Error()
 			if os.IsNotExist(err) {
 				roots[i].Status = followRootMissing
@@ -235,13 +237,19 @@ func (f *follower) locateAll(roots []followRoot, handle, id string) ([]followRec
 			}
 			continue
 		}
+		found, err := f.locateCopy(roots[i].Root, handle, id)
+		if err != nil {
+			unreadable = true
+			details = append(details, fmt.Sprintf("%s: %v", roots[i].Root, err))
+			continue
+		}
 		if found.Delivery == "" && found.Receipt == "none" {
 			continue
 		}
 		found.Handle, found.Root, found.Project, found.Session = handle, roots[i].Root, roots[i].Project, roots[i].Session
 		hits = append(hits, found)
 	}
-	return hits, unreadable
+	return hits, unreadable, strings.Join(details, "; ")
 }
 
 // locateCopy finds handle's inbox copy of id and its written or owed receipt

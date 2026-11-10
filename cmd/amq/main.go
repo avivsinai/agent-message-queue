@@ -24,9 +24,7 @@ func getVersion() string {
 
 func main() {
 	if err := cli.Run(os.Args[1:], getVersion()); err != nil {
-		if _, werr := fmt.Fprintln(os.Stderr, err); werr != nil {
-			os.Exit(1)
-		}
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(cli.GetExitCode(err))
 	}
 }

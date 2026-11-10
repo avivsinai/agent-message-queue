@@ -45,6 +45,8 @@ func checkHookConfigs() doctorCheck {
 		}
 		found, err := hookinstall.StaleSessionStartHooks(c.path, c.agent)
 		if err == nil {
+			// Stale findings stand even when the outdated scan then fails.
+			stale = append(stale, found...)
 			var old []hookinstall.OutdatedSessionStartHook
 			old, err = hookinstall.OutdatedSessionStartHooks(c.path, c.agent)
 			outdated = append(outdated, old...)
@@ -60,9 +62,7 @@ func checkHookConfigs() doctorCheck {
 			if !os.IsNotExist(err) {
 				warnings = append(warnings, fmt.Sprintf("%s config %s: %v; %s", c.agent, c.path, err, hookConfigErrorRemedy(c.path, c.agent, err)))
 			}
-			continue
 		}
-		stale = append(stale, found...)
 	}
 
 	if len(agents) == 0 && len(warnings) == 0 {

@@ -16,12 +16,9 @@ func VersionStrictlyNewer(incumbent, candidate string) bool {
 	if !ok {
 		return false
 	}
-	if len(current.prerelease) > 0 || len(next.prerelease) > 0 {
-		// Git-describe suffixes are build snapshots, not ordered SemVer
-		// prereleases. Require a strictly newer core whenever either exists.
-		return compareSemanticCore(current, next) < 0
-	}
-	return compareSemanticVersion(current, next) < 0
+	// Git-describe suffixes are build snapshots, not ordered SemVer
+	// prereleases, so only a strictly newer core is newer.
+	return compareSemanticCore(current, next) < 0
 }
 
 func parseSemanticVersion(raw string) (semanticVersion, bool) {
@@ -93,58 +90,6 @@ func numericIdentifier(raw string) bool {
 		}
 	}
 	return true
-}
-
-func compareSemanticVersion(first, second semanticVersion) int {
-	if core := compareSemanticCore(first, second); core != 0 {
-		return core
-	}
-	if len(first.prerelease) == 0 && len(second.prerelease) == 0 {
-		return 0
-	}
-	if len(first.prerelease) == 0 {
-		return 1
-	}
-	if len(second.prerelease) == 0 {
-		return -1
-	}
-	for index := 0; index < len(first.prerelease) && index < len(second.prerelease); index++ {
-		left := first.prerelease[index]
-		right := second.prerelease[index]
-		if left == right {
-			continue
-		}
-		leftNumeric := numericIdentifier(left)
-		rightNumeric := numericIdentifier(right)
-		switch {
-		case leftNumeric && rightNumeric:
-			if len(left) != len(right) {
-				if len(left) < len(right) {
-					return -1
-				}
-				return 1
-			}
-			if left < right {
-				return -1
-			}
-			return 1
-		case leftNumeric:
-			return -1
-		case rightNumeric:
-			return 1
-		case left < right:
-			return -1
-		default:
-			return 1
-		}
-	}
-	if len(first.prerelease) < len(second.prerelease) {
-		return -1
-	}
-	if len(first.prerelease) > len(second.prerelease) {
-		return 1
-	}
-	return 0
 }
 
 func compareSemanticCore(first, second semanticVersion) int {

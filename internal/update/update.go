@@ -39,9 +39,10 @@ const (
 )
 
 // CompanionBinaries are the amq-adjacent binaries published from the same
-// release but not packaged by the Homebrew formula or Scoop manifest: only
-// amq itself goes through a package manager. They are direct-installed at a
-// stable path (~/.local/bin or next to amq) and upgraded in place.
+// release. The Homebrew formula installs every one except amq-keepalive
+// beside amq; the Scoop manifest installs only amq. A companion no package
+// manager installed is direct-installed at a stable path (~/.local/bin or
+// next to amq) and upgraded in place.
 var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp", "amq-remote", "amq-owner-sign", "amq-board"}
 
 // InstallKind classifies how a resolved executable path was installed.
@@ -53,7 +54,8 @@ const (
 	InstallDirect InstallKind = iota
 	// InstallHomebrew means the resolved path lives under a Homebrew Cellar
 	// or prefix bin dir; amq upgrade delegates to brew so it does not corrupt
-	// brew bookkeeping. Companions are never Homebrew-owned.
+	// brew bookkeeping. The formula owns every companion except
+	// amq-keepalive.
 	InstallHomebrew
 	// InstallScoop means the resolved path lives under the Scoop apps dir on
 	// Windows user scope; amq upgrade delegates to scoop. Companions are never
