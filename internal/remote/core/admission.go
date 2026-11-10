@@ -510,10 +510,8 @@ func (e *Endpoint) linkFullLocked(host string) (bool, error) {
 // This is the per-runtime reservation — the endpoint's own knowledge of
 // what it has outstanding, not the attachment's Inspect() status, which is
 // advisory and racy. Scope note: a terminal record whose ack is pending is
-// NOT reserved — the attachment owns the native unacked-result slot (its
-// Submit already refuses on one) and the ack-replay machinery recovers it;
-// reserving it at the endpoint too double-counted and made the endpoint
-// refuse submits the attachment would accept. Fail-closed: an enumeration
+// NOT reserved: its run is over, and the ack-replay machinery delivers the
+// ack. Fail-closed: an enumeration
 // error is PROPAGATED, never read as "none" — a storage error must not
 // authorize the dispatch the reservation exists
 // to prevent. A POISON record for the target itself (undecodable file whose
