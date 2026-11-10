@@ -137,6 +137,10 @@ func reconcileLiveSeats(request ReconcileRequest, binding BindingRecord) ([]Seat
 	if err != nil {
 		return nil, false, ReasonLiveParticipantRefused
 	}
+	if inspection.Status == InspectAbsent {
+		// Nothing is live: the absent-binding path recreates the session.
+		return nil, false, ""
+	}
 	foreign := request.HostIdentity != "" && binding.HostIdentity != request.HostIdentity
 	detect := backend.Detect()
 	if detect.InstanceIdentity != "" && binding.InstanceIdentity != detect.InstanceIdentity {

@@ -1002,3 +1002,32 @@ func TestReconcileJoinCrashAfterBindingWrittenRecovers(t *testing.T) {
 		t.Fatalf("kept seat conversation = %#v err=%v", record, err)
 	}
 }
+
+// on_live keep with a bound session that no longer exists relaunches like any
+// other absent binding instead of refusing a seat that is not live (audit 2026-11-10).
+func TestReconcileOnLiveKeepRelaunchesAbsentBoundSession(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.OnLive = map[string]string{"claude": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || result.Outcome != OutcomeCreated || backend.creates != 1 {
+		t.Fatalf("result=%#v err=%v creates=%d, want a relaunch", result, err, backend.creates)
+	}
+}
