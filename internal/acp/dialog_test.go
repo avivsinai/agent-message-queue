@@ -318,7 +318,19 @@ func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
 			savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
 			t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
 			buzzOwner = owner
-			postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
+			// The not-taken notice posts from its own goroutine; the case
+			// waits for it so the cleanup never restores postAnswer while
+			// that goroutine reads it (audit 2026-11-10).
+			notice := make(chan struct{}, 1)
+			postAnswer = func(_, text string, _ time.Duration) (string, error) {
+				if strings.HasPrefix(text, "Your reply was not taken as an answer") {
+					select {
+					case notice <- struct{}{}:
+					default:
+					}
+				}
+				return strings.Repeat("f", 64), nil
+			}
 			readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
 			s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
 			s.lastChannel = dm
@@ -342,6 +354,13 @@ func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
 			_, a, ok := s.dialogReply(dm, id, buzzPrompt(dm, owner, tc.body))
 			if ok != tc.wantOK || (ok && (a.Option == 2) != tc.wantDeny) {
 				t.Fatalf("dialogReply = %+v, %v; want ok=%v deny=%v", a, ok, tc.wantOK, tc.wantDeny)
+			}
+			if !tc.wantOK {
+				select {
+				case <-notice:
+				case <-time.After(5 * time.Second):
+					t.Fatal("no not-taken notice was posted")
+				}
 			}
 		})
 	}
