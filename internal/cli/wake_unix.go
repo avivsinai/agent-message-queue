@@ -1081,9 +1081,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		Lock:   filepath.Join(fsq.AgentBase(root, me), wakeLockFileName),
 		Target: wakeTargetPath(root, me),
 	}
-	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
-		result.Status = "error"
-		err = withWakeDiagnostic(err, result.Root, result.Agent)
+	// The wake lock lives inside the agent directory, so without that
+	// directory there is no lock to repair. Refuse before openWakeAgentDir
+	// creates it: an empty directory would register a phantom agent.
+	if _, err := os.Lstat(fsq.AgentBase(root, me)); errors.Is(err, os.ErrNotExist) {
+		result.Status = "refused"
+		err = withWakeDiagnostic(errors.New("no wake lock present; start wake normally"), result.Root, result.Agent)
 		result.Reason = err.Error()
 		return result, err
 	}
@@ -3744,9 +3747,11 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 //
 // Required OS vars: PATH for exec.LookPath (self-upgrade, restart preflight,
 // recursive amq spawn), HOME for os.UserHomeDir config resolution,
-// XDG_STATE_HOME for the legacy launch state directory that holds the
-// Darwin wake restart stages (restart and self-upgrade staging), TERM_PROGRAM for terminal detection (wake injection),
-// and CMUX_SURFACE_ID for cmux surface detection (launch backend).
+// XDG_STATE_HOME for the legacy launch state directory, where the child
+// validates and prunes Darwin wake restart stages an older release wrote
+// (new stages go under ~/.amq/state/wake-stages), TERM_PROGRAM for terminal
+// detection (wake injection), and CMUX_SURFACE_ID for cmux surface
+// detection (launch backend).
 // All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
 // (session/identity/state, no-update-check, test re-exec helpers) so future
 // AMQ vars are covered without enumerating each one.
@@ -3760,11 +3765,11 @@ var wakeChildEnvAllowlist = map[string]bool{
 	"CMUX_SURFACE_ID": true,
 }
 
-// scrubWakeChildEnv filters a parent env slice to the wake-child allowlist
-// (7ra). Non-allowlisted vars are dropped before the child is spawned so the
+// scrubWakeChildEnv filters a parent env slice to the wake-child allowlist.
+// Non-allowlisted vars are dropped before the child is spawned so the
 // injector child never sees unrelated parent-shell secrets/tokens. The
-// allowlist is matched by key: AMQ_/AM_ prefix OR an explicit allowlist entry
-// (PATH, HOME). Callers still set/override specific AMQ vars after.
+// allowlist is matched by key: AMQ_/AM_ prefix OR an entry of
+// wakeChildEnvAllowlist. Callers still set/override specific AMQ vars after.
 func scrubWakeChildEnv(env []string) []string {
 	if len(env) == 0 {
 		return nil

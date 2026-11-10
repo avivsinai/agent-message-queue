@@ -53,7 +53,7 @@ func TestSyncDirPlatformFlushesRealDirectory(t *testing.T) {
 	if err := r.syncDirPlatform(filepath.Join("..", "outside")); err == nil {
 		t.Fatal("syncDirPlatform accepted an escaping path")
 	}
-	// The ambient form (package WriteFileAtomic) still flushes.
+	// The ambient form (package SyncDir) still flushes.
 	if err := syncDirPlatformAmbient(dir); err != nil {
 		t.Fatalf("syncDirPlatformAmbient on a real directory: %v", err)
 	}

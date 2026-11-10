@@ -428,8 +428,8 @@ func (n *claudeNativeNotifier) Observe() (bool, error) {
 			}
 			id := strings.TrimSuffix(name, ".md")
 			found := false
-			for _, stage := range []string{"drained", "dlq"} {
-				leaf := id + "__" + n.agent + "__" + stage + ".json"
+			for _, stage := range []string{receipt.StageDrained, receipt.StageDLQ} {
+				leaf := receipt.Filename(id, n.agent, stage)
 				raw, _, exists, err := readWakeRepairMetadataAt(receiptsFD, leaf, "native consumption receipt", filepath.Join(n.dir.path, "receipts", leaf), claudeNativeMetadataLimit)
 				if err != nil {
 					return err

@@ -521,8 +521,8 @@ const wakeDialogLockFileName = ".wake.dialog.lock"
 // replacement and a conditional removal never interleave: a writer cannot
 // replace the marker between a remover's read and its unlink, and a guarded
 // writer reads and replaces under it. The wake takes it only to remove a
-// Claude Code marker whose transcript shows its tool call's result, and
-// never waits for it.
+// Claude Code marker whose recorded host process is proven gone or whose
+// transcript proves its dialog gone, and never waits for it.
 func withWakeDialogMarkerLock(dirfd int, fn func() error) error {
 	return lockWakeDialogMarker(dirfd, unix.LOCK_EX, fn)
 }

@@ -258,6 +258,19 @@ func TestReadWakeTargetRejectsSymlink(t *testing.T) {
 	}
 }
 
+// Repairing an unknown agent refuses without creating an agent directory that `amq who` would list (audit 2026-11-10).
+func TestRepairWakeUnknownAgentCreatesNoAgentDirectory(t *testing.T) {
+	root := secureTempDirForTest(t)
+
+	result, err := repairWake(root, "typo")
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "no wake lock present") {
+		t.Fatalf("result = %#v err=%v, want no-lock refusal", result, err)
+	}
+	if _, statErr := os.Lstat(fsq.AgentBase(root, "typo")); !os.IsNotExist(statErr) {
+		t.Fatalf("repair created agent directory: %v", statErr)
+	}
+}
+
 func TestRepairWakeRefusesTamperedTargetDigest(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")

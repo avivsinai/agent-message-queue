@@ -65,6 +65,34 @@ func TestMoveToDLQ(t *testing.T) {
 	}
 }
 
+// A first DLQ move syncs the new dlq directory's entry before the inbox source is removed (audit 2026-11-10).
+func TestMoveToDLQSyncsFirstDLQTree(t *testing.T) {
+	root := t.TempDir()
+	inboxNew := AgentInboxNew(root, "alice")
+	if err := os.MkdirAll(inboxNew, 0o700); err != nil {
+		t.Fatalf("create inbox: %v", err)
+	}
+	filename := "corrupt_first.md"
+	if err := os.WriteFile(filepath.Join(inboxNew, filename), []byte("corrupt"), 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+	deliveryRoot := openDeliveryRootForTest(t, root)
+	synced := map[string]bool{}
+	deliveryRoot.syncDirForTest = func(dir string) error {
+		synced[dir] = true
+		return nil
+	}
+
+	if _, err := MoveToDLQ(deliveryRoot, "alice", filename, "corrupt_first", "parse_error", "bad data"); err != nil {
+		t.Fatalf("MoveToDLQ: %v", err)
+	}
+	for _, dir := range []string{filepath.Join("agents", "alice"), filepath.Join("agents", "alice", "dlq")} {
+		if !synced[dir] {
+			t.Fatalf("directory %s owning the new dlq tree was never synced (synced: %v)", dir, synced)
+		}
+	}
+}
+
 func TestMoveClaimedCurToDLQRejectsMismatchedClaimProvenanceBeforeMutation(t *testing.T) {
 	const (
 		agent    = "alice"

@@ -358,10 +358,9 @@ func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (stri
 	tmpDir := filepath.Join("agents", agent, "dlq", "tmp")
 	newDir := filepath.Join("agents", agent, "dlq", "new")
 
-	if err := root.root.MkdirAll(tmpDir, 0o700); err != nil {
-		return "", err
-	}
-	if err := root.root.MkdirAll(newDir, 0o700); err != nil {
+	// syncAlways: the caller removes the inbox source once this returns, so
+	// the dlq tree must be durable before that removal can be.
+	if err := root.mkdirAllSynced(syncAlways, tmpDir, newDir); err != nil {
 		return "", err
 	}
 
@@ -613,7 +612,7 @@ func retryFromDLQLocked(root *DeliveryRoot, agent, dlqFilename string, force boo
 
 func updateRetriedDLQEnvelope(root *DeliveryRoot, agent, dlqFilename, dlqPath, box string, updatedData []byte) error {
 	curDir := filepath.Join("agents", agent, "dlq", "cur")
-	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
+	if err := root.mkdirAllSynced(syncAlways, curDir); err != nil {
 		return fmt.Errorf("prepare dlq envelope cur dir: %w", err)
 	}
 
@@ -683,7 +682,7 @@ func moveDLQNewToCurLocked(root *DeliveryRoot, agent, filename string) error {
 	newPath := filepath.Join("agents", agent, "dlq", "new", filename)
 	curDir := filepath.Join("agents", agent, "dlq", "cur")
 	curPath := filepath.Join(curDir, filename)
-	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
+	if err := root.mkdirAllSynced(syncAlways, curDir); err != nil {
 		return err
 	}
 	if reconciled, err := reconcileDLQCurAuthorityLocked(root, agent, filename); err != nil {

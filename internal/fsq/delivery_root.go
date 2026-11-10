@@ -1114,7 +1114,7 @@ func (r *DeliveryRoot) WithConfigLock(fn func(*DeliveryRoot) error) error {
 		return fmt.Errorf("open config lock: %w", err)
 	}
 	defer func() { _ = lockFile.Close() }()
-	return withExclusiveDLQEnvelopeLock(lockFile, func() error {
+	return WithExclusiveFileLock(lockFile, func() error {
 		if err := r.VerifyBase(); err != nil {
 			return err
 		}
