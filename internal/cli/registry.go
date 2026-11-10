@@ -14,8 +14,10 @@ type CommandInfo struct {
 	LongDescription []string
 	Examples        []string
 	Footer          string
-	Handler         CommandHandler
-	Children        []CommandInfo
+	// Handler is set on top-level commands only; a parent dispatches its
+	// children.
+	Handler  CommandHandler
+	Children []CommandInfo
 }
 
 // commands is the canonical command registry. Populated in init() to avoid
@@ -35,8 +37,8 @@ func init() {
 			Summary: "View a thread",
 			Handler: runThread,
 			Children: []CommandInfo{
-				{Name: "open", Summary: "List open review requests, questions, and todos", Handler: runThreadOpen},
-				{Name: "list", Summary: "List retained thread IDs and message IDs", Handler: runThreadList},
+				{Name: "open", Summary: "List open review requests, questions, and todos"},
+				{Name: "list", Summary: "List retained thread IDs and message IDs"},
 			},
 		},
 		{Name: "trace", Summary: "Join current evidence for a message", Handler: runTrace},
@@ -53,8 +55,8 @@ func init() {
 			},
 			Handler: runPresence,
 			Children: []CommandInfo{
-				{Name: "set", Summary: "Update presence status", Handler: runPresenceSet},
-				{Name: "list", Summary: "List presence data", Handler: runPresenceList},
+				{Name: "set", Summary: "Update presence status"},
+				{Name: "list", Summary: "List presence data"},
 			},
 		},
 		{Name: "cleanup", Summary: "Remove selected tmp, wake quarantine, launch recovery, or empty mailbox artifacts", Handler: runCleanup},
@@ -68,10 +70,10 @@ func init() {
 			Description: "Dead letter queue management",
 			Handler:     runDLQ,
 			Children: []CommandInfo{
-				{Name: "list", Summary: "List dead-lettered messages", Handler: runDLQList},
-				{Name: "read", Summary: "Read a DLQ message with failure info", Handler: runDLQRead},
-				{Name: "retry", Summary: "Retry a DLQ message (move back to inbox)", Handler: runDLQRetry},
-				{Name: "purge", Summary: "Permanently remove DLQ messages", Handler: runDLQPurge},
+				{Name: "list", Summary: "List dead-lettered messages"},
+				{Name: "read", Summary: "Read a DLQ message with failure info"},
+				{Name: "retry", Summary: "Retry a DLQ message (move back to inbox)"},
+				{Name: "purge", Summary: "Permanently remove DLQ messages"},
 			},
 		},
 		{
@@ -79,15 +81,15 @@ func init() {
 			Summary: "Background waker (TIOCSTI injection)",
 			Handler: runWake,
 			Children: []CommandInfo{
-				{Name: "check", Summary: "Inspect wake start and restart capability without mutation", Handler: runWake},
-				{Name: "config", Summary: "Show or change the live settings of a running wake", Handler: runWake},
-				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
-				{Name: "restart", Summary: "Ask a live owner-bound wake to replace itself", Handler: runWake},
-				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim", Handler: runWake},
-				{Name: "retire", Summary: "Retire an exact managed wake and its matching retained state", Handler: runWake},
-				{Name: "dialog", Summary: "Claude Code hook receiver: mark a dialog open or closed", Handler: runWake},
-				{Name: "install-dialog-hook", Summary: "Hold the doorbell while a Claude Code, Codex or Cursor dialog is open", Handler: runWake},
-				{Name: "uninstall-dialog-hook", Summary: "Remove the dialog guard hooks", Handler: runWake},
+				{Name: "check", Summary: "Inspect wake start and restart capability without mutation"},
+				{Name: "config", Summary: "Show or change the live settings of a running wake"},
+				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target"},
+				{Name: "restart", Summary: "Ask a live owner-bound wake to replace itself"},
+				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim"},
+				{Name: "retire", Summary: "Retire an exact managed wake and its matching retained state"},
+				{Name: "dialog", Summary: "Claude Code hook receiver: mark a dialog open or closed"},
+				{Name: "install-dialog-hook", Summary: "Hold the doorbell while a Claude Code, Codex or Cursor dialog is open"},
+				{Name: "uninstall-dialog-hook", Summary: "Remove the dialog guard hooks"},
 			},
 		},
 		{Name: "upgrade", Summary: "Upgrade amq to the latest release", Handler: runUpgradeRegistry},
@@ -103,11 +105,11 @@ func init() {
 			},
 			Handler: runCoop,
 			Children: []CommandInfo{
-				{Name: "init", Summary: "Initialize project for co-op mode", Handler: runCoopInit},
-				{Name: "exec", Summary: "Set up co-op mode and exec into an agent", Handler: runCoopExec},
-				{Name: "install-hooks", Summary: "Install the co-op Claude Code hooks for AM_ME sessions", Handler: runCoopInstallHooks},
-				{Name: "uninstall-hooks", Summary: "Remove the co-op Claude Code hooks", Handler: runCoopUninstallHooks},
-				{Name: "hook", Summary: "Claude Code hook receiver: print the co-op preamble", Handler: runCoopHook},
+				{Name: "init", Summary: "Initialize project for co-op mode"},
+				{Name: "exec", Summary: "Set up co-op mode and exec into an agent"},
+				{Name: "install-hooks", Summary: "Install the co-op Claude Code hooks for AM_ME sessions"},
+				{Name: "uninstall-hooks", Summary: "Remove the co-op Claude Code hooks"},
+				{Name: "hook", Summary: "Claude Code hook receiver: print the co-op preamble"},
 			},
 		},
 		{
@@ -124,15 +126,15 @@ func init() {
 			},
 			Handler: runSwarm,
 			Children: []CommandInfo{
-				{Name: "list", Summary: "List discovered Agent Teams", Handler: runSwarmList},
-				{Name: "join", Summary: "Register an external agent in a team", Handler: runSwarmJoin},
-				{Name: "leave", Summary: "Deregister an agent from a team", Handler: runSwarmLeave},
-				{Name: "tasks", Summary: "List tasks from the shared task list", Handler: runSwarmTasks},
-				{Name: "claim", Summary: "Claim a task", Handler: runSwarmClaim},
-				{Name: "complete", Summary: "Mark a task as completed", Handler: runSwarmComplete},
-				{Name: "fail", Summary: "Mark a task as failed", Handler: runSwarmFail},
-				{Name: "block", Summary: "Mark a task as blocked", Handler: runSwarmBlock},
-				{Name: "bridge", Summary: "Run bridge process (sync tasks -> AMQ notifications)", Handler: runSwarmBridge},
+				{Name: "list", Summary: "List discovered Agent Teams"},
+				{Name: "join", Summary: "Register an external agent in a team"},
+				{Name: "leave", Summary: "Deregister an agent from a team"},
+				{Name: "tasks", Summary: "List tasks from the shared task list"},
+				{Name: "claim", Summary: "Claim a task"},
+				{Name: "complete", Summary: "Mark a task as completed"},
+				{Name: "fail", Summary: "Mark a task as failed"},
+				{Name: "block", Summary: "Mark a task as blocked"},
+				{Name: "bridge", Summary: "Run bridge process (sync tasks -> AMQ notifications)"},
 			},
 		},
 		{
@@ -153,18 +155,16 @@ func init() {
 				{
 					Name:    "symphony",
 					Summary: "Lightweight Symphony hook adapter",
-					Handler: runIntegrationSymphony,
 					Children: []CommandInfo{
-						{Name: "init", Summary: "Install AMQ hooks into WORKFLOW.md", Handler: runSymphonyInit},
-						{Name: "emit", Summary: "Emit a lifecycle event as an AMQ message", Handler: runSymphonyEmit},
+						{Name: "init", Summary: "Install AMQ hooks into WORKFLOW.md"},
+						{Name: "emit", Summary: "Emit a lifecycle event as an AMQ message"},
 					},
 				},
 				{
 					Name:    "kanban",
 					Summary: "Experimental Cline Kanban bridge",
-					Handler: runIntegrationKanban,
 					Children: []CommandInfo{
-						{Name: "bridge", Summary: "Run experimental bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
+						{Name: "bridge", Summary: "Run experimental bridge (Kanban events -> AMQ messages)"},
 					},
 				},
 			},
@@ -179,8 +179,8 @@ func init() {
 			},
 			Handler: runReceipts,
 			Children: []CommandInfo{
-				{Name: "list", Summary: "List receipts (optionally filtered)", Handler: runReceiptsList},
-				{Name: "wait", Summary: "Wait for a receipt to appear", Handler: runReceiptsWait},
+				{Name: "list", Summary: "List receipts (optionally filtered)"},
+				{Name: "wait", Summary: "Wait for a receipt to appear"},
 			},
 		},
 		{
@@ -199,9 +199,9 @@ func init() {
 			},
 			Handler: runSession,
 			Children: []CommandInfo{
-				{Name: "create", Summary: "Create a named session and its roster mailboxes", Handler: runSessionCreate},
-				{Name: "list", Summary: "List sessions under the base root", Handler: runSessionList},
-				{Name: "resume", Summary: "Resume an existing session through launch reconciliation", Handler: runSession},
+				{Name: "create", Summary: "Create a named session and its roster mailboxes"},
+				{Name: "list", Summary: "List sessions under the base root"},
+				{Name: "resume", Summary: "Resume an existing session through launch reconciliation"},
 			},
 		},
 		{
@@ -218,7 +218,7 @@ func init() {
 			},
 			Handler: runPeer,
 			Children: []CommandInfo{
-				{Name: "pair", Summary: "Pin a peer line and print the local line", Handler: runPeerPair},
+				{Name: "pair", Summary: "Pin a peer line and print the local line"},
 			},
 		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
@@ -233,8 +233,8 @@ func init() {
 			},
 			Handler: runRoute,
 			Children: []CommandInfo{
-				{Name: "explain", Summary: "Explain a send route as canonical JSON", Handler: runRouteExplain},
-				{Name: "peers", Summary: "List peers and whether replies come back", Handler: runRoutePeers},
+				{Name: "explain", Summary: "Explain a send route as canonical JSON"},
+				{Name: "peers", Summary: "List peers and whether replies come back"},
 			},
 		},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
