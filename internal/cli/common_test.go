@@ -382,6 +382,8 @@ func TestConfirmPromptUsesAnswerWithoutNewline(t *testing.T) {
 	}{
 		{"n", true, false},
 		{"y", false, true},
+		{"", true, false},
+		{"\n", true, true},
 	} {
 		restore := withStdin(t, tc.input)
 		var got bool
