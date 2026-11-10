@@ -78,7 +78,7 @@ func validateWrapperFileForProject(wrapper *Wrapper, projectRoot string) error {
 	if err != nil {
 		return fmt.Errorf("resolve wrapper executable: %w", err)
 	}
-	return rejectProjectContained(projectRoot, wrapper.Executable, resolved, wrapperProjectContainedCode)
+	return rejectProjectContained(projectRoot, wrapper.Executable, resolved, WrapperProjectContainedCode)
 }
 
 func cloneWrapper(wrapper *Wrapper) *Wrapper {

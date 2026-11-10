@@ -932,7 +932,7 @@ func resolveLaunchAMQExecutable(value, projectRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve amq executable identity: %w", err)
 	}
-	if err := rejectProjectContained(projectRoot, path, resolved, amqProjectContainedCode); err != nil {
+	if err := rejectProjectContained(projectRoot, path, resolved, AMQProjectContainedCode); err != nil {
 		return "", err
 	}
 	return resolved, nil

@@ -556,10 +556,10 @@ func resolveExternalExecutable(executable, projectRoot, label string, matchProvi
 	if raw, rawErr := rawExecutablePath(executable); rawErr != nil {
 		return "", fmt.Errorf("resolve %s executable: %w", provider, rawErr)
 	} else if pathWithin(raw, resolvedProject) {
-		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
+		return "", &LaunchPathError{Code: ProviderProjectContainedCode, Path: executable}
 	}
 	if pathWithin(resolvedExecutable, resolvedProject) {
-		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
+		return "", &LaunchPathError{Code: ProviderProjectContainedCode, Path: resolvedExecutable}
 	}
 	info, err := os.Stat(resolvedExecutable)
 	if err != nil {
