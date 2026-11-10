@@ -408,3 +408,103 @@ func TestLookupOfAnUndeliveredFrameIsUnknownAfterItsWindow(t *testing.T) {
 		t.Fatalf("lookup after the window = %s, want unknown", ev.Class)
 	}
 }
+
+// releaseFixture is an endpoint over one attached Claude target whose
+// adapter clock the test moves.
+func releaseFixture(t *testing.T) (*core.Endpoint, *requests.Store, *Attachment, *fakeTarget, *atomic.Int64) {
+	t.Helper()
+	pid := os.Getpid() // a live pid, so the target reads attached
+	ft := newFakeTarget(t, pid, nil)
+	store, err := requests.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
+	att, err := Attach(config{Pid: pid, Home: ft.home, Target: "cc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	skew := new(atomic.Int64) // the poller reads the clock too
+	att.clock = func() time.Time { return start.Add(time.Duration(skew.Load())) }
+	ep.Register(att)
+	return ep, store, att, ft, skew
+}
+
+func releaseSubmit(t *testing.T, ep *core.Endpoint, id string, window time.Duration) protocol.Reply {
+	t.Helper()
+	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: id, TargetID: "cc-1", Epoch: SentinelUnpinned,
+		NotAfter: protocol.FormatTime(time.Now().Add(window)),
+		Input:    &protocol.SubmitInput{Text: "prompt " + id, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}
+	out, err := ep.Handle(cmd, core.Source{Host: core.LocalHost})
+	if err != nil {
+		t.Fatalf("submit %s: %v", id, err)
+	}
+	return out.(protocol.Reply)
+}
+
+// An uncertain record held its Claude target busy for good. The owner's
+// release ends it failed released_by_owner, the target admits a new
+// request, and a late delivery of the released frame completes neither
+// request (audit 2026-11-10).
+func TestReleaseUncertainFreesTheTargetAndDisownsTheLateFrame(t *testing.T) {
+	ep, store, att, ft, skew := releaseFixture(t)
+	old := releaseSubmit(t, ep, "44444444-4444-4444-8444-444444444444", time.Minute)
+	oldEnv := frameEnvelope(t, ft)
+	skew.Store(int64(2 * time.Minute)) // the window closes with no delivery
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	oldKey := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: old.Snapshot.RequestID}
+	if rec, _, _ := store.Get(oldKey); rec.State != protocol.StateUncertain {
+		t.Fatalf("old record = %s, want uncertain", rec.State)
+	}
+	if busy := releaseSubmit(t, ep, "55555555-5555-4555-8555-555555555555", 5*time.Minute); busy.Snapshot.Code != protocol.CodeBusy {
+		t.Fatalf("submit while uncertain = %s/%s, want busy", busy.Snapshot.State, busy.Snapshot.Code)
+	}
+
+	rep, err := ep.Release(old.Snapshot.RequestRef)
+	if err != nil || rep.Snapshot.State != protocol.StateFailed || rep.Snapshot.Code != protocol.CodeReleasedByOwner {
+		t.Fatalf("release = %+v, %v; want failed released_by_owner", rep.Snapshot, err)
+	}
+	next := releaseSubmit(t, ep, "66666666-6666-4666-8666-666666666666", 5*time.Minute)
+	if next.Snapshot.State != protocol.StateRunning {
+		t.Fatalf("submit after release = %s/%s, want running", next.Snapshot.State, next.Snapshot.Code)
+	}
+	waitRecv(t, ft)
+
+	// The released frame lands now and its turn ends with a Stop that the
+	// new, not yet delivered request could claim by time.
+	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(oldKey), oldEnv), transcriptLine(t, "assistant", "late answer"))
+	appendStopMarker(t, ft.home, att.now().UnixMilli()+1)
+	att.pollConfirmations()
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := store.Get(oldKey); rec.State != protocol.StateFailed || rec.Code != protocol.CodeReleasedByOwner || rec.Result != nil {
+		t.Fatalf("old record after the late frame = %s/%s result=%+v, want failed released_by_owner with no result", rec.State, rec.Code, rec.Result)
+	}
+	nextKey := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: next.Snapshot.RequestID}
+	if rec, _, _ := store.Get(nextKey); rec.State != protocol.StateRunning || rec.Result != nil {
+		t.Fatalf("new record after the late frame = %s result=%+v, want running with no result", rec.State, rec.Result)
+	}
+}
+
+// Release acts only on an uncertain record: a running one is refused and
+// stays as it was (audit 2026-11-10).
+func TestReleaseRefusesARunningRecord(t *testing.T) {
+	ep, store, _, ft, _ := releaseFixture(t)
+	rep := releaseSubmit(t, ep, "77777777-7777-4777-8777-777777777777", time.Minute)
+	waitRecv(t, ft)
+	_, err := ep.Release(rep.Snapshot.RequestRef)
+	var r *protocol.Refusal
+	if !errors.As(err, &r) || protocol.ExitForCode(r.Code) != protocol.ExitActionRequired {
+		t.Fatalf("release of a running record = %v, want an action-required refusal", err)
+	}
+	key := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: rep.Snapshot.RequestID}
+	if rec, _, _ := store.Get(key); rec.State != protocol.StateRunning || rec.Revision != rep.Snapshot.Revision {
+		t.Fatalf("record after the refused release = %s rev %d, want running rev %d", rec.State, rec.Revision, rep.Snapshot.Revision)
+	}
+}

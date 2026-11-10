@@ -534,6 +534,35 @@ func (a *Attachment) Respond(requests.Key, string, string, string) (protocol.Cod
 // adapter drops its record, so a restarted attachment's Unknown is honest.
 func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 	a.mu.Lock()
+	a.forgetLocked(key)
+	a.mu.Unlock()
+}
+
+// ReleaseUncertain implements core.UncertainReleaser: the adapter disowns
+// the key's run. Its frame keeps the key's msg_id, but no run carries it any
+// more and recovery never rebuilds it, so a late delivery is a prompt that
+// no request owns: it ends the current turn's owner and claims no Stop. A
+// frame still being written, or a delivery the transcript already showed,
+// is refused; the record is not uncertain about either.
+func (a *Attachment) ReleaseUncertain(key requests.Key) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, sending := a.submitting[key]; sending {
+		return protocol.Refuse(protocol.CodeBusy, "the frame for this request is being written; retry once it is sent")
+	}
+	if rec, ok := a.runs[key]; ok && (rec.submitted || rec.admitted || rec.terminal) {
+		return protocol.Refuse(protocol.CodeUnsupported, "the session shows this request's delivery; the endpoint settles it from the transcript")
+	}
+	if rec, ok := a.runs[key]; ok && a.owner == rec {
+		a.owner = nil
+	}
+	a.forgetLocked(key)
+	return nil
+}
+
+// forgetLocked drops the key's run and recovery scan and marks it released,
+// so a Lookup never recovers it from the transcript. Caller holds a.mu.
+func (a *Attachment) forgetLocked(key requests.Key) {
 	delete(a.runs, key)
 	delete(a.recoverFrom, key)
 	if len(a.released) >= maxReleased {
@@ -543,7 +572,6 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 		}
 	}
 	a.released[key] = struct{}{}
-	a.mu.Unlock()
 }
 
 // maxReleased bounds the released-key set; the endpoint acknowledges each

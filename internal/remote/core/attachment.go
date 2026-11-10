@@ -174,6 +174,17 @@ type ConcurrentSubmitter interface {
 	ConcurrentSubmit() bool
 }
 
+// UncertainReleaser is an optional Attachment method for an adapter that can
+// disown the run of an uncertain request. After it returns nil the adapter
+// never attributes native evidence to the key again, a late delivery of its
+// input included: that evidence reads as work no request owns. The endpoint
+// calls it outside its lock, then ends the record failed with
+// released_by_owner. An adapter that cannot keep the promise does not
+// implement it, and the endpoint refuses the release.
+type UncertainReleaser interface {
+	ReleaseUncertain(key requests.Key) error
+}
+
 // SubmitBlocker is an optional Attachment method: Inspect plus, when the
 // projection advertises submit false, the adapter's actionable reason, both
 // from one observation. The endpoint's unsupported refusal carries it

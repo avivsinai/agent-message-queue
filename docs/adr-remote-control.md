@@ -54,6 +54,10 @@ invariants.
    and never permission to dispatch again. Global idle is not completion.
    The terminal medium has no request identity, so a terminal Stop leaves
    the record `uncertain` until native evidence arrives.
+   An `uncertain` record keeps its target busy until the owner releases it
+   on the machine: the adapter disowns the run, so a late delivery runs as
+   a turn no request owns, and the record ends `failed` with
+   `released_by_owner`.
 4. **Exact cancellation.** Cancel names the original request; the native
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A cancel of a request refused as

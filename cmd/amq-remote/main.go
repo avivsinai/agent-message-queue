@@ -42,6 +42,10 @@ Commands:
   wait REQUEST_REF         Wait for that request's outcome
   cancel REQUEST_REF       Cancel that exact request
   requests                 Recent local request records
+  requests release REQUEST_REF [--yes]
+                           End an uncertain request so its target admits new
+                           work (Claude Code); its input may still run as a
+                           turn no request owns
   share --session ID       Mint the session body key and print its NIP-OA
                            preimage for the owner to sign (--renew reprints,
                            --tag-file enrolls the signed tag)
@@ -277,6 +281,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "cancel":
 		out, code, err = cancel(rest, probe)
 	case "requests":
+		if len(rest) > 0 && rest[0] == "release" {
+			out, code, err = releaseRequest(rest[1:], stdin, stderr, probe)
+			break
+		}
 		out, code, err = listRequests(rest, probe)
 	case "share":
 		code, err = share(rest, stdout, stderr)
