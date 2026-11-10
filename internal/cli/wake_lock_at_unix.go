@@ -861,6 +861,20 @@ func writeWakeGenerationFileWith(
 }
 
 func writeWakeReadyTempAt(dirfd int, label string, data []byte, mode os.FileMode) (string, error) {
+	return writeWakeTempAt(dirfd, label, data, mode, func(name string) {
+		_ = wakeUnlinkAt(dirfd, name, 0)
+	})
+}
+
+// writeWakeTempAt creates an exclusive temp file under dirfd and calls cleanup
+// with its name when any step before the file is fully written and synced fails.
+func writeWakeTempAt(
+	dirfd int,
+	label string,
+	data []byte,
+	mode os.FileMode,
+	cleanup func(name string),
+) (string, error) {
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("generate %s temp name: %w", label, err)
@@ -880,7 +894,7 @@ func writeWakeReadyTempAt(dirfd int, label string, data []byte, mode os.FileMode
 	defer func() {
 		_ = file.Close()
 		if !keep {
-			_ = wakeUnlinkAt(dirfd, name, 0)
+			cleanup(name)
 		}
 	}()
 	if err := file.Chmod(mode); err != nil {
