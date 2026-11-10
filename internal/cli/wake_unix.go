@@ -353,7 +353,7 @@ func acquireWakeLockWithOptionsInDir(
 				); err != nil {
 					return err
 				}
-			} else if err := removeWakeRepairFloorGuardedAt(dirfd, agentDir); err != nil {
+			} else if err := removeWakeRepairFloorGuardedAt(dirfd); err != nil {
 				return err
 			}
 
@@ -662,7 +662,7 @@ func cleanupGenericWakeRepairFloorAt(
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return err
 	}
-	return removeWakeRepairFloorGuardedAt(dirfd, agentDir)
+	return removeWakeRepairFloorGuardedAt(dirfd)
 }
 
 func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, error) {

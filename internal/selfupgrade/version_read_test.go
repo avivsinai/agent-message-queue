@@ -122,6 +122,11 @@ func TestEmbeddedVersionFromBuildInfoRejectsUnknownVersion(t *testing.T) {
 }
 
 func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
+	embeddedVersionFromLDFlags := func(flags string) (string, bool) {
+		return embeddedVersionFromBuildInfo(&buildinfo.BuildInfo{
+			Settings: []debug.BuildSetting{{Key: "-ldflags", Value: flags}},
+		})
+	}
 	for _, test := range []struct {
 		flags string
 		want  string

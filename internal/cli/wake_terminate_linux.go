@@ -88,9 +88,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		pidfd = fd
 		locked.Process = inspectWakeProcess(locked.PID)
 		classifyWakeLock(locked.Root, locked.Agent, &locked)
-		if !sameWakeLockInspection(inspection, locked) || !locked.IdentityConfirmed {
-			return nil
-		}
 		return nil
 	}); err != nil {
 		if pidfd >= 0 {

@@ -17,11 +17,9 @@ func observeAuthoritativeWakeOwnerPlatform(owner wakeOwner) (wakeOwnerObservatio
 		if errors.Is(err, syscall.ESRCH) {
 			return deadWakeOwnerObservation("owner process is not running"), nil
 		}
-		unsupported := wakeOwnerCapabilityUnsupported(err)
 		return wakeOwnerObservation{
-			State:                 wakeOwnerUnknown,
-			Reason:                fmt.Sprintf("owner pidfd unavailable: %v", err),
-			CapabilityUnsupported: unsupported,
+			State:  wakeOwnerUnknown,
+			Reason: fmt.Sprintf("owner pidfd unavailable: %v", err),
 		}, fmt.Errorf("pidfd_open owner process %d: %w", owner.PID, err)
 	}
 	exited, err := linuxPidfdPoll(pidfd, 0)
@@ -178,8 +176,8 @@ func captureAuthoritativeCurrentWakeOwnerPlatform() (wakeOwner, error) {
 		if wakeOwnerCapabilityUnsupported(err) {
 			// The current process cannot be replaced while this function is
 			// executing, so a strict double snapshot remains stable without a
-			// pidfd. Coop will still detect the unsupported child capability
-			// and deliberately launch one ownerless wake.
+			// pidfd. Coop still refuses the unsupported child capability: it
+			// warns and runs with no wake, or fails under --require-wake.
 			return captureCurrentWakeOwnerWithoutPidfd()
 		}
 		return wakeOwner{}, fmt.Errorf("pidfd_open current process %d: %w", pid, err)

@@ -22,15 +22,11 @@ func terminateWakePidfd(pidfd int) error {
 }
 
 func prepareAuthoritativeWakeChildPlatform(cmd *exec.Cmd) (*authoritativeWakeChildCapability, error) {
-	// Prove the syscall boundary before launch so a conclusively unsupported
-	// host can choose the fresh ownerless path before an owner child exists.
+	// Prove the syscall boundary before launch so an unsupported host fails
+	// before an owner child exists: coop then warns and runs with no wake,
+	// or fails under --require-wake.
 	probe, err := linuxPidfdOpen(os.Getpid(), 0)
 	if err != nil {
-		if wakeOwnerCapabilityUnsupported(err) {
-			return nil, &wakeOwnerChildCapabilityUnsupportedError{
-				Err: fmt.Errorf("preflight owner wake child pidfd: %w", err),
-			}
-		}
 		return nil, fmt.Errorf("preflight owner wake child pidfd: %w", err)
 	}
 	if err := linuxPidfdClose(probe); err != nil {

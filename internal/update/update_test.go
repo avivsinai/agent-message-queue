@@ -295,23 +295,6 @@ efgh5678 amq_0.1.0_linux_amd64.tar.gz
 	}
 }
 
-func TestAssetName(t *testing.T) {
-	name, err := AssetName("v0.1.0", "darwin", "arm64")
-	if err != nil {
-		t.Fatalf("AssetName error: %v", err)
-	}
-	if name != "amq_0.1.0_darwin_arm64.tar.gz" {
-		t.Fatalf("AssetName=%q", name)
-	}
-	winName, err := AssetName("v0.1.0", "windows", "amd64")
-	if err != nil {
-		t.Fatalf("AssetName windows error: %v", err)
-	}
-	if winName != "amq_0.1.0_windows_amd64.zip" {
-		t.Fatalf("AssetName windows=%q", winName)
-	}
-}
-
 func TestAssetNameForCompanions(t *testing.T) {
 	cases := []struct {
 		binary string
@@ -334,13 +317,19 @@ func TestAssetNameForCompanions(t *testing.T) {
 			t.Fatalf("AssetNameFor(%q)=%q want %q", tc.binary, name, tc.want)
 		}
 	}
-	// The core amq asset matches AssetName exactly.
 	core, err := AssetNameFor("amq", "v0.1.0", "darwin", "arm64")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if core != "amq_0.1.0_darwin_arm64.tar.gz" {
 		t.Fatalf("AssetNameFor(amq)=%q", core)
+	}
+	winName, err := AssetNameFor("amq", "v0.1.0", "windows", "amd64")
+	if err != nil {
+		t.Fatalf("AssetNameFor(amq, windows): %v", err)
+	}
+	if winName != "amq_0.1.0_windows_amd64.zip" {
+		t.Fatalf("AssetNameFor(amq, windows)=%q", winName)
 	}
 	if _, err := AssetNameFor("", "v0.1.0", "darwin", "arm64"); err == nil {
 		t.Fatal("AssetNameFor(empty binary) want error")

@@ -446,9 +446,9 @@ func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (
 			return wakeIdentityGoneOrDifferent, "boot id mismatch"
 		case bootIDUnknown:
 			if wakeProcessProvenNotWake(proc) {
-				return wakeIdentityGoneOrDifferent, "boot id mismatch"
+				return wakeIdentityGoneOrDifferent, "boot id unavailable or incomparable"
 			}
-			return wakeIdentityUnknown, "boot id mismatch"
+			return wakeIdentityUnknown, "boot id unavailable or incomparable"
 		}
 		if lock.ProcessStart != proc.StartToken {
 			if lock.BootID == "" {

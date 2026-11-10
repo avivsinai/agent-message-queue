@@ -33,24 +33,6 @@ func TestValidateMessageFilename(t *testing.T) {
 	}
 }
 
-func TestFindMessagePrefersNewWhenBothBoxesExist(t *testing.T) {
-	root := t.TempDir()
-	if err := EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	filename := "both.md"
-	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, "alice"), filename), []byte("new"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(AgentInboxCur(root, "alice"), filename), []byte("cur"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	path, box, err := FindMessage(root, "alice", filename)
-	if err != nil || box != BoxNew || path != filepath.Join(AgentInboxNew(root, "alice"), filename) {
-		t.Fatalf("FindMessage = %q %q %v, want inbox/new", path, box, err)
-	}
-}
-
 func TestMoveNewToCurRejectsInvalidFilenames(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {

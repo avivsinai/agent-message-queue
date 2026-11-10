@@ -188,7 +188,7 @@ func writeWakeRepairFloorAndCaptureAuthorityAt(
 	return newWakeRepairFloorAuthority(snapshot)
 }
 
-func removeWakeRepairFloorGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
+func removeWakeRepairFloorGuardedAt(dirfd int) error {
 	if err := wakeUnlinkAt(dirfd, wakeRepairFloorFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return nil
@@ -198,7 +198,6 @@ func removeWakeRepairFloorGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync wake repair floor removal: %w", err)
 	}
-	_ = agentDir
 	return nil
 }
 

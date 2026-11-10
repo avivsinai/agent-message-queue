@@ -60,11 +60,10 @@ func (monitor *wakeOwnerObservationMonitor) Close() error {
 }
 
 type wakeOwnerObservation struct {
-	State                 wakeOwnerIdentityState
-	Reason                string
-	CapabilityUnsupported bool
-	monitor               *wakeOwnerObservationMonitor
-	done                  <-chan struct{}
+	State   wakeOwnerIdentityState
+	Reason  string
+	monitor *wakeOwnerObservationMonitor
+	done    <-chan struct{}
 }
 
 func deadWakeOwnerObservation(reason string) wakeOwnerObservation {

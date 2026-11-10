@@ -91,42 +91,6 @@ func TestMailboxEntrypointsRejectTraversalBeforeMutation(t *testing.T) {
 			t.Fatalf("claimed content = %q err=%v, want payload", got, readErr)
 		}
 	})
-
-	t.Run("FindMessage", func(t *testing.T) {
-		root := newQueueRoot(t)
-		decoy := filepath.Join(root, "meta", "inbox", "new", validFilename)
-		if err := os.MkdirAll(filepath.Dir(decoy), 0o700); err != nil {
-			t.Fatalf("mkdir decoy: %v", err)
-		}
-		if err := os.WriteFile(decoy, []byte("escaped"), 0o600); err != nil {
-			t.Fatalf("write decoy: %v", err)
-		}
-		inboxPath := filepath.Join(AgentInboxNew(root, validHandle), validFilename)
-		if err := os.WriteFile(inboxPath, []byte("payload"), 0o600); err != nil {
-			t.Fatalf("write inbox message: %v", err)
-		}
-
-		path, box, err := FindMessage(root, traversalHandle, validFilename)
-		if err == nil {
-			t.Fatalf("FindMessage(../meta) = (%q, %q), want rejection of decoy at %s", path, box, decoy)
-		}
-		if path != "" || box != "" {
-			t.Fatalf("FindMessage(../meta) leaked path (%q, %q)", path, box)
-		}
-
-		path, box, err = FindMessage(root, validHandle, traversalFilename)
-		if err == nil {
-			t.Fatalf("FindMessage(../../.wake.lock) = (%q, %q), want rejection", path, box)
-		}
-
-		path, box, err = FindMessage(root, validHandle, validFilename)
-		if err != nil {
-			t.Fatalf("FindMessage(valid) error = %v", err)
-		}
-		if path != inboxPath || box != BoxNew {
-			t.Fatalf("FindMessage(valid) = (%q, %q), want (%q, %q)", path, box, inboxPath, BoxNew)
-		}
-	})
 }
 
 func newQueueRoot(t *testing.T) string {

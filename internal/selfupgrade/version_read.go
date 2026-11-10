@@ -76,11 +76,6 @@ func embeddedVersionFromBuildInfo(info *buildinfo.BuildInfo) (string, bool) {
 	return version, found && version != ""
 }
 
-func embeddedVersionFromLDFlags(raw string) (string, bool) {
-	version, found, ambiguous := parseEmbeddedVersionFromLDFlags(raw)
-	return version, found && version != "" && !ambiguous
-}
-
 func parseEmbeddedVersionFromLDFlags(raw string) (string, bool, bool) {
 	fields, ok := splitLinkerFlags(raw)
 	if !ok {
