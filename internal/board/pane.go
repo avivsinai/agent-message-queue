@@ -3,6 +3,7 @@ package board
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -22,6 +23,9 @@ type PaneSource struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Partial bool   `json:"partial"`
+	// Detail explains a degraded source, so the live page can show a
+	// publication error without reading the whole model.
+	Detail string `json:"detail,omitempty"`
 }
 type PaneStrip struct {
 	TaskID  string    `json:"task_id"`
@@ -109,11 +113,28 @@ func ProjectPane(model Model) PaneModel {
 		}
 	}
 	p.WaitingOmitted = p.WaitingTotal - len(p.Waiting)
-	for _, source := range model.Sources {
+	// The cap must never drop a publication error: board-state first, then
+	// the other degraded sources, then the healthy ones, each in model order.
+	rank := func(v SourceView) int {
+		switch {
+		case v.Name == "board-state" && v.Status == StatusDegraded:
+			return 0
+		case v.Status == StatusDegraded:
+			return 1
+		}
+		return 2
+	}
+	ordered := append([]SourceView(nil), model.Sources...)
+	sort.SliceStable(ordered, func(i, j int) bool { return rank(ordered[i]) < rank(ordered[j]) })
+	for _, source := range ordered {
 		if len(p.Sources) == paneSourceLimit {
 			break
 		}
-		p.Sources = append(p.Sources, PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial})
+		entry := PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial}
+		if source.Status == StatusDegraded {
+			entry.Detail = paneText(source.Detail, 200)
+		}
+		p.Sources = append(p.Sources, entry)
 	}
 	p.SourcesOmitted = len(model.Sources) - len(p.Sources)
 	return p

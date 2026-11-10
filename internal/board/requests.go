@@ -166,10 +166,43 @@ type requestIndex struct {
 	referrer map[string][]string // namespace#id -> keys that ref id
 	tasks    map[string][]RequestTask
 	labels   map[string][]RequestLabel // message key -> labels
+	// byThreadOldest is byThread stably ordered by creation text.
+	byThreadOldest map[string][]string
+	// Memos of per-message derivations; an index is used by one goroutine.
+	senders map[string]senderMemo
+	times   map[string]timeMemo
+}
+
+type senderMemo struct {
+	p  Participant
+	ok bool
+}
+
+type timeMemo struct {
+	t  time.Time
+	ok bool
+}
+
+func (x requestIndex) senderOfKey(key string) (Participant, bool) {
+	if r, hit := x.senders[key]; hit {
+		return r.p, r.ok
+	}
+	p, ok := x.senderOf(x.s.Messages[key])
+	x.senders[key] = senderMemo{p, ok}
+	return p, ok
+}
+
+func (x requestIndex) timeOfKey(key string) (time.Time, bool) {
+	if r, hit := x.times[key]; hit {
+		return r.t, r.ok
+	}
+	t, ok := messageTime(x.s.Messages[key])
+	x.times[key] = timeMemo{t, ok}
+	return t, ok
 }
 
 func newRequestIndex(s Snapshot) requestIndex {
-	x := requestIndex{s: s, byID: map[string][]string{}, byThread: map[string][]string{}, lastRef: map[string][]string{}, referrer: map[string][]string{}, tasks: map[string][]RequestTask{}, labels: map[string][]RequestLabel{}}
+	x := requestIndex{s: s, byID: map[string][]string{}, byThread: map[string][]string{}, lastRef: map[string][]string{}, referrer: map[string][]string{}, tasks: map[string][]RequestTask{}, labels: map[string][]RequestLabel{}, byThreadOldest: map[string][]string{}, senders: map[string]senderMemo{}, times: map[string]timeMemo{}}
 	for _, nr := range s.Input.Results {
 		if nr.Name == "amq" && nr.Result.AMQ != nil {
 			x.project = nr.Result.AMQ.Project
@@ -203,6 +236,11 @@ func newRequestIndex(s Snapshot) requestIndex {
 		if n := len(m.Refs); n > 0 && m.Refs[n-1] != "" {
 			x.lastRef[m.Namespace+"#"+m.Refs[n-1]] = append(x.lastRef[m.Namespace+"#"+m.Refs[n-1]], key)
 		}
+	}
+	for thread, thKeys := range x.byThread {
+		oldest := append([]string(nil), thKeys...)
+		sort.SliceStable(oldest, func(i, j int) bool { return s.Messages[oldest[i]].Created < s.Messages[oldest[j]].Created })
+		x.byThreadOldest[thread] = oldest
 	}
 	ids := make([]string, 0, len(s.Tasks))
 	for id := range s.Tasks {
@@ -321,7 +359,7 @@ func (x requestIndex) request(key string, now time.Time) Request {
 		if scoped {
 			rec.Session = session
 			for _, reply := range x.lastRef[m.Namespace+"#"+m.ID] {
-				if p, ok := x.senderOf(x.s.Messages[reply]); ok && p == rec.participant() {
+				if p, ok := x.senderOfKey(reply); ok && p == rec.participant() {
 					rec.DirectReplies = append(rec.DirectReplies, reply)
 				}
 			}
@@ -329,12 +367,11 @@ func (x requestIndex) request(key string, now time.Time) Request {
 		rec.LaterAssessed = scoped && dated && m.Thread != ""
 		if rec.LaterAssessed {
 			for _, other := range x.byThread[m.Namespace+"#"+m.Thread] {
-				o := x.s.Messages[other]
-				at, ok := messageTime(o)
+				at, ok := x.timeOfKey(other)
 				if other == key || !ok || !at.After(created) {
 					continue
 				}
-				if p, ok := x.senderOf(o); ok && p == rec.participant() {
+				if p, ok := x.senderOfKey(other); ok && p == rec.participant() {
 					rec.LaterMessages = append(rec.LaterMessages, other)
 				}
 			}
@@ -368,9 +405,12 @@ func (x requestIndex) evidence(key string) [][2]string {
 	created, dated := messageTime(m)
 	out := [][2]string{{key, "request"}}
 	seen := map[string]bool{key: true}
-	add := func(role string, keys []string) {
-		sorted := append([]string(nil), keys...)
-		sort.SliceStable(sorted, func(i, j int) bool { return x.s.Messages[sorted[i]].Created < x.s.Messages[sorted[j]].Created })
+	add := func(role string, keys []string, presorted bool) {
+		sorted := keys
+		if !presorted {
+			sorted = append([]string(nil), keys...)
+			sort.SliceStable(sorted, func(i, j int) bool { return x.s.Messages[sorted[i]].Created < x.s.Messages[sorted[j]].Created })
+		}
 		for _, k := range sorted {
 			if !seen[k] {
 				seen[k] = true
@@ -379,20 +419,20 @@ func (x requestIndex) evidence(key string) [][2]string {
 		}
 	}
 	if n := len(m.Refs); n > 0 {
-		add("parent", x.byID[m.Namespace+"#"+m.Refs[n-1]])
+		add("parent", x.byID[m.Namespace+"#"+m.Refs[n-1]], false)
 	}
-	add("direct_reply", x.lastRef[m.Namespace+"#"+m.ID])
+	add("direct_reply", x.lastRef[m.Namespace+"#"+m.ID], false)
 	if m.Thread != "" {
 		var later []string
-		for _, other := range x.byThread[m.Namespace+"#"+m.Thread] {
-			if at, ok := messageTime(x.s.Messages[other]); dated && ok && at.Before(created) {
+		for _, other := range x.byThreadOldest[m.Namespace+"#"+m.Thread] {
+			if at, ok := x.timeOfKey(other); dated && ok && at.Before(created) {
 				continue
 			}
 			later = append(later, other)
 		}
-		add("later", later)
+		add("later", later, true)
 	}
-	add("referrer", x.referrer[m.Namespace+"#"+m.ID])
+	add("referrer", x.referrer[m.Namespace+"#"+m.ID], false)
 	return out
 }
 
@@ -410,7 +450,7 @@ func (x requestIndex) digest(r Request) string {
 	var messages []evidence
 	for _, e := range x.evidence(r.Message.Key) {
 		m := x.s.Messages[e[0]]
-		sender, ok := x.senderOf(m)
+		sender, ok := x.senderOfKey(e[0])
 		messages = append(messages, evidence{e[0], m.EvidenceHash, sender, ok})
 	}
 	sort.Slice(messages, func(i, j int) bool { return messages[i].Key < messages[j].Key })

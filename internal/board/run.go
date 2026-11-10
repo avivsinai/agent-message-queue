@@ -15,14 +15,9 @@ const SourceTimeout = 60 * time.Second
 // maxBeadLookups caps the closed-bead lookup per refresh (design 4.1).
 const maxBeadLookups = 200
 
-// Run reads every source once, each under its own deadline and error
-// boundary, resolves bead mentions, and builds the model. One failing source
-// never empties another source's cards.
-func Run(ctx context.Context, env Env, sources []Source, cfg Config, version string) Model {
-	return Build(Acquire(ctx, env, sources, cfg, version))
-}
-
-// Acquire reads source facts without assigning canonical task identities.
+// Acquire reads every source once, each under its own deadline and error
+// boundary, and resolves bead mentions, without assigning canonical task
+// identities. One failing source never empties another source's cards.
 func Acquire(ctx context.Context, env Env, sources []Source, cfg Config, version string) Input {
 	results := make([]NamedResult, len(sources))
 	var wg sync.WaitGroup

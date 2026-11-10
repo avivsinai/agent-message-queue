@@ -56,7 +56,7 @@ var pageCSP = "default-src 'none'; script-src 'sha256-" + sha256Base64(pageJS) +
 	"'; img-src data:; base-uri 'none'; form-action 'none'"
 
 // liveCSP is pageCSP plus fetches back to the serving origin, which the live
-// page needs to read model.json and press refresh.
+// page needs to read pane.json and press refresh.
 var liveCSP = pageCSP + "; connect-src 'self'"
 
 func sha256Base64(s string) string {
@@ -72,7 +72,7 @@ func WriteHTML(w io.Writer, m Model, regenerate string) error {
 }
 
 // WriteLiveHTML renders the page `amq-board serve` serves: the same page,
-// which also reads model.json from its own origin and reloads when a newer
+// which also reads pane.json from its own origin and reloads when a newer
 // model exists, and offers refresh instead of a regenerate command.
 func WriteLiveHTML(w io.Writer, m Model) error {
 	p := buildPage(m, "")

@@ -18,7 +18,6 @@ import (
 // --readonly blocks writes and --sandbox disables Dolt auto-push. The board
 // never writes a bead.
 type Beads struct {
-	IncludeClosed bool
 	// Humans are assignee names that belong to the board owner.
 	Humans []string
 	// GitHubRepo is the single configured "owner/repo"; with none, a bead's
@@ -26,37 +25,25 @@ type Beads struct {
 	GitHubRepo string
 }
 
-// beadsListArgv reads every non-closed bead with its description and notes.
-// Deferred beads are read so a deferred blocker still blocks; they are not
-// shown. --limit 0 because bd otherwise stops at 50 rows without saying so.
-var beadsListArgv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--status", "open,in_progress,blocked,deferred", "--limit", "0"}
-
 func (Beads) Name() string { return "beads" }
 
-func (b Beads) Discover(env board.Env) (bool, string) {
+func (Beads) Discover(env board.Env) (bool, string) {
 	if _, err := env.LookPath("bd"); err != nil {
 		return false, "bd not on PATH"
-	}
-	if !b.IncludeClosed && !env.IsDir(filepath.Join(env.Dir, ".beads")) {
-		return false, "no .beads directory in the project"
 	}
 	return true, ""
 }
 
+// Read lists every bead, closed included, bound to the database bd reports
+// so a worktree and the main checkout share one namespace.
 func (b Beads) Read(ctx context.Context, env board.Env) board.Result {
-	argv := beadsListArgv
-	namespace := ""
-	if b.IncludeClosed {
-		var err error
-		namespace, err = beadsNamespace(ctx, env)
-		if err != nil {
-			return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
-		}
-		argv = []string{"bd", "--readonly", "--sandbox", "list", "--json", "--all", "--limit", "0"}
+	namespace, err := beadsNamespace(ctx, env)
+	if err != nil {
+		return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
 	}
-	out, err := env.Run.Run(ctx, env.Dir, argv)
+	out, err := env.Run.Run(ctx, env.Dir, []string{"bd", "--readonly", "--sandbox", "list", "--json", "--all", "--limit", "0"})
 	result := b.Build(out, err, env.Now())
-	if b.IncludeClosed && err == nil {
+	if err == nil {
 		after, err := beadsNamespace(ctx, env)
 		if err != nil || after != namespace {
 			result.Status = board.StatusDegraded
